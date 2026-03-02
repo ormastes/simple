@@ -18,7 +18,7 @@ fn cache_lru_put(cache, key: text, value):
     Evicts least recently used entry if at capacity."""
     val keys = cache['keys']
     val values = cache['values']
-    val index = _find_key_index(keys, key)
+    val index = _find_key_index_in(cache, key)
 
     if index >= 0:
         # Update existing entry
@@ -28,6 +28,7 @@ fn cache_lru_put(cache, key: text, value):
         # New entry - check capacity
         if keys.len() >= cache['capacity']:
             # Evict least recently used (first element)
+            val evicted_key = keys[0]
             cache['keys'] = keys[1:]
             cache['values'] = values[1:]
 
@@ -40,6 +41,9 @@ fn cache_lru_put(cache, key: text, value):
     new_values.push(value)
     cache['values'] = new_values
 
+    # Rebuild key_index after structural change
+    _rebuild_key_index(cache)
+
     cache
 
 # ============================================================================
@@ -51,7 +55,7 @@ fn cache_fifo_put(cache, key: text, value):
     Evicts oldest entry if at capacity."""
     val keys = cache['keys']
     val values = cache['values']
-    val index = _find_key_index(keys, key)
+    val index = _find_key_index_in(cache, key)
 
     if index >= 0:
         # Update existing entry in place
@@ -74,6 +78,9 @@ fn cache_fifo_put(cache, key: text, value):
         new_values.push(value)
         cache['values'] = new_values
 
+        # Rebuild key_index after structural change
+        _rebuild_key_index(cache)
+
     cache
 
 # ============================================================================
@@ -86,7 +93,7 @@ fn cache_lfu_put(cache, key: text, value):
     val keys = cache['keys']
     val values = cache['values']
     val frequencies = cache['frequencies']
-    val index = _find_key_index(keys, key)
+    val index = _find_key_index_in(cache, key)
 
     if index >= 0:
         # Update existing entry
@@ -129,6 +136,9 @@ fn cache_lfu_put(cache, key: text, value):
         new_frequencies.push(1)
         cache['frequencies'] = new_frequencies
 
+        # Rebuild key_index after structural change
+        _rebuild_key_index(cache)
+
     cache
 
 # ============================================================================
@@ -141,7 +151,7 @@ fn cache_ttl_put(cache, key: text, value):
     val keys = cache['keys']
     val values = cache['values']
     val expiry_times = cache['expiry_times']
-    val index = _find_key_index(keys, key)
+    val index = _find_key_index_in(cache, key)
     val now = _get_timestamp()
     val expiry = now + cache['ttl']
 
@@ -175,6 +185,9 @@ fn cache_ttl_put(cache, key: text, value):
         new_expiry_times.push(expiry)
         cache['expiry_times'] = new_expiry_times
 
+        # Rebuild key_index after structural change
+        _rebuild_key_index(cache)
+
     cache
 
 # ============================================================================
@@ -199,13 +212,11 @@ fn cache_put(cache, key: text, value):
 # Helper Functions
 # ============================================================================
 
-fn _find_key_index(keys, key: text) -> i64:
-    """Find index of key in keys array. Returns -1 if not found."""
-    var i = 0
-    while i < keys.len():
-        if keys[i] == key:
-            return i
-        i = i + 1
+fn _find_key_index_in(cache, key: text) -> i64:
+    """Find index of key using the key_index dict. Returns -1 if not found."""
+    val ki = cache['key_index']
+    if ki.contains_key(key):
+        return ki[key]
     -1
 
 fn _remove_at_index(arr, index: i64):
@@ -218,8 +229,20 @@ fn _remove_at_index(arr, index: i64):
         i = i + 1
     result
 
+fn _rebuild_key_index(cache):
+    """Rebuild the key_index dict from the keys array."""
+    var ki = {}
+    val keys = cache['keys']
+    var i = 0
+    while i < keys.len():
+        ki[keys[i]] = i
+        i = i + 1
+    cache['key_index'] = ki
+
+extern fn rt_time_now_unix_micros() -> i64
+
 fn _get_timestamp() -> i64:
-    """Get current timestamp (simulated with counter for testing)."""
-    1000000
+    """Get current timestamp in milliseconds."""
+    rt_time_now_unix_micros() / 1000
 
 export cache_lru_put, cache_fifo_put, cache_lfu_put, cache_ttl_put, cache_put

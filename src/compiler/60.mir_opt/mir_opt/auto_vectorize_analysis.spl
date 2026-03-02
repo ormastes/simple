@@ -40,47 +40,12 @@ struct DependencyAnalysisResult:
     loop_carried_count: i64
 
 # ============================================================================
-# Simple Dictionary (used for def-use chain building)
+# GEP Info (base array + index pair for array access detection)
 # ============================================================================
 
-"""Simple dictionary implementation for local IDs."""
-struct Dict<K, V>:
-    keys_: [K]
-    values_: [V]
-
-impl Dict<K, V>:
-    static fn new() -> Dict<K, V>:
-        Dict(keys_: [], values_: [])
-
-    fn contains_key(key: K) -> bool:
-        var i = 0
-        while i < self.keys_.len():
-            if self.keys_[i] == key:
-                return true
-            i = i + 1
-        false
-
-    fn get(key: K) -> V?:
-        var i = 0
-        while i < self.keys_.len():
-            if self.keys_[i] == key:
-                return Some(self.values_[i])
-            i = i + 1
-        nil
-
-    fn set(key: K, value: V):
-        var i = 0
-        while i < self.keys_.len():
-            if self.keys_[i] == key:
-                self.values_[i] = value
-                return
-            i = i + 1
-        # Key not found, add it
-        self.keys_ = self.keys_ + [key]
-        self.values_ = self.values_ + [value]
-
-    fn keys() -> [K]:
-        self.keys_
+struct GepInfo:
+    base: LocalId
+    index: LocalId
 
 # ============================================================================
 # Def-Use Chain Construction
@@ -91,7 +56,7 @@ fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
     Build def-use chains for all locals used in the loop body.
     Returns a chain for each local that's defined or used.
     """
-    var chains_map = Dict.new()
+    var chains_map: {i64: DefUseChain} = {}
     var inst_index = 0
 
     for block in body_blocks:
@@ -101,34 +66,28 @@ fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
             if def_local.?:
                 val local = def_local.unwrap()
                 val local_id = local.id
-                if not dict_contains_key_i64(chains_map, local_id):
-                    dict_set_i64(chains_map, local_id, DefUseChain(local: local, defs: [], uses: []))
-                val chain_opt = dict_get_i64(chains_map, local_id)
-                if chain_opt.?:
-                    var chain = chain_opt.unwrap()
-                    chain.defs = chain.defs + [inst_index]
-                    dict_set_i64(chains_map, local_id, chain)
+                if not chains_map.contains_key(local_id):
+                    chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
+                var chain = chains_map[local_id]
+                chain.defs = chain.defs + [inst_index]
+                chains_map[local_id] = chain
 
             # Check what this instruction uses
             val use_locals = get_inst_uses(inst)
             for local in use_locals:
                 val local_id = local.id
-                if not dict_contains_key_i64(chains_map, local_id):
-                    dict_set_i64(chains_map, local_id, DefUseChain(local: local, defs: [], uses: []))
-                val chain_opt = dict_get_i64(chains_map, local_id)
-                if chain_opt.?:
-                    var chain = chain_opt.unwrap()
-                    chain.uses = chain.uses + [inst_index]
-                    dict_set_i64(chains_map, local_id, chain)
+                if not chains_map.contains_key(local_id):
+                    chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
+                var chain = chains_map[local_id]
+                chain.uses = chain.uses + [inst_index]
+                chains_map[local_id] = chain
 
             inst_index = inst_index + 1
 
     # Convert map to list
     var chains: [DefUseChain] = []
-    for key in chains_map.keys():
-        val chain_opt = dict_get_i64(chains_map, key)
-        if chain_opt.?:
-            chains = chains + [chain_opt.unwrap()]
+    for (key, chain) in chains_map.items():
+        chains = chains + [chain]
     chains
 
 # ============================================================================
@@ -419,7 +378,7 @@ fn detect_array_accesses(block: MirBlock) -> [ArrayAccess]:
     var accesses: [ArrayAccess] = []
 
     # Track GEP results to match with loads/stores
-    var gep_results: Dict = {}
+    var gep_results: {i64: GepInfo} = {}
 
     for inst in block.instructions:
         match inst.kind:
@@ -429,39 +388,33 @@ fn detect_array_accesses(block: MirBlock) -> [ArrayAccess]:
                     val base_local = get_operand_local(base)
                     val index_local = get_operand_local(indices[0])
                     if base_local.? and index_local.?:
-                        val gep_pair = (base_local.unwrap(), index_local.unwrap())
-                        gep_results.keys_ = gep_results.keys_ + [dest.id]
-                        gep_results.values_ = gep_results.values_ + [gep_pair]
+                        gep_results[dest.id] = GepInfo(base: base_local.unwrap(), index: index_local.unwrap())
 
             case Load(dest, ptr):
                 # Check if ptr is a GEP result
                 val ptr_local = get_operand_local(ptr)
                 if ptr_local.?:
                     val ptr_id = ptr_local.unwrap().id
-                    if dict_contains_key_gep(gep_results, ptr_id):
-                        val gep_info_opt = dict_get_gep(gep_results, ptr_id)
-                        if gep_info_opt.?:
-                            val gep_info = gep_info_opt.unwrap()
-                            accesses = accesses + [ArrayAccess(
-                                base_array: gep_info.0,
-                                index_expr: gep_info.1,
-                                is_load: true
-                            )]
+                    if gep_results.contains_key(ptr_id):
+                        val gep_info = gep_results[ptr_id]
+                        accesses = accesses + [ArrayAccess(
+                            base_array: gep_info.base,
+                            index_expr: gep_info.index,
+                            is_load: true
+                        )]
 
             case Store(ptr, value):
                 # Check if ptr is a GEP result
                 val ptr_local = get_operand_local(ptr)
                 if ptr_local.?:
                     val ptr_id = ptr_local.unwrap().id
-                    if dict_contains_key_gep(gep_results, ptr_id):
-                        val gep_info_opt = dict_get_gep(gep_results, ptr_id)
-                        if gep_info_opt.?:
-                            val gep_info = gep_info_opt.unwrap()
-                            accesses = accesses + [ArrayAccess(
-                                base_array: gep_info.0,
-                                index_expr: gep_info.1,
-                                is_load: false
-                            )]
+                    if gep_results.contains_key(ptr_id):
+                        val gep_info = gep_results[ptr_id]
+                        accesses = accesses + [ArrayAccess(
+                            base_array: gep_info.base,
+                            index_expr: gep_info.index,
+                            is_load: false
+                        )]
 
             case _:
                 pass_do_nothing
@@ -522,57 +475,6 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
     # Real implementation would analyze phi nodes and comparison operations
     nil
 
-# ============================================================================
-# Dictionary Helpers (for analysis)
-# ============================================================================
-
-fn dict_get_i64(d: Dict<i64, DefUseChain>, key: i64) -> DefUseChain?:
-    """Get value from Dict<i64, DefUseChain>."""
-    var i = 0
-    while i < d.keys_.len():
-        if d.keys_[i] == key:
-            return Some(d.values_[i])
-        i = i + 1
-    nil
-
-fn dict_set_i64(d: Dict<i64, DefUseChain>, key: i64, value: DefUseChain):
-    """Set value in Dict<i64, DefUseChain>."""
-    var i = 0
-    while i < d.keys_.len():
-        if d.keys_[i] == key:
-            d.values_[i] = value
-            return
-        i = i + 1
-    # Key not found, add it
-    d.keys_ = d.keys_ + [key]
-    d.values_ = d.values_ + [value]
-
-fn dict_contains_key_i64(d: Dict<i64, DefUseChain>, key: i64) -> bool:
-    """Check if Dict contains key."""
-    var i = 0
-    while i < d.keys_.len():
-        if d.keys_[i] == key:
-            return true
-        i = i + 1
-    false
-
-fn dict_get_gep(d: Dict<i64, (LocalId, LocalId)>, key: i64) -> (LocalId, LocalId)?:
-    """Get value from GEP results dict."""
-    var i = 0
-    while i < d.keys_.len():
-        if d.keys_[i] == key:
-            return Some(d.values_[i])
-        i = i + 1
-    nil
-
-fn dict_contains_key_gep(d: Dict<i64, (LocalId, LocalId)>, key: i64) -> bool:
-    """Check if GEP results dict contains key."""
-    var i = 0
-    while i < d.keys_.len():
-        if d.keys_[i] == key:
-            return true
-        i = i + 1
-    false
 
 # ============================================================================
 # Exports

@@ -1,0 +1,170 @@
+# Watcher Client Specification
+#
+# Tests client API for requesting cache artifacts from the watcher.
+# Uses module-level functions for all state mutations (closure limitation).
+#
+# **Feature IDs:** #WATCH-031 to #WATCH-040
+# **Category:** Infrastructure
+
+# ============================================================================
+# Module-level state (parallel arrays for cache)
+# ============================================================================
+
+val FRESH: i64 = 0
+val STALE: i64 = 2
+val MISSING: i64 = 3
+
+var shb_keys: [text] = []
+var shb_hashes: [i64] = []
+var smf_keys: [text] = []
+var smf_hashes: [i64] = []
+var generated_files: [text] = []
+
+fn client_reset():
+    shb_keys = []
+    shb_hashes = []
+    smf_keys = []
+    smf_hashes = []
+    generated_files = []
+
+fn client_add_shb(key: text, hash: i64):
+    shb_keys = shb_keys + [key]
+    shb_hashes = shb_hashes + [hash]
+
+fn client_add_smf(key: text, hash: i64):
+    smf_keys = smf_keys + [key]
+    smf_hashes = smf_hashes + [hash]
+
+fn client_find_shb(key: text) -> i64:
+    var i = 0
+    while i < shb_keys.len():
+        if shb_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn client_find_smf(key: text) -> i64:
+    var i = 0
+    while i < smf_keys.len():
+        if smf_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn mock_check_shb(source_path: text, shb_dir: text) -> i64:
+    val cache_key = "{shb_dir}/{source_path}"
+    val idx = client_find_shb(cache_key)
+    if idx >= 0:
+        return FRESH
+    MISSING
+
+fn mock_check_smf(source_path: text, smf_dir: text, options_hash: i64) -> i64:
+    val cache_key = "{smf_dir}/{source_path}"
+    val idx = client_find_smf(cache_key)
+    if idx < 0:
+        return MISSING
+    if smf_hashes[idx] == options_hash:
+        return FRESH
+    STALE
+
+fn mock_get_or_generate_shb(source_path: text) -> text:
+    val cache_key = ".build/headers/{source_path}"
+    val idx = client_find_shb(cache_key)
+    if idx >= 0:
+        return "cached"
+    generated_files = generated_files + [source_path]
+    client_add_shb(cache_key, 12345)
+    "generated"
+
+fn mock_get_or_generate_smf(source_path: text, options_hash: i64) -> text:
+    val cache_key = "build/smf/{source_path}"
+    val idx = client_find_smf(cache_key)
+    if idx >= 0:
+        if smf_hashes[idx] == options_hash:
+            return "cached"
+    generated_files = generated_files + [source_path]
+    client_add_smf(cache_key, options_hash)
+    "generated"
+
+# Getter functions (direct module var reads from `it` closures return stale values)
+fn client_gen_files_len() -> i64:
+    generated_files.len()
+
+fn client_gen_file_at(idx: i64) -> text:
+    generated_files[idx]
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "WatcherClient":
+    describe "check_shb_freshness":
+        it "returns FRESH for cached SHB":
+            client_reset()
+            client_add_shb(".build/headers/src/main.spl", 12345)
+            val result = mock_check_shb("src/main.spl", ".build/headers")
+            expect(result).to_equal(FRESH)
+
+        it "returns MISSING for uncached SHB":
+            client_reset()
+            val result = mock_check_shb("src/main.spl", ".build/headers")
+            expect(result).to_equal(MISSING)
+
+    describe "check_smf_freshness":
+        it "returns FRESH for matching options":
+            client_reset()
+            client_add_smf("build/smf/src/main.spl", 99999)
+            val result = mock_check_smf("src/main.spl", "build/smf", 99999)
+            expect(result).to_equal(FRESH)
+
+        it "returns STALE for mismatched options":
+            client_reset()
+            client_add_smf("build/smf/src/main.spl", 99999)
+            val result = mock_check_smf("src/main.spl", "build/smf", 11111)
+            expect(result).to_equal(STALE)
+
+        it "returns MISSING for uncached SMF":
+            client_reset()
+            val result = mock_check_smf("src/main.spl", "build/smf", 99999)
+            expect(result).to_equal(MISSING)
+
+    describe "get_or_generate_shb":
+        it "returns cached when available":
+            client_reset()
+            client_add_shb(".build/headers/src/main.spl", 12345)
+            val result = mock_get_or_generate_shb("src/main.spl")
+            expect(result).to_equal("cached")
+            expect(client_gen_files_len()).to_equal(0)
+
+        it "generates inline when not cached":
+            client_reset()
+            val result = mock_get_or_generate_shb("src/main.spl")
+            expect(result).to_equal("generated")
+            expect(client_gen_files_len()).to_equal(1)
+            expect(client_gen_file_at(0)).to_equal("src/main.spl")
+
+        it "caches after generation":
+            client_reset()
+            mock_get_or_generate_shb("src/main.spl")
+            val result2 = mock_get_or_generate_shb("src/main.spl")
+            expect(result2).to_equal("cached")
+            expect(client_gen_files_len()).to_equal(1)
+
+    describe "get_or_generate_smf":
+        it "returns cached for matching options":
+            client_reset()
+            client_add_smf("build/smf/src/main.spl", 55555)
+            val result = mock_get_or_generate_smf("src/main.spl", 55555)
+            expect(result).to_equal("cached")
+
+        it "regenerates for mismatched options":
+            client_reset()
+            client_add_smf("build/smf/src/main.spl", 55555)
+            val result = mock_get_or_generate_smf("src/main.spl", 99999)
+            expect(result).to_equal("generated")
+            expect(client_gen_files_len()).to_equal(1)
+
+        it "generates for missing SMF":
+            client_reset()
+            val result = mock_get_or_generate_smf("src/main.spl", 55555)
+            expect(result).to_equal("generated")

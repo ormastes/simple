@@ -1,0 +1,243 @@
+# Test Daemon Dependencies — Test dependency graph for change detection
+#
+# Analyzes `use` statements in test files to build a dependency graph.
+# Used by the cache to determine which tests are affected by source changes.
+
+export TestDepGraph, test_dep_graph_new, test_dep_graph_load
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Dependency Graph
+# ============================================================================
+
+class TestDepGraph:
+    deps: {text: [text]}
+    reverse_deps: {text: [text]}
+    graph_path: text
+
+fn test_dep_graph_new(graph_path: text) -> TestDepGraph:
+    TestDepGraph(deps: {}, reverse_deps: {}, graph_path: graph_path)
+
+impl TestDepGraph:
+    fn get_deps(test_path: text) -> [text]:
+        self.deps[test_path] ?? []
+
+    fn get_affected_tests(source_path: text) -> [text]:
+        self.reverse_deps[source_path] ?? []
+
+    # Analyze a test file's imports and build dependency list
+    me analyze_test(test_path: text):
+        val source = rt_file_read_text(test_path) ?? ""
+        if source == "":
+            return
+
+        val imports = extract_imports(source)
+        var resolved: [text] = []
+        var i = 0
+        while i < imports.len():
+            val module_path = resolve_module_to_file(imports[i])
+            if module_path != "":
+                resolved.push(module_path)
+                # Transitive: analyze imports of this dependency too
+                val transitive = extract_transitive_deps(module_path, 5)
+                var j = 0
+                while j < transitive.len():
+                    if not list_contains(resolved, transitive[j]):
+                        resolved.push(transitive[j])
+                    j = j + 1
+            i = i + 1
+
+        self.deps[test_path] = resolved
+
+        # Update reverse deps
+        var ri = 0
+        while ri < resolved.len():
+            val dep = resolved[ri]
+            var tests = self.reverse_deps[dep] ?? []
+            if not list_contains(tests, test_path):
+                tests.push(test_path)
+            self.reverse_deps[dep] = tests
+            ri = ri + 1
+
+    me save():
+        val parent = dep_graph_parent(self.graph_path)
+        rt_mkdir_p(parent)
+
+        var content = "# Test Dependency Graph\n"
+        val keys = self.deps.keys()
+        var i = 0
+        while i < keys.len():
+            val key = keys[i]
+            val dep_list = self.deps[key] ?? []
+            content = content + "\n[{key}]\n"
+            var di = 0
+            while di < dep_list.len():
+                content = content + "dep={dep_list[di]}\n"
+                di = di + 1
+            i = i + 1
+
+        rt_file_write_text(self.graph_path, content)
+
+# ============================================================================
+# Load Graph
+# ============================================================================
+
+fn test_dep_graph_load(graph_path: text) -> TestDepGraph:
+    var graph = test_dep_graph_new(graph_path)
+
+    if not rt_file_exists(graph_path):
+        return graph
+
+    val content = rt_file_read_text(graph_path) ?? ""
+    if content == "":
+        return graph
+
+    var current_key = ""
+    var current_deps: [text] = []
+
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("[") and line.ends_with("]"):
+            if current_key != "":
+                graph.deps[current_key] = current_deps
+                # Rebuild reverse deps
+                var ri = 0
+                while ri < current_deps.len():
+                    var tests = graph.reverse_deps[current_deps[ri]] ?? []
+                    if not list_contains(tests, current_key):
+                        tests.push(current_key)
+                    graph.reverse_deps[current_deps[ri]] = tests
+                    ri = ri + 1
+
+            current_key = line.substring(1, line.len() - 1)
+            current_deps = []
+        else if line.starts_with("dep="):
+            current_deps.push(line.substring(4))
+        li = li + 1
+
+    if current_key != "":
+        graph.deps[current_key] = current_deps
+        var ri = 0
+        while ri < current_deps.len():
+            var tests = graph.reverse_deps[current_deps[ri]] ?? []
+            if not list_contains(tests, current_key):
+                tests.push(current_key)
+            graph.reverse_deps[current_deps[ri]] = tests
+            ri = ri + 1
+
+    graph
+
+# ============================================================================
+# Import Extraction
+# ============================================================================
+
+fn extract_imports(source: text) -> [text]:
+    var imports: [text] = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("use "):
+            val module = parse_use_statement(line)
+            if module != "":
+                imports.push(module)
+        i = i + 1
+    imports
+
+fn parse_use_statement(line: text) -> text:
+    # "use std.foo.bar.{baz}" → "std.foo.bar"
+    # "use compiler.driver.xxx" → "compiler.driver.xxx"
+    val rest = line.substring(4).trim()
+    val brace_pos = rest.index_of(".{")
+    if brace_pos > 0:
+        return rest.substring(0, brace_pos)
+    # No brace — take everything up to end or .*
+    val star_pos = rest.index_of(".*")
+    if star_pos > 0:
+        return rest.substring(0, star_pos)
+    rest
+
+fn resolve_module_to_file(module_path: text) -> text:
+    # Convert module path to file path
+    # std.foo.bar → src/lib/.../foo/bar.spl (search common dirs)
+    # compiler.xxx → src/compiler/.../xxx.spl
+    # app.xxx → src/app/xxx.spl
+
+    val parts = module_path.split(".")
+    if parts.len() == 0:
+        return ""
+
+    val prefix = parts[0]
+    var base_dirs: [text] = []
+    if prefix == "std" or prefix == "lib":
+        base_dirs = ["src/lib/common", "src/lib/nogc_sync_mut", "src/lib/nogc_async_mut", "src/lib/gc_async_mut", "src/lib/nogc_async_mut_noalloc"]
+    else if prefix == "compiler":
+        base_dirs = ["src/compiler"]
+    else if prefix == "app":
+        base_dirs = ["src/app"]
+    else:
+        return ""
+
+    # Build relative path from remaining parts
+    var rel_path = ""
+    var i = 1
+    while i < parts.len():
+        if rel_path != "":
+            rel_path = rel_path + "/"
+        rel_path = rel_path + parts[i]
+        i = i + 1
+
+    # Try each base dir
+    var bi = 0
+    while bi < base_dirs.len():
+        val candidate = "{base_dirs[bi]}/{rel_path}.spl"
+        if rt_file_exists(candidate):
+            return candidate
+        val mod_candidate = "{base_dirs[bi]}/{rel_path}/mod.spl"
+        if rt_file_exists(mod_candidate):
+            return mod_candidate
+        bi = bi + 1
+
+    ""
+
+fn extract_transitive_deps(file_path: text, max_depth: i64) -> [text]:
+    if max_depth <= 0:
+        return []
+
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        return []
+
+    val imports = extract_imports(source)
+    var result: [text] = []
+    var i = 0
+    while i < imports.len():
+        val resolved = resolve_module_to_file(imports[i])
+        if resolved != "" and not list_contains(result, resolved):
+            result.push(resolved)
+        i = i + 1
+    result
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn list_contains(list: [text], item: text) -> bool:
+    var i = 0
+    while i < list.len():
+        if list[i] == item:
+            return true
+        i = i + 1
+    false
+
+fn dep_graph_parent(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    path.substring(0, last_slash)

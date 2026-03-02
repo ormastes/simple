@@ -1,0 +1,76 @@
+# Test Daemon Client — Client API for submitting test requests
+#
+# Wraps daemon_sdk.client with test-specific convenience functions.
+# Auto-starts daemon on first request.
+
+export test_daemon_ensure_running, test_submit, test_poll_result
+export test_submit_and_wait, test_daemon_status, test_daemon_stop
+
+use std.daemon_sdk.client.{
+    daemon_ensure_running, daemon_submit, daemon_poll_result,
+    daemon_submit_and_wait, daemon_stop
+}
+use std.daemon_sdk.types.{DaemonResponse, DaemonState}
+use std.daemon_sdk.lock.{is_daemon_running}
+use app.test_daemon.types.{
+    TestDaemonConfig, test_daemon_config_default,
+    test_request_to_daemon, daemon_response_to_test_result, TestResult,
+    TREQ_RUN_SINGLE, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP
+}
+
+extern fn rt_process_spawn_async(cmd: text) -> i64
+
+# ============================================================================
+# Ensure Running
+# ============================================================================
+
+fn test_daemon_ensure_running(config: TestDaemonConfig) -> bool:
+    daemon_ensure_running(config.daemon, fn() -> bool: start_test_daemon_process(config))
+
+fn start_test_daemon_process(config: TestDaemonConfig) -> bool:
+    # Spawn daemon as background process
+    val pid = rt_process_spawn_async("bin/simple test-daemon start")
+    pid > 0
+
+# ============================================================================
+# Submit Test
+# ============================================================================
+
+fn test_submit(path: text, config: TestDaemonConfig, clean: bool) -> text:
+    val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
+    val req = test_request_to_daemon(kind, path, "", clean)
+    daemon_submit(req, config.daemon)
+
+# ============================================================================
+# Poll Result
+# ============================================================================
+
+fn test_poll_result(request_id: text, config: TestDaemonConfig, timeout_ms: i64) -> TestResult:
+    val resp = daemon_poll_result(request_id, config.daemon, timeout_ms)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Submit and Wait
+# ============================================================================
+
+fn test_submit_and_wait(path: text, config: TestDaemonConfig, clean: bool, timeout_ms: i64) -> TestResult:
+    val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
+    val req = test_request_to_daemon(kind, path, "", clean)
+    val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Status
+# ============================================================================
+
+fn test_daemon_status(config: TestDaemonConfig) -> TestResult:
+    val req = test_request_to_daemon(TREQ_STATUS, "", "", false)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Stop
+# ============================================================================
+
+fn test_daemon_stop(config: TestDaemonConfig) -> bool:
+    daemon_stop(config.daemon)

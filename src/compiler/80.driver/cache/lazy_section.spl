@@ -1,0 +1,146 @@
+# Lazy Section Loading — Bitmap-tracked on-demand section loading for SHB/SMF
+#
+# Optimization: Type-checking only needs functions + structs sections.
+# Layout loading deferred until codegen. Reduces I/O for import-only checks.
+#
+# LazyShbReader wraps ShbReader with per-section bitmap tracking.
+# Sections are loaded on first access and cached thereafter.
+
+export LazyShbReader
+export lazy_shb_reader_open, lazy_shb_reader_from_reader
+export SECTION_FLAG_FUNCTIONS, SECTION_FLAG_STRUCTS, SECTION_FLAG_CLASSES
+export SECTION_FLAG_TYPE_LAYOUTS, SECTION_FLAG_ENUMS, SECTION_FLAG_TRAITS
+export SECTION_FLAG_REEXPORTS, SECTION_FLAG_DEPENDENCIES
+
+use compiler.shb.shb_reader.{ShbReader}
+use compiler.shb.shb_types.{
+    ShbFnEntry, ShbStructEntry, ShbClassEntry, ShbEnumEntry,
+    ShbTraitEntry, ShbReexportEntry, ShbTypeLayoutEntry, ShbDependencyEntry,
+    SHB_SECTION_FUNCTIONS, SHB_SECTION_STRUCTS, SHB_SECTION_CLASSES,
+    SHB_SECTION_TYPE_LAYOUTS, SHB_SECTION_ENUMS, SHB_SECTION_TRAITS,
+    SHB_SECTION_REEXPORTS, SHB_SECTION_DEPENDENCIES
+}
+
+# ============================================================================
+# Section Flags (bitmap tracking)
+# ============================================================================
+
+val SECTION_FLAG_FUNCTIONS: u8 = 0x01
+val SECTION_FLAG_STRUCTS: u8 = 0x02
+val SECTION_FLAG_CLASSES: u8 = 0x04
+val SECTION_FLAG_TYPE_LAYOUTS: u8 = 0x08
+val SECTION_FLAG_ENUMS: u8 = 0x10
+val SECTION_FLAG_TRAITS: u8 = 0x20
+val SECTION_FLAG_REEXPORTS: u8 = 0x40
+val SECTION_FLAG_DEPENDENCIES: u8 = 0x80
+
+# ============================================================================
+# LazyShbReader
+# ============================================================================
+
+class LazyShbReader:
+    reader: ShbReader
+    loaded_bitmap: u8
+    cached_functions: [ShbFnEntry]
+    cached_structs: [ShbStructEntry]
+    cached_classes: [ShbClassEntry]
+    cached_type_layouts: [ShbTypeLayoutEntry]
+    cached_enums: [ShbEnumEntry]
+    cached_traits: [ShbTraitEntry]
+    cached_reexports: [ShbReexportEntry]
+    cached_dependencies: [ShbDependencyEntry]
+
+    fn is_valid() -> bool:
+        self.reader.is_valid()
+
+    fn source_hash() -> i64:
+        self.reader.source_hash()
+
+    fn interface_hash() -> i64:
+        self.reader.interface_hash()
+
+    fn is_section_loaded(flag: u8) -> bool:
+        (self.loaded_bitmap & flag) != 0
+
+    fn loaded_section_count() -> i64:
+        var count: i64 = 0
+        var bit: u8 = 1
+        var i = 0
+        while i < 8:
+            if (self.loaded_bitmap & bit) != 0:
+                count = count + 1
+            bit = bit << 1
+            i = i + 1
+        count
+
+    # --- On-demand section accessors ---
+
+    me ensure_functions() -> [ShbFnEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_FUNCTIONS):
+            self.cached_functions = self.reader.read_functions()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_FUNCTIONS
+        self.cached_functions
+
+    me ensure_structs() -> [ShbStructEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_STRUCTS):
+            self.cached_structs = self.reader.read_structs()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_STRUCTS
+        self.cached_structs
+
+    me ensure_classes() -> [ShbClassEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_CLASSES):
+            self.cached_classes = self.reader.read_classes()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_CLASSES
+        self.cached_classes
+
+    me ensure_type_layouts() -> [ShbTypeLayoutEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_TYPE_LAYOUTS):
+            self.cached_type_layouts = self.reader.read_type_layouts()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_TYPE_LAYOUTS
+        self.cached_type_layouts
+
+    me ensure_enums() -> [ShbEnumEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_ENUMS):
+            self.cached_enums = self.reader.read_enums()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_ENUMS
+        self.cached_enums
+
+    me ensure_traits() -> [ShbTraitEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_TRAITS):
+            self.cached_traits = self.reader.read_traits()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_TRAITS
+        self.cached_traits
+
+    me ensure_reexports() -> [ShbReexportEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_REEXPORTS):
+            self.cached_reexports = self.reader.read_reexports()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_REEXPORTS
+        self.cached_reexports
+
+    me ensure_dependencies() -> [ShbDependencyEntry]:
+        if not self.is_section_loaded(SECTION_FLAG_DEPENDENCIES):
+            self.cached_dependencies = self.reader.read_dependencies()
+            self.loaded_bitmap = self.loaded_bitmap | SECTION_FLAG_DEPENDENCIES
+        self.cached_dependencies
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn lazy_shb_reader_open(path: text) -> LazyShbReader:
+    val reader = ShbReader.open(path)
+    lazy_shb_reader_from_reader(reader)
+
+fn lazy_shb_reader_from_reader(reader: ShbReader) -> LazyShbReader:
+    LazyShbReader(
+        reader: reader,
+        loaded_bitmap: 0,
+        cached_functions: [],
+        cached_structs: [],
+        cached_classes: [],
+        cached_type_layouts: [],
+        cached_enums: [],
+        cached_traits: [],
+        cached_reexports: [],
+        cached_dependencies: []
+    )

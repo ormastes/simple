@@ -15,8 +15,8 @@ Three parallel work streams completed this session, bringing compiler MDSOC cove
 
 ### Phase 3f: lexing_to_parsing Transform
 
-- `src/compiler/transform/feature/lexing_to_parsing/__init__.spl` — arch config for the lexing_to_parsing capsule
-- `src/compiler/transform/feature/lexing_to_parsing/entity_view/TokenStreamView.spl` — `TokenStreamView` struct bridging `LexerOutputPort` to `ParserInputPort`; adds `source_text` field required for parser error messages
+- `src/compiler/85.mdsoc/transform/feature/lexing_to_parsing/__init__.spl` — arch config for the lexing_to_parsing capsule
+- `src/compiler/85.mdsoc/transform/feature/lexing_to_parsing/entity_view/TokenStreamView.spl` — `TokenStreamView` struct bridging `LexerOutputPort` to `ParserInputPort`; adds `source_text` field required for parser error messages
 
 `TokenStreamView` is the entity view that carries the token stream across the D_transform boundary from lexing to parsing. It holds the `tokens` array (from `LexerOutputPort`) plus `source_text` (the original source, needed by the parser for error reporting).
 
@@ -24,12 +24,12 @@ Three parallel work streams completed this session, bringing compiler MDSOC cove
 
 Three pipeline stages that had no D_feature ports:
 
-- `src/compiler/feature/monomorphization/__init__.spl` — arch config
-- `src/compiler/feature/monomorphization/app/ports.spl` — `MonomorphizeInputPort` (typed HIR), `MonomorphizeOutputPort` (monomorphized HIR)
-- `src/compiler/feature/optimization/__init__.spl` — arch config
-- `src/compiler/feature/optimization/app/ports.spl` — `OptimizeInputPort` (MIR), `OptimizeOutputPort` (optimized MIR + stats)
-- `src/compiler/feature/linking/__init__.spl` — arch config
-- `src/compiler/feature/linking/app/ports.spl` — `LinkerInputPort` (object files + entry point), `LinkerOutputPort` (linked binary path)
+- `src/compiler/85.mdsoc/feature/monomorphization/__init__.spl` — arch config
+- `src/compiler/85.mdsoc/feature/monomorphization/app/ports.spl` — `MonomorphizeInputPort` (typed HIR), `MonomorphizeOutputPort` (monomorphized HIR)
+- `src/compiler/85.mdsoc/feature/optimization/__init__.spl` — arch config
+- `src/compiler/85.mdsoc/feature/optimization/app/ports.spl` — `OptimizeInputPort` (MIR), `OptimizeOutputPort` (optimized MIR + stats)
+- `src/compiler/85.mdsoc/feature/linking/__init__.spl` — arch config
+- `src/compiler/85.mdsoc/feature/linking/app/ports.spl` — `LinkerInputPort` (object files + entry point), `LinkerOutputPort` (linked binary path)
 
 ### doc_validation_spec Fixes
 
@@ -56,21 +56,21 @@ Three pipeline stages that had no D_feature ports:
 
 ## Architecture Completeness
 
-All planned MDSOC dimensions are now fully populated:
+All MDSOC code lives under `src/compiler/85.mdsoc/`:
 
-- **D_entity:** 12 entity files in `src/compiler_core/entity/` (token, ast, hir, mir, types)
-- **D_feature:** 12 pipeline stage port files in `src/compiler/feature/`
-- **D_transform:** 6 stage boundary views in `src/compiler/transform/feature/`
-- **D_adapters:** inbound (language server, profiler) and outbound (file, memory) adapters
+- **D_entity:** NOT extracted (entity types remain in numbered compiler layers 10/20/30/50)
+- **D_feature:** 12 pipeline stage port files in `src/compiler/85.mdsoc/feature/`
+- **D_transform:** 9 stage boundary views in `src/compiler/85.mdsoc/transform/feature/`
+- **D_adapters:** inbound (language server, profiler) and outbound (file, memory) in `src/compiler/85.mdsoc/adapters/`
 
 ## Follow-up (same session)
 
 All 4 future-work items implemented:
 
-1. `src/compiler_core/entity/span/Span.spl` — `SourceLocation` (line, col, to_text, at) + `Span` (start, end_loc, is_single_line, contains_line, line_count, single_line, empty)
-2. `src/compiler/transform/feature/mir_to_optimizer/entity_view/MirOptView.spl` — bridges MIR lowering → optimizer; has_functions, is_optimized, average_insts_per_fn
-3. `src/compiler/transform/feature/backend_to_linker/entity_view/ObjectFileView.spl` — bridges codegen output → linker; is_empty, has_symbols, from_codegen, failed
-4. `src/compiler/transform/feature/loading_to_parsing/entity_view/LoadedModuleView.spl` — bridges module loader → parser; has_source, is_empty, from_source, empty
+1. `src/compiler/85.mdsoc/ (note: entity types NOT extracted, remain in numbered layers)span/Span.spl` — `SourceLocation` (line, col, to_text, at) + `Span` (start, end_loc, is_single_line, contains_line, line_count, single_line, empty)
+2. `src/compiler/85.mdsoc/transform/feature/mir_to_optimizer/entity_view/MirOptView.spl` — bridges MIR lowering → optimizer; has_functions, is_optimized, average_insts_per_fn
+3. `src/compiler/85.mdsoc/transform/feature/backend_to_linker/entity_view/ObjectFileView.spl` — bridges codegen output → linker; is_empty, has_symbols, from_codegen, failed
+4. `src/compiler/85.mdsoc/transform/feature/loading_to_parsing/entity_view/LoadedModuleView.spl` — bridges module loader → parser; has_source, is_empty, from_source, empty
 
 Tests added:
 - `test/unit/compiler_core/entity/entity_span_spec.spl` — 16 tests for SourceLocation + Span

@@ -6,6 +6,11 @@
 
 extern fn rt_file_size(path: text) -> i64
 
+# Pointer write FFI for memory patching and relocation
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
 # Low-level syscall FFI (raw address-based wrappers in C runtime)
 extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
 extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
@@ -195,6 +200,11 @@ fn native_make_executable(address: i64, size: i64) -> bool:
     val prot = PROT_READ | PROT_EXEC
     rt_mprotect(address, size, prot) == 0
 
+fn native_make_rw(address: i64, size: i64) -> bool:
+    """Change protection to read-write (for relocation patching)."""
+    val prot = PROT_READ | PROT_WRITE
+    rt_mprotect(address, size, prot) == 0
+
 fn native_flush_icache(address: i64, size: i64):
     """Flush instruction cache (required on ARM/RISC-V)."""
     # x86/x64: no-op (hardware cache coherence)
@@ -251,10 +261,8 @@ fn ptr_read_u8(ptr: *u8, offset: i64) -> u8:
 
 fn ptr_write_u8(ptr: *u8, offset: i64, value: u8):
     """Write byte to pointer with offset."""
-    unsafe:
-        # TODO: proper pointer write once mutable pointers are supported in parser
-        val _ = (ptr + offset) as *mut u8
-        pass_do_nothing
+    val addr = ptr as i64
+    rt_ptr_write_u8(addr, offset, value as i64)
 
 fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
     """Copy bytes from raw pointer into a Simple array."""
@@ -281,6 +289,18 @@ fn char_from_byte(b: u8) -> text:
     "{b as char}"
 
 # ============================================================================
+# Relocation Patching Functions
+# ============================================================================
+
+fn native_reloc_write_i32(address: i64, offset: i64, value: i32):
+    """Write a 32-bit value at address+offset (for Pc32/Plt32 relocations)."""
+    rt_ptr_write_i32(address, offset, value)
+
+fn native_reloc_write_i64(address: i64, offset: i64, value: i64):
+    """Write a 64-bit value at address+offset (for Abs64 relocations)."""
+    rt_ptr_write_i64(address, offset, value)
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -297,6 +317,7 @@ export native_alloc_rw_memory
 export native_free_exec_memory
 export native_write_exec_memory
 export native_make_executable
+export native_make_rw
 export native_flush_icache
 export native_get_function_pointer
 export native_call_function_0
@@ -304,6 +325,10 @@ export native_call_function_1
 export native_call_function_2
 export native_exec_memory_total
 export native_exec_memory_count
+
+# Relocation patching
+export native_reloc_write_i32
+export native_reloc_write_i64
 
 # Constants
 export PROT_READ, PROT_WRITE, PROT_EXEC

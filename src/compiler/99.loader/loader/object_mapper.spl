@@ -5,12 +5,16 @@
 
 use .smf_mmap_native.{
     native_alloc_exec_memory,
+    native_alloc_rw_memory,
     native_write_exec_memory,
     native_make_executable,
     native_flush_icache,
     native_get_function_pointer,
-    native_free_exec_memory
+    native_free_exec_memory,
+    native_reloc_write_i32,
+    native_reloc_write_i64
 }
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 
 struct SharedExecMapperConfig:
     verbose: bool
@@ -206,9 +210,81 @@ impl JitMapper:
         exec_mapper.unmap_owner(owner_id)
 
 # ============================================================================
+# Relocation Application
+# ============================================================================
+
+"""Resolved symbol entry for relocation."""
+struct ResolvedSymbol:
+    name: text
+    address: i64
+
+"""Apply SMF relocations to code loaded at code_addr.
+
+Args:
+    code_addr: Base address where code was loaded
+    code_size: Size of the code region
+    relocs: List of relocation entries from SMF
+    symbols: Resolved symbol addresses (index -> ResolvedSymbol)
+    global_symbols: Fallback global symbol table (name -> address)
+
+Returns:
+    Ok(()) on success, Err with message on failure.
+"""
+fn apply_smf_relocations(
+    code_addr: i64,
+    code_size: i64,
+    relocs: [SmfRelocEntry],
+    symbols: [ResolvedSymbol],
+    global_symbols: Dict<text, i64>
+) -> Result<(), text>:
+    for reloc in relocs:
+        val patch_addr = code_addr + reloc.offset
+
+        # Bounds check
+        if reloc.offset < 0 or reloc.offset >= code_size:
+            return Err("Relocation offset {reloc.offset} out of bounds (code_size={code_size})")
+
+        # Resolve symbol address
+        var sym_addr = 0i64
+        if reloc.symbol_index < symbols.len():
+            val sym = symbols[reloc.symbol_index]
+            sym_addr = sym.address
+            # If unresolved, try global table
+            if sym_addr == 0 and global_symbols.contains_key(sym.name):
+                sym_addr = global_symbols[sym.name]
+        if sym_addr == 0:
+            return Err("Unresolved symbol at index {reloc.symbol_index}")
+
+        # Apply relocation based on type
+        # Wire values: 1=Abs64, 2=Rel32/Pc32, 3=PltRel32/Plt32, 4=GotRel32/GotPcRel
+        match reloc.reloc_type:
+            1:
+                # Abs64: write 8 bytes = sym_addr + addend
+                val value = sym_addr + reloc.addend
+                native_reloc_write_i64(code_addr, reloc.offset, value)
+            2:
+                # Rel32/Pc32: write 4 bytes = (sym_addr - patch_addr + addend) as i32
+                val value = sym_addr - patch_addr + reloc.addend
+                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+            3:
+                # PltRel32/Plt32: same as Pc32
+                val value = sym_addr - patch_addr + reloc.addend
+                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+            4:
+                # GotRel32/GotPcRel: same as Pc32 (GOT entry resolved)
+                val value = sym_addr - patch_addr + reloc.addend
+                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+            _:
+                return Err("Unknown relocation type: {reloc.reloc_type}")
+
+    Ok(())
+
+# ============================================================================
 # Exports
 # ============================================================================
 
+export ResolvedSymbol
+export apply_smf_relocations
 export SharedExecMapperConfig
 export SharedExecRecord
 export SharedExecMapperStats

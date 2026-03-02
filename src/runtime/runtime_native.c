@@ -270,6 +270,25 @@ double rt_sqrt(double x) { return sqrt(x); }
 double rt_pow(double a, double b) { return pow(a, b); }
 
 /* ================================================================
+ * Pointer Write Operations (for relocation patching)
+ * ================================================================ */
+
+void rt_ptr_write_u8(int64_t addr, int64_t offset, int64_t value) {
+    uint8_t* ptr = (uint8_t*)((char*)(uintptr_t)addr + offset);
+    *ptr = (uint8_t)value;
+}
+
+void rt_ptr_write_i32(int64_t addr, int64_t offset, int32_t value) {
+    int32_t* ptr = (int32_t*)((char*)(uintptr_t)addr + offset);
+    *ptr = value;
+}
+
+void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
+    int64_t* ptr = (int64_t*)((char*)(uintptr_t)addr + offset);
+    *ptr = value;
+}
+
+/* ================================================================
  * Error Handling
  * ================================================================ */
 

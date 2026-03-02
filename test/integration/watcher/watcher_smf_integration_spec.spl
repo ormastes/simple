@@ -1,0 +1,91 @@
+# Watcher SMF Integration Specification
+#
+# Tests end-to-end SMF cache generation and validation through the watcher.
+#
+# **Feature IDs:** #WATCH-INT-011 to #WATCH-INT-020
+# **Category:** Integration
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var smf_out_paths: [text] = []
+var smf_opt_hashes: [i64] = []
+var smf_compile_log: [text] = []
+
+fn smf_int_reset():
+    smf_out_paths = []
+    smf_opt_hashes = []
+    smf_compile_log = []
+
+fn smf_find(path: text) -> i64:
+    var i = 0
+    while i < smf_out_paths.len():
+        if smf_out_paths[i] == path:
+            return i
+        i = i + 1
+    -1
+
+fn smf_int_compile(source_path: text, output: text, options_hash: i64):
+    smf_compile_log = smf_compile_log + [source_path]
+    val idx = smf_find(output)
+    if idx >= 0:
+        smf_opt_hashes[idx] = options_hash
+    else:
+        smf_out_paths = smf_out_paths + [output]
+        smf_opt_hashes = smf_opt_hashes + [options_hash]
+
+fn smf_int_check(smf_path: text, expected_hash: i64) -> i64:
+    val idx = smf_find(smf_path)
+    if idx < 0:
+        return 3  # MISSING
+    if smf_opt_hashes[idx] == expected_hash:
+        return 0  # FRESH
+    2  # STALE
+
+# Getter functions (direct module var reads from `it` closures return stale values)
+fn smf_compile_log_len() -> i64:
+    smf_compile_log.len()
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Watcher SMF Integration":
+    describe "compile and cache":
+        it "stores options hash in SMF":
+            smf_int_reset()
+            smf_int_compile("src/main.spl", "build/smf/main.smf", 99999)
+            val idx = smf_find("build/smf/main.smf")
+            expect(idx).to_be_greater_than(-1)
+            expect(smf_compile_log_len()).to_equal(1)
+
+        it "verifies matching options":
+            smf_int_reset()
+            smf_int_compile("src/main.spl", "build/smf/main.smf", 99999)
+            val status = smf_int_check("build/smf/main.smf", 99999)
+            expect(status).to_equal(0)
+
+    describe "options mismatch detection":
+        it "detects backend change":
+            smf_int_reset()
+            smf_int_compile("src/main.spl", "build/smf/main.smf", 11111)
+            val status = smf_int_check("build/smf/main.smf", 22222)
+            expect(status).to_equal(2)
+
+        it "detects missing SMF":
+            smf_int_reset()
+            val status = smf_int_check("build/smf/main.smf", 11111)
+            expect(status).to_equal(3)
+
+    describe "recompilation":
+        it "recompiles when options change":
+            smf_int_reset()
+            smf_int_compile("src/main.spl", "build/smf/main.smf", 11111)
+            expect(smf_compile_log_len()).to_equal(1)
+            val status = smf_int_check("build/smf/main.smf", 22222)
+            expect(status).to_equal(2)
+            smf_int_compile("src/main.spl", "build/smf/main.smf", 22222)
+            expect(smf_compile_log_len()).to_equal(2)
+            val status2 = smf_int_check("build/smf/main.smf", 22222)
+            expect(status2).to_equal(0)

@@ -94,6 +94,14 @@ impl LoopInvariantMotion:
 
         self.hoisted_count = self.hoisted_count + invariant_insts.len()
 
+        # Pre-build invariant set for O(1) lookup (keyed on "dest_id:span_start:span_end")
+        var invariant_set: {text: bool} = {}
+        for inv_inst in invariant_insts:
+            val inv_dest = self.inst_dest(inv_inst)
+            if inv_dest.?:
+                val key = "{inv_dest.unwrap().id}:{inv_inst.span.start}:{inv_inst.span.end}"
+                invariant_set[key] = true
+
         # Build new blocks: add hoisted insts before header, remove from body
         var new_blocks: [MirBlock] = []
         var hoisted_to_preheader = false
@@ -105,7 +113,7 @@ impl LoopInvariantMotion:
                 for hinst in invariant_insts:
                     new_insts = new_insts.push(hinst)
                 for inst in block.instructions:
-                    if not self.is_in_list(inst, invariant_insts):
+                    if not self.is_in_invariant_set(inst, invariant_set):
                         new_insts = new_insts.push(inst)
                 new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
@@ -116,7 +124,7 @@ impl LoopInvariantMotion:
                 # Remove hoisted instructions from loop body
                 var kept: [MirInst] = []
                 for inst in block.instructions:
-                    if not self.is_in_list(inst, invariant_insts):
+                    if not self.is_in_invariant_set(inst, invariant_set):
                         kept = kept.push(inst)
                 new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
@@ -161,16 +169,12 @@ impl LoopInvariantMotion:
             case Copy(dest, _): dest
             case _: nil
 
-    fn is_in_list(inst: MirInst, insts: [MirInst]) -> bool:
-        """Check if instruction is in list (by span comparison)."""
-        for other in insts:
-            if inst.span.start == other.span.start and inst.span.end == other.span.end:
-                val same_kind = self.inst_dest(inst).? and self.inst_dest(other).?
-                if same_kind:
-                    val d1 = self.inst_dest(inst).unwrap()
-                    val d2 = self.inst_dest(other).unwrap()
-                    if d1.id == d2.id:
-                        return true
+    fn is_in_invariant_set(inst: MirInst, invariant_set: {text: bool}) -> bool:
+        """Check if instruction is in the invariant set (O(1) dict lookup)."""
+        val dest = self.inst_dest(inst)
+        if dest.?:
+            val key = "{dest.unwrap().id}:{inst.span.start}:{inst.span.end}"
+            return invariant_set.contains_key(key)
         false
 
 # ============================================================================

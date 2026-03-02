@@ -5,8 +5,15 @@
 >
 > Design: `doc/research/compiler_mdsoc_design.md`
 
-**Date:** 2026-02-17
-**Status:** Approved for implementation
+**Date:** 2026-02-17 (Updated 2026-03-02)
+**Status:** Partially implemented — see actual status below
+
+**Implementation Reality (2026-03-02):**
+- All code lives under `src/compiler/85.mdsoc/` (NOT `src/compiler_core/entity/` or `src/compiler/feature/` as planned)
+- Phase 1 (Entity Dimension): **NOT DONE** — `src/compiler_core/entity/` was never created
+- Phases 2-7 (Feature/Transform/Adapters): Code written under `85.mdsoc/`, not separate directories
+- Tests: 21/289 passing (multi-struct import limitation)
+- See `doc/report/compiler_mdsoc_migration.md` for current status
 
 ---
 
@@ -730,34 +737,21 @@ Design in `compiler_mdsoc_design.md` Section 7.
 
 ## Migration Tracking
 
-Each phase produces a migration status entry:
+Status as of 2026-03-02 (all under `src/compiler/85.mdsoc/`):
 
 ```
-doc/report/compiler_mdsoc_migration.md
-
-| Phase | Status | Files Changed | Tests |
-|-------|--------|---------------|-------|
-| 1a: token entity | TODO | 0 | 4067/4067 |
-| 1b: ast entity   | TODO | 0 | 4067/4067 |
-| 1c: hir entity   | TODO | 0 | 4067/4067 |
-| 1d: mir entity   | TODO | 0 | 4067/4067 |
-| 1e: types entity | TODO | 0 | 4067/4067 |
-| 2a: lexing stage | TODO | 0 | 4067/4067 |
-| 2b: parsing stage| TODO | 0 | 4067/4067 |
-| 2c: desugar stage| TODO | 0 | 4067/4067 |
-| 2d: typecheck    | TODO | 0 | 4067/4067 |
-| 2e: hir lower    | TODO | 0 | 4067/4067 |
-| 2f: mir lower    | TODO | 0 | 4067/4067 |
-| 2g: codegen      | TODO | 0 | 4067/4067 |
-| 3a: typing→hir   | TODO | 0 | 4067/4067 |
-| 3b: hir→mir      | TODO | 0 | 4067/4067 |
-| 3c: mir→backend  | TODO | 0 | 4067/4067 |
-| 3d: parse→desugar| TODO | 0 | 4067/4067 |
-| 3e: desugar→type | TODO | 0 | 4067/4067 |
-| 4: arch enforce  | TODO | 0 | 4067/4067 |
-| 5: module loader | TODO | 0 | 4067/4067 |
-| 6: interp backend| TODO | 0 | 4067/4067 |
+| Phase | Status | Location | Notes |
+|-------|--------|----------|-------|
+| 1a-1e: entity   | NOT DONE | (planned: src/compiler_core/entity/) | Never extracted |
+| 2a-2j: features | DONE     | 85.mdsoc/feature/ (12 stages) | Port structs only |
+| 3a-3f+: transforms | DONE  | 85.mdsoc/transform/ (9 boundaries) | Entity views only |
+| 4: arch enforce  | DONE     | src/app/cli/arch_check.spl | check-arch command |
+| 5: module loader | DONE     | 85.mdsoc/feature/module_loading/ | Ports + adapters |
+| 6: interp backend| DONE     | 85.mdsoc/feature/codegen/backends/interpreter/ | BackendPort |
+| 7: event bus     | DONE     | 85.mdsoc/feature/events/ + adapters/in/ | Ports + adapters |
 ```
+
+See `doc/report/compiler_mdsoc_migration.md` for detailed current status.
 
 ---
 

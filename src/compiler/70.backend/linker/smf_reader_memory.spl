@@ -165,6 +165,120 @@ impl SmfReaderMemory:
     fn data_size() -> i64:
         self.data.len()
 
+    """Check if the Code section contains a full ELF object file."""
+    fn has_elf_object() -> bool:
+        val section_entry_size = 64
+        val section_count = self.header.section_count as i64
+        var i = 0
+        while i < section_count:
+            val entry_off = self.sections_offset + i * section_entry_size
+            val entry_end = entry_off + section_entry_size
+            if entry_end > self.data.len():
+                i = i + 1
+                continue
+            val sec_type = self.data[entry_off] as i32
+            if sec_type == 1:
+                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
+                if (sec_size >= 4 and
+                    sec_offset + 4 <= self.data.len()):
+                    val b0 = self.data[sec_offset]
+                    val b1 = self.data[sec_offset + 1]
+                    val b2 = self.data[sec_offset + 2]
+                    val b3 = self.data[sec_offset + 3]
+                    return b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46
+                return false
+            i = i + 1
+        false
+
+    """Read the full ELF object bytes from the Code section."""
+    fn read_elf_object() -> Result<[u8], text>:
+        val section_entry_size = 64
+        val section_count = self.header.section_count as i64
+        var i = 0
+        while i < section_count:
+            val entry_off = self.sections_offset + i * section_entry_size
+            val entry_end = entry_off + section_entry_size
+            if entry_end > self.data.len():
+                i = i + 1
+                continue
+            val sec_type = self.data[entry_off] as i32
+            if sec_type == 1:
+                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
+                if sec_size < 4:
+                    return Err("Code section too small for ELF object")
+                if sec_offset + sec_size > self.data.len():
+                    return Err("Code section extends beyond SMF data")
+                val b0 = self.data[sec_offset]
+                val b1 = self.data[sec_offset + 1]
+                val b2 = self.data[sec_offset + 2]
+                val b3 = self.data[sec_offset + 3]
+                val is_elf = b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46
+                if not is_elf:
+                    return Err("Code section does not contain ELF object")
+                var result: [u8] = []
+                var j = sec_offset
+                while j < sec_offset + sec_size:
+                    result.push(self.data[j])
+                    j = j + 1
+                return Ok(result)
+            i = i + 1
+        Err("No Code section found in SMF")
+
+    """Read relocations from the Reloc section (wire type 5).
+
+    Each entry is 24 bytes: offset(8) | sym_idx(4) | type(1) | pad(3) | addend(8).
+    Returns empty list for old SMF files without relocation sections.
+    """
+    fn read_relocations() -> Result<[SmfRelocEntry], text>:
+        val section_entry_size = 64
+        val section_count = self.header.section_count as i64
+        val reloc_entry_size = 24
+        var i = 0
+        while i < section_count:
+            val entry_off = self.sections_offset + i * section_entry_size
+            val entry_end = entry_off + section_entry_size
+            if entry_end > self.data.len():
+                i = i + 1
+                continue
+            val sec_type = self.data[entry_off] as i32
+            if sec_type == 5:
+                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
+                if sec_offset + sec_size > self.data.len():
+                    return Err("Reloc section extends beyond SMF data")
+                val entry_count = sec_size / reloc_entry_size
+                var relocs: [SmfRelocEntry] = []
+                var j = 0
+                while j < entry_count:
+                    val e_off = sec_offset + j * reloc_entry_size
+                    val r_offset = bytes_to_u64(self.data, e_off) as i64
+                    val r_sym_idx = bytes_to_u32(self.data, e_off + 8) as i64
+                    val r_type = self.data[e_off + 12] as i32
+                    val r_addend = bytes_to_u64(self.data, e_off + 16) as i64
+                    relocs.push(SmfRelocEntry(
+                        offset: r_offset,
+                        symbol_index: r_sym_idx,
+                        reloc_type: r_type,
+                        addend: r_addend
+                    ))
+                    j = j + 1
+                return Ok(relocs)
+            i = i + 1
+        Ok([])
+
+# ============================================================================
+# SMF Relocation Entry (read-side)
+# ============================================================================
+
+"""Relocation entry read from an SMF Reloc section."""
+struct SmfRelocEntry:
+    offset: i64
+    symbol_index: i64
+    reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32
+    addend: i64
+
 # ============================================================================
 # Parsing Functions
 # ============================================================================
@@ -478,3 +592,4 @@ fn parse_sym_type(t: u8) -> SymbolType:
 # ============================================================================
 
 export SmfReaderMemory
+export SmfRelocEntry

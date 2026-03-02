@@ -1,0 +1,90 @@
+# Daemon SDK Lock — Singleton enforcement via PID lock file
+#
+# Ensures only one daemon instance runs per lock path.
+# Lock file contains PID and timestamp for stale detection.
+
+export try_acquire_daemon_lock, release_daemon_lock
+export is_daemon_running, read_daemon_pid, is_pid_alive
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Lock Acquisition
+# ============================================================================
+
+fn try_acquire_daemon_lock(lock_path: text) -> i64:
+    val parent = lock_path_parent(lock_path)
+    rt_mkdir_p(parent)
+
+    if rt_file_exists(lock_path):
+        val existing_pid = read_daemon_pid(lock_path)
+        if existing_pid > 0 and is_pid_alive(existing_pid):
+            return -1
+        rt_file_delete(lock_path)
+
+    val pid = rt_getpid()
+    val timestamp = rt_time_now_unix_micros()
+    val content = "{pid}\n{timestamp}"
+    if rt_file_write_text(lock_path, content):
+        return pid
+    -1
+
+# ============================================================================
+# Lock Release
+# ============================================================================
+
+fn release_daemon_lock(pid: i64, lock_path: text) -> bool:
+    if not rt_file_exists(lock_path):
+        return true
+
+    val lock_pid = read_daemon_pid(lock_path)
+    if lock_pid != pid:
+        return false
+
+    rt_file_delete(lock_path)
+
+# ============================================================================
+# Lock Status
+# ============================================================================
+
+fn is_daemon_running(lock_path: text) -> bool:
+    if not rt_file_exists(lock_path):
+        return false
+
+    val pid = read_daemon_pid(lock_path)
+    if pid <= 0:
+        return false
+
+    is_pid_alive(pid)
+
+fn read_daemon_pid(lock_path: text) -> i64:
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        return -1
+
+    val lines = content.split("\n")
+    if lines.len() == 0:
+        return -1
+
+    val pid_str = lines[0].trim()
+    pid_str.to_i64() ?? -1
+
+fn is_pid_alive(pid: i64) -> bool:
+    extern fn rt_process_exists(pid: i64) -> bool
+    rt_process_exists(pid)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn lock_path_parent(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    path.substring(0, last_slash)

@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len,
+    rt_tuple_new, rt_tuple_set,
     RuntimeValue,
 };
 
@@ -576,7 +577,95 @@ pub extern "C" fn to_string(val: i64) -> i64 {
 
 #[no_mangle] pub extern "C" fn rt_compile_to_llvm_ir(_source: i64) -> i64 { stub_make_string("") }
 #[no_mangle] pub extern "C" fn rt_compile_to_native(_source: i64, _output: i64) -> i64 { 0 }
-#[no_mangle] pub extern "C" fn rt_execute_native(_path: i64) -> i64 { 0 }
+
+/// Execute a native binary with arguments and timeout.
+///
+/// Simple signature: `extern fn rt_execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32)`
+#[no_mangle]
+pub extern "C" fn rt_execute_native(path_rv: RuntimeValue, args_rv: RuntimeValue, timeout_ms: i64) -> i64 {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // Helper: build a result tuple (stdout, stderr, exit_code)
+    fn make_result(stdout: &str, stderr: &str, code: i64) -> i64 {
+        let tup = rt_tuple_new(3);
+        let s1 = rt_string_new(stdout.as_ptr(), stdout.len() as u64);
+        let s2 = rt_string_new(stderr.as_ptr(), stderr.len() as u64);
+        rt_tuple_set(tup, 0, s1);
+        rt_tuple_set(tup, 1, s2);
+        rt_tuple_set(tup, 2, RuntimeValue::from_int(code));
+        from_rv(tup)
+    }
+
+    let binary_path = match extract_rt_string(path_rv) {
+        Some(s) => s,
+        None => return make_result("", "Invalid binary path", -1),
+    };
+
+    let cmd_args = extract_rt_string_array(args_rv);
+
+    // Check if binary exists
+    if !std::path::Path::new(&binary_path).exists() {
+        return make_result("", &format!("Binary not found: {}", binary_path), 127);
+    }
+
+    let timeout = if timeout_ms > 0 {
+        Duration::from_millis(timeout_ms as u64)
+    } else {
+        Duration::from_millis(1)
+    };
+
+    // Spawn with piped stdout/stderr
+    let mut child = match Command::new(&binary_path)
+        .args(&cmd_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return make_result("", &format!("Execution error: {}", e), -1),
+    };
+
+    // Poll with timeout
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+
+    if status.is_none() {
+        return make_result("", "Execution timed out", 124);
+    }
+
+    let mut stdout_str = String::new();
+    let mut stderr_str = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        let _ = out.read_to_string(&mut stdout_str);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read;
+        let _ = err.read_to_string(&mut stderr_str);
+    }
+
+    let exit_code = status.unwrap().code().unwrap_or(-1) as i64;
+    make_result(&stdout_str, &stderr_str, exit_code)
+}
 #[no_mangle] pub extern "C" fn rt_cargo_fmt() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn rt_cargo_lint() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn rt_cargo_test_doc() -> i64 { 0 }
