@@ -34,7 +34,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
         Err(_) => return Ok(Value::Int(0)),
     };
 
-    let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
 
     if handle.is_null() {
         // Log the dlerror for debugging

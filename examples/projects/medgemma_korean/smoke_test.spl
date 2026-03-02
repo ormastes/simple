@@ -1,0 +1,108 @@
+use src.torch_dyn.{
+    torch_available, cuda_available,
+    tensor_randn_2d, tensor_zeros_1d,
+    t_add, t_mul, t_matmul, t_gelu, t_transpose,
+    t_mul_scalar, t_sub,
+    t_mean, t_free, t_clone,
+    t_cuda, t_is_cuda, t_cpu,
+    autograd_set_requires_grad, autograd_backward, autograd_grad,
+    autograd_no_grad_begin, autograd_no_grad_end,
+    t_sum_dim, t_mean_dim
+}
+
+print "=== Torch Dynamic FFI Smoke Test ==="
+print "torch available: {torch_available()}"
+print "cuda available: {cuda_available()}"
+
+# Test 1: Basic tensor creation and mean
+print ""
+print "--- Test 1: Tensor creation ---"
+val h = tensor_randn_2d(4, 8)
+val m = t_mean(h)
+print "randn(4,8) mean: {m}"
+t_free(h)
+print "PASS: Test 1"
+
+# Test 2: Move tensor to CUDA
+print ""
+print "--- Test 2: CUDA transfer ---"
+val cpu_t = tensor_randn_2d(16, 64)
+val gpu_t = t_cuda(cpu_t, 0)
+t_free(cpu_t)
+val on_gpu = t_is_cuda(gpu_t)
+print "on GPU: {on_gpu}"
+t_free(gpu_t)
+print "PASS: Test 2"
+
+# Test 3: Matrix multiplication on GPU
+print ""
+print "--- Test 3: Matmul on GPU ---"
+val x_cpu = tensor_randn_2d(16, 64)
+val w_cpu = tensor_randn_2d(128, 64)
+val x = t_cuda(x_cpu, 0)
+val w = t_cuda(w_cpu, 0)
+t_free(x_cpu)
+t_free(w_cpu)
+val wt = t_transpose(w, 0, 1)
+val out = t_matmul(x, wt)
+t_free(wt)
+val out_mean = t_mean(out)
+print "matmul output mean: {out_mean}"
+t_free(x)
+t_free(w)
+t_free(out)
+print "PASS: Test 3"
+
+# Test 4: Autograd
+print ""
+print "--- Test 4: Autograd ---"
+val p_cpu = tensor_randn_2d(4, 4)
+val p = t_cuda(p_cpu, 0)
+t_free(p_cpu)
+autograd_set_requires_grad(p, true)
+val inp_cpu = tensor_randn_2d(4, 4)
+val inp = t_cuda(inp_cpu, 0)
+t_free(inp_cpu)
+val product = t_mul(p, inp)
+val loss_t = t_mean_dim(t_sum_dim(product, 1, false), 0, false)
+autograd_backward(loss_t)
+val grad_h = autograd_grad(p)
+print "grad handle: {grad_h}"
+t_free(product)
+t_free(loss_t)
+t_free(inp)
+t_free(p)
+print "PASS: Test 4"
+
+# Test 5: SGD-style update (no_grad)
+print ""
+print "--- Test 5: SGD update ---"
+val param_cpu = tensor_randn_2d(8, 8)
+val param = t_cuda(param_cpu, 0)
+t_free(param_cpu)
+autograd_set_requires_grad(param, true)
+
+val input_cpu = tensor_randn_2d(8, 8)
+val input_t = t_cuda(input_cpu, 0)
+t_free(input_cpu)
+val prod = t_mul(param, input_t)
+val loss2 = t_mean_dim(t_sum_dim(prod, 1, false), 0, false)
+autograd_backward(loss2)
+val grad2 = autograd_grad(param)
+
+autograd_no_grad_begin()
+val scaled = t_mul_scalar(grad2, 0.001)
+val updated = t_sub(param, scaled)
+autograd_no_grad_end()
+val updated_mean = t_mean(updated)
+print "updated param mean: {updated_mean}"
+t_free(scaled)
+t_free(updated)
+t_free(prod)
+t_free(loss2)
+t_free(input_t)
+t_free(param)
+print "PASS: Test 5"
+
+print ""
+print "=== ALL SMOKE TESTS PASSED ==="

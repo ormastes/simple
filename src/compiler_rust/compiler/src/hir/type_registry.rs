@@ -53,7 +53,7 @@ impl Default for TypeIdAllocator {
 /// Type registry that maps TypeId to HirType
 #[derive(Debug, Default)]
 pub struct TypeRegistry {
-    types: HashMap<TypeId, HirType>,
+    types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
 }

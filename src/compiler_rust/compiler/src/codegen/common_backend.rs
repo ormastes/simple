@@ -3,7 +3,7 @@
 //! This module provides a generic `CodegenBackend<M: Module>` that handles
 //! shared functionality between AOT (ObjectModule) and JIT (JITModule) backends.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cranelift_codegen::ir::{types, InstBuilder, UserFuncName};
 use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
@@ -49,9 +49,9 @@ pub type BackendResult<T> = Result<T, BackendError>;
 pub struct CodegenBackend<M: Module> {
     pub module: M,
     pub ctx: Context,
-    pub func_ids: HashMap<String, cranelift_module::FuncId>,
+    pub func_ids: BTreeMap<String, cranelift_module::FuncId>,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
-    pub global_ids: HashMap<String, cranelift_module::DataId>,
+    pub global_ids: BTreeMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
     pub target: Target,
     /// Optional module prefix for name mangling (e.g., "compiler__frontend__core__lexer").
@@ -218,9 +218,9 @@ impl<M: Module> CodegenBackend<M> {
         Ok(Self {
             module,
             ctx,
-            func_ids: HashMap::new(),
+            func_ids: BTreeMap::new(),
             runtime_funcs,
-            global_ids: HashMap::new(),
+            global_ids: BTreeMap::new(),
             body_stub: None,
             target,
             module_prefix: None,
@@ -319,7 +319,7 @@ impl<M: Module> CodegenBackend<M> {
     /// compilation units. The raw name is also inserted into `func_ids` so that
     /// intra-module call resolution by raw name still works.
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
-        let mut func_ids = HashMap::new();
+        let mut func_ids = BTreeMap::new();
 
         // First, add runtime function IDs for functions that are already declared
         for (name, id) in &self.runtime_funcs {
@@ -584,10 +584,46 @@ impl<M: Module> CodegenBackend<M> {
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
+        let debug_determinism = std::env::var("SIMPLE_DEBUG_DETERMINISM").is_ok();
+        if debug_determinism {
+            // Per-function hash to identify which functions have non-deterministic MIR
+            for func in &functions {
+                let mut h: u64 = 0xcbf29ce484222325;
+                let bc = func.blocks.len() as u64;
+                h ^= bc;
+                h = h.wrapping_mul(0x100000001b3);
+                for blk in &func.blocks {
+                    let ic = blk.instructions.len() as u64;
+                    h ^= ic;
+                    h = h.wrapping_mul(0x100000001b3);
+                    // Hash instruction debug strings for deeper comparison
+                    for inst in &blk.instructions {
+                        let s = format!("{:?}", inst);
+                        for b in s.as_bytes() {
+                            h ^= *b as u64;
+                            h = h.wrapping_mul(0x100000001b3);
+                        }
+                    }
+                    let t = format!("{:?}", blk.terminator);
+                    for b in t.as_bytes() {
+                        h ^= *b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                }
+                eprintln!("[DET] fn {} {:016x} blocks={} params={}", func.name, h, func.blocks.len(), func.params.len());
+            }
+        }
         for func in &functions {
             match self.compile_function(func) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if debug_determinism {
+                        eprintln!("[DET] compiled: {}", func.name);
+                    }
+                }
                 Err(_e) => {
+                    if debug_determinism {
+                        eprintln!("[DET] FAILED: {} -- {}", func.name, _e);
+                    }
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);

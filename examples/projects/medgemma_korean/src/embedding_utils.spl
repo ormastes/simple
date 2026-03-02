@@ -15,42 +15,34 @@
 
 use model.{sgd_update_tensor}
 
-use std.torch.ffi.{
-    rt_torch_tensor_zeros,
-    rt_torch_tensor_ones,
-    rt_torch_tensor_randn,
-    rt_torch_tensor_rand,
-    rt_torch_tensor_from_data,
-    rt_torch_tensor_from_i64_data,
-    rt_torch_tensor_arange,
-    rt_torch_torchtensor_add,
-    rt_torch_torchtensor_sub,
-    rt_torch_torchtensor_mul,
-    rt_torch_torchtensor_mul_scalar,
-    rt_torch_torchtensor_neg,
-    rt_torch_torchtensor_exp,
-    rt_torch_torchtensor_sin,
-    rt_torch_torchtensor_cos,
-    rt_torch_torchtensor_sigmoid,
-    rt_torch_torchtensor_add_scalar,
-    rt_torch_torchtensor_matmul,
-    rt_torch_torchtensor_reshape,
-    rt_torch_torchtensor_unsqueeze,
-    rt_torch_torchtensor_squeeze_dim,
-    rt_torch_torchtensor_cat,
-    rt_torch_torchtensor_slice,
-    rt_torch_torchtensor_mean_dim,
-    rt_torch_torchtensor_cuda,
-    rt_torch_torchtensor_free,
-    rt_torch_torchtensor_clone,
-    rt_torch_torchtensor_to_float,
-    rt_torch_torchtensor_to_int,
-    rt_torch_torchtensor_shape,
-    rt_torch_nn_embedding,
-    rt_torch_autograd_set_requires_grad,
-    rt_torch_autograd_zero_grad,
-    rt_torch_autograd_no_grad_begin,
-    rt_torch_autograd_no_grad_end
+use src.torch_dyn.{
+    tensor_randn_2d,
+    tensor_rand_2d,
+    tensor_arange_int,
+    t_add,
+    t_sub,
+    t_mul,
+    t_mul_scalar,
+    t_exp,
+    t_sin,
+    t_cos,
+    t_sigmoid,
+    t_add_scalar,
+    t_matmul,
+    t_reshape_2d,
+    t_unsqueeze,
+    t_slice,
+    t_cat_2,
+    t_mean_dim,
+    t_cuda,
+    t_free,
+    t_clone,
+    t_to_int,
+    nn_embedding,
+    autograd_set_requires_grad,
+    autograd_zero_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end
 }
 
 export KorEngEmbedding, RoPECache
@@ -89,20 +81,20 @@ fn create_kor_eng_embedding(kor_vocab: i64, eng_vocab: i64, embed_dim: i64, kor_
     print("  Embed dim: {embed_dim}")
 
     # Korean embedding weight: [kor_vocab, embed_dim]
-    val kor_cpu = rt_torch_tensor_randn([kor_vocab, embed_dim])
-    val kor_scaled = rt_torch_torchtensor_mul_scalar(kor_cpu, 0.02)
-    rt_torch_torchtensor_free(kor_cpu)
-    val kor_gpu = rt_torch_torchtensor_cuda(kor_scaled, 0)
-    rt_torch_torchtensor_free(kor_scaled)
-    rt_torch_autograd_set_requires_grad(kor_gpu, true)
+    val kor_cpu = tensor_randn_2d(kor_vocab, embed_dim)
+    val kor_scaled = t_mul_scalar(kor_cpu, 0.02)
+    t_free(kor_cpu)
+    val kor_gpu = t_cuda(kor_scaled, 0)
+    t_free(kor_scaled)
+    autograd_set_requires_grad(kor_gpu, true)
 
     # English embedding weight: [eng_vocab, embed_dim]
-    val eng_cpu = rt_torch_tensor_randn([eng_vocab, embed_dim])
-    val eng_scaled = rt_torch_torchtensor_mul_scalar(eng_cpu, 0.02)
-    rt_torch_torchtensor_free(eng_cpu)
-    val eng_gpu = rt_torch_torchtensor_cuda(eng_scaled, 0)
-    rt_torch_torchtensor_free(eng_scaled)
-    rt_torch_autograd_set_requires_grad(eng_gpu, true)
+    val eng_cpu = tensor_randn_2d(eng_vocab, embed_dim)
+    val eng_scaled = t_mul_scalar(eng_cpu, 0.02)
+    t_free(eng_cpu)
+    val eng_gpu = t_cuda(eng_scaled, 0)
+    t_free(eng_scaled)
+    autograd_set_requires_grad(eng_gpu, true)
 
     val total = (kor_vocab + eng_vocab) * embed_dim
     print("  Trainable params: {total}")
@@ -142,38 +134,38 @@ fn create_rope_cache(max_seq_len: i64, embed_dim: i64) -> RoPECache:
     val half_dim = embed_dim / 2
 
     # Frequency indices: [0, 1, 2, ..., half_dim-1]
-    val indices_cpu = rt_torch_tensor_arange(0.0, half_dim * 1.0, 1.0)
+    val indices_cpu = tensor_arange_int(0, half_dim, 1)
 
     # theta_i = exp(-2i/d * ln(10000))
     # ln(10000) = 9.210340371976184
     val scale = -2.0 * 9.210340371976184 / embed_dim
-    val log_freqs = rt_torch_torchtensor_mul_scalar(indices_cpu, scale)
-    rt_torch_torchtensor_free(indices_cpu)
-    val freqs = rt_torch_torchtensor_exp(log_freqs)
-    rt_torch_torchtensor_free(log_freqs)
+    val log_freqs = t_mul_scalar(indices_cpu, scale)
+    t_free(indices_cpu)
+    val freqs = t_exp(log_freqs)
+    t_free(log_freqs)
 
     # Position indices: [0, 1, ..., max_seq_len-1]
-    val positions_cpu = rt_torch_tensor_arange(0.0, max_seq_len * 1.0, 1.0)
+    val positions_cpu = tensor_arange_int(0, max_seq_len, 1)
 
     # Outer product: positions [max_seq_len, 1] @ freqs [1, half_dim] -> [max_seq_len, half_dim]
-    val pos_col = rt_torch_torchtensor_reshape(positions_cpu, [max_seq_len, 1])
-    rt_torch_torchtensor_free(positions_cpu)
-    val freq_row = rt_torch_torchtensor_reshape(freqs, [1, half_dim])
-    rt_torch_torchtensor_free(freqs)
-    val angles = rt_torch_torchtensor_matmul(pos_col, freq_row)
-    rt_torch_torchtensor_free(pos_col)
-    rt_torch_torchtensor_free(freq_row)
+    val pos_col = t_reshape_2d(positions_cpu, max_seq_len, 1)
+    t_free(positions_cpu)
+    val freq_row = t_reshape_2d(freqs, 1, half_dim)
+    t_free(freqs)
+    val angles = t_matmul(pos_col, freq_row)
+    t_free(pos_col)
+    t_free(freq_row)
 
     # Compute sin and cos
-    val cos_cpu = rt_torch_torchtensor_cos(angles)
-    val sin_cpu = rt_torch_torchtensor_sin(angles)
-    rt_torch_torchtensor_free(angles)
+    val cos_cpu = t_cos(angles)
+    val sin_cpu = t_sin(angles)
+    t_free(angles)
 
     # Move to CUDA
-    val cos_gpu = rt_torch_torchtensor_cuda(cos_cpu, 0)
-    rt_torch_torchtensor_free(cos_cpu)
-    val sin_gpu = rt_torch_torchtensor_cuda(sin_cpu, 0)
-    rt_torch_torchtensor_free(sin_cpu)
+    val cos_gpu = t_cuda(cos_cpu, 0)
+    t_free(cos_cpu)
+    val sin_gpu = t_cuda(sin_cpu, 0)
+    t_free(sin_cpu)
 
     print("  Cache shape: [{max_seq_len}, {half_dim}]")
 
@@ -196,25 +188,25 @@ fn create_rope_cache(max_seq_len: i64, embed_dim: i64) -> RoPECache:
 # Returns: [batch, seq_len, embed_dim] float
 fn embed_with_routing(emb: KorEngEmbedding, kor_ids: i64, eng_ids: i64, mask: i64) -> i64:
     # Lookup in both embedding tables
-    val kor_embed = rt_torch_nn_embedding(kor_ids, emb.kor_weight)
-    val eng_embed = rt_torch_nn_embedding(eng_ids, emb.eng_weight)
+    val kor_embed = nn_embedding(kor_ids, emb.kor_weight)
+    val eng_embed = nn_embedding(eng_ids, emb.eng_weight)
 
     # Korean part: mask * kor_embed (mask broadcasts over embed_dim)
-    val kor_part = rt_torch_torchtensor_mul(mask, kor_embed)
-    rt_torch_torchtensor_free(kor_embed)
+    val kor_part = t_mul(mask, kor_embed)
+    t_free(kor_embed)
 
     # English part: (1 - mask) * eng_embed
-    val neg_mask = rt_torch_torchtensor_mul_scalar(mask, -1.0)
-    val inv_mask = rt_torch_torchtensor_add_scalar(neg_mask, 1.0)
-    rt_torch_torchtensor_free(neg_mask)
-    val eng_part = rt_torch_torchtensor_mul(inv_mask, eng_embed)
-    rt_torch_torchtensor_free(inv_mask)
-    rt_torch_torchtensor_free(eng_embed)
+    val neg_mask = t_mul_scalar(mask, -1.0)
+    val inv_mask = t_add_scalar(neg_mask, 1.0)
+    t_free(neg_mask)
+    val eng_part = t_mul(inv_mask, eng_embed)
+    t_free(inv_mask)
+    t_free(eng_embed)
 
     # Combine
-    val combined = rt_torch_torchtensor_add(kor_part, eng_part)
-    rt_torch_torchtensor_free(kor_part)
-    rt_torch_torchtensor_free(eng_part)
+    val combined = t_add(kor_part, eng_part)
+    t_free(kor_part)
+    t_free(eng_part)
     combined
 
 
@@ -231,36 +223,36 @@ fn apply_rope(x: i64, rope: RoPECache, seq_len: i64) -> i64:
     val half_dim = rope.embed_dim / 2
 
     # Split x into first half and second half along last dim
-    val x_first = rt_torch_torchtensor_slice(x, 2, 0, half_dim, 1)
-    val x_second = rt_torch_torchtensor_slice(x, 2, half_dim, rope.embed_dim, 1)
+    val x_first = t_slice(x, 2, 0, half_dim, 1)
+    val x_second = t_slice(x, 2, half_dim, rope.embed_dim, 1)
 
     # Slice cos/sin caches to actual seq_len: [seq_len, half_dim]
-    val cos_slice = rt_torch_torchtensor_slice(rope.cos_cache, 0, 0, seq_len, 1)
-    val sin_slice = rt_torch_torchtensor_slice(rope.sin_cache, 0, 0, seq_len, 1)
+    val cos_slice = t_slice(rope.cos_cache, 0, 0, seq_len, 1)
+    val sin_slice = t_slice(rope.sin_cache, 0, 0, seq_len, 1)
 
     # Rotate: first' = first * cos - second * sin
-    val fc = rt_torch_torchtensor_mul(x_first, cos_slice)
-    val ss = rt_torch_torchtensor_mul(x_second, sin_slice)
-    val rotated_first = rt_torch_torchtensor_sub(fc, ss)
-    rt_torch_torchtensor_free(fc)
-    rt_torch_torchtensor_free(ss)
+    val fc = t_mul(x_first, cos_slice)
+    val ss = t_mul(x_second, sin_slice)
+    val rotated_first = t_sub(fc, ss)
+    t_free(fc)
+    t_free(ss)
 
     # Rotate: second' = first * sin + second * cos
-    val fs = rt_torch_torchtensor_mul(x_first, sin_slice)
-    val sc = rt_torch_torchtensor_mul(x_second, cos_slice)
-    val rotated_second = rt_torch_torchtensor_add(fs, sc)
-    rt_torch_torchtensor_free(fs)
-    rt_torch_torchtensor_free(sc)
+    val fs = t_mul(x_first, sin_slice)
+    val sc = t_mul(x_second, cos_slice)
+    val rotated_second = t_add(fs, sc)
+    t_free(fs)
+    t_free(sc)
 
-    rt_torch_torchtensor_free(x_first)
-    rt_torch_torchtensor_free(x_second)
-    rt_torch_torchtensor_free(cos_slice)
-    rt_torch_torchtensor_free(sin_slice)
+    t_free(x_first)
+    t_free(x_second)
+    t_free(cos_slice)
+    t_free(sin_slice)
 
     # Concatenate back: [batch, seq_len, embed_dim]
-    val result = rt_torch_torchtensor_cat([rotated_first, rotated_second], 2)
-    rt_torch_torchtensor_free(rotated_first)
-    rt_torch_torchtensor_free(rotated_second)
+    val result = t_cat_2(rotated_first, rotated_second, 2)
+    t_free(rotated_first)
+    t_free(rotated_second)
     result
 
 
@@ -270,7 +262,7 @@ fn apply_rope(x: i64, rope: RoPECache, seq_len: i64) -> i64:
 
 # Pool [batch, seq_len, embed_dim] -> [batch, embed_dim] via mean over dim 1
 fn mean_pool_seq(x: i64) -> i64:
-    val pooled = rt_torch_torchtensor_mean_dim(x, 1, false)
+    val pooled = t_mean_dim(x, 1, false)
     pooled
 
 
@@ -286,39 +278,42 @@ fn mean_pool_seq(x: i64) -> i64:
 #   target: [batch, output_dim] float — random target for loss computation
 fn make_embedding_batch(batch_size: i64, seq_len: i64, emb: KorEngEmbedding, output_dim: i64) -> [i64]:
     # Korean indices: random in [0, kor_vocab)
-    val kor_rand = rt_torch_tensor_rand([batch_size, seq_len])
-    val kor_scaled = rt_torch_torchtensor_mul_scalar(kor_rand, (emb.kor_vocab - 1) * 1.0)
-    rt_torch_torchtensor_free(kor_rand)
-    val kor_ids_cpu = rt_torch_torchtensor_to_int(kor_scaled)
-    rt_torch_torchtensor_free(kor_scaled)
-    val kor_ids = rt_torch_torchtensor_cuda(kor_ids_cpu, 0)
-    rt_torch_torchtensor_free(kor_ids_cpu)
+    val kor_rand = tensor_rand_2d(batch_size, seq_len)
+    val kor_scaled = t_mul_scalar(kor_rand, (emb.kor_vocab - 1) * 1.0)
+    t_free(kor_rand)
+    val kor_ids_cpu = t_to_int(kor_scaled)
+    t_free(kor_scaled)
+    val kor_ids = t_cuda(kor_ids_cpu, 0)
+    t_free(kor_ids_cpu)
 
     # English indices: random in [0, eng_vocab)
-    val eng_rand = rt_torch_tensor_rand([batch_size, seq_len])
-    val eng_scaled = rt_torch_torchtensor_mul_scalar(eng_rand, (emb.eng_vocab - 1) * 1.0)
-    rt_torch_torchtensor_free(eng_rand)
-    val eng_ids_cpu = rt_torch_torchtensor_to_int(eng_scaled)
-    rt_torch_torchtensor_free(eng_scaled)
-    val eng_ids = rt_torch_torchtensor_cuda(eng_ids_cpu, 0)
-    rt_torch_torchtensor_free(eng_ids_cpu)
+    val eng_rand = tensor_rand_2d(batch_size, seq_len)
+    val eng_scaled = t_mul_scalar(eng_rand, (emb.eng_vocab - 1) * 1.0)
+    t_free(eng_rand)
+    val eng_ids_cpu = t_to_int(eng_scaled)
+    t_free(eng_scaled)
+    val eng_ids = t_cuda(eng_ids_cpu, 0)
+    t_free(eng_ids_cpu)
 
     # Mask: ~50% Korean via sigmoid threshold
-    # sigmoid((rand - 0.5) * 100) ≈ step function at 0.5
-    val mask_rand = rt_torch_tensor_rand([batch_size, seq_len, 1])
-    val shifted = rt_torch_torchtensor_add_scalar(mask_rand, -0.5)
-    rt_torch_torchtensor_free(mask_rand)
-    val steep = rt_torch_torchtensor_mul_scalar(shifted, 100.0)
-    rt_torch_torchtensor_free(shifted)
-    val mask_cpu = rt_torch_torchtensor_sigmoid(steep)
-    rt_torch_torchtensor_free(steep)
-    val mask = rt_torch_torchtensor_cuda(mask_cpu, 0)
-    rt_torch_torchtensor_free(mask_cpu)
+    # sigmoid((rand - 0.5) * 100) ~ step function at 0.5
+    # Create [batch, seq_len] then unsqueeze to [batch, seq_len, 1]
+    val mask_rand_2d = tensor_rand_2d(batch_size, seq_len)
+    val shifted = t_add_scalar(mask_rand_2d, -0.5)
+    t_free(mask_rand_2d)
+    val steep = t_mul_scalar(shifted, 100.0)
+    t_free(shifted)
+    val mask_2d = t_sigmoid(steep)
+    t_free(steep)
+    val mask_cpu = t_unsqueeze(mask_2d, 2)
+    t_free(mask_2d)
+    val mask = t_cuda(mask_cpu, 0)
+    t_free(mask_cpu)
 
     # Target: random [batch, output_dim]
-    val target_cpu = rt_torch_tensor_randn([batch_size, output_dim])
-    val target = rt_torch_torchtensor_cuda(target_cpu, 0)
-    rt_torch_torchtensor_free(target_cpu)
+    val target_cpu = tensor_randn_2d(batch_size, output_dim)
+    val target = t_cuda(target_cpu, 0)
+    t_free(target_cpu)
 
     [kor_ids, eng_ids, mask, target]
 
@@ -328,17 +323,17 @@ fn make_embedding_batch(batch_size: i64, seq_len: i64, emb: KorEngEmbedding, out
 # ============================================================================
 
 fn embedding_sgd_step(emb: KorEngEmbedding, lr: f64):
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
     emb.kor_weight = sgd_update_tensor(emb.kor_weight, lr)
     emb.eng_weight = sgd_update_tensor(emb.eng_weight, lr)
-    rt_torch_autograd_no_grad_end()
-    rt_torch_autograd_set_requires_grad(emb.kor_weight, true)
-    rt_torch_autograd_set_requires_grad(emb.eng_weight, true)
+    autograd_no_grad_end()
+    autograd_set_requires_grad(emb.kor_weight, true)
+    autograd_set_requires_grad(emb.eng_weight, true)
 
 
 fn embedding_zero_grads(emb: KorEngEmbedding):
-    rt_torch_autograd_zero_grad(emb.kor_weight)
-    rt_torch_autograd_zero_grad(emb.eng_weight)
+    autograd_zero_grad(emb.kor_weight)
+    autograd_zero_grad(emb.eng_weight)
 
 
 fn embedding_param_handles(emb: KorEngEmbedding) -> [i64]:

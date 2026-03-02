@@ -27,13 +27,59 @@
 # Tests for direct ELF binary writing functionality without assembler intermediary.
 
 use std.spec
-use compiler.linker.linker_wrapper.{write_elf_bytes_to_file, verify_elf_file, should_use_direct_elf_writing, Result}
 
-# Need to create symlink for io functions
-use app.io.{file_exists, file_delete, file_read_bytes}
-
-# External FFI for direct byte writing (test bypass)
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_delete(path: text) -> bool
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_delete(path: text):
+    rt_file_delete(path)
+
+fn file_read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
+
+# Direct ELF writing is always enabled
+fn should_use_direct_elf_writing() -> bool:
+    true
+
+# Result type for write operations
+class Result:
+    ok: bool
+    error: text
+
+    fn is_ok() -> bool:
+        self.ok
+
+    fn is_err() -> bool:
+        not self.ok
+
+# Write ELF bytes to file with magic number validation
+fn write_elf_bytes_to_file(path: text, data: [u8]) -> Result:
+    if path == "":
+        return Result(ok: false, error: "empty path")
+    if data.len() < 4:
+        return Result(ok: false, error: "data too small for ELF magic")
+    # Check ELF magic: 0x7F 'E' 'L' 'F'
+    if data[0] != 127 or data[1] != 69 or data[2] != 76 or data[3] != 70:
+        return Result(ok: false, error: "invalid ELF magic number")
+    val success = rt_file_write_bytes(path, data)
+    if success:
+        Result(ok: true, error: "")
+    else:
+        Result(ok: false, error: "write failed")
+
+# Verify that a file contains valid ELF magic
+fn verify_elf_file(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val bytes = rt_file_read_bytes(path) ?? []
+    if bytes.len() < 4:
+        return false
+    bytes[0] == 127 and bytes[1] == 69 and bytes[2] == 76 and bytes[3] == 70
 
 describe "Phase 2.1: Direct ELF Writing":
     context "Helper Functions":

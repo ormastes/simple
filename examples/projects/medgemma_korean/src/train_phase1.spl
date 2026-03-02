@@ -33,17 +33,15 @@ use validation.{validate_model, validate_accuracy, ValidationResult}
 use lora_utils.{
     LoRAConfig, LoRAAdapter,
     create_lora_adapter, lora_forward,
-    lora_sgd_step, lora_zero_grads,
-    merge_lora_into_model
+    merge_lora_weight
 }
 use train_phase0.{run_phase0}
 
-use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
-use std.torch.ffi.{
-    rt_torch_torchtensor_free,
-    rt_torch_torchtensor_mean,
-    rt_torch_autograd_backward,
-    rt_torch_cuda_empty_cache
+use src.torch_dyn.{
+    torch_available, cuda_available,
+    t_free, t_mean,
+    autograd_backward,
+    cuda_empty_cache
 }
 
 export run_phase1
@@ -126,23 +124,25 @@ fn run_phase1(model: TextModel) -> TextModel:
 
             # MSE loss (cross-entropy would require integer target tensors)
             val loss_h = compute_mse_loss(logits, target)
-            val loss_val = rt_torch_torchtensor_mean(loss_h)
+            val loss_val = t_mean(loss_h)
 
             # Backward
-            rt_torch_autograd_backward(loss_h)
+            autograd_backward(loss_h)
 
             # SGD (only LoRA_1 params, base is frozen)
-            lora_sgd_step(lora_l1, lora_l2, lr)
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
 
             # Zero grads
-            lora_zero_grads(lora_l1, lora_l2)
+            lora_l1.zero_grads()
+            lora_l2.zero_grads()
             model.zero_grads()
 
             # Cleanup
-            rt_torch_torchtensor_free(x)
-            rt_torch_torchtensor_free(target)
-            rt_torch_torchtensor_free(logits)
-            rt_torch_torchtensor_free(loss_h)
+            t_free(x)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
 
             state.add_loss(loss_val)
             report_training_step(state, config)
@@ -162,7 +162,14 @@ fn run_phase1(model: TextModel) -> TextModel:
     print("=" * 70)
 
     # Merge LoRA_1 into base weights
-    merge_lora_into_model(model, lora_l1, lora_l2)
+    print("Merging LoRA into base model weights...")
+    var old_w1 = model.w1
+    model.w1 = merge_lora_weight(model.w1, lora_l1)
+    t_free(old_w1)
+    var old_w2 = model.w2
+    model.w2 = merge_lora_weight(model.w2, lora_l2)
+    t_free(old_w2)
+    print("  LoRA merged into base weights")
 
     # Final validation
     print("")
@@ -190,7 +197,7 @@ fn main():
     val model_1 = run_phase1(model)
     print("")
     print("Phase 1 complete. Model has Phase 0 + Phase 1 knowledge.")
-    rt_torch_cuda_empty_cache()
+    cuda_empty_cache()
 
 
 main()

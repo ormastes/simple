@@ -10,6 +10,25 @@
  *   - g_next_handle: monotonically increasing counter; 0 = invalid handle
  */
 
+#include <cstdio>
+#include <cstdlib>
+
+// Provide fallback implementations for runtime functions that may not exist
+// when loaded dynamically via RTLD_LAZY from non-C-runtime binaries.
+extern "C" {
+    void spl_eprintln(const char* msg) __attribute__((weak));
+    [[noreturn]] void spl_panic(const char* msg) __attribute__((weak));
+}
+
+static void safe_eprintln(const char* msg) {
+    if (spl_eprintln) { spl_eprintln(msg); }
+    else { fprintf(stderr, "%s\n", msg); }
+}
+[[noreturn]] static void safe_panic(const char* msg) {
+    if (spl_panic) { spl_panic(msg); }
+    else { fprintf(stderr, "PANIC: %s\n", msg); abort(); }
+}
+
 #include "runtime.h"
 
 #include <torch/torch.h>
@@ -49,8 +68,8 @@ static int64_t store_tensor(at::Tensor t) {
 static at::Tensor get_tensor(int64_t h) {
     auto it = g_tensors.find(h);
     if (it == g_tensors.end()) {
-        spl_eprintln("rt_torch: invalid tensor handle");
-        spl_panic("invalid tensor handle");
+        safe_eprintln("rt_torch: invalid tensor handle");
+        safe_panic("invalid tensor handle");
     }
     return it->second;
 }
@@ -554,6 +573,7 @@ void rt_torch_autograd_backward(int64_t handle) {
 
 void rt_torch_autograd_zero_grad(int64_t handle) {
     auto& t = g_tensors[handle];
+    if (!t.requires_grad()) return;
     if (t.grad().defined()) {
         t.grad().zero_();
     }
@@ -1088,8 +1108,8 @@ int64_t rt_torch_tensor_load(const char* path) {
     std::vector<torch::Tensor> tensors;
     torch::load(tensors, std::string(path));
     if (tensors.empty()) {
-        spl_eprintln("rt_torch: no tensors found in file");
-        spl_panic("tensor load failed");
+        safe_eprintln("rt_torch: no tensors found in file");
+        safe_panic("tensor load failed");
     }
     return store_tensor(tensors[0]);
 }
@@ -1206,7 +1226,7 @@ static at::ScalarType safetensor_dtype_to_torch(const std::string& dtype) {
     if (dtype == "I8") return torch::kInt8;
     if (dtype == "U8") return torch::kUInt8;
     if (dtype == "BOOL") return torch::kBool;
-    spl_eprintln("rt_torch: unknown safetensor dtype");
+    safe_eprintln("rt_torch: unknown safetensor dtype");
     return torch::kFloat32; /* fallback */
 }
 
@@ -1294,7 +1314,7 @@ extern "C" {
 int64_t rt_torch_safetensors_open(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) {
-        spl_eprintln("rt_torch: cannot open safetensors file");
+        safe_eprintln("rt_torch: cannot open safetensors file");
         return 0;
     }
 
@@ -1302,7 +1322,7 @@ int64_t rt_torch_safetensors_open(const char* path) {
     uint64_t header_size = 0;
     if (fread(&header_size, 8, 1, f) != 1) {
         fclose(f);
-        spl_eprintln("rt_torch: cannot read safetensors header size");
+        safe_eprintln("rt_torch: cannot read safetensors header size");
         return 0;
     }
 
@@ -1317,7 +1337,7 @@ int64_t rt_torch_safetensors_open(const char* path) {
     sf.file_data.resize(file_size);
     if ((long)fread(sf.file_data.data(), 1, file_size, f) != file_size) {
         fclose(f);
-        spl_eprintln("rt_torch: cannot read safetensors file data");
+        safe_eprintln("rt_torch: cannot read safetensors file data");
         return 0;
     }
     fclose(f);
@@ -1325,7 +1345,7 @@ int64_t rt_torch_safetensors_open(const char* path) {
     /* Parse JSON header (starts at byte 8, length = header_size) */
     const char* json = sf.file_data.data() + 8;
     if (!parse_safetensor_header(json, (int64_t)header_size, sf.tensors)) {
-        spl_eprintln("rt_torch: failed to parse safetensors header");
+        safe_eprintln("rt_torch: failed to parse safetensors header");
         return 0;
     }
 
@@ -1358,7 +1378,7 @@ char* rt_torch_safetensors_list_names(int64_t handle) {
 int64_t rt_torch_safetensors_get_tensor(int64_t sf_handle, const char* name) {
     auto it = g_safetensors.find(sf_handle);
     if (it == g_safetensors.end()) {
-        spl_eprintln("rt_torch: invalid safetensors handle");
+        safe_eprintln("rt_torch: invalid safetensors handle");
         return 0;
     }
     SafetensorFile& sf = it->second;
@@ -1381,7 +1401,7 @@ int64_t rt_torch_safetensors_get_tensor(int64_t sf_handle, const char* name) {
         return store_tensor(std::move(t));
     }
 
-    spl_eprintln("rt_torch: tensor not found in safetensors file");
+    safe_eprintln("rt_torch: tensor not found in safetensors file");
     return 0;
 }
 

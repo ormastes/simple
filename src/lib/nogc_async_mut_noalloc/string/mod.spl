@@ -1,0 +1,214 @@
+# Baremetal String Utilities
+#
+# Allocation-free string inspection and conversion functions for bare-metal targets.
+# All functions operate on Simple `text` values (immutable string views) without
+# allocating any heap memory.
+#
+# Functions:
+#   bm_str_len         - Character length of a string
+#   bm_str_eq          - Equality comparison
+#   bm_str_starts_with - Prefix test
+#   bm_str_ends_with   - Suffix test
+#   bm_str_find        - Substring search (returns index or -1)
+#   bm_int_to_str      - Integer to decimal string
+#   bm_str_to_int      - Decimal string to integer (0 on error)
+#   bm_hex_to_int      - Hex string to integer (with or without "0x" prefix)
+#
+# Usage:
+#   use std.string.{bm_str_len, bm_str_eq, bm_str_starts_with}
+#   use std.string.{bm_str_ends_with, bm_str_find}
+#   use std.string.{bm_int_to_str, bm_str_to_int, bm_hex_to_int}
+
+export bm_str_len, bm_str_eq, bm_str_starts_with, bm_str_ends_with
+export bm_str_find
+export bm_int_to_str, bm_str_to_int, bm_hex_to_int
+
+# ============================================================================
+# String Inspection
+# ============================================================================
+
+fn bm_str_len(s: text) -> i64:
+    """Return the number of characters in s.
+
+    Example:
+        bm_str_len("hello")  # => 5
+        bm_str_len("")        # => 0
+    """
+    s.len()
+
+fn bm_str_eq(a: text, b: text) -> bool:
+    """Return true if a and b have the same content.
+
+    Example:
+        bm_str_eq("foo", "foo")  # => true
+        bm_str_eq("foo", "bar")  # => false
+    """
+    a == b
+
+fn bm_str_starts_with(s: text, prefix: text) -> bool:
+    """Return true if s starts with prefix.
+
+    Returns true when prefix is empty. Returns false when prefix is longer
+    than s.
+
+    Example:
+        bm_str_starts_with("hello", "hel")  # => true
+        bm_str_starts_with("hello", "llo")  # => false
+        bm_str_starts_with("hi", "")        # => true
+    """
+    val slen = s.len()
+    val plen = prefix.len()
+    if plen > slen:
+        return false
+    var i = 0
+    while i < plen:
+        if s[i] != prefix[i]:
+            return false
+        i = i + 1
+    true
+
+fn bm_str_ends_with(s: text, suffix: text) -> bool:
+    """Return true if s ends with suffix.
+
+    Returns true when suffix is empty. Returns false when suffix is longer
+    than s.
+
+    Example:
+        bm_str_ends_with("hello", "llo")  # => true
+        bm_str_ends_with("hello", "hel")  # => false
+        bm_str_ends_with("hi", "")        # => true
+    """
+    val slen = s.len()
+    val sflen = suffix.len()
+    if sflen > slen:
+        return false
+    val offset = slen - sflen
+    var i = 0
+    while i < sflen:
+        if s[offset + i] != suffix[i]:
+            return false
+        i = i + 1
+    true
+
+fn bm_str_find(s: text, needle: text) -> i64:
+    """Find the first occurrence of needle in s. Returns the start index or -1.
+
+    Uses a naive O(n*m) scan — suitable for short strings in baremetal contexts.
+    Returns 0 when needle is empty.
+
+    Example:
+        bm_str_find("hello world", "world")  # => 6
+        bm_str_find("hello", "xyz")          # => -1
+        bm_str_find("abc", "")               # => 0
+    """
+    val slen = s.len()
+    val nlen = needle.len()
+    if nlen == 0:
+        return 0
+    if nlen > slen:
+        return -1
+    val limit = slen - nlen
+    var i: i64 = 0
+    while i <= limit:
+        var match = true
+        var j = 0
+        while j < nlen:
+            if s[i + j] != needle[j]:
+                match = false
+                j = nlen  # break inner loop
+            else:
+                j = j + 1
+        if match:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Integer <-> String Conversion
+# ============================================================================
+
+fn bm_int_to_str(n: i64) -> text:
+    """Convert integer n to its decimal string representation.
+
+    Handles negative numbers and zero.
+
+    Example:
+        bm_int_to_str(42)    # => "42"
+        bm_int_to_str(-7)    # => "-7"
+        bm_int_to_str(0)     # => "0"
+    """
+    # Use built-in interpolation to convert
+    "{n}"
+
+fn bm_str_to_int(s: text) -> i64:
+    """Parse a decimal integer string. Returns 0 on empty input or parse error.
+
+    Accepts an optional leading '-' for negative numbers.
+    Stops at the first non-digit character after the sign.
+
+    Example:
+        bm_str_to_int("42")    # => 42
+        bm_str_to_int("-7")    # => -7
+        bm_str_to_int("0")     # => 0
+        bm_str_to_int("abc")   # => 0
+    """
+    val len = s.len()
+    if len == 0:
+        return 0
+    var i: i64 = 0
+    var negative = false
+    if s[0] == '-':
+        negative = true
+        i = 1
+    var result: i64 = 0
+    while i < len:
+        val ch = s[i]
+        if (ch < '0') or (ch > '9'):
+            # Stop at first non-digit
+            i = len
+        else:
+            result = result * 10 + (ch - '0')
+            i = i + 1
+    if negative:
+        return -result
+    result
+
+fn bm_hex_to_int(s: text) -> i64:
+    """Parse a hexadecimal string to i64. Returns 0 on error.
+
+    Accepts optional leading "0x" or "0X" prefix.
+    Case-insensitive for hex digits a-f / A-F.
+    Stops at the first non-hex character.
+
+    Example:
+        bm_hex_to_int("0xFF")  # => 255
+        bm_hex_to_int("ff")    # => 255
+        bm_hex_to_int("1A")    # => 26
+        bm_hex_to_int("0x10")  # => 16
+    """
+    val len = s.len()
+    if len == 0:
+        return 0
+    var i: i64 = 0
+    # Skip optional 0x / 0X prefix
+    if (len >= 2) and (s[0] == '0') and ((s[1] == 'x') or (s[1] == 'X')):
+        i = 2
+    var result: i64 = 0
+    while i < len:
+        val ch = s[i]
+        var digit: i64 = -1
+        if (ch >= '0') and (ch <= '9'):
+            digit = ch - '0'
+        else:
+            if (ch >= 'a') and (ch <= 'f'):
+                digit = ch - 'a' + 10
+            else:
+                if (ch >= 'A') and (ch <= 'F'):
+                    digit = ch - 'A' + 10
+        if digit < 0:
+            # Non-hex character — stop
+            i = len
+        else:
+            result = result * 16 + digit
+            i = i + 1
+    result

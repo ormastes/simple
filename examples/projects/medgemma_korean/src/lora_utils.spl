@@ -13,27 +13,26 @@
 
 use model.{TextModel, sgd_update_tensor}
 
-use std.torch.ffi.{
-    rt_torch_tensor_zeros,
-    rt_torch_tensor_randn,
-    rt_torch_torchtensor_add,
-    rt_torch_torchtensor_sub,
-    rt_torch_torchtensor_mul,
-    rt_torch_torchtensor_mul_scalar,
-    rt_torch_torchtensor_matmul,
-    rt_torch_torchtensor_transpose,
-    rt_torch_torchtensor_gelu,
-    rt_torch_torchtensor_cuda,
-    rt_torch_torchtensor_free,
-    rt_torch_torchtensor_clone,
-    rt_torch_torchtensor_numel,
-    rt_torch_torchtensor_shape,
-    rt_torch_torchtensor_sum,
-    rt_torch_autograd_set_requires_grad,
-    rt_torch_autograd_grad,
-    rt_torch_autograd_zero_grad,
-    rt_torch_autograd_no_grad_begin,
-    rt_torch_autograd_no_grad_end
+use src.torch_dyn.{
+    tensor_randn_2d,
+    tensor_zeros_2d,
+    t_add,
+    t_sub,
+    t_mul,
+    t_mul_scalar,
+    t_matmul,
+    t_transpose,
+    t_gelu,
+    t_cuda,
+    t_free,
+    t_clone,
+    t_numel,
+    t_sum,
+    autograd_set_requires_grad,
+    autograd_grad,
+    autograd_zero_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end
 }
 
 export LoRAConfig, LoRAAdapter, create_lora_adapter, merge_lora_into_model
@@ -74,31 +73,35 @@ class LoRAAdapter:
 
     fn forward(x: i64) -> i64:
         # LoRA output: (x @ A^T) @ B^T * scale
-        val at = rt_torch_torchtensor_transpose(self.lora_a, 0, 1)
-        val xa = rt_torch_torchtensor_matmul(x, at)
-        rt_torch_torchtensor_free(at)
-        val bt = rt_torch_torchtensor_transpose(self.lora_b, 0, 1)
-        val xab = rt_torch_torchtensor_matmul(xa, bt)
-        rt_torch_torchtensor_free(bt)
-        rt_torch_torchtensor_free(xa)
-        val scaled = rt_torch_torchtensor_mul_scalar(xab, self.lora_scale)
-        rt_torch_torchtensor_free(xab)
+        val at = t_transpose(self.lora_a, 0, 1)
+        val xa = t_matmul(x, at)
+        t_free(at)
+        val bt = t_transpose(self.lora_b, 0, 1)
+        val xab = t_matmul(xa, bt)
+        t_free(bt)
+        t_free(xa)
+        val scaled = t_mul_scalar(xab, self.lora_scale)
+        t_free(xab)
         scaled
 
     fn param_handles() -> [i64]:
         [self.lora_a, self.lora_b]
 
     me sgd_step(lr: f64):
-        rt_torch_autograd_no_grad_begin()
+        autograd_no_grad_begin()
+        var old_a = self.lora_a
         self.lora_a = sgd_update_tensor(self.lora_a, lr)
+        t_free(old_a)
+        var old_b = self.lora_b
         self.lora_b = sgd_update_tensor(self.lora_b, lr)
-        rt_torch_autograd_no_grad_end()
-        rt_torch_autograd_set_requires_grad(self.lora_a, true)
-        rt_torch_autograd_set_requires_grad(self.lora_b, true)
+        t_free(old_b)
+        autograd_no_grad_end()
+        autograd_set_requires_grad(self.lora_a, true)
+        autograd_set_requires_grad(self.lora_b, true)
 
     fn zero_grads():
-        rt_torch_autograd_zero_grad(self.lora_a)
-        rt_torch_autograd_zero_grad(self.lora_b)
+        autograd_zero_grad(self.lora_a)
+        autograd_zero_grad(self.lora_b)
 
 
 # ============================================================================
@@ -110,19 +113,19 @@ fn create_lora_adapter(in_features: i64, out_features: i64, config: LoRAConfig) 
     print("    Scale: {config.scale()}, Rank: {config.rank}")
 
     # A: small random init (Kaiming-like)
-    val a_cpu = rt_torch_tensor_randn([config.rank, in_features])
-    val a_gpu = rt_torch_torchtensor_cuda(a_cpu, 0)
-    rt_torch_torchtensor_free(a_cpu)
+    val a_cpu = tensor_randn_2d(config.rank, in_features)
+    val a_gpu = t_cuda(a_cpu, 0)
+    t_free(a_cpu)
     val a_init_scale = 0.01
-    val a_scaled = rt_torch_torchtensor_mul_scalar(a_gpu, a_init_scale)
-    rt_torch_torchtensor_free(a_gpu)
-    rt_torch_autograd_set_requires_grad(a_scaled, true)
+    val a_scaled = t_mul_scalar(a_gpu, a_init_scale)
+    t_free(a_gpu)
+    autograd_set_requires_grad(a_scaled, true)
 
     # B: zero init (LoRA starts as no change)
-    val b_cpu = rt_torch_tensor_zeros([out_features, config.rank])
-    val b_gpu = rt_torch_torchtensor_cuda(b_cpu, 0)
-    rt_torch_torchtensor_free(b_cpu)
-    rt_torch_autograd_set_requires_grad(b_gpu, true)
+    val b_cpu = tensor_zeros_2d(out_features, config.rank)
+    val b_gpu = t_cuda(b_cpu, 0)
+    t_free(b_cpu)
+    autograd_set_requires_grad(b_gpu, true)
 
     val trainable_params = config.rank * in_features + out_features * config.rank
     print("    Trainable params: {trainable_params}")
@@ -143,39 +146,39 @@ fn create_lora_adapter(in_features: i64, out_features: i64, config: LoRAConfig) 
 
 fn lora_forward(model: TextModel, x: i64, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter) -> i64:
     # Layer 1 with LoRA: (x @ W1^T + b1) + lora_l1(x)  -> GELU
-    val w1t = rt_torch_torchtensor_transpose(model.w1, 0, 1)
-    val xw1 = rt_torch_torchtensor_matmul(x, w1t)
-    rt_torch_torchtensor_free(w1t)
-    val h1_base = rt_torch_torchtensor_add(xw1, model.b1)
-    rt_torch_torchtensor_free(xw1)
+    val w1t = t_transpose(model.w1, 0, 1)
+    val xw1 = t_matmul(x, w1t)
+    t_free(w1t)
+    val h1_base = t_add(xw1, model.b1)
+    t_free(xw1)
     val lora1_out = lora_l1.forward(x)
-    val h1_with_lora = rt_torch_torchtensor_add(h1_base, lora1_out)
-    rt_torch_torchtensor_free(h1_base)
-    rt_torch_torchtensor_free(lora1_out)
-    val h1 = rt_torch_torchtensor_gelu(h1_with_lora)
-    rt_torch_torchtensor_free(h1_with_lora)
+    val h1_with_lora = t_add(h1_base, lora1_out)
+    t_free(h1_base)
+    t_free(lora1_out)
+    val h1 = t_gelu(h1_with_lora)
+    t_free(h1_with_lora)
 
     # Layer 2 with LoRA: (h1 @ W2^T + b2) + lora_l2(h1) -> GELU
-    val w2t = rt_torch_torchtensor_transpose(model.w2, 0, 1)
-    val hw2 = rt_torch_torchtensor_matmul(h1, w2t)
-    rt_torch_torchtensor_free(w2t)
-    val h2_base = rt_torch_torchtensor_add(hw2, model.b2)
-    rt_torch_torchtensor_free(hw2)
+    val w2t = t_transpose(model.w2, 0, 1)
+    val hw2 = t_matmul(h1, w2t)
+    t_free(w2t)
+    val h2_base = t_add(hw2, model.b2)
+    t_free(hw2)
     val lora2_out = lora_l2.forward(h1)
-    val h2_with_lora = rt_torch_torchtensor_add(h2_base, lora2_out)
-    rt_torch_torchtensor_free(h2_base)
-    rt_torch_torchtensor_free(lora2_out)
-    val h2 = rt_torch_torchtensor_gelu(h2_with_lora)
-    rt_torch_torchtensor_free(h1)
-    rt_torch_torchtensor_free(h2_with_lora)
+    val h2_with_lora = t_add(h2_base, lora2_out)
+    t_free(h2_base)
+    t_free(lora2_out)
+    val h2 = t_gelu(h2_with_lora)
+    t_free(h1)
+    t_free(h2_with_lora)
 
     # Output layer (no LoRA on output): h2 @ W3^T + b3
-    val w3t = rt_torch_torchtensor_transpose(model.w3, 0, 1)
-    val hw3 = rt_torch_torchtensor_matmul(h2, w3t)
-    rt_torch_torchtensor_free(w3t)
-    rt_torch_torchtensor_free(h2)
-    val out = rt_torch_torchtensor_add(hw3, model.b3)
-    rt_torch_torchtensor_free(hw3)
+    val w3t = t_transpose(model.w3, 0, 1)
+    val hw3 = t_matmul(h2, w3t)
+    t_free(w3t)
+    t_free(h2)
+    val out = t_add(hw3, model.b3)
+    t_free(hw3)
     out
 
 
@@ -206,11 +209,11 @@ fn lora_clip_and_step(lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, lr: f64, max_n
     var total_sq = 0.0
     var i = 0
     while i < params.len():
-        val g = rt_torch_autograd_grad(params[i])
+        val g = autograd_grad(params[i])
         if g != 0:
-            val g_sq = rt_torch_torchtensor_mul(g, g)
-            val g_sum = rt_torch_torchtensor_sum(g_sq)
-            rt_torch_torchtensor_free(g_sq)
+            val g_sq = t_mul(g, g)
+            val g_sum = t_sum(g_sq)
+            t_free(g_sq)
             total_sq = total_sq + g_sum
         i = i + 1
 
@@ -244,21 +247,12 @@ fn simple_sqrt(x: f64) -> f64:
 
 fn merge_lora_weight(base_w: i64, lora: LoRAAdapter) -> i64:
     # W_merged = W + B @ A * scale
-    rt_torch_autograd_no_grad_begin()
-    val ba = rt_torch_torchtensor_matmul(lora.lora_b, lora.lora_a)
-    val ba_scaled = rt_torch_torchtensor_mul_scalar(ba, lora.lora_scale)
-    rt_torch_torchtensor_free(ba)
-    val merged = rt_torch_torchtensor_add(base_w, ba_scaled)
-    rt_torch_torchtensor_free(ba_scaled)
-    rt_torch_torchtensor_free(base_w)
-    rt_torch_autograd_no_grad_end()
+    # NOTE: does NOT free base_w - caller manages lifecycle
+    autograd_no_grad_begin()
+    val ba = t_matmul(lora.lora_b, lora.lora_a)
+    val ba_scaled = t_mul_scalar(ba, lora.lora_scale)
+    t_free(ba)
+    val merged = t_add(base_w, ba_scaled)
+    t_free(ba_scaled)
+    autograd_no_grad_end()
     merged
-
-
-fn merge_lora_into_model(model: TextModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter):
-    print("Merging LoRA into base model weights...")
-    print("  Merging layer 1 LoRA: B[{lora_l1.out_features},{lora_l1.rank}] @ A[{lora_l1.rank},{lora_l1.in_features}]")
-    model.w1 = merge_lora_weight(model.w1, lora_l1)
-    print("  Merging layer 2 LoRA: B[{lora_l2.out_features},{lora_l2.rank}] @ A[{lora_l2.rank},{lora_l2.in_features}]")
-    model.w2 = merge_lora_weight(model.w2, lora_l2)
-    print("  LoRA merged into base weights (knowledge frozen)")

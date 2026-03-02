@@ -29,19 +29,23 @@ use embedding_utils.{
     create_kor_eng_embedding, create_rope_cache,
     embed_with_routing, apply_rope, mean_pool_seq,
     make_embedding_batch,
-    embedding_sgd_step, embedding_zero_grads
+    embedding_zero_grads
 }
+use model.{sgd_update_tensor}
 use layer_utils.{ExtendedModel, create_extended_model}
 use train_phase0.{run_phase0}
 use train_phase1.{run_phase1}
 use train_phase2.{run_phase2}
 
-use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
-use std.torch.ffi.{
-    rt_torch_torchtensor_free,
-    rt_torch_torchtensor_mean,
-    rt_torch_autograd_backward,
-    rt_torch_cuda_empty_cache
+use src.torch_dyn.{
+    torch_available,
+    t_free,
+    t_mean,
+    autograd_backward,
+    autograd_set_requires_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end,
+    cuda_empty_cache
 }
 
 export run_phase3
@@ -83,7 +87,7 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
     print("")
 
     # Create Korean/English dual embeddings
-    val emb = create_kor_eng_embedding(KOR_VOCAB, ENG_VOCAB, EMBED_DIM, KOR_START, KOR_END)
+    var emb = create_kor_eng_embedding(KOR_VOCAB, ENG_VOCAB, EMBED_DIM, KOR_START, KOR_END)
     emb.print_summary()
     print("")
 
@@ -115,31 +119,40 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
             # Forward: embed -> RoPE -> pool -> model
             val embedded = embed_with_routing(emb, kor_ids, eng_ids, mask)
             val rotated = apply_rope(embedded, rope, EMBEDDING_SEQ_LEN)
-            rt_torch_torchtensor_free(embedded)
+            t_free(embedded)
             val pooled = mean_pool_seq(rotated)
-            rt_torch_torchtensor_free(rotated)
+            t_free(rotated)
 
             val logits = model.forward(pooled)
-            rt_torch_torchtensor_free(pooled)
+            t_free(pooled)
 
             # MSE loss
             val loss_h = compute_mse_loss(logits, target)
-            val loss_val = rt_torch_torchtensor_mean(loss_h)
+            val loss_val = t_mean(loss_h)
 
             # Backward (gradients flow to embedding weights only)
-            rt_torch_autograd_backward(loss_h)
+            autograd_backward(loss_h)
 
-            # SGD step on embeddings only
-            embedding_sgd_step(emb, lr)
+            # SGD step on embeddings only (inline to avoid copy semantics)
+            autograd_no_grad_begin()
+            var old_kor = emb.kor_weight
+            emb.kor_weight = sgd_update_tensor(emb.kor_weight, lr)
+            t_free(old_kor)
+            var old_eng = emb.eng_weight
+            emb.eng_weight = sgd_update_tensor(emb.eng_weight, lr)
+            t_free(old_eng)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(emb.kor_weight, true)
+            autograd_set_requires_grad(emb.eng_weight, true)
             embedding_zero_grads(emb)
 
             # Cleanup
-            rt_torch_torchtensor_free(kor_ids)
-            rt_torch_torchtensor_free(eng_ids)
-            rt_torch_torchtensor_free(mask)
-            rt_torch_torchtensor_free(target)
-            rt_torch_torchtensor_free(logits)
-            rt_torch_torchtensor_free(loss_h)
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
 
             state.add_loss(loss_val)
             report_training_step(state, config)
@@ -192,7 +205,7 @@ fn main():
     ext_model.print_summary()
     print("")
     print("Phase 3 complete. Model now has embeddings + RoPE.")
-    rt_torch_cuda_empty_cache()
+    cuda_empty_cache()
 
 
 main()

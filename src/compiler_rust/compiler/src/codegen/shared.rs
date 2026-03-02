@@ -61,8 +61,8 @@ pub fn create_body_stub<M: Module>(
 pub fn declare_functions<M: Module>(
     module: &mut M,
     functions: &[MirFunction],
-) -> Result<std::collections::HashMap<String, cranelift_module::FuncId>, String> {
-    let mut func_ids = std::collections::HashMap::new();
+) -> Result<std::collections::BTreeMap<String, cranelift_module::FuncId>, String> {
+    let mut func_ids = std::collections::BTreeMap::new();
 
     for func in functions {
         // Skip if already declared (handles duplicate functions in MIR)
@@ -121,7 +121,7 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
 ///
 /// Panics if the function is not declared in func_ids.
 pub fn get_func_block_addr<M: Module>(
-    func_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
+    func_ids: &std::collections::BTreeMap<String, cranelift_module::FuncId>,
     module: &mut M,
     parent_name: &str,
     block: crate::mir::BlockId,

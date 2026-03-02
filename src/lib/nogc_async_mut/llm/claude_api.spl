@@ -5,91 +5,9 @@
 
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
-# ============================================================================
-# JSON helpers (inlined)
-# ============================================================================
-
-fn _LB() -> text:
-    (123 as char).to_text()
-
-fn _RB() -> text:
-    (125 as char).to_text()
-
-fn _Q() -> text:
-    "\""
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn _escape_json(s: text) -> text:
-    var parts = []
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            parts.append("\\\\")
-        elif ch == "\"":
-            parts.append("\\\"")
-        elif ch == "\n":
-            parts.append("\\n")
-        elif ch == "\r":
-            parts.append("\\r")
-        elif ch == "\t":
-            parts.append("\\t")
-        else:
-            parts.append(ch)
-        i = i + 1
-    parts.join("")
-
-fn _extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
-
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
+use std.text.{escape_json}
+use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use std.nogc_async_mut.llm.json_helpers.{_unwrap_idx, extract_json_string, extract_json_value, extract_json_int}
 
 # ============================================================================
 # Response struct
@@ -115,27 +33,27 @@ fn build_claude_api_body(model: text, messages_json: text, system_prompt: text, 
     var model_val = model
     if model_val == "":
         model_val = "claude-sonnet-4-20250514"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
+    parts = parts + [Q() + "model" + Q() + ":" + Q() + model_val + Q()]
     # Max tokens
     var tokens = max_tokens
     if tokens <= 0:
         tokens = 4096
-    parts = parts + [_Q() + "max_tokens" + _Q() + ":" + tokens.to_text()]
+    parts = parts + [Q() + "max_tokens" + Q() + ":" + tokens.to_text()]
     # System prompt
     if system_prompt != "":
-        parts = parts + [_Q() + "system" + _Q() + ":" + _Q() + _escape_json(system_prompt) + _Q()]
+        parts = parts + [Q() + "system" + Q() + ":" + Q() + escape_json(system_prompt) + Q()]
     # Messages
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+    parts = parts + [Q() + "messages" + Q() + ":" + messages_json]
     # Join parts
     var body_parts = []
-    body_parts.append(_LB())
+    body_parts.append(LB())
     var i = 0
     for part in parts:
         if i > 0:
             body_parts.append(",")
         body_parts.append(part)
         i = i + 1
-    body_parts.append(_RB())
+    body_parts.append(RB())
     body_parts.join("")
 
 # Build headers string for Anthropic API
@@ -149,10 +67,10 @@ fn build_claude_api_headers(api_key: text) -> text:
 # Build a messages array for a single user message
 fn build_single_message_json(role: text, content: text) -> text:
     var parts = []
-    parts.append(_LB())
-    parts.append(_Q() + "role" + _Q() + ":" + _Q() + role + _Q() + ",")
-    parts.append(_Q() + "content" + _Q() + ":" + _Q() + _escape_json(content) + _Q())
-    parts.append(_RB())
+    parts.append(LB())
+    parts.append(Q() + "role" + Q() + ":" + Q() + role + Q() + ",")
+    parts.append(Q() + "content" + Q() + ":" + Q() + escape_json(content) + Q())
+    parts.append(RB())
     "[" + parts.join("") + "]"
 
 # ============================================================================
@@ -172,9 +90,9 @@ fn parse_claude_api_response(raw: text) -> ApiResponse:
             raw: ""
         )
     # Check for error response
-    val error_type = _extract_json_string(raw, "type")
+    val error_type = extract_json_string(raw, "type")
     if error_type == "error":
-        val error_msg = _extract_json_string(raw, "message")
+        val error_msg = extract_json_string(raw, "message")
         return ApiResponse(
             content: "",
             model: "",
@@ -186,11 +104,11 @@ fn parse_claude_api_response(raw: text) -> ApiResponse:
             raw: raw
         )
     # Extract content from content[0].text
-    val content_text = _extract_json_string(raw, "text")
-    val model_val = _extract_json_string(raw, "model")
-    val stop = _extract_json_string(raw, "stop_reason")
-    val in_tok = _extract_json_int(raw, "input_tokens")
-    val out_tok = _extract_json_int(raw, "output_tokens")
+    val content_text = extract_json_string(raw, "text")
+    val model_val = extract_json_string(raw, "model")
+    val stop = extract_json_string(raw, "stop_reason")
+    val in_tok = extract_json_int(raw, "input_tokens")
+    val out_tok = extract_json_int(raw, "output_tokens")
     var final_stop = stop
     if final_stop == "":
         final_stop = "end_turn"
