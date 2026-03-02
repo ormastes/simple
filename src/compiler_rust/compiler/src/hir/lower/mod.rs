@@ -141,8 +141,9 @@ pub fn lower_lenient(module: &Module) -> LowerResult<HirModule> {
 pub fn lower_with_context_lenient(module: &Module, current_file: &Path) -> LowerResult<HirModule> {
     let module_resolver = ModuleResolver::single_file(current_file);
     let mut lowerer = Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf());
-    // Switch to lenient mode
+    // Switch to lenient mode — both memory safety and type resolution
     lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
     lowerer.lower_module(module)
 }
 
