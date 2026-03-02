@@ -53,12 +53,15 @@ fn def_var_coerced(builder: &mut FunctionBuilder, var: Variable, val: cranelift_
 }
 
 /// Sync vreg_values → Variables: call def_var for all vregs that have values.
+/// VRegs are sorted to ensure deterministic Variable definition order.
 fn sync_vregs_to_vars(
     builder: &mut FunctionBuilder,
     vreg_values: &HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
 ) {
-    for (vreg, &val) in vreg_values {
+    let mut sorted: Vec<_> = vreg_values.iter().collect();
+    sorted.sort_by_key(|(v, _)| v.0);
+    for (vreg, &val) in sorted {
         if let Some(&var) = vreg_vars.get(vreg) {
             def_var_coerced(builder, var, val);
         }
@@ -66,12 +69,15 @@ fn sync_vregs_to_vars(
 }
 
 /// Sync Variables → vreg_values: call use_var for all declared vreg Variables.
+/// VRegs are sorted to ensure deterministic block parameter order.
 fn sync_vars_to_vregs(
     builder: &mut FunctionBuilder,
     vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
 ) {
-    for (&vreg, &var) in vreg_vars {
+    let mut sorted: Vec<_> = vreg_vars.iter().collect();
+    sorted.sort_by_key(|(v, _)| v.0);
+    for (&vreg, &var) in sorted {
         let val = builder.use_var(var);
         vreg_values.insert(vreg, val);
     }
@@ -83,9 +89,9 @@ pub fn compile_function_body<M: Module>(
     module: &mut M,
     cranelift_func: &mut cranelift_codegen::ir::Function,
     func: &MirFunction,
-    func_ids: &HashMap<String, cranelift_module::FuncId>,
+    func_ids: &std::collections::BTreeMap<String, cranelift_module::FuncId>,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
-    global_ids: &HashMap<String, cranelift_module::DataId>,
+    global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
     use_map: &std::collections::HashMap<String, String>,
 ) -> InstrResult<()> {
@@ -117,10 +123,13 @@ pub fn compile_function_body<M: Module>(
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
+    // VRegs are sorted to ensure deterministic Variable ID assignment.
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
     {
         let all_vregs = collect_cross_block_vregs(func);
-        for vreg in &all_vregs {
+        let mut sorted_vregs: Vec<_> = all_vregs.into_iter().collect();
+        sorted_vregs.sort_by_key(|v| v.0);
+        for vreg in &sorted_vregs {
             let var = Variable::from_u32(var_idx);
             builder.declare_var(var, types::I64); // default to i64; type is refined on def_var
             vreg_vars.insert(*vreg, var);

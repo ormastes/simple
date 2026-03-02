@@ -1,6 +1,9 @@
 # NoGC Torch Simple API (Tier 3)
 # PyTorch-like high-level API with unique ownership (no GC)
 #
+# This provides an idiomatic Simple API wrapping the FFI bindings.
+# Designed to feel like PyTorch from the user's perspective.
+#
 # Same API surface as gc_async_mut/torch/mod.spl by convention.
 # Key differences:
 #   - No owns_handle field — unique ownership always owns
@@ -8,7 +11,8 @@
 #   - sub()/div() use direct FFI (no ownership juggling workarounds)
 #   - clone() uses rt_torch_torchtensor_clone directly
 #
-# Training components are in torch_training.spl
+# Training components (loss functions, optimizers, Sequential, Stream,
+# utility functions) are in torch_training.spl
 
 use std.nogc_sync_mut.torch.ffi.{
     rt_torch_available,
@@ -60,6 +64,14 @@ use std.nogc_sync_mut.torch.ffi.{
 # Backend Detection
 # ============================================================================
 
+# Check if PyTorch C++ library (libtorch) is available
+# Returns true if torch backend is loaded, false otherwise
+#
+# Example:
+#     if torch_available():
+#         print "PyTorch version: {torch_version()}"
+#     else:
+#         print "PyTorch not found, using pure Simple tensors"
 fn torch_available() -> bool:
     rt_torch_available()
 
@@ -74,6 +86,18 @@ fn cuda_available() -> bool:
 # ============================================================================
 
 class Tensor:
+    """High-level PyTorch-like tensor wrapper (unique ownership, no GC).
+
+    Uses unique ownership — drop() is unconditional, no owns_handle field.
+    All operations return new tensors, original tensors are unchanged.
+
+    Example:
+        val t = Tensor.zeros([3, 3])
+        val t2 = t.add(t).mul(Tensor.ones([3, 3]))
+        print t2.shape()  # [3, 3]
+        print t2.numel()  # 9
+    """
+
     # No owns_handle field — unique ownership always owns the handle
     handle: i64
 
@@ -81,18 +105,34 @@ class Tensor:
     # Creation Operations (Factory Methods)
     # ========================================================================
 
+    # Create tensor filled with zeros
+    #
+    # Example:
+    #     val t = Tensor.zeros([2, 3])
+    #     # Creates [[0, 0, 0], [0, 0, 0]]
     static fn zeros(dims: [i64]) -> Tensor:
         val handle = rt_torch_tensor_zeros(dims)
         Tensor(handle: handle)
 
+    # Create tensor filled with ones
+    #
+    # Example:
+    #     val t = Tensor.ones([2, 2])
+    #     # Creates [[1, 1], [1, 1]]
     static fn ones(dims: [i64]) -> Tensor:
         val handle = rt_torch_tensor_ones(dims)
         Tensor(handle: handle)
 
+    # Create tensor with random normal distribution (mean=0, std=1)
+    #
+    # Example:
+    #     val t = Tensor.randn([3, 3])
+    #     # Creates 3x3 tensor with random values
     static fn randn(dims: [i64]) -> Tensor:
         val handle = rt_torch_tensor_randn(dims)
         Tensor(handle: handle)
 
+    # Create tensor from existing handle (internal use)
     static fn from_handle(handle: i64) -> Tensor:
         Tensor(handle: handle)
 
@@ -105,6 +145,7 @@ class Tensor:
         rt_torch_torchtensor_free(self.handle)
 
     fn clone() -> Tensor:
+        """Create a deep copy of this tensor."""
         # Direct FFI clone — no workaround needed
         val new_handle = rt_torch_torchtensor_clone(self.handle)
         Tensor.from_handle(new_handle)
@@ -114,15 +155,19 @@ class Tensor:
     # ========================================================================
 
     fn ndim() -> i64:
+        """Number of dimensions (rank)."""
         rt_torch_torchtensor_ndim(self.handle)
 
     fn numel() -> i64:
+        """Total number of elements."""
         rt_torch_torchtensor_numel(self.handle)
 
     fn shape() -> [i64]:
+        """Shape as array of dimensions."""
         rt_torch_torchtensor_shape(self.handle)
 
     fn size(dim: i64) -> i64:
+        """Size of specific dimension."""
         val sh = self.shape()
         if dim >= 0 and dim < sh.len():
             sh[dim]
@@ -134,31 +179,38 @@ class Tensor:
     # ========================================================================
 
     fn add(other: Tensor) -> Tensor:
+        """Element-wise addition."""
         val result_handle = rt_torch_torchtensor_add(self.handle, other.handle)
         Tensor.from_handle(result_handle)
 
     fn sub(other: Tensor) -> Tensor:
+        """Element-wise subtraction."""
         # Direct FFI — no ownership juggling needed in nogc mode
         val result_handle = rt_torch_torchtensor_sub(self.handle, other.handle)
         Tensor.from_handle(result_handle)
 
     fn mul(other: Tensor) -> Tensor:
+        """Element-wise multiplication."""
         val result_handle = rt_torch_torchtensor_mul(self.handle, other.handle)
         Tensor.from_handle(result_handle)
 
     fn div(other: Tensor) -> Tensor:
+        """Element-wise division."""
         # Direct FFI — no reciprocal workaround needed in nogc mode
         val result_handle = rt_torch_torchtensor_div(self.handle, other.handle)
         Tensor.from_handle(result_handle)
 
     fn matmul(other: Tensor) -> Tensor:
+        """Matrix multiplication."""
         val result_handle = rt_torch_torchtensor_matmul(self.handle, other.handle)
         Tensor.from_handle(result_handle)
 
     fn mm(other: Tensor) -> Tensor:
+        """Alias for matmul."""
         self.matmul(other)
 
     fn dot(other: Tensor) -> Tensor:
+        """Dot product (same as matmul for 2D)."""
         self.matmul(other)
 
     # ========================================================================
@@ -166,22 +218,27 @@ class Tensor:
     # ========================================================================
 
     fn relu() -> Tensor:
+        """Rectified Linear Unit: max(0, x)."""
         val result_handle = rt_torch_torchtensor_relu(self.handle)
         Tensor.from_handle(result_handle)
 
     fn sigmoid() -> Tensor:
+        """Sigmoid activation: 1 / (1 + exp(-x))."""
         val result_handle = rt_torch_torchtensor_sigmoid(self.handle)
         Tensor.from_handle(result_handle)
 
     fn tanh() -> Tensor:
+        """Hyperbolic tangent activation."""
         val result_handle = rt_torch_torchtensor_tanh(self.handle)
         Tensor.from_handle(result_handle)
 
     fn softmax(dim: i64) -> Tensor:
+        """Softmax activation along dimension."""
         val result_handle = rt_torch_torchtensor_softmax(self.handle, dim)
         Tensor.from_handle(result_handle)
 
     fn log_softmax(dim: i64) -> Tensor:
+        """Log-softmax activation along dimension."""
         val result_handle = rt_torch_torchtensor_log_softmax(self.handle, dim)
         Tensor.from_handle(result_handle)
 
@@ -190,18 +247,22 @@ class Tensor:
     # ========================================================================
 
     fn cuda(device_id: i64) -> Tensor:
+        """Move tensor to CUDA device."""
         val device_i32 = 0
         val result_handle = rt_torch_torchtensor_cuda(self.handle, device_i32)
         Tensor.from_handle(result_handle)
 
     fn cpu() -> Tensor:
+        """Move tensor to CPU."""
         val result_handle = rt_torch_torchtensor_cpu(self.handle)
         Tensor.from_handle(result_handle)
 
     fn is_cuda() -> bool:
+        """Check if tensor is on CUDA device."""
         rt_torch_torchtensor_is_cuda(self.handle)
 
     fn to_device(device: text) -> Tensor:
+        """Move to device by name ('cuda' or 'cpu')."""
         if device == "cuda":
             self.cuda(0)
         else:
@@ -212,16 +273,20 @@ class Tensor:
     # ========================================================================
 
     fn backward():
+        """Compute gradients via autograd backward pass."""
         rt_torch_autograd_backward(self.handle)
 
     fn zero_grad():
+        """Zero out gradients."""
         rt_torch_autograd_zero_grad(self.handle)
 
     fn requires_grad(value: bool) -> Tensor:
+        """Set requires_grad flag."""
         rt_torch_autograd_set_requires_grad(self.handle, value)
         self.clone()
 
     fn detach() -> Tensor:
+        """Detach from computation graph."""
         val result_handle = rt_torch_autograd_detach(self.handle)
         Tensor.from_handle(result_handle)
 
@@ -230,26 +295,32 @@ class Tensor:
     # ========================================================================
 
     fn view(dims: [i64]) -> Tensor:
+        """Reshape tensor (shares memory, must be contiguous)."""
         val result_handle = rt_torch_torchtensor_view(self.handle, dims)
         Tensor.from_handle(result_handle)
 
     fn reshape(dims: [i64]) -> Tensor:
+        """Reshape tensor (may copy if not contiguous)."""
         val result_handle = rt_torch_torchtensor_reshape(self.handle, dims)
         Tensor.from_handle(result_handle)
 
     fn transpose(dim0: i64, dim1: i64) -> Tensor:
+        """Transpose two dimensions."""
         val result_handle = rt_torch_torchtensor_transpose(self.handle, dim0, dim1)
         Tensor.from_handle(result_handle)
 
     fn permute(dims: [i64]) -> Tensor:
+        """Permute dimensions."""
         val result_handle = rt_torch_torchtensor_permute(self.handle, dims)
         Tensor.from_handle(result_handle)
 
     fn squeeze(dim: i64) -> Tensor:
+        """Remove specific dimension of size 1."""
         val result_handle = rt_torch_torchtensor_squeeze_dim(self.handle, dim)
         Tensor.from_handle(result_handle)
 
     fn unsqueeze(dim: i64) -> Tensor:
+        """Add dimension of size 1 at position dim."""
         val result_handle = rt_torch_torchtensor_unsqueeze(self.handle, dim)
         Tensor.from_handle(result_handle)
 
@@ -259,6 +330,15 @@ class Tensor:
 # ============================================================================
 
 class Linear:
+    """Fully connected linear layer: y = xW^T + b
+
+    Example:
+        val layer = Linear.create(128, 64)
+        val x = Tensor.randn([32, 128])
+        val y = layer.forward(x)
+        print y.shape()  # [32, 64]
+    """
+
     in_features: i64
     out_features: i64
     weight: Tensor
@@ -282,6 +362,7 @@ class Linear:
         )
 
     fn forward(x: Tensor) -> Tensor:
+        """Forward pass: y = xW^T + b."""
         val y = x.matmul(self.weight.transpose(0, 1))
         if self.has_bias:
             y.add(self.bias)
@@ -289,6 +370,7 @@ class Linear:
             y
 
     fn parameters() -> [Tensor]:
+        """Return list of trainable parameters."""
         if self.has_bias:
             [self.weight, self.bias]
         else:
@@ -296,6 +378,15 @@ class Linear:
 
 
 class Conv2d:
+    """2D Convolutional layer
+
+    Example:
+        val layer = Conv2d.create(3, 64, 3, 1, 1)
+        val x = Tensor.randn([1, 3, 224, 224])
+        val y = layer.forward(x)
+        print y.shape()  # [1, 64, 224, 224]
+    """
+
     in_channels: i64
     out_channels: i64
     kernel_size: i64
@@ -318,6 +409,7 @@ class Conv2d:
         )
 
     fn forward(x: Tensor) -> Tensor:
+        """Forward pass: 2D convolution."""
         val stride_arr = [self.stride, self.stride]
         val padding_arr = [self.padding, self.padding]
         val dilation_arr = [1, 1]
@@ -325,10 +417,20 @@ class Conv2d:
         Tensor.from_handle(result_handle)
 
     fn parameters() -> [Tensor]:
+        """Return list of trainable parameters."""
         [self.weight, self.bias]
 
 
 class MaxPool2d:
+    """2D Max pooling layer
+
+    Example:
+        val pool = MaxPool2d.create(2, 2)
+        val x = Tensor.randn([1, 64, 112, 112])
+        val y = pool.forward(x)
+        print y.shape()  # [1, 64, 56, 56]
+    """
+
     kernel_size: i64
     stride: i64
 
@@ -336,6 +438,7 @@ class MaxPool2d:
         MaxPool2d(kernel_size: kernel_size, stride: stride)
 
     fn forward(x: Tensor) -> Tensor:
+        """Forward pass: 2D max pooling."""
         val k_arr = [self.kernel_size, self.kernel_size]
         val s_arr = [self.stride, self.stride]
         val p_arr = [0, 0]
@@ -344,6 +447,15 @@ class MaxPool2d:
 
 
 class BatchNorm2d:
+    """2D Batch normalization layer
+
+    Example:
+        val bn = BatchNorm2d.create(64)
+        val x = Tensor.randn([32, 64, 28, 28])
+        val y = bn.forward(x)
+        print y.shape()  # [32, 64, 28, 28]
+    """
+
     num_features: i64
     running_mean: Tensor
     running_var: Tensor
@@ -368,14 +480,24 @@ class BatchNorm2d:
         )
 
     fn forward(x: Tensor) -> Tensor:
+        """Forward pass: batch normalization."""
         val result_handle = rt_torch_nn_batch_norm(x.handle, self.running_mean.handle, self.running_var.handle, self.weight.handle, self.bias.handle, true, 0.1, 1e-5)
         Tensor.from_handle(result_handle)
 
     fn parameters() -> [Tensor]:
+        """Return list of trainable parameters."""
         [self.weight, self.bias]
 
 
 class Dropout:
+    """Dropout regularization layer
+
+    Example:
+        val dropout = Dropout.create(0)
+        val x = Tensor.randn([32, 128])
+        val y = dropout.forward(x)
+    """
+
     p: i64
     training: bool
 
@@ -383,14 +505,17 @@ class Dropout:
         Dropout(p: p, training: true)
 
     fn forward(x: Tensor) -> Tensor:
+        """Forward pass: dropout regularization."""
         val p_f64 = self.p * 1.0
         val result_handle = rt_torch_nn_dropout(x.handle, p_f64, self.training)
         Tensor.from_handle(result_handle)
 
     me train():
+        """Set to training mode."""
         self.training = true
 
     me eval():
+        """Set to evaluation mode."""
         self.training = false
 
 

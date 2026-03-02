@@ -6,95 +6,9 @@
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
-# ============================================================================
-# JSON helpers (inlined)
-# ============================================================================
-
-fn _LB() -> text:
-    (123 as char).to_text()
-
-fn _RB() -> text:
-    (125 as char).to_text()
-
-fn _Q() -> text:
-    "\""
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn _escape_json(s: text) -> text:
-    var parts = []
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            parts.append("\\\\")
-        elif ch == "\"":
-            parts.append("\\\"")
-        elif ch == "\n":
-            parts.append("\\n")
-        elif ch == "\r":
-            parts.append("\\r")
-        elif ch == "\t":
-            parts.append("\\t")
-        else:
-            parts.append(ch)
-        i = i + 1
-    parts.join("")
-
-fn _extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
-
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
-
-fn _extract_json_bool(json: text, key: text) -> bool:
-    val raw = _extract_json_value(json, key)
-    raw == "true"
+use std.text.{escape_json}
+use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use std.nogc_async_mut.llm.json_helpers.{_unwrap_idx, extract_json_string, extract_json_value, extract_json_int, extract_json_bool}
 
 # ============================================================================
 # Unified response struct
@@ -200,12 +114,12 @@ fn _dispatch_claude_cli(cli_path: text, prompt: text, model: text, system_prompt
             err_msg = err_msg + ": " + stderr
         return new_llm_error("claude_cli", err_msg)
     # Parse JSON response
-    val content = _extract_json_string(stdout, "result")
-    val resp_model = _extract_json_string(stdout, "model")
-    val sess = _extract_json_string(stdout, "session_id")
-    val is_err = _extract_json_bool(stdout, "is_error")
-    val in_tok = _extract_json_int(stdout, "input_tokens")
-    val out_tok = _extract_json_int(stdout, "output_tokens")
+    val content = extract_json_string(stdout, "result")
+    val resp_model = extract_json_string(stdout, "model")
+    val sess = extract_json_string(stdout, "session_id")
+    val is_err = extract_json_bool(stdout, "is_error")
+    val in_tok = extract_json_int(stdout, "input_tokens")
+    val out_tok = extract_json_int(stdout, "output_tokens")
     if is_err:
         return LLMResponse(
             content: "",
@@ -251,20 +165,20 @@ fn _dispatch_claude_api(api_key: text, base_url: text, model: text, messages_jso
     var model_val = model
     if model_val == "":
         model_val = "claude-sonnet-4-20250514"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
-    parts = parts + [_Q() + "max_tokens" + _Q() + ":" + tokens.to_text()]
+    parts = parts + [Q() + "model" + Q() + ":" + Q() + model_val + Q()]
+    parts = parts + [Q() + "max_tokens" + Q() + ":" + tokens.to_text()]
     if system_prompt != "":
-        parts = parts + [_Q() + "system" + _Q() + ":" + _Q() + _escape_json(system_prompt) + _Q()]
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+        parts = parts + [Q() + "system" + Q() + ":" + Q() + escape_json(system_prompt) + Q()]
+    parts = parts + [Q() + "messages" + Q() + ":" + messages_json]
     var body_parts = []
-    body_parts.append(_LB())
+    body_parts.append(LB())
     var i = 0
     for part in parts:
         if i > 0:
             body_parts.append(",")
         body_parts.append(part)
         i = i + 1
-    body_parts.append(_RB())
+    body_parts.append(RB())
     val body = body_parts.join("")
     # Build headers
     var hdr_parts = []
@@ -277,10 +191,10 @@ fn _dispatch_claude_api(api_key: text, base_url: text, model: text, messages_jso
     val http_error = result.2 ?? ""
     if http_error != "":
         return new_llm_error("claude_api", "HTTP error: " + http_error)
-    val content = _extract_json_string(resp_body, "text")
-    val resp_model = _extract_json_string(resp_body, "model")
-    val in_tok = _extract_json_int(resp_body, "input_tokens")
-    val out_tok = _extract_json_int(resp_body, "output_tokens")
+    val content = extract_json_string(resp_body, "text")
+    val resp_model = extract_json_string(resp_body, "model")
+    val in_tok = extract_json_int(resp_body, "input_tokens")
+    val out_tok = extract_json_int(resp_body, "output_tokens")
     LLMResponse(
         content: content,
         model: resp_model,
@@ -310,19 +224,19 @@ fn _dispatch_openai(api_key: text, base_url: text, model: text, messages_json: t
     var model_val = model
     if model_val == "":
         model_val = "gpt-4o"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+    parts = parts + [Q() + "model" + Q() + ":" + Q() + model_val + Q()]
+    parts = parts + [Q() + "messages" + Q() + ":" + messages_json]
     if max_tokens > 0:
-        parts = parts + [_Q() + "max_tokens" + _Q() + ":" + max_tokens.to_text()]
+        parts = parts + [Q() + "max_tokens" + Q() + ":" + max_tokens.to_text()]
     var body_parts = []
-    body_parts.append(_LB())
+    body_parts.append(LB())
     var i = 0
     for part in parts:
         if i > 0:
             body_parts.append(",")
         body_parts.append(part)
         i = i + 1
-    body_parts.append(_RB())
+    body_parts.append(RB())
     val body = body_parts.join("")
     var hdr_parts = []
     hdr_parts.append("Authorization: Bearer " + api_key)
@@ -333,8 +247,8 @@ fn _dispatch_openai(api_key: text, base_url: text, model: text, messages_json: t
     val http_error = result.2 ?? ""
     if http_error != "":
         return new_llm_error("openai", "HTTP error: " + http_error)
-    val content = _extract_json_string(resp_body, "content")
-    val resp_model = _extract_json_string(resp_body, "model")
+    val content = extract_json_string(resp_body, "content")
+    val resp_model = extract_json_string(resp_body, "model")
     LLMResponse(
         content: content,
         model: resp_model,
@@ -358,19 +272,19 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
         url = "http://localhost:11434"
     url = url + "/v1/chat/completions"
     var parts: [text] = []
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model + _Q()]
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+    parts = parts + [Q() + "model" + Q() + ":" + Q() + model + Q()]
+    parts = parts + [Q() + "messages" + Q() + ":" + messages_json]
     if max_tokens > 0:
-        parts = parts + [_Q() + "max_tokens" + _Q() + ":" + max_tokens.to_text()]
+        parts = parts + [Q() + "max_tokens" + Q() + ":" + max_tokens.to_text()]
     var body_parts = []
-    body_parts.append(_LB())
+    body_parts.append(LB())
     var i = 0
     for part in parts:
         if i > 0:
             body_parts.append(",")
         body_parts.append(part)
         i = i + 1
-    body_parts.append(_RB())
+    body_parts.append(RB())
     val body = body_parts.join("")
     var hdr_parts = []
     if api_key != "":
@@ -382,8 +296,8 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
     val http_error = result.2 ?? ""
     if http_error != "":
         return new_llm_error("openai_compat", "HTTP error: " + http_error)
-    val content = _extract_json_string(resp_body, "content")
-    val resp_model = _extract_json_string(resp_body, "model")
+    val content = extract_json_string(resp_body, "content")
+    val resp_model = extract_json_string(resp_body, "model")
     LLMResponse(
         content: content,
         model: resp_model,

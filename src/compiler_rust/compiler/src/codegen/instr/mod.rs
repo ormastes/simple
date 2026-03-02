@@ -94,9 +94,9 @@ use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
     pub module: &'a mut M,
-    pub func_ids: &'a HashMap<String, cranelift_module::FuncId>,
+    pub func_ids: &'a std::collections::BTreeMap<String, cranelift_module::FuncId>,
     pub runtime_funcs: &'a HashMap<&'static str, cranelift_module::FuncId>,
-    pub global_ids: &'a HashMap<String, cranelift_module::DataId>,
+    pub global_ids: &'a std::collections::BTreeMap<String, cranelift_module::DataId>,
     pub vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value>,
     pub local_addr_map: &'a mut HashMap<VReg, usize>,
     pub variables: &'a HashMap<usize, cranelift_frontend::Variable>,

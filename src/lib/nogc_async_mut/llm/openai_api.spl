@@ -5,91 +5,9 @@
 
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
-# ============================================================================
-# JSON helpers (inlined)
-# ============================================================================
-
-fn _LB() -> text:
-    (123 as char).to_text()
-
-fn _RB() -> text:
-    (125 as char).to_text()
-
-fn _Q() -> text:
-    "\""
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn _escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-fn _extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
-
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
+use std.text.{escape_json}
+use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use std.nogc_async_mut.llm.json_helpers.{_unwrap_idx, extract_json_string, extract_json_value, extract_json_int}
 
 # ============================================================================
 # Response struct
@@ -116,24 +34,24 @@ fn build_openai_body(model: text, messages_json: text, max_tokens: i64, temperat
     var model_val = model
     if model_val == "":
         model_val = "gpt-4o"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
+    parts = parts + [Q() + "model" + Q() + ":" + Q() + model_val + Q()]
     # Messages
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+    parts = parts + [Q() + "messages" + Q() + ":" + messages_json]
     # Max tokens
     if max_tokens > 0:
-        parts = parts + [_Q() + "max_tokens" + _Q() + ":" + max_tokens.to_text()]
+        parts = parts + [Q() + "max_tokens" + Q() + ":" + max_tokens.to_text()]
     # Temperature
     if temperature >= 0.0:
-        parts = parts + [_Q() + "temperature" + _Q() + ":" + temperature.to_text()]
+        parts = parts + [Q() + "temperature" + Q() + ":" + temperature.to_text()]
     # Join parts
-    var body = _LB()
+    var body = LB()
     var i = 0
     for part in parts:
         if i > 0:
             body = body + ","
         body = body + part
         i = i + 1
-    body = body + _RB()
+    body = body + RB()
     body
 
 # Build headers string for OpenAI API
@@ -147,13 +65,13 @@ fn build_openai_messages_json(roles: [text], contents: [text]) -> text:
     var items: [text] = []
     var i = 0
     while i < roles.len():
-        var msg = _LB()
-        msg = msg + _Q() + "role" + _Q() + ":" + _Q() + roles[i] + _Q() + ","
+        var msg = LB()
+        msg = msg + Q() + "role" + Q() + ":" + Q() + roles[i] + Q() + ","
         var c = ""
         if i < contents.len():
             c = contents[i]
-        msg = msg + _Q() + "content" + _Q() + ":" + _Q() + _escape_json(c) + _Q()
-        msg = msg + _RB()
+        msg = msg + Q() + "content" + Q() + ":" + Q() + escape_json(c) + Q()
+        msg = msg + RB()
         items = items + [msg]
         i = i + 1
     var result = "["
@@ -184,10 +102,10 @@ fn parse_openai_response(raw: text) -> OpenAIResponse:
             raw: ""
         )
     # Check for error
-    val error_msg = _extract_json_string(raw, "message")
-    val error_type = _extract_json_string(raw, "type")
+    val error_msg = extract_json_string(raw, "message")
+    val error_type = extract_json_string(raw, "type")
     # If there's an error.message and no choices, it's an error
-    val has_content = _extract_json_string(raw, "content")
+    val has_content = extract_json_string(raw, "content")
     if error_msg != "" and has_content == "":
         return OpenAIResponse(
             content: "",
@@ -201,12 +119,12 @@ fn parse_openai_response(raw: text) -> OpenAIResponse:
             raw: raw
         )
     # Extract content from choices[0].message.content
-    val content_text = _extract_json_string(raw, "content")
-    val model_val = _extract_json_string(raw, "model")
-    val finish = _extract_json_string(raw, "finish_reason")
-    val p_tok = _extract_json_int(raw, "prompt_tokens")
-    val c_tok = _extract_json_int(raw, "completion_tokens")
-    val t_tok = _extract_json_int(raw, "total_tokens")
+    val content_text = extract_json_string(raw, "content")
+    val model_val = extract_json_string(raw, "model")
+    val finish = extract_json_string(raw, "finish_reason")
+    val p_tok = extract_json_int(raw, "prompt_tokens")
+    val c_tok = extract_json_int(raw, "completion_tokens")
+    val t_tok = extract_json_int(raw, "total_tokens")
     var final_finish = finish
     if final_finish == "":
         final_finish = "stop"

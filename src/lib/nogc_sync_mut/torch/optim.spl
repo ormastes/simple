@@ -1,7 +1,17 @@
 # NoGC Real Optimizers using Raw Tensor Handles
 #
+# SGD with momentum and Adam optimizer built entirely from
+# existing FFI tensor primitives. Operates on raw i64 tensor handles.
+#
+# Unlike the placeholder classes in torch_training.spl, these
+# actually perform parameter updates via the autograd system.
+#
 # Same API as gc_async_mut/torch/optim.spl by convention.
 # Uses duplicated FFI declarations from nogc ffi.spl.
+#
+# Requirements:
+#   - libspl_torch.so must be built and loaded
+#   - Parameters must have requires_grad=true
 
 use std.nogc_sync_mut.torch.ffi.{
     rt_torch_tensor_zeros,
@@ -43,6 +53,12 @@ fn zeros_like_on_cuda(param: i64) -> i64:
 # ============================================================================
 # SGD Optimizer with Momentum
 # ============================================================================
+#
+# Standard SGD with optional momentum:
+#   v_t = momentum * v_{t-1} + grad
+#   param = param - lr * v_t
+#
+# When momentum=0.0, reduces to vanilla SGD: param -= lr * grad
 
 class SGDOptimizer:
     params: [i64]
@@ -64,6 +80,9 @@ class SGDOptimizer:
             velocities: vels
         )
 
+    # Perform one optimization step.
+    # Updates parameters in-place using gradients.
+    # Returns new parameter handles (old ones are freed).
     me step() -> [i64]:
         rt_torch_autograd_no_grad_begin()
         var new_params = []
@@ -72,22 +91,26 @@ class SGDOptimizer:
             val p = self.params[i]
             val g = rt_torch_autograd_grad(p)
             if g == 0:
+                # No gradient, keep param unchanged
                 new_params = new_params + [rt_torch_torchtensor_clone(p)]
                 rt_torch_torchtensor_free(p)
             else:
                 if self.momentum > 0.0:
+                    # v = momentum * v + grad
                     val v_old = self.velocities[i]
                     val v_scaled = rt_torch_torchtensor_mul_scalar(v_old, self.momentum)
                     val v_new = rt_torch_torchtensor_add(v_scaled, g)
                     rt_torch_torchtensor_free(v_scaled)
                     rt_torch_torchtensor_free(v_old)
                     self.velocities[i] = v_new
+                    # param = param - lr * v
                     val update = rt_torch_torchtensor_mul_scalar(v_new, self.lr)
                     val p_new = rt_torch_torchtensor_sub(p, update)
                     rt_torch_torchtensor_free(update)
                     rt_torch_torchtensor_free(p)
                     new_params = new_params + [p_new]
                 else:
+                    # Vanilla SGD: param = param - lr * grad
                     val update = rt_torch_torchtensor_mul_scalar(g, self.lr)
                     val p_new = rt_torch_torchtensor_sub(p, update)
                     rt_torch_torchtensor_free(update)
@@ -95,6 +118,7 @@ class SGDOptimizer:
                     new_params = new_params + [p_new]
             i = i + 1
         rt_torch_autograd_no_grad_end()
+        # Re-enable gradient tracking
         var j = 0
         while j < new_params.len():
             rt_torch_autograd_set_requires_grad(new_params[j], true)
@@ -112,6 +136,13 @@ class SGDOptimizer:
 # ============================================================================
 # Adam Optimizer
 # ============================================================================
+#
+# Adam: Adaptive Moment Estimation
+#   m_t = beta1 * m_{t-1} + (1 - beta1) * grad
+#   v_t = beta2 * v_{t-1} + (1 - beta2) * grad^2
+#   m_hat = m_t / (1 - beta1^t)
+#   v_hat = v_t / (1 - beta2^t)
+#   param = param - lr * m_hat / (sqrt(v_hat) + eps)
 
 class AdamOptimizer:
     params: [i64]
@@ -165,10 +196,13 @@ class AdamOptimizer:
             t: 0
         )
 
+    # Perform one Adam optimization step.
+    # Returns new parameter handles.
     me step() -> [i64]:
         self.t = self.t + 1
         rt_torch_autograd_no_grad_begin()
 
+        # Bias correction factors
         val bc1 = 1.0 - pow_f64(self.beta1, self.t)
         val bc2 = 1.0 - pow_f64(self.beta2, self.t)
 
@@ -220,6 +254,7 @@ class AdamOptimizer:
             i = i + 1
 
         rt_torch_autograd_no_grad_end()
+        # Re-enable gradient tracking
         var j = 0
         while j < new_params.len():
             rt_torch_autograd_set_requires_grad(new_params[j], true)
@@ -234,6 +269,7 @@ class AdamOptimizer:
             i = i + 1
 
 
+# Simple f64 power for small integer exponents (for bias correction)
 fn pow_f64(base: f64, exp: i64) -> f64:
     var result = 1.0
     var i = 0

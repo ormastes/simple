@@ -9,95 +9,9 @@
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-# ============================================================================
-# JSON helpers (inlined to avoid import issues)
-# ============================================================================
-
-fn _LB() -> text:
-    (123 as char).to_text()
-
-fn _RB() -> text:
-    (125 as char).to_text()
-
-fn _Q() -> text:
-    "\""
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn _escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-fn _extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
-
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
-
-fn _extract_json_bool(json: text, key: text) -> bool:
-    val raw = _extract_json_value(json, key)
-    raw == "true"
+use std.text.{escape_json}
+use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use std.nogc_async_mut.llm.json_helpers.{_unwrap_idx, extract_json_string, extract_json_value, extract_json_int, extract_json_bool}
 
 # ============================================================================
 # Response struct (inline for import safety)
@@ -188,25 +102,25 @@ fn parse_claude_json_response(raw: text) -> CliResponse:
             raw: ""
         )
     # Extract fields from JSON output
-    val result_text = _extract_json_string(raw, "result")
-    val model_text = _extract_json_string(raw, "model")
-    val session = _extract_json_string(raw, "session_id")
-    val is_err = _extract_json_bool(raw, "is_error")
-    val stop = _extract_json_string(raw, "stop_reason")
-    val in_tok = _extract_json_int(raw, "input_tokens")
-    val out_tok = _extract_json_int(raw, "output_tokens")
+    val result_text = extract_json_string(raw, "result")
+    val model_text = extract_json_string(raw, "model")
+    val session = extract_json_string(raw, "session_id")
+    val is_err = extract_json_bool(raw, "is_error")
+    val stop = extract_json_string(raw, "stop_reason")
+    val in_tok = extract_json_int(raw, "input_tokens")
+    val out_tok = extract_json_int(raw, "output_tokens")
     # Handle usage sub-object for tokens
     var final_in_tok = in_tok
     var final_out_tok = out_tok
     if in_tok == 0:
-        final_in_tok = _extract_json_int(raw, "input_tokens_used")
+        final_in_tok = extract_json_int(raw, "input_tokens_used")
     if out_tok == 0:
-        final_out_tok = _extract_json_int(raw, "output_tokens_used")
+        final_out_tok = extract_json_int(raw, "output_tokens_used")
     var error_text = ""
     if is_err:
         error_text = result_text
         if error_text == "":
-            error_text = _extract_json_string(raw, "error")
+            error_text = extract_json_string(raw, "error")
     var final_stop = stop
     if final_stop == "":
         final_stop = "end_turn"
@@ -240,7 +154,7 @@ fn parse_claude_stream_line(line: text) -> CliStreamEvent:
             input_tokens: 0,
             output_tokens: 0
         )
-    val etype = _extract_json_string(trimmed, "type")
+    val etype = extract_json_string(trimmed, "type")
     var content_val = ""
     var sid = ""
     var mdl = ""
@@ -248,18 +162,18 @@ fn parse_claude_stream_line(line: text) -> CliStreamEvent:
     var in_tok = 0
     var out_tok = 0
     if etype == "content_block_delta":
-        content_val = _extract_json_string(trimmed, "text")
+        content_val = extract_json_string(trimmed, "text")
     elif etype == "message_stop":
-        stop_val = _extract_json_string(trimmed, "stop_reason")
+        stop_val = extract_json_string(trimmed, "stop_reason")
         if stop_val == "":
             stop_val = "end_turn"
     elif etype == "message_start":
-        mdl = _extract_json_string(trimmed, "model")
-        sid = _extract_json_string(trimmed, "session_id")
+        mdl = extract_json_string(trimmed, "model")
+        sid = extract_json_string(trimmed, "session_id")
     var final_etype = etype
     if final_etype == "":
         # Fallback: check for "result" field (final summary line)
-        val has_result = _extract_json_string(trimmed, "result")
+        val has_result = extract_json_string(trimmed, "result")
         if has_result != "":
             final_etype = "result"
             content_val = has_result

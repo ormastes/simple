@@ -75,7 +75,7 @@ pub struct HirUnitConstraints {
 }
 
 /// Unique identifier for types in the HIR
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeId(pub u32);
 
 //==============================================================================

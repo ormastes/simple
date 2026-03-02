@@ -24,20 +24,16 @@ use layer_utils.{
     ExtendedModel, extended_lora_forward
 }
 
-use std.torch.ffi.{
-    rt_torch_tensor_randn,
-    rt_torch_torchtensor_cuda,
-    rt_torch_torchtensor_free,
-    rt_torch_torchtensor_mean,
-    rt_torch_torchtensor_sub,
-    rt_torch_torchtensor_mul,
-    rt_torch_torchtensor_sum,
-    rt_torch_torchtensor_argmax,
-    rt_torch_torchtensor_softmax,
-    rt_torch_torchtensor_add_scalar,
-    rt_torch_torchtensor_pow,
-    rt_torch_autograd_no_grad_begin,
-    rt_torch_autograd_no_grad_end
+use src.torch_dyn.{
+    t_free,
+    t_mean,
+    t_sub,
+    t_mul,
+    t_argmax,
+    t_add_scalar,
+    t_pow,
+    autograd_no_grad_begin,
+    autograd_no_grad_end
 }
 
 export ValidationResult, validate_model, validate_with_lora
@@ -79,7 +75,7 @@ class ValidationResult:
 
 fn validate_model(model: TextModel, phase_name: text, threshold: f64) -> ValidationResult:
     print("  Validating: {phase_name}")
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
 
     val input_dim = model.config.input_dim
     val output_dim = model.config.output_dim
@@ -92,16 +88,16 @@ fn validate_model(model: TextModel, phase_name: text, threshold: f64) -> Validat
 
         val logits = model.forward(x)
         val loss_h = compute_mse_loss(logits, target)
-        val loss_val = rt_torch_torchtensor_mean(loss_h)
+        val loss_val = t_mean(loss_h)
 
         total_loss = total_loss + loss_val
 
-        rt_torch_torchtensor_free(x)
-        rt_torch_torchtensor_free(target)
-        rt_torch_torchtensor_free(logits)
-        rt_torch_torchtensor_free(loss_h)
+        t_free(x)
+        t_free(target)
+        t_free(logits)
+        t_free(loss_h)
 
-    rt_torch_autograd_no_grad_end()
+    autograd_no_grad_end()
 
     val avg_loss = total_loss / NUM_VAL_BATCHES
     val passed = avg_loss < threshold
@@ -129,7 +125,7 @@ fn validate_with_lora(
     threshold: f64
 ) -> ValidationResult:
     print("  Validating (with LoRA): {phase_name}")
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
 
     val input_dim = model.config.input_dim
     val output_dim = model.config.output_dim
@@ -142,16 +138,16 @@ fn validate_with_lora(
 
         val logits = lora_forward(model, x, lora_l1, lora_l2)
         val loss_h = compute_mse_loss(logits, target)
-        val loss_val = rt_torch_torchtensor_mean(loss_h)
+        val loss_val = t_mean(loss_h)
 
         total_loss = total_loss + loss_val
 
-        rt_torch_torchtensor_free(x)
-        rt_torch_torchtensor_free(target)
-        rt_torch_torchtensor_free(logits)
-        rt_torch_torchtensor_free(loss_h)
+        t_free(x)
+        t_free(target)
+        t_free(logits)
+        t_free(loss_h)
 
-    rt_torch_autograd_no_grad_end()
+    autograd_no_grad_end()
 
     val avg_loss = total_loss / NUM_VAL_BATCHES
     val passed = avg_loss < threshold
@@ -179,7 +175,7 @@ fn validate_with_lora(
 # With synthetic random data, accuracy will be ~random (1/output_dim).
 # With real MCQ data, accuracy should reach 97%+.
 fn validate_accuracy(model: TextModel, config: TrainConfig) -> f64:
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
 
     var total_accuracy = 0.0
     var num_batches = 0
@@ -192,30 +188,30 @@ fn validate_accuracy(model: TextModel, config: TrainConfig) -> f64:
         val logits = model.forward(x)
 
         # Get predicted class indices via argmax
-        val preds = rt_torch_torchtensor_argmax(logits, 1, false)
-        val target_classes = rt_torch_torchtensor_argmax(target, 1, false)
+        val preds = t_argmax(logits, 1, false)
+        val target_classes = t_argmax(target, 1, false)
 
         # Soft accuracy: mean(1 / (1 + (pred - target)^2))
-        val diff = rt_torch_torchtensor_sub(preds, target_classes)
-        val diff_sq = rt_torch_torchtensor_mul(diff, diff)
-        rt_torch_torchtensor_free(diff)
-        val denom = rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
-        rt_torch_torchtensor_free(diff_sq)
-        val inv = rt_torch_torchtensor_pow(denom, -1.0)
-        rt_torch_torchtensor_free(denom)
-        val batch_accuracy = rt_torch_torchtensor_mean(inv)
-        rt_torch_torchtensor_free(inv)
+        val diff = t_sub(preds, target_classes)
+        val diff_sq = t_mul(diff, diff)
+        t_free(diff)
+        val denom = t_add_scalar(diff_sq, 1.0)
+        t_free(diff_sq)
+        val inv = t_pow(denom, -1.0)
+        t_free(denom)
+        val batch_accuracy = t_mean(inv)
+        t_free(inv)
 
         total_accuracy = total_accuracy + batch_accuracy
         num_batches = num_batches + 1
 
-        rt_torch_torchtensor_free(x)
-        rt_torch_torchtensor_free(target)
-        rt_torch_torchtensor_free(logits)
-        rt_torch_torchtensor_free(preds)
-        rt_torch_torchtensor_free(target_classes)
+        t_free(x)
+        t_free(target)
+        t_free(logits)
+        t_free(preds)
+        t_free(target_classes)
 
-    rt_torch_autograd_no_grad_end()
+    autograd_no_grad_end()
 
     if num_batches == 0:
         return 0.0
@@ -277,7 +273,7 @@ fn validate_all_phases(model: TextModel, current_phase: i64):
 # Creates embedding batches, runs through extended forward, measures MSE loss.
 fn validate_extended_model(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, phase_name: text, threshold: f64) -> ValidationResult:
     print("  Validating extended: {phase_name}")
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
 
     val output_dim = ext.base.config.output_dim
     var total_loss = 0.0
@@ -291,18 +287,18 @@ fn validate_extended_model(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: Lo
 
         val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask_h, lora_l1, lora_l2)
         val loss_h = compute_mse_loss(logits, target)
-        val loss_val = rt_torch_torchtensor_mean(loss_h)
+        val loss_val = t_mean(loss_h)
 
         total_loss = total_loss + loss_val
 
-        rt_torch_torchtensor_free(kor_ids)
-        rt_torch_torchtensor_free(eng_ids)
-        rt_torch_torchtensor_free(mask_h)
-        rt_torch_torchtensor_free(target)
-        rt_torch_torchtensor_free(logits)
-        rt_torch_torchtensor_free(loss_h)
+        t_free(kor_ids)
+        t_free(eng_ids)
+        t_free(mask_h)
+        t_free(target)
+        t_free(logits)
+        t_free(loss_h)
 
-    rt_torch_autograd_no_grad_end()
+    autograd_no_grad_end()
 
     val avg_loss = total_loss / NUM_VAL_BATCHES
     val passed = avg_loss < threshold
@@ -326,7 +322,7 @@ fn validate_extended_model(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: Lo
 # Uses synthetic Korean-heavy embedding batches.
 fn validate_korean_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig) -> f64:
     print("  Checking Korean accuracy...")
-    rt_torch_autograd_no_grad_begin()
+    autograd_no_grad_begin()
 
     var total_accuracy = 0.0
     var num_batches = 0
@@ -341,31 +337,31 @@ fn validate_korean_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: L
         val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask_h, lora_l1, lora_l2)
 
         # Soft accuracy via argmax comparison
-        val preds = rt_torch_torchtensor_argmax(logits, 1, false)
-        val target_classes = rt_torch_torchtensor_argmax(target, 1, false)
+        val preds = t_argmax(logits, 1, false)
+        val target_classes = t_argmax(target, 1, false)
 
-        val diff = rt_torch_torchtensor_sub(preds, target_classes)
-        val diff_sq = rt_torch_torchtensor_mul(diff, diff)
-        rt_torch_torchtensor_free(diff)
-        val denom = rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
-        rt_torch_torchtensor_free(diff_sq)
-        val inv = rt_torch_torchtensor_pow(denom, -1.0)
-        rt_torch_torchtensor_free(denom)
-        val batch_accuracy = rt_torch_torchtensor_mean(inv)
-        rt_torch_torchtensor_free(inv)
+        val diff = t_sub(preds, target_classes)
+        val diff_sq = t_mul(diff, diff)
+        t_free(diff)
+        val denom = t_add_scalar(diff_sq, 1.0)
+        t_free(diff_sq)
+        val inv = t_pow(denom, -1.0)
+        t_free(denom)
+        val batch_accuracy = t_mean(inv)
+        t_free(inv)
 
         total_accuracy = total_accuracy + batch_accuracy
         num_batches = num_batches + 1
 
-        rt_torch_torchtensor_free(kor_ids)
-        rt_torch_torchtensor_free(eng_ids)
-        rt_torch_torchtensor_free(mask_h)
-        rt_torch_torchtensor_free(target)
-        rt_torch_torchtensor_free(logits)
-        rt_torch_torchtensor_free(preds)
-        rt_torch_torchtensor_free(target_classes)
+        t_free(kor_ids)
+        t_free(eng_ids)
+        t_free(mask_h)
+        t_free(target)
+        t_free(logits)
+        t_free(preds)
+        t_free(target_classes)
 
-    rt_torch_autograd_no_grad_end()
+    autograd_no_grad_end()
 
     if num_batches == 0:
         return 0.0
