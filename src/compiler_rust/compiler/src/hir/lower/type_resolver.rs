@@ -8,6 +8,14 @@ impl Lowerer {
     pub(super) fn resolve_type(&mut self, ty: &Type) -> LowerResult<TypeId> {
         match ty {
             Type::Simple(name) => {
+                // Handle "name?" pattern — some code paths produce Type::Simple("text?")
+                // instead of Type::Optional(Type::Simple("text")). Normalize here.
+                if let Some(base) = name.strip_suffix('?') {
+                    if !base.is_empty() {
+                        let inner = Type::Simple(base.to_string());
+                        return self.resolve_type(&Type::Optional(Box::new(inner)));
+                    }
+                }
                 // Handle Self type in class/struct methods
                 if name == "Self" {
                     if let Some(class_ty) = self.current_class_type {

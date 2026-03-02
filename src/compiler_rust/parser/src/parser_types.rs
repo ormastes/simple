@@ -326,13 +326,29 @@ impl<'a> Parser<'a> {
         // Simple or generic type (possibly qualified: module.Type or Iterator::Item)
         let mut name = self.expect_identifier()?;
 
+        // expect_identifier() absorbs trailing '?' (for method names like is_valid?).
+        // In type context, '?' means Optional — strip it and wrap later.
+        let had_question_suffix = if let Some(base) = name.strip_suffix('?') {
+            name = base.to_string();
+            true
+        } else {
+            false
+        };
+
         // Check for qualified type name: module.Type, module.submodule.Type, or Self::Item
         // Support both . (module path) and :: (associated type path)
         // Also check for dependent keys: name.keys
+        let mut had_question_suffix = had_question_suffix;
         while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
             let is_double_colon = self.check(&TokenKind::DoubleColon);
             self.advance(); // consume '.' or '::'
-            let segment = self.expect_identifier()?;
+            let mut segment = self.expect_identifier()?;
+
+            // expect_identifier absorbs '?'; detect and strip in type context
+            if let Some(base) = segment.strip_suffix('?') {
+                segment = base.to_string();
+                had_question_suffix = true;
+            }
 
             // Check for dependent keys: name.keys
             if !is_double_colon && segment == "keys" {
@@ -486,16 +502,20 @@ impl<'a> Parser<'a> {
 
             let generic_type = Type::Generic { name, args };
             // Check for optional generic: Type<T>?
-            if self.check(&TokenKind::Question) {
-                self.advance();
+            if had_question_suffix || self.check(&TokenKind::Question) {
+                if !had_question_suffix {
+                    self.advance();
+                }
                 return Ok(Type::Optional(Box::new(generic_type)));
             }
             return Ok(generic_type);
         }
 
-        // Check for optional
-        if self.check(&TokenKind::Question) {
-            self.advance();
+        // Check for optional (either from a separate ? token, or absorbed by expect_identifier)
+        if had_question_suffix || self.check(&TokenKind::Question) {
+            if !had_question_suffix {
+                self.advance();
+            }
             return Ok(Type::Optional(Box::new(Type::Simple(name))));
         }
 
