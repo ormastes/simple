@@ -39,26 +39,64 @@ pub(crate) fn get_vreg_or_default<M: Module>(
     builder.ins().iconst(types::I64, 3)
 }
 
-/// Helper to create a string constant in module data and return (ptr, len) values
+/// Helper to create a string constant in module data and return (ptr, len) values.
+/// Uses content-based naming for deterministic output and deduplication.
 pub(crate) fn create_string_constant<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     text: &str,
 ) -> InstrResult<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
     let bytes = text.as_bytes();
-    let data_id = ctx
-        .module
-        .declare_anonymous_data(true, false)
-        .map_err(|e| e.to_string())?;
-    let mut data_desc = cranelift_module::DataDescription::new();
-    data_desc.define(bytes.to_vec().into_boxed_slice());
-    ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
+    let data_id = declare_named_bytes(ctx, bytes)?;
 
     let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
     let ptr = builder.ins().global_value(types::I64, global_val);
     let len = builder.ins().iconst(types::I64, bytes.len() as i64);
 
     Ok((ptr, len))
+}
+
+/// FNV-1a 64-bit hash of byte slice — used for content-based data naming.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Declare a named data segment from raw bytes using content-based FNV-1a hash.
+/// Returns the DataId. Handles deduplication via deterministic naming.
+pub(crate) fn declare_named_bytes<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    bytes: &[u8],
+) -> InstrResult<cranelift_module::DataId> {
+    let name = format!(".Ldata_{:016x}", fnv1a_hash(bytes));
+    match ctx.module.declare_data(&name, cranelift_module::Linkage::Local, false, false) {
+        Ok(id) => {
+            let mut data_desc = cranelift_module::DataDescription::new();
+            data_desc.define(bytes.to_vec().into_boxed_slice());
+            let _ = ctx.module.define_data(id, &data_desc);
+            Ok(id)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Create a null-terminated C string constant and return a pointer value.
+/// Uses content-based naming for deterministic output and deduplication.
+pub(crate) fn create_cstring_constant<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    text: &str,
+) -> InstrResult<cranelift_codegen::ir::Value> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let data_id = declare_named_bytes(ctx, &bytes)?;
+    let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
+    let ptr = builder.ins().global_value(types::I64, global_val);
+    Ok(ptr)
 }
 
 /// Safely extend a value to i64, skipping if already i64.

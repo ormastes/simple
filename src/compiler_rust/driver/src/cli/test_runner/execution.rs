@@ -265,8 +265,11 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
 
     // catch_unwind catches panics (including stack overflows on some platforms)
     // so that a single crashing test doesn't abort the whole test suite.
+    // Use run_file_interpreted() instead of run_file() because the default JIT
+    // (Cranelift) crashes on some patterns (large functions with many var mutations
+    // + string interpolation). The `run` command also uses interpreted mode for .spl files.
     let run_result: Result<i32, String> = match std::panic::catch_unwind(
-        std::panic::AssertUnwindSafe(|| runner.run_file(path))
+        std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(path))
     ) {
         Ok(inner) => inner,
         Err(panic_info) => {

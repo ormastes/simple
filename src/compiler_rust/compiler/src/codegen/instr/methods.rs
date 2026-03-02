@@ -4,7 +4,7 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use super::helpers::adapted_call;
+use super::helpers::{adapted_call, declare_named_bytes};
 use super::{InstrContext, InstrResult};
 use crate::mir::VReg;
 
@@ -216,31 +216,13 @@ pub(crate) fn compile_builtin_method<M: Module>(
         _ => {
             // Unknown method - call rt_method_not_found
             let type_bytes = receiver_type.as_bytes();
-            let type_data_id = ctx
-                .module
-                .declare_anonymous_data(true, false)
-                .map_err(|e| e.to_string())?;
-            let mut type_data_desc = cranelift_module::DataDescription::new();
-            type_data_desc.define(type_bytes.to_vec().into_boxed_slice());
-            ctx.module
-                .define_data(type_data_id, &type_data_desc)
-                .map_err(|e| e.to_string())?;
-
+            let type_data_id = declare_named_bytes(ctx, type_bytes)?;
             let type_global = ctx.module.declare_data_in_func(type_data_id, builder.func);
             let type_ptr = builder.ins().global_value(types::I64, type_global);
             let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
 
             let method_bytes = method.as_bytes();
-            let method_data_id = ctx
-                .module
-                .declare_anonymous_data(true, false)
-                .map_err(|e| e.to_string())?;
-            let mut method_data_desc = cranelift_module::DataDescription::new();
-            method_data_desc.define(method_bytes.to_vec().into_boxed_slice());
-            ctx.module
-                .define_data(method_data_id, &method_data_desc)
-                .map_err(|e| e.to_string())?;
-
+            let method_data_id = declare_named_bytes(ctx, method_bytes)?;
             let method_global = ctx.module.declare_data_in_func(method_data_id, builder.func);
             let method_ptr = builder.ins().global_value(types::I64, method_global);
             let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);

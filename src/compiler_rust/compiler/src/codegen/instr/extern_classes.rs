@@ -11,7 +11,7 @@ use cranelift_frontend::FunctionBuilder;
 
 use crate::mir::VReg;
 
-use super::helpers::adapted_call;
+use super::helpers::{adapted_call, create_cstring_constant};
 use super::{InstrContext, InstrResult};
 
 /// Compile an extern class method call.
@@ -97,22 +97,7 @@ fn compile_ffi_static_call<M: Module>(
     };
 
     // Create method name string constant in data section (survives into binary)
-    let method_name_ptr = {
-        let data_id = ctx
-            .module
-            .declare_anonymous_data(true, false)
-            .map_err(|e| format!("declare string data: {e}"))?;
-        let mut desc = cranelift_module::DataDescription::new();
-        let mut bytes = full_method_name.as_bytes().to_vec();
-        bytes.push(0); // null terminate
-        let name_len = bytes.len() - 1; // exclude null terminator
-        desc.define(bytes.into_boxed_slice());
-        ctx.module
-            .define_data(data_id, &desc)
-            .map_err(|e| format!("define string data: {e}"))?;
-        let gv = ctx.module.declare_data_in_func(data_id, builder.func);
-        builder.ins().global_value(types::I64, gv)
-    };
+    let method_name_ptr = create_cstring_constant(ctx, builder, &full_method_name)?;
     let method_name_len = builder.ins().iconst(types::I64, full_method_name.len() as i64);
 
     // For static methods, receiver is 0 (null)
@@ -198,21 +183,7 @@ fn compile_ffi_instance_call<M: Module>(
     };
 
     // Create method name string constant in data section (survives into binary)
-    let method_name_ptr = {
-        let data_id = ctx
-            .module
-            .declare_anonymous_data(true, false)
-            .map_err(|e| format!("declare string data: {e}"))?;
-        let mut desc = cranelift_module::DataDescription::new();
-        let mut bytes = method_name.as_bytes().to_vec();
-        bytes.push(0); // null terminate
-        desc.define(bytes.into_boxed_slice());
-        ctx.module
-            .define_data(data_id, &desc)
-            .map_err(|e| format!("define string data: {e}"))?;
-        let gv = ctx.module.declare_data_in_func(data_id, builder.func);
-        builder.ins().global_value(types::I64, gv)
-    };
+    let method_name_ptr = create_cstring_constant(ctx, builder, method_name)?;
     let method_name_len = builder.ins().iconst(types::I64, method_name.len() as i64);
 
     // Call rt_ffi_object_call_method(receiver, method_name_ptr, method_name_len, argc, argv)

@@ -10,7 +10,7 @@ use cranelift_module::Module;
 use crate::hir::BinOp;
 use crate::mir::VReg;
 
-use super::helpers::{adapted_call, create_string_constant};
+use super::helpers::{adapted_call, create_string_constant, declare_named_bytes};
 use super::{InstrContext, InstrResult};
 
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
@@ -396,16 +396,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 // Add space between arguments (except first)
                 if i > 0 {
                     // Print a space separator
-                    let space_data_id = ctx
-                        .module
-                        .declare_anonymous_data(true, false)
-                        .map_err(|e| e.to_string())?;
-                    let mut space_desc = cranelift_module::DataDescription::new();
-                    space_desc.define(b" ".to_vec().into_boxed_slice());
-                    ctx.module
-                        .define_data(space_data_id, &space_desc)
-                        .map_err(|e| e.to_string())?;
-
+                    let space_data_id = declare_named_bytes(ctx, b" ")?;
                     let space_gv = ctx.module.declare_data_in_func(space_data_id, builder.func);
                     let space_ptr = builder.ins().global_value(types::I64, space_gv);
                     let space_len = builder.ins().iconst(types::I64, 1);
@@ -450,16 +441,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             // Handle empty print (just prints nothing or newline)
             if args.is_empty() && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
                 // Print just a newline
-                let newline_data_id = ctx
-                    .module
-                    .declare_anonymous_data(true, false)
-                    .map_err(|e| e.to_string())?;
-                let mut newline_desc = cranelift_module::DataDescription::new();
-                newline_desc.define(b"\n".to_vec().into_boxed_slice());
-                ctx.module
-                    .define_data(newline_data_id, &newline_desc)
-                    .map_err(|e| e.to_string())?;
-
+                let newline_data_id = declare_named_bytes(ctx, b"\n")?;
                 let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);
                 let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
                 let newline_len = builder.ins().iconst(types::I64, 1);
