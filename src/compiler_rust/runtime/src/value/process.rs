@@ -1,6 +1,7 @@
 //! Process spawning and management FFI functions
 
 use crate::value::RuntimeValue;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 
 #[cfg(unix)]

@@ -10,10 +10,9 @@
 
 use super::super::RuntimeValue;
 use std::fs::File;
-use std::os::unix::io::{FromRawFd, RawFd};
 
 #[cfg(target_family = "unix")]
-use std::os::unix::io::IntoRawFd;
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 
 // =============================================================================
 // Helper Functions

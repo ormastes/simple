@@ -261,23 +261,23 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
         }
         #[cfg(target_family = "windows")]
         {
-            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
             use windows_sys::Win32::Storage::FileSystem::{CreateFileA, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING};
 
-            let access = if mode & 0x1 != 0 { 0x80000000 } else { 0 }  // GENERIC_READ
-                       | if mode & 0x2 != 0 { 0x40000000 } else { 0 }; // GENERIC_WRITE
+            let access = if mode & 0x1 != 0 { 0x80000000u32 } else { 0 }  // GENERIC_READ
+                       | if mode & 0x2 != 0 { 0x40000000u32 } else { 0 }; // GENERIC_WRITE
 
-            let handle = CreateFileA(
+            let handle: HANDLE = CreateFileA(
                 path.as_ptr(),
                 access,
                 0x1 | 0x2, // FILE_SHARE_READ | FILE_SHARE_WRITE
                 std::ptr::null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             );
 
-            if handle == INVALID_HANDLE_VALUE as isize {
+            if handle == INVALID_HANDLE_VALUE {
                 return Err(format!("Failed to open file: {}", path));
             }
             handle as i32

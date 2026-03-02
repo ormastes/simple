@@ -606,8 +606,8 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
             #[cfg(not(target_os = "linux"))]
             fn set_limit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
                 let rlim = libc::rlimit {
-                    rlim_cur: value,
-                    rlim_max: value,
+                    rlim_cur: value as libc::rlim_t,
+                    rlim_max: value as libc::rlim_t,
                 };
                 let ret = unsafe { libc::setrlimit(resource, &rlim) };
                 if ret != 0 {

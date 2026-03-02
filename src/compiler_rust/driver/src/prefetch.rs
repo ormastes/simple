@@ -198,8 +198,8 @@ fn prefetch_file_mmap<P: AsRef<Path>>(path: P) -> io::Result<()> {
 #[cfg(windows)]
 fn prefetch_files_windows<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle> {
     use std::os::windows::io::AsRawHandle;
-    use winapi::um::memoryapi::PrefetchVirtualMemory;
-    use winapi::um::winnt::{HANDLE, WIN32_MEMORY_RANGE_ENTRY};
+    use winapi::um::memoryapi::{PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY};
+    use winapi::um::winnt::HANDLE;
 
     let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
@@ -220,8 +220,8 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use winapi::shared::minwindef::FALSE;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-    use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile};
-    use winapi::um::winnt::{FILE_MAP_READ, HANDLE, PAGE_READONLY, WIN32_MEMORY_RANGE_ENTRY};
+    use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile, FILE_MAP_READ, WIN32_MEMORY_RANGE_ENTRY};
+    use winapi::um::winnt::{HANDLE, PAGE_READONLY};
 
     let file = OpenOptions::new().read(true).open(path.as_ref())?;
     let metadata = file.metadata()?;
