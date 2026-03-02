@@ -885,17 +885,12 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                     "rt_path_parent",
                     "range",
                 ];
+                // Accept ALL undefined symbols for stub generation.
+                // Weak stubs return 0 — real implementations from libsimple_runtime.a
+                // will override them at link time.
                 for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
                     if let Some(sym) = line.split_whitespace().last() {
-                        let keep = sym.starts_with("rt_")
-                            || sym.starts_with("ds_")
-                            || sym.starts_with("get_global_")
-                            || sym.starts_with("set_global_")
-                            || sym.contains("GLOBAL_LOG_LEVEL")
-                            || sym.contains("SCOPE_LEVELS")
-                            || extra_keep.contains(&sym)
-                            || rt_keep.contains(&sym);
-                        if keep {
+                        if sym.len() >= 2 {
                             symbols.insert(sym.to_string());
                         }
                     }
@@ -1333,17 +1328,10 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                     "rt_path_parent",
                     "range",
                 ];
+                // Accept ALL undefined symbols for second-pass stub generation.
                 for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
                     if let Some(sym) = line.split_whitespace().last() {
-                        let keep = sym.starts_with("rt_")
-                            || sym.starts_with("ds_")
-                            || sym.starts_with("get_global_")
-                            || sym.starts_with("set_global_")
-                            || sym.contains("GLOBAL_LOG_LEVEL")
-                            || sym.contains("SCOPE_LEVELS")
-                            || extra_keep.contains(&sym)
-                            || rt_keep.contains(&sym);
-                        if keep {
+                        if sym.len() >= 2 {
                             symbols.insert(sym.to_string());
                         }
                     }
