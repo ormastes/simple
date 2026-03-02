@@ -1,0 +1,320 @@
+# Vulkan GUI Renderer - Extended Draw Utilities
+#
+# PipelineBuilder vertex input for UI, Attributes wrapper, dimension/padding/
+# color parsers, event conversion helpers (key, mouse), and Vulkan type aliases.
+# Part of the renderer module - see vulkan_renderer_draw.spl for core drawing.
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_buffers.*
+use ui.gui.vulkan_ffi.*
+
+# =============================================================================
+# Pipeline Builder Extension for UI
+# =============================================================================
+
+impl PipelineBuilder:
+    # Vertex input for UI rendering (Position2 + TexCoord2 + Color4)
+    pub fn vertex_input_ui(mut self) -> PipelineBuilder:
+        self.vertex_bindings.push(VkVertexInputBindingDescription {
+            binding: 0,
+            stride: 32,  # 2*4 + 2*4 + 4*4 = 32 bytes
+            input_rate: VK_VERTEX_INPUT_RATE_VERTEX,
+        })
+
+        # Position (vec2)
+        self.vertex_attributes.push(VkVertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: VK_FORMAT_R32G32_SFLOAT,
+            offset: 0,
+        })
+
+        # TexCoord (vec2)
+        self.vertex_attributes.push(VkVertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: VK_FORMAT_R32G32_SFLOAT,
+            offset: 8,
+        })
+
+        # Color (vec4)
+        self.vertex_attributes.push(VkVertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: VK_FORMAT_R32G32B32A32_SFLOAT,
+            offset: 16,
+        })
+
+        self
+
+# =============================================================================
+# Attribute Helpers
+# =============================================================================
+
+# Attributes wrapper for parsing element attributes and styles
+pub struct Attributes:
+    attrs: Dict<text, text>
+    styles: Dict<text, text>
+
+impl Attributes:
+    # Create Attributes from an Element
+    pub fn from_element(elem: &Element) -> Attributes:
+        return Attributes {
+            attrs: elem.attrs.clone(),
+            styles: elem.styles.clone()
+        }
+
+    # Get attribute value by name
+    pub fn get(&self, name: &str) -> Option<text>:
+        match self.attrs.get(&name.to_string()):
+            case Some(v): return Some(v.clone())
+            case None:
+                match self.styles.get(&name.to_string()):
+                    case Some(v): return Some(v.clone())
+                    case None: return None
+
+    pub fn get_width(&self) -> Option<u16>:
+        match self.get("width"):
+            case Some(val): return parse_dimension(&val)
+            case None: return None
+
+    pub fn get_height(&self) -> Option<u16>:
+        match self.get("height"):
+            case Some(val): return parse_dimension(&val)
+            case None: return None
+
+    pub fn get_padding(&self) -> Option<(u16, u16, u16, u16)>:
+        match self.get("padding"):
+            case Some(val): return parse_padding(&val)
+            case None: return None
+
+    pub fn get_background_color(&self) -> Option<[f32; 4]>:
+        match self.get("background-color"):
+            case Some(val): return parse_color(&val)
+            case None:
+                match self.get("background"):
+                    case Some(val): return parse_color(&val)
+                    case None: return None
+
+    pub fn get_color(&self) -> Option<[f32; 4]>:
+        match self.get("color"):
+            case Some(val): return parse_color(&val)
+            case None: return None
+
+# Parse dimension value (e.g., "100", "100px", "50%")
+fn parse_dimension(val: &str) -> Option<u16>:
+    val trimmed = val.trim()
+    # Remove 'px' suffix if present
+    val numeric = if trimmed.ends_with("px"):
+        trimmed[0..trimmed.len() - 2]
+    else if trimmed.ends_with("%"):
+        # Percentage not supported yet, return None
+        return None
+    else:
+        trimmed
+
+    match numeric.parse.<u16>():
+        case Ok(n): return Some(n)
+        case Err(_): return None
+
+# Parse padding value (e.g., "10", "10 20", "10 20 30 40")
+fn parse_padding(val: &str) -> Option<(u16, u16, u16, u16)>:
+    val parts = val.trim().split_whitespace().collect.<Array<&str>>()
+
+    match parts.len():
+        case 1:
+            # All sides same
+            match parts[0].parse.<u16>():
+                case Ok(n): return Some((n, n, n, n))
+                case Err(_): return None
+        case 2:
+            # Vertical, Horizontal
+            match (parts[0].parse.<u16>(), parts[1].parse.<u16>()):
+                case (Ok(v), Ok(h)): return Some((v, h, v, h))
+                case _: return None
+        case 4:
+            # Top, Right, Bottom, Left
+            match (parts[0].parse.<u16>(), parts[1].parse.<u16>(),
+                   parts[2].parse.<u16>(), parts[3].parse.<u16>()):
+                case (Ok(t), Ok(r), Ok(b), Ok(l)): return Some((t, r, b, l))
+                case _: return None
+        case _:
+            return None
+
+# Parse color value (e.g., "#FF0000", "rgb(255,0,0)", "red")
+fn parse_color(val: &str) -> Option<[f32; 4]>:
+    val trimmed = val.trim().lower()
+
+    # Named colors
+    match trimmed.as_str():
+        case "red": return Some([1.0, 0.0, 0.0, 1.0])
+        case "green": return Some([0.0, 1.0, 0.0, 1.0])
+        case "blue": return Some([0.0, 0.0, 1.0, 1.0])
+        case "white": return Some([1.0, 1.0, 1.0, 1.0])
+        case "black": return Some([0.0, 0.0, 0.0, 1.0])
+        case "yellow": return Some([1.0, 1.0, 0.0, 1.0])
+        case "cyan": return Some([0.0, 1.0, 1.0, 1.0])
+        case "magenta": return Some([1.0, 0.0, 1.0, 1.0])
+        case "gray" | "grey": return Some([0.5, 0.5, 0.5, 1.0])
+        case "transparent": return Some([0.0, 0.0, 0.0, 0.0])
+        case _: pass
+
+    # Hex color (#RGB, #RRGGBB, #RRGGBBAA)
+    if trimmed.starts_with("#"):
+        val hex = &trimmed[1..]
+        match hex.len():
+            case 3:
+                # #RGB -> #RRGGBB
+                val r = parse_hex_digit(hex[0..1]) * 17
+                val g = parse_hex_digit(hex[1..2]) * 17
+                val b = parse_hex_digit(hex[2..3]) * 17
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+            case 6:
+                # #RRGGBB
+                val r = parse_hex_byte(&hex[0..2])
+                val g = parse_hex_byte(&hex[2..4])
+                val b = parse_hex_byte(&hex[4..6])
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+            case 8:
+                # #RRGGBBAA
+                val r = parse_hex_byte(&hex[0..2])
+                val g = parse_hex_byte(&hex[2..4])
+                val b = parse_hex_byte(&hex[4..6])
+                val a = parse_hex_byte(&hex[6..8])
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0])
+            case _:
+                return None
+
+    # rgb(r, g, b) or rgba(r, g, b, a)
+    if trimmed.starts_with("rgb"):
+        val inner = if trimmed.starts_with("rgba("):
+            &trimmed[5..trimmed.len()-1]
+        else if trimmed.starts_with("rgb("):
+            &trimmed[4..trimmed.len()-1]
+        else:
+            return None
+
+        val parts = inner.split(",").map(|s| s.trim()).collect.<Array<&str>>()
+        match parts.len():
+            case 3:
+                match (parts[0].parse.<u8>(), parts[1].parse.<u8>(), parts[2].parse.<u8>()):
+                    case (Ok(r), Ok(g), Ok(b)):
+                        return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+                    case _: return None
+            case 4:
+                match (parts[0].parse.<u8>(), parts[1].parse.<u8>(),
+                       parts[2].parse.<u8>(), parts[3].parse.<f32>()):
+                    case (Ok(r), Ok(g), Ok(b), Ok(a)):
+                        return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a])
+                    case _: return None
+            case _: return None
+
+    return None
+
+# Parse single hex digit (0-15)
+fn parse_hex_digit(s: &str) -> u8:
+    match s.chars().next():
+        case Some(c):
+            if c >= '0' and c <= '9':
+                return (c as u8) - ('0' as u8)
+            if c >= 'a' and c <= 'f':
+                return (c as u8) - ('a' as u8) + 10
+            if c >= 'A' and c <= 'F':
+                return (c as u8) - ('A' as u8) + 10
+            return 0
+        case None: return 0
+
+# Parse two hex digits (00-FF)
+fn parse_hex_byte(s: &str) -> u8:
+    val high = parse_hex_digit(&s[0..1])
+    val low = parse_hex_digit(&s[1..2])
+    return high * 16 + low
+
+# =============================================================================
+# Event Conversion Helpers
+# =============================================================================
+
+# Convert raw key event data to KeyEvent
+fn convert_key_event(key_code: u32, modifiers: u8) -> KeyEvent:
+    # Parse modifier flags: ctrl=0x01, shift=0x02, alt=0x04
+    val ctrl = (modifiers & 0x01) != 0
+    val shift = (modifiers & 0x02) != 0
+    val alt = (modifiers & 0x04) != 0
+
+    val key_modifiers = KeyModifiers { shift: shift, ctrl: ctrl, alt: alt }
+
+    # Convert key_code to KeyCode enum
+    val code = match key_code:
+        case 0x0D: KeyCode.Enter          # VK_RETURN
+        case 0x1B: KeyCode.Escape         # VK_ESCAPE
+        case 0x08: KeyCode.Backspace      # VK_BACK
+        case 0x09: KeyCode.Tab            # VK_TAB
+        case 0x2E: KeyCode.Delete         # VK_DELETE
+        case 0x2D: KeyCode.Insert         # VK_INSERT
+        case 0x24: KeyCode.Home           # VK_HOME
+        case 0x23: KeyCode.End            # VK_END
+        case 0x21: KeyCode.PageUp         # VK_PRIOR
+        case 0x22: KeyCode.PageDown       # VK_NEXT
+        case 0x26: KeyCode.Up             # VK_UP
+        case 0x28: KeyCode.Down           # VK_DOWN
+        case 0x25: KeyCode.Left           # VK_LEFT
+        case 0x27: KeyCode.Right          # VK_RIGHT
+        case 0x70: KeyCode.F(1)           # VK_F1
+        case 0x71: KeyCode.F(2)           # VK_F2
+        case 0x72: KeyCode.F(3)           # VK_F3
+        case 0x73: KeyCode.F(4)           # VK_F4
+        case 0x74: KeyCode.F(5)           # VK_F5
+        case 0x75: KeyCode.F(6)           # VK_F6
+        case 0x76: KeyCode.F(7)           # VK_F7
+        case 0x77: KeyCode.F(8)           # VK_F8
+        case 0x78: KeyCode.F(9)           # VK_F9
+        case 0x79: KeyCode.F(10)          # VK_F10
+        case 0x7A: KeyCode.F(11)          # VK_F11
+        case 0x7B: KeyCode.F(12)          # VK_F12
+        case _:
+            # Printable character range
+            if key_code >= 0x20 and key_code <= 0x7E:
+                KeyCode.Char((key_code as u8) as char)
+            else:
+                KeyCode.Null
+
+    return KeyEvent.new(code, key_modifiers)
+
+# Convert raw mouse event data to MouseEvent
+fn convert_mouse_event(x: u16, y: u16, button: u8, kind: u8) -> MouseEvent:
+    val mouse_button = match button:
+        case 0: MouseButton.Left
+        case 1: MouseButton.Right
+        case 2: MouseButton.Middle
+        case _: MouseButton.Left
+
+    val event_kind = match kind:
+        case 0: MouseEventKind.Down(mouse_button)
+        case 1: MouseEventKind.Up(mouse_button)
+        case 2: MouseEventKind.Moved
+        case 3: MouseEventKind.Drag(mouse_button)
+        case 4: MouseEventKind.ScrollUp
+        case 5: MouseEventKind.ScrollDown
+        case 6: MouseEventKind.ScrollLeft
+        case 7: MouseEventKind.ScrollRight
+        case _: MouseEventKind.Moved
+
+    return MouseEvent {kind: event_kind, column: x, row: y, modifiers: KeyModifiers.none()}
+
+# =============================================================================
+# Type Aliases for Vulkan Integration
+# =============================================================================
+
+pub type VkTexture = i64
+pub type VkVertexInputBindingDescription = i64
+pub type VkVertexInputAttributeDescription = i64
+
+pub const VK_VERTEX_INPUT_RATE_VERTEX: u32 = 0
+pub const VK_FORMAT_R32G32_SFLOAT: u32 = 103
+pub const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
