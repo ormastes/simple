@@ -29,23 +29,49 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("spl_dlopen: path must be a string")),
     };
 
-    let c_path = match CString::new(path.as_str()) {
-        Ok(c) => c,
-        Err(_) => return Ok(Value::Int(0)),
-    };
+    #[cfg(unix)]
+    {
+        let c_path = match CString::new(path.as_str()) {
+            Ok(c) => c,
+            Err(_) => return Ok(Value::Int(0)),
+        };
 
-    let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
 
-    if handle.is_null() {
-        // Log the dlerror for debugging
-        let err = unsafe { libc::dlerror() };
-        if !err.is_null() {
-            let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
-            tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
+        if handle.is_null() {
+            let err = unsafe { libc::dlerror() };
+            if !err.is_null() {
+                let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
+                tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
+            }
+            Ok(Value::Int(0))
+        } else {
+            Ok(Value::Int(handle as usize as i64))
         }
+    }
+
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn LoadLibraryA(lpLibFileName: *const u8) -> isize;
+        }
+        let c_path = match CString::new(path.as_str()) {
+            Ok(c) => c,
+            Err(_) => return Ok(Value::Int(0)),
+        };
+        let handle = unsafe { LoadLibraryA(c_path.as_ptr() as *const u8) };
+        if handle == 0 {
+            tracing::warn!("spl_dlopen failed for '{}'", path);
+            Ok(Value::Int(0))
+        } else {
+            Ok(Value::Int(handle as usize as i64))
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        tracing::warn!("spl_dlopen not supported on this platform");
         Ok(Value::Int(0))
-    } else {
-        Ok(Value::Int(handle as usize as i64))
     }
 }
 
@@ -58,8 +84,8 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
     }
 
-    let handle = match &args[0] {
-        Value::Int(h) => *h as usize as *mut libc::c_void,
+    let handle_val = match &args[0] {
+        Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlsym: handle must be an integer")),
     };
 
@@ -73,9 +99,26 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         Err(_) => return Ok(Value::Int(0)),
     };
 
-    let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
+    #[cfg(unix)]
+    {
+        let handle = handle_val as *mut libc::c_void;
+        let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
+        Ok(Value::Int(sym as usize as i64))
+    }
 
-    Ok(Value::Int(sym as usize as i64))
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
+        }
+        let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
+        Ok(Value::Int(sym as usize as i64))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(Value::Int(0))
+    }
 }
 
 /// Close a loaded library.
@@ -87,13 +130,31 @@ pub fn spl_dlclose(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("spl_dlclose requires 1 argument (handle)"));
     }
 
-    let handle = match &args[0] {
-        Value::Int(h) => *h as usize as *mut libc::c_void,
+    let handle_val = match &args[0] {
+        Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlclose: handle must be an integer")),
     };
 
-    let result = unsafe { libc::dlclose(handle) };
-    Ok(Value::Int(result as i64))
+    #[cfg(unix)]
+    {
+        let handle = handle_val as *mut libc::c_void;
+        let result = unsafe { libc::dlclose(handle) };
+        Ok(Value::Int(result as i64))
+    }
+
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn FreeLibrary(hLibModule: isize) -> i32;
+        }
+        let result = unsafe { FreeLibrary(handle_val as isize) };
+        Ok(Value::Int(if result != 0 { 0 } else { 1 }))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(Value::Int(1))
+    }
 }
 
 /// Call a function pointer with i64 arguments and return an i64 result.
@@ -277,7 +338,7 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let ptr = match &args[0] {
-        Value::Int(p) => *p as usize as *const libc::c_char,
+        Value::Int(p) => *p as usize as *const std::os::raw::c_char,
         _ => return Err(CompileError::runtime("rt_cstring_to_text: argument must be an integer")),
     };
 
