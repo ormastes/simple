@@ -966,6 +966,93 @@ const char* spl_get_arg(int64_t idx) {
 }
 
 /* ================================================================
+ * File Prefetch (CLI keyword support)
+ * ================================================================ */
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+/* ---- POSIX (Linux, macOS, FreeBSD, OpenBSD, NetBSD) ---- */
+static pid_t g_prefetch_pid = 0;
+
+void spl_prefetch_start(const char* path) {
+    if (!path || !path[0]) return;
+    g_prefetch_pid = fork();
+    if (g_prefetch_pid == 0) {
+        /* Child: mmap file + MADV_POPULATE_READ to warm page cache */
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size > 0) {
+                void* mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+                if (mapped != MAP_FAILED) {
+#ifdef MADV_POPULATE_READ
+                    madvise(mapped, (size_t)st.st_size, MADV_POPULATE_READ);
+#else
+                    madvise(mapped, (size_t)st.st_size, MADV_SEQUENTIAL);
+                    /* Touch first byte of each page to force read */
+                    volatile char c;
+                    for (size_t off = 0; off < (size_t)st.st_size; off += 4096) {
+                        c = ((char*)mapped)[off];
+                    }
+                    (void)c;
+#endif
+                    munmap(mapped, (size_t)st.st_size);
+                }
+            }
+            close(fd);
+        }
+        _exit(0);
+    }
+}
+
+void spl_prefetch_wait(void) {
+    if (g_prefetch_pid > 0) {
+        int status;
+        waitpid(g_prefetch_pid, &status, 0);
+        g_prefetch_pid = 0;
+    }
+}
+
+#elif defined(_WIN32)
+/* ---- Windows ---- */
+static HANDLE g_prefetch_thread = NULL;
+
+static DWORD WINAPI spl_prefetch_thread_func(LPVOID param) {
+    const char* path = (const char*)param;
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        /* Read through the file to populate OS file cache */
+        char buf[65536];
+        DWORD bytesRead;
+        while (ReadFile(hFile, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {}
+        CloseHandle(hFile);
+    }
+    free((void*)param);
+    return 0;
+}
+
+void spl_prefetch_start(const char* path) {
+    if (!path || !path[0]) return;
+    char* path_copy = _strdup(path);
+    if (!path_copy) return;
+    g_prefetch_thread = CreateThread(NULL, 0, spl_prefetch_thread_func, path_copy, 0, NULL);
+}
+
+void spl_prefetch_wait(void) {
+    if (g_prefetch_thread) {
+        WaitForSingleObject(g_prefetch_thread, INFINITE);
+        CloseHandle(g_prefetch_thread);
+        g_prefetch_thread = NULL;
+    }
+}
+
+#else
+/* ---- Emscripten / other ---- */
+void spl_prefetch_start(const char* path) { (void)path; }
+void spl_prefetch_wait(void) {}
+#endif
+
+/* ================================================================
  * rt_ Aliases (FFI-compatible wrappers)
  * ================================================================ */
 
@@ -1026,6 +1113,10 @@ SplArray* rt_cli_get_args(void) {
     }
     return arr;
 }
+
+/* rt_ FFI wrappers for prefetch */
+void rt_prefetch_start(const char* path) { spl_prefetch_start(path); }
+void rt_prefetch_wait(void) { spl_prefetch_wait(); }
 
 /* ================================================================
  * Directory Walk (returns all files recursively)
