@@ -153,6 +153,7 @@ pub use module_cache::clear_module_cache;
 // Module loading and resolution
 #[path = "../interpreter_module/mod.rs"]
 mod interpreter_module;
+pub use interpreter_module::print_resolve_stats;
 use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
 };

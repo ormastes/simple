@@ -10,11 +10,75 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::trace;
 
 use crate::error::CompileError;
+
+// Profiling counters (active when SIMPLE_PROFILE env var is set)
+static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static DIR_LIST_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Print resolution statistics if SIMPLE_PROFILE env var is set.
+pub fn print_resolve_stats() {
+    if std::env::var("SIMPLE_PROFILE").is_ok() {
+        let calls = RESOLVE_CALLS.load(Ordering::Relaxed);
+        let hits = CACHE_HITS.load(Ordering::Relaxed);
+        let dir_lists = DIR_LIST_CALLS.load(Ordering::Relaxed);
+        let hit_rate = if calls > 0 { (hits * 100) / calls } else { 0 };
+        eprintln!(
+            "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={}",
+            calls, hits, hit_rate, dir_lists
+        );
+    }
+}
+
+/// Reset profiling counters.
+pub fn reset_resolve_stats() {
+    RESOLVE_CALLS.store(0, Ordering::Relaxed);
+    CACHE_HITS.store(0, Ordering::Relaxed);
+    DIR_LIST_CALLS.store(0, Ordering::Relaxed);
+}
+
+/// Compute a u64 cache key from parts + base_dir without allocating.
+fn compute_cache_key(parts: &[String], base_dir: &Path) -> u64 {
+    let mut hasher = ahash::AHasher::default();
+    parts.hash(&mut hasher);
+    base_dir.hash(&mut hasher);
+    hasher.finish()
+}
+
+// Thread-local cache for directory listings to avoid repeated read_dir calls.
+thread_local! {
+    static DIR_LISTING_CACHE: RefCell<HashMap<PathBuf, Vec<(String, PathBuf)>>> = RefCell::new(HashMap::new());
+}
+
+/// Get cached directory listing. Each entry is (name, full_path).
+fn cached_read_dir(dir: &Path) -> Vec<(String, PathBuf)> {
+    let cached = DIR_LISTING_CACHE.with(|cache| cache.borrow().get(dir).cloned());
+    if let Some(entries) = cached {
+        return entries;
+    }
+
+    DIR_LIST_CALLS.fetch_add(1, Ordering::Relaxed);
+    let mut entries = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            entries.push((name, path));
+        }
+    }
+
+    DIR_LISTING_CACHE.with(|cache| {
+        cache.borrow_mut().insert(dir.to_path_buf(), entries.clone());
+    });
+    entries
+}
 
 /// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
 ///
@@ -25,16 +89,12 @@ use crate::error::CompileError;
 ///
 /// When resolving `compiler.frontend`, this function finds `10.frontend` for segment `frontend`.
 fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(parent).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
+    for (name_str, path) in cached_read_dir(parent) {
         // Match pattern: 1-3 digits, dot, then the segment name
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
             let suffix = &name_str[after_dot + 1..];
             if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
-                let path = parent.join(&*name_str);
                 if path.is_dir() {
                     return Some(path);
                 }
@@ -51,20 +111,15 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
 /// a subdirectory named "core". Returns all matches sorted by numbered prefix.
 fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
     let mut results = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Check if this is a numbered directory (NN.name pattern)
-            if let Some(after_dot) = name_str.find('.') {
-                let prefix = &name_str[..after_dot];
-                if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
-                    let numbered_path = parent.join(&*name_str);
-                    if numbered_path.is_dir() {
-                        let sub = numbered_path.join(segment);
-                        if sub.is_dir() {
-                            results.push(sub);
-                        }
+    for (name_str, numbered_path) in cached_read_dir(parent) {
+        // Check if this is a numbered directory (NN.name pattern)
+        if let Some(after_dot) = name_str.find('.') {
+            let prefix = &name_str[..after_dot];
+            if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+                if numbered_path.is_dir() {
+                    let sub = numbered_path.join(segment);
+                    if sub.is_dir() {
+                        results.push(sub);
                     }
                 }
             }
@@ -123,13 +178,39 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
         return None;
     }
 
-    // Numbered directory resolution is disabled for now.
-    // Loading compiler source via numbered dirs (e.g., 10.frontend → frontend)
-    // causes the interpreter to load the entire compiler tree (~600K lines),
-    // consuming 4+ GB RAM per test and OOMing the test runner.
-    // TODO: Re-enable with a module loading depth/size limit.
-    let _ = base;
-    None
+    // Depth limit: avoid deep recursion that could trigger compiler tree loading.
+    // Most legitimate imports have <= 5 segments.
+    if parts.len() > 5 {
+        return None;
+    }
+
+    // Only attempt numbered dir resolution if base is within a project source tree.
+    // Scanning arbitrary dirs like /tmp or / for numbered subdirs wastes ~90 syscalls.
+    let base_str = base.to_string_lossy();
+    if !base_str.contains("/src/") && !base_str.ends_with("/src") {
+        return None;
+    }
+
+    let result = resolve_with_numbered_dirs_recursive(base, parts, 0);
+
+    // Blocklist: prevent test files (outside src/compiler) from accidentally resolving
+    // into the compiler tree (~600K lines), which would OOM the interpreter.
+    if let Some(ref resolved) = result {
+        if is_blocked_compiler_resolution(base, resolved) {
+            return None;
+        }
+    }
+
+    result
+}
+
+/// Check if a resolved path would pull in the compiler tree from an external caller.
+/// Returns true if the resolution should be blocked (prevents OOM from loading ~600K lines).
+fn is_blocked_compiler_resolution(base: &Path, resolved: &Path) -> bool {
+    let base_str = base.to_string_lossy();
+    let resolved_str = resolved.to_string_lossy();
+    // Block if caller is NOT in src/compiler but resolved path IS in src/compiler
+    !base_str.contains("src/compiler") && resolved_str.contains("src/compiler")
 }
 
 fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth: usize) -> Option<PathBuf> {
@@ -171,14 +252,48 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
     None
 }
 
-// Thread-local cache for resolved module paths to avoid repeated filesystem probing
+// Thread-local cache for resolved module paths to avoid repeated filesystem probing.
+// Keyed by u64 hash of (parts, base_dir) to avoid cloning Vec<String> + PathBuf on every lookup.
 thread_local! {
-    static PATH_RESOLUTION_CACHE: RefCell<HashMap<(Vec<String>, PathBuf), Option<PathBuf>>> = RefCell::new(HashMap::new());
+    static PATH_RESOLUTION_CACHE: RefCell<HashMap<u64, Option<PathBuf>>> = RefCell::new(HashMap::new());
+    // Cached project root to avoid re-discovering it per import.
+    static PROJECT_ROOT_CACHE: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
+}
+
+/// Find the project root by walking up from `start` looking for `src/` or `Cargo.toml`.
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    // Check thread-local cache first
+    let cached = PROJECT_ROOT_CACHE.with(|cache| cache.borrow().get(start).cloned());
+    if let Some(result) = cached {
+        return result;
+    }
+
+    let mut dir = start.to_path_buf();
+    let result = loop {
+        if dir.join("src").is_dir() || dir.join("Cargo.toml").is_file() {
+            break Some(dir.clone());
+        }
+        if !dir.pop() {
+            break None;
+        }
+    };
+
+    PROJECT_ROOT_CACHE.with(|cache| {
+        cache.borrow_mut().insert(start.to_path_buf(), result.clone());
+    });
+    result
+}
+
+/// Check if parts represent a stdlib-prefixed import.
+fn is_stdlib_import(parts: &[String]) -> bool {
+    !parts.is_empty() && matches!(parts[0].as_str(), "std" | "lib" | "std_lib")
 }
 
 /// Clear the path resolution cache (called between test runs)
 pub fn clear_path_resolution_cache() {
     PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
+    PROJECT_ROOT_CACHE.with(|cache| cache.borrow_mut().clear());
+    DIR_LISTING_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Resolve module path from segments
@@ -196,10 +311,13 @@ pub fn clear_path_resolution_cache() {
 /// # Returns
 /// Absolute path to the module file, or an error if not found
 pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
-    // Check cache first
-    let cache_key = (parts.to_vec(), base_dir.to_path_buf());
+    RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+
+    // Check cache first — O(1) hash lookup, no allocation
+    let cache_key = compute_cache_key(parts, base_dir);
     let cached = PATH_RESOLUTION_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
     if let Some(cached_result) = cached {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return cached_result.ok_or_else(|| crate::error::factory::cannot_resolve_module(&parts.join(".")));
     }
 
@@ -215,11 +333,11 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
 }
 
 fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
+    // Pre-compute the relative path segments once — reused across all strategies
+    let relative: PathBuf = parts.iter().collect();
+
     // Try resolving from base directory first (sibling files)
-    let mut resolved = base_dir.to_path_buf();
-    for part in parts {
-        resolved = resolved.join(part);
-    }
+    let mut resolved = base_dir.join(&relative);
     resolved.set_extension("spl");
     if resolved.exists() && resolved.is_file() {
         return Ok(resolved);
@@ -232,12 +350,8 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     }
 
     // Try __init__.spl in directory
-    let mut init_resolved = base_dir.to_path_buf();
-    for part in parts {
-        init_resolved = init_resolved.join(part);
-    }
-    init_resolved = init_resolved.join("__init__");
-    init_resolved.set_extension("spl");
+    let mut init_resolved = base_dir.join(&relative);
+    init_resolved.push("__init__.spl");
     if init_resolved.exists() && init_resolved.is_file() {
         return Ok(init_resolved);
     }
@@ -247,19 +361,17 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         return Ok(found);
     }
 
+    // Determine project root once for early break in parent traversal
+    let project_root = find_project_root(base_dir);
+
     // Try resolving from parent directories (for project-root-relative imports)
-    // This handles cases like importing "verification.lean.codegen" from within
-    // "verification/regenerate/" - we need to go up to find the "verification/" root
     let mut parent_dir = base_dir.to_path_buf();
     for _ in 0..10 {
         if let Some(parent) = parent_dir.parent() {
             parent_dir = parent.to_path_buf();
 
             // Try module.spl
-            let mut parent_resolved = parent_dir.clone();
-            for part in parts {
-                parent_resolved = parent_resolved.join(part);
-            }
+            let mut parent_resolved = parent_dir.join(&relative);
             parent_resolved.set_extension("spl");
             if parent_resolved.exists() && parent_resolved.is_file() {
                 trace!(path = ?parent_resolved, "Found module in parent directory");
@@ -267,12 +379,8 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             }
 
             // Try __init__.spl
-            let mut parent_init_resolved = parent_dir.clone();
-            for part in parts {
-                parent_init_resolved = parent_init_resolved.join(part);
-            }
-            parent_init_resolved = parent_init_resolved.join("__init__");
-            parent_init_resolved.set_extension("spl");
+            let mut parent_init_resolved = parent_dir.join(&relative);
+            parent_init_resolved.push("__init__.spl");
             if parent_init_resolved.exists() && parent_init_resolved.is_file() {
                 trace!(path = ?parent_init_resolved, "Found module __init__.spl in parent directory");
                 return Ok(parent_init_resolved);
@@ -283,122 +391,104 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 trace!(path = ?found, "Found module via numbered directory in parent");
                 return Ok(found);
             }
+
+            // Early break: stop at project root or filesystem root
+            if let Some(ref root) = project_root {
+                if parent_dir == *root || parent_dir.parent().is_none() {
+                    break;
+                }
+            }
         } else {
             break;
         }
     }
 
-    // Try stdlib location - walk up directory tree
-    let mut current = base_dir.to_path_buf();
+    // Stdlib search: try canonical paths first, then legacy.
+    // Skip stdlib search entirely for non-stdlib imports (parts[0] != std/lib/std_lib).
+    let is_stdlib = is_stdlib_import(parts);
+
+    // Strip stdlib prefix once if applicable
+    let stdlib_parts: &[String] = if is_stdlib { &parts[1..] } else { parts };
+
+    // Walk up from project root (or base_dir) to find stdlib/src locations
+    let search_start = project_root.as_deref().unwrap_or(base_dir);
+    let mut current = search_start.to_path_buf();
     for _ in 0..10 {
-        // Try various stdlib locations
-        for stdlib_subpath in &[
-            // Preferred: repo layout uses src/std/* (symlink to src/lib)
-            "src/std",
-            // Also try src/lib directly
-            "src/lib",
-            // Legacy layouts kept for compatibility
-            "src/std/src",
-            "src/lib/std/src",
-            "lib/std/src",
-            "rust/lib/std/src",
-            "simple/std_lib/src",
-            "std_lib/src",
-        ] {
-            let stdlib_candidate = current.join(stdlib_subpath);
-            if stdlib_candidate.exists() {
-                // When importing from stdlib, "std" / "lib" / "std_lib" represent the stdlib root itself,
-                // not a subdirectory. Strip the prefix if present.
-                let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
-                    parts[1..].to_vec()
-                } else if !parts.is_empty() && parts[0] == "lib" {
-                    parts[1..].to_vec()
-                } else if !parts.is_empty() && parts[0] == "std_lib" {
-                    parts[1..].to_vec()
-                } else {
-                    parts.to_vec()
-                };
+        // Only search stdlib paths if this looks like a stdlib import
+        if is_stdlib && !stdlib_parts.is_empty() {
+            // Canonical paths first (most likely to hit), then legacy
+            for stdlib_subpath in &[
+                "src/std",
+                "src/lib",
+                "src/std/src",
+                "src/lib/std/src",
+                "lib/std/src",
+                "rust/lib/std/src",
+                "simple/std_lib/src",
+                "std_lib/src",
+            ] {
+                let stdlib_candidate = current.join(stdlib_subpath);
+                if !stdlib_candidate.exists() {
+                    continue;
+                }
 
-                // Try resolving from stdlib (only if we have parts after stripping "std")
-                if !stdlib_parts.is_empty() {
-                    let mut stdlib_path = stdlib_candidate.clone();
-                    for part in &stdlib_parts {
-                        stdlib_path = stdlib_path.join(part);
-                    }
-                    stdlib_path.set_extension("spl");
-                    if stdlib_path.exists() && stdlib_path.is_file() {
-                        return Ok(stdlib_path);
-                    }
+                let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
-                    // Also try __init__.spl in stdlib
-                    let mut stdlib_init_path = stdlib_candidate.clone();
-                    for part in &stdlib_parts {
-                        stdlib_init_path = stdlib_init_path.join(part);
-                    }
-                    stdlib_init_path = stdlib_init_path.join("__init__");
-                    stdlib_init_path.set_extension("spl");
-                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
-                        return Ok(stdlib_init_path);
-                    }
+                // Try module.spl
+                let mut stdlib_path = stdlib_candidate.join(&stdlib_relative);
+                stdlib_path.set_extension("spl");
+                if stdlib_path.exists() && stdlib_path.is_file() {
+                    return Ok(stdlib_path);
+                }
 
-                    // Search lib subdirectories (mirrors module_loader.spl strategy)
-                    // For `use std.format.{...}`, the file might be at lib/common/format.spl
-                    // Search order: nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
-                    for subdir in &[
-                        "nogc_async_mut",
-                        "nogc_sync_mut",
-                        "common",
-                        "gc_async_mut",
-                        "nogc_async_mut_noalloc",
-                    ] {
-                        let mut sub_path = stdlib_candidate.join(subdir);
-                        for part in &stdlib_parts {
-                            sub_path = sub_path.join(part);
-                        }
-                        sub_path.set_extension("spl");
-                        if sub_path.exists() && sub_path.is_file() {
-                            return Ok(sub_path);
-                        }
-                        // Also try __init__.spl in subdirectory
-                        let mut sub_init = stdlib_candidate.join(subdir);
-                        for part in &stdlib_parts {
-                            sub_init = sub_init.join(part);
-                        }
-                        sub_init = sub_init.join("__init__");
-                        sub_init.set_extension("spl");
-                        if sub_init.exists() && sub_init.is_file() {
-                            return Ok(sub_init);
-                        }
-                    }
+                // Try __init__.spl in stdlib
+                let mut stdlib_init_path = stdlib_candidate.join(&stdlib_relative);
+                stdlib_init_path.push("__init__.spl");
+                if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+                    return Ok(stdlib_init_path);
+                }
 
-                    // Try with numbered directory support in stdlib
-                    if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, &stdlib_parts) {
-                        return Ok(found);
+                // Search lib subdirectories (mirrors module_loader.spl strategy)
+                for subdir in &[
+                    "nogc_async_mut",
+                    "nogc_sync_mut",
+                    "common",
+                    "gc_async_mut",
+                    "nogc_async_mut_noalloc",
+                ] {
+                    let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
+                    sub_path.set_extension("spl");
+                    if sub_path.exists() && sub_path.is_file() {
+                        return Ok(sub_path);
+                    }
+                    // Also try __init__.spl in subdirectory
+                    let mut sub_init = stdlib_candidate.join(subdir).join(&stdlib_relative);
+                    sub_init.push("__init__.spl");
+                    if sub_init.exists() && sub_init.is_file() {
+                        return Ok(sub_init);
                     }
                 }
-            } // End of if stdlib_candidate.exists()
-        } // End of for stdlib_subpath
+
+                // Try with numbered directory support in stdlib
+                if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, stdlib_parts) {
+                    return Ok(found);
+                }
+            }
+        }
 
         // Try src/ directory (for app modules like app.lsp.server)
         let src_candidate = current.join("src");
         if src_candidate.exists() {
             // Try module.spl in src/
-            let mut src_path = src_candidate.clone();
-            for part in parts {
-                src_path = src_path.join(part);
-            }
+            let mut src_path = src_candidate.join(&relative);
             src_path.set_extension("spl");
             if src_path.exists() && src_path.is_file() {
                 return Ok(src_path);
             }
 
             // Try __init__.spl in src/
-            let mut src_init_path = src_candidate.clone();
-            for part in parts {
-                src_init_path = src_init_path.join(part);
-            }
-            src_init_path = src_init_path.join("__init__");
-            src_init_path.set_extension("spl");
+            let mut src_init_path = src_candidate.join(&relative);
+            src_init_path.push("__init__.spl");
             if src_init_path.exists() && src_init_path.is_file() {
                 return Ok(src_init_path);
             }
@@ -409,7 +499,6 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             }
 
             // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
-            // This mirrors the compiler's Strategy 2 for resolving compiler internal modules
             if parts.len() > 1 && parts[0] == "compiler" {
                 let compiler_dir = src_candidate.join("compiler");
                 if compiler_dir.is_dir() {
@@ -420,9 +509,6 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             }
 
             // Strategy: "app.*" → src/compiler/ with numbered prefix support
-            // The self-hosted compiler maps app.build.X to src/app/build/X.smf (compiled),
-            // but the .spl source lives at src/compiler/80.driver/build/X.spl.
-            // This allows the Rust driver to resolve app.* imports to source files.
             if parts.len() > 1 && parts[0] == "app" {
                 let compiler_dir = src_candidate.join("compiler");
                 if compiler_dir.is_dir() {

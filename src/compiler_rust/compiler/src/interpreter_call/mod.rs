@@ -71,8 +71,14 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Priority 3: Try BDD framework (before user functions, since imported DSL
-        // functions lack captured_env for module-level state like group_stack)
+        // Priority 3: Check regular functions (user-defined) — most common case
+        // Moved before BDD/mock/env to avoid 3 failed lookups on the hot path
+        if let Some(func) = functions.get(name).cloned() {
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+        }
+
+        // Priority 4: Try BDD framework (imported DSL functions lack captured_env
+        // for module-level state like group_stack)
         if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
@@ -82,8 +88,8 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Priority 4: Check env for decorated functions and closures (before functions HashMap,
-        // because decorators store the decorated version in env while the original remains in functions)
+        // Priority 5: Check env for decorated functions and closures (decorators store
+        // the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
             match val {
                 Value::Function { def, captured_env, .. } => {
@@ -163,11 +169,6 @@ pub(crate) fn evaluate_call(
                 }
                 _ => {}
             }
-        }
-
-        // Priority 5: Check regular functions (user-defined, non-decorated)
-        if let Some(func) = functions.get(name).cloned() {
-            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Check class constructors (e.g., MyClass() instantiation)

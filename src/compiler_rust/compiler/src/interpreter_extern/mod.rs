@@ -651,6 +651,7 @@ pub(crate) fn call_extern_function(
         "rt_file_move" => file_io::rt_file_move(&evaluated),
         "rt_file_delete" => native_ffi::rt_file_delete(&evaluated),
         // Directory operations
+        "rt_dir_exists" => file_io::rt_dir_exists(&evaluated),
         "rt_dir_create" => file_io::rt_dir_create(&evaluated),
         "rt_dir_list" => file_io::rt_dir_list(&evaluated),
         "rt_dir_remove" => file_io::rt_dir_remove(&evaluated),

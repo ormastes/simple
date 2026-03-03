@@ -119,6 +119,9 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 
     match cmd {
         "bootstrap" => handle_bootstrap(&sub_args[1..]),
+        "lint" => handle_build_lint(),
+        "fmt" => handle_build_fmt(&sub_args[1..]),
+        "check" => handle_build_check(),
         "help" | "--help" | "-h" => {
             println!("Simple Build System");
             println!();
@@ -127,7 +130,13 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!();
             println!("COMMANDS:");
             println!("  bootstrap      3-stage self-compilation verification");
+            println!("  lint           Run clippy linter on Rust workspace");
+            println!("  fmt            Run rustfmt on Rust workspace");
+            println!("  check          Run lint + fmt --check + tests");
             println!("  help           Show this help");
+            println!();
+            println!("FMT OPTIONS:");
+            println!("  --check            Check formatting without modifying files");
             println!();
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
@@ -147,6 +156,68 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
                 1
             }
         }
+    }
+}
+
+/// Handle 'build lint' - run cargo clippy on the Rust workspace
+fn handle_build_lint() -> i32 {
+    let status = std::process::Command::new("cargo")
+        .args([
+            "clippy",
+            "--manifest-path",
+            "src/compiler_rust/Cargo.toml",
+            "--workspace",
+            "--",
+            "-W",
+            "clippy::all",
+        ])
+        .status();
+    match status {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("error: failed to run cargo clippy: {}", e);
+            1
+        }
+    }
+}
+
+/// Handle 'build fmt' - run cargo fmt on the Rust workspace
+fn handle_build_fmt(args: &[&str]) -> i32 {
+    let mut cmd_args = vec!["fmt", "--manifest-path", "src/compiler_rust/Cargo.toml", "--all"];
+    if args.contains(&"--check") {
+        cmd_args.push("--check");
+    }
+    let status = std::process::Command::new("cargo").args(&cmd_args).status();
+    match status {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("error: failed to run cargo fmt: {}", e);
+            1
+        }
+    }
+}
+
+/// Handle 'build check' - run lint + fmt check + tests
+fn handle_build_check() -> i32 {
+    println!("\n=== Running Lint (clippy) ===");
+    let lint = handle_build_lint();
+
+    println!("\n=== Running Format Check ===");
+    let fmt = handle_build_fmt(&["--check"]);
+
+    println!("\n=== Running Tests ===");
+    let test = std::process::Command::new("bin/simple")
+        .arg("test")
+        .status()
+        .map(|s| s.code().unwrap_or(1))
+        .unwrap_or(1);
+
+    if lint != 0 {
+        lint
+    } else if fmt != 0 {
+        fmt
+    } else {
+        test
     }
 }
 

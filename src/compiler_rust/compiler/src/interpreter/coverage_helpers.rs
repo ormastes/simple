@@ -111,6 +111,7 @@ pub fn record_node_coverage(node: &Node) {
 ///
 /// Typically called from if/while/match statements with the outcome
 /// This uses the runtime FFI to record decision coverage when running compiled code
+#[inline(always)]
 pub fn record_decision_coverage_ffi(file: &str, line: usize, column: usize, decision_result: bool) {
     if !is_coverage_enabled() {
         return;

@@ -319,6 +319,12 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 // Directory Operations
 // ============================================================================
 
+/// Check if directory exists
+pub fn rt_dir_exists(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
+}
+
 /// Create directory
 pub fn rt_dir_create(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
@@ -338,9 +344,9 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
                 .filter_map(|e| e.file_name().into_string().ok())
                 .map(Value::Str)
                 .collect();
-            Ok(make_some(Value::array(names)))
+            Ok(Value::array(names))
         }
-        Err(_) => Ok(make_none()),
+        Err(_) => Ok(Value::array(vec![])),
     }
 }
 

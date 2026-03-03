@@ -1228,19 +1228,20 @@ impl LintChecker {
             }
         }
 
-        // Find parameter indices that share a type with at least one other parameter
-        fn find_duplicate_typed_params(params: &[ParamInfo]) -> Vec<usize> {
-            let mut duplicates = Vec::new();
+        // Find parameter indices that share a type with at least one other parameter.
+        // O(n) via grouping by type string key.
+        fn find_duplicate_typed_params(params: &[ParamInfo]) -> std::collections::HashSet<usize> {
+            let mut by_type: HashMap<String, Vec<usize>> = HashMap::new();
             for (i, param) in params.iter().enumerate() {
-                if param.ty.is_none() {
-                    continue;
+                if let Some(ref ty) = param.ty {
+                    by_type.entry(format_type(ty)).or_default().push(i);
                 }
-                for (j, other) in params.iter().enumerate() {
-                    if i != j && types_match(&param.ty, &other.ty) {
-                        if !duplicates.contains(&i) {
-                            duplicates.push(i);
-                        }
-                        break;
+            }
+            let mut duplicates = std::collections::HashSet::new();
+            for indices in by_type.values() {
+                if indices.len() > 1 {
+                    for &i in indices {
+                        duplicates.insert(i);
                     }
                 }
             }
@@ -1269,6 +1270,29 @@ impl LintChecker {
                 return; // No duplicate types
             }
 
+            // Pre-compute peer name map: for each duplicate index, the names of
+            // other params sharing the same type. O(n) instead of re-scanning per arg.
+            let mut peer_names: HashMap<usize, (String, Vec<String>)> = HashMap::new();
+            {
+                // Group by type string
+                let mut by_type: HashMap<String, Vec<usize>> = HashMap::new();
+                for &i in &duplicate_indices {
+                    if let Some(ref ty) = func_info.params[i].ty {
+                        by_type.entry(format_type(ty)).or_default().push(i);
+                    }
+                }
+                for (type_str, indices) in &by_type {
+                    for &i in indices {
+                        let peers: Vec<String> = indices
+                            .iter()
+                            .filter(|&&j| j != i)
+                            .map(|&j| func_info.params[j].name.clone())
+                            .collect();
+                        peer_names.insert(i, (type_str.clone(), peers));
+                    }
+                }
+            }
+
             // Check if any duplicate-typed parameter is passed positionally
             for (arg_idx, arg) in args.iter().enumerate() {
                 if arg.name.is_some() {
@@ -1280,23 +1304,8 @@ impl LintChecker {
                     continue; // Extra args (variadic or error)
                 }
 
-                if duplicate_indices.contains(&arg_idx) {
+                if let Some((type_str, peers)) = peer_names.get(&arg_idx) {
                     let param = &func_info.params[arg_idx];
-
-                    // Find other params with same type
-                    let same_type_params: Vec<&str> = func_info
-                        .params
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, p)| *i != arg_idx && types_match(&p.ty, &param.ty))
-                        .map(|(_, p)| p.name.as_str())
-                        .collect();
-
-                    let type_str = param
-                        .ty
-                        .as_ref()
-                        .map(|t| format_type(t))
-                        .unwrap_or_else(|| "unknown".to_string());
 
                     checker.emit(
                         LintName::UnnamedDuplicateTypedArgs,
@@ -1305,7 +1314,7 @@ impl LintChecker {
                             "positional argument for parameter `{}` which shares type `{}` with `{}`",
                             param.name,
                             type_str,
-                            same_type_params.join("`, `")
+                            peers.join("`, `")
                         ),
                         Some(format!("consider using named argument: `{}: <value>`", param.name)),
                     );
