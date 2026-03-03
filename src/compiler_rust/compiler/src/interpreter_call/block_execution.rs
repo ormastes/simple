@@ -497,8 +497,7 @@ pub(super) fn exec_block_closure(
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &final_class.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -587,8 +586,7 @@ pub(super) fn exec_block_closure(
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -615,8 +613,7 @@ pub(super) fn exec_block_closure(
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &final_class.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -700,8 +697,7 @@ pub(super) fn exec_block_closure(
 
                 // Register static methods from impl as mangled free functions (TypeName__method)
                 for method in &impl_block.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", type_name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -1023,8 +1019,7 @@ fn exec_block_closure_mut(
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -1051,8 +1046,7 @@ fn exec_block_closure_mut(
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &final_class.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -1136,8 +1130,7 @@ fn exec_block_closure_mut(
 
                 // Register static methods from impl as mangled free functions (TypeName__method)
                 for method in &impl_block.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", type_name, method.name);
                         functions.insert(mangled.clone(), method.clone());

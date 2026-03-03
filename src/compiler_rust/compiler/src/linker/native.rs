@@ -215,20 +215,16 @@ impl NativeLinker {
             Self::Msvc => (self.command(), "/NOLOGO"),
             _ => (self.command(), "--version"),
         };
-        Command::new(cmd)
-            .arg(arg)
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout).ok().map(|s| {
-                        // Extract first line as version
-                        s.lines().next().unwrap_or("").to_string()
-                    })
-                } else {
-                    None
-                }
-            })
+        Command::new(cmd).arg(arg).output().ok().and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok().map(|s| {
+                    // Extract first line as version
+                    s.lines().next().unwrap_or("").to_string()
+                })
+            } else {
+                None
+            }
+        })
     }
 
     /// Check if this linker supports the given target triple.
@@ -383,9 +379,7 @@ impl NativeLinker {
         }
 
         // Check for multiple definition patterns (GNU/LLD and MSVC)
-        if stderr.contains("multiple definition")
-            || stderr.contains("already defined in")
-        {
+        if stderr.contains("multiple definition") || stderr.contains("already defined in") {
             if let Some(sym) = Self::extract_multiple_definition(stderr) {
                 return Err(LinkerError::MultipleDefinition(sym));
             }

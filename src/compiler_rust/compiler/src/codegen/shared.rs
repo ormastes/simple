@@ -141,7 +141,9 @@ pub fn get_body_kind(inst: &MirInst) -> Option<(crate::mir::BlockId, BodyKind)> 
         MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor)),
         MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator)),
         MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future)),
-        MirInst::ClosureCreate { body_block: Some(bb), .. } => Some((*bb, BodyKind::Lambda)),
+        MirInst::ClosureCreate {
+            body_block: Some(bb), ..
+        } => Some((*bb, BodyKind::Lambda)),
         _ => None,
     }
 }

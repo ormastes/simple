@@ -73,7 +73,10 @@ pub(crate) fn declare_named_bytes<M: Module>(
     bytes: &[u8],
 ) -> InstrResult<cranelift_module::DataId> {
     let name = format!(".Ldata_{:016x}", fnv1a_hash(bytes));
-    match ctx.module.declare_data(&name, cranelift_module::Linkage::Local, false, false) {
+    match ctx
+        .module
+        .declare_data(&name, cranelift_module::Linkage::Local, false, false)
+    {
         Ok(id) => {
             let mut data_desc = cranelift_module::DataDescription::new();
             data_desc.define(bytes.to_vec().into_boxed_slice());

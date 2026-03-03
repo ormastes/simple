@@ -378,10 +378,7 @@ mod tests {
         use simple_common::target::{TargetArch, TargetOS};
 
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let builder = LinkerBuilder::new()
-            .target(target)
-            .object("a.o")
-            .output("program");
+        let builder = LinkerBuilder::new().target(target).object("a.o").output("program");
 
         assert_eq!(builder.target, Some(target));
     }

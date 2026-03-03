@@ -44,7 +44,7 @@ fn asm_ret_instruction(target: &Target) -> &'static str {
         TargetArch::Aarch64 => "ret", // uses x30 (link register)
         TargetArch::Arm => "bx lr",
         TargetArch::Riscv64 | TargetArch::Riscv32 => "ret", // pseudo for jalr x0, ra, 0
-        _ => "ret", // fallback
+        _ => "ret",                                         // fallback
     }
 }
 
@@ -99,11 +99,21 @@ fn is_msvc_compiler(cc: &str) -> bool {
 fn detect_nm_command(target: &Target) -> (String, Vec<String>) {
     if target.os == TargetOS::Windows {
         // Try dumpbin first (MSVC tool)
-        if Command::new("dumpbin").arg("/?").output().map(|o| o.status.success()).unwrap_or(false) {
+        if Command::new("dumpbin")
+            .arg("/?")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return ("dumpbin".to_string(), vec!["/SYMBOLS".to_string()]);
         }
         // Try llvm-nm
-        if Command::new("llvm-nm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if Command::new("llvm-nm")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return ("llvm-nm".to_string(), vec!["-u".to_string()]);
         }
     }
@@ -205,7 +215,7 @@ impl NativeBinaryOptions {
             ],
             TargetOS::MacOS => vec![
                 "c".into(),
-                "System".into(),         // Provides pthread, dl, m on macOS
+                "System".into(), // Provides pthread, dl, m on macOS
                 "simple_runtime".into(),
             ],
             TargetOS::Windows => vec![
@@ -307,7 +317,11 @@ impl NativeBinaryOptions {
                         if let Ok(version) = std::env::var("WindowsSDKVersion") {
                             let version = version.trim_end_matches('\\');
                             for subdir in ["um", "ucrt"] {
-                                let p = PathBuf::from(&sdk_dir).join("Lib").join(version).join(subdir).join(arch_subdir);
+                                let p = PathBuf::from(&sdk_dir)
+                                    .join("Lib")
+                                    .join(version)
+                                    .join(subdir)
+                                    .join(arch_subdir);
                                 if p.exists() {
                                     paths.push(p);
                                 }
@@ -601,7 +615,8 @@ int main(int argc, char** argv) {
             let miss_o = temp_path.join("_bootstrap_missing.o");
             std::fs::write(
                 &miss_c,
-                format!(r#"
+                format!(
+                    r#"
 #include <stdint.h>
 #include <stdbool.h>
 __attribute__((weak)) int64_t get_global_GLOBAL_LOG_LEVEL(void) {{ return 0; }}
@@ -636,7 +651,9 @@ __attribute__((weak)) char* rt_hostname(void) {{ return (char*)""; }}
 __attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
 __attribute__((weak, visibility("default"))) int64_t count_by_severity(void) {{ return 0; }}
 __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
-"#, ret_insn = ret_insn),
+"#,
+                    ret_insn = ret_insn
+                ),
             )
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write missing-symbol stub: {}", e)))?;
             let status = std::process::Command::new(&cc)
@@ -654,7 +671,11 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
 
             // 3) auto-generate stubs for a constrained set of undefined symbols.
             let (nm_cmd, nm_args) = detect_nm_command(&self.options.target);
-            if let Ok(nm_out) = std::process::Command::new(&nm_cmd).args(&nm_args).arg(&obj_path).output() {
+            if let Ok(nm_out) = std::process::Command::new(&nm_cmd)
+                .args(&nm_args)
+                .arg(&obj_path)
+                .output()
+            {
                 let mut symbols = std::collections::BTreeSet::new();
                 // Allowlist: core runtime hooks (rt_*), debugger (ds_*), globals, and a
                 // short list of compiler/service symbols that may be pruned in bootstrap.
@@ -912,10 +933,7 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                             ));
                         } else {
                             let clean = sym.replace('\"', "");
-                            code.push_str(&format!(
-                                "__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n",
-                                clean, ret_insn
-                            ));
+                            code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
                         }
                     }
                     std::fs::write(&auto_c, code)
@@ -963,8 +981,7 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                            extra_stubs: &[PathBuf],
                            require_crypto: bool|
          -> LinkerResult<()> {
-            let mut builder = LinkerBuilder::new()
-                .target(self.options.target);
+            let mut builder = LinkerBuilder::new().target(self.options.target);
 
             if crt_files.len() >= 2 {
                 builder = builder.object(&crt_files[0]);
@@ -1106,236 +1123,238 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
         do_link(first_out, bootstrap_mode, &bootstrap_stubs, require_crypto)?;
 
         // If bootstrap, scan undefineds, add auto-stubs (done earlier for main.o), then relink without allow-unresolved.
-            let final_result = if bootstrap_mode {
-                // Regenerate auto-stubs from first-pass binary (captures runtime needs)
-                let (nm_cmd2, nm_args2) = detect_nm_command(&self.options.target);
-                let nm_out = std::process::Command::new(&nm_cmd2)
-                    .args(&nm_args2)
-                    .arg(&first_out)
-                    .output()
-                    .map_err(|e| LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e)))?;
+        let final_result = if bootstrap_mode {
+            // Regenerate auto-stubs from first-pass binary (captures runtime needs)
+            let (nm_cmd2, nm_args2) = detect_nm_command(&self.options.target);
+            let nm_out = std::process::Command::new(&nm_cmd2)
+                .args(&nm_args2)
+                .arg(&first_out)
+                .output()
+                .map_err(|e| {
+                    LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e))
+                })?;
 
-                let mut symbols = std::collections::BTreeSet::new();
-                let extra_keep = [
-                    "BackendPort",
-                    "BlockResolver",
-                    "AopWeaver",
-                    "CodegenPipeline",
-                    "CompilerBackendImpl",
-                    "DiContainer",
-                    "compile_module_with_backend",
-                    "Scope",
-                    "ScopeId",
-                    "SymbolTable",
-                    "LogAspect",
-                    "NativeLinkOptions",
-                    "visibilitychecker_new",
-                    "VisibilityWarning.new",
-                    "with_resolved_blocks",
-                    "write_elf_bytes_to_file",
-                    "HirLowering",
-                    "desugar_module",
-                    "optimize_mir_module",
-                    "process_async_mir",
-                    "get_effective_backend_name",
-                    "resolve_methods",
-                    "link_to_native",
-                    "link_llvm_native",
-                    "link_to_smf",
-                    "link_to_self_contained",
-                    "run_monomorphization",
-                    "run_effect_pass",
-                    "run_compile",
-                    "generate_cmake_for_modules",
-                    "SmfHeader.new_v1_1",
-                    "new",
-                    "create",
-                    "from_function",
-                    "aggressive",
-                    "eval_static_assert",
-                    "int",
-                    "preprocess_conditionals",
-                    "load_path",
-                    "join_path",
-                    "is_absolute_path",
-                    "for_arch",
-                    "host",
-                    "parse",
-                    "parse_leak_dump",
-                    "symbols_get",
-                    "size",
-                    "speed",
-                    "RUNTIME_SYMBOL_NAMES.contains",
-                    "checker_check_symbol_access",
-                    "checker_get_warnings",
-                    "checker_record_warning",
-                    "simple_contract_check",
-                    "simple_contract_check_msg",
-                    "fallback",
-                    "doctest_is_dir",
-                    "doctest_is_file",
-                    "doctest_path_contains",
-                    "doctest_path_exists",
-                    "doctest_path_has_extension",
-                    "doctest_read_file",
-                    "doctest_walk_directory",
-                    "ffi_regex_is_match",
-                    "ffi_regex_find",
-                    "ffi_regex_find_all",
-                    "ffi_regex_captures",
-                    "ffi_regex_replace",
-                    "ffi_regex_replace_all",
-                    "ffi_regex_split",
-                    "ffi_regex_split_n",
-                    "native_http_send",
-                    "native_tcp_accept",
-                    "native_tcp_bind",
-                    "native_tcp_close",
-                    "native_tcp_connect",
-                    "native_tcp_connect_timeout",
-                    "native_tcp_flush",
-                    "native_tcp_get_nodelay",
-                    "native_tcp_peek",
-                    "native_tcp_read",
-                    "native_tcp_set_backlog",
-                    "native_tcp_set_keepalive",
-                    "native_tcp_set_nodelay",
-                    "native_tcp_set_read_timeout",
-                    "native_tcp_set_write_timeout",
-                    "native_tcp_shutdown",
-                    "native_tcp_write",
-                    "native_udp_bind",
-                    "native_udp_close",
-                    "native_udp_connect",
-                    "native_udp_get_broadcast",
-                    "native_udp_get_ttl",
-                    "native_udp_join_multicast_v4",
-                    "native_udp_join_multicast_v6",
-                    "native_udp_leave_multicast_v4",
-                    "native_udp_leave_multicast_v6",
-                    "native_udp_peek",
-                    "native_udp_peek_from",
-                    "native_udp_peer_addr",
-                    "native_udp_recv",
-                    "native_udp_recv_from",
-                    "native_udp_send",
-                    "native_udp_send_to",
-                    "native_udp_set_broadcast",
-                    "native_udp_set_multicast_loop",
-                    "native_udp_set_multicast_ttl",
-                    "native_udp_set_read_timeout",
-                    "native_udp_set_ttl",
-                    "native_udp_set_write_timeout",
-                ];
-                let rt_keep = [
-                    "rt_time_now_nanos",
-                    "rt_time_now_micros",
-                    "rt_time_now_unix_micros",
-                    "rt_file_mmap_read_text",
-                    "rt_file_mmap_read_bytes",
-                    "rt_file_read_text_at",
-                    "rt_file_read_bytes_at",
-                    "rt_file_write_text_at",
-                    "rt_file_write_bytes_at",
-                    "rt_mmap",
-                    "rt_mmap_raw",
-                    "rt_munmap",
-                    "rt_munmap_raw",
-                    "rt_madvise",
-                    "rt_msync",
-                    "rt_process_spawn_async",
-                    "rt_process_wait",
-                    "rt_process_is_running",
-                    "rt_process_kill",
-                    "rt_hostname",
-                    "rt_volatile_read_u8",
-                    "rt_volatile_read_u16",
-                    "rt_volatile_read_u32",
-                    "rt_volatile_read_u64",
-                    "rt_volatile_write_u8",
-                    "rt_volatile_write_u16",
-                    "rt_volatile_write_u32",
-                    "rt_volatile_write_u64",
-                    "rt_memory_barrier",
-                    "rt_load_barrier",
-                    "rt_store_barrier",
-                    "panic",
-                    "future_alloc_ready",
-                    "future_map",
-                    "future_then",
-                    "rt_io_file_open",
-                    "rt_io_file_read",
-                    "rt_io_file_read_all",
-                    "rt_io_file_read_line",
-                    "rt_bytes_to_text",
-                    "rt_io_file_write",
-                    "rt_io_file_write_all",
-                    "rt_io_file_flush",
-                    "rt_io_file_seek",
-                    "rt_io_file_close",
-                    "rt_io_file_metadata",
-                    "rt_io_file_set_permissions",
-                    "rt_io_file_exists",
-                    "rt_io_file_delete",
-                    "rt_io_tcp_bind",
-                    "rt_io_tcp_accept",
-                    "rt_io_tcp_accept_timeout",
-                    "rt_io_tcp_connect",
-                    "rt_io_tcp_connect_timeout",
-                    "rt_io_tcp_read",
-                    "rt_io_tcp_read_line",
-                    "rt_io_tcp_write",
-                    "rt_io_tcp_flush",
-                    "rt_io_tcp_close",
-                    "rt_io_tcp_local_addr",
-                    "rt_io_tcp_peer_addr",
-                    "rt_io_tcp_set_nodelay",
-                    "rt_io_tcp_set_read_timeout",
-                    "rt_io_tcp_set_write_timeout",
-                    "rt_io_tcp_shutdown",
-                    "rt_io_udp_bind",
-                    "rt_io_udp_recv_from",
-                    "rt_io_udp_send_to",
-                    "rt_io_udp_connect",
-                    "rt_io_udp_send",
-                    "rt_io_udp_recv",
-                    "rt_io_udp_local_addr",
-                    "rt_io_udp_set_broadcast",
-                    "rt_io_udp_set_read_timeout",
-                    "rt_io_udp_close",
-                    "rt_stdin_read",
-                    "rt_stdin_read_all",
-                    "rt_stdin_read_line",
-                    "rt_stdout_write",
-                    "rt_stdout_flush",
-                    "rt_stderr_write",
-                    "rt_stderr_flush",
-                    "rt_text_to_bytes",
-                    "rt_fault_set_stack_overflow_detection",
-                    "rt_fault_set_timeout",
-                    "rt_fault_set_execution_limit",
-                    "rt_debug_set_active",
-                    "rt_debug_enable",
-                    "rt_debug_disable",
-                    "rt_file_rename",
-                    "rt_file_write",
-                    "rt_file_delete",
-                    "rt_file_size",
-                    "rt_file_lock",
-                    "rt_getpid",
-                    "rt_compile_to_llvm_ir",
-                    "rt_file_hash_sha256",
-                    "rt_path_parent",
-                    "range",
-                ];
-                // Accept ALL undefined symbols for second-pass stub generation.
-                for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
-                    if let Some(sym) = line.split_whitespace().last() {
-                        if sym.len() >= 2 {
-                            symbols.insert(sym.to_string());
-                        }
+            let mut symbols = std::collections::BTreeSet::new();
+            let extra_keep = [
+                "BackendPort",
+                "BlockResolver",
+                "AopWeaver",
+                "CodegenPipeline",
+                "CompilerBackendImpl",
+                "DiContainer",
+                "compile_module_with_backend",
+                "Scope",
+                "ScopeId",
+                "SymbolTable",
+                "LogAspect",
+                "NativeLinkOptions",
+                "visibilitychecker_new",
+                "VisibilityWarning.new",
+                "with_resolved_blocks",
+                "write_elf_bytes_to_file",
+                "HirLowering",
+                "desugar_module",
+                "optimize_mir_module",
+                "process_async_mir",
+                "get_effective_backend_name",
+                "resolve_methods",
+                "link_to_native",
+                "link_llvm_native",
+                "link_to_smf",
+                "link_to_self_contained",
+                "run_monomorphization",
+                "run_effect_pass",
+                "run_compile",
+                "generate_cmake_for_modules",
+                "SmfHeader.new_v1_1",
+                "new",
+                "create",
+                "from_function",
+                "aggressive",
+                "eval_static_assert",
+                "int",
+                "preprocess_conditionals",
+                "load_path",
+                "join_path",
+                "is_absolute_path",
+                "for_arch",
+                "host",
+                "parse",
+                "parse_leak_dump",
+                "symbols_get",
+                "size",
+                "speed",
+                "RUNTIME_SYMBOL_NAMES.contains",
+                "checker_check_symbol_access",
+                "checker_get_warnings",
+                "checker_record_warning",
+                "simple_contract_check",
+                "simple_contract_check_msg",
+                "fallback",
+                "doctest_is_dir",
+                "doctest_is_file",
+                "doctest_path_contains",
+                "doctest_path_exists",
+                "doctest_path_has_extension",
+                "doctest_read_file",
+                "doctest_walk_directory",
+                "ffi_regex_is_match",
+                "ffi_regex_find",
+                "ffi_regex_find_all",
+                "ffi_regex_captures",
+                "ffi_regex_replace",
+                "ffi_regex_replace_all",
+                "ffi_regex_split",
+                "ffi_regex_split_n",
+                "native_http_send",
+                "native_tcp_accept",
+                "native_tcp_bind",
+                "native_tcp_close",
+                "native_tcp_connect",
+                "native_tcp_connect_timeout",
+                "native_tcp_flush",
+                "native_tcp_get_nodelay",
+                "native_tcp_peek",
+                "native_tcp_read",
+                "native_tcp_set_backlog",
+                "native_tcp_set_keepalive",
+                "native_tcp_set_nodelay",
+                "native_tcp_set_read_timeout",
+                "native_tcp_set_write_timeout",
+                "native_tcp_shutdown",
+                "native_tcp_write",
+                "native_udp_bind",
+                "native_udp_close",
+                "native_udp_connect",
+                "native_udp_get_broadcast",
+                "native_udp_get_ttl",
+                "native_udp_join_multicast_v4",
+                "native_udp_join_multicast_v6",
+                "native_udp_leave_multicast_v4",
+                "native_udp_leave_multicast_v6",
+                "native_udp_peek",
+                "native_udp_peek_from",
+                "native_udp_peer_addr",
+                "native_udp_recv",
+                "native_udp_recv_from",
+                "native_udp_send",
+                "native_udp_send_to",
+                "native_udp_set_broadcast",
+                "native_udp_set_multicast_loop",
+                "native_udp_set_multicast_ttl",
+                "native_udp_set_read_timeout",
+                "native_udp_set_ttl",
+                "native_udp_set_write_timeout",
+            ];
+            let rt_keep = [
+                "rt_time_now_nanos",
+                "rt_time_now_micros",
+                "rt_time_now_unix_micros",
+                "rt_file_mmap_read_text",
+                "rt_file_mmap_read_bytes",
+                "rt_file_read_text_at",
+                "rt_file_read_bytes_at",
+                "rt_file_write_text_at",
+                "rt_file_write_bytes_at",
+                "rt_mmap",
+                "rt_mmap_raw",
+                "rt_munmap",
+                "rt_munmap_raw",
+                "rt_madvise",
+                "rt_msync",
+                "rt_process_spawn_async",
+                "rt_process_wait",
+                "rt_process_is_running",
+                "rt_process_kill",
+                "rt_hostname",
+                "rt_volatile_read_u8",
+                "rt_volatile_read_u16",
+                "rt_volatile_read_u32",
+                "rt_volatile_read_u64",
+                "rt_volatile_write_u8",
+                "rt_volatile_write_u16",
+                "rt_volatile_write_u32",
+                "rt_volatile_write_u64",
+                "rt_memory_barrier",
+                "rt_load_barrier",
+                "rt_store_barrier",
+                "panic",
+                "future_alloc_ready",
+                "future_map",
+                "future_then",
+                "rt_io_file_open",
+                "rt_io_file_read",
+                "rt_io_file_read_all",
+                "rt_io_file_read_line",
+                "rt_bytes_to_text",
+                "rt_io_file_write",
+                "rt_io_file_write_all",
+                "rt_io_file_flush",
+                "rt_io_file_seek",
+                "rt_io_file_close",
+                "rt_io_file_metadata",
+                "rt_io_file_set_permissions",
+                "rt_io_file_exists",
+                "rt_io_file_delete",
+                "rt_io_tcp_bind",
+                "rt_io_tcp_accept",
+                "rt_io_tcp_accept_timeout",
+                "rt_io_tcp_connect",
+                "rt_io_tcp_connect_timeout",
+                "rt_io_tcp_read",
+                "rt_io_tcp_read_line",
+                "rt_io_tcp_write",
+                "rt_io_tcp_flush",
+                "rt_io_tcp_close",
+                "rt_io_tcp_local_addr",
+                "rt_io_tcp_peer_addr",
+                "rt_io_tcp_set_nodelay",
+                "rt_io_tcp_set_read_timeout",
+                "rt_io_tcp_set_write_timeout",
+                "rt_io_tcp_shutdown",
+                "rt_io_udp_bind",
+                "rt_io_udp_recv_from",
+                "rt_io_udp_send_to",
+                "rt_io_udp_connect",
+                "rt_io_udp_send",
+                "rt_io_udp_recv",
+                "rt_io_udp_local_addr",
+                "rt_io_udp_set_broadcast",
+                "rt_io_udp_set_read_timeout",
+                "rt_io_udp_close",
+                "rt_stdin_read",
+                "rt_stdin_read_all",
+                "rt_stdin_read_line",
+                "rt_stdout_write",
+                "rt_stdout_flush",
+                "rt_stderr_write",
+                "rt_stderr_flush",
+                "rt_text_to_bytes",
+                "rt_fault_set_stack_overflow_detection",
+                "rt_fault_set_timeout",
+                "rt_fault_set_execution_limit",
+                "rt_debug_set_active",
+                "rt_debug_enable",
+                "rt_debug_disable",
+                "rt_file_rename",
+                "rt_file_write",
+                "rt_file_delete",
+                "rt_file_size",
+                "rt_file_lock",
+                "rt_getpid",
+                "rt_compile_to_llvm_ir",
+                "rt_file_hash_sha256",
+                "rt_path_parent",
+                "range",
+            ];
+            // Accept ALL undefined symbols for second-pass stub generation.
+            for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
+                if let Some(sym) = line.split_whitespace().last() {
+                    if sym.len() >= 2 {
+                        symbols.insert(sym.to_string());
                     }
                 }
+            }
             if !symbols.is_empty() {
                 // Use a different filename from the first-pass auto-stub so we don't
                 // clobber the broad stub set generated from main.o.
@@ -1354,10 +1373,7 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                         ));
                     } else {
                         let clean = sym.replace('\"', "");
-                        code.push_str(&format!(
-                            "__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n",
-                            clean, ret_insn
-                        ));
+                        code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
                     }
                 }
                 std::fs::write(&auto_c, code)
@@ -1909,20 +1925,35 @@ mod tests {
     #[test]
     fn test_static_lib_name_unix() {
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &linux), "libsimple_runtime.a");
+        assert_eq!(
+            NativeBinaryOptions::static_lib_name("simple_runtime", &linux),
+            "libsimple_runtime.a"
+        );
 
         let macos = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
-        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &macos), "libsimple_runtime.a");
+        assert_eq!(
+            NativeBinaryOptions::static_lib_name("simple_runtime", &macos),
+            "libsimple_runtime.a"
+        );
 
         let freebsd = Target::new(TargetArch::X86_64, TargetOS::FreeBSD);
-        assert_eq!(NativeBinaryOptions::static_lib_name("simple_compiler", &freebsd), "libsimple_compiler.a");
+        assert_eq!(
+            NativeBinaryOptions::static_lib_name("simple_compiler", &freebsd),
+            "libsimple_compiler.a"
+        );
     }
 
     #[test]
     fn test_static_lib_name_windows() {
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
-        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &windows), "simple_runtime.lib");
-        assert_eq!(NativeBinaryOptions::static_lib_name("simple_compiler", &windows), "simple_compiler.lib");
+        assert_eq!(
+            NativeBinaryOptions::static_lib_name("simple_runtime", &windows),
+            "simple_runtime.lib"
+        );
+        assert_eq!(
+            NativeBinaryOptions::static_lib_name("simple_compiler", &windows),
+            "simple_compiler.lib"
+        );
     }
 
     #[test]

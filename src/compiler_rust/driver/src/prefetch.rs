@@ -220,7 +220,10 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use winapi::shared::minwindef::FALSE;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-    use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile, FILE_MAP_READ, WIN32_MEMORY_RANGE_ENTRY};
+    use winapi::um::memoryapi::{
+        CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile, FILE_MAP_READ,
+        WIN32_MEMORY_RANGE_ENTRY,
+    };
     use winapi::um::winnt::{HANDLE, PAGE_READONLY};
 
     let file = OpenOptions::new().read(true).open(path.as_ref())?;

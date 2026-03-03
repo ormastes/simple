@@ -572,10 +572,12 @@ fn main() {
         let builder = std::thread::Builder::new()
             .name("simple-main".to_string())
             .stack_size(DESIRED_STACK);
-        let handler = builder.spawn(|| {
-            // Re-enter main with the large stack.
-            real_main();
-        }).expect("failed to spawn main thread with larger stack");
+        let handler = builder
+            .spawn(|| {
+                // Re-enter main with the large stack.
+                real_main();
+            })
+            .expect("failed to spawn main thread with larger stack");
         let result = handler.join();
         match result {
             Ok(()) => {}

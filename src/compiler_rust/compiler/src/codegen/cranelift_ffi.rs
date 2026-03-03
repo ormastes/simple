@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, FuncRef, Function, InstBuilder, MemFlags, Signature,
-    StackSlotData, StackSlotKind, StackSlot, TrapCode, Value,
+    types, AbiParam, Block, FuncRef, Function, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind,
+    StackSlot, TrapCode, Value,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -300,10 +300,13 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
     let module = JITModule::new(builder);
     let handle = next_handle();
 
-    JIT_MODULES.lock().unwrap().insert(handle, JITModuleContext {
-        module,
-        func_ids: HashMap::new(),
-    });
+    JIT_MODULES.lock().unwrap().insert(
+        handle,
+        JITModuleContext {
+            module,
+            func_ids: HashMap::new(),
+        },
+    );
     handle
 }
 
@@ -382,7 +385,11 @@ pub unsafe extern "C" fn rt_cranelift_sig_set_return(sig: i64, type_: i64) {
 /// Returns a function handle, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_function(
-    module: i64, name_ptr: i64, name_len: i64, sig: i64, linkage: i64,
+    module: i64,
+    name_ptr: i64,
+    name_len: i64,
+    sig: i64,
+    linkage: i64,
 ) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
@@ -443,11 +450,15 @@ pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64
 
     let func_ref = if ab.is_jit {
         let mut modules = JIT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
+            return 0;
+        };
         mod_ctx.module.declare_func_in_func(func_id, &mut builder.func)
     } else {
         let mut modules = AOT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
+            return 0;
+        };
         mod_ctx.module.declare_func_in_func(func_id, &mut builder.func)
     };
 
@@ -464,9 +475,7 @@ pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64
 /// Begin building a function. Creates a FunctionBuilder for emitting instructions.
 /// Returns function context handle, or 0 on failure.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_begin_function(
-    module: i64, name_ptr: i64, name_len: i64, sig: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64, name_len: i64, sig: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -511,18 +520,21 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(
 
     // Store backing and builder in separate registries
     BUILDER_BACKINGS.lock().unwrap().insert(handle, backing);
-    ACTIVE_BUILDERS.lock().unwrap().insert(handle, ActiveBuilder {
-        builder: Some(builder),
-        blocks: HashMap::new(),
-        values: HashMap::new(),
-        stack_slots: HashMap::new(),
-        func_refs: HashMap::new(),
-        next_block_id: 1,
-        next_value_id: 1,
-        module_handle: module,
-        is_jit,
-        func_name: name,
-    });
+    ACTIVE_BUILDERS.lock().unwrap().insert(
+        handle,
+        ActiveBuilder {
+            builder: Some(builder),
+            blocks: HashMap::new(),
+            values: HashMap::new(),
+            stack_slots: HashMap::new(),
+            func_refs: HashMap::new(),
+            next_block_id: 1,
+            next_value_id: 1,
+            module_handle: module,
+            is_jit,
+            func_name: name,
+        },
+    );
 
     handle
 }
@@ -547,12 +559,15 @@ pub unsafe extern "C" fn rt_cranelift_end_function(ctx: i64) -> i64 {
         let mut backings = BUILDER_BACKINGS.lock().unwrap();
         if let Some(backing) = backings.remove(&ctx) {
             let backing = *backing; // Unbox
-            FINISHED_FUNCS.lock().unwrap().insert(ctx, FinishedFunc {
-                ctx: backing.ctx,
-                name,
-                module_handle,
-                is_jit,
-            });
+            FINISHED_FUNCS.lock().unwrap().insert(
+                ctx,
+                FinishedFunc {
+                    ctx: backing.ctx,
+                    name,
+                    module_handle,
+                    is_jit,
+                },
+            );
         }
     }
 
@@ -565,20 +580,18 @@ pub unsafe extern "C" fn rt_cranelift_end_function(ctx: i64) -> i64 {
 /// Define a function in a JIT module.
 /// Returns true on success.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_define_function(
-    module: i64, _func_id: i64, ctx: i64,
-) -> bool {
+pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64, ctx: i64) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
 
     let mut modules = JIT_MODULES.lock().unwrap();
-    let Some(mod_ctx) = modules.get_mut(&module) else { return false };
+    let Some(mod_ctx) = modules.get_mut(&module) else {
+        return false;
+    };
 
-    let func_id_result = mod_ctx.module.declare_function(
-        &finished.name,
-        Linkage::Export,
-        &finished.ctx.func.signature,
-    );
+    let func_id_result = mod_ctx
+        .module
+        .declare_function(&finished.name, Linkage::Export, &finished.ctx.func.signature);
 
     match func_id_result {
         Ok(id) => {
@@ -706,7 +719,9 @@ macro_rules! impl_binop {
         pub unsafe extern "C" fn $name(ctx: i64, a: i64, b: i64) -> i64 {
             let mut active = ACTIVE_BUILDERS.lock().unwrap();
             let Some(ab) = active.get_mut(&ctx) else { return 0 };
-            let Some(builder) = ab.builder.as_mut() else { return 0 };
+            let Some(builder) = ab.builder.as_mut() else {
+                return 0;
+            };
             let Some(&a_val) = ab.values.get(&a) else { return 0 };
             let Some(&b_val) = ab.values.get(&b) else { return 0 };
             let result = builder.ins().$method(a_val, b_val);
@@ -798,7 +813,9 @@ pub unsafe extern "C" fn rt_cranelift_load(ctx: i64, type_: i64, addr: i64, offs
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(builder) = ab.builder.as_mut() else { return 0 };
-    let Some(&addr_val) = ab.values.get(&addr) else { return 0 };
+    let Some(&addr_val) = ab.values.get(&addr) else {
+        return 0;
+    };
 
     let ty = type_from_code(type_);
     let result = builder.ins().load(ty, MemFlags::new(), addr_val, offset as i32);
@@ -841,7 +858,9 @@ pub unsafe extern "C" fn rt_cranelift_stack_addr(ctx: i64, slot_handle: i64, off
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(builder) = ab.builder.as_mut() else { return 0 };
-    let Some(&slot) = ab.stack_slots.get(&slot_handle) else { return 0 };
+    let Some(&slot) = ab.stack_slots.get(&slot_handle) else {
+        return 0;
+    };
 
     let result = builder.ins().stack_addr(types::I64, slot, offset as i32);
     let id = ab.next_value_id;
@@ -866,15 +885,17 @@ pub unsafe extern "C" fn rt_cranelift_jump(ctx: i64, block: i64) {
 
 /// Conditional branch.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_brif(
-    ctx: i64, cond: i64, then_block: i64, else_block: i64,
-) {
+pub unsafe extern "C" fn rt_cranelift_brif(ctx: i64, cond: i64, then_block: i64, else_block: i64) {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return };
     let Some(builder) = ab.builder.as_mut() else { return };
     let Some(&cond_val) = ab.values.get(&cond) else { return };
-    let Some(&then_blk) = ab.blocks.get(&then_block) else { return };
-    let Some(&else_blk) = ab.blocks.get(&else_block) else { return };
+    let Some(&then_blk) = ab.blocks.get(&then_block) else {
+        return;
+    };
+    let Some(&else_blk) = ab.blocks.get(&else_block) else {
+        return;
+    };
     builder.ins().brif(cond_val, then_blk, &[], else_blk, &[]);
 }
 
@@ -913,13 +934,13 @@ pub unsafe extern "C" fn rt_cranelift_trap(ctx: i64, code: i64) {
 
 /// Direct function call via FuncRef handle (from import_function).
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_call(
-    ctx: i64, func_ref_handle: i64, args_ptr: i64, args_len: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_ptr: i64, args_len: i64) -> i64 {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(builder) = ab.builder.as_mut() else { return 0 };
-    let Some(&func_ref) = ab.func_refs.get(&func_ref_handle) else { return 0 };
+    let Some(&func_ref) = ab.func_refs.get(&func_ref_handle) else {
+        return 0;
+    };
 
     // Convert arg handles to Values
     let mut args = Vec::new();
@@ -947,7 +968,11 @@ pub unsafe extern "C" fn rt_cranelift_call(
 /// Indirect function call through a pointer.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_call_indirect(
-    ctx: i64, sig: i64, addr: i64, args_ptr: i64, args_len: i64,
+    ctx: i64,
+    sig: i64,
+    addr: i64,
+    args_ptr: i64,
+    args_len: i64,
 ) -> i64 {
     // Get signature first (separate lock)
     let signature = {
@@ -961,7 +986,9 @@ pub unsafe extern "C" fn rt_cranelift_call_indirect(
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(builder) = ab.builder.as_mut() else { return 0 };
-    let Some(&addr_val) = ab.values.get(&addr) else { return 0 };
+    let Some(&addr_val) = ab.values.get(&addr) else {
+        return 0;
+    };
 
     let sig_ref = builder.import_signature(signature);
 
@@ -997,8 +1024,12 @@ macro_rules! impl_conv {
         pub unsafe extern "C" fn $name(ctx: i64, to_type: i64, value: i64) -> i64 {
             let mut active = ACTIVE_BUILDERS.lock().unwrap();
             let Some(ab) = active.get_mut(&ctx) else { return 0 };
-            let Some(builder) = ab.builder.as_mut() else { return 0 };
-            let Some(&val) = ab.values.get(&value) else { return 0 };
+            let Some(builder) = ab.builder.as_mut() else {
+                return 0;
+            };
+            let Some(&val) = ab.values.get(&value) else {
+                return 0;
+            };
             let ty = type_from_code(to_type);
             let result = builder.ins().$method(ty, val);
             let id = ab.next_value_id;
@@ -1038,9 +1069,7 @@ pub unsafe extern "C" fn rt_cranelift_bitcast(ctx: i64, to_type: i64, value: i64
 
 /// Append a block parameter.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_append_block_param(
-    ctx: i64, block: i64, type_: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_append_block_param(ctx: i64, block: i64, type_: i64) -> i64 {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(builder) = ab.builder.as_mut() else { return 0 };
@@ -1090,9 +1119,7 @@ pub unsafe extern "C" fn rt_cranelift_append_func_params(ctx: i64, block: i64) {
 
 /// Get a function pointer from a JIT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_get_function_ptr(
-    module: i64, name_ptr: i64, name_len: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_get_function_ptr(module: i64, name_ptr: i64, name_len: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -1112,9 +1139,7 @@ pub unsafe extern "C" fn rt_cranelift_get_function_ptr(
 
 /// Call a JIT function pointer.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_call_function_ptr(
-    ptr: i64, _args_ptr: i64, _args_len: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_call_function_ptr(ptr: i64, _args_ptr: i64, _args_len: i64) -> i64 {
     if ptr == 0 {
         return 0;
     }
@@ -1129,9 +1154,7 @@ pub unsafe extern "C" fn rt_cranelift_call_function_ptr(
 
 /// Create a new AOT (Object) module for ahead-of-time compilation.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_new_aot_module(
-    name_ptr: i64, name_len: i64, target: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i64, target: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -1150,10 +1173,13 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(
     let module = ObjectModule::new(builder);
     let handle = next_handle();
 
-    AOT_MODULES.lock().unwrap().insert(handle, ObjectModuleContext {
-        module,
-        func_ids: HashMap::new(),
-    });
+    AOT_MODULES.lock().unwrap().insert(
+        handle,
+        ObjectModuleContext {
+            module,
+            func_ids: HashMap::new(),
+        },
+    );
     handle
 }
 
@@ -1183,9 +1209,7 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValu
 
 /// Define a function in an AOT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_aot_define_function(
-    module: i64, name_ptr: i64, name_len: i64, ctx: i64,
-) -> bool {
+pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, name_ptr: i64, name_len: i64, ctx: i64) -> bool {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return false;
@@ -1195,7 +1219,9 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
     let Some(finished) = finished else { return false };
 
     let mut modules = AOT_MODULES.lock().unwrap();
-    let Some(mod_ctx) = modules.get_mut(&module) else { return false };
+    let Some(mod_ctx) = modules.get_mut(&module) else {
+        return false;
+    };
 
     let func_id_result = mod_ctx
         .module
@@ -1233,7 +1259,10 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     // Module management (rt_ prefix — have Simple wrappers)
     builder.symbol("rt_cranelift_new_module", rt_cranelift_new_module as *const u8);
     builder.symbol("rt_cranelift_new_aot_module", rt_cranelift_new_aot_module as *const u8);
-    builder.symbol("rt_cranelift_finalize_module", rt_cranelift_finalize_module as *const u8);
+    builder.symbol(
+        "rt_cranelift_finalize_module",
+        rt_cranelift_finalize_module as *const u8,
+    );
     builder.symbol("cranelift_free_module", rt_cranelift_free_module as *const u8);
 
     // Signature building (bare names — direct extern in Simple)
@@ -1242,8 +1271,14 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     builder.symbol("cranelift_sig_set_return", rt_cranelift_sig_set_return as *const u8);
 
     // Function declaration (rt_ prefix — new functions with Simple wrappers)
-    builder.symbol("rt_cranelift_declare_function", rt_cranelift_declare_function as *const u8);
-    builder.symbol("rt_cranelift_import_function", rt_cranelift_import_function as *const u8);
+    builder.symbol(
+        "rt_cranelift_declare_function",
+        rt_cranelift_declare_function as *const u8,
+    );
+    builder.symbol(
+        "rt_cranelift_import_function",
+        rt_cranelift_import_function as *const u8,
+    );
 
     // Function building (rt_ prefix — Simple has wrapper for text→ptr/len)
     builder.symbol("rt_cranelift_begin_function", rt_cranelift_begin_function as *const u8);
@@ -1318,17 +1353,32 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     builder.symbol("cranelift_bitcast", rt_cranelift_bitcast as *const u8);
 
     // Block parameters (rt_ for append_block_param, bare for block_param)
-    builder.symbol("rt_cranelift_append_block_param", rt_cranelift_append_block_param as *const u8);
+    builder.symbol(
+        "rt_cranelift_append_block_param",
+        rt_cranelift_append_block_param as *const u8,
+    );
     builder.symbol("cranelift_block_param", rt_cranelift_block_param as *const u8);
-    builder.symbol("rt_cranelift_append_func_params", rt_cranelift_append_func_params as *const u8);
+    builder.symbol(
+        "rt_cranelift_append_func_params",
+        rt_cranelift_append_func_params as *const u8,
+    );
 
     // JIT execution (rt_ for get_function_ptr, bare for call_function_ptr)
-    builder.symbol("rt_cranelift_get_function_ptr", rt_cranelift_get_function_ptr as *const u8);
-    builder.symbol("cranelift_call_function_ptr", rt_cranelift_call_function_ptr as *const u8);
+    builder.symbol(
+        "rt_cranelift_get_function_ptr",
+        rt_cranelift_get_function_ptr as *const u8,
+    );
+    builder.symbol(
+        "cranelift_call_function_ptr",
+        rt_cranelift_call_function_ptr as *const u8,
+    );
 
     // Object file generation / AOT compilation
     builder.symbol("rt_cranelift_emit_object", rt_cranelift_emit_object as *const u8);
-    builder.symbol("rt_cranelift_aot_define_function", rt_cranelift_aot_define_function as *const u8);
+    builder.symbol(
+        "rt_cranelift_aot_define_function",
+        rt_cranelift_aot_define_function as *const u8,
+    );
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
@@ -1339,9 +1389,7 @@ mod tests {
     fn test_create_and_free_module() {
         unsafe {
             let name = "test_module";
-            let handle = rt_cranelift_new_module(
-                name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64,
-            );
+            let handle = rt_cranelift_new_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
             assert!(handle > 0);
             rt_cranelift_free_module(handle);
         }
@@ -1362,9 +1410,7 @@ mod tests {
         unsafe {
             // Create module
             let mod_name = "test_build";
-            let module = rt_cranelift_new_module(
-                mod_name.as_ptr() as i64, mod_name.len() as i64, CL_TARGET_X86_64,
-            );
+            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, CL_TARGET_X86_64);
             assert!(module > 0);
 
             // Create signature: () -> i64
@@ -1373,9 +1419,7 @@ mod tests {
 
             // Begin function
             let fname = "test_fn";
-            let ctx = rt_cranelift_begin_function(
-                module, fname.as_ptr() as i64, fname.len() as i64, sig,
-            );
+            let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
             assert!(ctx > 0);
 
             // Create entry block
@@ -1399,9 +1443,7 @@ mod tests {
             rt_cranelift_finalize_module(module);
 
             // Get function pointer and call it
-            let fptr = rt_cranelift_get_function_ptr(
-                module, fname.as_ptr() as i64, fname.len() as i64,
-            );
+            let fptr = rt_cranelift_get_function_ptr(module, fname.as_ptr() as i64, fname.len() as i64);
             assert!(fptr != 0);
             let func: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
             assert_eq!(func(), 42);
@@ -1414,9 +1456,7 @@ mod tests {
     fn test_aot_module() {
         unsafe {
             let name = "test_aot";
-            let handle = rt_cranelift_new_aot_module(
-                name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64,
-            );
+            let handle = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
             assert!(handle > 0);
             rt_cranelift_free_module(handle);
         }

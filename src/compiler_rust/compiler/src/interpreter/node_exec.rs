@@ -367,8 +367,7 @@ pub(crate) fn exec_node(
             );
             // Register static methods as mangled free functions (StructName__method)
             for method in &s.methods {
-                let is_static = method.is_static
-                    || !method.params.iter().any(|p| p.name == "self");
+                let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", s.name, method.name);
                     functions.insert(mangled.clone(), method.clone());
@@ -395,8 +394,7 @@ pub(crate) fn exec_node(
             );
             // Register static methods as mangled free functions (ClassName__method)
             for method in &c.methods {
-                let is_static = method.is_static
-                    || !method.params.iter().any(|p| p.name == "self");
+                let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", c.name, method.name);
                     functions.insert(mangled.clone(), method.clone());
@@ -423,8 +421,7 @@ pub(crate) fn exec_node(
             );
             // Register enum static methods as mangled free functions
             for method in &e.methods {
-                let is_static = method.is_static
-                    || !method.params.iter().any(|p| p.name == "self");
+                let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", e.name, method.name);
                     functions.insert(mangled.clone(), method.clone());

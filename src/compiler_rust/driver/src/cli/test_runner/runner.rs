@@ -680,8 +680,7 @@ fn execute_test_files(
         }
 
         let failed = result.failed > 0 || result.error.is_some();
-        let memory_abort = result.error.as_ref()
-            .map_or(false, |e| e.contains("MEMORY LIMIT"));
+        let memory_abort = result.error.as_ref().map_or(false, |e| e.contains("MEMORY LIMIT"));
         results.push(result);
 
         // Always abort on memory limit — continuing would just OOM the system.

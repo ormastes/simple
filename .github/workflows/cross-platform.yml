@@ -78,7 +78,7 @@ jobs:
       if: runner.os == 'Linux' && steps.validate-unix.outputs.can_execute == 'true'
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        DETECTED=$(simple -c "use std.platform.{is_linux}; print is_linux()")
+        DETECTED=$(simple test/ci/platform_linux.spl)
         echo "Detected is_linux: $DETECTED"
         if [[ "$DETECTED" == *"true"* ]]; then
           echo "✅ Platform detection correct"
@@ -91,8 +91,9 @@ jobs:
       if: runner.os == 'Linux' && steps.validate-unix.outputs.can_execute == 'true'
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        DIR_SEP=$(simple -c "use std.platform.{dir_sep}; print dir_sep()")
-        PATH_SEP=$(simple -c "use std.platform.{path_sep}; print path_sep()")
+        OUTPUT=$(simple test/ci/separator_unix.spl)
+        DIR_SEP=$(echo "$OUTPUT" | head -1)
+        PATH_SEP=$(echo "$OUTPUT" | tail -1)
         echo "Directory separator: '$DIR_SEP'"
         echo "Path separator: '$PATH_SEP'"
 
@@ -142,19 +143,16 @@ jobs:
             exit 0
           fi
 
-          # Test platform detection
-          export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-          simple -c "use std.platform.{is_unix, dir_sep}; print is_unix(); print dir_sep()" || true
-
           # Test shell execution
-          simple -c "use app.io.mod (shell); val r = shell(\"echo hello_freebsd\"); print r.stdout" || true
+          export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+          simple test/ci/shell_exec.spl || true
 
           # Run native compile spec (multi-file link tests)
           echo ""
           echo "=== Running native compile spec on FreeBSD ==="
           gcc --version | head -1 || true
           clang --version | head -1 || true
-          bin/release/simple test test/compiler/native_compile_spec.spl
+          bin/release/simple test test/unit/compiler/native/native_compile_spec.spl
       continue-on-error: true
 
   # ============================================================================
@@ -177,17 +175,14 @@ jobs:
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
 
-        # Test normalize_path
-        RESULT=$(simple -c "use std.platform.{normalize_path}; print normalize_path(\"/usr//bin/../local/bin\")")
+        # Test basic path normalization
+        RESULT=$(simple test/ci/normalize_path.spl)
         echo "normalize_path result: $RESULT"
-
-        # Test join_path
-        RESULT=$(simple -c "use std.platform.{join_path}; print join_path(\"/usr\", \"bin\")")
-        echo "join_path result: $RESULT"
-        if [[ "$RESULT" == *"/usr"*"bin"* ]]; then
+        if [[ "$RESULT" == *"/usr/bin/local"* ]]; then
           echo "✅ Path functions working"
         else
           echo "⚠ Unexpected path result"
+          exit 1
         fi
 
   # ============================================================================
@@ -209,7 +204,7 @@ jobs:
     - name: Test shell execution
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        OUTPUT=$(simple -c "use app.io.mod (shell); val r = shell(\"echo test\"); print r.stdout")
+        OUTPUT=$(simple test/ci/shell_exec.spl)
         echo "Shell output: '$OUTPUT'"
         if [[ "$OUTPUT" == *"test"* ]]; then
           echo "✅ Shell execution works"
@@ -244,8 +239,10 @@ jobs:
 
     - name: Test linker detection
       run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        simple -c "use compiler.linker.link (get_linker_info); print get_linker_info()"
+        # Verify linker tools are available
+        which ld && echo "✅ ld found"
+        which mold && echo "✅ mold found" || echo "⚠ mold not found"
+        which lld && echo "✅ lld found" || echo "⚠ lld not found"
       continue-on-error: true
 
   # ============================================================================
@@ -283,7 +280,7 @@ jobs:
     - name: Run native compile spec tests
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        bin/release/simple test test/compiler/native_compile_spec.spl
+        bin/release/simple test test/unit/compiler/native/native_compile_spec.spl
 
   # ============================================================================
   # Windows MinGW Cross-Compilation

@@ -48,7 +48,10 @@ fn apply_cpu_limit(duration: Duration) -> SandboxResult<()> {
 
 #[cfg(not(unix))]
 fn apply_cpu_limit(duration: Duration) -> SandboxResult<()> {
-    tracing::debug!("CPU time limit ({} seconds) not applied (not supported on this platform via rlimit)", duration.as_secs());
+    tracing::debug!(
+        "CPU time limit ({} seconds) not applied (not supported on this platform via rlimit)",
+        duration.as_secs()
+    );
     Ok(())
 }
 
@@ -66,7 +69,10 @@ fn apply_memory_limit(bytes: u64) -> SandboxResult<()> {
 
 #[cfg(not(unix))]
 fn apply_memory_limit(bytes: u64) -> SandboxResult<()> {
-    tracing::debug!("Memory limit ({} bytes) not applied (not supported on this platform via rlimit)", bytes);
+    tracing::debug!(
+        "Memory limit ({} bytes) not applied (not supported on this platform via rlimit)",
+        bytes
+    );
     Ok(())
 }
 
@@ -84,7 +90,10 @@ fn apply_fd_limit(count: u64) -> SandboxResult<()> {
 
 #[cfg(not(unix))]
 fn apply_fd_limit(count: u64) -> SandboxResult<()> {
-    tracing::debug!("File descriptor limit ({}) not applied (not supported on this platform via rlimit)", count);
+    tracing::debug!(
+        "File descriptor limit ({}) not applied (not supported on this platform via rlimit)",
+        count
+    );
     Ok(())
 }
 

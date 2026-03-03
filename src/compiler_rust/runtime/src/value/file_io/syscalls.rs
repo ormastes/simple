@@ -66,8 +66,7 @@ pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i3
     {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Memory::{
-            CreateFileMappingW, MapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS,
-            FILE_MAP_READ, FILE_MAP_WRITE,
+            CreateFileMappingW, MapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_READ, FILE_MAP_WRITE,
             PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
         };
 
@@ -244,8 +243,8 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                     // GetCurrentProcess() returns a pseudo-handle (-1)
                     let current_process: HANDLE = -1isize as HANDLE;
                     if PrefetchVirtualMemory(
-                        current_process,      // Current process
-                        1,                    // One range
+                        current_process, // Current process
+                        1,               // One range
                         &mut range as *mut WIN32_MEMORY_RANGE_ENTRY,
                         0, // No flags
                     ) != 0
@@ -331,8 +330,8 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
         use std::ffi::CStr;
         use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileA, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
+            CreateFileA, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+            OPEN_EXISTING, TRUNCATE_EXISTING,
         };
 
         unsafe {
