@@ -5,6 +5,8 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_getpid() -> i64
 
+var _jit_enabled_cached: i64 = -1
+
 class JitState:
     threshold: i64
     enabled: i64
@@ -128,6 +130,7 @@ fn jit_init(threshold: i64, verbose: i64):
         used_keys: [],
         used_vals: []
     ))
+    _jit_enabled_cached = enabled
     if verbose == 1:
         print "jit_init save={ok}"
 
@@ -138,8 +141,16 @@ fn jit_cleanup():
     rt_file_delete(_state_path())
 
 fn jit_record_call(fn_name: text):
+    if _jit_enabled_cached == 0:
+        return
+    if _jit_enabled_cached == -1:
+        val s = _load_state()
+        _jit_enabled_cached = s.enabled
+        if _jit_enabled_cached == 0:
+            return
     var s = _load_state()
     if s.enabled == 0:
+        _jit_enabled_cached = 0
         return
     jit_mark_symbol_used(fn_name)
     s = _load_state()
@@ -165,6 +176,8 @@ fn jit_should_compile(fn_name: text) -> bool:
     jit_get_call_count(fn_name) >= s.threshold
 
 fn jit_is_compiled(fn_name: text) -> bool:
+    if _jit_enabled_cached == 0:
+        return false
     val s = _load_state()
     s.compiled.contains(fn_name)
 
@@ -189,6 +202,8 @@ fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
     -1
 
 fn jit_is_enabled() -> bool:
+    if _jit_enabled_cached == 0:
+        return false
     val s = _load_state()
     s.enabled == 1
 

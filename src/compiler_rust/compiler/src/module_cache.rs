@@ -57,8 +57,11 @@ pub fn clear_module_cache() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
+    // Print resolve stats before clearing (if profiling enabled)
+    super::interpreter_module::print_resolve_stats();
     // Also clear path resolution cache
     super::interpreter_module::clear_path_resolution_cache();
+    super::interpreter_module::reset_resolve_stats();
 }
 
 /// Increment total modules loaded counter, return new count

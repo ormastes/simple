@@ -692,6 +692,9 @@ fn real_main() {
         }
     };
 
+    // Print resolve stats before exit (if SIMPLE_PROFILE is set)
+    simple_compiler::interpreter::print_resolve_stats();
+
     if metrics_enabled {
         exit_with_metrics(exit_code, &metrics);
     } else {

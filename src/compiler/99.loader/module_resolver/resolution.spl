@@ -10,6 +10,8 @@ export resolve_from_base
 export get_exports
 export get_common_uses
 export find_numbered_dir
+export clear_cache
+export print_resolve_stats
 
 use parser.ast (ModulePath, ImportTarget, Visibility, Node)
 use parser (Parser)
@@ -27,21 +29,13 @@ impl ModuleResolver:
     fn resolve(path: ModulePath, from_file: text) -> ResolvedModule | CompileError:
         """Resolve a module path to a filesystem path.
 
-        Arguments:
-        - path: The module path to resolve (e.g., crate.sys.http.router)
-        - from_file: The file making the import (for relative resolution)
-
-        Returns:
-        - ResolvedModule: The resolved module information including filesystem path
-        - CompileError: If the module cannot be found
-
-        ROBUSTNESS:
-        - Validates non-empty path
-        - Tries absolute (crate.*) then relative resolution
-        - Falls back to stdlib if relative fails
+        Uses a resolution cache to avoid repeated filesystem probing.
+        Cache key is "segments;from_file" for O(1) lookup on repeat imports.
         """
         val segments = path.segments
         debug("resolver", "Resolving module path: {segments} from {from_file}")
+
+        self.resolve_count = self.resolve_count + 1
 
         if segments.is_empty():
             return CompileError.semantic(
@@ -49,6 +43,21 @@ impl ModuleResolver:
                 ErrorCode.MODULE_NOT_FOUND,
                 "provide at least one module path segment"
             )
+
+        # Check resolution cache
+        val cache_key = "{segments.join('.')};{from_file}"
+        if self.resolution_cache.contains_key(cache_key):
+            self.cache_hit_count = self.cache_hit_count + 1
+            val cached = self.resolution_cache[cache_key]
+            if cached.?:
+                val cached_path = cached ?? ""
+                return Ok(ResolvedModule.file(cached_path, path.clone()))
+            else:
+                return CompileError.semantic(
+                    "cannot resolve import: module not found (cached)",
+                    ErrorCode.UNRESOLVED_IMPORT,
+                    "module path was previously unresolvable"
+                )
 
         # Determine base directory
         val (base_dir, remaining) = if segments[0] == "crate":
@@ -62,6 +71,7 @@ impl ModuleResolver:
         # Try resolving from the base directory first
         match self.resolve_from_base(base_dir, remaining, path):
             Ok(resolved):
+                self.resolution_cache[cache_key] = Some(resolved.path)
                 return Ok(resolved)
             Err(err):
                 # If relative resolution failed and stdlib is available, try stdlib
@@ -76,12 +86,12 @@ impl ModuleResolver:
                         if not stdlib_segments.is_empty():
                             match self.resolve_from_base(stdlib_root, stdlib_segments, path):
                                 Ok(resolved):
+                                    self.resolution_cache[cache_key] = Some(resolved.path)
                                     return Ok(resolved)
                                 Err(_):
-                                    # Stdlib resolution also failed, return original error
                                     pass
 
-                # Rewrite std/lib → lib (std is a package alias, real code is in lib/)
+                # Skip stdlib lib/ subdirectory search for non-std/lib imports
                 val is_std_or_lib = segments[0] == "std" or segments[0] == "lib"
                 if is_std_or_lib:
                     val inner_segments = segments[1..]
@@ -90,23 +100,54 @@ impl ModuleResolver:
                     lib_segments.extend(inner_segments)
                     match self.resolve_from_base(self.source_root.clone(), lib_segments, path):
                         Ok(resolved):
+                            self.resolution_cache[cache_key] = Some(resolved.path)
                             return Ok(resolved)
                         Err(_):
                             pass
                     # Try lib/*/ subdirectory search
                     val lib_dir = path_join(self.source_root.clone(), "lib")
                     if rt_dir_exists(lib_dir):
-                        val subdirs = rt_dir_list(lib_dir)
+                        val subdirs = self.cached_dir_list(lib_dir)
                         for subdir in subdirs:
                             var sub_segments = ["lib", subdir]
                             sub_segments.extend(inner_segments)
                             match self.resolve_from_base(self.source_root.clone(), sub_segments, path):
                                 Ok(resolved):
+                                    self.resolution_cache[cache_key] = Some(resolved.path)
                                     return Ok(resolved)
                                 Err(_):
                                     pass
 
+                # Cache the miss
+                self.resolution_cache[cache_key] = nil
                 return Err(err)
+
+    fn cached_dir_list(dir_path: text) -> [text]:
+        """Get directory listing with caching to avoid repeated rt_dir_list calls."""
+        if self.dir_cache.contains_key(dir_path):
+            return self.dir_cache[dir_path]
+        self.dir_list_call_count = self.dir_list_call_count + 1
+        val entries = rt_dir_list(dir_path)
+        self.dir_cache[dir_path] = entries
+        entries
+
+    fn clear_cache():
+        """Clear all resolution caches. Call between test runs."""
+        self.resolution_cache = {}
+        self.dir_cache = {}
+        self.resolve_count = 0
+        self.cache_hit_count = 0
+        self.dir_list_call_count = 0
+
+    fn print_resolve_stats():
+        """Print resolution statistics if SIMPLE_PROFILE env var is set."""
+        val profile_env = rt_env_get("SIMPLE_PROFILE")
+        if profile_env.?:
+            val hit_rate = if self.resolve_count > 0:
+                (self.cache_hit_count * 100) / self.resolve_count
+            else:
+                0
+            print "[resolve-stats] calls={self.resolve_count} cache_hits={self.cache_hit_count} hit_rate={hit_rate}% dir_list={self.dir_list_call_count}"
 
     fn resolve_from_base(
         base: text,
@@ -377,6 +418,18 @@ fn is_file(path: text) -> bool:
     rt_file_exists(path) and not rt_dir_exists(path)
 
 extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_env_get(key: text) -> text
+
+# Module-level directory listing cache for free functions
+var _dir_listing_cache: {text: [text]} = {}
+
+fn cached_dir_list_global(dir_path: text) -> [text]:
+    """Module-level cached dir listing for free functions."""
+    if _dir_listing_cache.contains_key(dir_path):
+        return _dir_listing_cache[dir_path]
+    val entries = rt_dir_list(dir_path)
+    _dir_listing_cache[dir_path] = entries
+    entries
 
 fn find_numbered_dir(parent: text, segment: text) -> text?:
     """Find a numbered directory matching a segment name.
@@ -384,14 +437,12 @@ fn find_numbered_dir(parent: text, segment: text) -> text?:
     Scans the parent directory for entries matching the pattern NN.name
     where NN is a 1-3 digit numeric prefix and name matches the segment.
     Returns the full path if found, nil otherwise.
-
-    Example: find_numbered_dir("/src/compiler", "frontend")
-             finds "/src/compiler/10.frontend" and returns that path.
+    Uses cached directory listings to avoid repeated rt_dir_list calls.
     """
     if not rt_dir_exists(parent):
         return nil
 
-    val entries = rt_dir_list(parent)
+    val entries = cached_dir_list_global(parent)
     for entry in entries:
         val dot_idx = entry.index_of(".")
         if dot_idx.?:
