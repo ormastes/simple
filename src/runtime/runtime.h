@@ -282,6 +282,13 @@ void        spl_init_args(int argc, char** argv);
 int64_t     spl_arg_count(void);
 const char* spl_get_arg(int64_t idx);
 
+/* ===== File Prefetch (CLI keyword support) ===== */
+
+void        spl_prefetch_start(const char* path);  /* warm page cache via fork+madvise */
+void        spl_prefetch_wait(void);               /* reap prefetch child */
+void        rt_prefetch_start(const char* path);   /* FFI alias */
+void        rt_prefetch_wait(void);                /* FFI alias */
+
 /* ===== rt_ Aliases (FFI-compatible wrappers) ===== */
 
 const char* rt_file_read_text(const char* path);
