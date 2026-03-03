@@ -192,6 +192,7 @@ struct CompileOptions:
     interpreter_mode: text  # "optimized" (default), "classic" (legacy)
     gc_off: bool            # Disable garbage collection
     smf_output_mode: text   # "code_only" (default), "elf_embedded", "reloc_sections"
+    low_memory: bool        # Enable aggressive memory eviction between phases
 
     static fn default() -> CompileOptions:
         val default_mode = CompileMode__from_text("jit").unwrap()
@@ -212,7 +213,8 @@ struct CompileOptions:
             backend: "auto",
             interpreter_mode: "optimized",
             gc_off: false,
-            smf_output_mode: "code_only"
+            smf_output_mode: "code_only",
+            low_memory: false
         )
 
 # Manually desugared static method for bootstrap runtime compatibility
@@ -235,7 +237,8 @@ fn CompileOptions__default() -> CompileOptions:
         backend: "auto",
         interpreter_mode: "optimized",
         gc_off: false,
-        smf_output_mode: "code_only"
+        smf_output_mode: "code_only",
+        low_memory: false
     )
 
 # ------------------------------------------------------------------------------
@@ -420,6 +423,25 @@ class CompileContext:
     me register_extension(name: text, value: Any):
         # Register a named extension instance for plugin use
         self.extensions.bind_instance(name, value)
+
+    # ------------------------------------------------------------------
+    # Memory eviction (--low-memory mode)
+    # ------------------------------------------------------------------
+    # After parsing, raw source text is no longer needed.
+    me evict_sources():
+        self.sources = []
+
+    # After HIR lowering, AST modules are no longer needed.
+    me evict_ast():
+        self.modules = {}
+
+    # After MIR lowering, HIR modules are no longer needed.
+    me evict_hir():
+        self.hir_modules = {}
+
+    # After codegen writes .o for a module, its MIR can be released.
+    me evict_mir_module(name: text):
+        self.mir_modules.remove(name)
 
 # ------------------------------------------------------------------------------
 # Check Backend (Type Check Only)

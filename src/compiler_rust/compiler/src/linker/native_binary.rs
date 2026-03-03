@@ -214,8 +214,7 @@ impl NativeBinaryOptions {
                 "simple_runtime".into(), // Runtime FFI functions
             ],
             TargetOS::MacOS => vec![
-                "c".into(),
-                "System".into(), // Provides pthread, dl, m on macOS
+                "System".into(), // Provides libc, pthread, dl, m on macOS
                 "simple_runtime".into(),
             ],
             TargetOS::Windows => vec![
@@ -285,6 +284,20 @@ impl NativeBinaryOptions {
                 }
             }
             TargetOS::MacOS => {
+                // On modern macOS, system libraries are TBD stubs inside the SDK.
+                // Detect SDK path via xcrun for reliable library resolution.
+                if let Ok(output) = std::process::Command::new("xcrun")
+                    .args(["--show-sdk-path"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let sdk_lib = PathBuf::from(&sdk).join("usr/lib");
+                        if sdk_lib.exists() {
+                            paths.push(sdk_lib);
+                        }
+                    }
+                }
                 for path in ["/usr/lib", "/usr/local/lib"] {
                     let p = PathBuf::from(path);
                     if p.exists() {
@@ -385,23 +398,37 @@ impl NativeBinaryOptions {
                 if exe_dir.join("libsimple_runtime.a").exists() {
                     return Some(exe_dir.to_path_buf());
                 }
+
+                // Check deps/ subdirectory (for bootstrap/custom profiles)
+                let deps_dir = exe_dir.join("deps");
+                if deps_dir.join("libsimple_runtime.a").exists() {
+                    return deps_dir.canonicalize().ok();
+                }
             }
         }
 
         // Check cargo target directory (for development)
-        // Try both release and debug directories
+        // Try release, debug, and bootstrap directories (including deps/ for profile builds)
         let cargo_target_paths = [
             // Standard cargo target directory
             "target/release",
             "target/debug",
+            "target/bootstrap",
+            "target/bootstrap/deps",
             // Rust compiler subdirectory (Simple project layout)
             "src/compiler_rust/target/release",
             "src/compiler_rust/target/debug",
+            "src/compiler_rust/target/bootstrap",
+            "src/compiler_rust/target/bootstrap/deps",
             // Workspace root (when running from subdirectory)
             "../target/release",
             "../target/debug",
+            "../target/bootstrap",
+            "../target/bootstrap/deps",
             "../../target/release",
             "../../target/debug",
+            "../../target/bootstrap",
+            "../../target/bootstrap/deps",
         ];
 
         for path in cargo_target_paths {
@@ -419,10 +446,15 @@ impl NativeBinaryOptions {
                 .map(|p| p.to_path_buf());
 
             if let Some(root) = workspace_root {
-                for profile in ["release", "debug"] {
+                for profile in ["release", "debug", "bootstrap"] {
                     let lib_path = root.join("target").join(profile);
                     if lib_path.join("libsimple_runtime.a").exists() {
                         return Some(lib_path);
+                    }
+                    // Also check deps/ subdirectory (custom profiles put libs there)
+                    let deps_path = lib_path.join("deps");
+                    if deps_path.join("libsimple_runtime.a").exists() {
+                        return Some(deps_path);
                     }
                 }
             }
@@ -573,42 +605,46 @@ impl NativeBinaryBuilder {
         std::fs::write(&obj_path, &self.object_code)
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write object file: {}", e)))?;
 
-        // Bootstrap helpers: stubs for entry + missing runtime symbols.
+        // Entry point and bootstrap stubs.
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
         let mut require_crypto = false;
         let ret_insn = asm_ret_instruction(&self.options.target);
 
-        if bootstrap_mode {
+        // Always create main shim: codegen emits spl_main (not main), so we need
+        // a C main() that calls spl_main() for the linker to find an entry point.
+        if !self.options.shared {
             let cc = detect_c_compiler(&self.options.target);
 
-            // 1) main shim
-            let stub_c = temp_path.join("_bootstrap_main.c");
-            let stub_o = temp_path.join("_bootstrap_main.o");
+            let stub_c = temp_path.join("_main_shim.c");
+            let stub_o = temp_path.join("_main_shim.o");
             std::fs::write(
                 &stub_c,
                 r#"
 extern int spl_main(void);
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    int r = spl_main ? spl_main() : 0;
-    return r;
+    return spl_main();
 }
 "#,
             )
-            .map_err(|e| LinkerError::LinkFailed(format!("failed to write stub: {}", e)))?;
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to write main shim: {}", e)))?;
             let status = std::process::Command::new(&cc)
                 .args(compile_c_args(&cc, &stub_o, &stub_c))
                 .status()
-                .map_err(|e| LinkerError::LinkFailed(format!("failed to compile stub: {}", e)))?;
+                .map_err(|e| LinkerError::LinkFailed(format!("failed to compile main shim: {}", e)))?;
             if status.success() {
                 bootstrap_stubs.push(stub_o);
             } else {
                 eprintln!(
-                    "warning: failed to build bootstrap main stub with {} (status {})",
+                    "warning: failed to build main shim with {} (status {})",
                     cc, status
                 );
             }
+        }
+
+        if bootstrap_mode {
+            let cc = detect_c_compiler(&self.options.target);
 
             // 2) common missing-symbol stub
             let miss_c = temp_path.join("_bootstrap_missing.c");
@@ -650,7 +686,11 @@ __attribute__((weak)) int64_t rt_time_now_unix_micros(void) {{ return _rt_now_na
 __attribute__((weak)) char* rt_hostname(void) {{ return (char*)""; }}
 __attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
 __attribute__((weak, visibility("default"))) int64_t count_by_severity(void) {{ return 0; }}
+#ifdef __APPLE__
+__asm__(".weak_definition _SCOPE_LEVELS.contains_key\n_SCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
+#else
 __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
+#endif
 "#,
                     ret_insn = ret_insn
                 ),
@@ -933,7 +973,15 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                             ));
                         } else {
                             let clean = sym.replace('\"', "");
+                            // macOS Mach-O uses .weak_definition + underscore prefix
+                            #[cfg(target_os = "macos")]
+                            code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                            // ELF (Linux/FreeBSD) uses .weak without underscore prefix
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                             code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                            // Windows: use __attribute__((weak)) instead of inline asm
+                            #[cfg(target_os = "windows")]
+                            code.push_str(&format!("__attribute__((weak)) void {0}(void) {{}}\n", clean));
                         }
                     }
                     std::fs::write(&auto_c, code)
@@ -1002,9 +1050,10 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                     LinkerFlavor::Gnu => {
                         if matches!(self.options.target.os, TargetOS::MacOS) {
                             // macOS ld64: -force_load per archive
+                            // Both flag and path must be in extra_flags to stay adjacent
                             for stub in extra_stubs {
                                 builder = builder.flag("-force_load".to_string());
-                                builder = builder.object(stub);
+                                builder = builder.flag(stub.display().to_string());
                             }
                         } else {
                             // GNU ld / LLD: --whole-archive / --no-whole-archive
@@ -1373,7 +1422,15 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                         ));
                     } else {
                         let clean = sym.replace('\"', "");
+                        // macOS Mach-O uses .weak_definition + underscore prefix
+                        #[cfg(target_os = "macos")]
+                        code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                        // ELF (Linux/FreeBSD) uses .weak without underscore prefix
+                        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                         code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                        // Windows: use __attribute__((weak)) instead of inline asm
+                        #[cfg(target_os = "windows")]
+                        code.push_str(&format!("__attribute__((weak)) void {0}(void) {{}}\n", clean));
                     }
                 }
                 std::fs::write(&auto_c, code)
@@ -1666,6 +1723,10 @@ mod tests {
         assert!(options.pie);
         assert!(!options.strip);
         assert!(!options.shared);
+        // macOS uses -lSystem instead of -lc (System provides libc)
+        #[cfg(target_os = "macos")]
+        assert!(options.libraries.contains(&"System".to_string()));
+        #[cfg(not(target_os = "macos"))]
         assert!(options.libraries.contains(&"c".to_string()));
     }
 
@@ -1891,10 +1952,10 @@ mod tests {
     fn test_default_libraries_macos() {
         let target = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
         let libs = NativeBinaryOptions::default_libraries_for_target(&target);
-        assert!(libs.contains(&"c".to_string()));
         assert!(libs.contains(&"System".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
-        // macOS should NOT have pthread/dl/m (provided by -lSystem)
+        // macOS should NOT have pthread/dl/m/c (all provided by -lSystem)
+        assert!(!libs.contains(&"c".to_string()));
         assert!(!libs.contains(&"pthread".to_string()));
         assert!(!libs.contains(&"dl".to_string()));
     }
