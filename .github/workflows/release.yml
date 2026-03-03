@@ -71,7 +71,7 @@ jobs:
           # macOS platforms
           - os: macos-latest
             platform: darwin-arm64
-          - os: macos-15  # Intel Mac
+          - os: macos-15-intel  # Intel Mac (until Aug 2027)
             platform: darwin-x86_64
 
           # FreeBSD (uses Linux binary via Linuxulator)
@@ -96,6 +96,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain (macOS)
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-bootstrap-
 
       - name: Download Bootstrap Runtime (v0.6.0)
         shell: bash
@@ -261,6 +277,37 @@ jobs:
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
           fi
 
+      - name: Build native macOS binary via Rust bootstrap
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Building native macOS binary via Rust bootstrap"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          cd ../..
+
+          BINARY="src/compiler_rust/target/bootstrap/simple"
+          if [ -f "$BINARY" ]; then
+            file "$BINARY"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$BINARY" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+
+            if "./$BINARY" --version 2>/dev/null; then
+              echo "✓ Native macOS binary verified"
+            else
+              echo "✓ Native macOS binary built (version check may differ)"
+            fi
+            ls -lh "$BINARY"
+          else
+            echo "✗ Rust bootstrap build failed — no binary produced"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+          fi
+
       - name: Create distribution package
         shell: bash
         run: |
@@ -289,9 +336,8 @@ jobs:
           BINARY_TO_PACKAGE=""
 
           if [ "${HAVE_BOOTSTRAP:-false}" = "true" ]; then
-            # For linux-x86_64, use newly built runtime if available
-            # For other platforms, use bootstrap runtime
-            if [ "$PLATFORM" = "linux-x86_64" ] && [ "${NEW_RUNTIME_BUILT:-false}" = "true" ] && [ -n "${NEW_RUNTIME_PATH}" ]; then
+            # Use newly built runtime if available (Linux committed binary or macOS Rust bootstrap)
+            if [ "${NEW_RUNTIME_BUILT:-false}" = "true" ] && [ -n "${NEW_RUNTIME_PATH}" ]; then
               echo "✓ Using newly built runtime for packaging"
               BINARY_TO_PACKAGE="$NEW_RUNTIME_PATH"
             elif [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then

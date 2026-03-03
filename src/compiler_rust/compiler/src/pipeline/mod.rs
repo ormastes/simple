@@ -162,32 +162,58 @@ mod tests {
         let codegen = crate::codegen::Codegen::new().expect("codegen new");
         let object_code = codegen.compile_module(&mir_module).expect("compile ok");
 
-        // Check if it's ELF
-        assert!(
-            object_code.len() > 4 && &object_code[0..4] == b"\x7fELF",
-            "Expected ELF format, got first 4 bytes: {:?}",
-            &object_code[0..4.min(object_code.len())]
-        );
-
-        // List all sections for debugging
-        let sections = list_elf_sections(&object_code);
-        eprintln!("ELF sections:");
-        for s in &sections {
-            eprintln!("  {}", s);
+        // Check object format based on host platform
+        #[cfg(target_os = "macos")]
+        {
+            // Mach-O 64-bit magic: 0xFEEDFACF (little-endian: CF FA ED FE)
+            assert!(
+                object_code.len() > 4 && &object_code[0..4] == b"\xcf\xfa\xed\xfe",
+                "Expected Mach-O format on macOS, got first 4 bytes: {:?}",
+                &object_code[0..4.min(object_code.len())]
+            );
+            eprintln!("Mach-O object code size: {} bytes", object_code.len());
         }
 
-        // Try to extract .text section
-        let text_section = extract_elf_text_section(&object_code);
-        assert!(
-            text_section.is_some(),
-            "Failed to extract .text section from ELF. Sections: {:?}",
-            sections
-        );
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            // ELF magic: 0x7F 'E' 'L' 'F'
+            assert!(
+                object_code.len() > 4 && &object_code[0..4] == b"\x7fELF",
+                "Expected ELF format, got first 4 bytes: {:?}",
+                &object_code[0..4.min(object_code.len())]
+            );
 
-        let text = text_section.unwrap();
-        assert!(!text.is_empty(), "Extracted .text section is empty");
-        eprintln!("Extracted .text section size: {} bytes", text.len());
-        eprintln!("First 16 bytes: {:02x?}", &text[0..16.min(text.len())]);
+            // List all sections for debugging
+            let sections = list_elf_sections(&object_code);
+            eprintln!("ELF sections:");
+            for s in &sections {
+                eprintln!("  {}", s);
+            }
+
+            // Try to extract .text section
+            let text_section = extract_elf_text_section(&object_code);
+            assert!(
+                text_section.is_some(),
+                "Failed to extract .text section from ELF. Sections: {:?}",
+                sections
+            );
+
+            let text = text_section.unwrap();
+            assert!(!text.is_empty(), "Extracted .text section is empty");
+            eprintln!("Extracted .text section size: {} bytes", text.len());
+            eprintln!("First 16 bytes: {:02x?}", &text[0..16.min(text.len())]);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // COFF magic: first two bytes are machine type (e.g., 0x8664 for x86_64)
+            assert!(
+                object_code.len() > 2,
+                "Expected COFF object, got {} bytes",
+                object_code.len()
+            );
+            eprintln!("COFF object code size: {} bytes", object_code.len());
+        }
     }
 
     #[cfg(not(feature = "llvm"))]

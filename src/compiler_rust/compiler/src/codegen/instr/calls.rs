@@ -476,6 +476,14 @@ pub fn compile_call<M: Module>(
             .map(|s| s.as_str())
             .unwrap_or(func_name);
 
+        // Sanitize symbol name for macOS: Mach-O does not support dots in symbols.
+        // Apple ld crashes on dot-containing symbol names.
+        let resolved_name = if cfg!(target_os = "macos") && resolved_name.contains('.') {
+            std::borrow::Cow::Owned(resolved_name.replace('.', "_dot_"))
+        } else {
+            std::borrow::Cow::Borrowed(resolved_name)
+        };
+
         // All Simple values are i64-tagged, so use a uniform i64 signature.
         let call_conv = cranelift_codegen::isa::CallConv::SystemV;
         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
@@ -487,7 +495,7 @@ pub fn compile_call<M: Module>(
 
         match ctx
             .module
-            .declare_function(resolved_name, cranelift_module::Linkage::Import, &sig)
+            .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig)
         {
             Ok(func_id) => {
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);

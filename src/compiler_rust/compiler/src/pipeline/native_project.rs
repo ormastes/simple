@@ -354,8 +354,17 @@ impl NativeProjectBuilder {
 
         // 7. Link
         let link_start = Instant::now();
-        self.link_objects(&object_paths)?;
+        let link_result = self.link_objects(&object_paths);
         let link_time = link_start.elapsed();
+
+        // On link failure, optionally keep objects for debugging
+        if link_result.is_err() {
+            if let Some(dir) = temp_dir.take() {
+                let path = dir.into_path();
+                eprintln!("Link failed. Objects kept at: {}", path.display());
+            }
+            return Err(link_result.unwrap_err());
+        }
 
         // Optionally keep the temporary object directory for debugging.
         if std::env::var("SIMPLE_KEEP_NATIVE_OBJS").is_ok() {
@@ -574,11 +583,63 @@ int main(int argc, char** argv) {
         // Use clang as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
         // libc initialization, and library paths automatically.
         let mut cmd = std::process::Command::new("clang");
-        cmd.arg("-fPIC").arg("-no-pie").arg("-o").arg(&self.output).arg(&main_o);
+        cmd.arg("-fPIC");
 
-        // Add all SPL object files
-        for obj in object_paths {
-            cmd.arg(obj);
+        // macOS: PIE is the default and -no-pie is not supported by Apple clang.
+        // Linux/FreeBSD: disable PIE for simpler static linking.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        cmd.arg("-no-pie");
+
+        cmd.arg("-o").arg(&self.output).arg(&main_o);
+
+        // For large builds, archive objects into a static library first to avoid
+        // linker crashes when passing thousands of individual .o files.
+        if object_paths.len() > 100 {
+            let archive_path = temp_dir.join("libspl_objects.a");
+            let ar_status = std::process::Command::new("ar")
+                .arg("rcs")
+                .arg(&archive_path)
+                .args(object_paths)
+                .status()
+                .map_err(|e| format!("ar: {e}"))?;
+            if !ar_status.success() {
+                // Fallback: try libtool on macOS (handles large inputs better)
+                #[cfg(target_os = "macos")]
+                {
+                    let lt_status = std::process::Command::new("libtool")
+                        .arg("-static")
+                        .arg("-o")
+                        .arg(&archive_path)
+                        .args(object_paths)
+                        .status()
+                        .map_err(|e| format!("libtool: {e}"))?;
+                    if !lt_status.success() {
+                        return Err("failed to archive object files with ar and libtool".to_string());
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(format!("ar failed with status {}", ar_status));
+            }
+            // Link the archive. Use -force_load/--whole-archive to include all symbols,
+            // not just referenced ones (needed for runtime dispatch tables).
+            // On macOS, also pass -no_deduplicate for faster linking with large archives.
+            #[cfg(target_os = "macos")]
+            {
+                cmd.arg("-Wl,-force_load").arg(&archive_path);
+                cmd.arg("-Wl,-no_deduplicate");
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                cmd.arg("-Wl,--whole-archive").arg(&archive_path).arg("-Wl,--no-whole-archive");
+            }
+            #[cfg(target_os = "windows")]
+            {
+                cmd.arg("-Wl,/WHOLEARCHIVE").arg(&archive_path);
+            }
+        } else {
+            for obj in object_paths {
+                cmd.arg(obj);
+            }
         }
 
         // Add runtime/compiler library. Prefer combined native_all library
@@ -589,17 +650,51 @@ int main(int argc, char** argv) {
             cmd.arg(&runtime);
         }
 
-        // Libraries
+        // Libraries — platform-specific
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: pthread and dl are part of libSystem (linked automatically),
+            // unwind is built into the system. Only -lm is needed explicitly.
+            cmd.arg("-lm");
+            // Link libSystem explicitly for completeness
+            cmd.arg("-lSystem");
+        }
+        #[cfg(target_os = "freebsd")]
+        {
+            // FreeBSD: dlopen is in libc (no -ldl), needs -lexecinfo for backtraces,
+            // pthread and m are separate libraries.
+            for lib in &["pthread", "m", "execinfo"] {
+                cmd.arg(format!("-l{}", lib));
+            }
+        }
+        #[cfg(target_os = "linux")]
         for lib in &["pthread", "dl", "m", "unwind"] {
             cmd.arg(format!("-l{}", lib));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows with clang/MinGW: link against Windows system libraries
+            for lib in &["kernel32", "ws2_32", "bcrypt", "userenv"] {
+                cmd.arg(format!("-l{}", lib));
+            }
         }
 
         // Allow undefined symbols at link time. Many .spl files declare extern fn rt_*
         // functions that aren't in the runtime library (CUDA, GC, debugger hooks, etc.).
+        #[cfg(target_os = "macos")]
+        cmd.arg("-Wl,-undefined,dynamic_lookup");
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+        #[cfg(target_os = "windows")]
+        cmd.arg("-Wl,/FORCE:UNRESOLVED");
 
         if self.config.strip {
+            #[cfg(target_os = "macos")]
+            cmd.arg("-Wl,-S");
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cmd.arg("-Wl,-s");
+            #[cfg(target_os = "windows")]
+            cmd.arg("-Wl,/DEBUG:NONE");
         }
 
         if self.config.verbose {
@@ -650,6 +745,8 @@ fn compile_file_to_object(
         if source.ends_with('?') {
             source.pop();
         }
+        // Layer connect operator ~> not yet in parser — rewrite to pipe |> for bootstrap
+        source = source.replace(" ~> ", " |> ");
     }
 
     // Parse
@@ -819,6 +916,19 @@ struct ImportMapResult {
     re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
+/// Sanitize a mangled symbol name for the host platform.
+///
+/// On macOS, Mach-O does not support dots in symbol names — Apple ld crashes.
+/// This replaces dots with `_dot_` to produce valid symbols, matching what
+/// `CommonBackend::sanitize_symbol` does during codegen.
+fn sanitize_mangled(name: String) -> String {
+    if cfg!(target_os = "macos") && name.contains('.') {
+        name.replace('.', "_dot_")
+    } else {
+        name
+    }
+}
+
 /// Build an import map for cross-module function resolution.
 ///
 /// Parses each source file to discover top-level function definitions,
@@ -853,11 +963,11 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", c.name, m.name);
                                 // include both raw method name and fully qualified with class for convenience
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
                                 raw_to_mangled
                                     .entry(m.name.clone())
                                     .or_default()
-                                    .push(format!("{}__{}.{}", prefix, c.name, m.name));
-                                let mangled = format!("{}__{}.{}", prefix, c.name, m.name);
+                                    .push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -876,14 +986,15 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                     simple_parser::ast::Node::ExternClass(ec) => {
                         for m in &ec.methods {
                             let raw = format!("{}.{}", ec.name, m.name);
+                            let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ec.name, m.name));
                             raw_to_mangled
                                 .entry(raw.clone())
                                 .or_default()
-                                .push(format!("{}__{}.{}", prefix, ec.name, m.name));
+                                .push(mangled.clone());
                             raw_to_mangled
                                 .entry(m.name.clone())
                                 .or_default()
-                                .push(format!("{}__{}.{}", prefix, ec.name, m.name));
+                                .push(mangled);
                         }
                     }
                     _ => {}
@@ -957,22 +1068,22 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
     }
 
     // Hardcode critical logging symbols to avoid bootstrap misses
-    let logger_debug = "compiler__common__config__Logger.debug".to_string();
+    let logger_debug = sanitize_mangled("compiler__common__config__Logger.debug".to_string());
     map.entry("Logger.debug".to_string())
         .or_insert_with(|| logger_debug.clone());
     map.entry("debug".to_string()).or_insert_with(|| logger_debug.clone());
 
-    let logger_trace = "compiler__common__config__Logger.trace".to_string();
+    let logger_trace = sanitize_mangled("compiler__common__config__Logger.trace".to_string());
     map.entry("Logger.trace".to_string())
         .or_insert_with(|| logger_trace.clone());
     map.entry("trace".to_string()).or_insert_with(|| logger_trace.clone());
 
     // Bootstrap logger (defined in driver_types) to keep logging non-fatal
-    let boot_debug = "compiler__driver__driver_types__BootLogger.debug".to_string();
+    let boot_debug = sanitize_mangled("compiler__driver__driver_types__BootLogger.debug".to_string());
     map.entry("BootLogger.debug".to_string())
         .or_insert_with(|| boot_debug.clone());
 
-    let boot_trace = "compiler__driver__driver_types__BootLogger.trace".to_string();
+    let boot_trace = sanitize_mangled("compiler__driver__driver_types__BootLogger.trace".to_string());
     map.entry("BootLogger.trace".to_string())
         .or_insert_with(|| boot_trace.clone());
 
@@ -1194,14 +1305,15 @@ fn find_native_all_library() -> Option<PathBuf> {
 fn find_runtime_library() -> Option<PathBuf> {
     // Check common locations
     let candidates = [
-        // Development layout
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/release/libsimple_runtime.a",
-        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        // Bootstrap profile (used for seed compiler)
+        // Bootstrap profile (smallest optimized build, used for seed compiler)
         "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
         "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
+        // Release layout (optimized)
+        "src/compiler_rust/target/release/libsimple_runtime.a",
+        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
+        // Debug layout (fallback, may be very large)
+        "src/compiler_rust/target/debug/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
         // System-installed
         "/usr/local/lib/libsimple_runtime.a",
     ];

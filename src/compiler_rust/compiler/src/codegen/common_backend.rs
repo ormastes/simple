@@ -163,8 +163,10 @@ pub fn create_isa_and_flags(
 
     let flags = Flags::new(settings_builder);
 
-    // Use the target from settings, or default to host
-    let triple = target_arch_to_triple(settings.target.arch)?;
+    // Use the full target (arch + OS) for correct object format (Mach-O on macOS, ELF on Linux)
+    let triple: Triple = settings.target.triple_str()
+        .parse()
+        .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?;
 
     create_isa_from_triple(triple, flags)
 }
@@ -275,9 +277,23 @@ impl<M: Module> CodegenBackend<M> {
         if name == "main" && self.is_entry_module {
             return "spl_main".to_string();
         }
-        match &self.module_prefix {
+        let mangled = match &self.module_prefix {
             Some(prefix) => format!("{}__{}", prefix, name),
             None => name.to_string(),
+        };
+        self.sanitize_symbol(&mangled)
+    }
+
+    /// Sanitize a symbol name for the target platform.
+    ///
+    /// Mach-O (macOS) does not support dots in symbol names — Apple ld crashes.
+    /// Replace dots with `_dot_` to produce valid symbols on macOS.
+    /// ELF (Linux) allows dots, so no transformation is needed.
+    pub fn sanitize_symbol(&self, name: &str) -> String {
+        if self.target.os == simple_common::target::TargetOS::MacOS && name.contains('.') {
+            name.replace('.', "_dot_")
+        } else {
+            name.to_string()
         }
     }
 
@@ -356,7 +372,7 @@ impl<M: Module> CodegenBackend<M> {
                     (self.mangle_name(&func.name), cranelift_module::Linkage::Local)
                 }
             } else if !has_body {
-                (func.name.clone(), cranelift_module::Linkage::Import)
+                (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Import)
             } else {
                 // All functions with bodies get mangled names + Preemptible linkage.
                 // This prevents symbol collisions when multiple modules define
@@ -422,9 +438,10 @@ impl<M: Module> CodegenBackend<M> {
                         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                         sig
                     };
+                    let sanitized = self.sanitize_symbol(name);
                     let fid = self
                         .module
-                        .declare_function(name, cranelift_module::Linkage::Import, &sig)
+                        .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
                         .map_err(|e| BackendError::ModuleError(format!("extern fn '{}': {}", name, e)))?;
                     self.func_ids.entry(name.clone()).or_insert(fid);
                     fid

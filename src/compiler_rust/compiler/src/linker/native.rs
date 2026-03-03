@@ -201,6 +201,13 @@ impl NativeLinker {
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false),
+            // Apple's ld doesn't support --version (exits 1). Use -v instead.
+            #[cfg(target_os = "macos")]
+            Self::Ld => Command::new(linker.command())
+                .arg("-v")
+                .output()
+                .map(|o| o.status.success() || !o.stderr.is_empty())
+                .unwrap_or(false),
             _ => Command::new(linker.command())
                 .arg("--version")
                 .output()
@@ -213,6 +220,9 @@ impl NativeLinker {
     pub fn version(&self) -> Option<String> {
         let (cmd, arg) = match self {
             Self::Msvc => (self.command(), "/NOLOGO"),
+            // Apple's ld prints version info to stderr with -v
+            #[cfg(target_os = "macos")]
+            Self::Ld => (self.command(), "-v"),
             _ => (self.command(), "--version"),
         };
         Command::new(cmd).arg(arg).output().ok().and_then(|o| {
@@ -222,6 +232,13 @@ impl NativeLinker {
                     s.lines().next().unwrap_or("").to_string()
                 })
             } else {
+                // Apple ld may exit non-zero with -v but still print version to stderr
+                #[cfg(target_os = "macos")]
+                if matches!(self, Self::Ld) {
+                    return String::from_utf8(o.stderr).ok().and_then(|s| {
+                        s.lines().next().map(|l| l.to_string())
+                    });
+                }
                 None
             }
         })
@@ -262,6 +279,31 @@ impl NativeLinker {
         // Add output file
         cmd.arg("-o").arg(output);
 
+        // macOS Apple ld requires several flags when invoked directly
+        // (syslibroot, arch, platform_version) that clang normally provides.
+        #[cfg(target_os = "macos")]
+        if matches!(self, Self::Ld) {
+            let mut sdk_version = String::from("15.0");
+            if let Ok(output_sdk) = Command::new("xcrun").args(["--show-sdk-path"]).output() {
+                if output_sdk.status.success() {
+                    let sdk = String::from_utf8_lossy(&output_sdk.stdout).trim().to_string();
+                    cmd.arg("-syslibroot").arg(&sdk);
+                }
+            }
+            if let Ok(output_ver) = Command::new("xcrun").args(["--show-sdk-version"]).output() {
+                if output_ver.status.success() {
+                    sdk_version = String::from_utf8_lossy(&output_ver.stdout).trim().to_string();
+                }
+            }
+            // Apple ld requires explicit -arch
+            #[cfg(target_arch = "aarch64")]
+            cmd.arg("-arch").arg("arm64");
+            #[cfg(target_arch = "x86_64")]
+            cmd.arg("-arch").arg("x86_64");
+            // Apple ld requires -platform_version: platform min_version sdk_version
+            cmd.arg("-platform_version").arg("macos").arg("11.0").arg(&sdk_version);
+        }
+
         // Add linker-specific flags
         self.add_common_flags(&mut cmd, options);
 
@@ -280,7 +322,13 @@ impl NativeLinker {
             cmd.arg("-L").arg(path);
         }
 
-        // Add rpath for runtime library loading (not on macOS — use @rpath via install_name_tool)
+        // Add rpath for runtime library loading
+        // macOS Apple ld uses -rpath <path> (not --rpath=); GNU ld uses --rpath=
+        #[cfg(target_os = "macos")]
+        for path in &options.library_paths {
+            cmd.arg("-rpath").arg(path);
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         for path in &options.library_paths {
             cmd.arg(format!("--rpath={}", path.display()));
         }
@@ -439,19 +487,34 @@ impl NativeLinker {
                 }
             }
             Self::Ld => {
-                if options.generate_map {
-                    if let Some(ref path) = options.map_file {
-                        cmd.arg(format!("-Map={}", path.display()));
+                #[cfg(target_os = "macos")]
+                {
+                    // Apple ld: PIE is default (skip -pie), no -Map=, use -S for debug strip
+                    if options.strip {
+                        cmd.arg("-S"); // Strip debug symbols (Apple ld)
                     }
+                    if options.shared {
+                        cmd.arg("-dylib"); // Apple ld uses -dylib, not -shared
+                    }
+                    // -dead_strip is Apple ld's equivalent of --gc-sections
+                    cmd.arg("-dead_strip");
                 }
-                if options.strip {
-                    cmd.arg("-s");
-                }
-                if options.shared {
-                    cmd.arg("-shared");
-                }
-                if options.pie {
-                    cmd.arg("-pie");
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                {
+                    if options.generate_map {
+                        if let Some(ref path) = options.map_file {
+                            cmd.arg(format!("-Map={}", path.display()));
+                        }
+                    }
+                    if options.strip {
+                        cmd.arg("-s");
+                    }
+                    if options.shared {
+                        cmd.arg("-shared");
+                    }
+                    if options.pie {
+                        cmd.arg("-pie");
+                    }
                 }
             }
             Self::Msvc => {
