@@ -649,21 +649,34 @@ int main(int argc, char** argv) {
             // 2) common missing-symbol stub
             let miss_c = temp_path.join("_bootstrap_missing.c");
             let miss_o = temp_path.join("_bootstrap_missing.o");
+            let is_windows = matches!(self.options.target.os, TargetOS::Windows);
+            // On Windows COFF, weak symbols don't satisfy undefined refs from other .o files.
+            // Use strong definitions; --allow-multiple-definition ensures runtime wins.
+            let weak_attr = if is_windows { "" } else { "__attribute__((weak)) " };
+            let weak_vis = if is_windows { "" } else { "__attribute__((weak, visibility(\"default\"))) " };
+            let asm_section = if is_windows {
+                String::new()
+            } else {
+                format!(
+                    "#ifdef __APPLE__\n__asm__(\".weak_definition _SCOPE_LEVELS.contains_key\\n_SCOPE_LEVELS.contains_key:\\n  {ret_insn}\\n\");\n#else\n__asm__(\".weak SCOPE_LEVELS.contains_key\\nSCOPE_LEVELS.contains_key:\\n  {ret_insn}\\n\");\n#endif\n",
+                    ret_insn = ret_insn
+                )
+            };
             std::fs::write(
                 &miss_c,
                 format!(
                     r#"
 #include <stdint.h>
 #include <stdbool.h>
-__attribute__((weak)) int64_t get_global_GLOBAL_LOG_LEVEL(void) {{ return 0; }}
-__attribute__((weak)) void set_global_GLOBAL_LOG_LEVEL(int64_t v) {{ (void)v; }}
-__attribute__((weak)) bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
-__attribute__((weak)) void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}
-__attribute__((weak)) void rt_fault_set_timeout(int64_t v) {{ (void)v; }}
-__attribute__((weak)) void rt_fault_set_execution_limit(int64_t v) {{ (void)v; }}
-__attribute__((weak)) void rt_debug_set_active(int64_t v) {{ (void)v; }}
-__attribute__((weak)) void rt_debug_enable(void) {{}}
-__attribute__((weak)) void rt_debug_disable(void) {{}}
+{w}int64_t get_global_GLOBAL_LOG_LEVEL(void) {{ return 0; }}
+{w}void set_global_GLOBAL_LOG_LEVEL(int64_t v) {{ (void)v; }}
+{w}bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
+{w}void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}
+{w}void rt_fault_set_timeout(int64_t v) {{ (void)v; }}
+{w}void rt_fault_set_execution_limit(int64_t v) {{ (void)v; }}
+{w}void rt_debug_set_active(int64_t v) {{ (void)v; }}
+{w}void rt_debug_enable(void) {{}}
+{w}void rt_debug_disable(void) {{}}
 // Real time helpers: provide working wall-clock nanos/micros for bootstrap.
 #if defined(_WIN32)
 #include <windows.h>
@@ -680,19 +693,17 @@ static inline int64_t _rt_now_nanos(void) {{
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }}
 #endif
-__attribute__((weak)) int64_t rt_time_now_nanos(void) {{ return _rt_now_nanos(); }}
-__attribute__((weak)) int64_t rt_time_now_micros(void) {{ return _rt_now_nanos() / 1000; }}
-__attribute__((weak)) int64_t rt_time_now_unix_micros(void) {{ return _rt_now_nanos() / 1000; }}
-__attribute__((weak)) char* rt_hostname(void) {{ return (char*)""; }}
-__attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
-__attribute__((weak, visibility("default"))) int64_t count_by_severity(void) {{ return 0; }}
-#ifdef __APPLE__
-__asm__(".weak_definition _SCOPE_LEVELS.contains_key\n_SCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
-#else
-__asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
-#endif
+{w}int64_t rt_time_now_nanos(void) {{ return _rt_now_nanos(); }}
+{w}int64_t rt_time_now_micros(void) {{ return _rt_now_nanos() / 1000; }}
+{w}int64_t rt_time_now_unix_micros(void) {{ return _rt_now_nanos() / 1000; }}
+{w}char* rt_hostname(void) {{ return (char*)""; }}
+{wv}void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
+{wv}int64_t count_by_severity(void) {{ return 0; }}
+{asm}
 "#,
-                    ret_insn = ret_insn
+                    w = weak_attr,
+                    wv = weak_vis,
+                    asm = asm_section
                 ),
             )
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write missing-symbol stub: {}", e)))?;
@@ -961,17 +972,21 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                     let auto_c = temp_path.join("_bootstrap_auto.c");
                     let auto_o = temp_path.join("_bootstrap_auto.o");
                     let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
+                    // On Windows COFF, weak attribute doesn't satisfy undefined references.
+                    // Use strong definitions; --allow-multiple-definition ensures runtime wins.
+                    let is_windows = matches!(self.options.target.os, TargetOS::Windows);
+                    let attr = if is_windows { "" } else { "__attribute__((weak)) " };
                     for sym in &symbols {
                         let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
                         let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
                         if is_data && valid_ident {
-                            code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
+                            code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                         } else if valid_ident {
                             code.push_str(&format!(
-                                "__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n",
-                                sym
+                                "{1}int64_t {0}(void) {{ return 0; }}\n",
+                                sym, attr
                             ));
-                        } else {
+                        } else if !is_windows {
                             let clean = sym.replace('\"', "");
                             // macOS Mach-O uses .weak_definition + underscore prefix
                             #[cfg(target_os = "macos")]
@@ -1038,6 +1053,42 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
 
             builder = builder.object(&obj_path);
 
+            // Link runtime library BEFORE bootstrap stubs so real implementations
+            // take precedence over stub fallbacks (first definition wins with
+            // --allow-multiple-definition).
+            let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.join("target/debug"))
+                    .filter(|p| p.join("libsimple_runtime.a").exists())
+            });
+
+            if let Some(runtime_dir) = &runtime_dir {
+                let native_all_lib = runtime_dir.join("libsimple_native_all.a");
+                let compiler_lib = runtime_dir.join("libsimple_compiler.a");
+                let runtime_lib = runtime_dir.join("libsimple_runtime.a");
+                if native_all_lib.exists() {
+                    builder = builder.object(&native_all_lib);
+                } else if runtime_lib.exists() {
+                    builder = builder.object(&runtime_lib);
+                } else if compiler_lib.exists() {
+                    builder = builder.object(&compiler_lib);
+                }
+            }
+
+            // Allow multiple definitions so bootstrap stubs don't conflict
+            // with real runtime symbols linked above.
+            if !extra_stubs.is_empty() && runtime_dir.is_some() {
+                match linker_flavor {
+                    LinkerFlavor::Gnu => {
+                        if !matches!(self.options.target.os, TargetOS::MacOS) {
+                            builder = builder.flag("--allow-multiple-definition".to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // Whole-archive flags differ by linker flavor
             if !extra_stubs.is_empty() {
                 match linker_flavor {
@@ -1091,26 +1142,6 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                     LinkerFlavor::WasmLd => {
                         builder = builder.flag("--allow-undefined".to_string());
                     }
-                }
-            }
-
-            let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|p| p.join("target/debug"))
-                    .filter(|p| p.join("libsimple_runtime.a").exists())
-            });
-
-            if let Some(runtime_dir) = runtime_dir {
-                let native_all_lib = runtime_dir.join("libsimple_native_all.a");
-                let compiler_lib = runtime_dir.join("libsimple_compiler.a");
-                let runtime_lib = runtime_dir.join("libsimple_runtime.a");
-                if native_all_lib.exists() {
-                    builder = builder.object(&native_all_lib);
-                } else if runtime_lib.exists() {
-                    builder = builder.object(&runtime_lib);
-                } else if compiler_lib.exists() {
-                    builder = builder.object(&compiler_lib);
                 }
             }
 
@@ -1410,17 +1441,23 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_ins
                 let auto_c = temp_path.join("_bootstrap_auto2.c");
                 let auto_o = temp_path.join("_bootstrap_auto2.o");
                 let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
+                // On Windows COFF, weak attribute doesn't satisfy undefined references,
+                // so use strong definitions. --allow-multiple-definition ensures the
+                // runtime library's definitions (linked first) take precedence.
+                let is_windows = matches!(self.options.target.os, TargetOS::Windows);
+                let attr = if is_windows { "" } else { "__attribute__((weak)) " };
                 for sym in &symbols {
                     let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
                     let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
                     if is_data && valid_ident {
-                        code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
+                        code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                     } else if valid_ident {
                         code.push_str(&format!(
-                            "__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n",
-                            sym
+                            "{1}int64_t {0}(void) {{ return 0; }}\n",
+                            sym, attr
                         ));
-                    } else {
+                    } else if !is_windows {
+                        // Inline asm .weak directive only works on ELF, skip on Windows
                         let clean = sym.replace('\"', "");
                         // macOS Mach-O uses .weak_definition + underscore prefix
                         #[cfg(target_os = "macos")]
