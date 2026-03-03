@@ -12,10 +12,9 @@ use super::build_cache::BuildCache;
 
 use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
-    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state,
-    clear_io_state, clear_macro_state, clear_module_cache, clear_net_state,
-    clear_collection_registries, clear_ast_ffi_registries, clear_env_ffi_registry,
-    clear_error_ffi_registry, clear_span_ffi_registry,
+    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state, clear_io_state,
+    clear_macro_state, clear_module_cache, clear_net_state, clear_collection_registries, clear_ast_ffi_registries,
+    clear_env_ffi_registry, clear_error_ffi_registry, clear_span_ffi_registry,
 };
 use simple_compiler::runtime_profile::profiler::clear_global_profiler;
 use simple_compiler::layout_recorder::clear_recording;
@@ -61,7 +60,9 @@ fn memory_limit_bytes() -> u64 {
     std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2048) * 1024 * 1024
+        .unwrap_or(2048)
+        * 1024
+        * 1024
 }
 
 /// Parse test output to extract pass/fail counts
@@ -254,7 +255,9 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     // Without this, glibc's ptmalloc2 holds onto freed pages, causing
     // RSS to grow monotonically even though allocations are freed.
     #[cfg(target_os = "linux")]
-    unsafe { libc::malloc_trim(0); }
+    unsafe {
+        libc::malloc_trim(0);
+    }
 
     // Create a fresh Runner per test so ExecCore/GcAllocator/SmfLoader don't accumulate.
     let runner = create_test_runner(options);
@@ -268,21 +271,20 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     // Use run_file_interpreted() instead of run_file() because the default JIT
     // (Cranelift) crashes on some patterns (large functions with many var mutations
     // + string interpolation). The `run` command also uses interpreted mode for .spl files.
-    let run_result: Result<i32, String> = match std::panic::catch_unwind(
-        std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(path))
-    ) {
-        Ok(inner) => inner,
-        Err(panic_info) => {
-            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "test panicked (possible stack overflow)".to_string()
-            };
-            Err(msg)
-        }
-    };
+    let run_result: Result<i32, String> =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(path))) {
+            Ok(inner) => inner,
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "test panicked (possible stack overflow)".to_string()
+                };
+                Err(msg)
+            }
+        };
 
     // Stop watchdog and reset the timeout flag for the next test.
     stop_watchdog();
@@ -511,12 +513,12 @@ fn find_simple_binary() -> PathBuf {
 
     // Fallback: try common locations
     let candidates = vec![
-        PathBuf::from("./bin/release/simple"),               // Release binary
-        PathBuf::from("./bin/wrappers/simple"),              // Wrapper script
-        PathBuf::from("./target/bootstrap/simple"),          // Bootstrap build
-        PathBuf::from("./target/release/simple"),            // Cargo release
-        PathBuf::from("./target/debug/simple"),              // Cargo debug
-        PathBuf::from("simple"),                             // In PATH
+        PathBuf::from("./bin/release/simple"),      // Release binary
+        PathBuf::from("./bin/wrappers/simple"),     // Wrapper script
+        PathBuf::from("./target/bootstrap/simple"), // Bootstrap build
+        PathBuf::from("./target/release/simple"),   // Cargo release
+        PathBuf::from("./target/debug/simple"),     // Cargo debug
+        PathBuf::from("simple"),                    // In PATH
     ];
 
     for candidate in candidates {

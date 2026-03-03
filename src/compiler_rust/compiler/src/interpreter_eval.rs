@@ -320,8 +320,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -439,8 +438,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &final_class.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
                         functions.insert(mangled.clone(), method.clone());
@@ -487,8 +485,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
-                        let is_static = method.is_static
-                            || !method.params.iter().any(|p| p.name == "self");
+                        let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
                             functions.insert(mangled.clone(), method.clone());

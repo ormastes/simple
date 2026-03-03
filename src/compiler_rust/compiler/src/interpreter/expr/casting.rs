@@ -94,10 +94,16 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             }
         }
         // Enum variant to numeric (ordinal position)
-        Value::Enum { ref enum_name, ref variant, .. } => {
+        Value::Enum {
+            ref enum_name,
+            ref variant,
+            ..
+        } => {
             let ordinal = BLOCK_SCOPED_ENUMS.with(|cell| {
                 if let Some(edef) = cell.borrow().get(enum_name) {
-                    edef.variants.iter().position(|v| v.name == *variant)
+                    edef.variants
+                        .iter()
+                        .position(|v| v.name == *variant)
                         .map(|i| i as i64)
                         .unwrap_or(0)
                 } else {

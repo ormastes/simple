@@ -33,10 +33,7 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
             let suffix = &name_str[after_dot + 1..];
-            if suffix == segment
-                && prefix.len() <= 3
-                && prefix.chars().all(|c| c.is_ascii_digit())
-            {
+            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
                 let path = parent.join(&*name_str);
                 if path.is_dir() {
                     return Some(path);
@@ -135,11 +132,7 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
     None
 }
 
-fn resolve_with_numbered_dirs_recursive(
-    current: &Path,
-    parts: &[String],
-    depth: usize,
-) -> Option<PathBuf> {
+fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth: usize) -> Option<PathBuf> {
     if depth >= parts.len() {
         return None;
     }
@@ -351,7 +344,13 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     // Search lib subdirectories (mirrors module_loader.spl strategy)
                     // For `use std.format.{...}`, the file might be at lib/common/format.spl
                     // Search order: nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
-                    for subdir in &["nogc_async_mut", "nogc_sync_mut", "common", "gc_async_mut", "nogc_async_mut_noalloc"] {
+                    for subdir in &[
+                        "nogc_async_mut",
+                        "nogc_sync_mut",
+                        "common",
+                        "gc_async_mut",
+                        "nogc_async_mut_noalloc",
+                    ] {
                         let mut sub_path = stdlib_candidate.join(subdir);
                         for part in &stdlib_parts {
                             sub_path = sub_path.join(part);

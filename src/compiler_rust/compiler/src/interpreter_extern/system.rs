@@ -314,11 +314,17 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let exit_code = out.status.code().unwrap_or(-1) as i64;
-            Ok(Value::Tuple(vec![Value::Str(stdout), Value::Str(stderr), Value::Int(exit_code)]))
+            Ok(Value::Tuple(vec![
+                Value::Str(stdout),
+                Value::Str(stderr),
+                Value::Int(exit_code),
+            ]))
         }
-        Err(_) => {
-            Ok(Value::Tuple(vec![Value::Str(String::new()), Value::Str(String::new()), Value::Int(-1)]))
-        }
+        Err(_) => Ok(Value::Tuple(vec![
+            Value::Str(String::new()),
+            Value::Str(String::new()),
+            Value::Int(-1),
+        ])),
     }
 }
 
@@ -330,7 +336,9 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
 /// * Int - exit code (0 = success, -1 = error)
 pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::runtime("rt_process_execute requires 2 arguments (cmd, args)"));
+        return Err(CompileError::runtime(
+            "rt_process_execute requires 2 arguments (cmd, args)",
+        ));
     }
 
     let cmd = match &args[0] {
@@ -455,18 +463,30 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 
     match status {
         Some(exit_status) => {
-            let stdout = child.stdout.take().map(|mut s| {
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                buf
-            }).unwrap_or_default();
-            let stderr = child.stderr.take().map(|mut s| {
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                buf
-            }).unwrap_or_default();
+            let stdout = child
+                .stdout
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                    buf
+                })
+                .unwrap_or_default();
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                    buf
+                })
+                .unwrap_or_default();
             let exit_code = exit_status.code().unwrap_or(-1) as i64;
-            Ok(Value::Tuple(vec![Value::Str(stdout), Value::Str(stderr), Value::Int(exit_code)]))
+            Ok(Value::Tuple(vec![
+                Value::Str(stdout),
+                Value::Str(stderr),
+                Value::Int(exit_code),
+            ]))
         }
         None => {
             // Timeout - kill the child

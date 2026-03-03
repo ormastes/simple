@@ -25,8 +25,8 @@ use crate::value::{Env, Value};
 use super::module_cache::{
     cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
     get_cached_module_exports, get_partial_module_exports, increment_load_depth, increment_total_modules,
-    is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
-    MAX_MODULE_DEPTH, MAX_TOTAL_MODULES,
+    is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading, MAX_MODULE_DEPTH,
+    MAX_TOTAL_MODULES,
 };
 use super::module_evaluator::evaluate_module_exports;
 use super::path_resolution::resolve_module_path;

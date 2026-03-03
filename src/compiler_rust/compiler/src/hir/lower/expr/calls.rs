@@ -48,7 +48,10 @@ impl Lowerer {
                     },
                     ty: struct_ty,
                 });
-            } else if self.lenient_types && name.starts_with(|c: char| c.is_ascii_uppercase()) && args.iter().any(|a| a.name.is_some()) {
+            } else if self.lenient_types
+                && name.starts_with(|c: char| c.is_ascii_uppercase())
+                && args.iter().any(|a| a.name.is_some())
+            {
                 // In lenient mode, uppercase identifier with named arguments is likely
                 // a struct construction even if the type isn't in the registry.
                 // Use TypeId::ANY since we don't have the actual type info.

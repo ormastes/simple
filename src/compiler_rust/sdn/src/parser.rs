@@ -484,7 +484,10 @@ impl<'a> Parser<'a> {
             // For non-last columns, absorb until the next comma.
             let is_last_col = expected_cols > 0 && row.len() + 1 == expected_cols;
             let has_extra = !self.is_at_end()
-                && !matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma));
+                && !matches!(
+                    self.peek_kind(),
+                    Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma)
+                );
 
             if has_extra {
                 let mut combined = match &value {
@@ -516,7 +519,10 @@ impl<'a> Parser<'a> {
                 } else {
                     // Non-last column: absorb until comma (the field separator)
                     while !self.is_at_end()
-                        && !matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma))
+                        && !matches!(
+                            self.peek_kind(),
+                            Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma)
+                        )
                     {
                         if let Some(token) = self.peek() {
                             if token.span.start > last_end {
@@ -1126,7 +1132,11 @@ mod tests {
         // but no ',' or '"' or '\n' — the serializer writes it unquoted
         let src = "strings |id, value|\n    1, BUG-RT-001: workaround\n";
         let result = parse(src);
-        assert!(result.is_ok(), "Unquoted colon in last column should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Unquoted colon in last column should parse: {:?}",
+            result.err()
+        );
         if let Ok(SdnValue::Dict(dict)) = &result {
             if let Some(SdnValue::Table { rows, .. }) = dict.get("strings") {
                 assert_eq!(rows.len(), 1);
@@ -1134,8 +1144,16 @@ mod tests {
                 assert_eq!(rows[0][0].as_i64(), Some(1));
                 // The value should contain the full text including the colon
                 let val = rows[0][1].as_str().unwrap();
-                assert!(val.contains("BUG-RT-001"), "Value should contain BUG-RT-001, got: {}", val);
-                assert!(val.contains("workaround"), "Value should contain workaround, got: {}", val);
+                assert!(
+                    val.contains("BUG-RT-001"),
+                    "Value should contain BUG-RT-001, got: {}",
+                    val
+                );
+                assert!(
+                    val.contains("workaround"),
+                    "Value should contain workaround, got: {}",
+                    val
+                );
             } else {
                 panic!("Expected table");
             }
@@ -1147,7 +1165,11 @@ mod tests {
         // Simulates what build_v3_sdn produces when a string contains '[]'
         let src = "strings |id, value|\n    2, slices string with s[0:end]\n";
         let result = parse(src);
-        assert!(result.is_ok(), "Unquoted brackets in last column should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Unquoted brackets in last column should parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1155,7 +1177,11 @@ mod tests {
         // Simulates what build_v3_sdn produces when a string contains '()'
         let src = "strings |id, value|\n    3, Dict.get() return type\n";
         let result = parse(src);
-        assert!(result.is_ok(), "Unquoted parens in last column should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Unquoted parens in last column should parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1163,7 +1189,11 @@ mod tests {
         // Multiple rows with special characters, simulating a real test_db scenario
         let src = "strings |id, value|\n    1, BUG-RT-001: Slice syntax [:variable] > workaround: explicit 0 start\n    2, passed\n    3, Dict.get() return type\n";
         let result = parse(src);
-        assert!(result.is_ok(), "Multi-row table with special chars should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Multi-row table with special chars should parse: {:?}",
+            result.err()
+        );
         if let Ok(SdnValue::Dict(dict)) = &result {
             if let Some(SdnValue::Table { rows, .. }) = dict.get("strings") {
                 assert_eq!(rows.len(), 3, "Should have 3 rows");
@@ -1195,7 +1225,11 @@ mod tests {
         run_20260222_040405_249, "2026-02-22T04:04:05.249674475+00:00", , 1, 14a73b269158, running, 0, 0, 0, 0, 0
 "#;
         let result = parse(src);
-        assert!(result.is_ok(), "Real test_db_runs pattern should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Real test_db_runs pattern should parse: {:?}",
+            result.err()
+        );
         if let Ok(SdnValue::Dict(dict)) = &result {
             if let Some(SdnValue::Table { rows, .. }) = dict.get("test_runs") {
                 assert_eq!(rows.len(), 1, "Should have 1 row");

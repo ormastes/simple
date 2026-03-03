@@ -303,8 +303,10 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
         if let Ok(rtp) = std::env::var("SIMPLE_RUNTIME_PATH") {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
-        println!("  Running: {} compile src/app/cli/main.spl --native -o {}",
-            compiler, output);
+        println!(
+            "  Running: {} compile src/app/cli/main.spl --native -o {}",
+            compiler, output
+        );
     } else {
         cmd.arg("src/app/compile/native.spl")
             .arg("src/app/cli/main.spl")
@@ -312,21 +314,30 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
         if backend != "auto" {
             cmd.arg(format!("--backend={}", backend));
         }
-        println!("  Running: {} src/app/compile/native.spl src/app/cli/main.spl {} {}",
-            compiler, output,
-            if backend != "auto" { format!("--backend={}", backend) } else { String::new() });
+        println!(
+            "  Running: {} src/app/compile/native.spl src/app/cli/main.spl {} {}",
+            compiler,
+            output,
+            if backend != "auto" {
+                format!("--backend={}", backend)
+            } else {
+                String::new()
+            }
+        );
     }
 
     // Use inherited stdio so the user can see progress
-    let status = cmd
-        .stdin(std::process::Stdio::null())
-        .status();
+    let status = cmd.stdin(std::process::Stdio::null()).status();
 
     match status {
         Ok(exit_status) => {
             if !exit_status.success() {
                 eprintln!("  Compile failed (exit {:?})", exit_status.code());
-                return StageResult { success: false, size: 0, hash: String::new() };
+                return StageResult {
+                    success: false,
+                    size: 0,
+                    hash: String::new(),
+                };
             }
 
             // Get file size
@@ -338,17 +349,25 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
                 .output()
                 .ok()
                 .and_then(|o| {
-                    String::from_utf8(o.stdout).ok().map(|s| {
-                        s.split_whitespace().next().unwrap_or("").to_string()
-                    })
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
                 })
                 .unwrap_or_default();
 
-            StageResult { success: true, size, hash }
+            StageResult {
+                success: true,
+                size,
+                hash,
+            }
         }
         Err(e) => {
             eprintln!("  Failed to execute compiler: {}", e);
-            StageResult { success: false, size: 0, hash: String::new() }
+            StageResult {
+                success: false,
+                size: 0,
+                hash: String::new(),
+            }
         }
     }
 }

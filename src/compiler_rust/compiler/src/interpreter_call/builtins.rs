@@ -527,7 +527,7 @@ pub(super) fn eval_builtin(
                 return Ok(Some(Value::array(gen.collect_remaining())));
             }
             if let Value::Array(arr) = val {
-                return Ok(Some(Value::Array(arr)));  // already Arc-wrapped
+                return Ok(Some(Value::Array(arr))); // already Arc-wrapped
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)

@@ -162,8 +162,7 @@ pub fn rt_thread_spawn_isolated_with_context(
     }
 
     // Evaluate the body expression — propagate timeout errors instead of swallowing them.
-    let body_value =
-        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {
@@ -233,8 +232,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
     }
 
     // First evaluate the body expression — propagate timeout errors.
-    let body_value =
-        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {

@@ -119,15 +119,14 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let call_args: Vec<i64> = match &args[1] {
-        Value::Array(arr) => {
-            arr.iter()
-                .map(|v| match v {
-                    Value::Int(n) => Ok(*n),
-                    Value::Bool(b) => Ok(if *b { 1i64 } else { 0i64 }),
-                    _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
+        Value::Array(arr) => arr
+            .iter()
+            .map(|v| match v {
+                Value::Int(n) => Ok(*n),
+                Value::Bool(b) => Ok(if *b { 1i64 } else { 0i64 }),
+                _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         _ => return Err(CompileError::runtime("spl_wffi_call_i64: args must be an array")),
     };
 
@@ -165,8 +164,7 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
                 f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4])
             }
             6 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                 f(
                     call_args[0],
                     call_args[1],
@@ -177,8 +175,7 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
                 )
             }
             7 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                 f(
                     call_args[0],
                     call_args[1],
@@ -190,8 +187,7 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
                 )
             }
             8 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                 f(
                     call_args[0],
                     call_args[1],
@@ -204,9 +200,7 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
                 )
             }
             _ => {
-                return Err(CompileError::runtime(
-                    "spl_wffi_call_i64: max 8 arguments supported",
-                ));
+                return Err(CompileError::runtime("spl_wffi_call_i64: max 8 arguments supported"));
             }
         }
     };

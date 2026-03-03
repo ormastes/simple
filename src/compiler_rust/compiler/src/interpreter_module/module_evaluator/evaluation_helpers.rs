@@ -81,8 +81,7 @@ pub(super) fn register_definitions(
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &c.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", c.name, method.name);
                         local_functions.insert(mangled.clone(), method.clone());
@@ -130,8 +129,7 @@ pub(super) fn register_definitions(
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
                         local_functions.insert(mangled.clone(), method.clone());
@@ -171,8 +169,7 @@ pub(super) fn register_definitions(
                     }
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
-                        let is_static = method.is_static
-                            || !method.params.iter().any(|p| p.name == "self");
+                        let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
                             local_functions.insert(mangled.clone(), method.clone());
@@ -201,8 +198,7 @@ pub(super) fn register_definitions(
                 env.insert(e.name.clone(), enum_type);
                 // Register enum static methods as mangled free functions
                 for method in &e.methods {
-                    let is_static = method.is_static
-                        || !method.params.iter().any(|p| p.name == "self");
+                    let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", e.name, method.name);
                         local_functions.insert(mangled.clone(), method.clone());
@@ -221,19 +217,20 @@ pub(super) fn register_definitions(
                 for variant in &e.variants {
                     let mangled = format!("{}__{}", e.name, variant.name);
                     // Export variant as an enum value (unit variant) or constructor
-                    let variant_value = if variant.fields.is_none() || variant.fields.as_ref().map_or(true, |f| f.is_empty()) {
-                        // Unit variant - export as enum value
-                        Value::Enum {
-                            enum_name: e.name.clone(),
-                            variant: variant.name.clone(),
-                            payload: None,
-                        }
-                    } else {
-                        // Variant with fields - export as constructor
-                        Value::Constructor {
-                            class_name: mangled.clone(),
-                        }
-                    };
+                    let variant_value =
+                        if variant.fields.is_none() || variant.fields.as_ref().map_or(true, |f| f.is_empty()) {
+                            // Unit variant - export as enum value
+                            Value::Enum {
+                                enum_name: e.name.clone(),
+                                variant: variant.name.clone(),
+                                payload: None,
+                            }
+                        } else {
+                            // Variant with fields - export as constructor
+                            Value::Constructor {
+                                class_name: mangled.clone(),
+                            }
+                        };
                     exports.insert(mangled.clone(), variant_value.clone());
                     env.insert(mangled, variant_value);
                 }

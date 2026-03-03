@@ -92,8 +92,7 @@ mod tests {
 
     #[test]
     fn test_basic_sandbox() {
-        let config = SandboxConfig::new()
-            .with_cpu_time(Duration::from_secs(60));
+        let config = SandboxConfig::new().with_cpu_time(Duration::from_secs(60));
 
         let result = apply_sandbox(&config);
         assert!(result.is_ok());

@@ -249,7 +249,12 @@ pub fn cleanup_network_rules() {
 }
 
 // Fallback for unsupported platforms
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd"
+)))]
 pub fn apply_sandbox(_config: &SandboxConfig) -> SandboxResult<()> {
     Err(SandboxError::UnsupportedPlatform(
         "Sandboxing is only supported on Linux, macOS, Windows, and FreeBSD".to_string(),

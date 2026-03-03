@@ -47,7 +47,7 @@ fn test_compile_if_else() {
 #[test]
 fn test_cranelift_target_support() {
     let targets = [
-        ("x86_64", TargetArch::X86_64, true),   // Cross-arch enabled
+        ("x86_64", TargetArch::X86_64, true),    // Cross-arch enabled
         ("aarch64", TargetArch::Aarch64, true),  // Cross-arch enabled
         ("riscv64", TargetArch::Riscv64, true),  // Cross-arch enabled
         ("i686", TargetArch::X86, false),        // Expected: NOT supported

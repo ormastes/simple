@@ -88,9 +88,7 @@ pub fn transform_placeholder_lambda(expr: Expr) -> Expr {
 fn find_max_numbered(expr: &Expr) -> usize {
     match expr {
         Expr::Identifier(name) => numbered_placeholder_index(name).unwrap_or(0),
-        Expr::Binary { left, right, .. } => {
-            find_max_numbered(left).max(find_max_numbered(right))
-        }
+        Expr::Binary { left, right, .. } => find_max_numbered(left).max(find_max_numbered(right)),
         Expr::Unary { operand, .. } => find_max_numbered(operand),
         Expr::Call { callee, args } => {
             let c = find_max_numbered(callee);
@@ -101,9 +99,7 @@ fn find_max_numbered(expr: &Expr) -> usize {
             args.iter().fold(r, |acc, a| acc.max(find_max_numbered(&a.value)))
         }
         Expr::FieldAccess { receiver, .. } => find_max_numbered(receiver),
-        Expr::Index { receiver, index } => {
-            find_max_numbered(receiver).max(find_max_numbered(index))
-        }
+        Expr::Index { receiver, index } => find_max_numbered(receiver).max(find_max_numbered(index)),
         Expr::If {
             condition,
             then_branch,
@@ -113,18 +109,12 @@ fn find_max_numbered(expr: &Expr) -> usize {
             let m = find_max_numbered(condition).max(find_max_numbered(then_branch));
             else_branch.as_ref().map_or(m, |e| m.max(find_max_numbered(e)))
         }
-        Expr::Tuple(items) | Expr::Array(items) => {
-            items.iter().fold(0, |acc, e| acc.max(find_max_numbered(e)))
-        }
+        Expr::Tuple(items) | Expr::Array(items) => items.iter().fold(0, |acc, e| acc.max(find_max_numbered(e))),
         Expr::Dict(entries) => entries
             .iter()
-            .fold(0, |acc, (k, v)| {
-                acc.max(find_max_numbered(k)).max(find_max_numbered(v))
-            }),
+            .fold(0, |acc, (k, v)| acc.max(find_max_numbered(k)).max(find_max_numbered(v))),
         Expr::OptionalChain { expr, .. } => find_max_numbered(expr),
-        Expr::Coalesce { expr, default } => {
-            find_max_numbered(expr).max(find_max_numbered(default))
-        }
+        Expr::Coalesce { expr, default } => find_max_numbered(expr).max(find_max_numbered(default)),
         Expr::Slice {
             receiver,
             start,
