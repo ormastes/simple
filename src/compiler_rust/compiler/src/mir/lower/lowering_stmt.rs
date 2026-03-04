@@ -640,19 +640,21 @@ impl<'a> MirLowerer<'a> {
                 })?;
                 let (index_addr, index_local_idx) = index_addr_reg;
 
-                // Create blocks
-                let (header_id, body_id, exit_id) = self.with_func(|func, current_block| {
+                // Create blocks (including separate increment block for correct continue behavior)
+                let (header_id, body_id, increment_id, exit_id) = self.with_func(|func, current_block| {
                     let header_id = func.new_block();
                     let body_id = func.new_block();
+                    let increment_id = func.new_block();
                     let exit_id = func.new_block();
 
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(header_id);
-                    (header_id, body_id, exit_id)
+                    (header_id, body_id, increment_id, exit_id)
                 })?;
 
+                // continue must jump to increment (not header) so the index advances
                 self.push_loop(LoopContext {
-                    continue_target: header_id,
+                    continue_target: increment_id,
                     break_target: exit_id,
                 })?;
 
@@ -746,7 +748,11 @@ impl<'a> MirLowerer<'a> {
                     self.lower_stmt(stmt, contract)?;
                 }
 
-                // Increment index
+                // Body falls through to increment block
+                self.finalize_block_jump(increment_id)?;
+
+                // Increment block: increment index, then jump back to header
+                self.set_current_block(increment_id)?;
                 self.with_func(|func, current_block| {
                     // Allocate all vregs first
                     let addr = func.new_vreg();

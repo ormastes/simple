@@ -1,0 +1,239 @@
+# Actor Snapshot — Zero-Copy Persistent Message Snapshots
+#
+# Bridges the actor model (mutable, isolated state per actor) with
+# persistent data structures (immutable, shared-structure values).
+# When an actor needs to send its state as a message, it creates a
+# snapshot that shares structure with the original persistent data.
+# The receiver gets a consistent view of the sender's state at the
+# time of snapshot, even if the sender continues modifying its state.
+#
+# Architecture:
+#   - ActorSnapshot is an immutable, frozen capture of state + metadata
+#   - ActorState wraps mutable state with versioning and snapshot creation
+#   - Metadata is stored as flat [key, value, key, value, ...] pairs
+#   - Snapshots share structure with the underlying persistent data
+#
+# Usage:
+#   val state = ActorState__new([1, 2, 3], "worker-1")
+#   state.update([1, 2, 3, 4])
+#   val snap = state.snapshot()
+#   snap.state()                   # [1, 2, 3, 4]
+#   snap.version()                 # 1
+#   snap.source()                  # "worker-1"
+#   snap.is_from("worker-1")      # true
+
+# ============================================================================
+# ActorSnapshot Class
+# ============================================================================
+
+# Immutable frozen snapshot of actor state at a point in time.
+# Once created, a snapshot never changes. Metadata is stored as
+# a flat array of [key, value, key, value, ...] pairs for simplicity.
+class ActorSnapshot:
+    _state              # The persistent value (immutable, structural sharing)
+    _version: i64       # Version number at time of snapshot
+    _timestamp: i64     # Logical timestamp (monotonic counter)
+    _source_id: text    # Identifier of the source actor/entity
+    _meta: []           # Flat [key, value, key, value, ...] pairs
+
+    # ========================================================================
+    # Read Operations (immutable -- fn)
+    # ========================================================================
+
+    fn state():
+        # Return the snapshotted state value.
+        self._state
+
+    fn version() -> i64:
+        # Return the version number at snapshot time.
+        self._version
+
+    fn timestamp() -> i64:
+        # Return the logical timestamp of this snapshot.
+        self._timestamp
+
+    fn source() -> text:
+        # Return the source actor identifier.
+        self._source_id
+
+    fn is_from(source_id: text) -> bool:
+        # Check if this snapshot originated from a specific source.
+        self._source_id == source_id
+
+    fn with_metadata(key: text, value) -> ActorSnapshot:
+        # Return a new snapshot with the given metadata key-value added.
+        # If the key already exists, the new pair is appended (last wins
+        # on lookup). The original snapshot is unchanged.
+        var new_meta = []
+        var i = 0
+        val n = self._meta.len()
+        while i < n:
+            new_meta.push(self._meta[i])
+            i = i + 1
+        new_meta.push(key)
+        new_meta.push(value)
+        ActorSnapshot(
+            _state: self._state,
+            _version: self._version,
+            _timestamp: self._timestamp,
+            _source_id: self._source_id,
+            _meta: new_meta
+        )
+
+    fn metadata(key: text):
+        # Look up a metadata value by key. Returns nil if not found.
+        # Scans backwards so that later entries shadow earlier ones.
+        var i = self._meta.len() - 2
+        while i >= 0:
+            if self._meta[i] == key:
+                return self._meta[i + 1]
+            i = i - 2
+        nil
+
+    fn has_metadata(key: text) -> bool:
+        # Check whether a metadata key exists.
+        var i = 0
+        val n = self._meta.len()
+        while i < n:
+            if self._meta[i] == key:
+                return true
+            i = i + 2
+        false
+
+# ============================================================================
+# ActorState Class
+# ============================================================================
+
+# Mutable actor state wrapper with versioning and snapshot creation.
+# Each call to update() increments the version and timestamp counters.
+# Snapshots capture the current state without copying the underlying
+# persistent data structure.
+class ActorState:
+    _current            # Current state value (persistent data structure)
+    _version: i64       # Current version number
+    _counter: i64       # Monotonic timestamp counter
+    _source_id: text    # Actor identifier
+    _meta: []           # Mutable metadata as flat [key, value, ...] pairs
+
+    # ========================================================================
+    # Read Operations (immutable -- fn)
+    # ========================================================================
+
+    fn current():
+        # Return the current state value.
+        self._current
+
+    fn version() -> i64:
+        # Return the current version number.
+        self._version
+
+    fn source() -> text:
+        # Return the actor identifier.
+        self._source_id
+
+    fn snapshot() -> ActorSnapshot:
+        # Create an immutable snapshot of the current state.
+        # The snapshot shares structure with the current persistent value.
+        var meta_copy = []
+        var i = 0
+        val n = self._meta.len()
+        while i < n:
+            meta_copy.push(self._meta[i])
+            i = i + 1
+        ActorSnapshot(
+            _state: self._current,
+            _version: self._version,
+            _timestamp: self._counter,
+            _source_id: self._source_id,
+            _meta: meta_copy
+        )
+
+    fn snapshot_with(state) -> ActorSnapshot:
+        # Create a snapshot with a custom state value instead of
+        # the current one. Useful for sending derived views.
+        var meta_copy = []
+        var i = 0
+        val n = self._meta.len()
+        while i < n:
+            meta_copy.push(self._meta[i])
+            i = i + 1
+        ActorSnapshot(
+            _state: state,
+            _version: self._version,
+            _timestamp: self._counter,
+            _source_id: self._source_id,
+            _meta: meta_copy
+        )
+
+    # ========================================================================
+    # Write Operations (mutable -- me)
+    # ========================================================================
+
+    me update(new_state):
+        # Replace the current state, increment version and timestamp.
+        self._current = new_state
+        self._version = self._version + 1
+        self._counter = self._counter + 1
+
+    me update_with(f):
+        # Apply f to the current state and store the result.
+        # Increments version and timestamp.
+        val new_state = f(self._current)
+        self._current = new_state
+        self._version = self._version + 1
+        self._counter = self._counter + 1
+
+    me set_metadata(key: text, value):
+        # Set a metadata key-value pair on the actor state.
+        # Overwrites if the key already exists.
+        var i = 0
+        val n = self._meta.len()
+        while i < n:
+            if self._meta[i] == key:
+                self._meta[i + 1] = value
+                return nil
+            i = i + 2
+        self._meta.push(key)
+        self._meta.push(value)
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+# Create a new ActorSnapshot directly.
+fn ActorSnapshot__new(state, version: i64, timestamp: i64, source_id: text) -> ActorSnapshot:
+    ActorSnapshot(
+        _state: state,
+        _version: version,
+        _timestamp: timestamp,
+        _source_id: source_id,
+        _meta: []
+    )
+
+# Create an ActorState with an initial state and source identifier.
+# Starts at version 0 and timestamp 0.
+fn ActorState__new(initial_state, source_id: text) -> ActorState:
+    ActorState(
+        _current: initial_state,
+        _version: 0,
+        _counter: 0,
+        _source_id: source_id,
+        _meta: []
+    )
+
+# Create an ActorState with nil initial state.
+fn ActorState__named(source_id: text) -> ActorState:
+    ActorState(
+        _current: nil,
+        _version: 0,
+        _counter: 0,
+        _source_id: source_id,
+        _meta: []
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ActorSnapshot, ActorState
+export ActorSnapshot__new, ActorState__new, ActorState__named
