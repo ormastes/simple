@@ -538,9 +538,32 @@ impl Target {
     }
 
     /// Get the linker flavor for this target.
-    pub const fn linker_flavor(&self) -> LinkerFlavor {
+    ///
+    /// Supports `SIMPLE_LINKER_FLAVOR` env var override (`gnu`/`mingw` or `msvc`)
+    /// to force a specific toolchain without depending on auto-detection.
+    pub fn linker_flavor(&self) -> LinkerFlavor {
+        // Allow explicit override via environment variable
+        if let Ok(flavor) = std::env::var("SIMPLE_LINKER_FLAVOR") {
+            match flavor.to_lowercase().as_str() {
+                "gnu" | "mingw" => return LinkerFlavor::Gnu,
+                "msvc" => return LinkerFlavor::Msvc,
+                _ => {} // Fall through to auto-detection
+            }
+        }
         match self.os {
-            TargetOS::Windows => LinkerFlavor::Msvc,
+            TargetOS::Windows => {
+                // Detect MinGW environment: if gcc is available, use GNU linker flavor
+                // instead of MSVC. This allows bootstrap on MSYS2/MinGW without
+                // requiring Visual Studio build tools.
+                if cfg!(target_env = "gnu") {
+                    LinkerFlavor::Gnu
+                } else if std::env::var("MSYSTEM").is_ok() {
+                    // MSYS2 environment detected (MINGW64, UCRT64, etc.)
+                    LinkerFlavor::Gnu
+                } else {
+                    LinkerFlavor::Msvc
+                }
+            }
             _ if self.is_wasm() => LinkerFlavor::WasmLd,
             _ => LinkerFlavor::Gnu,
         }

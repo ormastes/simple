@@ -163,10 +163,16 @@ pub fn create_isa_and_flags(
 
     let flags = Flags::new(settings_builder);
 
-    // Use the full target (arch + OS) for correct object format (Mach-O on macOS, ELF on Linux)
-    let triple: Triple = settings.target.triple_str()
-        .parse()
-        .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?;
+    // Use the full target (arch + OS) for correct object format.
+    // For native compilation, use Triple::host() which auto-detects MSVC vs GNU on Windows.
+    // For cross-compilation, parse the explicit triple from triple_str().
+    let triple: Triple = if settings.target.is_host() {
+        Triple::host()
+    } else {
+        settings.target.triple_str()
+            .parse()
+            .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
+    };
 
     create_isa_from_triple(triple, flags)
 }
