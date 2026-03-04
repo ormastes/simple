@@ -585,7 +585,12 @@ int main(int argc, char** argv) {
         let mut cmd = std::process::Command::new("clang");
         cmd.arg("-fPIC");
 
-        // macOS: PIE is the default and -no-pie is not supported by Apple clang.
+        // macOS: Apple's new ld (ld-1230+) crashes on some Cranelift-generated Mach-O objects
+        // (missing LC_BUILD_VERSION, unusual relocation patterns). Use -ld_classic as workaround.
+        // PIE is the default on macOS so -no-pie is not needed.
+        #[cfg(target_os = "macos")]
+        cmd.arg("-Wl,-ld_classic");
+
         // Linux/FreeBSD: disable PIE for simpler static linking.
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
