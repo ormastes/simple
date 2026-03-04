@@ -31,7 +31,6 @@ use compiler.driver.driver_aot_output.*
 use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 
-extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 
@@ -65,6 +64,49 @@ class CheckBackendImpl(Backend):
 
     fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
         Ok(Value.Unit)
+
+# ------------------------------------------------------------------------------
+# Source loading helpers (module-level for Rust bootstrap compatibility)
+# ------------------------------------------------------------------------------
+
+# Directories to skip (tests/docs/examples slow or fail in bootstrap)
+val _skip_dirs = ["test", "tests", "doc", "docs", "examples", "verification", "resources", "scripts", "build"]
+
+fn _driver_should_skip_dir(name: text) -> bool:
+    var i = 0
+    while i < _skip_dirs.len():
+        if name == _skip_dirs[i]:
+            return true
+        i = i + 1
+    false
+
+fn _driver_load_path(p: text, ctx: CompileContext):
+    if p.ends_with(".spl"):
+        # It's a source file
+        if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
+            return
+        if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
+            return
+        log_trace("loading file: {p}")
+        match SourceFile.load(p):
+            case Ok(source):
+                log_trace("loaded OK: {source.path}")
+                ctx.sources.push(source)
+            case Err(e):
+                log_error("load error: {e}")
+                ctx.add_error(e)
+    else:
+        # Treat as directory — depth-first traversal with pruning
+        val entries = rt_dir_list(p) ?? []
+        var idx = 0
+        while idx < entries.len():
+            val child = entries[idx]
+            val child_path = "{p}/{child}"
+            if _driver_should_skip_dir(child):
+                idx = idx + 1
+                continue
+            _driver_load_path(child_path, ctx)
+            idx = idx + 1
 
 # ------------------------------------------------------------------------------
 # Compiler Driver
@@ -172,57 +214,17 @@ class CompilerDriver:
         val log = self.ctx.logger
         log_debug("input_files count={self.ctx.options.input_files.len()}")
 
-        # Directories to skip (tests/docs/examples slow or fail in bootstrap)
-        val skip_dirs = ["test", "tests", "doc", "docs", "examples", "verification", "resources", "scripts", "build"]
-
-        fn should_skip_dir(name: text) -> bool:
-            var i = 0
-            while i < skip_dirs.len():
-                if name == skip_dirs[i]:
-                    return true
-                i = i + 1
-            false
-
-        fn load_path(p: text):
-            if rt_dir_exists(p):
-                # Depth-first traversal with pruning
-                val entries = rt_dir_list(p)
-                var idx = 0
-                while idx < entries.len():
-                    val child = entries[idx]
-                    val child_path = "{p}/{child}"
-                    if should_skip_dir(child):
-                        idx = idx + 1
-                        continue
-                    load_path(child_path)
-                    idx = idx + 1
-            else:
-                if not p.ends_with(".spl"):
-                    return
-                if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
-                    return
-                if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
-                    return
-                log_trace("loading file: {p}")
-                match SourceFile.load(p):
-                    case Ok(source):
-                        log_trace("loaded OK: {source.path}")
-                        self.ctx.sources.push(source)
-                    case Err(e):
-                        log_error("load error: {e}")
-                        self.ctx.add_error(e)
-
         # Start with user-provided roots
         var i = 0
         while i < self.ctx.options.input_files.len():
-            load_path(self.ctx.options.input_files[i])
+            _driver_load_path(self.ctx.options.input_files[i], self.ctx)
             i = i + 1
 
         # Add core source roots needed for CLI + compiler
-        load_path("src/app")
-        load_path("src/lib")
-        load_path("src/compiler")
-        load_path("src/runtime")
+        _driver_load_path("src/app", self.ctx)
+        _driver_load_path("src/lib", self.ctx)
+        _driver_load_path("src/compiler", self.ctx)
+        _driver_load_path("src/runtime", self.ctx)
 
         log_debug("sources stored, count={self.ctx.sources.len()}")
         not self.ctx.has_errors()

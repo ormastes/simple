@@ -1,0 +1,432 @@
+# Persistent Vector — RRB-tree Immutable Vector
+#
+# @tag:api
+#
+# An immutable, persistent vector using a Relaxed Radix Balanced tree (RRB-tree)
+# with 32-way branching and a tail buffer optimization. Every mutation (push, pop,
+# set) returns a NEW vector — the original is never modified.
+#
+# Structural sharing means updates copy only O(log32 n) nodes (~1-7 for
+# collections up to billions of entries), making immutable updates nearly
+# as fast as mutable ones while providing snapshot consistency for free.
+#
+# The tail buffer (Clojure-style) keeps the rightmost partial leaf separate,
+# giving amortized O(1) push and O(1) access to recent elements.
+#
+# Thread-safe by construction: immutable values need no locks.
+#
+# Usage:
+#   use std.persistent_vec.{PersistentVec, PersistentVec__empty}
+#
+#   val v0 = PersistentVec__empty()
+#   val v1 = v0.push(10)
+#   val v2 = v1.push(20).push(30)
+#   print v2.get(0)   # 10
+#   print v2.len()     # 3
+#   print v0.len()     # 0 (original unchanged)
+
+use std.persistent_vec.rrb_node.{
+    RRB_BRANCH_FACTOR, RRB_BITS, RRB_MASK,
+    RRB_NODE_LEAF, RRB_NODE_BRANCH,
+    rrb_leaf, rrb_branch,
+    rrb_is_leaf, rrb_is_branch,
+    rrb_leaf_items, rrb_leaf_get, rrb_leaf_set, rrb_leaf_count,
+    rrb_branch_children,
+    rrb_array_replace, rrb_array_copy, rrb_array_push,
+    rrb_get, rrb_set,
+    rrb_new_path, rrb_push_tail, rrb_pop_tail,
+    rrb_rightmost_leaf, rrb_collect_elements
+}
+
+# ============================================================================
+# PersistentVec
+# ============================================================================
+
+class PersistentVec:
+    root        # RRB tree root node (nil for empty / tail-only vectors)
+    tail: []    # Rightmost partial leaf (up to 32 elements, kept separate)
+    size: i64   # Total number of elements (tree + tail)
+    shift: i64  # Tree depth * RRB_BITS (0 = tail-only, 5 = one level, etc.)
+
+    # ------------------------------------------------------------------
+    # Size queries
+    # ------------------------------------------------------------------
+
+    # Return the total number of elements.
+    fn len() -> i64:
+        self.size
+
+    # Return true if the vector is empty.
+    fn is_empty() -> bool:
+        self.size == 0
+
+    # ------------------------------------------------------------------
+    # Element access
+    # ------------------------------------------------------------------
+
+    # Get the element at the given index, or nil if out of bounds.
+    # Supports negative indexing: -1 = last element.
+    fn get(index: i64):
+        var idx = index
+        if idx < 0:
+            idx = self.size + idx
+        if idx < 0:
+            return nil
+        if idx >= self.size:
+            return nil
+        val tail_off = self._tail_offset()
+        if idx >= tail_off:
+            # Element is in the tail buffer
+            return self.tail[idx - tail_off]
+        # Element is in the tree
+        rrb_get(self.root, idx, self.shift)
+
+    # Get the first element, or nil if empty.
+    fn first():
+        self.get(0)
+
+    # Get the last element, or nil if empty.
+    fn last():
+        if self.size == 0:
+            return nil
+        # Fast path: last element is always the last item in tail
+        val tail_len = self.tail.len()
+        if tail_len > 0:
+            return self.tail[tail_len - 1]
+        nil
+
+    # ------------------------------------------------------------------
+    # Immutable updates (return new vector)
+    # ------------------------------------------------------------------
+
+    # Return a new vector with value appended at the end.
+    # Amortized O(1) due to tail buffer.
+    fn push(value) -> PersistentVec:
+        val tail_len = self.tail.len()
+
+        if tail_len < RRB_BRANCH_FACTOR:
+            # Tail has room — just append to tail
+            val new_tail = rrb_array_push(self.tail, value)
+            return PersistentVec(root: self.root, tail: new_tail, size: self.size + 1, shift: self.shift)
+
+        # Tail is full — push current tail into tree as a leaf, start new tail
+        val tail_leaf = rrb_leaf(self.tail)
+
+        if self.root == nil:
+            # First overflow: tail leaf becomes the tree root (a single leaf)
+            # shift stays at 0 — root IS the leaf, no branch levels yet
+            return PersistentVec(root: tail_leaf, tail: [value], size: self.size + 1, shift: 0)
+
+        # Try to push the tail leaf into the existing tree
+        val new_root = rrb_push_tail(self.root, tail_leaf, self.shift)
+
+        if new_root != nil:
+            # Fit within existing tree depth
+            return PersistentVec(root: new_root, tail: [value], size: self.size + 1, shift: self.shift)
+
+        # Tree overflow — need a new root level
+        val new_path = rrb_new_path(self.shift, tail_leaf)
+        val elevated_root = rrb_branch([self.root, new_path], nil)
+        val new_shift = self.shift + RRB_BITS
+        PersistentVec(root: elevated_root, tail: [value], size: self.size + 1, shift: new_shift)
+
+    # Return a new vector with the last element removed.
+    # Returns an empty vector if already empty.
+    fn pop() -> PersistentVec:
+        if self.size == 0:
+            return PersistentVec__empty()
+
+        if self.size == 1:
+            return PersistentVec__empty()
+
+        val tail_len = self.tail.len()
+
+        if tail_len > 1:
+            # Tail has more than one element — just pop from tail
+            var new_tail = []
+            var i = 0
+            val new_len = tail_len - 1
+            while i < new_len:
+                new_tail.push(self.tail[i])
+                i = i + 1
+            return PersistentVec(root: self.root, tail: new_tail, size: self.size - 1, shift: self.shift)
+
+        # Tail has exactly 1 element — need to pull rightmost leaf from tree
+        if self.root == nil:
+            return PersistentVec__empty()
+
+        # Get the rightmost leaf to become the new tail
+        val right_leaf = rrb_rightmost_leaf(self.root)
+
+        if right_leaf == nil:
+            return PersistentVec__empty()
+
+        val new_tail = rrb_array_copy(rrb_leaf_items(right_leaf))
+
+        # Remove the rightmost leaf from the tree
+        val new_root = rrb_pop_tail(self.root, self.shift)
+
+        if new_root == nil:
+            # Tree is now empty (had only one leaf)
+            return PersistentVec(root: nil, tail: new_tail, size: self.size - 1, shift: 0)
+
+        # Check if we can reduce the tree depth
+        # If root is a branch with only one child, collapse it
+        var final_root = new_root
+        var final_shift = self.shift
+        if rrb_is_branch(final_root):
+            val children = rrb_branch_children(final_root)
+            val is_single = children.len() == 1
+            val can_collapse = is_single and final_shift > RRB_BITS
+            if can_collapse:
+                final_root = children[0]
+                final_shift = final_shift - RRB_BITS
+
+        PersistentVec(root: final_root, tail: new_tail, size: self.size - 1, shift: final_shift)
+
+    # Return a new vector with the element at index replaced.
+    # If index is out of bounds, returns this vector unchanged.
+    fn set(index: i64, value) -> PersistentVec:
+        var idx = index
+        if idx < 0:
+            idx = self.size + idx
+        if idx < 0:
+            return self
+        if idx >= self.size:
+            return self
+
+        val tail_off = self._tail_offset()
+
+        if idx >= tail_off:
+            # Element is in the tail
+            val tail_idx = idx - tail_off
+            val new_tail = rrb_array_replace(self.tail, tail_idx, value)
+            return PersistentVec(root: self.root, tail: new_tail, size: self.size, shift: self.shift)
+
+        # Element is in the tree — path-copy update
+        val new_root = rrb_set(self.root, idx, value, self.shift)
+        PersistentVec(root: new_root, tail: self.tail, size: self.size, shift: self.shift)
+
+    # ------------------------------------------------------------------
+    # Slicing
+    # ------------------------------------------------------------------
+
+    # Return a new vector with elements from start (inclusive) to end (exclusive).
+    fn slice(start_idx: i64, end_idx: i64) -> PersistentVec:
+        var s = start_idx
+        var e = end_idx
+        if s < 0:
+            s = 0
+        if e > self.size:
+            e = self.size
+        if s >= e:
+            return PersistentVec__empty()
+        # Build by iterating and pushing (simple approach)
+        var result = PersistentVec__empty()
+        var i = s
+        while i < e:
+            val elem = self.get(i)
+            result = result.push(elem)
+            i = i + 1
+        result
+
+    # Return a new vector with the first n elements.
+    fn take(n: i64) -> PersistentVec:
+        if n <= 0:
+            return PersistentVec__empty()
+        if n >= self.size:
+            return self
+        self.slice(0, n)
+
+    # Return a new vector with the first n elements removed.
+    fn drop(n: i64) -> PersistentVec:
+        if n <= 0:
+            return self
+        if n >= self.size:
+            return PersistentVec__empty()
+        self.slice(n, self.size)
+
+    # ------------------------------------------------------------------
+    # Concatenation
+    # ------------------------------------------------------------------
+
+    # Return a new vector that is this vector followed by other.
+    # Uses simple iterate-and-push approach.
+    fn concat(other: PersistentVec) -> PersistentVec:
+        if other.is_empty():
+            return self
+        if self.is_empty():
+            return other
+        var result = self
+        val other_arr = other.to_array()
+        var i = 0
+        val n = other_arr.len()
+        while i < n:
+            result = result.push(other_arr[i])
+            i = i + 1
+        result
+
+    # ------------------------------------------------------------------
+    # Higher-order operations
+    # ------------------------------------------------------------------
+
+    # Return a new vector with f applied to each element.
+    fn map(f: fn()) -> PersistentVec:
+        var result = PersistentVec__empty()
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            result = result.push(f(arr[i]))
+            i = i + 1
+        result
+
+    # Return a new vector with only elements matching the predicate.
+    fn filter(pred: fn()) -> PersistentVec:
+        var result = PersistentVec__empty()
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            if pred(arr[i]):
+                result = result.push(arr[i])
+            i = i + 1
+        result
+
+    # Left fold over all elements: f(f(f(init, a), b), c).
+    fn fold(init, f: fn()):
+        var acc = init
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            acc = f(acc, arr[i])
+            i = i + 1
+        acc
+
+    # Apply f to each element for side effects.
+    fn each(f: fn()):
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            f(arr[i])
+            i = i + 1
+        0
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
+    # Check if the vector contains the given value.
+    fn contains(value) -> bool:
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            if arr[i] == value:
+                return true
+            i = i + 1
+        false
+
+    # Find the index of the first occurrence of value, or -1 if not found.
+    fn index_of(value) -> i64:
+        val arr = self.to_array()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            if arr[i] == value:
+                return i
+            i = i + 1
+        -1
+
+    # ------------------------------------------------------------------
+    # Conversion
+    # ------------------------------------------------------------------
+
+    # Convert to a mutable array.
+    fn to_array():
+        var result = []
+        # Collect tree elements first
+        rrb_collect_elements(self.root, result)
+        # Then append tail elements
+        var i = 0
+        val n = self.tail.len()
+        while i < n:
+            result.push(self.tail[i])
+            i = i + 1
+        result
+
+    # Return a new vector with elements in reverse order.
+    fn reverse() -> PersistentVec:
+        val arr = self.to_array()
+        var result = PersistentVec__empty()
+        var i = arr.len() - 1
+        while i >= 0:
+            result = result.push(arr[i])
+            i = i - 1
+        result
+
+    # Return a copy (identity for immutable structures, but provided for
+    # API compatibility).
+    fn copy() -> PersistentVec:
+        PersistentVec(root: self.root, tail: rrb_array_copy(self.tail), size: self.size, shift: self.shift)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    # Compute the index where the tail starts.
+    # For vectors with <= 32 elements, tail_offset is 0 (everything in tail).
+    fn _tail_offset() -> i64:
+        if self.size < RRB_BRANCH_FACTOR:
+            return 0
+        self.size - self.tail.len()
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+# Create an empty PersistentVec.
+fn PersistentVec__empty() -> PersistentVec:
+    PersistentVec(root: nil, tail: [], size: 0, shift: 0)
+
+# Create a PersistentVec from an array.
+fn PersistentVec__from_array(arr) -> PersistentVec:
+    var result = PersistentVec__empty()
+    var i = 0
+    val n = arr.len()
+    while i < n:
+        result = result.push(arr[i])
+        i = i + 1
+    result
+
+# Create a PersistentVec from an array (alias).
+fn PersistentVec__of(arr) -> PersistentVec:
+    PersistentVec__from_array(arr)
+
+# Create a PersistentVec with n copies of a value.
+fn PersistentVec__repeat(value, n: i64) -> PersistentVec:
+    var result = PersistentVec__empty()
+    var i = 0
+    while i < n:
+        result = result.push(value)
+        i = i + 1
+    result
+
+# Create a PersistentVec with a range of integers [start, end).
+fn PersistentVec__range(start_val: i64, end_val: i64) -> PersistentVec:
+    var result = PersistentVec__empty()
+    var i = start_val
+    while i < end_val:
+        result = result.push(i)
+        i = i + 1
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export PersistentVec
+export PersistentVec__empty, PersistentVec__from_array, PersistentVec__of
+export PersistentVec__repeat, PersistentVec__range
