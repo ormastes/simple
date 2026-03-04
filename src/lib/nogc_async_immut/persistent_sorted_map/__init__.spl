@@ -1,0 +1,297 @@
+# Persistent Sorted Map — LLRB-based Immutable Ordered Map
+#
+# @tag:api
+#
+# An immutable, persistent sorted map using a Left-Leaning Red-Black Tree (LLRB)
+# with path-copying for structural sharing. Every mutation (set, remove, merge,
+# filter) returns a NEW map — the original is never modified.
+#
+# Keys are maintained in sorted order according to a user-supplied comparator
+# function. This enables efficient range queries, floor/ceiling lookups, and
+# ordered iteration — operations not possible with hash-based PersistentMap.
+#
+# Structural sharing means updates copy only O(log n) nodes along the path
+# from root to the modified leaf, making immutable updates efficient.
+#
+# Thread-safe by construction: immutable values need no locks.
+#
+# Usage:
+#   use std.persistent_sorted_map.{PersistentSortedMap, PersistentSortedMap__empty}
+#
+#   val m0 = PersistentSortedMap__of_ints()
+#   val m1 = m0.set(3, "three")
+#   val m2 = m1.set(1, "one")
+#   val m3 = m2.set(5, "five")
+#   print m3.get(3)       # "three"
+#   print m3.min_key()    # 1
+#   print m3.max_key()    # 5
+#   print m3.keys()       # [1, 3, 5]  (sorted!)
+#   print m0.len()        # 0 (original unchanged)
+
+use std.persistent_sorted_map.rb_node.{rb_get, rb_contains, rb_min_node, rb_max_node, rb_count, rb_collect_entries, rb_collect_range, rb_floor, rb_ceiling, RB_RED, RB_BLACK}
+use std.persistent_sorted_map.path_copy.{rb_insert, rb_remove, rb_build_from_sorted}
+
+# ============================================================================
+# Default Comparators
+# ============================================================================
+
+# Default comparator for integer keys.
+# Returns negative if a < b, 0 if equal, positive if a > b.
+fn compare_ints(a, b) -> i64:
+    if a < b:
+        return -1
+    if a > b:
+        return 1
+    0
+
+# Default comparator for text (string) keys.
+# Uses lexicographic ordering provided by the < and > operators.
+fn compare_text(a, b) -> i64:
+    if a < b:
+        return -1
+    if a > b:
+        return 1
+    0
+
+# ============================================================================
+# PersistentSortedMap
+# ============================================================================
+
+class PersistentSortedMap:
+    root       # LLRB tree root node (nil = empty)
+    size: i64
+    _compare   # fn(a, b) -> i64 comparator
+
+    # ------------------------------------------------------------------
+    # Lookup
+    # ------------------------------------------------------------------
+
+    # Get the value associated with `key`, or nil if not present.
+    fn get(key):
+        rb_get(self.root, key, self._compare)
+
+    # Get the value associated with `key`, or `default_val` if not present.
+    fn get_or(key, default_val):
+        val result = rb_get(self.root, key, self._compare)
+        if result != nil:
+            return result
+        default_val
+
+    # Check whether `key` exists in the map.
+    fn contains(key) -> bool:
+        rb_contains(self.root, key, self._compare)
+
+    # ------------------------------------------------------------------
+    # Mutation (returns new map)
+    # ------------------------------------------------------------------
+
+    # Insert or update `key` with `value`. Returns a NEW map.
+    fn set(key, value) -> PersistentSortedMap:
+        val already_exists = rb_contains(self.root, key, self._compare)
+        val new_root = rb_insert(self.root, key, value, self._compare)
+        var new_size = self.size
+        if not already_exists:
+            new_size = self.size + 1
+        PersistentSortedMap(root: new_root, size: new_size, _compare: self._compare)
+
+    # Remove `key` from the map. Returns a NEW map.
+    # If the key is not present, returns this map unchanged.
+    fn remove(key) -> PersistentSortedMap:
+        val new_root = rb_remove(self.root, key, self._compare)
+        if new_root == self.root:
+            return self
+        var new_size = self.size - 1
+        if new_size < 0:
+            new_size = 0
+        PersistentSortedMap(root: new_root, size: new_size, _compare: self._compare)
+
+    # ------------------------------------------------------------------
+    # Size queries
+    # ------------------------------------------------------------------
+
+    # Return the number of key-value pairs.
+    fn len() -> i64:
+        self.size
+
+    # Return true if the map is empty.
+    fn is_empty() -> bool:
+        self.size == 0
+
+    # ------------------------------------------------------------------
+    # Min / Max
+    # ------------------------------------------------------------------
+
+    # Return the smallest key, or nil if the map is empty.
+    fn min_key():
+        val node = rb_min_node(self.root)
+        if node == nil:
+            return nil
+        node[1]
+
+    # Return the largest key, or nil if the map is empty.
+    fn max_key():
+        val node = rb_max_node(self.root)
+        if node == nil:
+            return nil
+        node[1]
+
+    # Return [key, value] of the smallest key, or nil if the map is empty.
+    fn min_entry():
+        val node = rb_min_node(self.root)
+        if node == nil:
+            return nil
+        [node[1], node[2]]
+
+    # Return [key, value] of the largest key, or nil if the map is empty.
+    fn max_entry():
+        val node = rb_max_node(self.root)
+        if node == nil:
+            return nil
+        [node[1], node[2]]
+
+    # ------------------------------------------------------------------
+    # Ordered queries
+    # ------------------------------------------------------------------
+
+    # Return all [key, value] pairs where from_key <= key <= to_key, in sorted order.
+    fn range(from_key, to_key):
+        var result = []
+        rb_collect_range(self.root, from_key, to_key, self._compare, result)
+        result
+
+    # Return the greatest [key, value] entry with key <= the given key, or nil.
+    fn floor(key):
+        rb_floor(self.root, key, self._compare)
+
+    # Return the smallest [key, value] entry with key >= the given key, or nil.
+    fn ceiling(key):
+        rb_ceiling(self.root, key, self._compare)
+
+    # ------------------------------------------------------------------
+    # Iteration / conversion
+    # ------------------------------------------------------------------
+
+    # Return an array of all keys in sorted order.
+    fn keys():
+        val all_entries = self.entries()
+        var result = []
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            result.push(all_entries[i][0])
+            i = i + 1
+        result
+
+    # Return an array of all values in key-sorted order.
+    fn values():
+        val all_entries = self.entries()
+        var result = []
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            result.push(all_entries[i][1])
+            i = i + 1
+        result
+
+    # Return an array of [key, value] pairs in sorted order.
+    fn entries():
+        var result = []
+        rb_collect_entries(self.root, result)
+        result
+
+    # ------------------------------------------------------------------
+    # Bulk operations
+    # ------------------------------------------------------------------
+
+    # Merge another PersistentSortedMap into this one. Keys from `other` take
+    # precedence on conflict. Returns a NEW map.
+    fn merge(other: PersistentSortedMap) -> PersistentSortedMap:
+        if other.is_empty():
+            return self
+        if self.is_empty():
+            return other
+        var result = self
+        val other_entries = other.entries()
+        var i = 0
+        val n = other_entries.len()
+        while i < n:
+            val pair = other_entries[i]
+            result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
+
+    # Return a new map containing only entries where `pred(key, value)` is true.
+    fn filter(pred: fn()) -> PersistentSortedMap:
+        var result = PersistentSortedMap__empty(self._compare)
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            if pred(pair[0], pair[1]):
+                result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
+
+    # Fold (reduce) over all entries in sorted key order.
+    # `f(accumulator, key, value)` is called for each entry.
+    fn fold(init, f: fn()):
+        var acc = init
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            acc = f(acc, pair[0], pair[1])
+            i = i + 1
+        acc
+
+    # Convert to a mutable dict (built-in hash map).
+    # Note: ordering information is lost in the conversion.
+    fn to_dict():
+        var result = {}
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            result[pair[0]] = pair[1]
+            i = i + 1
+        result
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+# Create an empty PersistentSortedMap with the given comparator.
+# The comparator fn(a, b) must return negative if a < b, 0 if equal, positive if a > b.
+fn PersistentSortedMap__empty(compare) -> PersistentSortedMap:
+    PersistentSortedMap(root: nil, size: 0, _compare: compare)
+
+# Create a PersistentSortedMap from an array of [key, value] pairs.
+fn PersistentSortedMap__from_entries(entries, compare) -> PersistentSortedMap:
+    var result = PersistentSortedMap__empty(compare)
+    var i = 0
+    val n = entries.len()
+    while i < n:
+        val pair = entries[i]
+        result = result.set(pair[0], pair[1])
+        i = i + 1
+    result
+
+# Create an empty PersistentSortedMap with integer key ordering.
+fn PersistentSortedMap__of_ints() -> PersistentSortedMap:
+    PersistentSortedMap__empty(compare_ints)
+
+# Create an empty PersistentSortedMap with text (string) key ordering.
+fn PersistentSortedMap__of_text() -> PersistentSortedMap:
+    PersistentSortedMap__empty(compare_text)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export PersistentSortedMap
+export PersistentSortedMap__empty, PersistentSortedMap__from_entries
+export PersistentSortedMap__of_ints, PersistentSortedMap__of_text
+export compare_ints, compare_text
