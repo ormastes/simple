@@ -17,6 +17,7 @@ use app.build.doc_warnings (run_doc_warnings)
 use app.io.mod (file_exists, process_run)
 use compiler.driver.driver.{interpret_file}
 use compiler.driver.driver_types.{CompileResult}
+use compiler.driver.driver_api.{aot_llvm_file}
 use app.compile.native.{compile_native}
 use std.log.{info, debug, error}
 
@@ -104,7 +105,7 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
     var final_path = "build/simple"
     if is_release:
         output_path = "build/simple-release"
-        final_path = "bin/release/simple-new"
+        final_path = "bin/release/simple"
 
     debug("build", "Profile: {profile_to_string(config.profile)}, output: {output_path}")
 
@@ -120,14 +121,29 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
             duration_ms: 0
         )
 
-    # Run native compile pipeline in-process
+    # Run compile pipeline in-process
     debug("build", "Compiling {source_file} -> {output_path} (in-process)")
     info("build", "Compiling {source_file} -> {output_path}")
 
-    val exit_code = compile_native(source_file, output_path, config.verbose, "", false)
+    var exit_code = 0
+    if is_release:
+        # Release: LLVM backend with -O3 + mold linker
+        info("build", "Using LLVM backend (release, -O3)")
+        val compile_result = aot_llvm_file(source_file, output_path)
+        match compile_result:
+            case CompileResult.Success(_):
+                exit_code = 0
+            case _:
+                val errors = compile_result.get_errors()
+                for err in errors:
+                    error("build", err)
+                exit_code = 1
+    else:
+        # Debug: C backend (fast compilation)
+        exit_code = compile_native(source_file, output_path, config.verbose, "", false)
 
     if exit_code != 0:
-        error("build", "Native compilation failed (exit code {exit_code})")
+        error("build", "Compilation failed (exit code {exit_code})")
 
         return BuildResult(
             success: false,

@@ -114,6 +114,42 @@ fn monomorphizer_create() -> Monomorphizer:
         Monomorphizer(generic_functions: {}, generic_structs: {},
                       generic_classes: {}, table: monomorphizationtable_create())
 
+fn spec_key_mangled_name(key: SpecializationKey) -> text:
+    var parts: [text] = []
+    for arg in key.type_args:
+        parts = parts + [concrete_type_to_text(arg)]
+    val args_str = parts.join("_")
+    if args_str == "":
+        key.name
+    else:
+        "{key.name}${args_str}"
+
+impl Monomorphizer:
+    me register_generic_function(name: text, func: Any):
+        self.generic_functions[name] = func
+
+    me register_generic_struct(name: text, s: Any):
+        self.generic_structs[name] = s
+
+    me register_generic_class(name: text, c: Any):
+        self.generic_classes[name] = c
+
+    me specialize_function_call(name: text, args: [ConcreteType]) -> text:
+        val key = SpecializationKey(name: name, type_args: args)
+        val mangled = spec_key_mangled_name(key)
+        self.table.pending_functions = self.table.pending_functions + [(key, self.generic_functions[name])]
+        mangled
+
+    me process_pending():
+        for (key, func) in self.table.pending_functions:
+            val mangled = spec_key_mangled_name(key)
+            self.table.specialized_functions[mangled] = func
+            self.table.processed = self.table.processed + [mangled]
+        self.table.pending_functions = []
+
+    fn get_specialized_functions() -> {text: Any}:
+        self.table.specialized_functions
+
 
 fn monomorphizer_specialize_function_internal(self: Monomorphizer, key: SpecializationKey, func: Any) -> Any:
         """Specialize a single function with concrete type arguments.
