@@ -286,26 +286,57 @@ jobs:
           echo "Platform: ${{ matrix.platform }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+          # 1. Build Rust seed
           cd src/compiler_rust
           cargo build --profile bootstrap -p simple-driver
+
+          # 2. Build native_all library (runtime functions for native-build)
+          cargo build --profile bootstrap -p simple-native-all
           cd ../..
 
-          BINARY="src/compiler_rust/target/bootstrap/simple"
-          if [ -f "$BINARY" ]; then
-            file "$BINARY"
-            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/$BINARY" >> $GITHUB_ENV
-            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
-
-            if "./$BINARY" --version 2>/dev/null; then
-              echo "✓ Native macOS binary verified"
-            else
-              echo "✓ Native macOS binary built (version check may differ)"
-            fi
-            ls -lh "$BINARY"
-          else
-            echo "✗ Rust bootstrap build failed — no binary produced"
+          SEED="src/compiler_rust/target/bootstrap/simple"
+          if [ ! -f "$SEED" ]; then
+            echo "✗ Rust seed build failed — no binary produced"
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "Rust seed built:"
+          file "$SEED"
+          ls -lh "$SEED"
+
+          # 3. Run native-build: compile Simple source -> native binary
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Running native-build to compile Simple source"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          mkdir -p build/bootstrap/stage1
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            "$SEED" native-build \
+            --source-dir src \
+            --entry src/app/cli/bootstrap_main.spl \
+            --output build/bootstrap/stage1/simple \
+            2>&1 | tail -20
+
+          # 4. Verify native-built binary, fall back to Rust seed if needed
+          NATIVE_BIN="build/bootstrap/stage1/simple"
+          if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
+            echo "✓ Native-built Simple binary verified"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$NATIVE_BIN" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            file "$NATIVE_BIN"
+            ls -lh "$NATIVE_BIN"
+          else
+            echo "⚠ native-build failed or binary not runnable, falling back to Rust seed"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            if "./$SEED" --version 2>/dev/null; then
+              echo "✓ Rust seed binary verified (fallback)"
+            fi
+            file "$SEED"
+            ls -lh "$SEED"
           fi
 
       - name: Create distribution package
