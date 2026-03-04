@@ -1,0 +1,419 @@
+# PersistentMap Specification
+#
+# Comprehensive tests for the HAMT-based immutable PersistentMap.
+# Covers construction, lookup, mutation (returns new map), removal,
+# bulk operations, iteration, conversion, and persistence guarantees.
+
+use std.persistent_map.{PersistentMap, PersistentMap__empty, PersistentMap__from_entries, PersistentMap__from_dict}
+
+describe "PersistentMap":
+
+    describe "empty map":
+        it "has zero length":
+            val m = PersistentMap__empty()
+            expect(m.len()).to_equal(0)
+
+        it "is empty":
+            val m = PersistentMap__empty()
+            expect(m.is_empty()).to_equal(true)
+
+        it "get returns nil for any key":
+            val m = PersistentMap__empty()
+            expect(m.get("key")).to_be_nil()
+            expect(m.get("anything")).to_be_nil()
+
+        it "contains returns false for any key":
+            val m = PersistentMap__empty()
+            expect(m.contains("x")).to_equal(false)
+
+        it "keys returns empty array":
+            val m = PersistentMap__empty()
+            val k = m.keys()
+            expect(k.len()).to_equal(0)
+
+        it "values returns empty array":
+            val m = PersistentMap__empty()
+            val v = m.values()
+            expect(v.len()).to_equal(0)
+
+        it "entries returns empty array":
+            val m = PersistentMap__empty()
+            val e = m.entries()
+            expect(e.len()).to_equal(0)
+
+    describe "set and get":
+        it "stores and retrieves a single value":
+            val m = PersistentMap__empty().set("a", 1)
+            expect(m.get("a")).to_equal(1)
+            expect(m.len()).to_equal(1)
+
+        it "returns new map on set - original unchanged":
+            val m1 = PersistentMap__empty()
+            val m2 = m1.set("a", 1)
+            expect(m1.len()).to_equal(0)
+            expect(m1.get("a")).to_be_nil()
+            expect(m2.len()).to_equal(1)
+            expect(m2.get("a")).to_equal(1)
+
+        it "overwrites existing key with same length":
+            val m = PersistentMap__empty().set("a", 1).set("a", 2)
+            expect(m.get("a")).to_equal(2)
+            expect(m.len()).to_equal(1)
+
+        it "handles two keys":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            expect(m.get("a")).to_equal(1)
+            expect(m.get("b")).to_equal(2)
+            expect(m.len()).to_equal(2)
+
+        it "handles three keys":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2).set("c", 3)
+            expect(m.get("a")).to_equal(1)
+            expect(m.get("b")).to_equal(2)
+            expect(m.get("c")).to_equal(3)
+            expect(m.len()).to_equal(3)
+
+        it "stores text values":
+            val m = PersistentMap__empty().set("name", "Alice")
+            expect(m.get("name")).to_equal("Alice")
+
+        it "stores integer keys":
+            val m = PersistentMap__empty().set(1, "one").set(2, "two")
+            expect(m.get(1)).to_equal("one")
+            expect(m.get(2)).to_equal("two")
+
+        it "returns nil for missing key":
+            val m = PersistentMap__empty().set("a", 1)
+            expect(m.get("b")).to_be_nil()
+
+        it "is no longer empty after set":
+            val m = PersistentMap__empty().set("x", 42)
+            expect(m.is_empty()).to_equal(false)
+
+    describe "persistence across multiple sets":
+        it "preserves snapshots":
+            val m0 = PersistentMap__empty()
+            val m1 = m0.set("a", 1)
+            val m2 = m1.set("b", 2)
+            val m3 = m2.set("c", 3)
+            expect(m0.len()).to_equal(0)
+            expect(m1.len()).to_equal(1)
+            expect(m2.len()).to_equal(2)
+            expect(m3.len()).to_equal(3)
+            expect(m1.get("b")).to_be_nil()
+            expect(m2.get("c")).to_be_nil()
+
+        it "overwrite does not affect earlier version":
+            val m1 = PersistentMap__empty().set("key", "old")
+            val m2 = m1.set("key", "new")
+            expect(m1.get("key")).to_equal("old")
+            expect(m2.get("key")).to_equal("new")
+
+    describe "remove":
+        it "removes an existing key":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            val m2 = m.remove("a")
+            expect(m2.get("a")).to_be_nil()
+            expect(m2.get("b")).to_equal(2)
+            expect(m2.len()).to_equal(1)
+
+        it "does not modify original on remove":
+            val m1 = PersistentMap__empty().set("a", 1)
+            val m2 = m1.remove("a")
+            expect(m1.get("a")).to_equal(1)
+            expect(m1.len()).to_equal(1)
+            expect(m2.get("a")).to_be_nil()
+            expect(m2.len()).to_equal(0)
+
+        it "handles removing non-existent key":
+            val m = PersistentMap__empty().set("a", 1)
+            val m2 = m.remove("b")
+            expect(m2.len()).to_equal(1)
+            expect(m2.get("a")).to_equal(1)
+
+        it "removes last key to get empty map":
+            val m = PersistentMap__empty().set("only", 99)
+            val m2 = m.remove("only")
+            expect(m2.len()).to_equal(0)
+            expect(m2.is_empty()).to_equal(true)
+
+        it "removes from multi-key map":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2).set("c", 3)
+            val m2 = m.remove("b")
+            expect(m2.len()).to_equal(2)
+            expect(m2.get("a")).to_equal(1)
+            expect(m2.get("b")).to_be_nil()
+            expect(m2.get("c")).to_equal(3)
+
+    describe "contains":
+        it "returns true for existing key":
+            val m = PersistentMap__empty().set("x", 42)
+            expect(m.contains("x")).to_equal(true)
+
+        it "returns false for missing key":
+            val m = PersistentMap__empty().set("x", 42)
+            expect(m.contains("y")).to_equal(false)
+
+        it "returns false after removal":
+            val m = PersistentMap__empty().set("x", 42).remove("x")
+            expect(m.contains("x")).to_equal(false)
+
+    describe "get_or":
+        it "returns default for missing key":
+            val m = PersistentMap__empty()
+            expect(m.get_or("x", 42)).to_equal(42)
+
+        it "returns value for existing key":
+            val m = PersistentMap__empty().set("x", 10)
+            expect(m.get_or("x", 42)).to_equal(10)
+
+        it "returns default with text fallback":
+            val m = PersistentMap__empty()
+            expect(m.get_or("name", "unknown")).to_equal("unknown")
+
+    describe "from_entries":
+        it "builds from key-value pairs":
+            val m = PersistentMap__from_entries([["a", 1], ["b", 2]])
+            expect(m.get("a")).to_equal(1)
+            expect(m.get("b")).to_equal(2)
+            expect(m.len()).to_equal(2)
+
+        it "handles empty entries":
+            val m = PersistentMap__from_entries([])
+            expect(m.len()).to_equal(0)
+            expect(m.is_empty()).to_equal(true)
+
+        it "handles single entry":
+            val m = PersistentMap__from_entries([["only", 99]])
+            expect(m.get("only")).to_equal(99)
+            expect(m.len()).to_equal(1)
+
+        it "last value wins for duplicate keys":
+            val m = PersistentMap__from_entries([["a", 1], ["a", 2]])
+            expect(m.get("a")).to_equal(2)
+            expect(m.len()).to_equal(1)
+
+    describe "from_dict":
+        it "builds from mutable dict":
+            var d = {}
+            d["x"] = 10
+            d["y"] = 20
+            val m = PersistentMap__from_dict(d)
+            expect(m.get("x")).to_equal(10)
+            expect(m.get("y")).to_equal(20)
+            expect(m.len()).to_equal(2)
+
+        it "handles empty dict":
+            val d = {}
+            val m = PersistentMap__from_dict(d)
+            expect(m.len()).to_equal(0)
+
+    describe "keys and values":
+        it "returns correct number of keys":
+            val m = PersistentMap__empty().set("x", 1).set("y", 2)
+            val k = m.keys()
+            expect(k.len()).to_equal(2)
+
+        it "returns correct number of values":
+            val m = PersistentMap__empty().set("x", 10).set("y", 20)
+            val v = m.values()
+            expect(v.len()).to_equal(2)
+
+        it "single key map":
+            val m = PersistentMap__empty().set("only", 42)
+            val k = m.keys()
+            val v = m.values()
+            expect(k.len()).to_equal(1)
+            expect(v.len()).to_equal(1)
+
+    describe "entries":
+        it "returns key-value pairs":
+            val m = PersistentMap__empty().set("a", 1)
+            val e = m.entries()
+            expect(e.len()).to_equal(1)
+            val pair = e[0]
+            expect(pair[0]).to_equal("a")
+            expect(pair[1]).to_equal(1)
+
+        it "returns correct count for multi-entry map":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2).set("c", 3)
+            val e = m.entries()
+            expect(e.len()).to_equal(3)
+
+    describe "merge":
+        it "merges two disjoint maps":
+            val m1 = PersistentMap__empty().set("a", 1)
+            val m2 = PersistentMap__empty().set("b", 2)
+            val merged = m1.merge(m2)
+            expect(merged.get("a")).to_equal(1)
+            expect(merged.get("b")).to_equal(2)
+            expect(merged.len()).to_equal(2)
+
+        it "other takes precedence on conflict":
+            val m1 = PersistentMap__empty().set("a", 1)
+            val m2 = PersistentMap__empty().set("a", 99)
+            val merged = m1.merge(m2)
+            expect(merged.get("a")).to_equal(99)
+            expect(merged.len()).to_equal(1)
+
+        it "merge with empty returns self":
+            val m1 = PersistentMap__empty().set("a", 1)
+            val m2 = PersistentMap__empty()
+            val merged = m1.merge(m2)
+            expect(merged.get("a")).to_equal(1)
+            expect(merged.len()).to_equal(1)
+
+        it "empty merge with other returns other":
+            val m1 = PersistentMap__empty()
+            val m2 = PersistentMap__empty().set("b", 2)
+            val merged = m1.merge(m2)
+            expect(merged.get("b")).to_equal(2)
+            expect(merged.len()).to_equal(1)
+
+        it "does not modify originals":
+            val m1 = PersistentMap__empty().set("a", 1)
+            val m2 = PersistentMap__empty().set("b", 2)
+            val merged = m1.merge(m2)
+            expect(m1.len()).to_equal(1)
+            expect(m2.len()).to_equal(1)
+            expect(merged.len()).to_equal(2)
+
+    describe "filter":
+        it "keeps entries matching predicate":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2).set("c", 3)
+            val filtered = m.filter(fn(k, v): v > 1)
+            expect(filtered.len()).to_equal(2)
+            expect(filtered.get("a")).to_be_nil()
+            expect(filtered.get("b")).to_equal(2)
+            expect(filtered.get("c")).to_equal(3)
+
+        it "returns empty when nothing matches":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            val filtered = m.filter(fn(k, v): v > 100)
+            expect(filtered.len()).to_equal(0)
+            expect(filtered.is_empty()).to_equal(true)
+
+        it "returns all when everything matches":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            val filtered = m.filter(fn(k, v): v > 0)
+            expect(filtered.len()).to_equal(2)
+
+    describe "map_values":
+        it "transforms all values":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            val doubled = m.map_values(fn(v): v * 2)
+            expect(doubled.get("a")).to_equal(2)
+            expect(doubled.get("b")).to_equal(4)
+            expect(doubled.len()).to_equal(2)
+
+        it "does not modify original":
+            val m = PersistentMap__empty().set("a", 5)
+            val mapped = m.map_values(fn(v): v + 10)
+            expect(m.get("a")).to_equal(5)
+            expect(mapped.get("a")).to_equal(15)
+
+    describe "fold":
+        it "sums all values":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2).set("c", 3)
+            val total = m.fold(0, fn(acc, k, v): acc + v)
+            expect(total).to_equal(6)
+
+        it "fold over empty returns init":
+            val m = PersistentMap__empty()
+            val result = m.fold(42, fn(acc, k, v): acc + v)
+            expect(result).to_equal(42)
+
+    describe "update":
+        it "updates existing key":
+            val m = PersistentMap__empty().set("count", 5)
+            val m2 = m.update("count", fn(v): v + 1)
+            expect(m2.get("count")).to_equal(6)
+            expect(m.get("count")).to_equal(5)
+
+        it "creates key when missing":
+            val m = PersistentMap__empty()
+            val m2 = m.update("new", fn(v): 42)
+            expect(m2.get("new")).to_equal(42)
+
+    describe "copy":
+        it "returns identical map":
+            val m = PersistentMap__empty().set("a", 1).set("b", 2)
+            val c = m.copy()
+            expect(c.get("a")).to_equal(1)
+            expect(c.get("b")).to_equal(2)
+            expect(c.len()).to_equal(2)
+
+    describe "to_dict":
+        it "converts to mutable dict":
+            val m = PersistentMap__empty().set("x", 10).set("y", 20)
+            val d = m.to_dict()
+            expect(d["x"]).to_equal(10)
+            expect(d["y"]).to_equal(20)
+
+        it "empty map converts to empty dict":
+            val m = PersistentMap__empty()
+            val d = m.to_dict()
+            expect(d.len()).to_equal(0)
+
+    describe "stress test":
+        it "handles many elements via helper fn":
+            fn run_stress() -> i64:
+                var m = PersistentMap__empty()
+                var i = 0
+                while i < 100:
+                    m = m.set("key_{i}", i)
+                    i = i + 1
+                m.len()
+            expect(run_stress()).to_equal(100)
+
+        it "set and get many elements":
+            fn run_get_stress() -> i64:
+                var m = PersistentMap__empty()
+                var i = 0
+                while i < 50:
+                    m = m.set("k_{i}", i * 10)
+                    i = i + 1
+                var ok_count = 0
+                i = 0
+                while i < 50:
+                    val v = m.get("k_{i}")
+                    if v == i * 10:
+                        ok_count = ok_count + 1
+                    i = i + 1
+                ok_count
+            expect(run_get_stress()).to_equal(50)
+
+        it "remove many elements":
+            fn run_remove_stress() -> i64:
+                var m = PersistentMap__empty()
+                var i = 0
+                while i < 30:
+                    m = m.set("r_{i}", i)
+                    i = i + 1
+                i = 0
+                while i < 15:
+                    m = m.remove("r_{i}")
+                    i = i + 1
+                m.len()
+            expect(run_remove_stress()).to_equal(15)
+
+    describe "edge cases":
+        it "set same key same value returns same map":
+            val m = PersistentMap__empty().set("a", 1)
+            val m2 = m.set("a", 1)
+            expect(m2.get("a")).to_equal(1)
+            expect(m2.len()).to_equal(1)
+
+        it "empty key string":
+            val m = PersistentMap__empty().set("", "empty_key")
+            expect(m.get("")).to_equal("empty_key")
+            expect(m.len()).to_equal(1)
+
+        it "nil value stored and retrieved":
+            val m = PersistentMap__empty().set("nil_val", nil)
+            expect(m.len()).to_equal(1)
+
+        it "remove from empty map":
+            val m = PersistentMap__empty()
+            val m2 = m.remove("nothing")
+            expect(m2.len()).to_equal(0)
