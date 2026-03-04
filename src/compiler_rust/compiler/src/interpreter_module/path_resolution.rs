@@ -452,6 +452,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 for subdir in &[
                     "nogc_async_mut",
                     "nogc_sync_mut",
+                    "nogc_async_immut",
                     "common",
                     "gc_async_mut",
                     "nogc_async_mut_noalloc",

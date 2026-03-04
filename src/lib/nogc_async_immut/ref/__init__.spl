@@ -1,0 +1,164 @@
+# Ref — Validated Atom Wrapper
+#
+# A Ref wraps an Atom and adds a validator function. Every state
+# transition (swap, reset, compare_and_set) runs the validator on
+# the proposed new value before committing. If the validator returns
+# false, the transition is rejected and the old value is preserved.
+#
+# Because Simple has no exceptions, rejection is signaled by return
+# value: swap/reset return the old value unchanged, compare_and_set
+# returns false, and swap_validated returns a [success, value] pair
+# so the caller can distinguish "validator rejected" from "value
+# happened to be the same."
+#
+# Usage:
+#   val positive = Ref__new(1, \x: x > 0)
+#   positive.swap(\x: x + 1)          # Succeeds, returns 2
+#   positive.swap(\x: x - 100)        # Rejected (result <= 0), returns 2
+#   positive.reset(42)                 # Succeeds, returns 42
+#   positive.reset(-5)                 # Rejected, returns 42
+#
+#   val r = positive.swap_validated(\x: x * 2)
+#   # r[0] == true (success), r[1] == 84
+#
+#   val unrestricted = Ref__unvalidated(0)
+#   unrestricted.swap(\x: x + 1)      # Always succeeds
+
+use std.atom.{Atom, Atom__new}
+
+# ============================================================================
+# Ref Class
+# ============================================================================
+
+class Ref:
+    """Thread-safe mutable reference with validation.
+
+    Wraps an Atom and gates every mutation through a validator function.
+    If the validator returns false for a proposed value, the mutation
+    is rejected and the current value is preserved.
+    """
+    _atom: Atom             # Underlying atomic storage
+    _validator: fn          # fn(value) -> bool — returns true if value is acceptable
+
+    # ========================================================================
+    # Read Operations (immutable — fn)
+    # ========================================================================
+
+    fn deref():
+        """Read the current value. Delegates to the underlying Atom."""
+        self._atom.deref()
+
+    fn version() -> i64:
+        """Return the current version number. Delegates to the underlying Atom."""
+        self._atom.version()
+
+    fn is_valid(value) -> bool:
+        """Run the validator against a proposed value.
+
+        Returns true if the value would be accepted by swap/reset.
+        Does not modify the Ref.
+        """
+        self._validator(value)
+
+    # ========================================================================
+    # Write Operations (mutable — me)
+    # ========================================================================
+
+    me swap(f):
+        """Apply f to the current value; commit only if the result is valid.
+
+        Computes new_val = f(current). If the validator accepts new_val,
+        installs it and returns new_val. Otherwise leaves the Ref unchanged
+        and returns the old value.
+
+        Parameters:
+          f: Function that takes the current value and returns a candidate.
+
+        Returns:
+          The new value if accepted, the old value if rejected.
+        """
+        val old = self._atom.deref()
+        val new_val = f(old)
+        if self._validator(new_val):
+            self._atom.reset(new_val)
+            return new_val
+        old
+
+    me reset(new_value):
+        """Set the Ref to new_value if it passes validation.
+
+        Parameters:
+          new_value: The candidate value to install.
+
+        Returns:
+          new_value if accepted, the current value if rejected.
+        """
+        if self._validator(new_value):
+            self._atom.reset(new_value)
+            return new_value
+        self._atom.deref()
+
+    me compare_and_set(expected, new_value) -> bool:
+        """Atomically set the value only if it equals expected AND new_value is valid.
+
+        Parameters:
+          expected: The value we expect to find.
+          new_value: The candidate value to install.
+
+        Returns:
+          true if validation passed and the swap succeeded, false otherwise.
+        """
+        if self._validator(new_value):
+            return self._atom.compare_and_set(expected, new_value)
+        false
+
+    me swap_validated(f):
+        """Like swap(), but returns [success, value] so the caller can
+        distinguish a validation rejection from a no-change swap.
+
+        Parameters:
+          f: Function that takes the current value and returns a candidate.
+
+        Returns:
+          [true, new_value] if validation passed.
+          [false, old_value] if validation rejected.
+        """
+        val old = self._atom.deref()
+        val new_val = f(old)
+        if self._validator(new_val):
+            self._atom.reset(new_val)
+            return [true, new_val]
+        [false, old]
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn Ref__new(initial, validator) -> Ref:
+    """Create a new Ref with the given initial value and validator.
+
+    The initial value is validated before construction. Returns nil
+    if the initial value fails validation.
+    """
+    if validator(initial):
+        return Ref(_atom: Atom__new(initial), _validator: validator)
+    nil
+
+fn Ref__of(initial, validator) -> Ref:
+    """Alias for Ref__new."""
+    Ref__new(initial, validator)
+
+fn Ref__unvalidated(initial) -> Ref:
+    """Create a Ref with no validation constraint (always accepts).
+
+    Useful when you want the Ref interface but don't need guarding.
+    """
+    val always_true = \x: true
+    Ref(_atom: Atom__new(initial), _validator: always_true)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Ref
+export Ref__new, Ref__of, Ref__unvalidated

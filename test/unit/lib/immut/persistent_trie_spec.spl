@@ -1,0 +1,566 @@
+# PersistentTrie Specification
+#
+# Comprehensive tests for the persistent (immutable) prefix trie.
+# Covers construction, lookup, mutation (returns new trie), removal,
+# persistence guarantees, prefix operations, iteration, filter, fold,
+# map_values, update, conversion, and edge cases.
+
+use std.persistent_trie.{PersistentTrie, PersistentTrie__empty, PersistentTrie__from_entries, PersistentTrie__from_dict}
+
+describe "PersistentTrie":
+
+    # ==================================================================
+    # Empty trie
+    # ==================================================================
+    describe "empty trie":
+        it "has zero length":
+            val t = PersistentTrie__empty()
+            expect(t.len()).to_equal(0)
+
+        it "is empty":
+            val t = PersistentTrie__empty()
+            expect(t.is_empty()).to_equal(true)
+
+        it "get returns nil for any key":
+            val t = PersistentTrie__empty()
+            expect(t.get("hello")).to_be_nil()
+            expect(t.get("")).to_be_nil()
+
+        it "get_or returns default for any key":
+            val t = PersistentTrie__empty()
+            expect(t.get_or("hello", 42)).to_equal(42)
+
+        it "contains returns false for any key":
+            val t = PersistentTrie__empty()
+            expect(t.contains("hello")).to_equal(false)
+
+        it "keys returns empty array":
+            val t = PersistentTrie__empty()
+            expect(t.keys().len()).to_equal(0)
+
+        it "values returns empty array":
+            val t = PersistentTrie__empty()
+            expect(t.values().len()).to_equal(0)
+
+        it "entries returns empty array":
+            val t = PersistentTrie__empty()
+            expect(t.entries().len()).to_equal(0)
+
+        it "keys_with_prefix returns empty on empty trie":
+            val t = PersistentTrie__empty()
+            expect(t.keys_with_prefix("any").len()).to_equal(0)
+
+        it "longest_prefix returns nil on empty trie":
+            val t = PersistentTrie__empty()
+            expect(t.longest_prefix("anything")).to_be_nil()
+
+    # ==================================================================
+    # set and get
+    # ==================================================================
+    describe "set and get":
+        it "stores and retrieves a single value":
+            val t = PersistentTrie__empty().set("hello", 1)
+            expect(t.get("hello")).to_equal(1)
+            expect(t.len()).to_equal(1)
+
+        it "returns new trie on set - original unchanged":
+            val t1 = PersistentTrie__empty()
+            val t2 = t1.set("key", 42)
+            expect(t1.len()).to_equal(0)
+            expect(t1.get("key")).to_be_nil()
+            expect(t2.len()).to_equal(1)
+            expect(t2.get("key")).to_equal(42)
+
+        it "overwrites existing key":
+            val t1 = PersistentTrie__empty().set("key", "old")
+            val t2 = t1.set("key", "new")
+            expect(t2.get("key")).to_equal("new")
+            expect(t2.len()).to_equal(1)
+
+        it "handles two keys":
+            val t = PersistentTrie__empty().set("apple", 1).set("banana", 2)
+            expect(t.get("apple")).to_equal(1)
+            expect(t.get("banana")).to_equal(2)
+            expect(t.len()).to_equal(2)
+
+        it "handles keys sharing prefix":
+            val t = PersistentTrie__empty().set("app", 1).set("apple", 2).set("application", 3)
+            expect(t.get("app")).to_equal(1)
+            expect(t.get("apple")).to_equal(2)
+            expect(t.get("application")).to_equal(3)
+            expect(t.len()).to_equal(3)
+
+        it "returns nil for missing key":
+            val t = PersistentTrie__empty().set("hello", 1)
+            expect(t.get("world")).to_be_nil()
+
+        it "returns nil for partial prefix key":
+            val t = PersistentTrie__empty().set("apple", 1)
+            expect(t.get("app")).to_be_nil()
+
+        it "is no longer empty after set":
+            val t = PersistentTrie__empty().set("x", 1)
+            expect(t.is_empty()).to_equal(false)
+
+        it "stores integer values":
+            val t = PersistentTrie__empty().set("count", 42)
+            expect(t.get("count")).to_equal(42)
+
+        it "stores text values":
+            val t = PersistentTrie__empty().set("name", "Alice")
+            expect(t.get("name")).to_equal("Alice")
+
+    # ==================================================================
+    # contains
+    # ==================================================================
+    describe "contains":
+        it "returns true for existing key":
+            val t = PersistentTrie__empty().set("hello", 1)
+            expect(t.contains("hello")).to_equal(true)
+
+        it "returns false for missing key":
+            val t = PersistentTrie__empty().set("hello", 1)
+            expect(t.contains("world")).to_equal(false)
+
+        it "returns false for prefix of existing key":
+            val t = PersistentTrie__empty().set("apple", 1)
+            expect(t.contains("app")).to_equal(false)
+
+        it "returns false after removal":
+            val t = PersistentTrie__empty().set("hello", 1).remove("hello")
+            expect(t.contains("hello")).to_equal(false)
+
+        it "returns true when key is prefix and also stored":
+            val t = PersistentTrie__empty().set("app", 1).set("apple", 2)
+            expect(t.contains("app")).to_equal(true)
+            expect(t.contains("apple")).to_equal(true)
+
+    # ==================================================================
+    # get_or
+    # ==================================================================
+    describe "get_or":
+        it "returns value for existing key":
+            val t = PersistentTrie__empty().set("key", 10)
+            expect(t.get_or("key", 99)).to_equal(10)
+
+        it "returns default for missing key":
+            val t = PersistentTrie__empty()
+            expect(t.get_or("key", 99)).to_equal(99)
+
+        it "returns default with text fallback":
+            val t = PersistentTrie__empty()
+            expect(t.get_or("name", "unknown")).to_equal("unknown")
+
+    # ==================================================================
+    # Persistence (old versions unchanged)
+    # ==================================================================
+    describe "persistence":
+        it "preserves snapshots across multiple sets":
+            val t0 = PersistentTrie__empty()
+            val t1 = t0.set("a", 1)
+            val t2 = t1.set("b", 2)
+            val t3 = t2.set("c", 3)
+            expect(t0.len()).to_equal(0)
+            expect(t1.len()).to_equal(1)
+            expect(t2.len()).to_equal(2)
+            expect(t3.len()).to_equal(3)
+            expect(t1.get("b")).to_be_nil()
+            expect(t2.get("c")).to_be_nil()
+
+        it "overwrite does not affect earlier version":
+            val t1 = PersistentTrie__empty().set("key", "old")
+            val t2 = t1.set("key", "new")
+            expect(t1.get("key")).to_equal("old")
+            expect(t2.get("key")).to_equal("new")
+
+        it "remove does not affect earlier version":
+            val t1 = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val t2 = t1.remove("a")
+            expect(t1.get("a")).to_equal(1)
+            expect(t1.len()).to_equal(2)
+            expect(t2.get("a")).to_be_nil()
+            expect(t2.len()).to_equal(1)
+
+    # ==================================================================
+    # remove
+    # ==================================================================
+    describe "remove":
+        it "removes an existing key":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val t2 = t.remove("a")
+            expect(t2.get("a")).to_be_nil()
+            expect(t2.get("b")).to_equal(2)
+            expect(t2.len()).to_equal(1)
+
+        it "handles removing non-existent key":
+            val t = PersistentTrie__empty().set("a", 1)
+            val t2 = t.remove("zzz")
+            expect(t2.len()).to_equal(1)
+            expect(t2.get("a")).to_equal(1)
+
+        it "removes last key to get empty trie":
+            val t = PersistentTrie__empty().set("only", 99)
+            val t2 = t.remove("only")
+            expect(t2.len()).to_equal(0)
+            expect(t2.is_empty()).to_equal(true)
+
+        it "removes prefix key but keeps longer key":
+            val t = PersistentTrie__empty().set("app", 1).set("apple", 2)
+            val t2 = t.remove("app")
+            expect(t2.get("app")).to_be_nil()
+            expect(t2.get("apple")).to_equal(2)
+            expect(t2.len()).to_equal(1)
+
+        it "removes longer key but keeps prefix key":
+            val t = PersistentTrie__empty().set("app", 1).set("apple", 2)
+            val t2 = t.remove("apple")
+            expect(t2.get("apple")).to_be_nil()
+            expect(t2.get("app")).to_equal(1)
+            expect(t2.len()).to_equal(1)
+
+        it "removes from multi-key trie":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2).set("c", 3)
+            val t2 = t.remove("b")
+            expect(t2.len()).to_equal(2)
+            expect(t2.get("a")).to_equal(1)
+            expect(t2.get("b")).to_be_nil()
+            expect(t2.get("c")).to_equal(3)
+
+    # ==================================================================
+    # keys_with_prefix
+    # ==================================================================
+    describe "keys_with_prefix":
+        it "finds all keys starting with prefix":
+            val t = PersistentTrie__empty().set("app", 1).set("apple", 2).set("application", 3).set("banana", 4)
+            val result = t.keys_with_prefix("app")
+            expect(result.len()).to_equal(3)
+            expect(result).to_contain("app")
+            expect(result).to_contain("apple")
+            expect(result).to_contain("application")
+
+        it "returns empty for non-matching prefix":
+            val t = PersistentTrie__empty().set("apple", 1).set("banana", 2)
+            val result = t.keys_with_prefix("xyz")
+            expect(result.len()).to_equal(0)
+
+        it "returns exact match when prefix is a key":
+            val t = PersistentTrie__empty().set("test", 1)
+            val result = t.keys_with_prefix("test")
+            expect(result.len()).to_equal(1)
+            expect(result).to_contain("test")
+
+        it "returns all keys for empty prefix":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2).set("c", 3)
+            val result = t.keys_with_prefix("")
+            expect(result.len()).to_equal(3)
+
+        it "single character prefix":
+            val t = PersistentTrie__empty().set("cat", 1).set("car", 2).set("dog", 3)
+            val result = t.keys_with_prefix("ca")
+            expect(result.len()).to_equal(2)
+            expect(result).to_contain("cat")
+            expect(result).to_contain("car")
+
+    # ==================================================================
+    # longest_prefix
+    # ==================================================================
+    describe "longest_prefix":
+        it "finds the longest key that is a prefix of query":
+            val t = PersistentTrie__empty().set("a", 1).set("app", 2).set("apple", 3)
+            val result = t.longest_prefix("applesauce")
+            expect(result).to_equal("apple")
+
+        it "returns shorter prefix when exact match not present":
+            val t = PersistentTrie__empty().set("a", 1).set("app", 2)
+            val result = t.longest_prefix("application")
+            expect(result).to_equal("app")
+
+        it "returns nil when no key is a prefix":
+            val t = PersistentTrie__empty().set("xyz", 1)
+            val result = t.longest_prefix("abc")
+            expect(result).to_be_nil()
+
+        it "returns exact match when query equals a key":
+            val t = PersistentTrie__empty().set("hello", 1)
+            val result = t.longest_prefix("hello")
+            expect(result).to_equal("hello")
+
+        it "returns single char prefix":
+            val t = PersistentTrie__empty().set("h", 1)
+            val result = t.longest_prefix("hello")
+            expect(result).to_equal("h")
+
+    # ==================================================================
+    # keys / values / entries
+    # ==================================================================
+    describe "iteration":
+        it "keys returns all stored keys":
+            val t = PersistentTrie__empty().set("b", 2).set("a", 1).set("c", 3)
+            val k = t.keys()
+            expect(k.len()).to_equal(3)
+
+        it "values returns all stored values":
+            val t = PersistentTrie__empty().set("x", 10).set("y", 20)
+            val v = t.values()
+            expect(v.len()).to_equal(2)
+
+        it "entries returns key-value pairs":
+            val t = PersistentTrie__empty().set("a", 1)
+            val e = t.entries()
+            expect(e.len()).to_equal(1)
+            val pair = e[0]
+            expect(pair[0]).to_equal("a")
+            expect(pair[1]).to_equal(1)
+
+        it "entries returns correct count for multi-entry trie":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2).set("c", 3)
+            val e = t.entries()
+            expect(e.len()).to_equal(3)
+
+    # ==================================================================
+    # filter
+    # ==================================================================
+    describe "filter":
+        it "keeps entries matching predicate":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2).set("c", 3)
+            val filtered = t.filter(fn(k, v): v > 1)
+            expect(filtered.len()).to_equal(2)
+            expect(filtered.get("a")).to_be_nil()
+            expect(filtered.get("b")).to_equal(2)
+            expect(filtered.get("c")).to_equal(3)
+
+        it "returns empty when nothing matches":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val filtered = t.filter(fn(k, v): v > 100)
+            expect(filtered.len()).to_equal(0)
+            expect(filtered.is_empty()).to_equal(true)
+
+        it "returns all when everything matches":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val filtered = t.filter(fn(k, v): v > 0)
+            expect(filtered.len()).to_equal(2)
+
+        it "filter by key":
+            val t = PersistentTrie__empty().set("apple", 1).set("banana", 2).set("avocado", 3)
+            val filtered = t.filter(fn(k, v): k == "apple")
+            expect(filtered.len()).to_equal(1)
+            expect(filtered.get("apple")).to_equal(1)
+
+        it "does not modify original":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val filtered = t.filter(fn(k, v): v > 1)
+            expect(t.len()).to_equal(2)
+            expect(filtered.len()).to_equal(1)
+
+    # ==================================================================
+    # fold
+    # ==================================================================
+    describe "fold":
+        it "sums all values":
+            val t = PersistentTrie__empty().set("a", 10).set("b", 20).set("c", 30)
+            val total = t.fold(0, fn(acc, k, v): acc + v)
+            expect(total).to_equal(60)
+
+        it "fold over empty returns init":
+            val t = PersistentTrie__empty()
+            val result = t.fold(42, fn(acc, k, v): acc + v)
+            expect(result).to_equal(42)
+
+        it "fold counts entries":
+            val t = PersistentTrie__empty().set("x", 1).set("y", 2).set("z", 3)
+            val count = t.fold(0, fn(acc, k, v): acc + 1)
+            expect(count).to_equal(3)
+
+    # ==================================================================
+    # map_values
+    # ==================================================================
+    describe "map_values":
+        it "transforms all values":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val doubled = t.map_values(fn(v): v * 2)
+            expect(doubled.get("a")).to_equal(2)
+            expect(doubled.get("b")).to_equal(4)
+            expect(doubled.len()).to_equal(2)
+
+        it "does not modify original":
+            val t = PersistentTrie__empty().set("a", 5)
+            val mapped = t.map_values(fn(v): v + 10)
+            expect(t.get("a")).to_equal(5)
+            expect(mapped.get("a")).to_equal(15)
+
+        it "maps to different type":
+            val t = PersistentTrie__empty().set("x", 3)
+            val mapped = t.map_values(fn(v): v * v)
+            expect(mapped.get("x")).to_equal(9)
+
+    # ==================================================================
+    # update
+    # ==================================================================
+    describe "update":
+        it "updates existing key":
+            val t = PersistentTrie__empty().set("count", 5)
+            val t2 = t.update("count", fn(v): v + 1)
+            expect(t2.get("count")).to_equal(6)
+            expect(t.get("count")).to_equal(5)
+
+        it "creates key when missing":
+            val t = PersistentTrie__empty()
+            val t2 = t.update("new", fn(v): 42)
+            expect(t2.get("new")).to_equal(42)
+
+    # ==================================================================
+    # from_entries
+    # ==================================================================
+    describe "from_entries":
+        it "builds from key-value pairs":
+            val t = PersistentTrie__from_entries([["a", 1], ["b", 2]])
+            expect(t.get("a")).to_equal(1)
+            expect(t.get("b")).to_equal(2)
+            expect(t.len()).to_equal(2)
+
+        it "handles empty entries":
+            val t = PersistentTrie__from_entries([])
+            expect(t.len()).to_equal(0)
+            expect(t.is_empty()).to_equal(true)
+
+        it "handles single entry":
+            val t = PersistentTrie__from_entries([["only", 99]])
+            expect(t.get("only")).to_equal(99)
+            expect(t.len()).to_equal(1)
+
+        it "last value wins for duplicate keys":
+            val t = PersistentTrie__from_entries([["a", 1], ["a", 2]])
+            expect(t.get("a")).to_equal(2)
+            expect(t.len()).to_equal(1)
+
+    # ==================================================================
+    # from_dict
+    # ==================================================================
+    describe "from_dict":
+        it "builds from mutable dict":
+            var d = {}
+            d["x"] = 10
+            d["y"] = 20
+            val t = PersistentTrie__from_dict(d)
+            expect(t.get("x")).to_equal(10)
+            expect(t.get("y")).to_equal(20)
+            expect(t.len()).to_equal(2)
+
+        it "handles empty dict":
+            val d = {}
+            val t = PersistentTrie__from_dict(d)
+            expect(t.len()).to_equal(0)
+
+    # ==================================================================
+    # to_dict
+    # ==================================================================
+    describe "to_dict":
+        it "converts to mutable dict":
+            val t = PersistentTrie__empty().set("x", 10).set("y", 20)
+            val d = t.to_dict()
+            expect(d["x"]).to_equal(10)
+            expect(d["y"]).to_equal(20)
+
+        it "empty trie converts to empty dict":
+            val t = PersistentTrie__empty()
+            val d = t.to_dict()
+            expect(d.len()).to_equal(0)
+
+    # ==================================================================
+    # copy
+    # ==================================================================
+    describe "copy":
+        it "returns identical trie":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2)
+            val c = t.copy()
+            expect(c.get("a")).to_equal(1)
+            expect(c.get("b")).to_equal(2)
+            expect(c.len()).to_equal(2)
+
+    # ==================================================================
+    # stress tests
+    # ==================================================================
+    describe "stress test":
+        it "handles many insertions via helper fn":
+            fn run_insert_stress() -> i64:
+                var t = PersistentTrie__empty()
+                var i = 0
+                while i < 100:
+                    t = t.set("key_{i}", i)
+                    i = i + 1
+                t.len()
+            expect(run_insert_stress()).to_equal(100)
+
+        it "set and get many elements":
+            fn run_get_stress() -> i64:
+                var t = PersistentTrie__empty()
+                var i = 0
+                while i < 50:
+                    t = t.set("k_{i}", i * 10)
+                    i = i + 1
+                var ok_count = 0
+                i = 0
+                while i < 50:
+                    val v = t.get("k_{i}")
+                    if v == i * 10:
+                        ok_count = ok_count + 1
+                    i = i + 1
+                ok_count
+            expect(run_get_stress()).to_equal(50)
+
+        it "remove many elements":
+            fn run_remove_stress() -> i64:
+                var t = PersistentTrie__empty()
+                var i = 0
+                while i < 30:
+                    t = t.set("r_{i}", i)
+                    i = i + 1
+                i = 0
+                while i < 15:
+                    t = t.remove("r_{i}")
+                    i = i + 1
+                t.len()
+            expect(run_remove_stress()).to_equal(15)
+
+    # ==================================================================
+    # edge cases
+    # ==================================================================
+    describe "edge cases":
+        it "empty string key":
+            val t = PersistentTrie__empty().set("", "empty_key")
+            expect(t.get("")).to_equal("empty_key")
+            expect(t.len()).to_equal(1)
+
+        it "single character keys":
+            val t = PersistentTrie__empty().set("a", 1).set("b", 2).set("c", 3)
+            expect(t.get("a")).to_equal(1)
+            expect(t.get("b")).to_equal(2)
+            expect(t.get("c")).to_equal(3)
+            expect(t.len()).to_equal(3)
+
+        it "keys that share no prefix":
+            val t = PersistentTrie__empty().set("xyz", 1).set("abc", 2)
+            expect(t.get("xyz")).to_equal(1)
+            expect(t.get("abc")).to_equal(2)
+            expect(t.len()).to_equal(2)
+
+        it "deeply nested keys":
+            val t = PersistentTrie__empty().set("abcdefghij", 1)
+            expect(t.get("abcdefghij")).to_equal(1)
+            expect(t.get("abcde")).to_be_nil()
+            expect(t.len()).to_equal(1)
+
+        it "prefix operations with shared prefixes":
+            val t = PersistentTrie__empty().set("ab", 1).set("abc", 2).set("abcd", 3).set("abcde", 4)
+            val prefix_keys = t.keys_with_prefix("abc")
+            expect(prefix_keys.len()).to_equal(3)
+            expect(prefix_keys).to_contain("abc")
+            expect(prefix_keys).to_contain("abcd")
+            expect(prefix_keys).to_contain("abcde")
+            val longest = t.longest_prefix("abcdef")
+            expect(longest).to_equal("abcde")
+
+        it "remove from empty trie returns same trie":
+            val t = PersistentTrie__empty()
+            val t2 = t.remove("nothing")
+            expect(t2.len()).to_equal(0)

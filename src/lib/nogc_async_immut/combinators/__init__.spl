@@ -1,0 +1,251 @@
+# Functional Combinators for Persistent Collections
+#
+# @tag:api
+#
+# Standalone functions that work with plain arrays. Since all persistent
+# collections expose `.to_array()` or `.entries()`, these combinators
+# compose freely with any collection type.
+#
+# In interpreter mode "parallel" variants run sequentially. When a
+# concurrent scheduler is available the `p*` prefix functions may
+# partition work across threads; the sequential semantics remain
+# identical so callers never observe a difference in results.
+#
+# All functions use `while` loops with index variables for correctness
+# (nested closures cannot modify captured variables in Simple).
+#
+# Usage:
+#   use std.combinators.{pmap, pfilter, pfold, pzip}
+#
+#   val nums  = [1, 2, 3, 4, 5]
+#   val doubled = pmap(nums, \x: x * 2)       # [2, 4, 6, 8, 10]
+#   val evens   = pfilter(nums, \x: x % 2 == 0)  # [2, 4]
+#   val total   = pfold(nums, 0, \a, x: a + x)   # 15
+
+# Apply `f` to every element and return the new array.
+fn pmap(items, f):
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        result.push(f(items[i]))
+        i = i + 1
+    result
+
+# Return items for which `pred(item)` is true.
+fn pfilter(items, pred):
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]):
+            result.push(items[i])
+        i = i + 1
+    result
+
+# Left fold: `f(f(f(init, a), b), c)`.
+fn pfold(items, init, f):
+    var acc = init
+    val n = items.len()
+    var i = 0
+    while i < n:
+        acc = f(acc, items[i])
+        i = i + 1
+    acc
+
+# Zip two arrays into an array of `[a, b]` pairs.
+# Length is the minimum of the two inputs.
+fn pzip(items_a, items_b):
+    val len_a = items_a.len()
+    val len_b = items_b.len()
+    var limit = len_a
+    if len_b < limit:
+        limit = len_b
+    var result = []
+    var i = 0
+    while i < limit:
+        result.push([items_a[i], items_b[i]])
+        i = i + 1
+    result
+
+# Map then flatten. `f(item)` must return an array; all results are
+# concatenated into a single array.
+fn pflat_map(items, f):
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        val sub = f(items[i])
+        val sub_len = sub.len()
+        var j = 0
+        while j < sub_len:
+            result.push(sub[j])
+            j = j + 1
+        i = i + 1
+    result
+
+# Group items by the result of `key_fn(item)`.
+# Returns an array of `[key, [items...]]` pairs.
+fn pgroup_by(items, key_fn):
+    var dict = {}
+    var key_order = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        val k = key_fn(items[i])
+        val k_str = "{k}"
+        if dict[k_str] == nil:
+            dict[k_str] = []
+            key_order.push(k)
+        dict[k_str].push(items[i])
+        i = i + 1
+    # Convert dict to array of [key, group] pairs in insertion order
+    var result = []
+    var j = 0
+    val nk = key_order.len()
+    while j < nk:
+        val key = key_order[j]
+        val key_str = "{key}"
+        result.push([key, dict[key_str]])
+        j = j + 1
+    result
+
+# Partition into `[matching, non_matching]`.
+fn ppartition(items, pred):
+    var matching = []
+    var non_matching = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]):
+            matching.push(items[i])
+        else:
+            non_matching.push(items[i])
+        i = i + 1
+    [matching, non_matching]
+
+# Take elements while `pred(item)` is true, stop at first false.
+fn ptake_while(items, pred):
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]) == false:
+            return result
+        result.push(items[i])
+        i = i + 1
+    result
+
+# Drop elements while `pred(item)` is true, return the rest.
+fn pdrop_while(items, pred):
+    val n = items.len()
+    var start = 0
+    while start < n:
+        if pred(items[start]) == false:
+            # Found first non-matching element
+            var result = []
+            var i = start
+            while i < n:
+                result.push(items[i])
+                i = i + 1
+            return result
+        start = start + 1
+    []
+
+# Like fold but returns array of all intermediate accumulator values.
+# The result has the same length as `items`.
+fn pscan(items, init, f):
+    var result = []
+    var acc = init
+    val n = items.len()
+    var i = 0
+    while i < n:
+        acc = f(acc, items[i])
+        result.push(acc)
+        i = i + 1
+    result
+
+# True if any item satisfies `pred`.
+fn pany(items, pred) -> bool:
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]):
+            return true
+        i = i + 1
+    false
+
+# True if all items satisfy `pred`. Empty array returns true.
+fn pall(items, pred) -> bool:
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]) == false:
+            return false
+        i = i + 1
+    true
+
+# Return the first item matching `pred`, or nil if none.
+fn pfind(items, pred):
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]):
+            return items[i]
+        i = i + 1
+    nil
+
+# Return the index of the first item matching `pred`, or -1.
+fn pfind_index(items, pred) -> i64:
+    val n = items.len()
+    var i = 0
+    while i < n:
+        if pred(items[i]):
+            return i
+        i = i + 1
+    -1
+
+# Remove duplicates, preserving first occurrence order.
+# Uses a dict for O(1) lookup keyed by string representation.
+fn pdistinct(items):
+    var seen = {}
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        val key = "{items[i]}"
+        if seen[key] == nil:
+            seen[key] = true
+            result.push(items[i])
+        i = i + 1
+    result
+
+# Split array into chunks of at most `size` elements.
+# The last chunk may be smaller.
+fn pchunk(items, size: i64):
+    if size <= 0:
+        return [items]
+    var result = []
+    val n = items.len()
+    var i = 0
+    while i < n:
+        var chunk = []
+        var j = 0
+        while j < size:
+            if i + j >= n:
+                j = size
+            else:
+                chunk.push(items[i + j])
+                j = j + 1
+        result.push(chunk)
+        i = i + j
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export pmap, pfilter, pfold, pzip, pflat_map
+export pgroup_by, ppartition, ptake_while, pdrop_while
+export pscan, pany, pall, pfind, pfind_index
+export pdistinct, pchunk
