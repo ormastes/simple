@@ -86,15 +86,102 @@ impl LlvmBackend {
                 };
                 Ok(result.into())
             }
-            _ => {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::TYPE_MISMATCH)
-                    .with_help("both operands must have the same type (both integers or both floats)");
-                Err(CompileError::semantic_with_context(
-                    "Type mismatch in binary operation".to_string(),
-                    ctx,
-                ))
+            (inkwell::values::BasicValueEnum::PointerValue(l), inkwell::values::BasicValueEnum::PointerValue(r)) => {
+                // Pointer comparisons: cast to i64 and compare
+                let i64_type = self.context.i64_type();
+                let l_int = builder
+                    .build_ptr_to_int(l, i64_type, "ptrtoint_l")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e))?;
+                let r_int = builder
+                    .build_ptr_to_int(r, i64_type, "ptrtoint_r")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e))?;
+                let result = match op {
+                    BinOp::Eq => builder
+                        .build_int_compare(IntPredicate::EQ, l_int, r_int, "ptr_eq")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
+                    BinOp::NotEq => builder
+                        .build_int_compare(IntPredicate::NE, l_int, r_int, "ptr_ne")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        // Arithmetic on pointers (runtime representation): operate on integer form
+                        match op {
+                            BinOp::Add => builder
+                                .build_int_add(l_int, r_int, "ptr_add")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_add", &e))?,
+                            BinOp::Sub => builder
+                                .build_int_sub(l_int, r_int, "ptr_sub")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_sub", &e))?,
+                            BinOp::Mul => builder
+                                .build_int_mul(l_int, r_int, "ptr_mul")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_mul", &e))?,
+                            BinOp::Div => builder
+                                .build_int_signed_div(l_int, r_int, "ptr_div")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_signed_div", &e))?,
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => return Err(crate::error::factory::unsupported_operation("pointer binop", &op)),
+                };
+                Ok(result.into())
             }
+            _ => {
+                // Mixed types: cast both to i64 and operate as integers
+                let i64_type = self.context.i64_type();
+                let l_int = self.coerce_to_int(left, i64_type, builder, "coerce_l")?;
+                let r_int = self.coerce_to_int(right, i64_type, builder, "coerce_r")?;
+                let result = match op {
+                    BinOp::Add => builder.build_int_add(l_int, r_int, "mixed_add"),
+                    BinOp::Sub => builder.build_int_sub(l_int, r_int, "mixed_sub"),
+                    BinOp::Mul => builder.build_int_mul(l_int, r_int, "mixed_mul"),
+                    BinOp::Div => builder.build_int_signed_div(l_int, r_int, "mixed_div"),
+                    BinOp::Eq => builder.build_int_compare(IntPredicate::EQ, l_int, r_int, "mixed_eq"),
+                    BinOp::NotEq => builder.build_int_compare(IntPredicate::NE, l_int, r_int, "mixed_ne"),
+                    BinOp::Lt => builder.build_int_compare(IntPredicate::SLT, l_int, r_int, "mixed_lt"),
+                    BinOp::LtEq => builder.build_int_compare(IntPredicate::SLE, l_int, r_int, "mixed_le"),
+                    BinOp::Gt => builder.build_int_compare(IntPredicate::SGT, l_int, r_int, "mixed_gt"),
+                    BinOp::GtEq => builder.build_int_compare(IntPredicate::SGE, l_int, r_int, "mixed_ge"),
+                    _ => return Err(crate::error::factory::unsupported_operation("mixed binop", &op)),
+                }
+                .map_err(|e| crate::error::factory::llvm_build_failed("mixed_binop", &e))?;
+                Ok(result.into())
+            }
+        }
+    }
+
+    /// Coerce a value to an integer type for mixed-type operations
+    #[cfg(feature = "llvm")]
+    fn coerce_to_int(
+        &self,
+        val: inkwell::values::BasicValueEnum<'static>,
+        int_type: inkwell::types::IntType<'static>,
+        builder: &Builder<'static>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
+        match val {
+            inkwell::values::BasicValueEnum::IntValue(v) => {
+                // Already integer, bitcast/extend/truncate to target width
+                if v.get_type().get_bit_width() == int_type.get_bit_width() {
+                    Ok(v)
+                } else if v.get_type().get_bit_width() < int_type.get_bit_width() {
+                    builder
+                        .build_int_s_extend(v, int_type, name)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_s_extend", &e))
+                } else {
+                    builder
+                        .build_int_truncate(v, int_type, name)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_truncate", &e))
+                }
+            }
+            inkwell::values::BasicValueEnum::PointerValue(v) => builder
+                .build_ptr_to_int(v, int_type, name)
+                .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e)),
+            inkwell::values::BasicValueEnum::FloatValue(v) => builder
+                .build_float_to_signed_int(v, int_type, name)
+                .map_err(|e| crate::error::factory::llvm_build_failed("build_float_to_signed_int", &e)),
+            _ => Err(CompileError::semantic(format!(
+                "Cannot coerce {:?} to integer",
+                val
+            ))),
         }
     }
 

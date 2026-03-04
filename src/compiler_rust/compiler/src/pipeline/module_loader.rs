@@ -151,17 +151,24 @@ pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
     None
 }
 
-/// Bootstrap-only: aggressively strip legacy optional type suffix (`?`) from
-/// identifiers/types so older code parses under newer syntax rules.
+/// Bootstrap-only: strip optional type suffix (`?`) and convert `.?` existence
+/// checks, while preserving `??` (null coalescing) and `?.` (optional chaining).
 fn strip_optionals(mut s: String) -> String {
-    // Optional chaining/presence checks like `foo.?` -> `foo != nil` (best-effort)
+    // Step 1: Protect `??` and `?.` operators by replacing with placeholders
+    s = s.replace("??", "\x00NULLCOAL\x00");
+    s = s.replace("?.", "\x00OPTCHAIN\x00");
+
+    // Step 2: Convert `.?` existence checks to `!= nil`
     s = s.replace(".?:", " != nil:");
+    s = s.replace(".? ", " != nil ");
     s = s.replace(".?\n", " != nil\n");
     s = s.replace(".?\r\n", " != nil\r\n");
+    s = s.replace(".?)", " != nil)");
+    s = s.replace(".?,", " != nil,");
 
-    // Patterns where `?` commonly appears.
+    // Step 3: Strip remaining `?` (type suffixes like `Type?`)
     for pat in [
-        "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;", "?>",
+        "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;",
     ] {
         while s.contains(pat) {
             s = s.replace(pat, &pat[1..]); // drop leading '?'
@@ -171,6 +178,10 @@ fn strip_optionals(mut s: String) -> String {
     if s.ends_with('?') {
         s.pop();
     }
+
+    // Step 4: Restore `??` and `?.` operators
+    s = s.replace("\x00NULLCOAL\x00", "??");
+    s = s.replace("\x00OPTCHAIN\x00", "?.");
     s
 }
 

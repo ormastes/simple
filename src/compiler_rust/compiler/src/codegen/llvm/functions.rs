@@ -395,42 +395,47 @@ impl LlvmBackend {
             // Unsupported instruction categories
             // =====================================================================
 
-            // SIMD instructions (not yet implemented in LLVM backend)
-            MirInst::VecLit { .. }
-            | MirInst::VecSum { .. }
-            | MirInst::VecProduct { .. }
-            | MirInst::VecMin { .. }
-            | MirInst::VecMax { .. }
-            | MirInst::VecAll { .. }
-            | MirInst::VecAny { .. }
-            | MirInst::VecExtract { .. }
-            | MirInst::VecWith { .. }
-            | MirInst::VecSqrt { .. }
-            | MirInst::VecAbs { .. }
-            | MirInst::VecFloor { .. }
-            | MirInst::VecCeil { .. }
-            | MirInst::VecRound { .. }
-            | MirInst::VecShuffle { .. }
-            | MirInst::VecBlend { .. }
-            | MirInst::VecSelect { .. }
-            | MirInst::VecLoad { .. }
-            | MirInst::VecStore { .. }
-            | MirInst::VecGather { .. }
+            // SIMD instructions (not yet implemented — insert default dest values)
+            MirInst::VecLit { dest, .. }
+            | MirInst::VecSum { dest, .. }
+            | MirInst::VecProduct { dest, .. }
+            | MirInst::VecMin { dest, .. }
+            | MirInst::VecMax { dest, .. }
+            | MirInst::VecAll { dest, .. }
+            | MirInst::VecAny { dest, .. }
+            | MirInst::VecExtract { dest, .. }
+            | MirInst::VecWith { dest, .. }
+            | MirInst::VecSqrt { dest, .. }
+            | MirInst::VecAbs { dest, .. }
+            | MirInst::VecFloor { dest, .. }
+            | MirInst::VecCeil { dest, .. }
+            | MirInst::VecRound { dest, .. }
+            | MirInst::VecShuffle { dest, .. }
+            | MirInst::VecBlend { dest, .. }
+            | MirInst::VecSelect { dest, .. }
+            | MirInst::VecLoad { dest, .. }
+            | MirInst::VecGather { dest, .. }
+            | MirInst::VecFma { dest, .. }
+            | MirInst::VecRecip { dest, .. }
+            | MirInst::VecMaskedLoad { dest, .. }
+            | MirInst::VecMinVec { dest, .. }
+            | MirInst::VecMaxVec { dest, .. }
+            | MirInst::VecClamp { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
+            }
+            // SIMD store instructions (no dest vreg)
+            MirInst::VecStore { .. }
             | MirInst::VecScatter { .. }
-            | MirInst::VecFma { .. }
-            | MirInst::VecRecip { .. }
-            | MirInst::VecMaskedLoad { .. }
-            | MirInst::VecMaskedStore { .. }
-            | MirInst::VecMinVec { .. }
-            | MirInst::VecMaxVec { .. }
-            | MirInst::VecClamp { .. } => {
-                // SIMD instructions not yet supported by LLVM backend
-                // These will be implemented in a future update
+            | MirInst::VecMaskedStore { .. } => {
             }
 
-            // Pointer instructions (not yet implemented)
-            MirInst::PointerNew { .. } | MirInst::PointerRef { .. } | MirInst::PointerDeref { .. } => {
-                // Pointer operations not yet implemented
+            // Pointer instructions (not yet implemented — insert default dest values)
+            MirInst::PointerNew { dest, .. }
+            | MirInst::PointerRef { dest, .. }
+            | MirInst::PointerDeref { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
             // Memory safety instructions (not yet implemented)
@@ -438,45 +443,53 @@ impl LlvmBackend {
                 // Drop and scope tracking not yet implemented
             }
 
-            // Pattern matching instructions (not yet implemented)
-            MirInst::PatternTest { .. }
-            | MirInst::PatternBind { .. }
-            | MirInst::EnumDiscriminant { .. }
-            | MirInst::EnumPayload { .. }
-            | MirInst::EnumUnit { .. }
-            | MirInst::EnumWith { .. }
-            | MirInst::UnionDiscriminant { .. }
-            | MirInst::UnionPayload { .. }
-            | MirInst::UnionWrap { .. } => {
-                // Pattern matching not yet implemented
+            // Pattern matching instructions (not yet implemented — insert default dest values)
+            MirInst::PatternTest { dest, .. }
+            | MirInst::PatternBind { dest, .. }
+            | MirInst::EnumDiscriminant { dest, .. }
+            | MirInst::EnumPayload { dest, .. }
+            | MirInst::EnumUnit { dest, .. }
+            | MirInst::EnumWith { dest, .. }
+            | MirInst::UnionDiscriminant { dest, .. }
+            | MirInst::UnionPayload { dest, .. }
+            | MirInst::UnionWrap { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
-            // Async/Actor instructions (interpreter-only)
-            MirInst::FutureCreate { .. }
-            | MirInst::Await { .. }
-            | MirInst::ActorSpawn { .. }
-            | MirInst::ActorSend { .. }
-            | MirInst::ActorRecv { .. }
-            | MirInst::ActorJoin { .. }
+            // Async/Actor instructions (interpreter-only — insert default dest values)
+            MirInst::FutureCreate { dest, .. }
+            | MirInst::Await { dest, .. }
+            | MirInst::ActorSpawn { dest, .. }
+            | MirInst::ActorRecv { dest, .. }
+            | MirInst::ActorJoin { dest, .. }
+            | MirInst::GeneratorCreate { dest, .. }
+            | MirInst::GeneratorNext { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
+            }
+            // Async instructions without dest vreg
+            MirInst::ActorSend { .. }
             | MirInst::ActorReply { .. }
-            | MirInst::GeneratorCreate { .. }
-            | MirInst::Yield { .. }
-            | MirInst::GeneratorNext { .. } => {
-                // Async/actor operations only supported in interpreter
+            | MirInst::Yield { .. } => {
             }
 
-            // Error handling instructions (not yet implemented)
-            MirInst::TryUnwrap { .. }
-            | MirInst::OptionSome { .. }
-            | MirInst::OptionNone { .. }
-            | MirInst::ResultOk { .. }
-            | MirInst::ResultErr { .. } => {
-                // Error handling not yet implemented
+            // Error handling instructions (not yet implemented — insert default dest values)
+            MirInst::TryUnwrap { dest, .. }
+            | MirInst::OptionSome { dest, .. }
+            | MirInst::OptionNone { dest, .. }
+            | MirInst::ResultOk { dest, .. }
+            | MirInst::ResultErr { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
             // Contract instructions (not yet implemented)
-            MirInst::ContractCheck { .. } | MirInst::ContractOldCapture { .. } => {
-                // Contract checking not yet implemented
+            MirInst::ContractCheck { .. } => {
+            }
+            MirInst::ContractOldCapture { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
             // Coverage instrumentation (not yet implemented)
@@ -485,49 +498,65 @@ impl LlvmBackend {
             }
 
             // Unit type instructions (not yet implemented)
-            MirInst::UnitBoundCheck { .. }
-            | MirInst::UnitWiden { .. }
-            | MirInst::UnitNarrow { .. }
-            | MirInst::UnitSaturate { .. } => {
-                // Unit type operations not yet implemented
+            MirInst::UnitBoundCheck { .. } => {
+            }
+            MirInst::UnitWiden { dest, .. }
+            | MirInst::UnitNarrow { dest, .. }
+            | MirInst::UnitSaturate { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
             // Parallel iterator instructions (not yet implemented)
-            MirInst::ParMap { .. }
-            | MirInst::ParReduce { .. }
-            | MirInst::ParFilter { .. }
-            | MirInst::ParForEach { .. } => {
-                // Parallel iterators not yet implemented
+            MirInst::ParMap { dest, .. }
+            | MirInst::ParReduce { dest, .. }
+            | MirInst::ParFilter { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
+            }
+            MirInst::ParForEach { .. } => {
             }
 
-            // Boxing instructions (not yet implemented)
-            MirInst::BoxInt { .. }
-            | MirInst::BoxFloat { .. }
-            | MirInst::UnboxInt { .. }
-            | MirInst::UnboxFloat { .. } => {
-                // Value boxing not yet implemented
+            // Boxing instructions (not yet implemented — insert default dest values)
+            MirInst::BoxInt { dest, .. }
+            | MirInst::BoxFloat { dest, .. }
+            | MirInst::UnboxInt { dest, .. }
+            | MirInst::UnboxFloat { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
-            // Other collection instructions (not yet implemented)
-            MirInst::Spread { .. } | MirInst::FStringFormat { .. } => {
-                // Spread and format string not yet implemented
+            // Other collection instructions (not yet implemented — insert default dest values)
+            MirInst::Spread { dest, .. } | MirInst::FStringFormat { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
             }
 
-            // Method call instructions (not yet implemented)
-            MirInst::MethodCallStatic { .. }
-            | MirInst::MethodCallVirtual { .. }
-            | MirInst::BuiltinMethod { .. }
-            | MirInst::ExternMethodCall { .. } => {
-                // Method calls not yet implemented
+            // Method call instructions (not yet implemented — insert default dest values)
+            MirInst::MethodCallStatic { dest, .. }
+            | MirInst::MethodCallVirtual { dest, .. }
+            | MirInst::BuiltinMethod { dest, .. }
+            | MirInst::ExternMethodCall { dest, .. } => {
+                if let Some(d) = dest {
+                    let default_val = self.context.i64_type().const_int(0, false);
+                    vreg_map.insert(*d, default_val.into());
+                }
             }
 
-            // Advanced memory instructions (not yet implemented)
-            MirInst::GlobalLoad { .. }
-            | MirInst::GlobalStore { .. }
-            | MirInst::GetElementPtr { .. }
-            | MirInst::Wait { .. }
-            | MirInst::NeighborLoad { .. } => {
-                // Advanced memory operations not yet implemented
+            // Advanced memory instructions (not yet implemented — insert default dest values)
+            MirInst::GlobalLoad { dest, .. }
+            | MirInst::GetElementPtr { dest, .. }
+            | MirInst::NeighborLoad { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
+            }
+            MirInst::Wait { dest, .. } => {
+                if let Some(d) = dest {
+                    let default_val = self.context.i64_type().const_int(0, false);
+                    vreg_map.insert(*d, default_val.into());
+                }
+            }
+            MirInst::GlobalStore { .. } => {
             }
         }
 
