@@ -1,0 +1,155 @@
+# Atom — CAS Reference Tests
+#
+# Tests for the Atom class from nogc_async_immut/atom.
+# Atom provides lock-free mutable reference to an immutable value
+# using compare-and-swap semantics.
+
+use std.atom.{Atom, Atom__new, Atom__of}
+
+describe "Atom":
+
+    describe "creation":
+        it "creates with initial value":
+            val a = Atom__new(42)
+            expect(a.deref()).to_equal(42)
+
+        it "starts at version 0":
+            val a = Atom__new(0)
+            expect(a.version()).to_equal(0)
+
+        it "Atom__of is alias for Atom__new":
+            val a = Atom__of("hello")
+            expect(a.deref()).to_equal("hello")
+
+        it "creates with nil initial value":
+            val a = Atom__new(nil)
+            expect(a.deref()).to_be_nil()
+
+        it "creates with string value":
+            val a = Atom__new("test")
+            expect(a.deref()).to_equal("test")
+
+    describe "deref":
+        it "reads the current value":
+            val a = Atom__new(100)
+            expect(a.deref()).to_equal(100)
+
+        it "returns same value on repeated reads":
+            val a = Atom__new(77)
+            expect(a.deref()).to_equal(77)
+            expect(a.deref()).to_equal(77)
+
+    describe "swap":
+        it "applies function and returns new value":
+            var a = Atom__new(10)
+            val result = a.swap(\x: x + 5)
+            expect(result).to_equal(15)
+            expect(a.deref()).to_equal(15)
+
+        it "increments version on swap":
+            var a = Atom__new(0)
+            a.swap(\x: x + 1)
+            expect(a.version()).to_equal(1)
+            a.swap(\x: x + 1)
+            expect(a.version()).to_equal(2)
+
+        it "applies multiplication":
+            var a = Atom__new(5)
+            val result = a.swap(\x: x * 3)
+            expect(result).to_equal(15)
+
+        it "applies identity function":
+            var a = Atom__new(42)
+            val result = a.swap(\x: x)
+            expect(result).to_equal(42)
+            expect(a.version()).to_equal(1)
+
+    describe "reset":
+        it "sets new value unconditionally":
+            var a = Atom__new(1)
+            a.reset(99)
+            expect(a.deref()).to_equal(99)
+
+        it "increments version":
+            var a = Atom__new(0)
+            a.reset(42)
+            expect(a.version()).to_equal(1)
+
+        it "overwrites previous value":
+            var a = Atom__new(10)
+            a.reset(20)
+            a.reset(30)
+            expect(a.deref()).to_equal(30)
+            expect(a.version()).to_equal(2)
+
+        it "can reset to nil":
+            var a = Atom__new(42)
+            a.reset(nil)
+            expect(a.deref()).to_be_nil()
+
+    describe "compare_and_set":
+        it "succeeds when expected matches":
+            var a = Atom__new(10)
+            val ok = a.compare_and_set(10, 20)
+            expect(ok).to_equal(true)
+            expect(a.deref()).to_equal(20)
+
+        it "fails when expected does not match":
+            var a = Atom__new(10)
+            val ok = a.compare_and_set(5, 20)
+            expect(ok).to_equal(false)
+            expect(a.deref()).to_equal(10)
+
+        it "does not increment version on failure":
+            var a = Atom__new(10)
+            a.compare_and_set(999, 20)
+            expect(a.version()).to_equal(0)
+
+        it "increments version on success":
+            var a = Atom__new(10)
+            a.compare_and_set(10, 20)
+            expect(a.version()).to_equal(1)
+
+    describe "swap_returning_old":
+        it "returns old value":
+            var a = Atom__new(100)
+            val old = a.swap_returning_old(\x: x * 2)
+            expect(old).to_equal(100)
+            expect(a.deref()).to_equal(200)
+
+        it "increments version":
+            var a = Atom__new(0)
+            a.swap_returning_old(\x: x + 1)
+            expect(a.version()).to_equal(1)
+
+        it "returns old on multiple swaps":
+            var a = Atom__new(1)
+            val old1 = a.swap_returning_old(\x: x + 10)
+            val old2 = a.swap_returning_old(\x: x + 10)
+            expect(old1).to_equal(1)
+            expect(old2).to_equal(11)
+            expect(a.deref()).to_equal(21)
+
+    describe "multiple operations":
+        it "tracks version across operations":
+            var a = Atom__new(0)
+            a.swap(\x: x + 1)
+            a.reset(50)
+            a.compare_and_set(50, 100)
+            expect(a.version()).to_equal(3)
+            expect(a.deref()).to_equal(100)
+
+        it "failed CAS does not affect version":
+            var a = Atom__new(0)
+            a.swap(\x: x + 1)
+            a.compare_and_set(999, 0)
+            expect(a.version()).to_equal(1)
+            expect(a.deref()).to_equal(1)
+
+        it "sequence of resets":
+            var a = Atom__new(0)
+            a.reset(1)
+            a.reset(2)
+            a.reset(3)
+            expect(a.deref()).to_equal(3)
+            expect(a.version()).to_equal(3)

@@ -1,0 +1,132 @@
+# CAS Loop Utilities — Compare-And-Swap with Exponential Backoff
+#
+# Provides retry loops for atomic compare-and-swap operations.
+# Used by Atom to coordinate concurrent updates to shared state.
+#
+# In the interpreter (single-threaded), CAS always succeeds on first
+# attempt. The backoff logic exists for correctness when compiled to
+# native code with real threads.
+#
+# Architecture:
+#   - cas_loop: Retry loop that reads, applies update, attempts CAS
+#   - cas_backoff: Exponential busy-wait (2^attempt iterations, capped)
+#   - cas_swap_value: Simple CAS swap helper
+
+use std.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Maximum spin iterations for backoff (2^10 = 1024)
+val CAS_MAX_SPIN: i64 = 1024
+
+# Sentinel value returned when max retries exceeded
+val CAS_FAILURE: i64 = -1
+
+# ============================================================================
+# CAS Backoff
+# ============================================================================
+
+fn cas_backoff(attempt: i64):
+    """Exponential backoff via busy-wait spin loop.
+
+    Spins for min(2^attempt, CAS_MAX_SPIN) iterations.
+    No sleep is available in nogc context, so we use pure spinning.
+    """
+    # Calculate spin count: 2^attempt, capped at CAS_MAX_SPIN
+    var spins = 1
+    var i = 0
+    while i < attempt:
+        spins = spins * 2
+        if spins >= CAS_MAX_SPIN:
+            spins = CAS_MAX_SPIN
+            i = attempt  # break out
+        i = i + 1
+
+    # Busy-wait spin
+    var j = 0
+    while j < spins:
+        j = j + 1
+
+# ============================================================================
+# CAS Loop
+# ============================================================================
+
+fn cas_loop(atomic: AtomicI64, update_fn, max_retries: i64) -> i64:
+    """CAS retry loop with exponential backoff.
+
+    Reads the current value from `atomic`, applies `update_fn` to compute
+    a new value, then attempts a compare-and-swap. On failure (another
+    thread changed the value), backs off and retries.
+
+    Parameters:
+      atomic: The atomic integer to update.
+      update_fn: Function (i64) -> i64 that computes the new value
+                 from the current value.
+      max_retries: Maximum retry attempts. Use -1 for unlimited retries.
+
+    Returns:
+      The new value on success, or CAS_FAILURE (-1) if max retries exceeded.
+    """
+    var attempt = 0
+
+    while true:
+        # Check retry limit (-1 means unlimited)
+        if max_retries >= 0:
+            if attempt >= max_retries:
+                return CAS_FAILURE
+
+        # Step 1: Read current value (acquire ordering)
+        val current = atomic.load(MemoryOrdering.Acquire)
+
+        # Step 2: Compute desired new value
+        val desired = update_fn(current)
+
+        # Step 3: Attempt CAS (acquire-release ordering)
+        val success = atomic.compare_exchange(
+            current, desired,
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire
+        )
+
+        if success:
+            return desired
+
+        # Step 4: CAS failed — another thread won. Back off and retry.
+        cas_backoff(attempt)
+        attempt = attempt + 1
+
+    # Unreachable, but satisfies return type
+    CAS_FAILURE
+
+# ============================================================================
+# CAS Swap Helper
+# ============================================================================
+
+fn cas_swap_value(atomic: AtomicI64, new_value: i64) -> i64:
+    """Atomically swap the value in `atomic`, returning the old value.
+
+    Uses the atomic swap operation directly (no CAS loop needed).
+    """
+    atomic.swap(new_value, MemoryOrdering.AcqRel)
+
+# ============================================================================
+# CAS Compare-And-Set Helper
+# ============================================================================
+
+fn cas_compare_and_set(atomic: AtomicI64, expected: i64, new_value: i64) -> bool:
+    """Single CAS attempt. Returns true if the swap succeeded.
+
+    Succeeds only if the current value equals `expected`.
+    """
+    atomic.compare_exchange(
+        expected, new_value,
+        MemoryOrdering.AcqRel, MemoryOrdering.Acquire
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CAS_MAX_SPIN, CAS_FAILURE
+export cas_backoff, cas_loop, cas_swap_value, cas_compare_and_set
