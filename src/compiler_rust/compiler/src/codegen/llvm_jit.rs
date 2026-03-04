@@ -69,8 +69,6 @@ impl LlvmJitCompiler {
         }
 
         // Compile function bodies using the backend
-        // Note: We use the backend's compile_function which handles the
-        // full LLVM IR generation pipeline
         compile_functions_into_module(&backend, &module, &mir.functions)?;
 
         // Create JIT execution engine from the compiled module
@@ -83,7 +81,7 @@ impl LlvmJitCompiler {
             if !func.blocks.is_empty() {
                 if let Ok(addr) = ee.get_function_address(&func.name) {
                     if addr != 0 {
-                        self.compiled_funcs.insert(func.name.clone(), addr);
+                        self.compiled_funcs.insert(func.name.clone(), addr as u64);
                     }
                 }
             }
@@ -130,10 +128,29 @@ impl LlvmJitCompiler {
     }
 }
 
+/// Check if a TypeId represents a floating-point type.
+fn is_float_type(ty: &TypeId) -> bool {
+    *ty == TypeId::F32 || *ty == TypeId::F64
+}
+
+/// Check if a TypeId represents an integer or integer-like type.
+fn is_integer_type(ty: &TypeId) -> bool {
+    *ty == TypeId::I64
+        || *ty == TypeId::I32
+        || *ty == TypeId::I16
+        || *ty == TypeId::I8
+        || *ty == TypeId::U64
+        || *ty == TypeId::U32
+        || *ty == TypeId::U16
+        || *ty == TypeId::U8
+        || *ty == TypeId::BOOL
+        || *ty == TypeId::CHAR
+}
+
 /// Create a function declaration in an LLVM module.
-fn create_function_in_module(
-    context: &Context,
-    module: &Module<'_>,
+fn create_function_in_module<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
     name: &str,
     param_types: &[TypeId],
     return_type: &TypeId,
@@ -145,35 +162,27 @@ fn create_function_in_module(
     let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
 
     let map_type = |ty: &TypeId| -> BasicMetadataTypeEnum {
-        match ty {
-            TypeId::Int
-            | TypeId::I64
-            | TypeId::I32
-            | TypeId::I16
-            | TypeId::I8
-            | TypeId::U64
-            | TypeId::U32
-            | TypeId::U16
-            | TypeId::U8
-            | TypeId::Bool
-            | TypeId::Char => i64_type.into(),
-            TypeId::Float | TypeId::F64 | TypeId::F32 => f64_type.into(),
-            TypeId::String
-            | TypeId::Array(_)
-            | TypeId::Tuple(_)
-            | TypeId::Struct(_)
-            | TypeId::Ref(_)
-            | TypeId::MutRef(_) => ptr_type.into(),
-            _ => i64_type.into(),
+        if is_float_type(ty) {
+            f64_type.into()
+        } else if is_integer_type(ty) {
+            i64_type.into()
+        } else if *ty == TypeId::STRING {
+            ptr_type.into()
+        } else {
+            // Composite types (arrays, tuples, structs, refs) and unknown → pointer
+            // Default to i64 for unrecognized primitive-like types
+            i64_type.into()
         }
     };
 
     let params: Vec<BasicMetadataTypeEnum> = param_types.iter().map(|t| map_type(t)).collect();
 
-    let fn_type = match return_type {
-        TypeId::Float | TypeId::F64 | TypeId::F32 => f64_type.fn_type(&params, false),
-        TypeId::Unit | TypeId::Never => context.void_type().fn_type(&params, false),
-        _ => i64_type.fn_type(&params, false),
+    let fn_type = if is_float_type(return_type) {
+        f64_type.fn_type(&params, false)
+    } else if *return_type == TypeId::VOID {
+        context.void_type().fn_type(&params, false)
+    } else {
+        i64_type.fn_type(&params, false)
     };
 
     module.add_function(name, fn_type, None);

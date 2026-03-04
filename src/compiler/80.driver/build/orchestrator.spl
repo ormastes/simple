@@ -17,9 +17,10 @@ use app.build.doc_warnings (run_doc_warnings)
 use app.io.mod (file_exists, process_run)
 use compiler.driver.driver.{interpret_file}
 use compiler.driver.driver_types.{CompileResult}
-use compiler.driver.driver_api.{aot_llvm_native_file}
 use app.compile.native.{compile_native}
 use std.log.{info, debug, error}
+
+extern fn rt_env_set(name: text, value: text) -> bool
 
 # Run FFI generator to create Rust workspace
 fn run_ffi_generator(verbose: bool) -> bool:
@@ -127,17 +128,19 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
 
     var exit_code = 0
     if is_release:
-        # Release: LLVM backend with -O3 + mold linker
-        info("build", "Using LLVM backend (release, -O3)")
-        val compile_result = aot_llvm_native_file(source_file, output_path)
-        match compile_result:
-            case CompileResult.Success(_):
-                exit_code = 0
-            case _:
-                val errors = compile_result.get_errors()
-                for err in errors:
-                    error("build", err)
-                exit_code = 1
+        # Release: native compilation via subprocess (avoids interpreter import chain issues)
+        info("build", "Using native compilation (release)")
+        val compile_args = [
+            "compile", source_file, "--native", "-o", output_path, "--verbose"
+        ]
+        # Enable bootstrap mode for auto-stub generation of missing symbols
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val (stdout, stderr, compile_exit) = process_run("bin/release/simple", compile_args)
+        if stdout.?:
+            print stdout
+        if stderr.?:
+            print stderr
+        exit_code = compile_exit
     else:
         # Debug: C backend (fast compilation)
         exit_code = compile_native(source_file, output_path, config.verbose, "", false)
