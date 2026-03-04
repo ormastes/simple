@@ -246,7 +246,11 @@ fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn crane
     flag_builder.set("opt_level", "speed").ok()?;
     flag_builder.set("is_pic", "true").ok()?;
 
+    // When target arch matches host arch, use Triple::host() for correct OS/ABI detection
+    // (e.g., windows-gnu vs windows-msvc). Only use explicit triples for cross-compilation.
     let triple = match target {
+        CL_TARGET_X86_64 if cfg!(target_arch = "x86_64") => Triple::host(),
+        CL_TARGET_AARCH64 if cfg!(target_arch = "aarch64") => Triple::host(),
         CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu"
             .parse::<Triple>()
             .unwrap_or_else(|_| Triple::host()),

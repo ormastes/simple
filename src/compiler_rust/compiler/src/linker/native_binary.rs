@@ -56,9 +56,28 @@ fn detect_c_compiler(target: &Target) -> String {
         return cc;
     }
     match target.os {
-        TargetOS::Windows => "cl.exe".to_string(),
+        TargetOS::Windows => {
+            // Prefer MinGW gcc over MSVC cl.exe for bootstrap compatibility.
+            // cl.exe requires VS build tools + specific environment setup.
+            if which_exists("gcc") {
+                "gcc".to_string()
+            } else if which_exists("cc") {
+                "cc".to_string()
+            } else {
+                "cl.exe".to_string()
+            }
+        }
         _ => "cc".to_string(),
     }
+}
+
+fn which_exists(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 /// Build arguments for compiling a C file to an object file.
@@ -361,13 +380,21 @@ impl NativeBinaryOptions {
 
     /// Get the platform-appropriate static library filename for a base name.
     ///
-    /// Returns `lib{base}.a` on Unix (Linux, macOS, FreeBSD) and `{base}.lib` on Windows.
+    /// Returns `lib{base}.a` on Unix and MinGW, `{base}.lib` on MSVC Windows.
     pub fn static_lib_name(base: &str, target: &Target) -> String {
-        use simple_common::target::TargetOS;
-        match target.os {
-            TargetOS::Windows => format!("{}.lib", base),
+        match target.linker_flavor() {
+            LinkerFlavor::Msvc => format!("{}.lib", base),
             _ => format!("lib{}.a", base),
         }
+    }
+
+    /// Check if a directory contains the Simple runtime library.
+    ///
+    /// On Windows, checks for both `libsimple_runtime.a` (MinGW) and
+    /// `simple_runtime.lib` (MSVC) since either toolchain may be in use.
+    fn runtime_lib_exists(dir: &Path) -> bool {
+        dir.join("libsimple_runtime.a").exists()
+            || dir.join("simple_runtime.lib").exists()
     }
 
     /// Find the Simple runtime library path.
@@ -390,18 +417,18 @@ impl NativeBinaryOptions {
             if let Some(exe_dir) = exe_path.parent() {
                 // Check ../lib relative to executable
                 let lib_dir = exe_dir.join("../lib");
-                if lib_dir.join("libsimple_runtime.a").exists() {
+                if Self::runtime_lib_exists(&lib_dir) {
                     return lib_dir.canonicalize().ok();
                 }
 
                 // Check same directory as executable
-                if exe_dir.join("libsimple_runtime.a").exists() {
+                if Self::runtime_lib_exists(exe_dir) {
                     return Some(exe_dir.to_path_buf());
                 }
 
                 // Check deps/ subdirectory (for bootstrap/custom profiles)
                 let deps_dir = exe_dir.join("deps");
-                if deps_dir.join("libsimple_runtime.a").exists() {
+                if Self::runtime_lib_exists(&deps_dir) {
                     return deps_dir.canonicalize().ok();
                 }
             }
@@ -433,7 +460,7 @@ impl NativeBinaryOptions {
 
         for path in cargo_target_paths {
             let p = PathBuf::from(path);
-            if p.join("libsimple_runtime.a").exists() {
+            if Self::runtime_lib_exists(&p) {
                 return p.canonicalize().ok();
             }
         }
@@ -448,12 +475,12 @@ impl NativeBinaryOptions {
             if let Some(root) = workspace_root {
                 for profile in ["release", "debug", "bootstrap"] {
                     let lib_path = root.join("target").join(profile);
-                    if lib_path.join("libsimple_runtime.a").exists() {
+                    if Self::runtime_lib_exists(&lib_path) {
                         return Some(lib_path);
                     }
                     // Also check deps/ subdirectory (custom profiles put libs there)
                     let deps_path = lib_path.join("deps");
-                    if deps_path.join("libsimple_runtime.a").exists() {
+                    if Self::runtime_lib_exists(&deps_path) {
                         return Some(deps_path);
                     }
                 }
@@ -461,6 +488,12 @@ impl NativeBinaryOptions {
         }
 
         None
+    }
+
+    /// Check if a directory contains the Simple compiler library.
+    fn compiler_lib_exists(dir: &Path) -> bool {
+        dir.join("libsimple_compiler.a").exists()
+            || dir.join("simple_compiler.lib").exists()
     }
 
     /// Find the Simple compiler static library path (libsimple_compiler.a).
@@ -479,10 +512,10 @@ impl NativeBinaryOptions {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 let lib_dir = exe_dir.join("../lib");
-                if lib_dir.join("libsimple_compiler.a").exists() {
+                if Self::compiler_lib_exists(&lib_dir) {
                     return lib_dir.canonicalize().ok();
                 }
-                if exe_dir.join("libsimple_compiler.a").exists() {
+                if Self::compiler_lib_exists(exe_dir) {
                     return Some(exe_dir.to_path_buf());
                 }
             }
@@ -500,7 +533,7 @@ impl NativeBinaryOptions {
 
         for path in cargo_target_paths {
             let p = PathBuf::from(path);
-            if p.join("libsimple_compiler.a").exists() {
+            if Self::compiler_lib_exists(&p) {
                 return p.canonicalize().ok();
             }
         }
@@ -512,7 +545,7 @@ impl NativeBinaryOptions {
             if let Some(root) = workspace_root {
                 for profile in ["release", "debug"] {
                     let lib_path = root.join("target").join(profile);
-                    if lib_path.join("libsimple_compiler.a").exists() {
+                    if Self::compiler_lib_exists(&lib_path) {
                         return Some(lib_path);
                     }
                 }
