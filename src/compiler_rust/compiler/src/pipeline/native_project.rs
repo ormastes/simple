@@ -212,15 +212,21 @@ impl NativeProjectBuilder {
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
         if use_incremental {
+            // Canonicalize entry early so we can force-recompile the entry file
+            let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
             for (i, (path, source)) in file_sources.iter().enumerate() {
-                let hash = content_hash(source);
-                let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                if cached_o.exists() {
-                    // Cache hit: copy to temp dir
-                    let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
-                    if std::fs::copy(&cached_o, &obj_path).is_ok() {
-                        cached_objects.push((i, obj_path));
-                        continue;
+                // Always recompile the entry file (its main→spl_main renaming depends on is_entry)
+                let is_entry = is_entry_file(path, &canon_entry_for_cache);
+                if !is_entry {
+                    let hash = content_hash(source);
+                    let cached_o = objects_dir.join(format!("{:016x}.o", hash));
+                    if cached_o.exists() {
+                        // Cache hit: copy to temp dir
+                        let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
+                        if std::fs::copy(&cached_o, &obj_path).is_ok() {
+                            cached_objects.push((i, obj_path));
+                            continue;
+                        }
                     }
                 }
                 to_compile.push((i, path.clone(), source.clone()));
@@ -684,10 +690,18 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Allow undefined symbols at link time. Many .spl files declare extern fn rt_*
-        // functions that aren't in the runtime library (CUDA, GC, debugger hooks, etc.).
+        // Generate stub object for unresolved symbols.
+        // On macOS, -undefined,dynamic_lookup defers resolution to runtime (dyld), which
+        // crashes on missing symbols.  Instead, we scan the archive for undefined symbols
+        // that have no definition, then generate weak stub functions that return 0/nil.
+        // On Linux/FreeBSD we still use --unresolved-symbols=ignore-all (cheaper).
         #[cfg(target_os = "macos")]
-        cmd.arg("-Wl,-undefined,dynamic_lookup");
+        {
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            cmd.arg(&stubs_o);
+            // Still allow any remaining undefined symbols (e.g., system dylib symbols)
+            cmd.arg("-Wl,-undefined,dynamic_lookup");
+        }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-Wl,--unresolved-symbols=ignore-all");
         #[cfg(target_os = "windows")]
@@ -721,6 +735,253 @@ int main(int argc, char** argv) {
     }
 }
 
+/// Generate a stub object file that provides weak definitions for all unresolved symbols.
+///
+/// Scans the given object files / archive for undefined symbols that have no definition,
+/// then generates a small C file with weak stub functions returning 0 for each.
+/// This prevents dyld from crashing at load time on macOS.
+#[cfg(target_os = "macos")]
+fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], main_o: &std::path::Path) -> Result<PathBuf, String> {
+    use std::collections::{HashSet, BTreeSet};
+
+    // Collect all defined and undefined symbols from the objects.
+    let mut defined = HashSet::new();
+    let mut undefined = BTreeSet::new();
+
+    // Check if an archive exists (for large builds)
+    let archive_path = temp_dir.join("libspl_objects.a");
+    let scan_paths: Vec<&std::path::Path> = if archive_path.exists() {
+        vec![archive_path.as_path(), main_o]
+    } else {
+        let mut v: Vec<&std::path::Path> = object_paths.iter().map(|p| p.as_path()).collect();
+        v.push(main_o);
+        v
+    };
+
+    for path in &scan_paths {
+        let output = std::process::Command::new("nm")
+            .arg("-g")  // external (global) symbols only
+            .arg("-p")  // don't sort (faster)
+            .arg(path)
+            .output()
+            .map_err(|e| format!("nm: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.as_slice() {
+                // "                 U _symbol"
+                [sym_type, name] if *sym_type == "U" => {
+                    undefined.insert(name.to_string());
+                }
+                // "0000000000000000 T _symbol"  (or D, S, B, etc.)
+                [_addr, sym_type, name] if *sym_type != "U" => {
+                    defined.insert(name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Also scan the runtime library for defined symbols
+    if let Some(native_all) = find_native_all_library() {
+        let output = std::process::Command::new("nm")
+            .arg("-g").arg("-p").arg(&native_all)
+            .output()
+            .map_err(|e| format!("nm runtime: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let [_addr, sym_type, name] = parts.as_slice() {
+                if *sym_type != "U" {
+                    defined.insert(name.to_string());
+                }
+            }
+        }
+    } else if let Some(runtime) = find_runtime_library() {
+        let output = std::process::Command::new("nm")
+            .arg("-g").arg("-p").arg(&runtime)
+            .output()
+            .map_err(|e| format!("nm runtime: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let [_addr, sym_type, name] = parts.as_slice() {
+                if *sym_type != "U" {
+                    defined.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    // Also scan system libraries for symbols (libc, libm, libSystem)
+    #[cfg(target_os = "macos")]
+    {
+        // Scan common system dylibs to find symbols like malloc, memset, sqrt, etc.
+        let system_libs = [
+            "/usr/lib/libSystem.B.dylib",
+        ];
+        for lib_path in &system_libs {
+            if std::path::Path::new(lib_path).exists() {
+                if let Ok(output) = std::process::Command::new("nm")
+                    .arg("-g").arg("-p").arg(lib_path)
+                    .output()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let [_addr, sym_type, name] = parts.as_slice() {
+                            if *sym_type != "U" {
+                                defined.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Symbols that are undefined and not defined anywhere → need stubs
+    let needs_stub: Vec<String> = undefined
+        .into_iter()
+        .filter(|s| !defined.contains(s))
+        // Skip system/dyld symbols only
+        .filter(|s| !s.starts_with("_dyld_") && *s != "_main")
+        // Skip known C standard library / system builtins
+        .filter(|s| !is_system_symbol(s))
+        .collect();
+
+    if needs_stub.is_empty() {
+        // Generate a minimal empty object
+        let stub_c = temp_dir.join("_stubs.c");
+        std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
+        let stub_o = temp_dir.join("_stubs.o");
+        let status = std::process::Command::new("clang")
+            .arg("-c").arg("-o").arg(&stub_o).arg(&stub_c)
+            .status().map_err(|e| format!("compile stubs: {e}"))?;
+        if !status.success() {
+            return Err("failed to compile empty stubs".to_string());
+        }
+        return Ok(stub_o);
+    }
+
+    eprintln!("Generating {} stub functions for unresolved symbols...", needs_stub.len());
+
+    // Generate pure assembly stubs. This avoids all C keyword/builtin conflicts.
+    // Each stub is a weak global symbol that returns 0 (x0 = 0 on ARM64, rax = 0 on x86_64).
+    // For __builtin_* symbols, generate trampolines to the real C library function.
+    let mut asm_code = String::with_capacity(needs_stub.len() * 100);
+    asm_code.push_str("/* Auto-generated weak stubs for bootstrap linking */\n");
+
+    // ARM64: return tagged nil (3) — Simple uses tag bits, 0 is not a valid nil.
+    // mov x0, #3 means "tagged nil" in the Simple runtime value system.
+    #[cfg(target_arch = "aarch64")]
+    let (ret_nil, jmp_prefix) = ("mov x0, #3\n  ret", "b");
+    // x86_64: return tagged nil (3)
+    #[cfg(target_arch = "x86_64")]
+    let (ret_nil, jmp_prefix) = ("movq $3, %rax\n  retq", "jmp");
+
+    for sym in &needs_stub {
+        // sym already includes the macOS _ prefix (e.g., "_AABB", "___bdd_clear_contexts")
+        // In assembly, we use the symbol name as-is (no stripping needed)
+
+        // Skip symbols with characters not valid in assembly labels
+        // Assembly labels can contain alphanumerics, _, and $ (on macOS)
+        if sym.is_empty() || !sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+            continue;
+        }
+
+        // __builtin_* symbols (mangled: ___builtin_* on macOS) → trampoline to real function
+        if sym.starts_with("___builtin_") {
+            let real_fn = format!("_{}", &sym["___builtin_".len()..]);
+            asm_code.push_str(&format!(
+                ".weak_definition {0}\n.globl {0}\n{0}:\n  {1} {2}\n\n",
+                sym, jmp_prefix, real_fn
+            ));
+            continue;
+        }
+
+        // Regular stub: weak symbol returning tagged nil (3)
+        asm_code.push_str(&format!(
+            ".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n",
+            sym, ret_nil
+        ));
+    }
+
+    let stub_s = temp_dir.join("_stubs.s");
+    std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
+
+    let stub_o = temp_dir.join("_stubs.o");
+    let output = std::process::Command::new("clang")
+        .arg("-c")
+        .arg("-o").arg(&stub_o)
+        .arg(&stub_s)
+        .output()
+        .map_err(|e| format!("assemble stubs: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("failed to assemble stub functions: {}", stderr));
+    }
+
+    Ok(stub_o)
+}
+
+/// Check if a mangled symbol name refers to a C standard library / system function.
+/// These must NOT be stubbed as weak — the real definitions come from system dylibs.
+#[cfg(target_os = "macos")]
+fn is_system_symbol(sym: &str) -> bool {
+    // Strip leading underscore (macOS C ABI prepends _)
+    let name = sym.strip_prefix('_').unwrap_or(sym);
+    matches!(name,
+        // Memory
+        "malloc" | "calloc" | "realloc" | "free" | "posix_memalign" | "aligned_alloc" |
+        "memcpy" | "memmove" | "memset" | "memcmp" | "memchr" |
+        // String
+        "strlen" | "strcmp" | "strncmp" | "strcpy" | "strncpy" | "strcat" | "strdup" |
+        "strerror" | "strstr" | "strchr" | "strrchr" | "strtol" | "strtoul" | "strtod" |
+        "strtoll" | "strtoull" |
+        // I/O
+        "printf" | "fprintf" | "sprintf" | "snprintf" | "puts" | "fputs" | "fputc" |
+        "fwrite" | "fread" | "fopen" | "fclose" | "fflush" | "fseek" | "ftell" |
+        "feof" | "ferror" | "fileno" | "fdopen" | "freopen" | "getline" | "getdelim" |
+        "stdin" | "stdout" | "stderr" |
+        // Math
+        "sqrt" | "sqrtf" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" |
+        "exp" | "expf" | "log" | "logf" | "log2" | "log10" | "pow" | "powf" |
+        "fabs" | "fabsf" | "ceil" | "ceilf" | "floor" | "floorf" | "round" | "roundf" |
+        "fmod" | "fmodf" | "fmin" | "fmax" | "copysign" | "nan" | "isnan" | "isinf" |
+        "trunc" | "truncf" |
+        // Process
+        "exit" | "_exit" | "abort" | "atexit" | "getenv" | "setenv" | "unsetenv" | "system" |
+        "fork" | "execve" | "execvp" | "waitpid" | "kill" | "getpid" | "getppid" |
+        // Signals
+        "signal" | "sigaction" | "sigemptyset" | "sigfillset" | "sigaddset" |
+        // Threads
+        "pthread_create" | "pthread_join" | "pthread_detach" | "pthread_self" |
+        "pthread_mutex_init" | "pthread_mutex_lock" | "pthread_mutex_unlock" |
+        "pthread_mutex_destroy" | "pthread_rwlock_init" | "pthread_rwlock_destroy" |
+        "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock" | "pthread_rwlock_unlock" |
+        "pthread_cond_init" | "pthread_cond_wait" | "pthread_cond_signal" |
+        "pthread_cond_broadcast" | "pthread_cond_destroy" |
+        // Dynamic linking
+        "dlopen" | "dlclose" | "dlsym" | "dlerror" |
+        // File system
+        "open" | "close" | "read" | "write" | "lseek" | "stat" | "fstat" | "lstat" |
+        "mkdir" | "rmdir" | "unlink" | "rename" | "getcwd" | "chdir" | "access" |
+        "realpath" | "readlink" | "symlink" | "opendir" | "readdir" | "closedir" |
+        // Network
+        "socket" | "bind" | "listen" | "accept" | "connect" | "send" | "recv" |
+        "sendto" | "recvfrom" | "setsockopt" | "getsockopt" | "getaddrinfo" |
+        "freeaddrinfo" | "inet_ntop" | "inet_pton" | "htons" | "ntohs" | "htonl" |
+        // Time
+        "time" | "clock" | "clock_gettime" | "gettimeofday" | "nanosleep" | "usleep" | "sleep" |
+        // Misc
+        "qsort" | "bsearch" | "abs" | "labs" | "rand" | "srand" | "isdigit" | "isalpha" |
+        "isspace" | "tolower" | "toupper" | "mmap" | "munmap" | "mprotect" | "sysconf" |
+        "pipe" | "dup" | "dup2" | "fcntl" | "ioctl" | "select" | "poll"
+    )
+}
+
 /// Compile a single .spl file to object code.
 fn compile_file_to_object(
     source: &str,
@@ -750,6 +1011,9 @@ fn compile_file_to_object(
         if source.ends_with('?') {
             source.pop();
         }
+        // Replace /* complex expr */ placeholders with 0 (used in main.spl and others
+        // as stub expressions that the full compiler interprets but the Rust parser can't)
+        source = source.replace("/* complex expr */", "0");
         // Layer connect operator ~> not yet in parser — rewrite to pipe |> for bootstrap
         source = source.replace(" ~> ", " |> ");
     }

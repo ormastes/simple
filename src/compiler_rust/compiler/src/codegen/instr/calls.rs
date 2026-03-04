@@ -466,6 +466,69 @@ pub fn compile_call<M: Module>(
             }
         }
     } else {
+        // Before falling through to cross-module import, check if this is a qualified
+        // builtin method call like "ALPHA_LOWER.contains" or "items.push".
+        // The parser sometimes treats `val.method(args)` as a qualified function call
+        // when it can't resolve the receiver type. Map the method part to the
+        // corresponding runtime function.
+        if let Some(dot_pos) = func_name.rfind('.') {
+            let method_part = &func_name[dot_pos + 1..];
+            let runtime_func: Option<&str> = match method_part {
+                "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+                "len" => Some("rt_len"),
+                "starts_with" => Some("rt_string_starts_with"),
+                "ends_with" => Some("rt_string_ends_with"),
+                "concat" => Some("rt_string_concat"),
+                "char_at" | "at" => Some("rt_string_char_at"),
+                "push" => Some("rt_array_push"),
+                "pop" => Some("rt_array_pop"),
+                "clear" => Some("rt_array_clear"),
+                "join" => Some("rt_string_join"),
+                "trim" => Some("rt_string_trim"),
+                "split" => Some("rt_string_split"),
+                "replace" => Some("rt_string_replace"),
+                "to_upper" | "upper" => Some("rt_string_to_upper"),
+                "to_lower" | "lower" => Some("rt_string_to_lower"),
+                "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "to_string" | "str" => Some("rt_to_string"),
+                "slice" | "substring" => Some("rt_slice"),
+                "get" => Some("rt_index_get"),
+                "keys" => Some("rt_dict_keys"),
+                "values" => Some("rt_dict_values"),
+                "filter" => Some("rt_array_filter"),
+                "sort" => Some("rt_array_sort"),
+                "reverse" => Some("rt_array_reverse"),
+                "first" => Some("rt_array_first"),
+                "last" => Some("rt_array_last"),
+                "find" => Some("rt_array_find"),
+                "any" => Some("rt_array_any"),
+                "all" => Some("rt_array_all"),
+                _ => None,
+            };
+            if let Some(rt_name) = runtime_func {
+                if let Some(&func_id) = ctx.runtime_funcs.get(rt_name) {
+                    // The first argument to the runtime call is the receiver (the part before the dot).
+                    // For a Call instruction, the receiver was lowered as the first arg by MIR.
+                    // However, for qualified calls like `X.method(args)`, there may be no
+                    // explicit receiver arg — re-check by looking at whether the receiver is
+                    // a known global.  In practice the MIR lowering wraps these as
+                    // Call { target: "X.method", args } with no implicit receiver, so we pass
+                    // args as-is (the runtime function expects receiver + method args).
+                    let runtime_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                    let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+                    let arg_vals = adapt_args_to_signature(builder, runtime_ref, arg_vals);
+                    let call = adapted_call(builder, runtime_ref, &arg_vals);
+                    if let Some(d) = dest {
+                        let results = builder.inst_results(call);
+                        if !results.is_empty() {
+                            ctx.vreg_values.insert(*d, results[0]);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Cross-module function: declare as import, resolve at link time.
         // Resolution order: 1) per-module use_map (from `use` statements),
         // 2) global import_map (unique names), 3) raw name fallback.
