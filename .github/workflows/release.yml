@@ -97,12 +97,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (macOS)
-        if: runner.os == 'macOS'
+      - name: Setup Rust toolchain (macOS/Windows)
+        if: runner.os == 'macOS' || runner.os == 'Windows'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust build artifacts (macOS)
-        if: runner.os == 'macOS'
+      - name: Cache Rust build artifacts (macOS/Windows)
+        if: runner.os == 'macOS' || runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: |
@@ -339,6 +339,138 @@ jobs:
             ls -lh "$SEED"
           fi
 
+      - name: Build native Windows binary via Rust bootstrap
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Building native Windows binary via Rust bootstrap"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Determine target for cross-compile
+          CROSS_TARGET=""
+          TARGET_DIR="bootstrap"
+          if [[ "${{ matrix.platform }}" == "windows-aarch64" ]]; then
+            CROSS_TARGET="aarch64-pc-windows-msvc"
+            TARGET_DIR="${CROSS_TARGET}/bootstrap"
+            rustup target add "$CROSS_TARGET" 2>/dev/null || true
+          fi
+
+          # 1. Build Rust seed
+          cd src/compiler_rust
+          if [ -n "$CROSS_TARGET" ]; then
+            cargo build --profile bootstrap -p simple-driver --target "$CROSS_TARGET"
+          else
+            cargo build --profile bootstrap -p simple-driver
+            # 2. Build native_all library (only for native builds, not cross)
+            cargo build --profile bootstrap -p simple-native-all
+          fi
+          cd ../..
+
+          SEED="src/compiler_rust/target/${TARGET_DIR}/simple.exe"
+          if [ ! -f "$SEED" ]; then
+            echo "✗ Rust seed build failed — no binary produced"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "Rust seed built:"
+          file "$SEED"
+          ls -lh "$SEED"
+
+          # 3. For native builds (not cross-compile), try native-build
+          if [ -z "$CROSS_TARGET" ]; then
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Running native-build to compile Simple source"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            mkdir -p build/bootstrap/stage1
+            RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+              "$SEED" native-build \
+              --source-dir src \
+              --entry src/app/cli/bootstrap_main.spl \
+              --output build/bootstrap/stage1/simple.exe \
+              2>&1 | tail -20
+
+            # 4. Verify native-built binary, fall back to Rust seed if needed
+            NATIVE_BIN="build/bootstrap/stage1/simple.exe"
+            if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
+              echo "✓ Native-built Simple binary verified"
+              echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+              echo "NEW_RUNTIME_PATH=$(pwd)/$NATIVE_BIN" >> $GITHUB_ENV
+              echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+              file "$NATIVE_BIN"
+              ls -lh "$NATIVE_BIN"
+            else
+              echo "⚠ native-build failed or binary not runnable, falling back to Rust seed"
+              echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+              echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
+              echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+              if "./$SEED" --version 2>/dev/null; then
+                echo "✓ Rust seed binary verified (fallback)"
+              fi
+            fi
+          else
+            # Cross-compiled binary — can't run native-build, use seed directly
+            echo "✓ Cross-compiled binary ready (cannot run native-build for cross target)"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+          fi
+          file "$SEED"
+          ls -lh "$SEED"
+
+      - name: Build Windows cross-compile binary via Rust
+        if: runner.os == 'Linux' && contains(matrix.platform, 'windows') && matrix.cross_compile
+        shell: bash
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Cross-compiling Windows binary from Linux"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Map platform to Rust target and MinGW package
+          case "${{ matrix.platform }}" in
+            windows-x86_64)
+              RUST_TARGET="x86_64-pc-windows-gnu"
+              MINGW_PKG="gcc-mingw-w64-x86-64"
+              ;;
+            windows-x86)
+              RUST_TARGET="i686-pc-windows-gnu"
+              MINGW_PKG="gcc-mingw-w64-i686"
+              ;;
+            *)
+              echo "⚠ Unsupported cross-compile platform: ${{ matrix.platform }}"
+              echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+              exit 0
+              ;;
+          esac
+
+          # Install Rust target and MinGW toolchain
+          rustup toolchain install stable 2>/dev/null || true
+          rustup target add "$RUST_TARGET" 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "$MINGW_PKG"
+
+          # Build Rust seed for Windows (cross-compile)
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver --target "$RUST_TARGET"
+          cd ../..
+
+          SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple.exe"
+          if [ -f "$SEED" ]; then
+            echo "✓ Cross-compiled Windows binary built"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            file "$SEED"
+            ls -lh "$SEED"
+          else
+            echo "⚠ Cross-compilation failed"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+          fi
+
       - name: Create distribution package
         shell: bash
         run: |
@@ -378,9 +510,15 @@ jobs:
 
             # Copy binary if we have one
             if [ -n "$BINARY_TO_PACKAGE" ] && [ -f "$BINARY_TO_PACKAGE" ]; then
-              cp "$BINARY_TO_PACKAGE" "${PKG_DIR}/bin/simple"
-              chmod +x "${PKG_DIR}/bin/simple"
-              echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE)"
+              # Use .exe extension for Windows platforms
+              if [[ "$PLATFORM" == windows-* ]]; then
+                BIN_NAME="simple.exe"
+              else
+                BIN_NAME="simple"
+              fi
+              cp "$BINARY_TO_PACKAGE" "${PKG_DIR}/bin/${BIN_NAME}"
+              chmod +x "${PKG_DIR}/bin/${BIN_NAME}"
+              echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
             else
               echo "⚠ Warning: No binary available for this platform"
               echo "  Package will contain source code only"

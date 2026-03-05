@@ -33,6 +33,7 @@ extern fn rt_getpid() -> i64
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use std.log.{error, warn, info, debug}
 use compiler.driver.driver.{aot_c_file}
+use compiler.driver.driver_api.{aot_llvm_native_file, aot_native_file_with_backend}
 use compiler.driver.driver_types.{CompileResult}
 
 # ============================================================================
@@ -234,7 +235,28 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
 # Compilation Pipeline
 # ============================================================================
 
-fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool) -> i64:
+fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
+    # LLVM backends: MIR -> LLVM -> .o -> linker (all handled by driver)
+    if backend == "llvm" or backend == "llvm-lib":
+        if verbose:
+            info("compile", "Compiling {source_file} to native binary via {backend} backend...")
+        _cli_eprint("[DEBUG] Calling aot_native_file_with_backend({source_file}, {output_file}, {backend})")
+        val llvm_result = aot_native_file_with_backend(source_file, output_file, backend)
+        _cli_eprint("[DEBUG] aot_native_file_with_backend returned: {llvm_result}")
+        match llvm_result:
+            case CompileResult.Success(_):
+                if rt_file_exists(output_file):
+                    val size = file_size(output_file)
+                    info("compile", "Compiled: {output_file} ({size} bytes)")
+                return 0
+            case _:
+                error("compile", "LLVM native compilation failed")
+                val errors = llvm_result.get_errors()
+                _cli_eprint("[DEBUG] errors: {errors}")
+                for err in errors:
+                    error("compile", err)
+                return 1
+
     if verbose:
         info("compile", "Compiling {source_file} to native binary...")
 
@@ -374,9 +396,9 @@ fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -
         return false
     true
 
-fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool) -> i64:
+fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
     # Delegate to compile_native — MIR C backend handles all modules in one pass
-    compile_native(source_file, output_file, verbose, compiler_override, sanitize)
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
 
 # ============================================================================
 # Generate C Only (for cross-compilation workflows)
@@ -444,6 +466,7 @@ fn main() -> i64:
     var gen_c_only = false
     var compiler_override = ""
     var sanitize = false
+    var backend = ""
     for ai in range(4, args.len()):
         if args[ai] == "--verbose":
             verbose = true
@@ -455,12 +478,14 @@ fn main() -> i64:
             sanitize = true
         if args[ai].starts_with("--compiler="):
             compiler_override = args[ai].substring(11)
+        if args[ai].starts_with("--backend="):
+            backend = args[ai].substring(10)
 
     if gen_c_only:
         return compile_gen_c_only(source_file, output_file, verbose)
     if use_linked:
-        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize)
-    compile_native(source_file, output_file, verbose, compiler_override, sanitize)
+        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize, backend)
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
 
 export compile_native, compile_native_linked, compile_gen_c_only
 export find_c_compiler, find_cpp_compiler, detect_platform

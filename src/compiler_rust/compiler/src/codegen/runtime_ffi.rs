@@ -1037,6 +1037,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),   // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),   // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),    // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
     // =========================================================================

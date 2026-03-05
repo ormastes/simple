@@ -7,7 +7,7 @@ use compiler.mir.mir_data.*
 use compiler.backend.backend_api.*
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRBuilder__create, natural_alignment, is_integer_type, is_signed_int_type}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRBuilder__create, natural_alignment, is_integer_type, is_signed_int_type, is_float_type}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 
 # ============================================================================
@@ -146,8 +146,8 @@ impl MirTextCodegen for MirToLlvm:
             case Return(value):
                 if value.?:
                     val val_str = self.translate_operand(value.unwrap())
-                    val nit = self.native_int()
-                    self.builder.emit_ret(nit, val_str)
+                    val ret_ty = self.get_operand_type(value.unwrap())
+                    self.builder.emit_ret(ret_ty, val_str)
                 else:
                     self.builder.emit_ret_void()
 
@@ -156,10 +156,14 @@ impl MirTextCodegen for MirToLlvm:
 
             case If(cond, then_, else_):
                 val cond_val = self.translate_operand(cond)
-                val nit = self.native_int()
-                val i1_cond = self.builder.fresh_local()
-                self.builder.emit("  {i1_cond} = icmp ne {nit} {cond_val}, 0")
-                self.builder.emit_cond_br(i1_cond, "bb{then_}", "bb{else_}")
+                val cond_ty = self.get_operand_type(cond)
+                if cond_ty == "i1":
+                    # Already boolean, use directly
+                    self.builder.emit_cond_br(cond_val, "bb{then_}", "bb{else_}")
+                else:
+                    val i1_cond = self.builder.fresh_local()
+                    self.builder.emit("  {i1_cond} = icmp ne {cond_ty} {cond_val}, 0")
+                    self.builder.emit_cond_br(i1_cond, "bb{then_}", "bb{else_}")
 
             case Switch(value, targets, default):
                 val discr_val = self.translate_operand(value)
@@ -204,15 +208,68 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_name = self.get_local(dest.id)
         val llvm_ty = self.type_mapper.map_type(ty)
-        val const_val = self.translate_const_value(value)
-        self.builder.emit("  {dest_name} = add {llvm_ty} {const_val}, 0  ; const load")
+
+        match value:
+            case Int(v):
+                self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+            case Float(v):
+                val fv = ensure_float_literal("{v}")
+                self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, 0.0  ; const float")
+            case Bool(v):
+                val bval = if v: "1" else: "0"
+                self.builder.emit("  {dest_name} = add {llvm_ty} {bval}, 0  ; const bool")
+            case Str(v):
+                val global_name = self.add_string_global(v)
+                val str_len = escaped_string_byte_len(v) + 1
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
+            case Zero:
+                if is_float_type(llvm_ty):
+                    self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
+                elif llvm_ty == "ptr":
+                    val nit = self.native_int()
+                    self.builder.emit("  {dest_name} = inttoptr {nit} 0 to ptr  ; const null")
+                elif llvm_ty == "void":
+                    ()
+                else:
+                    self.builder.emit("  {dest_name} = add {llvm_ty} 0, 0  ; const zero")
+            case Array(elements):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
+            case Tuple(elements):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
+            case Struct(fields):
+                val tmp = self.builder.fresh_local()
+                self.builder.emit_alloca(tmp, llvm_ty)
+                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load(dest_name, llvm_ty, tmp)
 
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
         val dest_name = self.get_local(dest.id)
         val src_name = self.get_local(src.id)
         val ty = self.get_local_type(src.id)
         val comment = if is_move: "move" else: "copy"
-        self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; {comment}")
+
+        if is_float_type(ty):
+            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
+        elif ty == "ptr":
+            val nit = self.native_int()
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_name}, {nit} 0  ; {comment}")
+        elif ty == "void":
+            ()
+        elif is_integer_type(ty) or ty == "i1":
+            self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; {comment}")
+        else:
+            # Aggregate types: alloca + store + load
+            val tmp = self.builder.fresh_local()
+            self.builder.emit_alloca(tmp, ty)
+            self.builder.emit_store(ty, src_name, tmp)
+            self.builder.emit_load(dest_name, ty, tmp)
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
@@ -223,36 +280,72 @@ impl MirTextCodegen for MirToLlvm:
 
         match op:
             case Add:
-                if is_signed_int_type(ty):
+                if is_float_type(ty):
+                    self.builder.emit_fadd(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
                     self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_add(dest_name, ty, left_val, right_val)
             case Sub:
-                if is_signed_int_type(ty):
+                if is_float_type(ty):
+                    self.builder.emit_fsub(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
                     self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_sub(dest_name, ty, left_val, right_val)
             case Mul:
-                if is_signed_int_type(ty):
+                if is_float_type(ty):
+                    self.builder.emit_fmul(dest_name, ty, left_val, right_val)
+                elif is_signed_int_type(ty):
                     self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_mul(dest_name, ty, left_val, right_val)
-            case Div: self.builder.emit_div(dest_name, ty, left_val, right_val)
-            case Rem: self.builder.emit_rem(dest_name, ty, left_val, right_val)
+            case Div:
+                if is_float_type(ty):
+                    self.builder.emit_fdiv(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_div(dest_name, ty, left_val, right_val)
+            case Rem:
+                if is_float_type(ty):
+                    self.builder.emit_frem(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_rem(dest_name, ty, left_val, right_val)
             case Pow:
-                val nit = self.native_int()
-                self.builder.emit("  {dest_name} = call {nit} @llvm.powi.{nit}.{nit}({nit} {left_val}, {nit} {right_val})")
+                if is_float_type(ty):
+                    val fsuffix = if ty == "double": "f64" else: "f32"
+                    self.builder.emit("  {dest_name} = call {ty} @llvm.pow.{fsuffix}({ty} {left_val}, {ty} {right_val})")
+                else:
+                    val nit = self.native_int()
+                    self.builder.emit("  {dest_name} = call {nit} @__simple_pow({nit} {left_val}, {nit} {right_val})")
             case BitAnd: self.builder.emit_and(dest_name, ty, left_val, right_val)
             case BitOr: self.builder.emit_or(dest_name, ty, left_val, right_val)
             case BitXor: self.builder.emit_xor(dest_name, ty, left_val, right_val)
             case Shl: self.builder.emit_shl(dest_name, ty, left_val, right_val)
             case Shr: self.builder.emit_ashr(dest_name, ty, left_val, right_val)
-            case Eq: self.builder.emit_icmp_eq(dest_name, ty, left_val, right_val)
-            case Ne: self.builder.emit_icmp_ne(dest_name, ty, left_val, right_val)
-            case Lt: self.builder.emit_icmp_slt(dest_name, ty, left_val, right_val)
-            case Le: self.builder.emit_icmp_sle(dest_name, ty, left_val, right_val)
-            case Gt: self.builder.emit_icmp_sgt(dest_name, ty, left_val, right_val)
-            case Ge: self.builder.emit_icmp_sge(dest_name, ty, left_val, right_val)
+            case Eq:
+                val eq_cmp_ty = self.get_operand_type(left)
+                val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
+                self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)
+            case Ne:
+                val ne_cmp_ty = self.get_operand_type(left)
+                val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
+                self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, left_val, right_val)
+            case Lt:
+                val lt_cmp_ty = self.get_operand_type(left)
+                val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
+                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, left_val, right_val)
+            case Le:
+                val le_cmp_ty = self.get_operand_type(left)
+                val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
+                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, left_val, right_val)
+            case Gt:
+                val gt_cmp_ty = self.get_operand_type(left)
+                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
+                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, left_val, right_val)
+            case Ge:
+                val ge_cmp_ty = self.get_operand_type(left)
+                val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
+                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, left_val, right_val)
             case MatMul:
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_matmul(ptr {left_val}, ptr {right_val})  ; matrix multiply (@)")
             case BroadcastAdd:
@@ -278,7 +371,11 @@ impl MirTextCodegen for MirToLlvm:
         val ty = self.get_local_type(dest.id)
 
         match op:
-            case Neg: self.builder.emit_neg(dest_name, ty, operand_val)
+            case Neg:
+                if is_float_type(ty):
+                    self.builder.emit_fneg(dest_name, ty, operand_val)
+                else:
+                    self.builder.emit_neg(dest_name, ty, operand_val)
             case Not:
                 self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
             case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
@@ -312,7 +409,18 @@ impl MirTextCodegen for MirToLlvm:
             case Move(local):
                 self.get_local(local)
             case Const(value, type_):
-                self.translate_const_value(value)
+                # For function references, return @name directly
+                match type_.kind:
+                    case FuncPtr(_):
+                        match value:
+                            case Str(name): "@{name}"
+                            case _: self.translate_const_value(value)
+                    case Function(_, _):
+                        match value:
+                            case Str(name): "@{name}"
+                            case _: self.translate_const_value(value)
+                    case _:
+                        self.translate_const_value(value)
 
     me translate_const_value(value: MirConstValue) -> text:
         """Translate MIR constant value to LLVM constant."""
@@ -652,8 +760,12 @@ impl MirTextCodegen for MirToLlvm:
 impl MirToLlvm:
 
     me emit_runtime_declarations():
-        """Emit declarations for runtime intrinsics used by matrix/broadcast ops."""
-        self.builder.emit("; Runtime intrinsic declarations")
+        """Emit declarations for runtime intrinsics used by matrix/broadcast ops.
+
+        Note: These functions are stubs — not yet implemented in the C runtime.
+        They will cause linker errors if MatMul/Broadcast MIR ops are used.
+        """
+        self.builder.emit("; Matrix/broadcast runtime intrinsic declarations (stubs)")
         self.builder.emit("declare ptr @__simple_runtime_matmul(ptr, ptr)")
         self.builder.emit("declare ptr @__simple_runtime_transpose(ptr)")
         self.builder.emit("declare ptr @__simple_runtime_broadcast_add(ptr, ptr)")
@@ -668,8 +780,9 @@ impl MirToLlvm:
         val id = self.string_counter
         self.string_counter = self.string_counter + 1
         val global_name = "@.str.{id}"
-        val str_len = value.len() + 1
-        val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{value}\\00\""
+        val escaped = escape_llvm_string(value)
+        val str_len = escaped_string_byte_len(value) + 1
+        val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
         self.string_globals = self.string_globals.push(decl)
         global_name
 
@@ -727,6 +840,53 @@ impl MirToLlvm:
             case Imm: "i"
             case RegSpec(name): "{{name}}"
 
+    me emit_comparison(dest_name: text, dest_ty: text, cmp_pred: text, cmp_ty: text, left_val: text, right_val: text):
+        """Emit comparison with proper type handling.
+
+        Uses fcmp for float types, icmp for integer/ptr types.
+        Extends i1 result to dest_ty if needed (zext).
+        """
+        val cmp_prefix = if is_float_type(cmp_ty): "fcmp" else: "icmp"
+
+        if dest_ty == "i1":
+            self.builder.emit("  {dest_name} = {cmp_prefix} {cmp_pred} {cmp_ty} {left_val}, {right_val}")
+        else:
+            val tmp = self.builder.fresh_local()
+            self.builder.emit("  {tmp} = {cmp_prefix} {cmp_pred} {cmp_ty} {left_val}, {right_val}")
+            self.builder.emit("  {dest_name} = zext i1 {tmp} to {dest_ty}")
+
+# ============================================================================
+# Free Helper Functions
+# ============================================================================
+
+fn escape_llvm_string(value: text) -> text:
+    """Escape special characters in strings for LLVM IR c\"...\" format.
+
+    LLVM IR uses \\xx hex escapes for non-printable characters.
+    """
+    var s = value
+    s = s.replace("\\", "\\5C")
+    s = s.replace("\n", "\\0A")
+    s = s.replace("\r", "\\0D")
+    s = s.replace("\t", "\\09")
+    s = s.replace("\"", "\\22")
+    s
+
+fn escaped_string_byte_len(value: text) -> i64:
+    """Compute byte length of original string (not escaped) for LLVM array size."""
+    value.len()
+
+fn ensure_float_literal(s: text) -> text:
+    """Ensure a float value string is valid for LLVM IR.
+
+    LLVM IR requires float literals to have a decimal point or exponent.
+    Converts '3' to '3.0' if needed.
+    """
+    if s.contains(".") or s.contains("e") or s.contains("E") or s.contains("inf") or s.contains("nan"):
+        s
+    else:
+        "{s}.0"
+
 # Desugared static methods
 fn MirToLlvm__create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
     MirToLlvm__create(module_name, target, cpu_override)
@@ -736,3 +896,4 @@ fn MirToLlvm__create_baremetal(module_name: text, target: CodegenTarget, cpu_ove
 
 export MirToLlvm
 export MirToLlvm__create, MirToLlvm__create_baremetal
+export escape_llvm_string, escaped_string_byte_len, ensure_float_literal

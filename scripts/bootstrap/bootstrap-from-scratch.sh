@@ -137,6 +137,24 @@ check_prerequisites() {
         exit 1
     fi
 
+    # llvm-lib backend requires libLLVM shared library
+    if [[ "${BACKEND}" == "llvm-lib" ]]; then
+        local llvm_found=false
+        if ldconfig -p 2>/dev/null | grep -q libLLVM; then
+            llvm_found=true
+        elif ls /usr/lib/libLLVM*.so 2>/dev/null | head -1 | grep -q libLLVM; then
+            llvm_found=true
+        elif ls /usr/lib/libLLVM*.dylib 2>/dev/null | head -1 | grep -q libLLVM; then
+            llvm_found=true
+        fi
+        if [[ "${llvm_found}" != "true" ]]; then
+            echo "Error: libLLVM not found. Required for --backend=llvm-lib."
+            echo "Install: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"
+            exit 1
+        fi
+        echo "libLLVM:    found"
+    fi
+
     # Platform-specific checks
     case "$HOST_OS" in
         macos)
@@ -295,18 +313,31 @@ STAGE2_DIR="${BOOTSTRAP_DIR}/stage2"
 STAGE2_BIN="${STAGE2_DIR}/simple"
 mkdir -p "${STAGE2_DIR}"
 
-SELFHOST_ARGS=(
-    "native-build"
-    "--source" "${PROJECT_DIR}/src/compiler"
-    "--source" "${PROJECT_DIR}/src/lib"
-    "--source" "${PROJECT_DIR}/src/app"
-    "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
-    "-o" "${STAGE2_BIN}"
-    "--strip"
-)
+if [[ "${BACKEND}" == "llvm-lib" || "${BACKEND}" == "llvm" ]]; then
+    # Pure Simple compile path (driver loads all sources internally)
+    SELFHOST_ARGS=(
+        "compile"
+        "${PROJECT_DIR}/src/app/cli/main.spl"
+        "--native"
+        "--backend=${BACKEND}"
+        "--release"
+        "-o" "${STAGE2_BIN}"
+        "--verbose"
+    )
+else
+    SELFHOST_ARGS=(
+        "native-build"
+        "--source" "${PROJECT_DIR}/src/compiler"
+        "--source" "${PROJECT_DIR}/src/lib"
+        "--source" "${PROJECT_DIR}/src/app"
+        "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
+        "-o" "${STAGE2_BIN}"
+        "--strip"
+    )
 
-if [[ "${BACKEND}" != "auto" ]]; then
-    SELFHOST_ARGS+=("--backend=${BACKEND}")
+    if [[ "${BACKEND}" != "auto" ]]; then
+        SELFHOST_ARGS+=("--backend=${BACKEND}")
+    fi
 fi
 
 echo "Running: ${STAGE1_BIN} ${SELFHOST_ARGS[*]}"

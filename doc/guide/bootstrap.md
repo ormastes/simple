@@ -11,10 +11,12 @@ This guide is the quick bootstrap reference for the current repository layout.
 `src/compiler_core_legacy/` is retired. Bootstrap and docs should use `src/compiler/`.
 Runtime files are in `src/runtime/` (previously `src/compiler_seed/`).
 
-## Linux Bootstrap Stages & Default Backends
+## Bootstrap Stages & Default Backends
 
 The Simple compiler goes through multiple stages to reach a fully self-hosted binary.
-Each stage uses a different default backend for compilation:
+Each stage uses a different default backend for compilation. The backend selection logic
+(`get_effective_backend_name()`) is platform-agnostic — the same code runs on Linux, macOS,
+and Windows. What differs per platform is LLVM library availability and linker toolchain.
 
 ```
 Stage 1: Rust Bootstrap Binary
@@ -80,6 +82,40 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
 3. **Pure Simple release → LLVM-lib**: Release builds prioritize runtime performance. LLVM generates 4-5x faster code than Cranelift for compute-bound workloads (measured: fib(35) runs in ~40ms vs ~190ms). Uses `libLLVM` via dynamic FFI (`spl_dlopen`), so requires `libllvm-18-dev` (or equivalent) to be installed.
 
 4. **Fallback chain**: If LLVM is not installed, release builds gracefully fall back to `llc` (LLVM text IR → object file) or Cranelift.
+
+### Platform-Specific Notes
+
+#### Linux
+
+- LLVM library: `libLLVM-18.so` (install `libllvm-18-dev` or equivalent)
+- Linker: `mold` (preferred), `lld`, or system `ld`
+- LLVM is most commonly available on Linux — release builds typically get `llvm-lib`
+
+#### macOS
+
+- LLVM library: `libLLVM-18.dylib` (install via `brew install llvm`)
+- Default macOS (Xcode CLT only, no Homebrew LLVM) → Cranelift for all stages
+- Linker: system `ld` (ld64) — `mold` is not supported on macOS
+- Homebrew LLVM path must be discoverable by `spl_dlopen` for `llvm-lib` backend
+
+#### Windows
+
+- Dual-toolchain support: MSVC (`clang-cl` / `link.exe`) and MinGW/GNU (`clang` / `ld`)
+- CMake bootstrap auto-detects `clang-cl` on Windows for MSVC ABI compatibility
+- LLVM dynamic library rarely available on Windows → typically falls back to Cranelift
+- Windows system libraries always linked: `kernel32`, `ws2_32`, `bcrypt`, `userenv`
+- Linker flags differ by flavor: MSVC uses `/WHOLEARCHIVE`, `/FORCE:UNRESOLVED`; GNU uses `--whole-archive`, `--unresolved-symbols`
+
+### Cross-Platform Default Backend Summary
+
+| Stage | Linux | macOS (with brew LLVM) | macOS (no brew LLVM) | Windows |
+|-------|-------|------------------------|----------------------|---------|
+| **Stage 1** (Rust bootstrap) | Cranelift | Cranelift | Cranelift | Cranelift |
+| **Stage 2** (debug build) | Cranelift | Cranelift | Cranelift | Cranelift |
+| **Stage 3** (release build) | LLVM-lib | LLVM-lib | Cranelift | Cranelift |
+
+The fallback chain for Stage 3 release builds is: `llvm-lib` → `llvm` (llc) → `cranelift`.
+The effective backend depends solely on whether `libLLVM` or `llc` can be found at runtime.
 
 ## Bootstrap Fallback Chain
 

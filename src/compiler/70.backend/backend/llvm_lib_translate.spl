@@ -1,0 +1,197 @@
+# LLVM Lib Translate — Module/Function Structure
+#
+# Translates MIR module structure to LLVM IR via C API calls.
+# Handles: function declarations, basic block layout, runtime declarations.
+# Delegates instruction translation to llvm_lib_translate_expr.spl.
+
+use compiler.mir.mir_data.*
+use compiler.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
+use compiler.backend.llvm_lib_translate_expr.{translate_instruction, translate_terminator}
+use std.ffi.llvm.*
+
+# ============================================================================
+# Module Translation
+# ============================================================================
+
+fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, mir_module: MirModule):
+    # Pass 0: Declare runtime functions
+    declare_runtime_functions(ctx, mod_, type_mapper)
+
+    # Pass 1: Declare all functions (forward references)
+    var func_map: {text: i64} = {}
+    for sym_id, func in mir_module.functions:
+        val fn_name = if func.name == "main": "__simple_main" else: func.name
+        val fn_ty = build_function_type(ctx, type_mapper, func.signature)
+        val llvm_fn = llvm_add_function(mod_, fn_name, fn_ty)
+        llvm_set_linkage(llvm_fn, LLVM_EXTERNAL_LINKAGE)
+        func_map[func.name] = llvm_fn
+
+        # Add nounwind attribute (Simple has no exceptions)
+        val nounwind_kind = llvm_get_enum_attribute_kind_for_name("nounwind")
+        if nounwind_kind != 0:
+            val attr = llvm_create_enum_attribute(ctx, nounwind_kind, 0)
+            llvm_add_attribute_at_index(llvm_fn, -1, attr)
+
+    # Pass 2: Compile function bodies
+    for sym_id, func in mir_module.functions:
+        val llvm_fn = func_map[func.name]
+        compile_function(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
+
+# ============================================================================
+# Function Compilation
+# ============================================================================
+
+fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, func: MirFunction, llvm_fn: i64, func_map: {text: i64}):
+    # Create basic blocks
+    var block_map: {i64: i64} = {}
+    for block in func.blocks:
+        val bb = llvm_append_basic_block_in_context(ctx, llvm_fn, "bb{block.id}")
+        block_map[block.id] = bb
+
+    # Build value map: local ID → LLVMValueRef
+    var value_map: {i64: i64} = {}
+
+    # Map function parameters to locals
+    var param_idx = 0
+    for local in func.locals:
+        match local.kind:
+            case Arg(index):
+                val param_val = llvm_get_param(llvm_fn, index)
+                value_map[local.id.id] = param_val
+                param_idx = param_idx + 1
+            case _: ()
+
+    # Build local type map: local ID → LLVMTypeRef
+    var local_types: {i64: i64} = {}
+    for local in func.locals:
+        local_types[local.id.id] = type_mapper.map_type(local.type_)
+
+    # Compile each block
+    for block in func.blocks:
+        val bb = block_map[block.id]
+        llvm_position_builder_at_end(builder, bb)
+
+        # Translate instructions
+        for inst in block.instructions:
+            translate_instruction(ctx, mod_, builder, type_mapper, inst, value_map, local_types, func_map)
+
+        # Translate terminator
+        translate_terminator(ctx, mod_, builder, type_mapper, block.terminator, value_map, local_types, block_map, func_map)
+
+# ============================================================================
+# Function Type Builder
+# ============================================================================
+
+fn build_function_type(ctx: i64, type_mapper: LlvmLibTypeMapper, sig: MirSignature) -> i64:
+    val ret_ty = type_mapper.map_type(sig.return_type)
+    var param_types: [i64] = []
+    for param in sig.params:
+        param_types.push(type_mapper.map_type(param.type_))
+    llvm_function_type(ret_ty, param_types, false)
+
+# ============================================================================
+# Runtime Function Declarations
+# ============================================================================
+
+fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
+    val void_ty = llvm_void_type_in_context(ctx)
+    val i1_ty = llvm_int1_type_in_context(ctx)
+    val i8_ty = llvm_int8_type_in_context(ctx)
+    val i64_ty = llvm_int64_type_in_context(ctx)
+    val ptr_ty = tm.ptr_type()
+    val double_ty = llvm_double_type_in_context(ctx)
+
+    # File I/O
+    declare_fn(mod_, "rt_file_open", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_close", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_read_text", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_write", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_read_bytes", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_write_bytes", llvm_function_type(i1_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_file_exists", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_delete", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_copy", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_move", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_file_size", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_lock", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_file_unlock", llvm_function_type(i1_ty, [ptr_ty], false))
+
+    # Directory operations
+    declare_fn(mod_, "rt_dir_create", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_delete", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_exists", llvm_function_type(i1_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_dir_list", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Process operations
+    declare_fn(mod_, "rt_process_spawn", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_process_wait", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_getenv", llvm_function_type(ptr_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_setenv", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_getpid", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_exit", llvm_function_type(void_ty, [i64_ty], false))
+
+    # Memory operations
+    declare_fn(mod_, "rt_alloc", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_realloc", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_free", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_memcpy", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_memset", llvm_function_type(ptr_ty, [ptr_ty, i8_ty, i64_ty], false))
+    declare_fn(mod_, "rt_memcmp", llvm_function_type(i64_ty, [ptr_ty, ptr_ty, i64_ty], false))
+
+    # String operations
+    declare_fn(mod_, "rt_strlen", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_strcat", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_substr", llvm_function_type(ptr_ty, [ptr_ty, i64_ty, i64_ty], false))
+    declare_fn(mod_, "rt_strfind", llvm_function_type(i64_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strreplace", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strsplit", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_strcmp", llvm_function_type(i64_ty, [ptr_ty, ptr_ty], false))
+
+    # Array/Collection operations
+    declare_fn(mod_, "rt_array_new", llvm_function_type(ptr_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_array_len", llvm_function_type(i64_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_array_get", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_array_set", llvm_function_type(void_ty, [ptr_ty, i64_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_push", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_array_pop", llvm_function_type(ptr_ty, [ptr_ty], false))
+
+    # Dict/Map operations
+    declare_fn(mod_, "rt_dict_new", llvm_function_type(ptr_ty, [], false))
+    declare_fn(mod_, "rt_dict_get", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_set", llvm_function_type(void_ty, [ptr_ty, ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_contains", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
+    declare_fn(mod_, "rt_dict_len", llvm_function_type(i64_ty, [ptr_ty], false))
+
+    # I/O operations
+    declare_fn(mod_, "rt_print", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_println", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "rt_readline", llvm_function_type(ptr_ty, [], false))
+
+    # Time operations
+    declare_fn(mod_, "rt_time_now_unix", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_time_now_unix_micros", llvm_function_type(i64_ty, [], false))
+    declare_fn(mod_, "rt_sleep_ms", llvm_function_type(void_ty, [i64_ty], false))
+
+    # Error handling
+    declare_fn(mod_, "rt_panic", llvm_function_type(void_ty, [ptr_ty], false))
+    declare_fn(mod_, "abort", llvm_function_type(void_ty, [], false))
+
+    # Math operations
+    declare_fn(mod_, "rt_sin", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_cos", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_sqrt", llvm_function_type(double_ty, [double_ty], false))
+    declare_fn(mod_, "rt_pow", llvm_function_type(double_ty, [double_ty, double_ty], false))
+
+    # Integer power
+    declare_fn(mod_, "__simple_pow", llvm_function_type(i64_ty, [i64_ty, i64_ty], false))
+
+fn declare_fn(mod_: i64, name: text, ty: i64):
+    val existing = llvm_get_named_function(mod_, name)
+    if existing == 0:
+        llvm_add_function(mod_, name, ty)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export translate_module_to_llvm

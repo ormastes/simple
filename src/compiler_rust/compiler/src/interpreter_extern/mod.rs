@@ -488,6 +488,15 @@ pub(crate) fn call_extern_function(
         "sys_malloc" => memory::sys_malloc(&evaluated),
         "sys_free" => memory::sys_free(&evaluated),
         "sys_realloc" => memory::sys_realloc(&evaluated),
+        // Raw memory operations (for LLVM-lib FFI backend)
+        "rt_alloc" => memory::rt_alloc(&evaluated),
+        "rt_free" => memory::rt_free(&evaluated),
+        "rt_ptr_write_i64" => memory::rt_ptr_write_i64(&evaluated),
+        "rt_ptr_read_i64" => memory::rt_ptr_read_i64(&evaluated),
+        "rt_ptr_write_i32" => memory::rt_ptr_write_i32(&evaluated),
+        "rt_ptr_write_u8" => memory::rt_ptr_write_u8(&evaluated),
+        "rt_memset" => memory::rt_memset(&evaluated),
+        "rt_memcpy" => memory::rt_memcpy(&evaluated),
 
         // ====================================================================
         // RC/ARC Operations (20 functions: Rc + Arc reference counting)
@@ -647,6 +656,7 @@ pub(crate) fn call_extern_function(
         "rt_file_read_lines" => file_io::rt_file_read_lines(&evaluated),
         "rt_file_append_text" => file_io::rt_file_append_text(&evaluated),
         "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
+        "rt_bytes_from_raw" => file_io::rt_bytes_from_raw(&evaluated),
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
         "rt_file_move" => file_io::rt_file_move(&evaluated),
         "rt_file_delete" => native_ffi::rt_file_delete(&evaluated),

@@ -273,6 +273,25 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Create a byte array from a raw memory pointer
+pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = match args.get(0) {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    let len = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    if ptr == 0 || len <= 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let src = ptr as usize as *const u8;
+    let slice = unsafe { std::slice::from_raw_parts(src, len as usize) };
+    let arr: Vec<Value> = slice.iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(Value::array(arr))
+}
+
 /// Write bytes to file
 pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

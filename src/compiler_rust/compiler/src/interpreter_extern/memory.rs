@@ -226,6 +226,150 @@ pub fn sys_free(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+// ============================================================================
+// Raw Memory Operations (for LLVM-lib FFI backend)
+// ============================================================================
+
+/// Allocate zeroed memory with alignment 8.
+///
+/// Callable from Simple as: `rt_alloc(size: i64) -> i64`
+/// Returns pointer as i64, 0 on failure.
+pub fn rt_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_alloc requires 1 argument (size)"));
+    }
+    let size = args[0].as_int()? as usize;
+    if size == 0 {
+        return Ok(Value::Int(0));
+    }
+    let layout = std::alloc::Layout::from_size_align(size, 8)
+        .map_err(|_| CompileError::runtime("rt_alloc: invalid size"))?;
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout);
+        if ptr.is_null() {
+            return Ok(Value::Int(0));
+        }
+        Ok(Value::Int(ptr as usize as i64))
+    }
+}
+
+/// Free memory allocated by rt_alloc. No-op for null pointers.
+///
+/// Callable from Simple as: `rt_free(ptr: i64)`
+pub fn rt_free(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_free requires 1 argument (ptr)"));
+    }
+    let ptr_val = args[0].as_int()?;
+    if ptr_val == 0 {
+        return Ok(Value::Nil);
+    }
+    // Note: We don't know the original size, so we can't properly dealloc.
+    // For the interpreter (short-lived compiler process), this is acceptable.
+    // The memory will be freed when the process exits.
+    Ok(Value::Nil)
+}
+
+/// Write i64 value at addr+offset.
+///
+/// Callable from Simple as: `rt_ptr_write_i64(addr: i64, offset: i64, value: i64)`
+pub fn rt_ptr_write_i64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_ptr_write_i64 requires 3 arguments (addr, offset, value)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    let value = args[2].as_int()?;
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize) as *mut i64;
+        ptr.write(value);
+    }
+    Ok(Value::Nil)
+}
+
+/// Read i64 value from addr+offset.
+///
+/// Callable from Simple as: `rt_ptr_read_i64(addr: i64, offset: i64) -> i64`
+pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_ptr_read_i64 requires 2 arguments (addr, offset)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    unsafe {
+        let ptr = (addr as *const u8).offset(offset as isize) as *const i64;
+        Ok(Value::Int(ptr.read()))
+    }
+}
+
+/// Write i32 value at addr+offset.
+///
+/// Callable from Simple as: `rt_ptr_write_i32(addr: i64, offset: i64, value: i64)`
+pub fn rt_ptr_write_i32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_ptr_write_i32 requires 3 arguments (addr, offset, value)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    let value = args[2].as_int()? as i32;
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize) as *mut i32;
+        ptr.write(value);
+    }
+    Ok(Value::Nil)
+}
+
+/// Write u8 value at addr+offset.
+///
+/// Callable from Simple as: `rt_ptr_write_u8(addr: i64, offset: i64, value: i64)`
+pub fn rt_ptr_write_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_ptr_write_u8 requires 3 arguments (addr, offset, value)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    let value = args[2].as_int()? as u8;
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize);
+        ptr.write(value);
+    }
+    Ok(Value::Nil)
+}
+
+/// Fill memory with a byte value.
+///
+/// Callable from Simple as: `rt_memset(addr: i64, value: i64, n: i64) -> i64`
+/// Returns the destination address.
+pub fn rt_memset(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_memset requires 3 arguments (addr, value, n)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u8;
+    let n = args[2].as_int()? as usize;
+    unsafe {
+        std::ptr::write_bytes(addr as *mut u8, value, n);
+    }
+    Ok(Value::Int(addr as i64))
+}
+
+/// Copy memory from src to dst.
+///
+/// Callable from Simple as: `rt_memcpy(dst: i64, src: i64, n: i64) -> i64`
+/// Returns the destination address.
+pub fn rt_memcpy(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_memcpy requires 3 arguments (dst, src, n)"));
+    }
+    let dst = args[0].as_int()? as usize;
+    let src = args[1].as_int()? as usize;
+    let n = args[2].as_int()? as usize;
+    unsafe {
+        std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, n);
+    }
+    Ok(Value::Int(dst as i64))
+}
+
 /// Reallocate memory
 ///
 /// Callable from Simple as: `sys_realloc(ptr, old_size, new_size, align)`

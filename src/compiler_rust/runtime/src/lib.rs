@@ -170,6 +170,9 @@ pub use value::{
     rt_enum_new,
     rt_enum_payload,
     rt_free,
+    // Memory operations (raw pointer)
+    rt_memcpy,
+    rt_memset,
     // Future operations
     rt_future_all,
     rt_future_await,
@@ -197,7 +200,11 @@ pub use value::{
     rt_object_field_get,
     rt_object_field_set,
     rt_object_new,
+    rt_ptr_read_i64,
     rt_ptr_to_value,
+    rt_ptr_write_i32,
+    rt_ptr_write_i64,
+    rt_ptr_write_u8,
     // Shared pointer operations
     rt_shared_clone,
     rt_shared_downgrade,
