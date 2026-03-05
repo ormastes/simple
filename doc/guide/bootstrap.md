@@ -1,4 +1,4 @@
-# Bootstrap Guide (2026-02-28)
+# Bootstrap Guide (2026-03-05)
 
 This guide is the quick bootstrap reference for the current repository layout.
 
@@ -10,6 +10,76 @@ This guide is the quick bootstrap reference for the current repository layout.
 
 `src/compiler_core_legacy/` is retired. Bootstrap and docs should use `src/compiler/`.
 Runtime files are in `src/runtime/` (previously `src/compiler_seed/`).
+
+## Linux Bootstrap Stages & Default Backends
+
+The Simple compiler goes through multiple stages to reach a fully self-hosted binary.
+Each stage uses a different default backend for compilation:
+
+```
+Stage 1: Rust Bootstrap Binary
+  Build:   cargo build --profile bootstrap -p simple-driver
+  Binary:  src/compiler_rust/target/bootstrap/simple
+  Backend: Cranelift (Rust, hardcoded)
+  Role:    Interprets .spl files and compiles via native-build
+
+    │
+    │  native-build (always Cranelift)
+    ▼
+
+Stage 2: Pure Simple (compiled by Cranelift)
+  Build:   simple native-build
+  Binary:  bin/release/simple_native  (or bin/release/simple)
+  Backend: Cranelift (no --backend flag for native-build)
+  Role:    Natively compiled Simple compiler — runs all Pure Simple code
+
+    │
+    │  build --release  (auto backend selection)
+    ▼
+
+Stage 3: Full Pure Simple (self-hosted)
+  Build:   bin/release/simple build --release
+  Binary:  bin/release/simple
+  Backend: auto → LLVM-lib (if libLLVM available) → LLVM llc (if llc available) → Cranelift
+  Role:    Self-hosted compiler that compiled itself
+```
+
+### Default Backend Selection Per Stage
+
+| Stage | Command | Backend | Selection Logic |
+|-------|---------|---------|-----------------|
+| **Rust bootstrap** | `native-build` | **Cranelift** | Hardcoded in Rust `NativeProjectBuilder` (`codegen/cranelift.rs`) |
+| **Pure Simple** (debug) | `build` | **Cranelift** | `get_effective_backend_name("auto", false)` → `"cranelift"` |
+| **Pure Simple** (release) | `build --release` | **LLVM-lib** | `get_effective_backend_name("auto", true)` → `"llvm-lib"` if `libLLVM` available → `"llvm"` if `llc` available → `"cranelift"` fallback |
+| **Full Pure Simple** | `compile --backend=X` | **explicit** | User-specified backend, no auto-selection |
+
+### Backend Resolution Code
+
+From `src/compiler/70.backend/backend/backend_helpers.spl`:
+
+```simple
+fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
+    if backend_name == "auto":
+        if is_release:
+            if llvm_available():   # libLLVM dynamic library
+                "llvm-lib"
+            elif llc_available():  # llc command-line tool
+                "llvm"
+            else:
+                "cranelift"
+        else:
+            "cranelift"            # debug always uses Cranelift
+```
+
+### Why Each Stage Uses Its Backend
+
+1. **Rust bootstrap → Cranelift**: The `NativeProjectBuilder` in Rust directly uses the `cranelift` crate. No backend selection logic — Cranelift is the only compiled-in codegen. Fast compilation, no external dependencies.
+
+2. **Pure Simple debug → Cranelift**: Debug builds prioritize compile speed. Cranelift compiles ~2.5x faster than LLVM. Good enough code quality for development iteration.
+
+3. **Pure Simple release → LLVM-lib**: Release builds prioritize runtime performance. LLVM generates 4-5x faster code than Cranelift for compute-bound workloads (measured: fib(35) runs in ~40ms vs ~190ms). Uses `libLLVM` via dynamic FFI (`spl_dlopen`), so requires `libllvm-18-dev` (or equivalent) to be installed.
+
+4. **Fallback chain**: If LLVM is not installed, release builds gracefully fall back to `llc` (LLVM text IR → object file) or Cranelift.
 
 ## Bootstrap Fallback Chain
 
@@ -105,7 +175,7 @@ scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --deploy
 - C backend bootstrap binary: `bin/bootstrap/cpp/simple`
 - Intermediate artifacts: `build/bootstrap/`
 
-## Architecture Note (2026-02-28)
+## Architecture Note (2026-03-05)
 
 The self-hosted binary (`bin/release/simple`) no longer delegates any work to subprocess calls. All compilation backends (C, VHDL, native), file execution, and test running use in-process function calls. The only external tool calls are system compilers/linkers: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`, `uname`, `which`.
 
@@ -113,3 +183,5 @@ The self-hosted binary (`bin/release/simple`) no longer delegates any work to su
 
 - `doc/build/bootstrap_pipeline.md`
 - `doc/build/github_actions_bootstrap_guide.md`
+- `doc/design/backend_architecture.md` — Backend architecture, compilation paths, and why only Cranelift can bootstrap
+- `doc/design/backend_default_decision.md` — Decision doc for making LLVM the default release backend
