@@ -53,6 +53,64 @@ pub extern "C" fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
     v.as_heap_ptr() as *mut u8
 }
 
+// ============================================================================
+// Raw pointer operations (for LLVM-lib FFI backend / relocation patching)
+// ============================================================================
+
+/// Read i64 value from addr+offset
+#[no_mangle]
+pub extern "C" fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64 {
+    unsafe {
+        let ptr = (addr as *const u8).offset(offset as isize) as *const i64;
+        ptr.read()
+    }
+}
+
+/// Write u8 value at addr+offset
+#[no_mangle]
+pub extern "C" fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) {
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize);
+        ptr.write(value as u8);
+    }
+}
+
+/// Write i32 value at addr+offset
+#[no_mangle]
+pub extern "C" fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32) {
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize) as *mut i32;
+        ptr.write(value);
+    }
+}
+
+/// Write i64 value at addr+offset
+#[no_mangle]
+pub extern "C" fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) {
+    unsafe {
+        let ptr = (addr as *mut u8).offset(offset as isize) as *mut i64;
+        ptr.write(value);
+    }
+}
+
+/// Fill memory with byte value. Returns dst.
+#[no_mangle]
+pub extern "C" fn rt_memset(dst: *mut u8, val: i8, n: i64) -> *mut u8 {
+    unsafe {
+        std::ptr::write_bytes(dst, val as u8, n as usize);
+    }
+    dst
+}
+
+/// Copy memory from src to dst. Returns dst.
+#[no_mangle]
+pub extern "C" fn rt_memcpy(dst: *mut u8, src: *const u8, n: i64) -> *mut u8 {
+    unsafe {
+        std::ptr::copy_nonoverlapping(src, dst, n as usize);
+    }
+    dst
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,13 +11,15 @@
 
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
-use compiler.backend.backend.llvm_backend.{compile_ir_to_object, LlvmTargetConfig, LlvmTargetConfig__for_target}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig, LlvmTargetConfig__for_target}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llc_available}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
-use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
 
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Configuration
@@ -39,6 +41,33 @@ fn NativeLinkOptions__default() -> NativeLinkOptions:
     )
 
 # ============================================================================
+# C-Based Entry Point Compiler (no llc needed)
+# ============================================================================
+
+fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
+    """Compile entry point as C source (no llc needed)."""
+    val cc = find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found")
+    val entry_c = "/tmp/simple_entry_{pid}.c"
+    val entry_o = "/tmp/simple_entry_{pid}.o"
+    val c_source = "extern void __simple_runtime_init(void);\n" +
+        "extern long long __simple_main(void);\n" +
+        "extern void __simple_runtime_shutdown(void);\n" +
+        "int main(int argc, char** argv) {\n" +
+        "    __simple_runtime_init();\n" +
+        "    long long result = __simple_main();\n" +
+        "    __simple_runtime_shutdown();\n" +
+        "    return (int)result;\n" +
+        "}\n"
+    rt_file_write_text(entry_c, c_source)
+    val (ep_out, ep_err, ep_code) = shell("{cc} -c -fPIC -O2 -o {entry_o} {entry_c} 2>&1")
+    rt_file_delete(entry_c)
+    if ep_code != 0:
+        return Err("Entry point compilation failed: {ep_out}")
+    Ok(entry_o)
+
+# ============================================================================
 # Main Orchestrator
 # ============================================================================
 
@@ -47,58 +76,46 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     Pipeline:
     1. Compile C runtime (runtime.c, runtime_native.c, etc.) to .o files
-    2. Generate and compile entry point IR to .o
+    2. Generate and compile entry point IR to .o (via llc, or C fallback)
     3. Combine all objects and link with system linker
 
     Returns Ok(output_path) on success, Err(message) on failure.
     """
+    print "[LLVM-LINK] enter link_llvm_native"
     val verbose = options.verbose
+    print "[LLVM-LINK] verbose={verbose}"
     val pid = getpid()
+    print "[LLVM-LINK] pid={pid}"
 
     # Step 1: Compile C runtime to object files
-    if verbose:
-        shell("echo '[llvm-link] Compiling C runtime...' >&2")
-
+    print "[LLVM-LINK] step 1: compile_runtime_objects..."
     val rt_result = compile_runtime_objects(verbose)
+    print "[LLVM-LINK] compile_runtime_objects returned"
     if rt_result.is_err():
         return Err("Runtime compilation failed: {rt_result.unwrap_err()}")
     val runtime_objects = rt_result.unwrap()
+    print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
-    # Step 2: Generate entry point IR and compile to object
-    if verbose:
-        shell("echo '[llvm-link] Generating entry point...' >&2")
-
-    val entry_ir = generate_entry_point_ir("program")
+    # Step 2: Generate and compile entry point
+    print "[LLVM-LINK] step 2: compile entry point..."
     val entry_obj_path = "/tmp/simple_entry_{pid}.o"
-
-    val target_config = LlvmTargetConfig__for_target(CodegenTarget.Host, nil)
-    val entry_compile = compile_ir_to_object(entry_ir, target_config, OptimizationLevel.Speed)
-    if entry_compile.is_err():
+    val c_result = compile_entry_point_c(pid, verbose)
+    print "[LLVM-LINK] entry point compiled"
+    if c_result.is_err():
         cleanup_runtime_objects(runtime_objects)
-        return Err("Entry point compilation failed: {entry_compile.unwrap_err()}")
-
-    val entry_obj = entry_compile.unwrap()
-    if not rt_file_write_bytes(entry_obj_path, entry_obj.bytes):
-        cleanup_runtime_objects(runtime_objects)
-        return Err("Failed to write entry point object file")
+        return Err("Entry point compilation failed: {c_result.unwrap_err()}")
 
     # Step 3: Combine all objects and link
-    if verbose:
-        shell("echo '[llvm-link] Linking native executable...' >&2")
-
+    print "[LLVM-LINK] step 3: combining objects..."
     var all_objects: [text] = []
-    # Add user objects first
     for obj in user_objects:
         all_objects.push(obj)
-    # Add runtime objects
     for obj in runtime_objects:
         all_objects.push(obj)
-    # Add entry point
     all_objects.push(entry_obj_path)
+    print "[LLVM-LINK] total objects: {all_objects.len()}"
 
-    # Configure linker — system libs added by linker_wrapper automatically.
-    # Set runtime_path to "none" to skip auto-detecting libsimple_compiler
-    # (we provide runtime symbols via the compiled C runtime objects instead).
+    print "[LLVM-LINK] creating NativeLinkConfig..."
     var link_config = NativeLinkConfig(
         libraries: [],
         library_paths: [],
@@ -108,8 +125,10 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         verbose: options.verbose,
         extra_flags: []
     )
+    print "[LLVM-LINK] calling link_to_native..."
 
     val link_result = link_to_native(all_objects, output, link_config)
+    print "[LLVM-LINK] link_to_native returned"
 
     # Cleanup temp files
     cleanup_runtime_objects(runtime_objects)
@@ -127,4 +146,4 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 # Exports
 # ============================================================================
 
-export link_llvm_native, NativeLinkOptions, NativeLinkOptions__default
+export link_llvm_native, compile_entry_point_c, NativeLinkOptions, NativeLinkOptions__default

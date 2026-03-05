@@ -211,6 +211,18 @@ int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
     return written == (size_t)len ? 1 : 0;
 }
 
+SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len) {
+    /* Create a byte array ([u8]) from a raw memory pointer.
+     * Used by LLVM memory buffer emission to avoid temp file I/O. */
+    if (ptr == 0 || len <= 0) return spl_array_new();
+    SplArray* arr = spl_array_new_cap(len);
+    const unsigned char* src = (const unsigned char*)(uintptr_t)ptr;
+    for (int64_t i = 0; i < len; i++) {
+        spl_array_push_i64(arr, (int64_t)src[i]);
+    }
+    return arr;
+}
+
 /* ================================================================
  * Directory Operations (bridge to spl_ or direct libc)
  * ================================================================ */
@@ -270,8 +282,13 @@ double rt_sqrt(double x) { return sqrt(x); }
 double rt_pow(double a, double b) { return pow(a, b); }
 
 /* ================================================================
- * Pointer Write Operations (for relocation patching)
+ * Pointer Read/Write Operations (for relocation patching, FFI interop)
  * ================================================================ */
+
+int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
+    int64_t* ptr = (int64_t*)((char*)(uintptr_t)addr + offset);
+    return *ptr;
+}
 
 void rt_ptr_write_u8(int64_t addr, int64_t offset, int64_t value) {
     uint8_t* ptr = (uint8_t*)((char*)(uintptr_t)addr + offset);

@@ -13,6 +13,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
     compileerror_backend_error}
 use compiler.backend.llvm_backend.{llc_available}
 use compiler.backend.codegen_factory.{CodegenFactory}
+use std.ffi.llvm.{llvm_available}
 
 # ============================================================================
 # Helper Functions
@@ -109,6 +110,7 @@ fn available_backends() -> [BackendKind]:
     [
         BackendKind.Cranelift,
         BackendKind.Llvm,
+        BackendKind.LlvmLib,
         BackendKind.Native,
         BackendKind.Wasm,
         BackendKind.Lean,
@@ -130,6 +132,8 @@ fn backend_for_name(name: text) -> has_BackendKind:
     match name:
         case "cranelift": BackendKind.Cranelift
         case "llvm": BackendKind.Llvm
+        case "llvm-lib": BackendKind.LlvmLib
+        case "llvmlib": BackendKind.LlvmLib
         case "native": BackendKind.Native
         case "wasm": BackendKind.Wasm
         case "lean": BackendKind.Lean
@@ -169,6 +173,8 @@ fn compile_module_with_backend(
     var kind = BackendKind.Llvm
     if backend_name == "llvm":
         kind = BackendKind.Llvm
+    elif backend_name == "llvm-lib" or backend_name == "llvmlib":
+        kind = BackendKind.LlvmLib
     elif backend_name == "cranelift":
         kind = BackendKind.Cranelift
     elif backend_name == "native":
@@ -176,8 +182,10 @@ fn compile_module_with_backend(
     elif backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
         kind = BackendKind.CCodegen
     elif backend_name == "auto":
-        # Prefer LLVM when available; fall back to Cranelift
-        if llc_available():
+        # Prefer LlvmLib (no external tools) → Llvm (llc) → Cranelift
+        if llvm_available():
+            kind = BackendKind.LlvmLib
+        elif llc_available():
             kind = BackendKind.Llvm
         else:
             kind = BackendKind.Cranelift
@@ -200,6 +208,9 @@ fn compile_module_with_backend(
     if kind == BackendKind.Llvm and not llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
             "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
+    if kind == BackendKind.LlvmLib and not llvm_available():
+        return Err(compileerror_backend_error(BackendKind.LlvmLib,
+            "libLLVM not found. Install LLVM: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"))
 
     val codegen = CodegenFactory.create(kind, options)
     val result = codegen.compile_module(module)
@@ -213,6 +224,8 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     """Get the effective backend name after auto-resolution."""
     if backend_name == "llvm":
         "llvm"
+    elif backend_name == "llvm-lib" or backend_name == "llvmlib":
+        "llvm-lib"
     elif backend_name == "cranelift":
         "cranelift"
     elif backend_name == "native":
@@ -221,8 +234,12 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
         "c"
     elif backend_name == "auto":
         if is_release:
-            if llc_available():
+            if llvm_available():
+                "llvm-lib"
+            elif llc_available():
                 "llvm"
+            else:
+                "cranelift"
         else:
             "cranelift"
     else:

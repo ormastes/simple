@@ -26,8 +26,8 @@ fn find_c_compiler() -> text:
     """
     val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
     for candidate in candidates:
-        val result = shell("which {candidate} 2>/dev/null")
-        if result.exit_code == 0:
+        val (out, err, code) = shell("which {candidate} 2>/dev/null")
+        if code == 0:
             return candidate
     ""
 
@@ -46,13 +46,13 @@ fn find_runtime_source_dir() -> text:
         return "src/runtime"
 
     # Try relative to executable location (common for installed binaries)
-    val exe_result = shell("readlink -f /proc/self/exe 2>/dev/null")
-    if exe_result.exit_code == 0:
-        val exe_dir = exe_result.stdout.trim()
+    val (exe_out, exe_err, exe_code) = shell("readlink -f /proc/self/exe 2>/dev/null")
+    if exe_code == 0:
+        val exe_dir = exe_out.trim()
         # Go up from bin/release/simple to project root
-        val project_root_result = shell("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
-        if project_root_result.exit_code == 0:
-            val project_root = project_root_result.stdout.trim()
+        val (pr_out, pr_err, pr_code) = shell("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
+        if pr_code == 0:
+            val project_root = pr_out.trim()
             val rt_path = "{project_root}/src/runtime/runtime.c"
             if rt_file_exists(rt_path):
                 return "{project_root}/src/runtime"
@@ -71,44 +71,50 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
 
     Returns a list of object file paths on success, or an error message.
     """
+    print "[RT-COMPILE] enter compile_runtime_objects"
     val cc = find_c_compiler()
+    print "[RT-COMPILE] cc={cc}"
     if cc == "":
         return Err("No C compiler found. Install clang or gcc.")
 
     val rt_dir = find_runtime_source_dir()
+    print "[RT-COMPILE] rt_dir={rt_dir}"
     if rt_dir == "":
         return Err("Runtime source directory not found. Expected src/runtime/runtime.c")
 
     val pid = getpid()
+    print "[RT-COMPILE] pid={pid}"
     val sources = ["runtime", "runtime_native", "runtime_thread", "runtime_memtrack"]
     var object_files: [text] = []
+    print "[RT-COMPILE] starting loop over {sources.len()} sources"
 
     for name in sources:
+        print "[RT-COMPILE] processing: {name}"
         val src_path = "{rt_dir}/{name}.c"
+        print "[RT-COMPILE] checking existence of {src_path}"
         if not rt_file_exists(src_path):
-            if verbose:
-                val msg = "Skipping {name}.c (not found)"
-                shell("echo '{msg}' >&2")
+            print "[RT-COMPILE] not found, skipping {name}"
             continue
 
         val obj_path = "/tmp/simple_rt_{pid}_{name}.o"
         val cmd = "{cc} -c -fPIC -O2 -std=gnu11 -I {rt_dir} -I {rt_dir}/platform -o {obj_path} {src_path} 2>&1"
+        print "[RT-COMPILE] compiling: {name}.c"
 
-        if verbose:
-            shell("echo 'Compiling: {cmd}' >&2")
-
-        val result = shell(cmd)
-        if result.exit_code != 0:
+        val (comp_out, comp_err, comp_code) = shell(cmd)
+        print "[RT-COMPILE] compile result: code={comp_code}"
+        if comp_code != 0:
             # Clean up already-compiled objects
             for obj in object_files:
                 shell("rm -f {obj}")
-            return Err("Failed to compile {name}.c:\n{result.stdout}")
+            return Err("Failed to compile {name}.c:\n{comp_out}")
 
         object_files.push(obj_path)
 
+    print "[RT-COMPILE] loop done, {object_files.len()} objects compiled"
     if object_files.len() == 0:
         return Err("No runtime source files were compiled")
 
+    print "[RT-COMPILE] returning Ok with {object_files.len()} objects"
     Ok(object_files)
 
 fn cleanup_runtime_objects(objects: [text]):

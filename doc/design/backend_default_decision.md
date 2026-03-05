@@ -6,6 +6,27 @@
 
 ---
 
+## CURRENT STATUS (2026-03-05)
+
+**Phase**: Still in Phase 1 — LLVM is NOT yet the default
+
+**Reality check**:
+- **LLVM llc** (text-based, Pure Simple): Works for small programs, cannot bootstrap (OOM when interpreted, >27GB RAM)
+- **LLVM lib** (inkwell, Rust): ~60% MIR instruction coverage, not yet usable for compilation
+- **Cranelift** (Rust FFI): **Only working bootstrap path** via `native-build`
+- **C backend** (Pure Simple): Works end-to-end for small programs via `mir_to_c.spl` → clang
+- The `compile --backend=llvm` path is an architectural dead-end for bootstrap (runs entire pipeline interpreted)
+
+**Next steps to reach Phase 2**:
+1. Complete LLVM lib (inkwell) P0 MIR instructions in Rust
+2. Add LLVM lib as backend option in `NativeProjectBuilder`
+3. Validate with full compiler compilation
+4. Add `native-build --backend=llvm` flag
+
+**See also**: [`backend_architecture.md`](backend_architecture.md) — comprehensive backend architecture doc
+
+---
+
 ## EXECUTIVE SUMMARY
 
 **Recommendation**: ✅ **YES - Make LLVM the default backend for release builds**

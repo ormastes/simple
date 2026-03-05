@@ -17,7 +17,9 @@ struct CrtFiles:
     found: bool
 
 fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
+    print "[CRT] enter find_crt_files, pie={pie}, verbose={verbose}"
     val arch = host_arch()
+    print "[CRT] arch={arch}"
 
     # Build candidate search directories based on architecture
     var candidates: [text] = []
@@ -29,9 +31,12 @@ fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
         candidates = ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
     else:
         candidates = ["/usr/lib"]
+    print "[CRT] candidates={candidates.len()}"
 
     # Choose crt1 variant based on PIE
+    print "[CRT] choosing crt1 variant..."
     val crt1_name = if pie: "Scrt1.o" else: "crt1.o"
+    print "[CRT] crt1_name={crt1_name}"
 
     # Probe each candidate directory for CRT files
     var found_crt1 = ""
@@ -67,12 +72,17 @@ fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
         )
 
     # Find crtbegin.o and crtend.o from GCC lib dirs
+    print "[CRT] found crt1={found_crt1}"
+    print "[CRT] calling find_gcc_lib_dirs..."
     val gcc_dirs = find_gcc_lib_dirs()
+    print "[CRT] gcc_dirs={gcc_dirs.len()}"
     var found_crtbegin = ""
     var found_crtend = ""
 
+    print "[CRT] choosing crtbegin/crtend variant..."
     val crtbegin_name = if pie: "crtbeginS.o" else: "crtbegin.o"
     val crtend_name = if pie: "crtendS.o" else: "crtend.o"
+    print "[CRT] crtbegin_name={crtbegin_name}, crtend_name={crtend_name}"
 
     for gcc_dir in gcc_dirs:
         val try_begin = "{gcc_dir}/{crtbegin_name}"
@@ -89,7 +99,9 @@ fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
             break
 
     # Find dynamic linker
+    print "[CRT] calling find_dynamic_linker..."
     val dyn_linker = find_dynamic_linker()
+    print "[CRT] dyn_linker={dyn_linker}"
     if verbose:
         if dyn_linker != "":
             print "[crt-discovery] Dynamic linker: {dyn_linker}"
@@ -140,7 +152,7 @@ fn find_dynamic_linker() -> text:
             return path
 
     # Fallback: parse from readelf -l /bin/sh
-    val readelf_output = shell_output("readelf -l /bin/sh 2>/dev/null | grep 'Requesting program interpreter' | sed 's/.*: //;s/]//'", "")
+    val readelf_output = shell_output("readelf -l /bin/sh 2>/dev/null | grep 'Requesting program interpreter' | sed 's/.*: //;s/]//'")
     val trimmed = readelf_output.trim()
     if trimmed != "" and file_exists(trimmed):
         return trimmed
@@ -149,26 +161,45 @@ fn find_dynamic_linker() -> text:
 
 fn find_gcc_lib_dirs() -> [text]:
     var dirs: [text] = []
+    print "[GCC] enter find_gcc_lib_dirs"
 
     # Method 1: Ask GCC for crtbegin.o location
-    val gcc_crtbegin = shell_output("gcc -print-file-name=crtbegin.o 2>/dev/null", "")
+    print "[GCC] method 1: gcc -print-file-name..."
+    val gcc_crtbegin = shell_output("gcc -print-file-name=crtbegin.o 2>/dev/null")
+    print "[GCC] gcc_crtbegin returned"
     val gcc_trimmed = gcc_crtbegin.trim()
-    if gcc_trimmed != "" and gcc_trimmed != "crtbegin.o" and file_exists(gcc_trimmed):
+    print "[GCC] gcc_trimmed={gcc_trimmed}"
+    val check1 = gcc_trimmed != ""
+    print "[GCC] check1={check1}"
+    val check2 = gcc_trimmed != "crtbegin.o"
+    print "[GCC] check2={check2}"
+    val check3 = file_exists(gcc_trimmed)
+    print "[GCC] check3={check3}"
+    if check1 and check2 and check3:
+        print "[GCC] conditions passed, calling path_dirname..."
         val dir = path_dirname(gcc_trimmed)
+        print "[GCC] dir={dir}"
         if dir != "":
             dirs.push(dir)
+            print "[GCC] method 1: found dir={dir}"
 
     # Method 2: Ask cc (may be clang or gcc)
+    print "[GCC] dirs.len()={dirs.len()}"
     if dirs.len() == 0:
-        val cc_crtbegin = shell_output("cc -print-file-name=crtbegin.o 2>/dev/null", "")
+        print "[GCC] method 2: cc -print-file-name..."
+        val cc_crtbegin = shell_output("cc -print-file-name=crtbegin.o 2>/dev/null")
         val cc_trimmed = cc_crtbegin.trim()
+        print "[GCC] cc_trimmed={cc_trimmed}"
         if cc_trimmed != "" and cc_trimmed != "crtbegin.o" and file_exists(cc_trimmed):
             val dir = path_dirname(cc_trimmed)
             if dir != "":
                 dirs.push(dir)
+                print "[GCC] method 2: found dir={dir}"
 
     # Method 3: Probe common GCC installation paths
+    print "[GCC] after method 2: dirs.len()={dirs.len()}"
     if dirs.len() == 0:
+        print "[GCC] method 3: probing common paths..."
         val arch = host_arch()
         var triplet = "x86_64-linux-gnu"
         if arch == "aarch64":
@@ -180,22 +211,26 @@ fn find_gcc_lib_dirs() -> [text]:
         var ver = 14
         while ver >= 9:
             val try_dir = "/usr/lib/gcc/{triplet}/{ver}"
+            print "[GCC] trying {try_dir}..."
             if file_exists("{try_dir}/crtbegin.o"):
                 dirs.push(try_dir)
+                print "[GCC] method 3: found dir={try_dir}"
                 break
             ver = ver - 1
 
+    print "[GCC] returning {dirs.len()} dirs"
     dirs
 
 fn path_dirname(path: text) -> text:
-    val last_slash = path.last_index_of("/")
-    if last_slash >= 0:
+    val last_slash_opt = path.last_index_of("/")
+    if last_slash_opt != nil:
+        val last_slash = last_slash_opt ?? 0
         path.substring(0, last_slash)
     else:
         ""
 
 fn cc_print_file(name: text) -> text:
-    val result = shell_output("cc -print-file-name={name} 2>/dev/null", "")
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null")
     val trimmed = result.trim()
     if trimmed != "" and trimmed != name:
         trimmed

@@ -744,8 +744,9 @@ fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
-    // Fallback to Simple apps is disabled for the standalone Rust compiler.
-    // Keeping the signature allows future re-enabling without changing callers.
+    // Simple app dispatch is disabled for the Rust bootstrap binary.
+    // The interpreter cannot handle full compilation pipelines (e.g. compile --native --backend=llvm-lib).
+    // Use a natively-compiled stage1+ binary for Simple app dispatch.
     let _ = (app_relative_path, args, gc_log, gc_off);
     None
 }

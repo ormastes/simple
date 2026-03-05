@@ -43,7 +43,7 @@ fn SelfContainedConfig__default() -> SelfContainedConfig:
 fn link_to_smf(smf_bytes: [u8], output: text, verbose: bool) -> Result:
     # Write SMF bytes directly to file
     # Use shell to write binary data via base64 encoding
-    if smf_bytes_len(smf_bytes) == 0:
+    if smf_bytes.len() == 0:
         return Err("No SMF data to write")
 
     # Write bytes using file_write_bytes helper
@@ -61,17 +61,17 @@ fn link_to_smf(smf_bytes: [u8], output: text, verbose: bool) -> Result:
 # ============================================================================
 
 fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedConfig) -> Result:
-    debug("linker", "link_to_self_contained: output={output}, smf_data_size={smf_data_len(smf_data)}")
-    if smf_data_len(smf_data) == 0:
+    debug("linker", "link_to_self_contained: output={output}, smf_data_size={smf_data.len()}")
+    if smf_data.len() == 0:
         return Err("No SMF data for self-contained binary")
 
     # Find runtime binary
     var runtime_path = config.runtime_binary
     if runtime_path == "":
         val found = find_runtime_binary()
-        if found_is_err(found):
-            return Err(found_unwrap_err(found))
-        runtime_path = found_value
+        if found.is_err():
+            return Err(found.unwrap_err())
+        runtime_path = found.unwrap()
     debug("linker", "Runtime binary: {runtime_path}")
 
     if config.verbose:
@@ -95,7 +95,7 @@ fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedCon
 
     # Step 4: Build and append trailer (32 bytes)
     val smf_offset = runtime_size
-    val smf_size = smf_data_len(smf_data)
+    val smf_size = smf_data.len()
     val checksum = fnv1a_hash(smf_data)
     val trailer = build_trailer(smf_offset, smf_size, checksum)
 
@@ -131,12 +131,12 @@ fn detect_self_contained(exe_path: text) -> Result:
 
     # Read trailer using dd (portable across platforms)
     val trailer_offset = total_size - SMFE_TRAILER_SIZE
-    val hex_result = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count={SMFE_TRAILER_SIZE} 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
-    if hex_result.exit_code != 0:
+    val (hex_stdout, hex_stderr, hex_code) = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count={SMFE_TRAILER_SIZE} 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
+    if hex_code != 0:
         return Err("Failed to read trailer bytes")
 
-    val hex = hex_result.stdout
-    if hex_len(hex) < 8:
+    val hex = hex_stdout
+    if hex.len() < 8:
         return Err("Trailer too short")
 
     # Check magic: "SMFE" = 53 4d 46 45
@@ -260,7 +260,7 @@ fn parse_hex_u64(hex: text, offset: i64) -> i64:
     var i = 0
     for idx in range(0, 8):
         val pos = offset + (idx * 2)
-        if pos + 2 <= hex_len(hex):
+        if pos + 2 <= hex.len():
             val byte_hex = hex[pos:pos + 2]
             val byte_val = hex_byte_to_int(byte_hex)
             result = result | (byte_val << (idx * 8))
@@ -268,7 +268,7 @@ fn parse_hex_u64(hex: text, offset: i64) -> i64:
     result
 
 fn hex_byte_to_int(hex: text) -> i64:
-    if hex_len(hex) < 2:
+    if hex.len() < 2:
         return 0
     val hi = hex_char_to_int(hex[0:1])
     val lo = hex_char_to_int(hex[1:2])
@@ -326,7 +326,8 @@ fn write_elf_bytes_to_file(path: text, bytes: [i64]) -> Result<(), text>:
 
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:
-        return shell("touch '{path}'").exit_code == 0
+        val (t_out, t_err, t_code) = shell("touch '{path}'")
+        return t_code == 0
 
     var hex_parts: [text] = []
     for byte in data:
@@ -336,7 +337,8 @@ fn write_bytes_to_file(path: text, data: [u8]) -> bool:
         hex_parts.push(hi + lo)
     val hex_str = hex_parts.join("")
 
-    shell("echo '{hex_str}' | xxd -r -p > '{path}'").exit_code == 0
+    val (w_out, w_err, w_code) = shell("echo '{hex_str}' | xxd -r -p > '{path}'")
+    w_code == 0
 
 fn append_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:
@@ -350,7 +352,8 @@ fn append_bytes_to_file(path: text, data: [u8]) -> bool:
         hex_parts.push(hi + lo)
     val hex_str = hex_parts.join("")
 
-    shell("echo '{hex_str}' | xxd -r -p >> '{path}'").exit_code == 0
+    val (a_out, a_err, a_code) = shell("echo '{hex_str}' | xxd -r -p >> '{path}'")
+    a_code == 0
 
 # ============================================================================
 # Exports

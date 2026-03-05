@@ -2,6 +2,19 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.8.1] - 2026-03-05
+
+### Added
+- **Windows native binary** in release workflow — Rust bootstrap builds `simple.exe` natively on `windows-latest`
+- **Windows cross-compile binaries** — MinGW cross-compilation for `windows-x86` (i686) from Linux
+- **Windows aarch64 binary** — MSVC cross-compilation for ARM64 Windows
+- **Cross-platform bootstrap doc** — updated `doc/guide/bootstrap.md` with macOS/Windows platform notes and backend summary table
+
+### Fixed
+- Release workflow now produces Windows `.exe` binaries instead of source-only packages
+- Distribution packages use correct `.exe` extension for Windows platforms
+- Bootstrap doc section renamed from "Linux Bootstrap Stages" to platform-agnostic title
+
 ## [0.8.0] - 2026-03-02
 
 ### Added

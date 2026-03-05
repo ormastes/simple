@@ -278,6 +278,23 @@ pub unsafe extern "C" fn rt_file_read_bytes(path_ptr: *const u8, path_len: u64) 
     }
 }
 
+/// Create a byte array ([u8]) from a raw memory pointer.
+/// Used by LLVM memory buffer emission to avoid temp file I/O.
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
+    if ptr == 0 || len <= 0 {
+        return rt_array_new(0);
+    }
+    let src = ptr as usize as *const u8;
+    let slice = std::slice::from_raw_parts(src, len as usize);
+    let array_handle = rt_array_new(len as u64);
+    for &byte in slice {
+        let byte_value = RuntimeValue::from_int(byte as i64);
+        rt_array_push(array_handle, byte_value);
+    }
+    array_handle
+}
+
 /// Write raw bytes to file
 /// Takes an array of integers (0-255)
 #[no_mangle]

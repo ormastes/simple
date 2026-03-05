@@ -302,6 +302,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_free",
     "rt_ptr_to_value",
     "rt_value_to_ptr",
+    // Raw pointer operations
+    "rt_ptr_read_i64",
+    "rt_ptr_write_u8",
+    "rt_ptr_write_i32",
+    "rt_ptr_write_i64",
+    "rt_memset",
+    "rt_memcpy",
     // Async/concurrency operations
     "rt_wait",
     "rt_future_new",
@@ -373,6 +380,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_read_lines",
     "rt_file_append_text",
     "rt_file_read_bytes",
+    "rt_bytes_from_raw",
     "rt_file_write_bytes",
     "rt_file_move",
     // File I/O operations - directory

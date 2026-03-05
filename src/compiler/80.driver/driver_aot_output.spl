@@ -8,9 +8,8 @@
 # - collect_smf_bytes: Shared helper for SMF byte collection
 # - link_objects: Legacy linker helper
 
-# NOTE: compile_module_with_backend and get_effective_backend_name are inlined below
-# to avoid loading the full backend stack (CodegenFactory, etc.) in interpreter mode.
-# The actual backend compilation is done by the Rust-compiled CompilerDriver.compile().
+# Backend helpers for module compilation and backend resolution
+use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{generate_smf_with_templates, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions}
@@ -28,16 +27,18 @@ impl CompilerDriver:
         val log = self.ctx.logger
         val backend_name = self.ctx.options.backend
         val is_release = self.ctx.options.release
+        print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
         val effective_backend = get_effective_backend_name(backend_name, is_release)
-        log.debug("AOT native: compiling to {output} (backend: {effective_backend})")
+        print "[NATIVE] effective_backend={effective_backend}"
 
         # Compile all modules and collect object files
         var object_files: [text] = []
 
         val low_memory = self.ctx.options.low_memory
         val module_names = self.ctx.mir_modules.keys()
+        print "[NATIVE] compiling {module_names.len()} modules..."
         for name in module_names:
-            log.trace("compiling module: {name}")
+            print "[NATIVE] compiling module: {name}"
             val mir_module = self.ctx.mir_modules[name]
             val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
 
@@ -62,14 +63,17 @@ impl CompilerDriver:
                 return CompileResult.CodegenError("Backend produced no object code for {name}")
 
         # Link object files into final executable
-        if effective_backend == "llvm":
+        print "[NATIVE] linking {object_files.len()} object files..."
+        if effective_backend == "llvm" or effective_backend == "llvm-lib":
             # LLVM path: compile C runtime and link with entry point
+            print "[NATIVE] creating NativeLinkOptions..."
             val llvm_opts = NativeLinkOptions(
                 debug: self.ctx.options.debug_info,
                 verbose: self.ctx.options.verbose,
                 pie: true,
                 bare_metal: false
             )
+            print "[NATIVE] calling link_llvm_native..."
             match link_llvm_native(object_files, output, llvm_opts):
                 case Ok(_):
                     log.info("Native executable written to {output} (backend: LLVM)")

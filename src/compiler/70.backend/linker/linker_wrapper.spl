@@ -80,47 +80,54 @@ struct CrtFiles:
 # ============================================================================
 
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    debug("linker", "link_to_native: {object_files_len(object_files)} input files, output={output}")
-    if object_files_len(object_files) == 0:
+    print "[LINKER] link_to_native: {object_files.len()} files, output={output}"
+    if object_files.len() == 0:
         return Err("No object files to link")
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
+    print "[LINKER] smf_inputs={smf_inputs.len()}"
     if smf_inputs.len() > 0:
-        debug("linker", "Detected {smf_inputs.len()} SMF inputs, using SMF bundle mode")
-        val mixed = smf_inputs.len() != object_files_len(object_files)
+        val mixed = smf_inputs.len() != object_files.len()
         if mixed:
             return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
         return link_smf_bundle(smf_inputs, output, config)
 
     val os = host_os()
+    print "[LINKER] os={os}"
 
     # Platform-specific linking
     if os == "windows":
         return link_native_windows(object_files, output, config)
 
     # Unix-like: Linux, macOS, FreeBSD
+    print "[LINKER] calling link_native_unix..."
     link_native_unix(object_files, output, config)
 
 fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val os = host_os()
     val arch = host_arch()
-    debug("linker", "link_native_unix: os={os}, arch={arch}")
+    print "[LINKER] link_native_unix: os={os}, arch={arch}"
 
     # Try to find platform linker (mold > lld > ld)
+    print "[LINKER] calling find_linker..."
     val linker_result = find_linker()
-    if linker_result_is_err(linker_result):
-        debug("linker", "No direct linker found, falling back to cc")
-        # Fall back to cc (always available on Unix)
+    print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
+    if linker_result.is_err():
+        print "[LINKER] No direct linker found, falling back to cc"
         return link_native_cc(object_files, output, config)
 
-    val linker_info = linker_result_value
+    val linker_info = linker_result.unwrap()
+    print "[LINKER] linker_info unwrapped"
     val linker_path = linker_info[0]
+    print "[LINKER] got linker_path={linker_path}"
     val linker_type = linker_info[1]
-    debug("linker", "Found linker: type={linker_type}, path={linker_path}")
+    print "[LINKER] got linker_type"
 
     # Discover CRT files needed for direct linker invocation
+    print "[LINKER] calling find_crt_files..."
     val crt = find_crt_files(config.pie, config.verbose)
+    print "[LINKER] crt.found={crt.found}"
     if not crt.found:
         debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
@@ -135,7 +142,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 
     # Output file
     args.push("-o")
-    args_push(args, output)
+    args.push(output)
 
     # Emulation mode
     if os == "linux":
@@ -149,7 +156,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Dynamic linker
     if crt.dynamic_linker != "":
         args.push("-dynamic-linker")
-        args_push(args, crt.dynamic_linker)
+        args.push(crt.dynamic_linker)
 
     # Hardening flags
     args.push("--eh-frame-hdr")
@@ -165,34 +172,35 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-pie")
 
     # CRT prologue: crt1.o, crti.o, crtbegin.o (before user objects)
-    args_push(args, crt.crt1)
-    args_push(args, crt.crti)
-    args_push(args, crt.crtbegin)
+    args.push(crt.crt1)
+    args.push(crt.crti)
+    args.push(crt.crtbegin)
 
     # User object files
     for obj in object_files:
-        args_push(args, obj)
+        args.push(obj)
 
     # Library search paths from CRT discovery
     for dir in crt.lib_dirs:
         args.push("-L")
-        args_push(args, dir)
+        args.push(dir)
 
     # Library paths from config
     for lp in config.library_paths:
         args.push("-L")
-        args_push(args, lp)
+        args.push(lp)
 
     # Auto-detect runtime library if not specified
+    # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
-    if runtime_dir != "":
+    if runtime_dir != "" and runtime_dir != "none":
         args.push("-L")
-        args_push(args, runtime_dir)
+        args.push(runtime_dir)
         args.push("-lsimple_compiler")
         args.push("-rpath")
-        args_push(args, runtime_dir)
+        args.push(runtime_dir)
 
     # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
     if os == "linux":
@@ -213,7 +221,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Libraries from config
     for lib in config.libraries:
         args.push("-l")
-        args_push(args, lib)
+        args.push(lib)
 
     # Debug info
     if config.debug:
@@ -221,15 +229,15 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 
     # Extra flags
     for flag in config.extra_flags:
-        args_push(args, flag)
+        args.push(flag)
 
     # CRT epilogue: crtend.o, crtn.o (after libs)
-    args_push(args, crt.crtend)
-    args_push(args, crt.crtn)
+    args.push(crt.crtend)
+    args.push(crt.crtn)
 
     # Execute linker
     val exec_result = execute_linker(linker_path, args)
-    if exec_result_is_err(exec_result):
+    if exec_result.is_err():
         # Fallback to cc on failure
         if config.verbose:
             print "[linker-wrapper] Direct linker failed, falling back to cc: {exec_result.unwrap_err()}"
@@ -345,7 +353,7 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
 
     # Fallback: self-contained binary
     val data = file_read_bytes(path)
-    if data_len(data) == 0:
+    if data.len() == 0:
         return Err("Failed to read SMF data from {path}")
 
     val sc_config = SelfContainedConfig(
@@ -399,16 +407,18 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         sb.push(lp)
 
     # Auto-detect runtime library
+    # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
-    if runtime_dir != "":
+    if runtime_dir != "" and runtime_dir != "none":
         sb.push(" -L{runtime_dir} -lsimple_compiler")
         sb.push(" -Wl,-rpath,{runtime_dir}")
 
     # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
-    var os_name = shell("uname -s").stdout
-    os_name = os_name_trim(os_name)
+    val (uname_out, uname_err, uname_code) = shell("uname -s")
+    var os_name = uname_out
+    os_name = os_name.trim()
     if os_name == "Darwin":
         sb.push(" -lc -lpthread -lm -lSystem")
     elif os_name == "FreeBSD":
@@ -433,19 +443,19 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if config.verbose:
         print "[linker-wrapper] cc command: {cmd}"
 
-    val result = shell(cmd)
-    if result.exit_code == 0:
+    val (link_out, link_err, link_code) = shell(cmd)
+    if link_code == 0:
         Ok(output)
     else:
-        val err_msg = result.stderr ?? "Unknown linking error"
+        val err_msg = link_err ?? "Unknown linking error"
         Err("cc linking failed: {err_msg}")
 
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # Windows linking via lld-link or MSVC link.exe
     # Try lld-link first
-    val lld_check = shell("where lld-link 2>nul")
+    val (lld_out, lld_err, lld_code) = shell("where lld-link 2>nul")
     var linker_cmd = "link"
-    if lld_check.exit_code == 0:
+    if lld_code == 0:
         linker_cmd = "lld-link"
 
     val sb = StringBuilder(parts: [])
@@ -470,11 +480,11 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
     if config.verbose:
         print "[linker-wrapper] Windows linker: {cmd}"
 
-    val result = shell(cmd)
-    if result.exit_code == 0:
+    val (wlink_out, wlink_err, wlink_code) = shell(cmd)
+    if wlink_code == 0:
         Ok(output)
     else:
-        val err_msg = result.stderr ?? "Unknown linking error"
+        val err_msg = wlink_err ?? "Unknown linking error"
         Err("Windows linking failed: {err_msg}")
 
 # ============================================================================

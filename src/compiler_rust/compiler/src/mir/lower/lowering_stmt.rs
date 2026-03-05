@@ -702,12 +702,42 @@ impl<'a> MirLowerer<'a> {
                 // Body: get element, store to loop var, execute body, increment index
                 self.set_current_block(body_id)?;
 
+                // Determine element type for unboxing after IndexGet
+                let element_ty = if let Some(registry) = self.type_registry {
+                    if let Some(crate::hir::HirType::Array { element, .. }) = registry.get(iterable.ty) {
+                        *element
+                    } else {
+                        crate::hir::TypeId::ANY
+                    }
+                } else {
+                    crate::hir::TypeId::ANY
+                };
+                let needs_int_unbox = matches!(
+                    element_ty,
+                    crate::hir::TypeId::I8
+                        | crate::hir::TypeId::I16
+                        | crate::hir::TypeId::I32
+                        | crate::hir::TypeId::I64
+                        | crate::hir::TypeId::U8
+                        | crate::hir::TypeId::U16
+                        | crate::hir::TypeId::U32
+                        | crate::hir::TypeId::U64
+                        | crate::hir::TypeId::BOOL
+                );
+                let needs_float_unbox = matches!(element_ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64);
+
                 // Load current index and get element
                 self.with_func(|func, current_block| {
                     // Allocate all vregs first
                     let addr = func.new_vreg();
                     let current_idx = func.new_vreg();
-                    let element = func.new_vreg();
+                    let boxed_idx = func.new_vreg();
+                    let raw_element = func.new_vreg();
+                    let element = if needs_int_unbox || needs_float_unbox {
+                        func.new_vreg()
+                    } else {
+                        raw_element
+                    };
                     let var_addr = func.new_vreg();
 
                     // Now get the block and emit instructions
@@ -724,12 +754,31 @@ impl<'a> MirLowerer<'a> {
                         ty: crate::hir::TypeId::I64,
                     });
 
+                    // Box the raw i64 index for rt_index_get (expects RuntimeValue)
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed_idx,
+                        value: current_idx,
+                    });
+
                     // Get element via IndexGet (which calls rt_index_get internally)
                     block.instructions.push(MirInst::IndexGet {
-                        dest: element,
+                        dest: raw_element,
                         collection: collection_reg,
-                        index: current_idx,
+                        index: boxed_idx,
                     });
+
+                    // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
+                    if needs_int_unbox {
+                        block.instructions.push(MirInst::UnboxInt {
+                            dest: element,
+                            value: raw_element,
+                        });
+                    } else if needs_float_unbox {
+                        block.instructions.push(MirInst::UnboxFloat {
+                            dest: element,
+                            value: raw_element,
+                        });
+                    }
 
                     // Store element to loop variable's local
                     block.instructions.push(MirInst::LocalAddr {
@@ -739,7 +788,7 @@ impl<'a> MirLowerer<'a> {
                     block.instructions.push(MirInst::Store {
                         addr: var_addr,
                         value: element,
-                        ty: iterable.ty, // Use element type
+                        ty: element_ty,
                     });
                 })?;
 

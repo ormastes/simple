@@ -1,0 +1,135 @@
+# LLVM Lib Backend — Pure C API, no llc
+#
+# LlvmLibCodegenAdapter implements the Codegen trait using LLVM C API
+# loaded dynamically via DynLib. No external tools needed (no llc, no opt).
+#
+# Pipeline:
+#   MIR Module → translate_module_to_llvm() → LLVM in-memory IR
+#   → LLVMRunPasses() → LLVMTargetMachineEmitToFile() → read object bytes
+#   → CodegenOutput.object()
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, OptimizationLevel, compileerror_backend_error}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.llvm_target.{LlvmTargetConfig, LlvmTargetConfig__for_target}
+use compiler.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper, LlvmLibTypeMapper__create_for_bits}
+use compiler.backend.llvm_lib_translate.{translate_module_to_llvm}
+use std.ffi.llvm.*
+use app.io.mod (getpid, file_delete, time_now_unix_micros)
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
+# ============================================================================
+# LlvmLib Codegen Adapter
+# ============================================================================
+
+class LlvmLibCodegenAdapter:
+    options: CompileOptions
+
+impl Codegen for LlvmLibCodegenAdapter:
+    fn backend_kind() -> BackendKind: BackendKind.LlvmLib
+    fn backend_name() -> text: "llvm-lib"
+    fn supports_target(target: CodegenTarget) -> bool: true
+    fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val start_time = time_now_unix_micros()
+
+        # 1. Check LLVM availability
+        if not llvm_available():
+            return Err(compileerror_backend_error(BackendKind.LlvmLib,
+                "libLLVM not found. Install LLVM: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"))
+
+        # 2. Initialize LLVM targets
+        llvm_initialize_targets()
+
+        # 3. Create LLVM context, module, builder
+        val ctx = llvm_context_create()
+        val llvm_mod = llvm_module_create_with_name_in_context(module.name, ctx)
+        val builder = llvm_create_builder_in_context(ctx)
+
+        # 4. Configure target
+        val config = LlvmTargetConfig__for_target(self.options.target, nil)
+        val triple_str = config.triple.to_text()
+        val data_layout = config.triple.datalayout()
+        llvm_set_target(llvm_mod, triple_str)
+        llvm_set_data_layout(llvm_mod, data_layout)
+        llvm_set_source_file_name(llvm_mod, "{module.name}.spl")
+
+        # 5. Create type mapper
+        val target_bits = if config.triple.is_32bit(): 32 else: 64
+        val type_mapper = LlvmLibTypeMapper__create_for_bits(ctx, target_bits)
+
+        # 6. Translate MIR → LLVM IR via C API
+        translate_module_to_llvm(ctx, llvm_mod, builder, type_mapper, module)
+
+        # 7. Get target machine
+        val target = llvm_get_target_from_triple(triple_str)
+        if target == 0:
+            llvm_dispose_builder(builder)
+            llvm_dispose_module(llvm_mod)
+            llvm_context_dispose(ctx)
+            return Err(compileerror_backend_error(BackendKind.LlvmLib,
+                "Failed to get LLVM target for triple: {triple_str}"))
+
+        val opt = match self.options.opt_level:
+            case None_ | Debug: LLVM_CODE_GEN_LEVEL_NONE
+            case Size: LLVM_CODE_GEN_LEVEL_DEFAULT
+            case Speed: LLVM_CODE_GEN_LEVEL_DEFAULT
+            case Aggressive: LLVM_CODE_GEN_LEVEL_AGGRESSIVE
+
+        val tm = llvm_create_target_machine(
+            target, triple_str,
+            config.cpu, config.to_feature_string(),
+            opt, LLVM_RELOC_PIC, LLVM_CODE_MODEL_DEFAULT
+        )
+
+        if tm == 0:
+            llvm_dispose_builder(builder)
+            llvm_dispose_module(llvm_mod)
+            llvm_context_dispose(ctx)
+            return Err(compileerror_backend_error(BackendKind.LlvmLib,
+                "Failed to create LLVM target machine"))
+
+        # 8. Run optimization passes (new pass manager)
+        val passes = match self.options.opt_level:
+            case None_ | Debug: "default<O0>"
+            case Size: "default<Os>"
+            case Speed: "default<O2>"
+            case Aggressive: "default<O3>"
+
+        val pb_opts = llvm_create_pass_builder_options()
+        val pass_err = llvm_run_passes(llvm_mod, passes, tm, pb_opts)
+        llvm_dispose_pass_builder_options(pb_opts)
+        # pass_err is LLVMErrorRef; 0 = success. Non-zero is acceptable (passes may warn)
+
+        # 9. Emit object code to memory buffer (no temp file I/O)
+        val mem_buf = llvm_target_machine_emit_to_memory_buffer(tm, llvm_mod, LLVM_OBJECT_FILE)
+
+        # 10. Cleanup LLVM resources (before reading buffer — module no longer needed)
+        llvm_dispose_target_machine(tm)
+        llvm_dispose_builder(builder)
+        llvm_dispose_module(llvm_mod)
+        llvm_context_dispose(ctx)
+
+        if mem_buf == 0:
+            return Err(compileerror_backend_error(BackendKind.LlvmLib,
+                "LLVM failed to emit object code to memory buffer"))
+
+        # 11. Read object bytes from memory buffer and return
+        val buf_ptr = llvm_get_buffer_start(mem_buf)
+        val buf_size = llvm_get_buffer_size(mem_buf)
+        val bytes = rt_bytes_from_raw(buf_ptr, buf_size)
+        llvm_dispose_memory_buffer(mem_buf)
+
+        val end_time = time_now_unix_micros()
+        val compile_time = (end_time - start_time) / 1000
+
+        Ok(CodegenOutput.object(module.name, bytes).with_compile_time(compile_time))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LlvmLibCodegenAdapter
