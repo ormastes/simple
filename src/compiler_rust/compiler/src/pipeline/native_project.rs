@@ -607,29 +607,56 @@ int main(int argc, char** argv) {
         // linker crashes when passing thousands of individual .o files.
         if object_paths.len() > 100 {
             let archive_path = temp_dir.join("libspl_objects.a");
-            let ar_status = std::process::Command::new("ar")
-                .arg("rcs")
-                .arg(&archive_path)
-                .args(object_paths)
-                .status()
-                .map_err(|e| format!("ar: {e}"))?;
-            if !ar_status.success() {
-                // Fallback: try libtool on macOS (handles large inputs better)
+
+            // Batch ar calls to avoid Windows 32K command-line limit (~2000 objects = ~120K chars).
+            // First batch creates the archive (rcs), subsequent batches append (rs).
+            const BATCH_SIZE: usize = 200;
+            let mut ar_ok = true;
+            for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                let flag = if i == 0 { "rcs" } else { "rs" };
+                let status = std::process::Command::new("ar")
+                    .arg(flag)
+                    .arg(&archive_path)
+                    .args(chunk)
+                    .status()
+                    .map_err(|e| format!("ar batch {i}: {e}"))?;
+                if !status.success() {
+                    ar_ok = false;
+                    break;
+                }
+            }
+            if !ar_ok {
+                // Fallback: try libtool on macOS (also batched)
                 #[cfg(target_os = "macos")]
                 {
-                    let lt_status = std::process::Command::new("libtool")
+                    let mut sub_archives = Vec::new();
+                    for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                        let sub = temp_dir.join(format!("_batch_{}.a", i));
+                        let s = std::process::Command::new("libtool")
+                            .arg("-static")
+                            .arg("-o")
+                            .arg(&sub)
+                            .args(chunk)
+                            .status()
+                            .map_err(|e| format!("libtool batch {i}: {e}"))?;
+                        if !s.success() {
+                            return Err(format!("libtool failed on batch {i}"));
+                        }
+                        sub_archives.push(sub);
+                    }
+                    let s = std::process::Command::new("libtool")
                         .arg("-static")
                         .arg("-o")
                         .arg(&archive_path)
-                        .args(object_paths)
+                        .args(&sub_archives)
                         .status()
-                        .map_err(|e| format!("libtool: {e}"))?;
-                    if !lt_status.success() {
-                        return Err("failed to archive object files with ar and libtool".to_string());
+                        .map_err(|e| format!("libtool merge: {e}"))?;
+                    if !s.success() {
+                        return Err("libtool merge failed".to_string());
                     }
                 }
                 #[cfg(not(target_os = "macos"))]
-                return Err(format!("ar failed with status {}", ar_status));
+                return Err("ar failed to create archive".to_string());
             }
             // Link the archive. Use -force_load/--whole-archive to include all symbols,
             // not just referenced ones (needed for runtime dispatch tables).
