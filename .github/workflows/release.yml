@@ -277,6 +277,17 @@ jobs:
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
           fi
 
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install llvm
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "LLVM installed at: ${LLVM_PREFIX}"
+          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "PATH=${LLVM_PREFIX}/bin:${PATH}" >> $GITHUB_ENV
+          ls -la "${LLVM_PREFIX}/lib/"libLLVM*.dylib | head -5
+
       - name: Build native macOS binary via Rust bootstrap
         if: runner.os == 'macOS'
         shell: bash
@@ -328,6 +339,39 @@ jobs:
           echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
           file "$NATIVE_BIN"
           ls -lh "$NATIVE_BIN"
+
+      - name: Self-host with LLVM lib backend (macOS stage2)
+        if: runner.os == 'macOS'
+        shell: bash
+        continue-on-error: true
+        run: |
+          NATIVE_BIN="build/bootstrap/stage1/simple"
+          if [ ! -x "$NATIVE_BIN" ]; then
+            echo "⚠ Skipping stage2 — no stage1 binary"
+            exit 0
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Self-host stage2 with --backend=llvm-lib"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          mkdir -p build/bootstrap/stage2
+          SIMPLE_LIB="$(pwd)/src" SIMPLE_BOOTSTRAP=1 \
+            "./$NATIVE_BIN" native-build \
+            --source-dir src \
+            --entry src/app/cli/bootstrap_main.spl \
+            --output build/bootstrap/stage2/simple \
+            --backend=llvm-lib \
+            2>&1 || true
+
+          STAGE2="build/bootstrap/stage2/simple"
+          if [ -x "$STAGE2" ]; then
+            "./$STAGE2" --version && "./$STAGE2" -c "print 42"
+            echo "✓ LLVM lib stage2 verified — updating binary"
+            echo "NEW_RUNTIME_PATH=$(pwd)/$STAGE2" >> $GITHUB_ENV
+            file "$STAGE2"
+            ls -lh "$STAGE2"
+          else
+            echo "⚠ LLVM lib stage2 failed — using stage1 binary"
+          fi
 
       - name: Build native Windows binary via Rust bootstrap
         if: runner.os == 'Windows'
