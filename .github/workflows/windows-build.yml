@@ -1,0 +1,130 @@
+name: Windows Build (MSVC + MinGW)
+
+on:
+  push:
+    paths:
+      - 'src/compiler_rust/**'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: msvc
+            rust-target: x86_64-pc-windows-msvc
+            linker-flavor: msvc
+            name: Windows MSVC
+          - toolchain: mingw
+            rust-target: x86_64-pc-windows-gnu
+            linker-flavor: gnu
+            name: Windows MinGW
+    runs-on: windows-latest
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # MSVC: set up Visual Studio developer environment
+      - name: Setup MSVC
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # MinGW: set up MSYS2 with GCC toolchain
+      - name: Setup MSYS2 (MinGW)
+        if: matrix.toolchain == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+
+      - name: Add MinGW to PATH
+        if: matrix.toolchain == 'mingw'
+        shell: bash
+        run: echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+
+      - name: Set MinGW environment
+        if: matrix.toolchain == 'mingw'
+        shell: bash
+        run: echo "MSYSTEM=MINGW64" >> "$GITHUB_ENV"
+
+      # Override .cargo/config.toml linker for native MSYS2 builds.
+      # config.toml sets linker = "x86_64-w64-mingw32-gcc" (Linux cross-compile name),
+      # but native MSYS2 uses plain "gcc".
+      - name: Set MinGW linker override
+        if: matrix.toolchain == 'mingw'
+        shell: bash
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: windows-${{ matrix.toolchain }}-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            windows-${{ matrix.toolchain }}-bootstrap-
+
+      - name: Build Rust seed
+        working-directory: src/compiler_rust
+        shell: bash
+        run: cargo build --profile bootstrap -p simple-driver --target ${{ matrix.rust-target }}
+
+      - name: Build native_all library
+        working-directory: src/compiler_rust
+        shell: bash
+        run: cargo build --profile bootstrap -p simple-native-all --target ${{ matrix.rust-target }}
+
+      - name: Verify seed binary
+        shell: bash
+        run: |
+          SEED="src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe"
+          if [ ! -f "$SEED" ]; then
+            echo "::error::Seed binary not found at $SEED"
+            exit 1
+          fi
+          echo "Seed binary size: $(wc -c < "$SEED") bytes"
+          "$SEED" --version
+
+      # Stage 2: compile Simple compiler from source using the seed
+      # continue-on-error because stage2 is still maturing
+      - name: Stage 2 compile
+        continue-on-error: true
+        shell: bash
+        env:
+          SIMPLE_LINKER_FLAVOR: ${{ matrix.linker-flavor }}
+          SIMPLE_BOOTSTRAP: "1"
+        run: |
+          SEED="src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe"
+          mkdir -p build/bootstrap
+          "$SEED" native-build --entry src/app/cli/bootstrap_main.spl \
+            -o build/bootstrap/simple_stage2.exe
+
+      - name: Upload seed binary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seed-${{ matrix.toolchain }}-${{ github.sha }}
+          path: src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload stage2 binary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage2-${{ matrix.toolchain }}-${{ github.sha }}
+          path: build/bootstrap/simple_stage2.exe
+          if-no-files-found: ignore
+          retention-days: 7
