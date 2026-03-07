@@ -429,7 +429,7 @@ describe "MyLib":
 | `src/app/wrapper_gen/spec_parser.spl` | `.wrapper_spec` parser |
 | `examples/torch.wrapper_spec` | Example: C++ library (PyTorch) |
 | `examples/regex.wrapper_spec` | Example: Rust crate (regex) |
-| `doc/guide/sffi_gen_guide.md` | SFFI generation guide |
+| `doc/guide/ffi/sffi.md` | SFFI guide |
 
 ## SFFI vs Raw FFI
 
@@ -449,4 +449,4 @@ describe "MyLib":
 - `src/lib/ffi/` - Centralized FFI extern declarations
 - `src/app/io/mod.spl` - I/O SFFI wrapper implementations
 - `/coding` skill - Simple language coding standards
-- `doc/guide/sffi_gen_guide.md` - SFFI generation guide
+- `doc/guide/ffi/sffi.md` - SFFI guide

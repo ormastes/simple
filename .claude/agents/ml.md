@@ -44,4 +44,4 @@ result = x ** 2
 
 - `/deeplearning` - Full ML infrastructure guide
 - `doc/design/pipeline_operators_design.md`
-- `doc/guide/dimension_errors_guide.md`
+- `doc/guide/deep_learning/tensor_dimensions.md`

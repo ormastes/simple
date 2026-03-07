@@ -4,7 +4,7 @@
 
 ### Common Mistakes from Other Languages
 
-Simple provides helpful error messages when you use syntax from other languages. See `doc/guide/common_mistakes.md` for complete guide.
+Simple provides helpful error messages when you use syntax from other languages. See `doc/guide/language/coding_style.md` for complete guide.
 
 **Quick Reference:**
 
@@ -418,8 +418,7 @@ mul3(4)                       # → 12
 
 ## See Also
 
-- **`doc/guide/common_mistakes.md`** - Complete guide for transitioning from other languages
-- **`doc/guide/coding_style.md`** - Full coding style guide (domain types, defaults, config, AOP)
+- **`doc/guide/language/coding_style.md`** - Coding style guide + common mistakes
 - `doc/examples/error_messages_demo.spl` - Demo file showing all error types
 - `doc/spec/syntax.md` - Lexical structure
 - `doc/spec/types.md` - Type system

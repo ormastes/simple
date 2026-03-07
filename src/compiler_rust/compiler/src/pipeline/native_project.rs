@@ -1088,13 +1088,63 @@ fn compile_file_to_object(
         // Replace `fn(...)` type annotations with `any`.
         // Must handle: fn(text) -> i64, fn([text]) -> Result<T,E>, fn() -> (), fn(m): body
         // Strategy: find `: fn(`, match balanced parens, skip optional `-> RetType`
+        // IMPORTANT: Skip strings and comments to avoid mangling docstrings
         {
             let mut result = String::new();
             let bytes = s.as_bytes();
             let mut i = 0;
+            let mut in_triple_quote = false;
+            let mut in_single_quote = false;
+            let mut in_comment = false;
             while i < bytes.len() {
+                // Track string/comment state
+                if !in_single_quote && !in_comment && i + 2 < bytes.len()
+                    && bytes[i] == b'"' && bytes[i+1] == b'"' && bytes[i+2] == b'"'
+                {
+                    in_triple_quote = !in_triple_quote;
+                    result.push('"');
+                    result.push('"');
+                    result.push('"');
+                    i += 3;
+                    continue;
+                }
+                if in_triple_quote {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                if !in_comment && !in_single_quote && bytes[i] == b'"' {
+                    in_single_quote = true;
+                    result.push('"');
+                    i += 1;
+                    continue;
+                }
+                if in_single_quote {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        result.push(bytes[i] as char);
+                        result.push(bytes[i+1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        in_single_quote = false;
+                    }
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                if bytes[i] == b'#' {
+                    in_comment = true;
+                }
+                if in_comment {
+                    if bytes[i] == b'\n' {
+                        in_comment = false;
+                    }
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
                 // Look for `: fn(` pattern (field/param fn-type annotation)
-                // Also match `= fn(` for assignment lambdas like `run_fn: fn(m): body`
                 let is_fn_type = i + 5 < bytes.len()
                     && (bytes[i] == b':' || bytes[i] == b'=')
                     && bytes[i + 1] == b' '
@@ -1140,7 +1190,7 @@ fn compile_file_to_object(
                             } else {
                                 break;
                             }
-                        } else if type_depth == 0 && (c == b',' || c == b':' || c == b'\n' || c == b'\r') {
+                        } else if type_depth == 0 && (c == b',' || c == b':' || c == b'\n' || c == b'\r' || c == b'#' || c == b' ') {
                             break;
                         }
                         j += 1;
@@ -1200,8 +1250,8 @@ fn compile_file_to_object(
             s = result;
         }
 
-        // Generic impl blocks: `impl<T, E> Result<T, E>:` → `impl Result:`
-        // Strip the `<...>` after `impl` and after the type name
+        // Generic impl blocks: `impl<T, E> Type<T, E>:` → `impl Type:`
+        // Only process lines starting with `impl<` (safe — only at start of line)
         {
             let mut result = String::new();
             for line in s.lines() {
@@ -1250,93 +1300,6 @@ fn compile_file_to_object(
             }
             s = result;
         }
-
-        // Enum variants with named fields: `Local(id: i64)` → `Local(i64)`
-        // Strip the `name: ` prefix from enum variant fields
-        {
-            let mut result = String::new();
-            let mut in_enum = false;
-            for line in s.lines() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("enum ") && trimmed.ends_with(':') {
-                    in_enum = true;
-                    result.push_str(line);
-                    result.push('\n');
-                    continue;
-                }
-                if in_enum && !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("\"\"\"") {
-                    // Check if this line is still inside the enum (indented)
-                    let indent = line.len() - trimmed.len();
-                    if indent == 0 && !trimmed.is_empty() {
-                        in_enum = false;
-                    }
-                }
-                if in_enum && trimmed.contains('(') && trimmed.contains(':') {
-                    // Strip `name: ` from variant fields: Variant(name: Type) → Variant(Type)
-                    let mut cleaned = String::new();
-                    let mut chars = line.chars().peekable();
-                    let mut inside_parens = false;
-                    while let Some(c) = chars.next() {
-                        if c == '(' {
-                            inside_parens = true;
-                            cleaned.push(c);
-                            // Process fields inside parens
-                            let mut field = String::new();
-                            let mut paren_depth = 1i32;
-                            for c in chars.by_ref() {
-                                if c == '(' { paren_depth += 1; }
-                                if c == ')' {
-                                    paren_depth -= 1;
-                                    if paren_depth == 0 {
-                                        // Process last field
-                                        let f = field.trim();
-                                        if let Some(colon_pos) = f.find(": ") {
-                                            cleaned.push_str(f[colon_pos + 2..].trim());
-                                        } else {
-                                            cleaned.push_str(f);
-                                        }
-                                        cleaned.push(')');
-                                        inside_parens = false;
-                                        break;
-                                    }
-                                }
-                                if c == ',' && paren_depth == 1 {
-                                    let f = field.trim();
-                                    if let Some(colon_pos) = f.find(": ") {
-                                        cleaned.push_str(f[colon_pos + 2..].trim());
-                                    } else {
-                                        cleaned.push_str(f);
-                                    }
-                                    cleaned.push_str(", ");
-                                    field.clear();
-                                } else {
-                                    field.push(c);
-                                }
-                            }
-                        } else {
-                            cleaned.push(c);
-                        }
-                    }
-                    result.push_str(&cleaned);
-                    result.push('\n');
-                } else {
-                    result.push_str(line);
-                    result.push('\n');
-                }
-            }
-            if !s.ends_with('\n') && result.ends_with('\n') {
-                result.pop();
-            }
-            s = result;
-        }
-
-        // for (a, b) in collection: → for _pair in collection:\n    a = _pair.0\n    b = _pair.1
-        // This is complex to do at text level — instead, rewrite destructuring to simple var
-        // Actually the Rust parser should handle this; let's add it to the parser instead.
-        // For now, comment out for-destructuring lines as a simple workaround:
-        // `for (_, unit) in X:` → `for unit in X.values():`
-        // `for (id, _) in X:` → `for id in X.keys():`
-        // `for (k, v) in X:` → multiple lines (complex, skip for now)
 
         s
     } else {

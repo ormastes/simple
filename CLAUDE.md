@@ -286,6 +286,8 @@ scripts/            # Bootstrap bash scripts (3 only)
 
 **Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
 
+**Glossary:** See [`doc/architecture/glossary.md`](doc/architecture/glossary.md) for key concepts (Crate, Virtual Crate, Linker Wrapper, SMF, Bootstrap, Frontend sharing).
+
 ---
 
 ## Auto-Generated Docs
