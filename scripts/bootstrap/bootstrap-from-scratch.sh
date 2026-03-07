@@ -264,8 +264,8 @@ if [[ "${SKIP_RUST_BUILD}" == "true" ]]; then
     fi
     echo "Reusing existing Rust seed: ${RUST_SEED_BIN}"
 else
-    echo "Building Rust seed (cargo build --profile bootstrap -p simple-driver)..."
-    (cd "${RUST_SEED_DIR}" && cargo build --profile bootstrap -p simple-driver 2>&1)
+    echo "Building Rust seed (cargo build --profile bootstrap -p simple-driver -p simple-native-all)..."
+    (cd "${RUST_SEED_DIR}" && cargo build --profile bootstrap -p simple-driver -p simple-native-all 2>&1)
 
     if [[ ! -x "${RUST_SEED_BIN}" ]]; then
         echo "Error: Rust seed build failed — binary not found at: ${RUST_SEED_BIN}"
@@ -296,7 +296,7 @@ COMPILE_ARGS=(
     "--source" "${PROJECT_DIR}/src/compiler"
     "--source" "${PROJECT_DIR}/src/lib"
     "--source" "${PROJECT_DIR}/src/app"
-    "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
+    "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
     "-o" "${STAGE1_BIN}"
     "--strip"
 )
@@ -338,7 +338,7 @@ SELFHOST_ARGS=(
     "--source" "${PROJECT_DIR}/src/compiler"
     "--source" "${PROJECT_DIR}/src/lib"
     "--source" "${PROJECT_DIR}/src/app"
-    "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
+    "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
     "-o" "${STAGE2_BIN}"
     "--strip"
 )
