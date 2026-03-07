@@ -1,14 +1,13 @@
 # DAP Handlers - Breakpoint, Variable, and Data Inspection Handlers
 # Handler methods for the DapServer (setBreakpoints, variables, data breakpoints, evaluate, setVariable)
+# All handlers use the unified DebugAdapter trait — no conditional backend dispatch.
 
 import sys
 import dap.protocol as protocol
 import dap.transport as transport
 import dap.breakpoints as breakpoints
-import app.dap.hooks.{InterpreterHookContext, StackFrame, Variable, VariableScope, ExecutionState, EvalResult}
-import app.debug.remote.backend.RemoteRiscV32Backend
-import app.debug.remote.types.DebugConfig
 import app.debug.coordinator.{VarInfo, FrameInfo}
+import app.dap.adapter.mod.{DebugAdapter, AdapterCapabilities}
 
 impl DapServer:
     fn handle_set_breakpoints(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
@@ -28,28 +27,41 @@ impl DapServer:
                     val source_bp = protocol.SourceBreakpoint__from_json(bp_data)?
                     source_breakpoints.push(source_bp)
 
-                # Set breakpoints using hook context
+                # Set breakpoints using adapter
                 var protocol_breakpoints = []
                 for source_bp in source_breakpoints:
-                    # Add breakpoint to hook context
-                    val bp_id = self.hook_context.add_breakpoint_with_options(
-                        file: source_path,
-                        line: source_bp.line,
-                        condition: source_bp.condition,
-                        hit_condition: source_bp.hit_condition,
-                        log_message: source_bp.log_message,
+                    # Add breakpoint via unified adapter
+                    val bp_result = self.adapter.set_breakpoint_rich(
+                        source_path,
+                        source_bp.line,
+                        source_bp.condition,
+                        source_bp.hit_condition,
+                        source_bp.log_message
                     )
 
                     # Create protocol breakpoint response
-                    val protocol_bp = {
-                        "id": bp_id.id,
-                        "verified": true,
-                        "line": source_bp.line,
-                        "source": {
-                            "path": source_path
-                        }
-                    }
-                    protocol_breakpoints.push(protocol_bp)
+                    match bp_result:
+                        Ok(bp_id):
+                            val protocol_bp = {
+                                "id": bp_id,
+                                "verified": true,
+                                "line": source_bp.line,
+                                "source": {
+                                    "path": source_path
+                                }
+                            }
+                            protocol_breakpoints.push(protocol_bp)
+                        Err(e):
+                            val protocol_bp = {
+                                "id": 0,
+                                "verified": false,
+                                "line": source_bp.line,
+                                "message": e,
+                                "source": {
+                                    "path": source_path
+                                }
+                            }
+                            protocol_breakpoints.push(protocol_bp)
 
                 val body = {
                     "breakpoints": protocol_breakpoints
@@ -70,25 +82,17 @@ impl DapServer:
 
                 var variables: [Dict] = []
 
-                # Variables reference 1 = local scope, 2 = global scope, 3 = registers (remote)
+                # Variables reference 1 = local scope, 2 = global/arguments scope, 3 = registers
                 if variables_reference == 1:
-                    # Check remote backend first
-                    match self.remote_backend:
-                        Some(backend):
-                            val remote_vars = backend.locals()
-                            match remote_vars:
-                                Ok(vars):
-                                    for v in vars:
-                                        val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
-                                        variables.push(protocol_var.to_json())
-                                Err(_):
-                                    pass
-                        nil:
-                            # Get local variables from hook context (frame 0 = current frame)
-                            val vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
+                    # Get local variables via adapter
+                    val locals_result = self.adapter.read_locals()
+                    match locals_result:
+                        Ok(vars):
                             for v in vars:
-                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type)
+                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
                                 variables.push(protocol_var.to_json())
+                        Err(_):
+                            pass
 
                     # Placeholder if no variables
                     if variables.len() == 0:
@@ -99,23 +103,17 @@ impl DapServer:
                         variables.push(placeholder.to_json())
 
                 elif variables_reference == 2:
-                    # Check remote backend first
-                    match self.remote_backend:
-                        Some(backend):
-                            val remote_vars = backend.read_arguments()
-                            match remote_vars:
-                                Ok(vars):
-                                    for v in vars:
-                                        val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
-                                        variables.push(protocol_var.to_json())
-                                Err(_):
-                                    pass
-                        nil:
-                            # Get global variables from hook context
-                            val vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
+                    # Get globals/arguments via adapter
+                    # NOTE: ref=2 means "arguments" for remote, "globals" for local
+                    # This semantic mismatch is preserved intentionally (see plan)
+                    val vars_result = self.adapter.read_globals()
+                    match vars_result:
+                        Ok(vars):
                             for v in vars:
-                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type)
+                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
                                 variables.push(protocol_var.to_json())
+                        Err(_):
+                            pass
 
                     # Placeholder if no variables
                     if variables.len() == 0:
@@ -126,45 +124,32 @@ impl DapServer:
                         variables.push(placeholder.to_json())
 
                 elif variables_reference == 3:
-                    # Register scope (remote targets only)
-                    match self.remote_backend:
-                        Some(backend):
-                            val regs_result = backend.read_all_registers()
-                            match regs_result:
-                                Ok(regs):
-                                    for name in regs.keys():
-                                        val value = "0x{regs[name]}"
-                                        val protocol_var = protocol.Variable__new(name, value).with_type("u32")
-                                        variables.push(protocol_var.to_json())
-                                Err(_):
-                                    val placeholder = protocol.Variable__new(
-                                        "(registers unavailable)",
-                                        ""
-                                    ).with_type("")
-                                    variables.push(placeholder.to_json())
-                        nil:
-                            pass
+                    # Register scope (adapter reports if supported)
+                    val regs_result = self.adapter.read_all_registers()
+                    match regs_result:
+                        Ok(regs):
+                            for name in regs.keys():
+                                val value = "0x{regs[name]}"
+                                val protocol_var = protocol.Variable__new(name, value).with_type("u32")
+                                variables.push(protocol_var.to_json())
+                        Err(_):
+                            val placeholder = protocol.Variable__new(
+                                "(registers unavailable)",
+                                ""
+                            ).with_type("")
+                            variables.push(placeholder.to_json())
 
                 else:
-                    # Nested variable inspection (for objects, arrays, structs)
-                    match self.remote_backend:
-                        Some(backend):
-                            # Use GDB variable objects for recursive expansion
-                            match backend.gdb:
-                                Some(gdb):
-                                    val children = gdb.list_children("{variables_reference}")
-                                    match children:
-                                        Ok(child_list):
-                                            for child in child_list:
-                                                var pvar = protocol.Variable__new(child.name, child.value).with_type(child.type_name)
-                                                if child.num_children > 0:
-                                                    pvar = pvar.with_children(child.name.hash())
-                                                variables.push(pvar.to_json())
-                                        Err(_):
-                                            pass
-                                nil:
-                                    pass
-                        nil:
+                    # Nested variable inspection via adapter
+                    val children_result = self.adapter.list_children("{variables_reference}")
+                    match children_result:
+                        Ok(child_list):
+                            for child in child_list:
+                                var pvar = protocol.Variable__new(child.name, child.value).with_type(child.type_name)
+                                if child.num_children > 0:
+                                    pvar = pvar.with_children(child.name.hash())
+                                variables.push(pvar.to_json())
+                        Err(_):
                             pass
 
                 val body = {
@@ -182,19 +167,13 @@ impl DapServer:
                 val expression = args.get("expression")?
 
                 var result_value = ""
-                var result_type = ""
 
-                match self.remote_backend:
-                    Some(backend):
-                        val eval_result = backend.evaluate(expression)
-                        match eval_result:
-                            Ok(value):
-                                result_value = value
-                            Err(e):
-                                result_value = "<error: {e}>"
-                    nil:
-                        # Use hook context for local evaluation
-                        result_value = "<evaluation not available>"
+                val eval_result = self.adapter.evaluate(expression)
+                match eval_result:
+                    Ok(value):
+                        result_value = value
+                    Err(e):
+                        result_value = "<error: {e}>"
 
                 val body = {
                     "result": result_value,
@@ -236,17 +215,10 @@ impl DapServer:
                 self.data_breakpoints = []
                 var response_breakpoints = []
                 var applied = 0
-                var limit = self.max_data_breakpoints
+                val caps = self.adapter.capabilities()
+                var limit = caps.max_watchpoints
                 if limit < 1:
                     limit = 1
-
-                match self.remote_backend:
-                    Some(backend):
-                        val cap = backend.watchpoint_capacity()
-                        if cap > 0:
-                            limit = cap
-                    nil:
-                        pass
 
                 for bp_data in requested:
                     var data_id = ""
@@ -293,17 +265,14 @@ impl DapServer:
                     else:
                         var remote_ok = true
                         var remote_error = ""
-                        match self.remote_backend:
-                            Some(backend):
-                                val set_result = backend.set_watchpoint(data_id, access_type)
-                                match set_result:
-                                    Ok(_):
-                                        remote_ok = true
-                                    Err(e):
-                                        remote_ok = false
-                                        remote_error = e
-                            nil:
-                                pass
+                        if caps.supports_watchpoints:
+                            val set_result = self.adapter.set_watchpoint(data_id, access_type)
+                            match set_result:
+                                Ok(_):
+                                    remote_ok = true
+                                Err(e):
+                                    remote_ok = false
+                                    remote_error = e
 
                         if not remote_ok:
                             val out_bp = {

@@ -1,0 +1,167 @@
+# Remote Debug Adapter
+# Wraps RemoteRiscV32Backend to implement the DebugAdapter trait
+# Avoids modifying backend.spl (shared by coordinator)
+
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.remote.backend.RemoteRiscV32Backend
+
+class RemoteAdapter:
+    backend: RemoteRiscV32Backend
+    config: AdapterConfig
+    adapter_capabilities: AdapterCapabilities
+
+impl RemoteAdapter:
+    static fn create(backend: RemoteRiscV32Backend, config: AdapterConfig) -> RemoteAdapter:
+        val wp_cap = backend.watchpoint_capacity()
+        RemoteAdapter(
+            backend: backend,
+            config: config,
+            adapter_capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+                .with_watchpoints(wp_cap)
+        )
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "remote-riscv32"
+
+    fn is_attached() -> bool:
+        self.backend.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        self.backend.attach(program, args)?
+        Ok("attached to remote target")
+
+    fn detach() -> Result<text, text>:
+        self.backend.detach()?
+        Ok("detached from remote target")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        self.backend.pause()?
+        Ok("halted")
+
+    fn resume() -> Result<text, text>:
+        self.backend.resume()?
+        Ok("running")
+
+    fn single_step() -> Result<text, text>:
+        self.backend.step_in()?
+        Ok("stepped")
+
+    fn step_over() -> Result<text, text>:
+        self.backend.step_over()?
+        Ok("stepped over")
+
+    fn step_out() -> Result<text, text>:
+        self.backend.step_out()?
+        Ok("stepped out")
+
+    fn reset() -> Result<text, text>:
+        match self.backend.gdb:
+            Some(gdb):
+                gdb.send_command("target-download")?
+                Ok("target reset")
+            nil:
+                Err("reset requires GDB connection")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        self.backend.add_breakpoint(file, line)
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        self.backend.set_breakpoint_at_addr(addr)
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.backend.gdb:
+            Some(gdb):
+                gdb.send_command("break-delete {id}")?
+                Ok("breakpoint {id} removed")
+            nil:
+                Err("no GDB connection")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        self.backend.set_watchpoint(expr, access)
+
+    fn set_breakpoint_rich(file: text, line: i32, condition: Option<text>,
+                           hit_condition: Option<text>, log_message: Option<text>) -> Result<i32, text>:
+        self.set_breakpoint(file, line)
+
+    # --- Variable Inspection ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        self.backend.locals()
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.backend.gdb:
+            Some(gdb): gdb.read_arguments()
+            nil: Err("arguments not available")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.backend.gdb:
+            Some(gdb): gdb.read_globals()
+            nil: Err("globals not available")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        self.backend.evaluate(expr)
+
+    fn list_children(var_ref: text) -> Result<[VarInfo], text>:
+        match self.backend.gdb:
+            Some(gdb): gdb.list_children(var_ref)
+            nil: Err("nested variable expansion not supported")
+
+    # --- Stack Inspection ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        self.backend.stack_trace()
+
+    fn stack_depth() -> Result<i32, text>:
+        val frames = self.backend.stack_trace()?
+        Ok(frames.len())
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.backend.gdb:
+            Some(gdb): gdb.select_frame(level)
+            nil: Err("no GDB connection")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        self.backend.current_location()
+
+    # --- Memory Access ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        self.backend.read_memory(addr, size)
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        self.backend.write_memory(addr, data)
+
+    # --- Register Access ---
+
+    fn read_register(name: text) -> Result<i64, text>:
+        self.backend.read_register(name)
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        self.backend.read_all_registers()
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.backend.gdb:
+            Some(gdb): gdb.write_register(name, value)
+            nil: Err("no GDB connection")
+
+    # --- Context Management ---
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context clearing not supported (remote target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        self.backend.attach(program, [])?
+        Ok("program reloaded")
+
+    fn capabilities() -> AdapterCapabilities:
+        self.adapter_capabilities
