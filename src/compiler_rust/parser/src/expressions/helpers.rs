@@ -416,6 +416,8 @@ impl<'a> Parser<'a> {
                 TokenKind::Old => Some("old".to_string()),
                 TokenKind::Out => Some("out".to_string()),
                 TokenKind::Var => Some("var".to_string()),
+                TokenKind::Lazy => Some("lazy".to_string()),
+                TokenKind::Skip => Some("skip".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {

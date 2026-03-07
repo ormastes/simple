@@ -389,6 +389,10 @@ impl<'a> Parser<'a> {
         // `common` keyword: only treat as `common use` when followed by `use`.
         // Otherwise it's used as a variable name (e.g., `common.push(x)`).
         let is_common_use = matches!(&self.current.kind, TokenKind::Common) && self.peek_is(&TokenKind::Use);
+        // `lazy` keyword: treat `lazy val` / `lazy var` as lazy declaration,
+        // otherwise treat as identifier expression (e.g., lazy = false, lazy.field)
+        let is_lazy_decl = matches!(&self.current.kind, TokenKind::Lazy)
+            && (self.peek_is(&TokenKind::Val) || self.peek_is(&TokenKind::Var));
         // `mock` keyword: only treat as mock declaration when followed by identifier
         // (mock Name implements Trait:). Otherwise treat as expression (mock.field, etc.)
         let is_mock_decl = matches!(&self.current.kind, TokenKind::Mock)
@@ -531,6 +535,15 @@ impl<'a> Parser<'a> {
                     self.parse_comptime_val()
                 } else {
                     self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Lazy if is_lazy_decl => {
+                // lazy val name = expr or lazy var name = expr
+                self.advance(); // consume 'lazy'
+                if self.check(&TokenKind::Val) {
+                    self.parse_val() // parse as val (the lazy modifier is ignored in bootstrap)
+                } else {
+                    self.parse_var() // parse as var
                 }
             }
             TokenKind::Unit => self.parse_unit(),

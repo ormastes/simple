@@ -117,6 +117,16 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 ---
 
+## Setup
+
+```bash
+# Install MCP config (auto-detects OS)
+sh config/mcp/install.shs
+# Windows without sh: manually copy config/mcp/win/.mcp.json to .mcp.json
+```
+
+---
+
 ## Quick Commands
 
 ```bash

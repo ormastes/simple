@@ -302,8 +302,13 @@ impl<'a> Parser<'a> {
         };
 
         let name = self.expect_identifier()?;
-        self.expect(&TokenKind::Colon)?;
-        let ty = self.parse_type()?;
+        // Type annotation is optional — bare fields (no `: Type`) default to `any`
+        let ty = if self.check(&TokenKind::Colon) {
+            self.advance();
+            self.parse_type()?
+        } else {
+            crate::ast::Type::Simple("any".to_string())
+        };
 
         let default = if self.check(&TokenKind::Assign) {
             self.advance();

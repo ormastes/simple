@@ -1022,28 +1022,97 @@ fn compile_file_to_object(
     all_mangled: &std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     re_exports: &std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
 ) -> Result<Vec<u8>, String> {
-    // Bootstrap hack: normalize optional text types that older lenient type resolver misses
-    let mut source = source.replace("text?", "text");
-    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
-        source = source.replace(".?:", " != nil:");
-        source = source.replace(".?\n", " != nil\n");
-        source = source.replace(".?\r\n", " != nil\r\n");
+    // Bootstrap hack: normalize optional types that older lenient type resolver misses
+    let mut source = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        // Protect ?? (null coalesce) before stripping ? from types
+        let mut s = source.replace("??", "\x00COALESCE\x00");
+
+        // Handle `.?` (optional chaining / nil-check) before general ? stripping.
+        // `.?` followed by non-identifier chars is a nil-check: `val.?` → `val != nil`
+        // `.?` followed by identifier is optional chain: `val.?method()` → `val.method()`
+        for pat in [".?:", ".?\n", ".?\r\n", ".? ", ".?\t", ".?)", ".?,", ".?]", ".?;"] {
+            s = s.replace(pat, &format!(" != nil{}", &pat[2..]));
+        }
+        // `.?` followed by `=` is nil-check before comparison: `val.? == false`
+        s = s.replace(".? =", " != nil =");
+        // `.?` at end of file
+        if s.ends_with(".?") {
+            let len = s.len();
+            s.replace_range(len - 2.., " != nil");
+        }
+
+        // Strip `?` suffix from nullable types (Type? → Type)
+        // Only strip when ? is followed by non-identifier chars (whitespace, punctuation, EOL)
         for pat in [
-            "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;", "?>",
+            "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;",
         ] {
-            while source.contains(pat) {
-                source = source.replace(pat, &pat[1..]);
+            while s.contains(pat) {
+                s = s.replace(pat, &pat[1..]);
             }
         }
-        if source.ends_with('?') {
-            source.pop();
+        if s.ends_with('?') {
+            s.pop();
         }
+
+        // Restore ?? (null coalesce) operator
+        s = s.replace("\x00COALESCE\x00", "??");
+
         // Replace /* complex expr */ placeholders with 0 (used in main.spl and others
         // as stub expressions that the full compiler interprets but the Rust parser can't)
-        source = source.replace("/* complex expr */", "0");
+        s = s.replace("/* complex expr */", "0");
         // Layer connect operator ~> not yet in parser — rewrite to pipe |> for bootstrap
-        source = source.replace(" ~> ", " |> ");
-    }
+        s = s.replace(" ~> ", " |> ");
+
+        // Function-type parameters not yet supported in Rust parser.
+        // Replace common fn-type patterns with `any`:
+        //   fn(text) -> i64  → any
+        //   fn() -> bool     → any
+        //   ": fn\n"         → ": any\n" (bare fn as field type)
+        // Use regex-like iterative replacement for fn(...) -> Type patterns
+        while let Some(pos) = s.find(": fn(") {
+            // Find the closing ) then optional -> RetType
+            if let Some(rparen) = s[pos..].find(')') {
+                let after_rparen = pos + rparen + 1;
+                // Check for -> return type
+                let end = if s[after_rparen..].starts_with(" -> ") {
+                    // Find end of return type (next comma, rparen, colon, or newline)
+                    let type_start = after_rparen + 4;
+                    let mut end = type_start;
+                    for (i, c) in s[type_start..].char_indices() {
+                        if c == ',' || c == ')' || c == ':' || c == '\n' || c == '\r' {
+                            end = type_start + i;
+                            break;
+                        }
+                        end = type_start + i + c.len_utf8();
+                    }
+                    end
+                } else {
+                    after_rparen
+                };
+                s = format!("{}: any{}", &s[..pos], &s[end..]);
+            } else {
+                break;
+            }
+        }
+        // Bare `fn` as field type (e.g., `_validator: fn`)
+        s = s.replace(": fn\n", ": any\n");
+        s = s.replace(": fn\r\n", ": any\r\n");
+        // Inline lambda `fn() -> Type:` in call args — replace just the type part
+        // fn() -> bool: expr  →  fn(): expr (parser handles fn() lambdas)
+        // Actually these become `any` above, but handle edge cases
+
+        // `cli Name:` blocks are not supported — comment out the entire block
+        // by replacing `cli ` at line start with `# cli `
+        s = s.replace("\ncli ", "\n# cli ");
+        if s.starts_with("cli ") {
+            s = format!("# {}", s);
+        }
+
+        s
+    } else {
+        // Non-bootstrap: just normalize text? → text for basic compat
+        source.replace("text?", "text")
+    };
 
     // Parse
     let mut parser = simple_parser::Parser::new(&source);

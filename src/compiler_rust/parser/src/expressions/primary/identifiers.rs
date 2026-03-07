@@ -137,6 +137,9 @@ impl<'a> Parser<'a> {
             TokenKind::Into => self.parse_keyword_identifier("into"),
             TokenKind::Bind => self.parse_keyword_identifier("bind"),
             TokenKind::Unwrap => self.parse_keyword_identifier("unwrap"),
+            // Allow 'lazy' and 'skip' as identifiers (e.g., var lazy = false)
+            TokenKind::Lazy => self.parse_keyword_identifier("lazy"),
+            TokenKind::Skip => self.parse_keyword_identifier("skip"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {
