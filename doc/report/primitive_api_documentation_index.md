@@ -10,7 +10,7 @@
 ### 🚀 Start Here
 
 **For Developers Using Semantic Types**:
-→ [`doc/guide/semantic_types_quick_reference.md`](../guide/semantic_types_quick_reference.md)
+→ [`doc/guide/quick_reference/semantic_types_quick_reference.md`](../guide/quick_reference/semantic_types_quick_reference.md)
 - Practical usage examples
 - Type lookup by use case
 - Common patterns
@@ -38,7 +38,7 @@
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| **[Semantic Types Quick Reference](../guide/semantic_types_quick_reference.md)** | At-a-glance type usage guide | Developers |
+| **[Semantic Types Quick Reference](../guide/quick_reference/semantic_types_quick_reference.md)** | At-a-glance type usage guide | Developers |
 | **[Newtype Design Patterns](../guide/newtype_design_patterns.md)** | Best practices and patterns | Library authors |
 | **[Primitive API Next Steps](../guide/primitive_api_next_steps.md)** | Future opportunities analysis | Maintainers |
 
@@ -69,7 +69,7 @@
 - Helper methods documented
 
 **How to Use Types?**
-→ [Quick Reference](../guide/semantic_types_quick_reference.md)
+→ [Quick Reference](../guide/quick_reference/semantic_types_quick_reference.md)
 - Examples by use case
 - Import guide
 - Common patterns
@@ -238,10 +238,10 @@ simple/std_lib/src/units/
 ## FAQs Covered
 
 **"Which type should I use for X?"**
-→ [Quick Reference](../guide/semantic_types_quick_reference.md)
+→ [Quick Reference](../guide/quick_reference/semantic_types_quick_reference.md)
 
 **"How do I import types?"**
-→ [Quick Reference: Import Guide](../guide/semantic_types_quick_reference.md#import-guide)
+→ [Quick Reference: Import Guide](../guide/quick_reference/semantic_types_quick_reference.md#import-guide)
 
 **"When should I create a new type?"**
 → [Design Patterns](../guide/newtype_design_patterns.md)
@@ -250,7 +250,7 @@ simple/std_lib/src/units/
 → [Project Closure: Remaining Warnings](./primitive_api_project_closure.md#remaining-warnings-classification)
 
 **"Are there performance concerns?"**
-→ [Quick Reference: Performance Note](../guide/semantic_types_quick_reference.md#performance-note)
+→ [Quick Reference: Performance Note](../guide/quick_reference/semantic_types_quick_reference.md#performance-note)
 
 **"What work is left to do?"**
 → [Next Steps](../guide/primitive_api_next_steps.md)

@@ -109,7 +109,17 @@ impl<'a> super::Lexer<'a> {
             "loop" => TokenKind::Loop,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
-            "pass" => TokenKind::Pass,
+            "pass" => {
+                // Contextual keyword: treat as identifier when followed by '.' or ':'
+                // This allows: pass: Type (parameter name) and pass.method()
+                // while keeping: pass (no-op statement)
+                if self.check('.') || self.check(':') {
+                    let pattern = NamePattern::detect(&name);
+                    TokenKind::Identifier { name, pattern }
+                } else {
+                    TokenKind::Pass
+                }
+            }
             "defer" => TokenKind::Defer,
             "skip" => {
                 // Contextual keyword: only treat as keyword if NOT followed by '('

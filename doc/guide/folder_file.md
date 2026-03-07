@@ -327,7 +327,7 @@ Example programs and tutorials.
 ### "I want to..."
 
 **...learn the language**
-→ `README.md`, `doc/guide/syntax_quick_reference.md`
+→ `README.md`, `doc/guide/quick_reference/syntax_quick_reference.md`
 
 **...contribute code**
 → `CLAUDE.md`, `doc/architecture/overview.md`

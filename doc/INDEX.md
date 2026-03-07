@@ -51,7 +51,7 @@
 - [guide/backend_capabilities.md](guide/backend_capabilities.md) - Compiler backends (1,410 lines)
 
 **Quick References:**
-- [guide/syntax_quick_reference.md](guide/syntax_quick_reference.md) - Language syntax
+- [guide/quick_reference/syntax_quick_reference.md](guide/quick_reference/syntax_quick_reference.md) - Language syntax
 - [guide/README.md](guide/README.md) - All guides index
 
 ---
@@ -83,7 +83,7 @@
 - Features: async/await, generators, actors, coroutines
 
 **Syntax:**
-- [guide/syntax_quick_reference.md](guide/syntax_quick_reference.md)
+- [guide/quick_reference/syntax_quick_reference.md](guide/quick_reference/syntax_quick_reference.md)
 - Tests: 9/9 passing (100%)
 - Features: lambdas, comprehensions, set literals, bitfields
 

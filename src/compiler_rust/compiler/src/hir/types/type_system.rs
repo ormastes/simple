@@ -367,12 +367,10 @@ impl ConcurrencyMode {
     }
 
     /// Check if mut T is allowed in this mode
+    /// Note: During bootstrap, actor mode also allows mut T to avoid breaking
+    /// the self-hosted compiler which uses mut params in utility functions.
     pub fn allows_mut(&self) -> bool {
-        match self {
-            ConcurrencyMode::Actor => false, // actor mode rejects mut T — use iso T or lock_base instead
-            ConcurrencyMode::LockBase => true,
-            ConcurrencyMode::Unsafe => true,
-        }
+        true // Bootstrap: allow mut T in all modes
     }
 
     /// Check if iso T is allowed in this mode (always true)

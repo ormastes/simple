@@ -280,7 +280,7 @@ Results: 7436 total, 6717 passed, 719 failed
 
 5. **Update documentation**
    - CLAUDE.md - Update operator reference
-   - `doc/guide/syntax_quick_reference.md` - Show new syntax
+   - `doc/guide/quick_reference/syntax_quick_reference.md` - Show new syntax
    - Add migration guide to docs
 
 6. **Create migration script**

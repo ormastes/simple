@@ -491,7 +491,7 @@ fn process(obj: any, obj_type: i64):
 
 **Documentation:**
 - `doc/guide/advanced_types.md` - User guide
-- `doc/guide/syntax_quick_reference.md` - Syntax reference
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Syntax reference
 - `CLAUDE.md` - Runtime limitations
 
 ### Related Features

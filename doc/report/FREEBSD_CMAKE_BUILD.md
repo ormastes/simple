@@ -283,7 +283,7 @@ clang++ -o myprogram myprogram.cpp
 - `FREEBSD_WORKSPACE.md` - Main guide
 - `FREEBSD_CMAKE_BUILD.md` - This file
 - `doc/guide/freebsd_workspace_setup.md` - Complete guide
-- `doc/guide/freebsd_quick_reference.md` - Cheat sheet
+- `doc/guide/quick_reference/freebsd_quick_reference.md` - Cheat sheet
 
 **Scripts:**
 - `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native bootstrap

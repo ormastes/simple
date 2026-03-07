@@ -170,4 +170,4 @@ The `VisibilityChecker` (in `visibility_checker.spl`) is extended to:
 ## See Also
 
 - [Layered Compiler Architecture](layered_compiler_architecture.md) — numbered layer system
-- [Syntax Quick Reference](../guide/syntax_quick_reference.md) — language syntax
+- [Syntax Quick Reference](../guide/quick_reference/syntax_quick_reference.md) — language syntax

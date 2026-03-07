@@ -41,7 +41,7 @@ This report presents a comprehensive research on making custom block creation in
 
 ### 3. Quick Reference Guide
 
-**Location:** `doc/guide/custom_blocks_quick_reference.md`
+**Location:** `doc/guide/quick_reference/custom_blocks_quick_reference.md`
 - Concise cheat sheet (5-minute read)
 - API signatures
 - Common patterns
@@ -694,7 +694,7 @@ This research demonstrates that custom block creation in Simple can be dramatica
 ### Research Documents (Completed)
 
 1. `doc/research/custom_blocks_user_friendly_api.md` - Full API design (800 lines)
-2. `doc/guide/custom_blocks_quick_reference.md` - Quick reference (300 lines)
+2. `doc/guide/quick_reference/custom_blocks_quick_reference.md` - Quick reference (300 lines)
 3. `doc/report/custom_blocks_easy_api_implementation_2026-02-05.md` - This report (600 lines)
 
 ### Test Specifications (Completed)

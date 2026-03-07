@@ -341,7 +341,7 @@ Make Pure Simple parser the default
 - `doc/bug/bug_db.sdn` - Update when fixed
 - `MEMORY.md` - Remove limitation note
 - `CHANGELOG.md` - Add fix note
-- `doc/guide/syntax_quick_reference.md` - Update if needed
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Update if needed
 
 ---
 

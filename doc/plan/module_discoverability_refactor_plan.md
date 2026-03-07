@@ -58,7 +58,7 @@ src/lib/
 
 ### Task 1.1: Stdlib Quick Reference (2 hours)
 
-**File:** `doc/guide/stdlib_quick_reference.md`
+**File:** `doc/guide/quick_reference/stdlib_quick_reference.md`
 
 **Content Structure:**
 ```markdown
@@ -344,7 +344,7 @@ use testing.mocking.*
 ## Quick Search Strategies
 
 ### 1. Check Stdlib Quick Reference
-Start here: `doc/guide/stdlib_quick_reference.md`
+Start here: `doc/guide/quick_reference/stdlib_quick_reference.md`
 
 ### 2. Browse Source Directories
 ```bash
@@ -823,7 +823,7 @@ simple show-module async
 - **Discoverability Score: 3/10**
 
 ### After (Target State)
-- ✅ `doc/guide/stdlib_quick_reference.md` - One-stop shop
+- ✅ `doc/guide/quick_reference/stdlib_quick_reference.md` - One-stop shop
 - ✅ DI guide with examples
 - ✅ Mocking guide with examples
 - ✅ `src/lib/__init__.spl` - Clear entry point
@@ -874,7 +874,7 @@ use di.{Container, Profile}
 ## Files to Create
 
 **Documentation (Phase 1):**
-- `doc/guide/stdlib_quick_reference.md`
+- `doc/guide/quick_reference/stdlib_quick_reference.md`
 - `doc/guide/dependency_injection_guide.md`
 - `doc/guide/mocking_guide.md`
 - `doc/guide/module_discovery_guide.md`

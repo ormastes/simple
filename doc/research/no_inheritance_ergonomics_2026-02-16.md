@@ -911,7 +911,7 @@ If two items at the same priority level provide the same method name -> **compil
 - [Scala 3 Extensions](https://docs.scala-lang.org/scala3/reference/contextual/extension-methods.html)
 
 ### Simple Language (Implementation References)
-- `doc/guide/syntax_quick_reference.md` -- Current alias/type syntax
+- `doc/guide/quick_reference/syntax_quick_reference.md` -- Current alias/type syntax
 - `doc/report/alias_feature_investigation_2026-02-16.md` -- Function alias investigation
 - `src/app/desugar/static_methods.spl` -- Existing desugaring infrastructure (model for forwarding desugar)
 - `src/app/parser/def/function.spl:310-328` -- Existing `FunctionAliasDef` parser structure

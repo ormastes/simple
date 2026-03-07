@@ -471,7 +471,7 @@ struct CustomMathDef: BlockDefinition:
 ### Documentation (7 files, 3,680 lines)
 
 7. ✅ `doc/research/custom_blocks_user_friendly_api.md` (800 lines)
-8. ✅ `doc/guide/custom_blocks_quick_reference.md` (300 lines)
+8. ✅ `doc/guide/quick_reference/custom_blocks_quick_reference.md` (300 lines)
 9. ✅ `doc/report/custom_blocks_easy_api_implementation_2026-02-05.md` (600 lines)
 10. ✅ `doc/report/custom_blocks_implementation_progress_2026-02-05.md` (400 lines)
 11. ✅ `test/compiler/custom_blocks_easy_api_spec.spl` (600 lines) - Template

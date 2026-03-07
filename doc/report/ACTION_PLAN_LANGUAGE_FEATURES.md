@@ -123,7 +123,7 @@ bin/simple build --no-warn         # Suppress warnings
 **Enhancement:** Create comprehensive guide
 
 - `doc/guide/warnings.md` - All warning types with examples
-- `doc/guide/syntax_quick_reference.md` - Add warning section
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Add warning section
 - Update CLAUDE.md with warning system overview
 
 ### D. Generic Type Checking (Future)

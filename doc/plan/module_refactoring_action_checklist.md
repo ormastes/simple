@@ -17,11 +17,11 @@
 
 ### ✅ Task 1.1: Create Stdlib Quick Reference (2 hours)
 
-**File:** `doc/guide/stdlib_quick_reference.md`
+**File:** `doc/guide/quick_reference/stdlib_quick_reference.md`
 
 ```bash
 # Create the file
-touch doc/guide/stdlib_quick_reference.md
+touch doc/guide/quick_reference/stdlib_quick_reference.md
 
 # Content outline:
 # - Core modules list (allocator, async, di, json, etc.)
@@ -41,7 +41,7 @@ touch doc/guide/stdlib_quick_reference.md
 **Validation:**
 ```bash
 # Check file exists and is readable
-cat doc/guide/stdlib_quick_reference.md | head -20
+cat doc/guide/quick_reference/stdlib_quick_reference.md | head -20
 ```
 
 ---
@@ -438,7 +438,7 @@ jj git push --bookmark main
 
 ```bash
 # 1. Documentation exists
-ls doc/guide/stdlib_quick_reference.md
+ls doc/guide/quick_reference/stdlib_quick_reference.md
 ls doc/guide/dependency_injection_guide.md
 ls doc/guide/mocking_guide.md
 ls doc/guide/module_discovery_guide.md
@@ -550,7 +550,7 @@ DI works!
 ### Files to Create (12 new)
 
 **Documentation:**
-1. `doc/guide/stdlib_quick_reference.md`
+1. `doc/guide/quick_reference/stdlib_quick_reference.md`
 2. `doc/guide/dependency_injection_guide.md`
 3. `doc/guide/mocking_guide.md`
 4. `doc/guide/module_discovery_guide.md`

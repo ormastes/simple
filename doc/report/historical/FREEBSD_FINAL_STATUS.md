@@ -9,7 +9,7 @@
 - ✅ `FREEBSD_BUILD_STATUS.md` - Build status report
 - ✅ `FREEBSD_SETUP_SUMMARY.md` - Quick start guide
 - ✅ `doc/guide/freebsd_workspace_setup.md` - Complete setup guide (16KB)
-- ✅ `doc/guide/freebsd_quick_reference.md` - Command cheat sheet (7.4KB)
+- ✅ `doc/guide/quick_reference/freebsd_quick_reference.md` - Command cheat sheet (7.4KB)
 - ✅ `FREEBSD_FINAL_STATUS.md` - This file
 
 **Scripts:**
@@ -314,7 +314,7 @@ The native bootstrap inside FreeBSD:
 - `FREEBSD_SETUP_SUMMARY.md`
 - `FREEBSD_FINAL_STATUS.md` (this file)
 - `doc/guide/freebsd_workspace_setup.md`
-- `doc/guide/freebsd_quick_reference.md`
+- `doc/guide/quick_reference/freebsd_quick_reference.md`
 
 **Scripts:**
 - `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`

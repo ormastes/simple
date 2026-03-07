@@ -154,7 +154,7 @@ fn old_name(args):
 
 Modified files to reflect current status:
 
-1. **`doc/guide/syntax_quick_reference.md`**
+1. **`doc/guide/quick_reference/syntax_quick_reference.md`**
    - Added warning: "Parser structure exists, runtime implementation incomplete"
    - Showed delegation workaround
 

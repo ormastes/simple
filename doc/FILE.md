@@ -569,7 +569,7 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ### "I want to learn Simple"
 → Start with `doc/guide/getting_started.md`
-→ Then `doc/guide/syntax_quick_reference.md`
+→ Then `doc/guide/quick_reference/syntax_quick_reference.md`
 → Try `examples/01_getting_started/`
 
 ### "I want to understand how feature X works"
@@ -602,13 +602,13 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ### Must-Read for Developers
 1. `architecture/file_class_structure.md` - Codebase overview
-2. `guide/syntax_quick_reference.md` - Language reference
+2. `guide/quick_reference/syntax_quick_reference.md` - Language reference
 3. `contributing/` - How to contribute
 4. `guide/container_testing.md` - Testing guide
 
 ### Must-Read for Users
 1. `guide/getting_started.md` - First steps
-2. `guide/syntax_quick_reference.md` - Syntax reference
+2. `guide/quick_reference/syntax_quick_reference.md` - Syntax reference
 3. `tutorial/` - Interactive tutorials
 4. `examples/` - Code examples
 

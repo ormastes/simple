@@ -8,7 +8,7 @@
 - ✅ `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native FreeBSD bootstrap script
 - ✅ `FREEBSD_WORKSPACE.md` - Main workspace guide
 - ✅ `doc/guide/freebsd_workspace_setup.md` - Detailed setup guide (16KB)
-- ✅ `doc/guide/freebsd_quick_reference.md` - Command cheat sheet (7.4KB)
+- ✅ `doc/guide/quick_reference/freebsd_quick_reference.md` - Command cheat sheet (7.4KB)
 - ✅ `scripts/verify_freebsd_workspace.spl` - Verification script
 - ✅ `FREEBSD_SETUP_SUMMARY.md` - Quick start summary
 
@@ -273,7 +273,7 @@ ls -lh scripts/verify_freebsd_workspace.spl
 |------|------|---------|
 | `FREEBSD_WORKSPACE.md` | 12KB | Main workspace guide |
 | `doc/guide/freebsd_workspace_setup.md` | 16KB | Complete setup guide |
-| `doc/guide/freebsd_quick_reference.md` | 7.4KB | Command cheat sheet |
+| `doc/guide/quick_reference/freebsd_quick_reference.md` | 7.4KB | Command cheat sheet |
 | `FREEBSD_SETUP_SUMMARY.md` | ~10KB | Quick start summary |
 | `FREEBSD_BUILD_STATUS.md` | ~7KB | This file - build status |
 

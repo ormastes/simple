@@ -198,7 +198,7 @@ simple build 2>&1 | grep "import.*warning"
 
 **Files to Update:**
 - `CLAUDE.md` - Update import examples
-- `doc/guide/syntax_quick_reference.md` - Import syntax section
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Import syntax section
 - `doc/design/import_path_design.md` - Already created
 - `.claude/skills/coding.md` - Import guidelines
 - README examples

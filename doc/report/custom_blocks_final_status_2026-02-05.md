@@ -54,7 +54,7 @@ Successfully implemented a comprehensive user-friendly API for creating custom b
 | File | Lines | Status |
 |------|-------|--------|
 | `doc/research/custom_blocks_user_friendly_api.md` | 800 | ✅ Done |
-| `doc/guide/custom_blocks_quick_reference.md` | 300 | ✅ Done |
+| `doc/guide/quick_reference/custom_blocks_quick_reference.md` | 300 | ✅ Done |
 | `doc/report/custom_blocks_easy_api_implementation_2026-02-05.md` | 600 | ✅ Done |
 | `doc/report/custom_blocks_implementation_progress_2026-02-05.md` | 400 | ✅ Done |
 | `test/compiler/custom_blocks_easy_api_spec.spl` (template) | 600 | ✅ Done |

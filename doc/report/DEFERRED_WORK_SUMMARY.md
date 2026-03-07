@@ -56,7 +56,7 @@ for warning in closure_warnings_get():
 **Effort:** 2-4 hours
 **What's missing:**
 - `doc/guide/warnings.md` - Comprehensive warning guide
-- Examples in `doc/guide/syntax_quick_reference.md`
+- Examples in `doc/guide/quick_reference/syntax_quick_reference.md`
 - Warning section in CLAUDE.md
 
 **Current workaround:** MEMORY.md has all critical information

@@ -385,7 +385,7 @@ Template:
 
 ### Update Main Documentation
 
-**File:** `doc/guide/ffi_syscalls_quick_reference.md`
+**File:** `doc/guide/quick_reference/ffi_syscalls_quick_reference.md`
 
 Add "Usage in Simple" section showing wrapper functions.
 
@@ -540,7 +540,7 @@ simple benchmark_syscalls.spl
 ## Getting Help
 
 If stuck:
-1. Check documentation: `doc/guide/ffi_syscalls_quick_reference.md`
+1. Check documentation: `doc/guide/quick_reference/ffi_syscalls_quick_reference.md`
 2. Review Phase 1-2 reports: `doc/report/ffi_syscalls_*.md`
 3. Examine implementation: `rust/ffi_syscalls/src/lib.rs`
 4. Test in isolation: Create minimal Simple script to test function

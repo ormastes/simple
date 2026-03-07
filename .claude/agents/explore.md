@@ -87,7 +87,7 @@ Source (.spl) -> Lexer -> Tokens -> Parser -> AST -> HIR -> MIR -> Codegen/Inter
 | All TODOs? | `doc/TODO.md` |
 | All features? | `doc/feature/feature.md` |
 | All bugs? | `doc/bug/bug_report.md` |
-| Syntax reference | `doc/guide/syntax_quick_reference.md` |
+| Syntax reference | `doc/guide/quick_reference/syntax_quick_reference.md` |
 
 ## Research Patterns
 

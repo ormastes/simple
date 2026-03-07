@@ -222,7 +222,7 @@ cargo test --workspace
 
 | File | Type | Purpose |
 |------|------|---------|
-| `doc/guide/ffi_syscalls_quick_reference.md` | Reference | Quick lookup for all functions |
+| `doc/guide/quick_reference/ffi_syscalls_quick_reference.md` | Reference | Quick lookup for all functions |
 | `doc/guide/ffi_syscalls_phase3_guide.md` | Guide | Step-by-step Phase 3 instructions |
 | `doc/report/ffi_syscalls_phases_1_2_summary.md` | Report | Complete Phase 1-2 summary |
 | `doc/report/ffi_dependency_reduction_plan.md` | Plan | Full 4-phase plan with estimates |
@@ -371,7 +371,7 @@ fn main():
 ## Resources
 
 ### Documentation
-- Quick Reference: `doc/guide/ffi_syscalls_quick_reference.md`
+- Quick Reference: `doc/guide/quick_reference/ffi_syscalls_quick_reference.md`
 - Phase 3 Guide: `doc/guide/ffi_syscalls_phase3_guide.md`
 - Full Summary: `doc/report/ffi_syscalls_phases_1_2_summary.md`
 

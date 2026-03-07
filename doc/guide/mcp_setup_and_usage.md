@@ -355,7 +355,7 @@ Potential additions for the MCP server:
 ## Related Documentation
 
 - MCP Specification: https://modelcontextprotocol.io/docs
-- Simple Language Guide: `doc/guide/syntax_quick_reference.md`
+- Simple Language Guide: `doc/guide/quick_reference/syntax_quick_reference.md`
 - SFFI Documentation: See `/sffi` skill
 - File I/O: `src/app/io/mod.spl`
 

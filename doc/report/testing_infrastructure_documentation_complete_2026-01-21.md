@@ -122,7 +122,7 @@ This report documents the completion of comprehensive documentation and addition
 
 ### 3. Test Helpers Quick Reference
 
-**File:** `doc/guide/test_helpers_quick_reference.md` (~350 lines)
+**File:** `doc/guide/quick_reference/test_helpers_quick_reference.md` (~350 lines)
 
 **Content Organization:**
 
@@ -170,7 +170,7 @@ This report documents the completion of comprehensive documentation and addition
    - Scalability analysis
    - All operation categories covered
 
-3. **`doc/guide/test_helpers_quick_reference.md`** (~350 lines)
+3. **`doc/guide/quick_reference/test_helpers_quick_reference.md`** (~350 lines)
    - Quick reference card
    - Reference tables and patterns
    - Cheat sheet summary
@@ -307,7 +307,7 @@ This report documents the completion of comprehensive documentation and addition
 cat doc/guide/comprehensive_testing.md
 
 # Print quick reference
-cat doc/guide/test_helpers_quick_reference.md
+cat doc/guide/quick_reference/test_helpers_quick_reference.md
 ```
 
 **Specialized Topics:**

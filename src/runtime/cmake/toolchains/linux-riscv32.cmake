@@ -5,8 +5,8 @@
 #   2. Linux:                riscv32-linux-gnu-gcc   (glibc, Linux userspace)
 #
 # Usage:
-#   cmake -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/linux-riscv32.cmake ..
-#   cmake -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/linux-riscv32.cmake -DRV32_LINUX=ON ..
+#   cmake -DCMAKE_TOOLCHAIN_FILE=src/runtime/cmake/toolchains/linux-riscv32.cmake ..
+#   cmake -DCMAKE_TOOLCHAIN_FILE=src/runtime/cmake/toolchains/linux-riscv32.cmake -DRV32_LINUX=ON ..
 
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR riscv32)

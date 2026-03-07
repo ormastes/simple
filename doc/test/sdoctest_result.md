@@ -392,7 +392,7 @@
 | doc/guide/application_writing.md | 17 | 17 | 0 | 0 | 94ms |
 | doc/guide/architecture.md | 4 | 4 | 0 | 0 | 21ms |
 | doc/guide/architecture_writing.md | 11 | 11 | 0 | 0 | 45ms |
-| doc/guide/arm_neon_quick_reference.md | 6 | 6 | 0 | 0 | 26ms |
+| doc/guide/quick_reference/arm_neon_quick_reference.md | 6 | 6 | 0 | 0 | 26ms |
 | doc/guide/async_guide.md | 44 | 44 | 0 | 0 | 222ms |
 | doc/guide/async_runtime_guide.md | 6 | 6 | 0 | 0 | 34ms |
 | doc/guide/backend_capabilities.md | 12 | 12 | 0 | 0 | 64ms |
@@ -425,9 +425,9 @@
 | doc/guide/contextual_errors_usage.spl | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/coverage_ci_cd.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/coverage_status.md | 7 | 7 | 0 | 0 | 37ms |
-| doc/guide/custom_blocks_quick_reference.md | 28 | 28 | 0 | 0 | 123ms |
+| doc/guide/quick_reference/custom_blocks_quick_reference.md | 28 | 28 | 0 | 0 | 123ms |
 | doc/guide/dap_debugging_guide.md | 7 | 7 | 0 | 0 | 28ms |
-| doc/guide/dap_quick_reference.md | 9 | 9 | 0 | 0 | 40ms |
+| doc/guide/quick_reference/dap_quick_reference.md | 9 | 9 | 0 | 0 | 40ms |
 | doc/guide/dashboard_cicd.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/dashboard_examples.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/DASHBOARD_INDEX.md | 0 | 0 | 0 | 0 | 0ms |
@@ -449,11 +449,11 @@
 | doc/guide/fault_detection_guide.md | 1 | 1 | 0 | 0 | 6ms |
 | doc/guide/ffi_phase4_execution_plan.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/ffi_syscalls_phase3_guide.md | 6 | 6 | 0 | 0 | 30ms |
-| doc/guide/ffi_syscalls_quick_reference.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/guide/quick_reference/ffi_syscalls_quick_reference.md | 1 | 1 | 0 | 0 | 4ms |
 | doc/guide/fn_lambda_syntax.md | 8 | 8 | 0 | 0 | 31ms |
 | doc/guide/folder_file.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/freebsd_qemu_bootstrap.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/guide/freebsd_quick_reference.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/quick_reference/freebsd_quick_reference.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/freebsd_testing_qemu.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/freebsd_workspace_setup.md | 2 | 2 | 0 | 0 | 9ms |
 | doc/guide/fuzzing_mutation_quickstart.md | 14 | 14 | 0 | 0 | 64ms |
@@ -471,7 +471,7 @@
 | doc/guide/http_implementation_guide.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/i18n.md | 1 | 1 | 0 | 0 | 6ms |
 | doc/guide/implementation_roadmap_complete.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/guide/import_quick_reference.md | 20 | 20 | 0 | 0 | 153ms |
+| doc/guide/quick_reference/import_quick_reference.md | 20 | 20 | 0 | 0 | 153ms |
 | doc/guide/import_syntax_verified.md | 16 | 16 | 0 | 0 | 100ms |
 | doc/guide/installation.md | 1 | 1 | 0 | 0 | 6ms |
 | doc/guide/installing_packages.md | 0 | 0 | 0 | 0 | 0ms |
@@ -495,7 +495,7 @@
 | doc/guide/mdsoc_guide.md | 24 | 24 | 0 | 0 | 118ms |
 | doc/guide/memory_migration_guide.md | 17 | 17 | 0 | 0 | 74ms |
 | doc/guide/migration_pattern_cookbook.md | 17 | 17 | 0 | 0 | 78ms |
-| doc/guide/migration_quick_reference.md | 19 | 19 | 0 | 0 | 101ms |
+| doc/guide/quick_reference/migration_quick_reference.md | 19 | 19 | 0 | 0 | 101ms |
 | doc/guide/migration_verification_checklist.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/mir_optimization_integration.md | 13 | 13 | 0 | 0 | 90ms |
 | doc/guide/mocking.md | 57 | 57 | 0 | 0 | 248ms |
@@ -514,7 +514,7 @@
 | doc/guide/PLATFORMS.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/primitive_api_next_steps.md | 14 | 14 | 0 | 0 | 65ms |
 | doc/guide/process_cleanup_integration_example.md | 9 | 9 | 0 | 0 | 41ms |
-| doc/guide/process_cleanup_quick_reference.md | 9 | 9 | 0 | 0 | 43ms |
+| doc/guide/quick_reference/process_cleanup_quick_reference.md | 9 | 9 | 0 | 0 | 43ms |
 | doc/guide/PRODUCTION_READY.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/publishing_packages.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/pure_dl_getting_started.md | 18 | 18 | 0 | 0 | 115ms |
@@ -539,7 +539,7 @@
 | doc/guide/safety_infrastructure.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/script_migration.md | 21 | 21 | 0 | 0 | 108ms |
 | doc/guide/SDOCTEST_ENFORCEMENT_GUIDE.md | 15 | 15 | 0 | 0 | 89ms |
-| doc/guide/semantic_types_quick_reference.md | 38 | 38 | 0 | 0 | 291ms |
+| doc/guide/quick_reference/semantic_types_quick_reference.md | 38 | 38 | 0 | 0 | 291ms |
 | doc/guide/semihosting_testing_quickstart.md | 7 | 7 | 0 | 0 | 30ms |
 | doc/guide/sffi_external_libraries_quick_start.md | 7 | 7 | 0 | 0 | 39ms |
 | doc/guide/sffi_gen_guide.md | 5 | 5 | 0 | 0 | 32ms |
@@ -561,14 +561,14 @@
 | doc/guide/standard_architecture.md | 33 | 33 | 0 | 0 | 154ms |
 | doc/guide/stats_command_guide.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/string_core_usage.md | 19 | 19 | 0 | 0 | 109ms |
-| doc/guide/syntax_quick_reference.md | 76 | 76 | 0 | 0 | 354ms |
+| doc/guide/quick_reference/syntax_quick_reference.md | 76 | 76 | 0 | 0 | 354ms |
 | doc/guide/system_test.md | 8 | 8 | 0 | 0 | 32ms |
 | doc/guide/tensor_dimensions_guide.md | 16 | 16 | 0 | 0 | 96ms |
 | doc/guide/tensor_dimensions_usage.md | 14 | 14 | 0 | 0 | 56ms |
 | doc/guide/test_analysis_guide.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/test_database_guide.md | 17 | 17 | 0 | 0 | 71ms |
 | doc/guide/test_guides.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/guide/test_helpers_quick_reference.md | 20 | 20 | 0 | 0 | 111ms |
+| doc/guide/quick_reference/test_helpers_quick_reference.md | 20 | 20 | 0 | 0 | 111ms |
 | doc/guide/testing_core_simple.md | 5 | 5 | 0 | 0 | 26ms |
 | doc/guide/test_listing_workarounds.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/guide/test.md | 0 | 0 | 0 | 0 | 0ms |

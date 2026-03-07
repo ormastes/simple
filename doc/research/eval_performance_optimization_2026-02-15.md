@@ -121,4 +121,4 @@ All tests pass with zero regressions:
 ## Related Documentation
 
 - Simple Language Runtime Limitations: `MEMORY.md`
-- String Performance Best Practices: `doc/guide/syntax_quick_reference.md`
+- String Performance Best Practices: `doc/guide/quick_reference/syntax_quick_reference.md`

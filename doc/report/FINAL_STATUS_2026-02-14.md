@@ -494,7 +494,7 @@ Parallel mode and signal handlers are enhancements that can be added incremental
 - `IMPLEMENTATION_SUMMARY_2026-02-14.md` - Overview
 - `PHASE_2_3_COMPLETE_2026-02-14.md` - Technical details
 - `doc/guide/robust_process_cleanup.md` - Complete guide
-- `doc/guide/process_cleanup_quick_reference.md` - Quick reference
+- `doc/guide/quick_reference/process_cleanup_quick_reference.md` - Quick reference
 
 **Testing:**
 - Unit tests: `test/unit/app/test_runner_new/`
