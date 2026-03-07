@@ -1,0 +1,192 @@
+# T32 GDB Bridge Client
+# Combines Trace32 native connection (for unique ops) with GDB MI (via T32's GDB server).
+# Standard debug ops go through GDB (richer MI protocol).
+# T32-unique ops (trace, coverage, PRACTICE scripts) go through t32rem.
+
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.protocol.trace32.Trace32Client
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo}
+
+class T32GdbBridgeClient:
+    t32: Trace32Client
+    gdb: Option<GdbMiClient>
+    gdb_port: i32
+    attached: bool
+
+impl T32GdbBridgeClient:
+    # Connect: first to T32 via t32rem, then enable GDB server and connect GDB
+    static fn connect(t32_config: DebugConfig, gdb_port: i32) -> Result<T32GdbBridgeClient, text>:
+        # Connect to Trace32 via t32rem
+        val t32 = Trace32Client.connect(t32_config)?
+
+        # Enable T32 GDB server
+        t32.run_command("System.Option GDBSERVER ON")?
+        t32.run_command("GDBSERVER.PORT {gdb_port}")?
+
+        # Connect GDB to T32's GDB server
+        val gdb_config = DebugConfig(
+            host: t32_config.host,
+            port: gdb_port,
+            target: Architecture.Arm32,
+            program: t32_config.program,
+            options: {}
+        )
+        val gdb = GdbMiClient.connect(gdb_config)?
+
+        Ok(T32GdbBridgeClient(
+            t32: t32,
+            gdb: Some(gdb),
+            gdb_port: gdb_port,
+            attached: true
+        ))
+
+    # Create from existing clients
+    static fn from_clients(t32: Trace32Client, gdb: GdbMiClient, gdb_port: i32) -> T32GdbBridgeClient:
+        T32GdbBridgeClient(
+            t32: t32,
+            gdb: Some(gdb),
+            gdb_port: gdb_port,
+            attached: true
+        )
+
+    fn is_attached() -> bool:
+        self.attached
+
+    # --- Standard debug ops (via GDB for richer MI protocol) ---
+
+    fn halt() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.halt()
+            nil: Err("GDB not connected")
+
+    fn resume() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.resume()
+            nil: Err("GDB not connected")
+
+    fn single_step() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.single_step()
+            nil: Err("GDB not connected")
+
+    fn step_over() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.step_over()
+            nil: Err("GDB not connected")
+
+    fn step_out() -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.step_out()
+            nil: Err("GDB not connected")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_memory(addr, size)
+            nil: Err("GDB not connected")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.write_memory(addr, data)
+            nil: Err("GDB not connected")
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_register(name)
+            nil: Err("GDB not connected")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_all_registers()
+            nil: Err("GDB not connected")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.write_register(name, value)
+            nil: Err("GDB not connected")
+
+    fn set_breakpoint(location: text) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_breakpoint(location)
+            nil: Err("GDB not connected")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_breakpoint_at_addr(addr)
+            nil: Err("GDB not connected")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.delete_breakpoint(id)
+            nil: Err("GDB not connected")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_watchpoint(expr, access)
+            nil: Err("GDB not connected")
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_locals()
+            nil: Err("GDB not connected")
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_arguments()
+            nil: Err("GDB not connected")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_globals()
+            nil: Err("GDB not connected")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.evaluate(expr)
+            nil: Err("GDB not connected")
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        match self.gdb:
+            Some(gdb): gdb.stack_trace()
+            nil: Err("GDB not connected")
+
+    fn stack_depth() -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.stack_depth()
+            nil: Err("GDB not connected")
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.select_frame(level)
+            nil: Err("GDB not connected")
+
+    # --- T32-unique ops (via PRACTICE commands through t32rem) ---
+
+    fn trace_capture(duration_ms: i32) -> Result<text, text>:
+        self.t32.trace_capture(duration_ms)
+
+    fn coverage_collect(module: text) -> Result<text, text>:
+        self.t32.coverage_collect(module)
+
+    fn flash_program(elf_path: text) -> Result<text, text>:
+        self.t32.flash_program(elf_path)
+
+    fn system_reset() -> Result<text, text>:
+        self.t32.system_reset()
+
+    fn practice_script(script: text) -> Result<text, text>:
+        self.t32.run_command("DO {script}")
+
+    fn run_practice_command(cmd: text) -> Result<text, text>:
+        self.t32.run_command(cmd)
+
+    # --- Lifecycle ---
+
+    me disconnect():
+        # Disable T32 GDB server
+        self.t32.run_command("System.Option GDBSERVER OFF")
+        match self.gdb:
+            Some(gdb): gdb.disconnect()
+            nil: pass
+        self.t32.disconnect()
+        self.attached = false

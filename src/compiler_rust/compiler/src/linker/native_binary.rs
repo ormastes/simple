@@ -57,11 +57,12 @@ fn detect_c_compiler(target: &Target) -> String {
     }
     match target.os {
         TargetOS::Windows => {
-            // Prefer MinGW gcc over MSVC cl.exe for bootstrap compatibility.
-            // cl.exe requires VS build tools + specific environment setup.
-            if which_exists("gcc") {
+            // When running on Windows, prefer MinGW gcc over MSVC cl.exe
+            // for bootstrap compatibility. When cross-compiling from
+            // non-Windows, default to cl.exe (MSVC toolchain).
+            if cfg!(target_os = "windows") && which_exists("gcc") {
                 "gcc".to_string()
-            } else if which_exists("cc") {
+            } else if cfg!(target_os = "windows") && which_exists("cc") {
                 "cc".to_string()
             } else {
                 "cl.exe".to_string()

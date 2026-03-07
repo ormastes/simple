@@ -4,7 +4,7 @@
 //! Uses raw pointers where Simple manages allocation with sys_malloc/sys_free.
 //!
 //! Memory layout:
-//! ```
+//! ```text
 //! RcBox<T> / ArcBox<T>:
 //! ┌────────────────────────────────┐
 //! │ strong_count: usize/AtomicUsize │

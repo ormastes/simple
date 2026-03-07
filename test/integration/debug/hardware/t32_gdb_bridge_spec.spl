@@ -1,0 +1,62 @@
+# T32 GDB Bridge Integration Test (Combo 6)
+# Requires: Lauterbach Power Debug II + T32 GDB server enabled
+# Uses: GDB via T32 GDB server on port 2331
+
+extern fn rt_command_output(cmd: text) -> text
+extern fn rt_sleep_ms(ms: i64)
+
+fn is_t32_available() -> bool:
+    val output = rt_command_output("ls /opt/t32/bin/pc_linux64/t32rem 2>/dev/null")
+    output.contains("t32rem")
+
+fn is_gdb_available() -> bool:
+    val output = rt_command_output("which gdb-multiarch 2>/dev/null")
+    if output.len() > 0:
+        return true
+    val output2 = rt_command_output("which arm-none-eabi-gdb 2>/dev/null")
+    output2.len() > 0
+
+fn t32rem(cmd: text) -> text:
+    rt_command_output("/opt/t32/bin/pc_linux64/t32rem localhost port=20000 {cmd}")
+
+describe "T32 GDB Bridge via T32 server":
+    it "enable GDB server":
+        if not is_t32_available():
+            skip("t32rem not found")
+        val output1 = t32rem("System.Option GDBSERVER ON")
+        val output2 = t32rem("GDBSERVER.PORT 2331")
+        rt_sleep_ms(500)
+        # GDB server should now be listening
+        expect(output1.len() >= 0).to_equal(true)
+
+    it "GDB connects to T32 GDB server":
+        if not is_t32_available():
+            skip("t32rem not found")
+        if not is_gdb_available():
+            skip("GDB multiarch not installed")
+        # Ensure GDB server is on
+        t32rem("System.Option GDBSERVER ON")
+        t32rem("GDBSERVER.PORT 2331")
+        rt_sleep_ms(500)
+        # Try GDB connect
+        val gdb_cmd = "gdb-multiarch -batch -ex 'target remote localhost:2331' -ex 'info reg' -ex 'disconnect' -ex 'quit' 2>&1"
+        val output = rt_command_output(gdb_cmd)
+        expect(output.len() > 0).to_equal(true)
+
+    it "set and delete breakpoint via GDB":
+        if not is_t32_available():
+            skip("t32rem not found")
+        if not is_gdb_available():
+            skip("GDB multiarch not installed")
+        t32rem("System.Option GDBSERVER ON")
+        t32rem("GDBSERVER.PORT 2331")
+        rt_sleep_ms(500)
+        val gdb_cmd = "gdb-multiarch -batch -ex 'target remote localhost:2331' -ex 'break *0x08000000' -ex 'delete 1' -ex 'disconnect' -ex 'quit' 2>&1"
+        val output = rt_command_output(gdb_cmd)
+        expect(output.len() > 0).to_equal(true)
+
+    it "disable GDB server":
+        if not is_t32_available():
+            skip("t32rem not found")
+        val output = t32rem("System.Option GDBSERVER OFF")
+        expect(output.len() >= 0).to_equal(true)

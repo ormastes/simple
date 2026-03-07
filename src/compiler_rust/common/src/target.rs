@@ -555,9 +555,11 @@ impl Target {
                 // Detect MinGW environment: if gcc is available, use GNU linker flavor
                 // instead of MSVC. This allows bootstrap on MSYS2/MinGW without
                 // requiring Visual Studio build tools.
-                if cfg!(target_env = "gnu") {
+                // Only check host environment when actually running on Windows;
+                // cross-compiling from Linux should default to Msvc flavor.
+                if cfg!(target_os = "windows") && cfg!(target_env = "gnu") {
                     LinkerFlavor::Gnu
-                } else if std::env::var("MSYSTEM").is_ok() {
+                } else if cfg!(target_os = "windows") && std::env::var("MSYSTEM").is_ok() {
                     // MSYS2 environment detected (MINGW64, UCRT64, etc.)
                     LinkerFlavor::Gnu
                 } else {

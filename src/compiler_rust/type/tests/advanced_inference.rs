@@ -392,7 +392,7 @@ fn infers_nested_pattern_match() {
 #[test]
 fn infers_destructuring_assignment() {
     let items = parse_items(
-        "struct Pair:\n    first: i64\n    second: i64\nlet p = Pair { first: 1, second: 2 }\nmatch p:\n    Pair { first: a, second: b } =>\n        a + b\nmain = 0"
+        "struct Pair:\n    first: i64\n    second: i64\nlet p = Pair { first: 1, second: 2 }\nmatch p:\n    Pair { first, second } =>\n        first + second\nmain = 0"
     );
     check(&items).expect("type check ok");
 }

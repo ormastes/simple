@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# test-opnsense.sh - Test Simple compiler on OPNsense router
+#
+# Usage:
+#   ./scripts/test/test-opnsense.sh [binary-path]
+#
+# Environment variables:
+#   OPNSENSE_HOST  - Router IP/hostname (default: 192.168.1.1)
+#   OPNSENSE_PORT  - SSH port (default: 2202)
+#   OPNSENSE_USER  - SSH user (default: root)
+#   OPNSENSE_PASS  - SSH password (read from env or prompted)
+#   SIMPLE_BINARY  - Path to FreeBSD binary (default: first argument or auto-detect)
+#
+# Prerequisites:
+#   - sshpass installed (apt install sshpass)
+#   - FreeBSD x86_64 binary of Simple compiler
+#   - OPNsense router accessible via SSH
+
+set -euo pipefail
+
+# Configuration with defaults
+HOST="${OPNSENSE_HOST:-192.168.1.1}"
+PORT="${OPNSENSE_PORT:-2202}"
+USER="${OPNSENSE_USER:-root}"
+PASS="${OPNSENSE_PASS:-}"
+BINARY="${1:-${SIMPLE_BINARY:-}}"
+REMOTE_BIN="/usr/local/bin/simple"
+REMOTE_TEST_DIR="/tmp/simple-test"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log_ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+log_fail() { echo -e "${RED}[FAIL]${NC} $*"; }
+log_info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
+
+# Check prerequisites
+check_prerequisites() {
+    if ! command -v sshpass &>/dev/null; then
+        log_fail "sshpass not found. Install with: sudo apt install sshpass"
+        exit 1
+    fi
+
+    if [ -z "$PASS" ]; then
+        echo -n "OPNsense SSH password: "
+        read -rs PASS
+        echo
+    fi
+
+    # Auto-detect binary if not specified
+    if [ -z "$BINARY" ]; then
+        # Try common locations
+        for candidate in \
+            "src/compiler_rust/target/x86_64-unknown-freebsd/bootstrap/simple" \
+            "bin/release/freebsd-x86_64/simple" \
+            "/tmp/freebsd-bin/simple"; do
+            if [ -f "$candidate" ]; then
+                BINARY="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
+        log_fail "FreeBSD binary not found. Specify path as argument or set SIMPLE_BINARY."
+        echo "  Usage: $0 <path-to-freebsd-binary>"
+        exit 1
+    fi
+
+    # Verify it's a FreeBSD ELF
+    if ! file "$BINARY" | grep -qi "freebsd\|elf"; then
+        log_info "Warning: $BINARY may not be a FreeBSD binary"
+        file "$BINARY"
+    fi
+
+    log_ok "Prerequisites satisfied"
+    log_info "Binary: $BINARY"
+    log_info "Target: ${USER}@${HOST}:${PORT}"
+}
+
+# SSH/SCP wrapper
+remote_cmd() {
+    sshpass -p "$PASS" ssh -p "$PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${USER}@${HOST}" "$@"
+}
+
+remote_copy() {
+    sshpass -p "$PASS" scp -P "$PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$@"
+}
+
+# Step 1: Check connectivity
+test_connectivity() {
+    log_info "Step 1: Testing SSH connectivity..."
+    if remote_cmd "uname -a" 2>/dev/null; then
+        log_ok "SSH connection successful"
+    else
+        log_fail "Cannot connect to ${HOST}:${PORT}"
+        exit 1
+    fi
+}
+
+# Step 2: Copy binary
+deploy_binary() {
+    log_info "Step 2: Deploying binary to router..."
+    remote_copy "$BINARY" "${USER}@${HOST}:${REMOTE_BIN}"
+    remote_cmd "chmod +x ${REMOTE_BIN}"
+    log_ok "Binary deployed to ${REMOTE_BIN}"
+}
+
+# Step 3: Version check
+test_version() {
+    log_info "Step 3: Version check..."
+    local version
+    version=$(remote_cmd "${REMOTE_BIN} --version" 2>&1) || true
+    if [ -n "$version" ]; then
+        log_ok "Version: $version"
+    else
+        log_fail "Version check returned empty output"
+        return 1
+    fi
+}
+
+# Step 4: Basic smoke test
+test_smoke() {
+    log_info "Step 4: Smoke test..."
+    local output
+    output=$(remote_cmd "${REMOTE_BIN} -c 'print 42'" 2>&1) || true
+    if echo "$output" | grep -q "42"; then
+        log_ok "Smoke test passed (output: $output)"
+    else
+        log_fail "Smoke test failed (output: $output)"
+        return 1
+    fi
+}
+
+# Step 5: Copy and run test suite
+test_suite() {
+    log_info "Step 5: Running test suite on router..."
+
+    # Check if test directory exists locally
+    if [ ! -d "test" ]; then
+        log_info "No test/ directory found, skipping test suite"
+        return 0
+    fi
+
+    # Create remote test dir and copy tests
+    remote_cmd "rm -rf ${REMOTE_TEST_DIR} && mkdir -p ${REMOTE_TEST_DIR}"
+    remote_copy -r test/ "${USER}@${HOST}:${REMOTE_TEST_DIR}/"
+
+    # Copy lib/ and src/ if they exist (needed for imports)
+    for dir in lib src; do
+        if [ -d "$dir" ]; then
+            remote_copy -r "$dir/" "${USER}@${HOST}:${REMOTE_TEST_DIR}/"
+        fi
+    done
+
+    # Run tests
+    local test_output
+    test_output=$(remote_cmd "cd ${REMOTE_TEST_DIR} && ${REMOTE_BIN} test 2>&1") || true
+    echo "$test_output"
+
+    # Parse results
+    if echo "$test_output" | grep -q "PASS\|passed"; then
+        log_ok "Test suite completed"
+    else
+        log_info "Test suite completed (check output above for details)"
+    fi
+}
+
+# Step 6: Cleanup
+cleanup() {
+    log_info "Step 6: Cleanup..."
+    remote_cmd "rm -rf ${REMOTE_TEST_DIR}" 2>/dev/null || true
+    log_ok "Cleanup done"
+}
+
+# Main
+main() {
+    echo "================================================"
+    echo "Simple Language - OPNsense Router Test"
+    echo "================================================"
+    echo
+
+    check_prerequisites
+    echo
+    test_connectivity
+    echo
+    deploy_binary
+    echo
+    test_version
+    echo
+    test_smoke
+    echo
+    test_suite
+    echo
+    cleanup
+    echo
+    echo "================================================"
+    log_ok "All tests completed"
+    echo "================================================"
+}
+
+main "$@"

@@ -245,6 +245,12 @@ impl LlvmBackend {
         Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
+    /// Take ownership of the LLVM module (for JIT execution engine creation).
+    #[cfg(feature = "llvm")]
+    pub fn take_module(&self) -> Option<Module<'static>> {
+        self.module.borrow_mut().take()
+    }
+
     /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {

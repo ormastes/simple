@@ -1,0 +1,244 @@
+# T32 GDB Bridge Debug Adapter
+# Wraps T32GdbBridgeClient to implement the DebugAdapter trait
+# Standard ops via GDB (through T32 GDB server), unique ops via PRACTICE.
+
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.remote.protocol.t32_gdb_bridge.T32GdbBridgeClient
+
+class T32GdbAdapter:
+    client: Option<T32GdbBridgeClient>
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+
+impl T32GdbAdapter:
+    # Create adapter from config
+    static fn connect(config: AdapterConfig) -> Result<T32GdbAdapter, text>:
+        val debug_config = DebugConfig(
+            host: config.host,
+            port: config.port,
+            target: Architecture.Arm32,
+            program: config.program,
+            options: {"backend": "trace32-gdb"}
+        )
+        val gdb_port = config.port + 100
+        val client = T32GdbBridgeClient.connect(debug_config, gdb_port)?
+
+        Ok(T32GdbAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        ))
+
+    # Factory for T32 target (Lauterbach Power Debug II with its own JTAG target)
+    static fn for_t32_target(program: text) -> AdapterConfig:
+        AdapterConfig(
+            adapter_type: "t32-gdb",
+            host: "localhost",
+            port: 20000,
+            program: program,
+            args: ["2331"],
+            timeout_ms: 30000,
+            architecture: "arm"
+        )
+
+    # Wrap existing client
+    static fn from_client(client: T32GdbBridgeClient, config: AdapterConfig) -> T32GdbAdapter:
+        T32GdbAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        )
+
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "t32-gdb"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                if program.len() > 0:
+                    client.flash_program(program)?
+                self.attached = true
+                Ok("attached via T32 GDB bridge")
+            nil:
+                Err("T32 GDB client not connected")
+
+    fn detach() -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.disconnect()
+                self.attached = false
+                Ok("detached from T32 GDB bridge")
+            nil:
+                Err("T32 GDB client not connected")
+
+    fn halt() -> Result<text, text>:
+        match self.client:
+            Some(client): client.halt()
+            nil: Err("T32 GDB client not connected")
+
+    fn resume() -> Result<text, text>:
+        match self.client:
+            Some(client): client.resume()
+            nil: Err("T32 GDB client not connected")
+
+    fn single_step() -> Result<text, text>:
+        match self.client:
+            Some(client): client.single_step()
+            nil: Err("T32 GDB client not connected")
+
+    fn step_over() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_over()
+            nil: Err("T32 GDB client not connected")
+
+    fn step_out() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_out()
+            nil: Err("T32 GDB client not connected")
+
+    fn reset() -> Result<text, text>:
+        match self.client:
+            Some(client): client.system_reset()
+            nil: Err("T32 GDB client not connected")
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        match self.client:
+            Some(client):
+                val location = "{file}:{line}"
+                client.set_breakpoint(location)
+            nil:
+                Err("T32 GDB client not connected")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_breakpoint_at_addr(addr)
+            nil: Err("T32 GDB client not connected")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.delete_breakpoint(id)
+            nil: Err("T32 GDB client not connected")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_watchpoint(expr, access)
+            nil: Err("T32 GDB client not connected")
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_locals()
+            nil: Err("T32 GDB client not connected")
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_arguments()
+            nil: Err("T32 GDB client not connected")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_globals()
+            nil: Err("T32 GDB client not connected")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.evaluate(expr)
+            nil: Err("T32 GDB client not connected")
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        match self.client:
+            Some(client): client.stack_trace()
+            nil: Err("T32 GDB client not connected")
+
+    fn stack_depth() -> Result<i32, text>:
+        match self.client:
+            Some(client): client.stack_depth()
+            nil: Err("T32 GDB client not connected")
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.select_frame(level)
+            nil: Err("T32 GDB client not connected")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        match self.client:
+            Some(client):
+                val frames = client.stack_trace()?
+                if frames.len() > 0:
+                    val f = frames[0]
+                    Ok(LocationInfo.at(f.file, f.line, f.function_name))
+                else:
+                    Err("no frames available")
+            nil:
+                Err("T32 GDB client not connected")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.client:
+            Some(client): client.read_memory(addr, size)
+            nil: Err("T32 GDB client not connected")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_memory(addr, data)
+            nil: Err("T32 GDB client not connected")
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.client:
+            Some(client): client.read_register(name)
+            nil: Err("T32 GDB client not connected")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.client:
+            Some(client): client.read_all_registers()
+            nil: Err("T32 GDB client not connected")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_register(name, value)
+            nil: Err("T32 GDB client not connected")
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context clearing not supported (hardware target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.flash_program(program)?
+                client.system_reset()?
+                Ok("program reloaded via T32 GDB bridge")
+            nil:
+                Err("T32 GDB client not connected")
+
+    # --- T32-unique operations ---
+
+    fn trace_capture(duration_ms: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.trace_capture(duration_ms)
+            nil: Err("T32 GDB client not connected")
+
+    fn coverage_collect(module: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.coverage_collect(module)
+            nil: Err("T32 GDB client not connected")
+
+    fn practice_script(script: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.practice_script(script)
+            nil: Err("T32 GDB client not connected")

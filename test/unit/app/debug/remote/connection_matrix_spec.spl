@@ -1,0 +1,248 @@
+# Connection Matrix Tests
+# Tests all 8 valid (target x debugger) combos, find/list queries.
+# Corrected matrix: STM32 via ST-Link/OpenOCD, T32 with own target, QEMU.
+
+# --- Local copies ---
+
+enum DebugTarget:
+    Stm32H7
+    Stm32Wb
+    T32PowerDebug
+    QemuArmCortexM
+    QemuRiscV32
+
+    fn to_string() -> text:
+        match self:
+            Stm32H7: "STM32H7"
+            Stm32Wb: "STM32WB"
+            T32PowerDebug: "T32 Power Debug"
+            QemuArmCortexM: "QEMU ARM Cortex-M"
+            QemuRiscV32: "QEMU RISC-V32"
+
+    fn eq(other: DebugTarget) -> bool:
+        self.to_string() == other.to_string()
+
+enum DebuggerKind:
+    StLinkTools
+    T32Native
+    T32AsGdbServer
+    OpenocdGdb
+    GdbDirectRemote
+
+    fn to_string() -> text:
+        match self:
+            StLinkTools: "ST-Link Tools"
+            T32Native: "T32 Native"
+            T32AsGdbServer: "T32 GDB Bridge"
+            OpenocdGdb: "OpenOCD+GDB"
+            GdbDirectRemote: "GDB Direct"
+
+    fn eq(other: DebuggerKind) -> bool:
+        self.to_string() == other.to_string()
+
+class ConnectionSpec:
+    index: i32
+    target: DebugTarget
+    debugger: DebuggerKind
+    transport: text
+    gdb_port: i32
+    t32_port: i32
+    cfg_path: text
+    stlink_serial: text
+
+impl ConnectionSpec:
+    fn to_string() -> text:
+        "#{self.index}: {self.target.to_string()} via {self.debugger.to_string()} (port {self.gdb_port})"
+
+    fn is_hardware() -> bool:
+        match self.target:
+            Stm32H7: true
+            Stm32Wb: true
+            T32PowerDebug: true
+            QemuArmCortexM: false
+            QemuRiscV32: false
+
+    fn is_t32() -> bool:
+        match self.debugger:
+            T32Native: true
+            T32AsGdbServer: true
+            StLinkTools: false
+            OpenocdGdb: false
+            GdbDirectRemote: false
+
+    fn is_stlink() -> bool:
+        match self.debugger:
+            StLinkTools: true
+            T32Native: false
+            T32AsGdbServer: false
+            OpenocdGdb: false
+            GdbDirectRemote: false
+
+class ConnectionMatrix:
+    specs: [ConnectionSpec]
+
+impl ConnectionMatrix:
+    static fn default() -> ConnectionMatrix:
+        ConnectionMatrix(specs: [
+            # 1: STM32H7 via ST-Link tools
+            ConnectionSpec(index: 1, target: DebugTarget.Stm32H7, debugger: DebuggerKind.StLinkTools, transport: "st-flash/st-info", gdb_port: 0, t32_port: 0, cfg_path: "", stlink_serial: "002600213137510833333639"),
+            # 2: STM32H7 via OpenOCD+GDB
+            ConnectionSpec(index: 2, target: DebugTarget.Stm32H7, debugger: DebuggerKind.OpenocdGdb, transport: "OpenOCD", gdb_port: 3333, t32_port: 0, cfg_path: "board/stm32h7x3i_eval.cfg", stlink_serial: "002600213137510833333639"),
+            # 3: STM32WB via ST-Link tools
+            ConnectionSpec(index: 3, target: DebugTarget.Stm32Wb, debugger: DebuggerKind.StLinkTools, transport: "st-flash/st-info", gdb_port: 0, t32_port: 0, cfg_path: "", stlink_serial: "0671FF555755846687041216"),
+            # 4: STM32WB via OpenOCD+GDB
+            ConnectionSpec(index: 4, target: DebugTarget.Stm32Wb, debugger: DebuggerKind.OpenocdGdb, transport: "OpenOCD", gdb_port: 3334, t32_port: 0, cfg_path: "board/stm32wb5x_nucleo.cfg", stlink_serial: "0671FF555755846687041216"),
+            # 5: T32 Power Debug via T32 Native
+            ConnectionSpec(index: 5, target: DebugTarget.T32PowerDebug, debugger: DebuggerKind.T32Native, transport: "t32rem", gdb_port: 0, t32_port: 20000, cfg_path: "t32_startup.cmm", stlink_serial: ""),
+            # 6: T32 Power Debug via T32 GDB Bridge
+            ConnectionSpec(index: 6, target: DebugTarget.T32PowerDebug, debugger: DebuggerKind.T32AsGdbServer, transport: "GDB->T32", gdb_port: 2331, t32_port: 20000, cfg_path: "t32_startup.cmm", stlink_serial: ""),
+            # 7: QEMU ARM via GDB Direct
+            ConnectionSpec(index: 7, target: DebugTarget.QemuArmCortexM, debugger: DebuggerKind.GdbDirectRemote, transport: "QEMU ARM", gdb_port: 3335, t32_port: 0, cfg_path: "", stlink_serial: ""),
+            # 8: QEMU RISC-V32 via GDB Direct
+            ConnectionSpec(index: 8, target: DebugTarget.QemuRiscV32, debugger: DebuggerKind.GdbDirectRemote, transport: "QEMU RV32", gdb_port: 1234, t32_port: 0, cfg_path: "", stlink_serial: "")
+        ])
+
+    fn count() -> i32:
+        self.specs.len()
+
+    fn get(index: i32) -> Option<ConnectionSpec>:
+        if index >= 1 and index <= self.specs.len():
+            Some(self.specs[index - 1])
+        else:
+            nil
+
+    fn find_by_target(target: DebugTarget) -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if spec.target.eq(target):
+                result = result + [spec]
+        result
+
+    fn find_by_debugger(debugger: DebuggerKind) -> [ConnectionSpec]:
+        var result: [ConnectionSpec] = []
+        for spec in self.specs:
+            if spec.debugger.eq(debugger):
+                result = result + [spec]
+        result
+
+    fn find(target: DebugTarget, debugger: DebuggerKind) -> Option<ConnectionSpec>:
+        for spec in self.specs:
+            if spec.target.eq(target) and spec.debugger.eq(debugger):
+                return Some(spec)
+        nil
+
+# --- Tests ---
+
+describe "ConnectionMatrix default":
+    it "has 8 specs":
+        val m = ConnectionMatrix.default()
+        expect(m.count()).to_equal(8)
+
+    it "spec 1 is STM32H7 via ST-Link Tools":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[0]
+        expect(s.target.to_string()).to_equal("STM32H7")
+        expect(s.debugger.to_string()).to_equal("ST-Link Tools")
+        expect(s.stlink_serial).to_equal("002600213137510833333639")
+
+    it "spec 2 is STM32H7 via OpenOCD":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[1]
+        expect(s.target.to_string()).to_equal("STM32H7")
+        expect(s.debugger.to_string()).to_equal("OpenOCD+GDB")
+        expect(s.gdb_port).to_equal(3333)
+
+    it "spec 5 is T32 Power Debug via T32 Native":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[4]
+        expect(s.target.to_string()).to_equal("T32 Power Debug")
+        expect(s.debugger.to_string()).to_equal("T32 Native")
+        expect(s.t32_port).to_equal(20000)
+
+    it "spec 8 is QEMU RV32 via GDB Direct":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[7]
+        expect(s.target.to_string()).to_equal("QEMU RISC-V32")
+        expect(s.gdb_port).to_equal(1234)
+
+describe "ConnectionMatrix queries":
+    it "find_by_target STM32H7 returns 2 specs":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_target(DebugTarget.Stm32H7)
+        expect(result.len()).to_equal(2)
+
+    it "find_by_target STM32WB returns 2 specs":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_target(DebugTarget.Stm32Wb)
+        expect(result.len()).to_equal(2)
+
+    it "find_by_target T32PowerDebug returns 2 specs":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_target(DebugTarget.T32PowerDebug)
+        expect(result.len()).to_equal(2)
+
+    it "find_by_target QEMU ARM returns 1 spec":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_target(DebugTarget.QemuArmCortexM)
+        expect(result.len()).to_equal(1)
+
+    it "find_by_debugger StLinkTools returns 2 specs":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_debugger(DebuggerKind.StLinkTools)
+        expect(result.len()).to_equal(2)
+
+    it "find_by_debugger OpenocdGdb returns 2 specs":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_debugger(DebuggerKind.OpenocdGdb)
+        expect(result.len()).to_equal(2)
+
+    it "find_by_debugger T32Native returns 1 spec":
+        val m = ConnectionMatrix.default()
+        val result = m.find_by_debugger(DebuggerKind.T32Native)
+        expect(result.len()).to_equal(1)
+
+    it "find specific combo returns correct spec":
+        val m = ConnectionMatrix.default()
+        val result = m.find(DebugTarget.Stm32H7, DebuggerKind.OpenocdGdb)
+        expect(result != nil).to_equal(true)
+
+    it "find unsupported combo returns nil":
+        val m = ConnectionMatrix.default()
+        val result = m.find(DebugTarget.QemuRiscV32, DebuggerKind.T32Native)
+        expect(result == nil).to_equal(true)
+
+    it "STM32 not connected via T32":
+        val m = ConnectionMatrix.default()
+        val result = m.find(DebugTarget.Stm32H7, DebuggerKind.T32Native)
+        expect(result == nil).to_equal(true)
+
+describe "ConnectionSpec properties":
+    it "hardware specs are marked as hardware":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[0]
+        expect(s.is_hardware()).to_equal(true)
+
+    it "T32 Power Debug is marked as hardware":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[4]
+        expect(s.is_hardware()).to_equal(true)
+
+    it "QEMU specs are not hardware":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[6]
+        expect(s.is_hardware()).to_equal(false)
+
+    it "T32 specs are marked as T32":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[4]
+        expect(s.is_t32()).to_equal(true)
+
+    it "ST-Link specs are marked as stlink":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[0]
+        expect(s.is_stlink()).to_equal(true)
+
+    it "OpenOCD specs are not T32":
+        val m = ConnectionMatrix.default()
+        val s = m.specs[1]
+        expect(s.is_t32()).to_equal(false)
