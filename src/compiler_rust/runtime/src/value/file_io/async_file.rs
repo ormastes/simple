@@ -490,5 +490,6 @@ pub extern "C" fn async_yield() {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "async_file_tests.rs"]
 mod tests;
