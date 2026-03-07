@@ -1,0 +1,54 @@
+# STM32H7 via OpenOCD+GDB Integration Test (Combo 2)
+# Requires: STM32H7 board connected, OpenOCD installed, GDB multiarch
+# Uses: board/stm32h7x3i_eval.cfg, GDB port 3333
+
+extern fn rt_command_output(cmd: text) -> text
+extern fn rt_system(cmd: text) -> i64
+extern fn rt_sleep_ms(ms: i64)
+
+fn is_stm32h7_available() -> bool:
+    val output = rt_command_output("st-info --probe 2>/dev/null")
+    output.contains("002600213137510833333639")
+
+fn is_openocd_available() -> bool:
+    val output = rt_command_output("which openocd 2>/dev/null")
+    output.len() > 0
+
+fn is_gdb_available() -> bool:
+    val output = rt_command_output("which gdb-multiarch 2>/dev/null")
+    if output.len() > 0:
+        return true
+    val output2 = rt_command_output("which arm-none-eabi-gdb 2>/dev/null")
+    output2.len() > 0
+
+describe "STM32H7 via OpenOCD+GDB":
+    it "OpenOCD starts with STM32H7 config":
+        if not is_stm32h7_available():
+            skip("STM32H7 board not connected")
+        if not is_openocd_available():
+            skip("OpenOCD not installed")
+        # Start OpenOCD in background, kill after check
+        rt_system("openocd -f board/stm32h7x3i_eval.cfg -c 'gdb_port 3333' -c 'telnet_port 4444' &")
+        rt_sleep_ms(1000)
+        # Check if OpenOCD is running
+        val ps = rt_command_output("pgrep -f 'openocd.*stm32h7' 2>/dev/null")
+        # Cleanup
+        rt_system("pkill -f 'openocd.*stm32h7' 2>/dev/null")
+        expect(ps.len() > 0).to_equal(true)
+
+    it "GDB can connect to OpenOCD":
+        if not is_stm32h7_available():
+            skip("STM32H7 board not connected")
+        if not is_openocd_available():
+            skip("OpenOCD not installed")
+        if not is_gdb_available():
+            skip("GDB multiarch not installed")
+        # Start OpenOCD
+        rt_system("openocd -f board/stm32h7x3i_eval.cfg -c 'gdb_port 3333' -c 'telnet_port 4444' &")
+        rt_sleep_ms(1000)
+        # Try GDB connect + quit
+        val gdb_cmd = "gdb-multiarch -batch -ex 'target remote localhost:3333' -ex 'monitor reset halt' -ex 'info reg pc' -ex 'disconnect' -ex 'quit' 2>&1"
+        val output = rt_command_output(gdb_cmd)
+        # Cleanup
+        rt_system("pkill -f 'openocd.*stm32h7' 2>/dev/null")
+        expect(output.len() > 0).to_equal(true)

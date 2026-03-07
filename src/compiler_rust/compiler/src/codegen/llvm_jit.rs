@@ -10,11 +10,9 @@ use std::collections::HashMap;
 
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
-use inkwell::module::Module;
 use inkwell::targets::InitializationConfig;
 use inkwell::OptimizationLevel;
 
-use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 
 use super::llvm::LlvmBackend;
@@ -53,23 +51,29 @@ impl LlvmJitCompiler {
     pub fn compile_module(&mut self, mir: &MirModule) -> Result<(), String> {
         let module_name = mir.name.as_deref().unwrap_or("jit_module");
 
-        // Create a fresh LLVM module
-        let module = self.context.create_module(module_name);
-
         // Set up the LLVM backend for compilation
         let backend =
             LlvmBackend::new(simple_common::target::Target::host()).map_err(|e| format!("LLVM backend init: {}", e))?;
 
-        // Use the backend to compile all functions into the module
-        // Forward-declare all function signatures first
+        // Initialize the backend's internal module and builder
+        backend
+            .create_module(module_name)
+            .map_err(|e| format!("LLVM JIT create module: {}", e))?;
+
+        // Forward-declare all function signatures via the backend
         for func in &mir.functions {
             let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
-            create_function_in_module(self.context, &module, &func.name, &param_types, &func.return_type)
+            backend
+                .create_function_signature(&func.name, &param_types, &func.return_type)
                 .map_err(|e| format!("LLVM JIT declare '{}': {}", func.name, e))?;
         }
 
         // Compile function bodies using the backend
-        compile_functions_into_module(&backend, &module, &mir.functions)?;
+        compile_functions_into_module(&backend, &mir.functions)?;
+
+        // Take the module from the backend to create the JIT execution engine
+        let module = backend.take_module()
+            .ok_or_else(|| "LLVM JIT: failed to take module from backend".to_string())?;
 
         // Create JIT execution engine from the compiled module
         let ee = module
@@ -128,74 +132,12 @@ impl LlvmJitCompiler {
     }
 }
 
-/// Check if a TypeId represents a floating-point type.
-fn is_float_type(ty: &TypeId) -> bool {
-    *ty == TypeId::F32 || *ty == TypeId::F64
-}
-
-/// Check if a TypeId represents an integer or integer-like type.
-fn is_integer_type(ty: &TypeId) -> bool {
-    *ty == TypeId::I64
-        || *ty == TypeId::I32
-        || *ty == TypeId::I16
-        || *ty == TypeId::I8
-        || *ty == TypeId::U64
-        || *ty == TypeId::U32
-        || *ty == TypeId::U16
-        || *ty == TypeId::U8
-        || *ty == TypeId::BOOL
-        || *ty == TypeId::CHAR
-}
-
-/// Create a function declaration in an LLVM module.
-fn create_function_in_module<'a>(
-    context: &'a Context,
-    module: &Module<'a>,
-    name: &str,
-    param_types: &[TypeId],
-    return_type: &TypeId,
-) -> Result<(), String> {
-    use inkwell::types::BasicMetadataTypeEnum;
-
-    let i64_type = context.i64_type();
-    let f64_type = context.f64_type();
-    let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
-
-    let map_type = |ty: &TypeId| -> BasicMetadataTypeEnum {
-        if is_float_type(ty) {
-            f64_type.into()
-        } else if is_integer_type(ty) {
-            i64_type.into()
-        } else if *ty == TypeId::STRING {
-            ptr_type.into()
-        } else {
-            // Composite types (arrays, tuples, structs, refs) and unknown → pointer
-            // Default to i64 for unrecognized primitive-like types
-            i64_type.into()
-        }
-    };
-
-    let params: Vec<BasicMetadataTypeEnum> = param_types.iter().map(|t| map_type(t)).collect();
-
-    let fn_type = if is_float_type(return_type) {
-        f64_type.fn_type(&params, false)
-    } else if *return_type == TypeId::VOID {
-        context.void_type().fn_type(&params, false)
-    } else {
-        i64_type.fn_type(&params, false)
-    };
-
-    module.add_function(name, fn_type, None);
-    Ok(())
-}
-
-/// Compile function bodies into an LLVM module.
+/// Compile function bodies using the backend's internal module.
 ///
 /// This is a simplified compilation path. For full feature support,
 /// functions are compiled through the LlvmBackend's emitter pipeline.
 fn compile_functions_into_module(
     backend: &LlvmBackend,
-    _module: &Module<'_>,
     functions: &[MirFunction],
 ) -> Result<(), String> {
     for func in functions {

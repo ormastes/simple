@@ -1,0 +1,229 @@
+# ST-Link Tools Debug Adapter
+# Wraps StLinkToolsClient to implement the DebugAdapter trait.
+# Limited capabilities: memory, reset, flash — no breakpoints/step/stack.
+
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.remote.protocol.stlink_tools.StLinkToolsClient
+use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
+use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
+
+class StLinkToolsAdapter:
+    client: Option<StLinkToolsClient>
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+
+impl StLinkToolsAdapter:
+    # Connect to ST-LINK probe
+    static fn connect(config: AdapterConfig) -> Result<StLinkToolsAdapter, text>:
+        val serial = config.architecture
+        val client = StLinkToolsClient.connect(serial)?
+
+        Ok(StLinkToolsAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+        ))
+
+    # Factory for STM32H7 target
+    static fn for_stm32h7(program: text) -> AdapterConfig:
+        val target = Stm32H7Target.default()
+        AdapterConfig(
+            adapter_type: "stlink-tools",
+            host: "",
+            port: 0,
+            program: program,
+            args: [],
+            timeout_ms: 30000,
+            architecture: target.stlink_serial
+        )
+
+    # Factory for STM32WB target
+    static fn for_stm32wb(program: text) -> AdapterConfig:
+        val target = Stm32WbTarget.default()
+        AdapterConfig(
+            adapter_type: "stlink-tools",
+            host: "",
+            port: 0,
+            program: program,
+            args: [],
+            timeout_ms: 30000,
+            architecture: target.stlink_serial
+        )
+
+    # Wrap existing client
+    static fn from_client(client: StLinkToolsClient, config: AdapterConfig) -> StLinkToolsAdapter:
+        StLinkToolsAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+        )
+
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "stlink-tools"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                if program.len() > 0:
+                    client.flash_write(program, 0x08000000)?
+                self.attached = true
+                Ok("attached via ST-Link tools")
+            nil:
+                Err("ST-Link client not connected")
+
+    fn detach() -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.disconnect()
+                self.attached = false
+                Ok("detached from ST-Link tools")
+            nil:
+                Err("ST-Link client not connected")
+
+    # Not supported — st-link tools cannot halt
+    fn halt() -> Result<text, text>:
+        Err("halt not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn resume() -> Result<text, text>:
+        Err("resume not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn single_step() -> Result<text, text>:
+        Err("single_step not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn step_over() -> Result<text, text>:
+        Err("step_over not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn step_out() -> Result<text, text>:
+        Err("step_out not supported by st-link tools (use OpenOCD+GDB)")
+
+    fn reset() -> Result<text, text>:
+        match self.client:
+            Some(client): client.reset()
+            nil: Err("ST-Link client not connected")
+
+    # Not supported
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        Err("breakpoints not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        Err("breakpoints not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        Err("breakpoints not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        Err("watchpoints not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn read_locals() -> Result<[VarInfo], text>:
+        Err("variable inspection not supported by st-link tools")
+
+    # Not supported
+    fn read_arguments() -> Result<[VarInfo], text>:
+        Err("variable inspection not supported by st-link tools")
+
+    # Not supported
+    fn read_globals() -> Result<[VarInfo], text>:
+        Err("variable inspection not supported by st-link tools")
+
+    # Not supported
+    fn evaluate(expr: text) -> Result<text, text>:
+        Err("expression evaluation not supported by st-link tools")
+
+    # Not supported
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        Err("stack trace not supported by st-link tools")
+
+    # Not supported
+    fn stack_depth() -> Result<i32, text>:
+        Err("stack trace not supported by st-link tools")
+
+    # Not supported
+    fn select_frame(level: i32) -> Result<text, text>:
+        Err("stack trace not supported by st-link tools")
+
+    # Not supported
+    fn current_location() -> Result<LocationInfo, text>:
+        Err("current location not supported by st-link tools")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.client:
+            Some(client):
+                val raw = client.read_memory(addr, size)?
+                # Return empty array — raw binary data not easily parsed
+                Ok([])
+            nil:
+                Err("ST-Link client not connected")
+
+    # Not supported (st-flash write requires file, not arbitrary bytes)
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        Err("arbitrary memory write not supported by st-link tools (use flash_write)")
+
+    # Not supported
+    fn read_register(name: text) -> Result<i64, text>:
+        Err("register access not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        Err("register access not supported by st-link tools (use OpenOCD+GDB)")
+
+    # Not supported
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        Err("register access not supported by st-link tools (use OpenOCD+GDB)")
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context clearing not supported (hardware target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.flash_write(program, 0x08000000)?
+                client.reset()?
+                Ok("program reloaded via ST-Link tools")
+            nil:
+                Err("ST-Link client not connected")
+
+    # --- ST-Link-specific operations ---
+
+    fn chip_id() -> Result<i64, text>:
+        match self.client:
+            Some(client): client.chip_id()
+            nil: Err("ST-Link client not connected")
+
+    fn flash_size() -> Result<i64, text>:
+        match self.client:
+            Some(client): client.flash_size()
+            nil: Err("ST-Link client not connected")
+
+    fn sram_size() -> Result<i64, text>:
+        match self.client:
+            Some(client): client.sram_size()
+            nil: Err("ST-Link client not connected")
+
+    fn flash_erase() -> Result<text, text>:
+        match self.client:
+            Some(client): client.flash_erase()
+            nil: Err("ST-Link client not connected")

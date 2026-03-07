@@ -156,12 +156,8 @@ fn runner_runs_from_file() {
     let exit = runner.run_file(&src_path).expect("run from file");
     assert_eq!(exit, 0);
 
-    // SMF files are now stored in .simple/build/ directory
-    let build_dir = src_path.parent().unwrap().join(".simple").join("build");
-    let file_stem = src_path.file_stem().unwrap();
-    let smf_path = build_dir.join(file_stem).with_extension("smf");
-    let meta = std::fs::metadata(&smf_path).expect("smf emitted");
-    assert!(meta.len() > 0, "smf should not be empty");
+    // Note: The interpreter mode (Runner::run_file) does not emit .smf files.
+    // Only compilation mode creates .smf output. Just verify execution succeeded.
 }
 
 #[test]
@@ -256,7 +252,7 @@ fn cli_flag_emits_gc_logs() {
     let src_path = dir.path().join("main.spl");
     std::fs::write(&src_path, "main = 0").unwrap();
 
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("run").arg(&src_path).arg("--gc-log");
 
     // Note: `simple run` uses interpreter mode and doesn't create .smf files
@@ -418,7 +414,7 @@ main = res
 /// Regression: CLI should accept spec `case` match arms; currently fails.
 #[test]
 fn runner_cli_case_match_rejects_spec_syntax() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c")
         .arg("let x: i32 = 2\nmatch x:\n    case 2:\n        main = 20\n    case _:\n        main = 0");
     cmd.assert().code(20).stdout(contains("20"));
@@ -427,7 +423,7 @@ fn runner_cli_case_match_rejects_spec_syntax() {
 /// Regression: CLI rejects `match` even with `=>` syntax (should succeed).
 #[test]
 fn runner_cli_match_arrow_rejects_basic_syntax() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c")
         .arg("let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0");
     cmd.assert().code(20).stdout(contains("20"));
@@ -444,7 +440,7 @@ fn runner_cli_match_arrow_file_rejects_basic_syntax() {
     )
     .expect("write main.spl");
 
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg(&main_path);
     cmd.assert().code(20);
 }
@@ -452,7 +448,7 @@ fn runner_cli_match_arrow_file_rejects_basic_syntax() {
 /// Regression: CLI rejects match guards with spec `case` syntax.
 #[test]
 fn runner_cli_case_guard_rejects_spec_syntax() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c")
         .arg("let x: i32 = 3\nmatch x:\n    case n if n > 0:\n        main = 1\n    case _:\n        main = 0");
     cmd.assert().code(1).stdout(contains("1"));
@@ -461,7 +457,7 @@ fn runner_cli_case_guard_rejects_spec_syntax() {
 /// Regression: mixed match syntax (case + =>) rejected by CLI.
 #[test]
 fn runner_cli_match_mixed_syntax_rejects() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c").arg(
         "let x: i32 = 2\nmatch x:\n    case 1:\n        main = 10\n    2 =>\n        main = 20\n    _ =>\n        main = 0",
     );
@@ -471,7 +467,7 @@ fn runner_cli_match_mixed_syntax_rejects() {
 /// Regression: match inside function rejected in CLI executable path.
 #[test]
 fn runner_cli_match_inside_function_rejects() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c").arg(
         "fn f(x: i32) -> i32:\n    match x:\n        1 =>\n            return 10\n        _ =>\n            return 0\nmain = f(1)",
     );
@@ -481,7 +477,7 @@ fn runner_cli_match_inside_function_rejects() {
 /// Regression: destructuring patterns rejected in CLI executable path.
 #[test]
 fn runner_cli_match_destructuring_rejects() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c").arg(
         "let tup: (i32, i32) = (1, 2)\nmatch tup:\n    (a, b) =>\n        main = a + b\n    _ =>\n        main = 0",
     );
@@ -501,7 +497,7 @@ fn runner_cli_match_in_imported_module_rejects() {
     let main_path = dir.path().join("main.spl");
     fs::write(&main_path, "use lib\nmain = lib::classify(0)").expect("write main.spl");
 
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.current_dir(dir.path());
     cmd.arg(&main_path);
     cmd.assert().code(0);
@@ -520,7 +516,7 @@ fn runner_cli_match_in_imported_module_dot_call() {
     let main_path = dir.path().join("main.spl");
     fs::write(&main_path, "use lib\nmain = lib.classify(0)").expect("write main.spl");
 
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.current_dir(dir.path());
     cmd.arg(&main_path);
     cmd.assert().code(0);
@@ -529,7 +525,7 @@ fn runner_cli_match_in_imported_module_dot_call() {
 /// Regression: array destructuring rejected in CLI executable path.
 #[test]
 fn runner_cli_array_destructuring_rejects() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c").arg(
         "let arr: [i32] = [1, 2, 3]\nmatch arr:\n    [a, b, c] =>\n        main = a + b + c\n    _ =>\n        main = 0",
     );
@@ -539,7 +535,7 @@ fn runner_cli_array_destructuring_rejects() {
 /// Regression: guard referencing outer binding rejected in CLI executable path.
 #[test]
 fn runner_cli_guard_outer_binding_rejects() {
-    let mut cmd = Command::cargo_bin("simple_runtime").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("-c").arg(
         "let y: i32 = 2\nlet x: i32 = 2\nmatch x:\n    case y if x == y:\n        main = 1\n    _ =>\n        main = 0",
     );

@@ -80,8 +80,8 @@ Status: All 9 leak categories fixed. Zero ASan leaks across 42 code paths.
 ## Verification
 
 - **Test:** `bin/simple test/unit/memleak/c_runtime_leak_spec.spl` — 30/30 pass
-- **ASan:** `ASAN_OPTIONS=detect_leaks=1 build-asan/simple <cmd>` — 42 paths, zero leaks
-- **Build:** `cmake -B build-asan ... && ninja -C build-asan`
+- **ASan:** `ASAN_OPTIONS=detect_leaks=1 build/asan/simple <cmd>` — 42 paths, zero leaks
+- **Build:** `cmake -B build/asan ... && ninja -C build/asan`
 
 ## Test File
 

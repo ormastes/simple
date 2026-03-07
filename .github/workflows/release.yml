@@ -537,6 +537,79 @@ jobs:
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
           fi
 
+      - name: Build FreeBSD cross-compile binary via Rust
+        if: runner.os == 'Linux' && contains(matrix.platform, 'freebsd')
+        shell: bash
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Cross-compiling FreeBSD binary from Linux"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Map platform to Rust target
+          case "${{ matrix.platform }}" in
+            freebsd-x86_64)
+              RUST_TARGET="x86_64-unknown-freebsd"
+              SYSROOT_URL="https://archive.freebsd.org/old-releases/amd64/14.1-RELEASE/base.txz"
+              CLANG_TARGET="x86_64-unknown-freebsd14.1"
+              ;;
+            freebsd-x86)
+              RUST_TARGET="i686-unknown-freebsd"
+              SYSROOT_URL="https://archive.freebsd.org/old-releases/i386/13.2-RELEASE/base.txz"
+              CLANG_TARGET="i686-unknown-freebsd13.2"
+              ;;
+            *)
+              echo "Unsupported FreeBSD platform: ${{ matrix.platform }}"
+              echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+              exit 0
+              ;;
+          esac
+
+          # Install dependencies
+          rustup toolchain install stable 2>/dev/null || true
+          rustup target add "$RUST_TARGET" 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lld clang
+
+          # Download FreeBSD sysroot
+          curl -L -o /tmp/freebsd-base.txz "$SYSROOT_URL"
+          sudo mkdir -p /opt/sysroots/freebsd
+          sudo tar xf /tmp/freebsd-base.txz -C /opt/sysroots/freebsd \
+            ./usr/include ./usr/lib ./lib
+          sudo chmod -R a+rX /opt/sysroots/freebsd
+
+          # Configure Cargo for FreeBSD cross-compilation
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<CARGO_EOF
+          [target.${RUST_TARGET}]
+          linker = "clang"
+          rustflags = [
+            "-C", "link-arg=--target=${CLANG_TARGET}",
+            "-C", "link-arg=--sysroot=/opt/sysroots/freebsd",
+            "-C", "link-arg=-fuse-ld=lld",
+          ]
+          CARGO_EOF
+
+          # Build Rust seed for FreeBSD (Cranelift only, no LLVM)
+          cd src/compiler_rust
+          CC_${RUST_TARGET//-/_}="clang" \
+          CFLAGS_${RUST_TARGET//-/_}="--target=${CLANG_TARGET} --sysroot=/opt/sysroots/freebsd -Wno-error=implicit-function-declaration" \
+          cargo build --profile bootstrap -p simple-driver --target "$RUST_TARGET"
+          cd ../..
+
+          SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple"
+          if [ -f "$SEED" ]; then
+            echo "Cross-compiled FreeBSD binary built"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            file "$SEED"
+            ls -lh "$SEED"
+          else
+            echo "Cross-compilation failed"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+          fi
+
       - name: Create distribution package
         shell: bash
         run: |

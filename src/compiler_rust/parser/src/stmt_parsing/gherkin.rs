@@ -361,11 +361,11 @@ mod tests {
         let src = r#"feature Calculator:
     scenario Add two numbers:
         given fresh calculator:
-        when add 5:
+        when "add 5":
         then value is 5:
 "#;
         let result = parse_source(src);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let module = result.unwrap();
         assert_eq!(module.items.len(), 1);
         // Should be feature("Calculator", do_block)
@@ -410,10 +410,10 @@ mod tests {
     fn test_parse_scenario_outline_as_call() {
         let src = r#"scenario outline Addition:
     given calculator at 0:
-    when add n:
+    when "add n":
 "#;
         let result = parse_source(src);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let module = result.unwrap();
         if let Node::Expression(Expr::Call { callee, .. }) = &module.items[0] {
             if let Expr::Identifier(name) = callee.as_ref() {
@@ -448,11 +448,11 @@ mod tests {
 
     #[test]
     fn test_parse_step_with_placeholder() {
-        let src = r#"when add <n>:
+        let src = r#"when "add <n>":
     calc.add(n)
 "#;
         let result = parse_source(src);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let module = result.unwrap();
         if let Node::Expression(Expr::Call { callee, args }) = &module.items[0] {
             if let Expr::Identifier(name) = callee.as_ref() {
