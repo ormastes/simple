@@ -1023,7 +1023,8 @@ fn compile_file_to_object(
     re_exports: &std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
 ) -> Result<Vec<u8>, String> {
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
-    let mut source = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    let mut source = if is_bootstrap {
         // Protect ?? (null coalesce) before stripping ? from types
         let mut s = source.replace("??", "\x00COALESCE\x00");
 
