@@ -447,6 +447,46 @@ jobs:
           file "$SEED"
           ls -lh "$SEED"
 
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows' && !matrix.cross_compile
+        shell: bash
+        run: |
+          choco install llvm --version=18.1.8 -y --no-progress
+          echo "SIMPLE_LLVM_PATH=C:/Program Files/LLVM/bin/LLVM-C.dll" >> "$GITHUB_ENV"
+
+      - name: Self-host with LLVM lib backend (Windows stage2)
+        if: runner.os == 'Windows' && !matrix.cross_compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          NATIVE_BIN="build/bootstrap/stage1/simple.exe"
+          if [ ! -f "$NATIVE_BIN" ]; then
+            echo "Skipping LLVM stage2 — no stage1 binary"
+            exit 0
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Self-host stage2 with --backend=llvm-lib"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          mkdir -p build/bootstrap/stage2
+          SIMPLE_LIB="$(pwd)/src" SIMPLE_BOOTSTRAP=1 \
+            "./$NATIVE_BIN" native-build \
+            --source-dir src \
+            --entry src/app/cli/bootstrap_main.spl \
+            --output build/bootstrap/stage2/simple.exe \
+            --backend=llvm-lib \
+            2>&1 || true
+
+          STAGE2="build/bootstrap/stage2/simple.exe"
+          if [ -f "$STAGE2" ]; then
+            "./$STAGE2" --version && "./$STAGE2" -c "print 42"
+            echo "LLVM lib stage2 verified — updating binary"
+            echo "NEW_RUNTIME_PATH=$(pwd)/$STAGE2" >> $GITHUB_ENV
+            file "$STAGE2"
+            ls -lh "$STAGE2"
+          else
+            echo "LLVM lib stage2 failed — using stage1 binary"
+          fi
+
       - name: Build Windows cross-compile binary via Rust
         if: runner.os == 'Linux' && contains(matrix.platform, 'windows') && matrix.cross_compile
         shell: bash

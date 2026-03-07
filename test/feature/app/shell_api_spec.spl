@@ -174,159 +174,175 @@ val dir = DirApi()
 val path = PathApi()
 val env = EnvApi()
 
+val tmp = rt_env_get("TEMP") ?? rt_env_get("TMPDIR") ?? "/tmp"
+
+# Platform detection: this spec uses /bin/sh, ls, find, etc. — Unix only
+val _os_val = rt_env_get("OS") ?? ""
+val _os_lower = _os_val.lower()
+val is_windows = _os_lower.contains("windows")
+
 fn check(condition: bool):
     expect(condition).to_equal(true)
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
 
-# ## Test: Process Execution
+# ## Test: Process Execution (Unix only — uses /bin/sh)
 
-it "execute_command_basic":
-    val result = shell.run("echo hello")
-    check(result.ok())
-    check(result.stdout == "hello\n")
-    check(result.exit_code == 0)
+if not is_windows:
+    it "execute_command_basic":
+        val result = shell.run("echo hello")
+        check(result.ok())
+        check(result.stdout == "hello\n")
+        check(result.exit_code == 0)
 
-it "execute_command_with_args":
-    val result = shell.run("ls -la /tmp")
-    check(result.ok())
-    check(result.stdout.contains("total"))
+    it "execute_command_with_args":
+        val result = shell.run("ls -la {tmp}")
+        check(result.ok())
+        check(result.stdout.contains("total"))
 
-it "execute_command_capture_stderr":
-    val result = shell.run("ls /nonexistent_path_xyz 2>&1")
-    check(result.stdout.contains("No such file") or result.exit_code != 0)
+    it "execute_command_capture_stderr":
+        val result = shell.run("ls /nonexistent_path_xyz 2>&1")
+        check(result.stdout.contains("No such file") or result.exit_code != 0)
 
 # ## Test: File Operations
 
-it "read_file_contents":
-    val content = file.read_text("/etc/hostname")
-    check(content.len() > 0)
+if not is_windows:
+    it "read_file_contents":
+        val content = file.read_text("/etc/hostname")
+        check(content.len() > 0)
 
 it "write_file_contents":
-    file.write_text("/tmp/simple_test_shell_api.txt", "hello world")
-    val content = file.read_text("/tmp/simple_test_shell_api.txt")
+    file.write_text("{tmp}/simple_test_shell_api.txt", "hello world")
+    val content = file.read_text("{tmp}/simple_test_shell_api.txt")
     check(content == "hello world")
-    file.delete("/tmp/simple_test_shell_api.txt")
+    file.delete("{tmp}/simple_test_shell_api.txt")
 
 it "append_to_file":
-    file.write_text("/tmp/simple_test_append.txt", "line 1\n")
-    file.append_text("/tmp/simple_test_append.txt", "line 2\n")
-    val content = file.read_text("/tmp/simple_test_append.txt")
+    file.write_text("{tmp}/simple_test_append.txt", "line 1\n")
+    file.append_text("{tmp}/simple_test_append.txt", "line 2\n")
+    val content = file.read_text("{tmp}/simple_test_append.txt")
     check(content == "line 1\nline 2\n")
-    file.delete("/tmp/simple_test_append.txt")
+    file.delete("{tmp}/simple_test_append.txt")
 
-it "check_file_exists":
-    check(file.exists("/etc/hostname"))
-    check(not file.exists("/nonexistent/file.txt"))
+if not is_windows:
+    it "check_file_exists":
+        check(file.exists("/etc/hostname"))
+        check(not file.exists("/nonexistent/file.txt"))
 
-# ## Test: Directory Operations
+# ## Test: Directory Operations (Unix only — uses ls, find via /bin/sh)
 
-it "list_directory":
-    val entries = dir.list("/tmp")
-    check(entries.len() > 0)
+if not is_windows:
+    it "list_directory":
+        val entries = dir.list(tmp)
+        check(entries.len() > 0)
 
-it "list_directory_with_pattern":
-    file.write_text("/tmp/simple_glob_test.txt", "test")
-    val txt_files = dir.glob_files("/tmp", "simple_glob_test.txt")
-    check(txt_files.len() > 0)
-    file.delete("/tmp/simple_glob_test.txt")
+    it "list_directory_with_pattern":
+        file.write_text("{tmp}/simple_glob_test.txt", "test")
+        val txt_files = dir.glob_files(tmp, "simple_glob_test.txt")
+        check(txt_files.len() > 0)
+        file.delete("{tmp}/simple_glob_test.txt")
 
-it "create_directory":
-    dir.create("/tmp/simple_test_nested/a/b")
-    check(dir.exists("/tmp/simple_test_nested/a/b"))
-    dir.remove("/tmp/simple_test_nested")
+    it "create_directory":
+        dir.create("{tmp}/simple_test_nested/a/b")
+        check(dir.exists("{tmp}/simple_test_nested/a/b"))
+        dir.remove("{tmp}/simple_test_nested")
 
-it "remove_directory":
-    dir.create("/tmp/simple_test_rmdir/sub")
-    dir.remove("/tmp/simple_test_rmdir")
-    check(not dir.exists("/tmp/simple_test_rmdir"))
+    it "remove_directory":
+        dir.create("{tmp}/simple_test_rmdir/sub")
+        dir.remove("{tmp}/simple_test_rmdir")
+        check(not dir.exists("{tmp}/simple_test_rmdir"))
 
-# ## Test: Path Operations
+# ## Test: Path Operations (Unix only — uses basename, dirname, realpath via /bin/sh)
 
-it "join_paths":
-    val result = path.join_parts("/home", "user", "file.txt")
-    check(result == "/home/user/file.txt")
+if not is_windows:
+    it "join_paths":
+        val result = path.join_parts("/home", "user", "file.txt")
+        check(result == "/home/user/file.txt")
 
-it "get_basename":
-    check(path.basename("/home/user/file.txt") == "file.txt")
-    check(path.basename("/home/user/") == "user")
+    it "get_basename":
+        check(path.basename("/home/user/file.txt") == "file.txt")
+        check(path.basename("/home/user/") == "user")
 
-it "get_dirname":
-    check(path.dirname("/home/user/file.txt") == "/home/user")
+    it "get_dirname":
+        check(path.dirname("/home/user/file.txt") == "/home/user")
 
-it "get_extension":
-    check(path.ext("/home/user/file.txt") == ".txt")
-    check(path.ext("/home/user/archive.tar.gz") == ".gz")
+    it "get_extension":
+        check(path.ext("/home/user/file.txt") == ".txt")
+        check(path.ext("/home/user/archive.tar.gz") == ".gz")
 
-it "absolute_path":
-    val abs = path.absolute("../file.txt")
-    check(abs.starts_with("/"))
+    it "absolute_path":
+        val abs = path.absolute("../file.txt")
+        check(abs.starts_with("/"))
 
 # ## Test: Environment Variables
 
 it "get_environment_variable":
-    val home = env.get_with_default("HOME", "/tmp")
+    val home = env.get_with_default("HOME", tmp)
     check(home.len() > 0)
 
     val missing = env.get_with_default("NONEXISTENT_SIMPLE_VAR_XYZ", "default")
     check(missing == "default")
 
-it "set_environment_variable":
-    env.set("SIMPLE_TEST_VAR", "test_value")
-    val result = shell.run("echo $SIMPLE_TEST_VAR")
-    check(result.stdout.trim() == "test_value")
+if not is_windows:
+    it "set_environment_variable":
+        env.set("SIMPLE_TEST_VAR", "test_value")
+        val result = shell.run("echo $SIMPLE_TEST_VAR")
+        check(result.stdout.trim() == "test_value")
 
 # ## Test: Error Handling
 
-it "command_failure_result":
-    val result = shell.run("false")
-    check(not result.ok())
-    check(result.exit_code != 0)
+if not is_windows:
+    it "command_failure_result":
+        val result = shell.run("false")
+        check(not result.ok())
+        check(result.exit_code != 0)
 
 it "file_not_found_error":
     val content = file.read_text("/nonexistent_xyz_path")
     check(content == "")
 
-# ## Test: Piping and Chaining
+# ## Test: Piping and Chaining (Unix only — uses grep, wc via /bin/sh)
 
-it "pipe_commands":
-    val result = shell.pipe([
-        ["echo", "hello world"],
-        ["grep", "world"],
-        ["wc", "-l"]
-    ])
-    check(result.stdout.trim() == "1")
+if not is_windows:
+    it "pipe_commands":
+        val result = shell.pipe([
+            ["echo", "hello world"],
+            ["grep", "world"],
+            ["wc", "-l"]
+        ])
+        check(result.stdout.trim() == "1")
 
 it "chain_operations":
-    file.write_text("/tmp/simple_chain_test.txt", "line1\nline2\nline3")
-    val content = file.read_text("/tmp/simple_chain_test.txt")
+    file.write_text("{tmp}/simple_chain_test.txt", "line1\nline2\nline3")
+    val content = file.read_text("{tmp}/simple_chain_test.txt")
     val lines = content.split("\n")
     var count = 0
     for l in lines:
         if l.len() > 0:
             count = count + 1
     check(count == 3)
-    file.delete("/tmp/simple_chain_test.txt")
+    file.delete("{tmp}/simple_chain_test.txt")
 
-# ## Test: Script Utilities
+# ## Test: Script Utilities (Unix only — uses find via /bin/sh)
 
-it "find_files_recursive":
-    file.write_text("/tmp/simple_find_test.txt", "test")
-    val files = file.find_files("/tmp", "simple_find_test.txt")
-    check(files.len() > 0)
-    file.delete("/tmp/simple_find_test.txt")
+if not is_windows:
+    it "find_files_recursive":
+        file.write_text("{tmp}/simple_find_test.txt", "test")
+        val files = file.find_files(tmp, "simple_find_test.txt")
+        check(files.len() > 0)
+        file.delete("{tmp}/simple_find_test.txt")
 
 it "copy_file":
-    file.write_text("/tmp/simple_copy_src.txt", "content")
-    file.copy("/tmp/simple_copy_src.txt", "/tmp/simple_copy_dst.txt")
-    check(file.read_text("/tmp/simple_copy_dst.txt") == "content")
-    file.delete("/tmp/simple_copy_src.txt")
-    file.delete("/tmp/simple_copy_dst.txt")
+    file.write_text("{tmp}/simple_copy_src.txt", "content")
+    file.copy("{tmp}/simple_copy_src.txt", "{tmp}/simple_copy_dst.txt")
+    check(file.read_text("{tmp}/simple_copy_dst.txt") == "content")
+    file.delete("{tmp}/simple_copy_src.txt")
+    file.delete("{tmp}/simple_copy_dst.txt")
 
 it "move_file":
-    file.write_text("/tmp/simple_move_old.txt", "content")
-    rt_file_rename("/tmp/simple_move_old.txt", "/tmp/simple_move_new.txt")
-    check(file.exists("/tmp/simple_move_new.txt"))
-    check(not file.exists("/tmp/simple_move_old.txt"))
-    file.delete("/tmp/simple_move_new.txt")
+    file.write_text("{tmp}/simple_move_old.txt", "content")
+    rt_file_rename("{tmp}/simple_move_old.txt", "{tmp}/simple_move_new.txt")
+    check(file.exists("{tmp}/simple_move_new.txt"))
+    check(not file.exists("{tmp}/simple_move_old.txt"))
+    file.delete("{tmp}/simple_move_new.txt")

@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'src/compiler_rust/**'
+      - 'src/lib/nogc_sync_mut/ffi/llvm.spl'
       - '.github/workflows/windows-build.yml'
   workflow_dispatch:
 
@@ -35,13 +36,21 @@ jobs:
         if: matrix.toolchain == 'msvc'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # MinGW: set up MSYS2 with GCC toolchain
+      # MSVC: Install LLVM for llvm-lib backend testing
+      - name: Install LLVM (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: bash
+        run: |
+          choco install llvm --version=18.1.8 -y --no-progress
+          echo "SIMPLE_LLVM_PATH=C:/Program Files/LLVM/bin/LLVM-C.dll" >> "$GITHUB_ENV"
+
+      # MinGW: set up MSYS2 with GCC + LLVM toolchain
       - name: Setup MSYS2 (MinGW)
         if: matrix.toolchain == 'mingw'
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-llvm
 
       - name: Add MinGW to PATH
         if: matrix.toolchain == 'mingw'
@@ -110,6 +119,40 @@ jobs:
           mkdir -p build/bootstrap
           "$SEED" native-build --entry src/app/cli/bootstrap_main.spl \
             -o build/bootstrap/simple_stage2.exe
+
+      # Stage 2 LLVM: compile Simple compiler using stage1 + LLVM lib backend
+      - name: Stage 2 with LLVM lib backend
+        continue-on-error: true
+        shell: bash
+        env:
+          SIMPLE_BOOTSTRAP: "1"
+        run: |
+          STAGE1="build/bootstrap/simple_stage2.exe"
+          if [ ! -f "$STAGE1" ]; then
+            echo "Skipping LLVM stage2 — no stage1 binary"
+            exit 0
+          fi
+          mkdir -p build/bootstrap
+          "./$STAGE1" native-build \
+            --entry src/app/cli/bootstrap_main.spl \
+            --backend=llvm-lib \
+            -o build/bootstrap/simple_llvm_stage2.exe \
+            2>&1 || true
+          if [ -f build/bootstrap/simple_llvm_stage2.exe ]; then
+            ./build/bootstrap/simple_llvm_stage2.exe --version
+            echo "LLVM lib stage2 verified"
+          else
+            echo "LLVM lib stage2 not produced (expected during early development)"
+          fi
+
+      - name: Upload LLVM stage2 binary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llvm-stage2-${{ matrix.toolchain }}-${{ github.sha }}
+          path: build/bootstrap/simple_llvm_stage2.exe
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload seed binary
         uses: actions/upload-artifact@v4
