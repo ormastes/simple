@@ -121,4 +121,4 @@ use compiler.mir.mir_instructions.{MirInst}
 ## See Also
 
 - [Friend Access Control](friend_access_control.md) — `friend` declarations and visibility modifiers
-- [Syntax Quick Reference](../guide/syntax_quick_reference.md) — language syntax
+- [Syntax Quick Reference](../guide/quick_reference/syntax_quick_reference.md) — language syntax

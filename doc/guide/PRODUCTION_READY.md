@@ -152,7 +152,7 @@ bin/simple run hello.spl
 
 ### For Users
 1. Download the compiler
-2. Read `doc/guide/syntax_quick_reference.md`
+2. Read `doc/guide/quick_reference/syntax_quick_reference.md`
 3. Try the examples
 4. Build your project
 
@@ -166,7 +166,7 @@ bin/simple run hello.spl
 
 ## Documentation
 
-- **Quick Reference:** `doc/guide/syntax_quick_reference.md`
+- **Quick Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Release Notes:** `doc/RELEASE_2026-02-14.md`
 - **Production Summary:** `doc/PRODUCTION_READY_SUMMARY.md`
 - **Session Reports:** `doc/session/*_2026-02-14.md` (8 files)

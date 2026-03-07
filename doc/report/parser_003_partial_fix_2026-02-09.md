@@ -164,7 +164,7 @@ bin/simple mycode.smf
 
 1. **Document Limitation**
    - Add to `MEMORY.md` as permanent limitation
-   - Update `doc/guide/syntax_quick_reference.md`
+   - Update `doc/guide/quick_reference/syntax_quick_reference.md`
    - Add note in error messages
 
 2. **Keep Workarounds**
@@ -210,7 +210,7 @@ bin/simple mycode.smf
 ### Documentation (Next Phase):
 - ⏳ `doc/bug/bug_db.sdn` - Update parser_003 status
 - ⏳ `MEMORY.md` - Add permanent limitation note
-- ⏳ `doc/guide/syntax_quick_reference.md` - Document workaround
+- ⏳ `doc/guide/quick_reference/syntax_quick_reference.md` - Document workaround
 - ⏳ `BUG_FIX_SUMMARY.md` - Update with findings
 
 ---

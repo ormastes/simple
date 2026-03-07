@@ -50,7 +50,7 @@ Successfully **completed implementation** of a comprehensive user-friendly API f
 | File | Lines | Purpose | Status |
 |------|-------|---------|--------|
 | `doc/research/custom_blocks_user_friendly_api.md` | 800 | Complete API design & specification | ✅ Done |
-| `doc/guide/custom_blocks_quick_reference.md` | 300 | Quick reference cheat sheet | ✅ Done |
+| `doc/guide/quick_reference/custom_blocks_quick_reference.md` | 300 | Quick reference cheat sheet | ✅ Done |
 | `doc/report/custom_blocks_easy_api_implementation_2026-02-05.md` | 600 | Implementation roadmap | ✅ Done |
 | `doc/report/custom_blocks_implementation_progress_2026-02-05.md` | 400 | Progress tracking | ✅ Done |
 | `test/compiler/custom_blocks_easy_api_spec.spl` | 600 | Test template | ✅ Done |

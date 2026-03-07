@@ -95,7 +95,7 @@ This appears to be a test case specifically testing the broken import alias beha
 Comprehensive import documentation created:
 
 1. **Quick Reference:** `doc/import_errors_summary.md`
-2. **Pattern Guide:** `doc/guide/import_quick_reference.md`
+2. **Pattern Guide:** `doc/guide/quick_reference/import_quick_reference.md`
 3. **Full Analysis:** `doc/report/import_errors_analysis_2026-02-07.md`
 4. **Memory Updated:** `.claude/memory/MEMORY.md`
 
@@ -173,7 +173,7 @@ find test/lib -name "*.spl" -exec sed -i 's/^import \(.*\)$/use \1.*/' {} \;
 ## References
 
 - **Quick Fix Guide:** `doc/import_errors_summary.md`
-- **Pattern Reference:** `doc/guide/import_quick_reference.md`
+- **Pattern Reference:** `doc/guide/quick_reference/import_quick_reference.md`
 - **Complete Analysis:** `doc/report/import_errors_analysis_2026-02-07.md`
 - **Memory Notes:** `.claude/memory/MEMORY.md`
 - **Project Guide:** `CLAUDE.md` (Critical Prohibitions section)

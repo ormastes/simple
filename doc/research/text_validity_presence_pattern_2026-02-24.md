@@ -793,5 +793,5 @@ All three phases of the hybrid E+B approach have been implemented:
 - Rust `Option::filter`: [std::option docs](https://doc.rust-lang.org/std/option/enum.Option.html#method.filter)
 - Haskell `mfilter`: [Control.Monad docs](https://hackage.haskell.org/package/base/docs/Control-Monad.html)
 - Simple `if val` syntax: `test/feature/usage/elif_val_pattern_binding_spec.spl`
-- Simple `.?` operator: `doc/guide/syntax_quick_reference.md` (line 343)
+- Simple `.?` operator: `doc/guide/quick_reference/syntax_quick_reference.md` (line 343)
 - Simple text utilities: `src/lib/common/text.spl` (lines 210–224)

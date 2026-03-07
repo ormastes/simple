@@ -416,7 +416,7 @@ match value:
 ## Resources
 
 ### Documentation
-- Simple Language Guide: `doc/guide/syntax_quick_reference.md`
+- Simple Language Guide: `doc/guide/quick_reference/syntax_quick_reference.md`
 - FFI Reference: `/ffi` skill
 - Pattern Matching: `doc/design/pattern_matching.md`
 

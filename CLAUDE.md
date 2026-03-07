@@ -72,7 +72,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `release` | Release process and versioning |
 | `rule` | Engineering rules, doc folder map, ADR process |
 
-**Full Syntax Reference:** `doc/guide/syntax_quick_reference.md`
+**Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`
 **Doc Model:** `doc/FILE.md` — PLAN → REQ → FEATURE → TESTS relationship
 
@@ -237,7 +237,7 @@ words.map(&:len)                     # Method reference (&:method)
 
 **Operators:** `|>` pipe, `>>` compose, `~>` layer connect, `**` power, `m{ x^2 }` math blocks
 
-See `doc/guide/syntax_quick_reference.md` for complete reference.
+See `doc/guide/quick_reference/syntax_quick_reference.md` for complete reference.
 
 ---
 

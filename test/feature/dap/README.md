@@ -300,6 +300,6 @@ describe "New Feature":
 ## See Also
 
 - [DAP Debugging Guide](../../../doc/guide/dap_debugging_guide.md)
-- [DAP Quick Reference](../../../doc/guide/dap_quick_reference.md)
+- [DAP Quick Reference](../../../doc/guide/quick_reference/dap_quick_reference.md)
 - [SSpec Framework](../../../doc/guide/sspec_guide.md)
 - [Integration Report](../../../doc/report/dap_integration_complete_2026-02-04.md)

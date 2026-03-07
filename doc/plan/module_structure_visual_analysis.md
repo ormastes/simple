@@ -358,7 +358,7 @@ use dependency_injection as di  # Now possible!
 ### New Files (12)
 
 **Documentation:**
-1. `doc/guide/stdlib_quick_reference.md`
+1. `doc/guide/quick_reference/stdlib_quick_reference.md`
 2. `doc/guide/dependency_injection_guide.md`
 3. `doc/guide/mocking_guide.md`
 4. `doc/guide/module_discovery_guide.md`
@@ -429,7 +429,7 @@ use dependency_injection as di  # Now possible!
 ## Success Criteria Checklist
 
 ### Documentation
-- [ ] `doc/guide/stdlib_quick_reference.md` created
+- [ ] `doc/guide/quick_reference/stdlib_quick_reference.md` created
 - [ ] `doc/guide/dependency_injection_guide.md` created
 - [ ] `doc/guide/mocking_guide.md` created
 - [ ] `doc/guide/module_discovery_guide.md` created

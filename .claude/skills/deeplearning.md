@@ -981,7 +981,7 @@ val encoder: Layer<[batch, 784], [batch, 64]> =
 
 - **Design Document**: `doc/design/pipeline_operators_design.md`
 - **Error Guide**: `doc/guide/dimension_errors_guide.md`
-- **Syntax Reference**: `doc/guide/syntax_quick_reference.md`
+- **Syntax Reference**: `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Test Specs**: `src/compiler/test/dim_constraints_spec.spl`
 
 ---

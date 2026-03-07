@@ -447,7 +447,7 @@ val tensor = BlockBuilder("tensor")
 **Files Created Today:**
 1. `doc/research/custom_blocks_user_friendly_api.md` (800 lines)
 2. `test/compiler/custom_blocks_easy_api_spec.spl` (600 lines)
-3. `doc/guide/custom_blocks_quick_reference.md` (300 lines)
+3. `doc/guide/quick_reference/custom_blocks_quick_reference.md` (300 lines)
 4. `doc/report/custom_blocks_easy_api_implementation_2026-02-05.md` (600 lines)
 5. `src/compiler/blocks/easy.spl` (266 lines)
 6. `src/compiler/blocks/builder.spl` (530 lines)

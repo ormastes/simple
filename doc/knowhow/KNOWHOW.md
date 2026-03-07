@@ -468,7 +468,7 @@ Skills located in `.claude/skills/`.
 
 ## Getting Help
 
-- **Syntax reference:** `doc/guide/syntax_quick_reference.md`
+- **Syntax reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 - **SSpec template:** `.claude/templates/sspec_template.spl`
 - **Project instructions:** `CLAUDE.md`
 - **Bug reports:** `doc/bug_report.md`

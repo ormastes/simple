@@ -287,7 +287,7 @@ jj status  # If using jujutsu
 **Migration Reports:**
 - Complete summary: `doc/report/complete_session_summary_2026-02-03.md`
 - FFI spec: `doc/spec/ffi_boundary_spec.md`
-- Quick reference: `doc/guide/migration_quick_reference.md`
+- Quick reference: `doc/guide/quick_reference/migration_quick_reference.md`
 
 **Created This Session:**
 - `src/lib/path.spl` - Path utilities (ready to use)

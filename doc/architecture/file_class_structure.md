@@ -1344,7 +1344,7 @@ find src/compiler/70.backend/backend/native -name "isel_*.spl" -o -name "encode_
 
 **Documentation:**
 - `CLAUDE.md` - Development guide
-- `doc/guide/syntax_quick_reference.md` - Language syntax
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Language syntax
 
 **Core Implementation:**
 - `src/compiler/10.frontend/core/parser.spl` - Self-hosted parser

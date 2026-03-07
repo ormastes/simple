@@ -353,6 +353,36 @@ impl<'a> Parser<'a> {
             return self.parse_metadata_block();
         }
 
+        // Handle `cli Name:` blocks — skip entire DSL block (not yet supported in bootstrap)
+        let is_cli_block = matches!(&self.current.kind,
+            TokenKind::Identifier { name, .. } if name == "cli"
+        ) && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        if is_cli_block {
+            // Skip: cli <Name> : <indented block>
+            self.advance(); // consume 'cli'
+            self.advance(); // consume name
+            if self.check(&TokenKind::Colon) {
+                self.advance(); // consume ':'
+            }
+            // Skip indented block
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Indent) {
+                let mut depth = 1u32;
+                self.advance();
+                while depth > 0 && !self.check(&TokenKind::Eof) {
+                    if self.check(&TokenKind::Indent) {
+                        depth += 1;
+                    } else if self.check(&TokenKind::Dedent) {
+                        depth -= 1;
+                    }
+                    self.advance();
+                }
+            }
+            return Ok(Node::Pass(crate::ast::PassStmt { span: self.current.span })); // treat as no-op
+        }
+
         // `me` starts a mutable method declaration (me method_name(...):)
         // BUT `me.field` or `me.method()` is an expression (field access/method call on self).
         // Similarly, `gen` and `kernel` start function declarations but can also be variable names.

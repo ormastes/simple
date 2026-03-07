@@ -365,7 +365,7 @@ The Simple parser has **zero external dependencies**:
 
 ### User Documentation
 
-- **Syntax guide:** `doc/guide/syntax_quick_reference.md`
+- **Syntax guide:** `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Parser API:** `doc/api/parser.md` (TODO)
 - **Error codes:** `doc/guide/error_codes.md` (TODO)
 

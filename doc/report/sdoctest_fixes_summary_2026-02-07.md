@@ -70,7 +70,7 @@ Including 5 new tests:
 
 **Expected result** when running:
 ```bash
-bin/simple test --sdoctest doc/guide/syntax_quick_reference.md
+bin/simple test --sdoctest doc/guide/quick_reference/syntax_quick_reference.md
 ```
 
 **Before:**

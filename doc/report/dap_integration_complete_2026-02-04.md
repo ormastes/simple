@@ -368,7 +368,7 @@ Break when: depth < 5 (returned from function)
 
 ### 2. DAP Quick Reference (500+ lines)
 
-**File:** `doc/guide/dap_quick_reference.md`
+**File:** `doc/guide/quick_reference/dap_quick_reference.md`
 
 **Contents:**
 - Keyboard shortcuts table

@@ -28,17 +28,22 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_single_type(&mut self) -> Result<Type, ParseError> {
-        // Handle function type: fn(T) -> U
+        // Handle function type: fn(T) -> U or bare fn (callable type)
         if self.check(&TokenKind::Fn) {
             self.advance();
-            let params = self.parse_paren_type_list()?;
-            let ret = if self.check(&TokenKind::Arrow) {
-                self.advance();
-                Some(Box::new(self.parse_type()?))
+            if self.check(&TokenKind::LParen) {
+                let params = self.parse_paren_type_list()?;
+                let ret = if self.check(&TokenKind::Arrow) {
+                    self.advance();
+                    Some(Box::new(self.parse_type()?))
+                } else {
+                    None
+                };
+                return Ok(Type::Function { params, ret });
             } else {
-                None
-            };
-            return Ok(Type::Function { params, ret });
+                // Bare `fn` type without parens — treat as generic callable
+                return Ok(Type::Function { params: vec![], ret: None });
+            }
         }
 
         // Handle capability prefixes: mut T, iso T

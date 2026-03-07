@@ -303,7 +303,7 @@ Add flags to control warning output:
 - `--no-warn` - Suppress all warnings
 
 ### 3. **Documentation Enhancements**
-- Add warning examples to `doc/guide/syntax_quick_reference.md`
+- Add warning examples to `doc/guide/quick_reference/syntax_quick_reference.md`
 - Create `doc/guide/warnings.md` explaining all warning types
 - Update CLAUDE.md with warning system overview
 

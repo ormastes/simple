@@ -477,7 +477,7 @@ jj git push --bookmark feat/matrix-multiplication
    - Add `@` operator to operators section
    - Update examples
 
-2. **doc/guide/syntax_quick_reference.md**
+2. **doc/guide/quick_reference/syntax_quick_reference.md**
    - Add matrix multiplication examples
    - Document dimension requirements
 

@@ -83,7 +83,7 @@ Successfully renamed FFI wrapper terminology to **SFFI (Simple FFI)** throughout
 ### 4. Files Preserved (No Change Needed) ✅
 
 The following files keep their original names as they refer to low-level FFI, not SFFI wrappers:
-- `doc/guide/ffi_syscalls_quick_reference.md` - Low-level syscalls
+- `doc/guide/quick_reference/ffi_syscalls_quick_reference.md` - Low-level syscalls
 - `doc/guide/ffi_syscalls_phase3_guide.md` - Syscall implementation
 - `doc/guide/ffi_phase4_execution_plan.md` - FFI execution plan
 - `src/app/ffi_gen/` directory - Generator implementation (internal)

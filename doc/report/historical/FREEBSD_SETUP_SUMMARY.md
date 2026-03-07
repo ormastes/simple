@@ -38,7 +38,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 - Testing infrastructure
 - Troubleshooting
 
-**`doc/guide/freebsd_quick_reference.md`** (7.4KB)
+**`doc/guide/quick_reference/freebsd_quick_reference.md`** (7.4KB)
 - Command cheat sheet
 - FreeBSD vs Linux differences
 - Common tasks and shortcuts
@@ -203,7 +203,7 @@ simple/
 
 1. **Quick Start** → `FREEBSD_WORKSPACE.md` (overview, quick commands)
 2. **Detailed Setup** → `doc/guide/freebsd_workspace_setup.md` (complete guide)
-3. **Command Reference** → `doc/guide/freebsd_quick_reference.md` (cheat sheet)
+3. **Command Reference** → `doc/guide/quick_reference/freebsd_quick_reference.md` (cheat sheet)
 4. **QEMU Setup** → `doc/guide/qemu_setup.md` (QEMU installation)
 
 ---
@@ -462,7 +462,7 @@ You have successfully set up the FreeBSD workspace when:
 ### Documentation
 - **Main Guide:** `FREEBSD_WORKSPACE.md`
 - **Setup Details:** `doc/guide/freebsd_workspace_setup.md`
-- **Quick Reference:** `doc/guide/freebsd_quick_reference.md`
+- **Quick Reference:** `doc/guide/quick_reference/freebsd_quick_reference.md`
 
 ### Verification
 - **Check Setup:** `bin/release/simple scripts/verify_freebsd_workspace.spl`

@@ -63,7 +63,7 @@ use lib.database.bug.{BugDatabase, Bug}
 
 ## Tools
 
-- **Quick Reference**: `doc/guide/import_quick_reference.md`
+- **Quick Reference**: `doc/guide/quick_reference/import_quick_reference.md`
 - **Full Analysis**: `doc/report/import_errors_analysis_2026-02-07.md`
 - **Checker Script**: `scripts/check_imports.spl`
 

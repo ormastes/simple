@@ -44,7 +44,7 @@ bin/simple test
 | Guide | Purpose |
 |-------|---------|
 | **[FreeBSD Workspace Setup](doc/guide/freebsd_workspace_setup.md)** | Complete setup guide (VM, bootstrap, cross-compile, testing) |
-| **[FreeBSD Quick Reference](doc/guide/freebsd_quick_reference.md)** | Command cheat sheet and tips |
+| **[FreeBSD Quick Reference](doc/guide/quick_reference/freebsd_quick_reference.md)** | Command cheat sheet and tips |
 | **[QEMU Setup Guide](doc/guide/qemu_setup.md)** | QEMU installation and configuration |
 
 ---
@@ -504,7 +504,7 @@ simple/
 - SHA256: `sha256 file` (not `sha256sum`)
 - Compiler: `clang++` in base (not `gcc`)
 
-**See:** [FreeBSD Quick Reference](doc/guide/freebsd_quick_reference.md)
+**See:** [FreeBSD Quick Reference](doc/guide/quick_reference/freebsd_quick_reference.md)
 
 ### Linuxulator
 

@@ -119,5 +119,5 @@ grep -r ":\s*<[A-Z]" src/lib/std/src --include="*.spl" | wc -l
 
 ## Related Documentation
 
-- **Syntax Reference**: `doc/guide/syntax_quick_reference.md`
+- **Syntax Reference**: `doc/guide/quick_reference/syntax_quick_reference.md`
 - **CLAUDE.md**: Generic syntax section (lines 43-61)

@@ -206,6 +206,44 @@ impl<'a> MirLowerer<'a> {
                         })?;
                     }
 
+                    // Tuple destructuring: (a, b, c) = expr
+                    HirExprKind::Tuple(elements) => {
+                        // val_reg holds the tuple value; extract each element and assign
+                        for (i, elem) in elements.iter().enumerate() {
+                            // Create index constant
+                            let index_reg = self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::ConstInt {
+                                    dest,
+                                    value: i as i64,
+                                });
+                                dest
+                            })?;
+                            // Extract tuple element via rt_tuple_get
+                            let elem_reg = self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name("rt_tuple_get"),
+                                    args: vec![val_reg, index_reg],
+                                });
+                                dest
+                            })?;
+                            // Store to the lvalue element
+                            let addr_reg = self.lower_lvalue(elem)?;
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Store {
+                                    addr: addr_reg,
+                                    value: elem_reg,
+                                    ty: elem.ty,
+                                });
+                            })?;
+                        }
+                    }
+
                     // Local variable assignment: use address + store pattern
                     _ => {
                         let addr_reg = self.lower_lvalue(target)?;

@@ -193,7 +193,7 @@ test/system/ffi/syscalls_test.spl         # Integration tests
 doc/report/project_completion_summary_2026-02-04.md    # Complete summary
 doc/report/final_build_status_2026-02-04.md            # Build status
 doc/report/ffi_mmap_implementation_2026-02-04.md       # Mmap details
-doc/guide/ffi_syscalls_quick_reference.md              # Quick reference
+doc/guide/quick_reference/ffi_syscalls_quick_reference.md              # Quick reference
 ```
 
 ## Usage Example (Simple Language)
@@ -283,7 +283,7 @@ val cpus = rt_system_cpu_count()
 ### Quick Links
 - **Complete Summary:** `doc/report/project_completion_summary_2026-02-04.md`
 - **Build Status:** `doc/report/final_build_status_2026-02-04.md`
-- **Quick Reference:** `doc/guide/ffi_syscalls_quick_reference.md`
+- **Quick Reference:** `doc/guide/quick_reference/ffi_syscalls_quick_reference.md`
 
 ## License
 

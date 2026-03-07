@@ -269,7 +269,7 @@ Verifies:
 
 ## Documentation
 
-1. **Syntax Reference:** `doc/guide/syntax_quick_reference.md`
+1. **Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
    - Section: "Empty Statements / No-op"
    - Documents both forms and when to use each
 
@@ -328,5 +328,5 @@ Simple's support for both `pass` and `()` is a **pragmatic design decision** tha
 
 - Implementation: `src/rust/parser/src/stmt_parsing/jump.rs`
 - Spec Test: `test/system/features/control_flow/pass_unit_equivalence_spec.spl`
-- Documentation: `doc/guide/syntax_quick_reference.md`
+- Documentation: `doc/guide/quick_reference/syntax_quick_reference.md`
 - Issue: (none - this is original design)

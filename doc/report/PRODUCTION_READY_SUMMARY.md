@@ -450,7 +450,7 @@ bin/simple test --unit --tag=smoke test/
 
 **Documentation:**
 - `FINAL_STATUS_2026-02-14.md` - Complete status
-- `doc/guide/process_cleanup_quick_reference.md` - Quick reference
+- `doc/guide/quick_reference/process_cleanup_quick_reference.md` - Quick reference
 - `doc/guide/robust_process_cleanup.md` - Complete guide
 
 **Implementation:**

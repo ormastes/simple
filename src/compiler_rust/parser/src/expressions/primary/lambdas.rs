@@ -12,18 +12,43 @@ impl<'a> Parser<'a> {
                 self.parse_lambda_body(MoveMode::Copy)
             }
             TokenKind::Fn => {
-                // Lambda: fn(): expr or fn(x, y): expr (alias for backslash syntax)
-                // This provides more familiar syntax for those coming from other languages
+                // Lambda: fn(): expr or fn(x, y): expr or fn(p: text) -> i64: expr
+                // Supports optional type annotations on params and optional return type
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
-                // Parse parameters inside parentheses (can be empty for fn():)
+                // Parse parameters with optional type annotations
                 let params = if self.check(&TokenKind::RParen) {
                     vec![]
                 } else {
-                    let (params, _capture_all) = self.parse_lambda_params()?;
+                    let mut params = Vec::new();
+                    loop {
+                        let name = if self.check(&TokenKind::Underscore) {
+                            self.advance();
+                            "_".to_string()
+                        } else {
+                            self.expect_identifier()?
+                        };
+                        // Optional type annotation: name: Type
+                        let ty = if self.check(&TokenKind::Colon) {
+                            self.advance();
+                            Some(self.parse_type()?)
+                        } else {
+                            None
+                        };
+                        params.push(crate::ast::LambdaParam { name, ty });
+                        if !self.check(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.advance(); // consume comma
+                    }
                     params
                 };
                 self.expect(&TokenKind::RParen)?;
+                // Skip optional return type annotation: fn() -> Type: expr
+                if self.check(&TokenKind::Arrow) {
+                    self.advance();
+                    let _ = self.parse_type()?; // consume return type (ignored for lambdas)
+                }
                 // Enable forced indentation BEFORE consuming colon, so the newline after colon is preserved
                 // This handles lambda expressions inside function call arguments where newlines would be suppressed
                 self.lexer.enable_forced_indentation();

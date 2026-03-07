@@ -84,4 +84,4 @@ fn file_read(path: text) -> text:                 # Tier 2: Simple wrapper
 - `/coding` - Full language rules and common mistakes
 - `/design` - Design principles and type system
 - `/sffi` - FFI wrapper patterns
-- `doc/guide/syntax_quick_reference.md` - Complete syntax reference
+- `doc/guide/quick_reference/syntax_quick_reference.md` - Complete syntax reference
