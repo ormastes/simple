@@ -12,7 +12,8 @@
 #   Phase 4: Verify reproducibility (stage1 vs stage2 hash comparison)
 #   Phase 5: Deploy to bin/release/simple
 #
-# Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, arm64), FreeBSD
+# Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, arm64), FreeBSD,
+#                     Windows (via MSYS2/Git Bash/Cygwin)
 #
 # Usage:
 #   scripts/bootstrap/bootstrap-from-scratch.sh                     # Try release download, fall back to Rust build
@@ -35,7 +36,7 @@ BUILD_DIR="${PROJECT_DIR}/build"
 BOOTSTRAP_DIR="${BUILD_DIR}/bootstrap"
 RELEASE_DIR="${PROJECT_DIR}/bin/release"
 RUST_SEED_DIR="${PROJECT_DIR}/src/compiler_rust"
-RUST_SEED_BIN="${RUST_SEED_DIR}/target/bootstrap/simple"
+RUST_SEED_BIN=""  # set after detect_platform
 
 # Parse arguments
 DEPLOY=false
@@ -89,6 +90,7 @@ detect_platform() {
         Linux)  HOST_OS="linux" ;;
         Darwin) HOST_OS="macos" ;;
         FreeBSD) HOST_OS="freebsd" ;;
+        MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
         *) echo "Error: Unsupported OS: $os"; exit 1 ;;
     esac
 
@@ -97,9 +99,24 @@ detect_platform() {
         aarch64|arm64) HOST_ARCH="aarch64" ;;
         *) echo "Error: Unsupported architecture: $arch"; exit 1 ;;
     esac
+
+    # Windows-specific: set .exe extension, handle path issues
+    if [[ "${HOST_OS}" == "windows" ]]; then
+        EXE_EXT=".exe"
+        # Git for Windows ships /usr/bin/link which shadows MSVC link.exe.
+        # Ensure MSVC link.exe is found first if available.
+        if [[ -f "/usr/bin/link" ]] && command -v link.exe &>/dev/null; then
+            # link.exe from MSVC is the real linker
+            :
+        fi
+    else
+        EXE_EXT=""
+    fi
 }
 
 detect_platform
+
+RUST_SEED_BIN="${RUST_SEED_DIR}/target/bootstrap/simple${EXE_EXT}"
 
 echo "=== Simple Bootstrap (Rust Seed + Self-Host) ==="
 echo "Project:    ${PROJECT_DIR}"
@@ -128,13 +145,27 @@ check_prerequisites() {
     fi
 
     # C compiler (needed for linking)
-    if command -v clang &>/dev/null; then
-        echo "C compiler: clang ($(clang --version | head -1))"
-    elif command -v gcc &>/dev/null; then
-        echo "C compiler: gcc ($(gcc --version | head -1))"
+    if [[ "${HOST_OS}" == "windows" ]]; then
+        # On Windows, prefer clang-cl (MSVC-compatible) over clang/gcc
+        if command -v clang-cl &>/dev/null; then
+            echo "C compiler: clang-cl ($(clang-cl --version 2>&1 | head -1))"
+        elif command -v clang &>/dev/null; then
+            echo "C compiler: clang ($(clang --version | head -1))"
+        elif command -v gcc &>/dev/null; then
+            echo "C compiler: gcc ($(gcc --version | head -1))"
+        else
+            echo "Error: No C compiler found (clang-cl, clang, or gcc required for linking)."
+            exit 1
+        fi
     else
-        echo "Error: No C compiler found (clang or gcc required for linking)."
-        exit 1
+        if command -v clang &>/dev/null; then
+            echo "C compiler: clang ($(clang --version | head -1))"
+        elif command -v gcc &>/dev/null; then
+            echo "C compiler: gcc ($(gcc --version | head -1))"
+        else
+            echo "Error: No C compiler found (clang or gcc required for linking)."
+            exit 1
+        fi
     fi
 
     # llvm-lib backend requires libLLVM shared library
@@ -165,9 +196,36 @@ check_prerequisites() {
                 fi
             done
         fi
+        # Windows: check standard LLVM install paths
+        if [[ "${llvm_found}" != "true" && "${HOST_OS}" == "windows" ]]; then
+            for win_path in \
+                "/c/Program Files/LLVM" \
+                "/c/LLVM" \
+                "/c/msys64/mingw64" \
+                "/c/msys64/clang64" \
+                "/c/msys64/ucrt64"; do
+                if [[ -f "${win_path}/bin/LLVM-C.dll" ]]; then
+                    llvm_found=true
+                    llvm_path="${win_path}"
+                    export SIMPLE_LLVM_PATH="${win_path}"
+                    echo "libLLVM:    found at ${win_path}"
+                    break
+                fi
+            done
+            # Also check LLVM_DIR env var
+            if [[ "${llvm_found}" != "true" && -n "${LLVM_DIR:-}" ]]; then
+                if [[ -f "${LLVM_DIR}/bin/LLVM-C.dll" ]]; then
+                    llvm_found=true
+                    llvm_path="${LLVM_DIR}"
+                    export SIMPLE_LLVM_PATH="${LLVM_DIR}"
+                    echo "libLLVM:    found at ${LLVM_DIR}"
+                fi
+            fi
+        fi
         if [[ "${llvm_found}" != "true" ]]; then
             echo "Error: libLLVM not found. Required for --backend=llvm-lib."
-            echo "Install: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"
+            echo "Install: apt install libllvm-18-dev (Ubuntu), brew install llvm (macOS),"
+            echo "         or download from https://releases.llvm.org (Windows)"
             exit 1
         fi
         if [[ -z "${llvm_path}" ]]; then
@@ -204,7 +262,7 @@ if [[ "${SKIP_DOWNLOAD}" != "true" ]]; then
     echo "--- Phase 0: Download release binary ---"
 
     DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-release.sh"
-    DOWNLOAD_ARGS=("--output=${BUILD_DIR}/simple" "--quiet")
+    DOWNLOAD_ARGS=("--output=${BUILD_DIR}/simple${EXE_EXT}" "--quiet")
 
     if [[ -n "${DOWNLOAD_VERSION}" ]]; then
         DOWNLOAD_ARGS+=("--version=${DOWNLOAD_VERSION}")
@@ -213,12 +271,12 @@ if [[ "${SKIP_DOWNLOAD}" != "true" ]]; then
     if [[ -x "${DOWNLOAD_SCRIPT}" ]]; then
         if DOWNLOADED_BIN=$("${DOWNLOAD_SCRIPT}" "${DOWNLOAD_ARGS[@]}" 2>/dev/null); then
             # Double-check with --version
-            if "${BUILD_DIR}/simple" --version &>/dev/null; then
-                echo "Release binary downloaded and verified: ${BUILD_DIR}/simple"
+            if "${BUILD_DIR}/simple${EXE_EXT}" --version &>/dev/null; then
+                echo "Release binary downloaded and verified: ${BUILD_DIR}/simple${EXE_EXT}"
                 USED_RELEASE_BINARY=true
             else
                 echo "Downloaded binary failed verification, falling back to Rust bootstrap."
-                rm -f "${BUILD_DIR}/simple"
+                rm -f "${BUILD_DIR}/simple${EXE_EXT}"
             fi
         else
             echo "Release download failed or unavailable, falling back to Rust bootstrap."
@@ -241,10 +299,10 @@ if [[ "${USED_RELEASE_BINARY}" == "true" ]]; then
     if [[ "${DEPLOY}" == "true" ]]; then
         echo "--- Deploy ---"
         mkdir -p "${RELEASE_DIR}"
-        cp "${BUILD_DIR}/simple" "${RELEASE_DIR}/simple"
-        chmod +x "${RELEASE_DIR}/simple"
-        echo "Deployed to: ${RELEASE_DIR}/simple"
-        ls -lh "${RELEASE_DIR}/simple"
+        cp "${BUILD_DIR}/simple${EXE_EXT}" "${RELEASE_DIR}/simple${EXE_EXT}"
+        chmod +x "${RELEASE_DIR}/simple${EXE_EXT}"
+        echo "Deployed to: ${RELEASE_DIR}/simple${EXE_EXT}"
+        ls -lh "${RELEASE_DIR}/simple${EXE_EXT}"
     fi
 
     echo ""
@@ -283,7 +341,7 @@ echo ""
 echo "--- Phase 2: Compile Simple compiler with Rust seed (stage1) ---"
 
 STAGE1_DIR="${BOOTSTRAP_DIR}/stage1"
-STAGE1_BIN="${STAGE1_DIR}/simple"
+STAGE1_BIN="${STAGE1_DIR}/simple${EXE_EXT}"
 mkdir -p "${STAGE1_DIR}"
 
 # Set SIMPLE_LIB so the compiler can find the standard library
@@ -330,7 +388,7 @@ echo ""
 echo "--- Phase 3: Self-host verification (stage1 → stage2) ---"
 
 STAGE2_DIR="${BOOTSTRAP_DIR}/stage2"
-STAGE2_BIN="${STAGE2_DIR}/simple"
+STAGE2_BIN="${STAGE2_DIR}/simple${EXE_EXT}"
 mkdir -p "${STAGE2_DIR}"
 
 SELFHOST_ARGS=(
@@ -372,19 +430,28 @@ echo ""
 if [[ "${VERIFY_HASH}" == "true" ]]; then
     echo "--- Phase 4: Reproducibility verification ---"
 
-    # Use shasum on macOS, sha256sum on Linux/FreeBSD
+    # Use shasum on macOS, sha256sum on Linux/FreeBSD, certutil on Windows
+    HASH_CMD=""
     if command -v sha256sum &>/dev/null; then
         HASH_CMD="sha256sum"
     elif command -v shasum &>/dev/null; then
         HASH_CMD="shasum -a 256"
+    elif command -v certutil &>/dev/null && [[ "${HOST_OS}" == "windows" ]]; then
+        HASH_CMD="certutil"
     else
         echo "Warning: No SHA-256 tool found, skipping hash verification."
         VERIFY_HASH=false
     fi
 
     if [[ "${VERIFY_HASH}" == "true" ]]; then
-        HASH1=$(${HASH_CMD} "${STAGE1_BIN}" | awk '{print $1}')
-        HASH2=$(${HASH_CMD} "${STAGE2_BIN}" | awk '{print $1}')
+        if [[ "${HASH_CMD}" == "certutil" ]]; then
+            # certutil outputs hash on line 2; extract it
+            HASH1=$(certutil -hashfile "${STAGE1_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
+            HASH2=$(certutil -hashfile "${STAGE2_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
+        else
+            HASH1=$(${HASH_CMD} "${STAGE1_BIN}" | awk '{print $1}')
+            HASH2=$(${HASH_CMD} "${STAGE2_BIN}" | awk '{print $1}')
+        fi
 
         echo "Stage 1 SHA-256: ${HASH1}"
         echo "Stage 2 SHA-256: ${HASH2}"
@@ -411,11 +478,11 @@ FINAL_BIN="${STAGE2_BIN}"
 if [[ "${DEPLOY}" == "true" ]]; then
     echo "--- Phase 5: Deploy ---"
     mkdir -p "${RELEASE_DIR}"
-    cp "${FINAL_BIN}" "${RELEASE_DIR}/simple"
-    chmod +x "${RELEASE_DIR}/simple"
+    cp "${FINAL_BIN}" "${RELEASE_DIR}/simple${EXE_EXT}"
+    chmod +x "${RELEASE_DIR}/simple${EXE_EXT}"
 
     echo "Deployed to:"
-    ls -lh "${RELEASE_DIR}/simple"
+    ls -lh "${RELEASE_DIR}/simple${EXE_EXT}"
     echo ""
 fi
 

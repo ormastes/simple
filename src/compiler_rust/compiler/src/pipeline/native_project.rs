@@ -558,12 +558,21 @@ int main(int argc, char** argv) {
 
         let main_o = temp_dir.join("_main_stub.o");
         let cc = find_c_compiler();
-        let status = std::process::Command::new(&cc)
-            .args(["-c", "-o"])
-            .arg(&main_o)
-            .arg(&main_c)
-            .status()
-            .map_err(|e| format!("compile main stub: {e}"))?;
+        let status = if cc.contains("clang-cl") {
+            std::process::Command::new(&cc)
+                .arg("/c")
+                .arg(&format!("/Fo{}", main_o.display()))
+                .arg(&main_c)
+                .status()
+                .map_err(|e| format!("compile main stub: {e}"))?
+        } else {
+            std::process::Command::new(&cc)
+                .args(["-c", "-o"])
+                .arg(&main_o)
+                .arg(&main_c)
+                .status()
+                .map_err(|e| format!("compile main stub: {e}"))?
+        };
         if !status.success() {
             return Err("Failed to compile main stub".to_string());
         }
@@ -588,8 +597,12 @@ int main(int argc, char** argv) {
 
         // Use clang as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
         // libc initialization, and library paths automatically.
-        let mut cmd = std::process::Command::new("clang");
-        cmd.arg("-fPIC");
+        let cc = find_c_compiler();
+        let is_clang_cl = cc.contains("clang-cl");
+        let mut cmd = std::process::Command::new(&cc);
+        if !is_clang_cl {
+            cmd.arg("-fPIC");
+        }
 
         // macOS: Apple's new ld (ld-1230+) crashes on some Cranelift-generated Mach-O objects
         // (missing LC_BUILD_VERSION, unusual relocation patterns). Use -ld_classic as workaround.
@@ -601,25 +614,46 @@ int main(int argc, char** argv) {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
 
-        cmd.arg("-o").arg(&self.output).arg(&main_o);
+        if is_clang_cl {
+            cmd.arg(&main_o);
+            cmd.arg(&format!("/Fe:{}", self.output.display()));
+        } else {
+            cmd.arg("-o").arg(&self.output).arg(&main_o);
+        }
 
         // For large builds, archive objects into a static library first to avoid
         // linker crashes when passing thousands of individual .o files.
         if object_paths.len() > 100 {
             let archive_path = temp_dir.join("libspl_objects.a");
+            let ar_tool = find_archive_tool();
+            let is_msvc_lib = ar_tool == "lib";
 
             // Batch ar calls to avoid Windows 32K command-line limit (~2000 objects = ~120K chars).
             // First batch creates the archive (rcs), subsequent batches append (rs).
             const BATCH_SIZE: usize = 200;
             let mut ar_ok = true;
             for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
-                let flag = if i == 0 { "rcs" } else { "rs" };
-                let status = std::process::Command::new("ar")
-                    .arg(flag)
-                    .arg(&archive_path)
-                    .args(chunk)
-                    .status()
-                    .map_err(|e| format!("ar batch {i}: {e}"))?;
+                let status = if is_msvc_lib {
+                    // MSVC lib.exe: lib /OUT:archive.lib obj1.o obj2.o ...
+                    let mut lib_cmd = std::process::Command::new(&ar_tool);
+                    if i == 0 {
+                        lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
+                    } else {
+                        // Append to existing archive
+                        lib_cmd.arg(&archive_path);
+                    }
+                    lib_cmd.args(chunk)
+                        .status()
+                        .map_err(|e| format!("lib batch {i}: {e}"))?
+                } else {
+                    let flag = if i == 0 { "rcs" } else { "rs" };
+                    std::process::Command::new(&ar_tool)
+                        .arg(flag)
+                        .arg(&archive_path)
+                        .args(chunk)
+                        .status()
+                        .map_err(|e| format!("ar batch {i}: {e}"))?
+                };
                 if !status.success() {
                     ar_ok = false;
                     break;
@@ -747,12 +781,12 @@ int main(int argc, char** argv) {
             eprintln!("Link command: {:?}", cmd);
         }
 
-        let output_result = cmd.output().map_err(|e| format!("link (clang): {e}"))?;
+        let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
             // Report binary size
             if let Ok(meta) = std::fs::metadata(&self.output) {
-                eprintln!("Linked: {} ({} KB) in clang", self.output.display(), meta.len() / 1024);
+                eprintln!("Linked: {} ({} KB) via {cc}", self.output.display(), meta.len() / 1024);
             }
             Ok(())
         } else {
@@ -1833,11 +1867,29 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).
 fn find_native_all_library() -> Option<PathBuf> {
-    let candidates = [
+    // Check env var override first
+    if let Ok(path) = std::env::var("SIMPLE_NATIVE_ALL_PATH") {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    let mut candidates: Vec<&str> = vec![
+        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
         "src/compiler_rust/target/release/libsimple_native_all.a",
         "src/compiler_rust/target/debug/libsimple_native_all.a",
-        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
     ];
+
+    // Windows MSVC produces .lib instead of lib*.a
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
+            "src/compiler_rust/target/release/simple_native_all.lib",
+            "src/compiler_rust/target/debug/simple_native_all.lib",
+        ]);
+    }
 
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
@@ -1853,6 +1905,13 @@ fn find_native_all_library() -> Option<PathBuf> {
             if path.exists() {
                 return Some(path);
             }
+            #[cfg(target_os = "windows")]
+            {
+                let path = dir.join("simple_native_all.lib");
+                if path.exists() {
+                    return Some(path);
+                }
+            }
         }
     }
 
@@ -1862,7 +1921,7 @@ fn find_native_all_library() -> Option<PathBuf> {
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
     // Check common locations
-    let candidates = [
+    let mut candidates: Vec<&str> = vec![
         // Bootstrap profile (smallest optimized build, used for seed compiler)
         "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
         "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
@@ -1872,9 +1931,24 @@ fn find_runtime_library() -> Option<PathBuf> {
         // Debug layout (fallback, may be very large)
         "src/compiler_rust/target/debug/libsimple_runtime.a",
         "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-        // System-installed
-        "/usr/local/lib/libsimple_runtime.a",
     ];
+
+    // Windows MSVC produces .lib instead of lib*.a
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
+            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
+            "src/compiler_rust/target/release/simple_runtime.lib",
+            "src/compiler_rust/target/release/deps/simple_runtime.lib",
+            "src/compiler_rust/target/debug/simple_runtime.lib",
+            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
+        ]);
+    }
+
+    // System-installed (Unix only)
+    #[cfg(not(target_os = "windows"))]
+    candidates.push("/usr/local/lib/libsimple_runtime.a");
 
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
@@ -1890,6 +1964,13 @@ fn find_runtime_library() -> Option<PathBuf> {
             if path.exists() {
                 return Some(path);
             }
+            #[cfg(target_os = "windows")]
+            {
+                let path = dir.join("simple_runtime.lib");
+                if path.exists() {
+                    return Some(path);
+                }
+            }
         }
     }
 
@@ -1901,10 +1982,54 @@ fn find_c_compiler() -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
     }
-    if std::process::Command::new("clang").arg("--version").output().is_ok() {
+
+    // On Windows, prefer clang-cl (MSVC-compatible) over clang/gcc
+    #[cfg(target_os = "windows")]
+    {
+        for cc in &["clang-cl", "clang", "gcc"] {
+            if let Ok(out) = std::process::Command::new(cc).arg("--version").output() {
+                if out.status.success() {
+                    return cc.to_string();
+                }
+            }
+        }
         return "clang".to_string();
     }
-    "gcc".to_string()
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(out) = std::process::Command::new("clang").arg("--version").output() {
+            if out.status.success() {
+                return "clang".to_string();
+            }
+        }
+        "gcc".to_string()
+    }
+}
+
+/// Find an archive tool (ar, llvm-ar, or lib.exe on Windows).
+fn find_archive_tool() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        for tool in &["llvm-ar", "ar", "lib"] {
+            if let Ok(out) = std::process::Command::new(tool).arg("/?").output() {
+                let _ = out; // just checking it exists
+                return tool.to_string();
+            }
+            // llvm-ar and ar use --version, not /?
+            if let Ok(out) = std::process::Command::new(tool).arg("--version").output() {
+                if out.status.success() {
+                    return tool.to_string();
+                }
+            }
+        }
+        "ar".to_string()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        "ar".to_string()
+    }
 }
 
 #[cfg(test)]
