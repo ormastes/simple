@@ -367,6 +367,6 @@ ls -R src/path/to/module/
 ## Reference
 
 - **Full Analysis:** `doc/report/import_errors_analysis_2026-02-07.md`
-- **Language Guide:** `doc/guide/syntax_quick_reference.md`
+- **Language Guide:** `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Memory Notes:** `.claude/memory/MEMORY.md` (section: Module Import Bugs)
 - **CLAUDE.md:** Project instructions (section: Critical Prohibitions)

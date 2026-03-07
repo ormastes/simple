@@ -388,7 +388,7 @@ Type constants (✅) → Runtime C types (⏳) → Type checking (⏳) → Execu
 
 - `doc/plan/async_await_implementation_plan.md` - Full async roadmap
 - `doc/design/async_validation_status.md` - Async validation design
-- `doc/guide/async_runtime_guide.md` - Runtime usage guide
+- `doc/guide/sync_async/async/async_runtime_guide.md` - Runtime usage guide
 - `src/lib/async_core.spl` - Core async types
 - `src/compiler/hir_lowering/async.spl` - HIR async integration
 

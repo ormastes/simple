@@ -768,8 +768,8 @@ All tests should pass in <10ms.
 
 ## Related Documentation
 
-- [Async Guide](async_guide.md) - Async/await for LSP (if needed)
-- [Backend Capabilities](backend_capabilities.md) - Compiler backends
+- [Async Guide](sync_async/async/async_guide.md) - Async/await for LSP (if needed)
+- [Backend Capabilities](backend/capabilities.md) - Compiler backends
 - [DAP Debugging](dap_debugging_guide.md) - Debug adapter protocol
 - [VS Code Setup](vscode_lsp_dap_setup.md) - Detailed VS Code config
 - [Neovim Setup](neovim_lsp_dap_setup.md) - Detailed Neovim config

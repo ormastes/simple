@@ -314,9 +314,8 @@ testing.assert_fast(\: operation(), 1000000, "1 second limit")
 
 ## See Also
 
-- **Full Guide:** `doc/guide/comprehensive_testing.md`
+- **Full Guide:** `doc/guide/test/comprehensive.md`
 - **Benchmarking:** `doc/guide/benchmarking.md`
-- **Smoke Testing:** `doc/guide/smoke_testing.md`
 - **Mocking:** `doc/guide/mocking.md`
 - **Examples:** `simple/std_lib/examples/testing/`
 

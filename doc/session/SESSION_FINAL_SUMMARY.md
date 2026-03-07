@@ -385,7 +385,7 @@ struct Data:
 3. **doc/FEATURES_THAT_WORK.md** - Feature catalog
 4. **doc/IMPLEMENTATION_FIXES.md** - Fixes implemented
 5. **doc/TEST_STATUS_AUDIT.md** - Complete test results
-6. **doc/guide/async_guide.md** - Async programming
+6. **doc/guide/sync_async/async/async_guide.md** - Async programming
 7. **doc/guide/lsp_integration.md** - Editor setup
 8. **doc/guide/backend_capabilities.md** - Compiler backends
 

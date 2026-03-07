@@ -288,7 +288,7 @@ fn gpu_async_upload_batch(rows: i64, cols: i64, device_id: i32, stream_handle: i
 
 ### User Guides
 
-1. **Quick Start** (`doc/guide/gpu_quick_start.md`)
+1. **Quick Start** (`doc/guide/quick_reference/gpu_quick_start.md`)
    - Full Context API tutorial
    - Step-by-step examples
    - Integration with DL config
@@ -349,7 +349,7 @@ fn gpu_async_upload_batch(rows: i64, cols: i64, device_id: i32, stream_handle: i
 5. `doc/report/gpu_testing_session_2026-02-09.md`
 6. `doc/report/gpu_test_specifications_2026-02-09.md`
 7. `doc/report/gpu_unified_interface_complete_2026-02-09.md`
-8. `doc/guide/gpu_quick_start.md`
+8. `doc/guide/quick_reference/gpu_quick_start.md`
 9. `doc/guide/gpu_runtime_api.md`
 
 **Total:** ~15,000 words of documentation

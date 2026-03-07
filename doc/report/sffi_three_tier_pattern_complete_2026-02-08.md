@@ -48,7 +48,7 @@ Successfully designed and implemented a comprehensive **three-tier SFFI pattern*
 - Limitations and future work
 
 #### Quick Start Tutorial
-**File**: `doc/guide/sffi_external_libraries_quick_start.md` (400+ lines)
+**File**: `doc/guide/quick_reference/sffi_external_libraries_quick_start.md` (400+ lines)
 
 **Practical step-by-step guide**:
 - When to use each pattern
@@ -772,7 +772,7 @@ The three-tier SFFI pattern successfully maintains Simple's "Simple-first" philo
 **Design & Documentation** (7 files):
 1. `doc/design/sffi_external_library_pattern.md`
 2. `doc/design/pytorch_thin_wrapper_design.md`
-3. `doc/guide/sffi_external_libraries_quick_start.md`
+3. `doc/guide/quick_reference/sffi_external_libraries_quick_start.md`
 4. `doc/report/sffi_external_library_implementation_2026-02-08.md`
 5. `doc/report/pytorch_sffi_implementation_2026-02-08.md`
 6. `doc/report/sffi_three_tier_pattern_complete_2026-02-08.md`
@@ -803,7 +803,7 @@ The three-tier SFFI pattern successfully maintains Simple's "Simple-first" philo
 
 - **Main Design**: `doc/design/sffi_external_library_pattern.md`
 - **PyTorch Design**: `doc/design/pytorch_thin_wrapper_design.md`
-- **Quick Start**: `doc/guide/sffi_external_libraries_quick_start.md`
+- **Quick Start**: `doc/guide/quick_reference/sffi_external_libraries_quick_start.md`
 - **CLAUDE.md**: Lines 889-982
 - **Skill**: `.claude/skills/sffi.md`
 - **Implementation**: `.build/rust/ffi_torch/`, `src/lib/torch/`

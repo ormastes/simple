@@ -465,7 +465,7 @@ import units.ids::*                  # RequestId, EntityId
 ## Need Help?
 
 **Documentation**:
-- Design patterns: `doc/guide/newtype_design_patterns.md`
+- Design patterns: `doc/guide/types/newtype_patterns.md`
 - Full project report: `doc/report/primitive_api_migration_summary_2026-01-20.md`
 - Future opportunities: `doc/guide/primitive_api_next_steps.md`
 

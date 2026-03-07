@@ -5,7 +5,7 @@ This directory contains comprehensive documentation for container-based testing 
 ## Quick Start
 
 **For developers:**
-1. Read `container_testing.md` (10 min read)
+1. Read `test/container.md` (10 min read)
 2. Run `scripts/local-container-test.sh unit` to try it out
 3. Use `docker-compose up unit-tests` for daily development
 
@@ -20,7 +20,7 @@ This directory contains comprehensive documentation for container-based testing 
 
 ### Core Guides
 
-#### 1. **container_testing.md** (Primary Guide)
+#### 1. **test/container.md** (Primary Guide)
 **Full guide to container-based testing**
 
 Topics covered:
@@ -377,7 +377,7 @@ scripts/local-container-test.sh shell
 
 - **CLAUDE.md** - Main development guide (Quick Commands, Troubleshooting)
 - **doc/guide/test.md** - General test policy and structure
-- **doc/guide/comprehensive_testing.md** - Testing methodology
+- **doc/guide/test/comprehensive.md** - Testing methodology
 - **.github/workflows/** - All CI/CD workflows
 - **simple.test.sdn** - Test configuration file
 

@@ -248,7 +248,7 @@ When GC async modules are created:
 ## Cross-References
 
 - **Async migration guide:** [`doc/design/async_migration_guide.md`](async_migration_guide.md) — GC↔NoGC patterns for async code
-- **nogc_async_mut architecture:** [`doc/guide/nogc_async_mut_architecture.md`](../guide/nogc_async_mut_architecture.md) — 53-file, 9,795-line async library
+- **nogc_async_mut architecture:** [`doc/guide/sync_async/async/nogc_async_mut_architecture.md`](../guide/sync_async/async/nogc_async_mut_architecture.md) — 53-file, 9,795-line async library
 - **Cross-language async patterns:** [`doc/research/async_patterns_cross_language.md`](../research/async_patterns_cross_language.md) — Rust/Go/Erlang/Swift/Kotlin/Zig/C++/Python
 
 ---

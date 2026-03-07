@@ -566,5 +566,5 @@ else:
 - `src/app/test_runner_new/runner_lifecycle.spl` - Lifecycle management
 - `src/app/test_runner_new/checkpoint.spl` - Progress persistence
 - `src/app/test_runner_new/shutdown.spl` - Graceful shutdown
-- `doc/guide/container_testing.md` - Container testing guide
+- `doc/guide/test/container.md` - Container testing guide
 - `doc/guide/resource_limits.md` - Resource limit enforcement

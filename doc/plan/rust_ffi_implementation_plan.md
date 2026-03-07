@@ -588,7 +588,7 @@ If issues arise:
 ## Documentation Updates
 
 After implementation:
-- [ ] Update `doc/guide/jit_infrastructure_quick_start.md` with "works!" status
+- [ ] Update `doc/guide/backend/jit.md` with "works!" status
 - [ ] Add examples of actual working JIT code
 - [ ] Document any platform-specific quirks
 - [ ] Add performance benchmarks

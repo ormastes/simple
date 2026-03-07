@@ -455,7 +455,7 @@ impl Resource for MyExistingType:
 
 ## See Also
 
-- [Syntax Quick Reference](syntax_quick_reference.md) - Resource cleanup syntax
+- [Syntax Quick Reference](quick_reference/syntax_quick_reference.md) - Resource cleanup syntax
 - [core.resource](../../src/lib/std/src/compiler_core/resource.spl) - Resource trait source
 - [core.resource_registry](../../src/lib/std/src/compiler_core/resource_registry.spl) - Registry source
 - [core.leak_tracked](../../src/lib/std/src/compiler_core/leak_tracked.spl) - LeakTracked mixin source

@@ -291,7 +291,7 @@ simple/
 - Read: guide/ documentation
 
 ### For User Questions
-- Read: guide/async_guide.md
+- Read: guide/sync_async/async/async_guide.md
 - Read: guide/lsp_integration.md
 - Read: guide/backend_capabilities.md
 

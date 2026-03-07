@@ -510,7 +510,7 @@ simple gen-lean write --force               # Regenerate all
 
 ## See Also
 
-- **`doc/guide/architecture_writing.md`** - Architecture writing guide
+- **`doc/guide/writing/architecture_writing.md`** - Architecture writing guide
 - `doc/architecture/README.md` - Full architecture docs
 - `doc/architecture/file_class_structure.md` - Codebase inventory
 - `doc/codegen_technical.md` - Codegen details

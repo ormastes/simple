@@ -28,9 +28,9 @@ This directory contains practical guides for:
 
 | Guide | Status | Tests | Description |
 |-------|--------|-------|-------------|
-| [async_guide.md](async_guide.md) | ✅ READY | 9/9 PASS | **Async/await programming** - Lambdas, futures, generators, actor model (all <10ms) |
+| [async_guide.md](sync_async/async/async_guide.md) | ✅ READY | 9/9 PASS | **Async/await programming** - Lambdas, futures, generators, actor model (all <10ms) |
 | [lsp_integration.md](lsp_integration.md) | ✅ READY | 8/8 PASS | **Language Server Protocol** - VS Code, Neovim, Emacs setup; go-to-def, hover, completion |
-| [backend_capabilities.md](backend_capabilities.md) | ✅ READY | 9/9 PASS | **Compiler backends** - Cranelift, LLVM, Native selection; capability detection |
+| [backend/capabilities.md](backend/capabilities.md) | ✅ READY | 9/9 PASS | **Compiler backends** - Cranelift, LLVM, Native selection; capability detection |
 
 **See also:** [FEATURES_THAT_WORK.md](../FEATURES_THAT_WORK.md) for complete list of working features.
 
@@ -48,7 +48,7 @@ This directory contains practical guides for:
 
 | Guide | Description |
 |-------|-------------|
-| [syntax_quick_reference.md](syntax_quick_reference.md) | **Syntax cheatsheet** - Slicing `[1:5]`, comprehensions, `?.`, `??`, destructuring, ranges, all implemented syntax |
+| [syntax_quick_reference.md](quick_reference/syntax_quick_reference.md) | **Syntax cheatsheet** - Slicing `[1:5]`, comprehensions, `?.`, `??`, destructuring, ranges, all implemented syntax |
 | [fn_lambda_syntax.md](fn_lambda_syntax.md) | Function and lambda syntax details |
 
 ---
@@ -58,10 +58,10 @@ This directory contains practical guides for:
 | Guide | Description |
 |-------|-------------|
 | [coding_style.md](coding_style.md) | **Main coding guide** - Domain types, defaults, config patterns, type inference, keyword omission, Lean verification, AOP logging, doctest examples |
-| [sspec_writing.md](sspec_writing.md) | **SSpec test guide** - BDD tests, document format, doctest integration, matchers, fixtures |
-| [architecture_writing.md](architecture_writing.md) | **Architecture guide** - Skeleton-first design, Lean verification workflow, diagram generation from tests |
-| [design_writing.md](design_writing.md) | **Design guide** - Draft diagrams replaced by test-generated class/sequence diagrams |
-| [application_writing.md](application_writing.md) | **Application guide** - Building apps with links to spec/generated manuals, GUI/TUI/Web/CLI patterns |
+| [sspec_writing.md](test/sspec_writing.md) | **SSpec test guide** - BDD tests, document format, doctest integration, matchers, fixtures |
+| [writing/architecture_writing.md](writing/architecture_writing.md) | **Architecture guide** - Skeleton-first design, Lean verification workflow, diagram generation from tests |
+| [writing/design_writing.md](writing/design_writing.md) | **Design guide** - Draft diagrams replaced by test-generated class/sequence diagrams |
+| [writing/application_writing.md](writing/application_writing.md) | **Application guide** - Building apps with links to spec/generated manuals, GUI/TUI/Web/CLI patterns |
 
 **Key rules:** No primitives in public APIs, defaults everywhere, type inference for app code, explicit types for lib code, doctest for all public APIs, max 800 lines per file.
 
@@ -117,7 +117,22 @@ This directory contains practical guides for:
 | Guide | Description |
 |-------|-------------|
 | [ui.md](ui.md) | UI framework overview (TUI, GUI) |
-| [vulkan_backend.md](vulkan_backend.md) | Vulkan GPU backend for graphics |
+| [backend/vulkan.md](backend/vulkan.md) | Vulkan GPU backend for graphics |
+
+---
+
+## Bare-Metal & Embedded
+
+| Guide | Description |
+|-------|-------------|
+| [baremetal/baremetal_quick_start.md](baremetal/baremetal_quick_start.md) | **Quick start** - Build and run on ARM, x86_64, RISC-V bare-metal |
+| [baremetal/qemu_setup.md](baremetal/qemu_setup.md) | **QEMU setup** - Install QEMU for all architectures |
+| [baremetal/qemu_unified_library.md](baremetal/qemu_unified_library.md) | **QEMU library** - Unified API for QEMU instances |
+| [baremetal/unified_execution_guide.md](baremetal/unified_execution_guide.md) | **Unified execution** - Local, QEMU, and hardware testing |
+| [baremetal/getting_started_unified_execution.md](baremetal/getting_started_unified_execution.md) | **Getting started** - Quick start for unified execution |
+| [baremetal/semihosting_testing_quickstart.md](baremetal/semihosting_testing_quickstart.md) | **Semihosting** - Test bare-metal RISC-V with semihosting |
+| [baremetal/embedded_board_running.md](baremetal/embedded_board_running.md) | **Hardware debug** - STM32, Trace32, OpenOCD 8-combo matrix |
+| [baremetal/embedded_connection_setup.md](baremetal/embedded_connection_setup.md) | **Hardware setup** - ST-LINK, OpenOCD, Trace32 installation |
 
 ---
 
@@ -131,17 +146,20 @@ This directory contains practical guides for:
 
 ---
 
-## LLM-Friendly Development
+## LLM & Deep Learning
+
+All LLM, PyTorch, and deep learning guides are in [`llm/`](llm/).
 
 | Guide | Description |
 |-------|-------------|
-| [llm_friendly.md](llm_friendly.md) | Guidelines for making code LLM-friendly |
-
-Covers:
-- IR export for AI code review
-- Context packs for LLM consumption
-- Lint framework for code quality
-- Best practices for AI-assisted development
+| [llm/deep_learning.md](llm/deep_learning.md) | Comprehensive DL guide (Pure Simple, PyTorch FFI, CUDA, MedGemma) |
+| [llm/training_infrastructure.md](llm/training_infrastructure.md) | ML infrastructure (config, experiment tracking, training engine) |
+| [llm/pytorch_cuda_setup.md](llm/pytorch_cuda_setup.md) | PyTorch CUDA setup and troubleshooting |
+| [llm/pytorch_quick_start.md](llm/pytorch_quick_start.md) | PyTorch FFI quick start |
+| [llm/tensor_dimensions.md](llm/tensor_dimensions.md) | Tensor dimension inference and shape verification |
+| [llm/dimension_errors.md](llm/dimension_errors.md) | Dimension error reference (E0501-E0510) |
+| [llm/acceleration.md](llm/acceleration.md) | Pure Simple DL acceleration modes |
+| [llm/llm_friendly.md](llm/llm_friendly.md) | LLM-friendly language design features |
 
 ---
 
@@ -150,29 +168,30 @@ Covers:
 ### By Purpose
 
 **NEW! Production-Ready Features:**
-1. [async_guide.md](async_guide.md) - ✅ **Async/await guide** (9 tests passing)
+1. [async_guide.md](sync_async/async/async_guide.md) - ✅ **Async/await guide** (9 tests passing)
 2. [lsp_integration.md](lsp_integration.md) - ✅ **LSP editor setup** (8 tests passing)
-3. [backend_capabilities.md](backend_capabilities.md) - ✅ **Compiler backends** (9 tests passing)
+3. [backend/capabilities.md](backend/capabilities.md) - ✅ **Compiler backends** (9 tests passing)
 
 **Getting Started:**
-1. [syntax_quick_reference.md](syntax_quick_reference.md) - **Language syntax cheatsheet** (slicing, comprehensions, `?.`, `??`, etc.)
+1. [syntax_quick_reference.md](quick_reference/syntax_quick_reference.md) - **Language syntax cheatsheet** (slicing, comprehensions, `?.`, `??`, etc.)
 2. [coding_style.md](coding_style.md) - Coding conventions
-3. [sspec_writing.md](sspec_writing.md) - Writing tests with SSpec
+3. [sspec_writing.md](test/sspec_writing.md) - Writing tests with SSpec
 4. [module_system.md](module_system.md) - Project organization
 5. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
 
 **Building Applications:**
-1. [application_writing.md](application_writing.md) - Application patterns with spec links
+1. [writing/application_writing.md](writing/application_writing.md) - Application patterns with spec links
 2. [db.md](db.md) - Database integration
 3. [web_framework.md](web_framework.md) - Web applications
 4. [ui.md](ui.md) - User interfaces
 
 **Advanced Topics:**
-1. [architecture_writing.md](architecture_writing.md) - Skeleton-first architecture
-2. [design_writing.md](design_writing.md) - Draft-to-generated diagrams
-3. [vulkan_backend.md](vulkan_backend.md) - GPU programming
+1. [writing/architecture_writing.md](writing/architecture_writing.md) - Skeleton-first architecture
+2. [writing/design_writing.md](writing/design_writing.md) - Draft-to-generated diagrams
+3. [backend/vulkan.md](backend/vulkan.md) - GPU programming
 4. [context_sharing_usage_guide.md](context_sharing_usage_guide.md) - Advanced module patterns
-5. [llm_friendly.md](llm_friendly.md) - LLM integration
+5. [llm/](llm/) - LLM & deep learning guides
+6. [baremetal/](baremetal/) - Bare-metal & embedded development
 
 ---
 
@@ -219,7 +238,7 @@ When adding new guides:
 Added 3 comprehensive guides for production-ready features (1700+ lines total):
 - ✅ `async_guide.md` - Complete async/await programming guide
 - ✅ `lsp_integration.md` - LSP setup for all major editors
-- ✅ `backend_capabilities.md` - Compiler backend selection guide
+- ✅ `backend/capabilities.md` - Compiler backend selection guide
 
 **Test Audit Results:**
 - 30+ tests previously marked @skip/@pending actually PASS!

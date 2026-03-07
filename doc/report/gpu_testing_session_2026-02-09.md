@@ -477,6 +477,6 @@ The pre-built runtime parser doesn't support:
 ## Related Documents
 
 - Implementation: `doc/report/gpu_unified_interface_complete_2026-02-09.md`
-- Quick start: `doc/guide/gpu_quick_start.md`
+- Quick start: `doc/guide/quick_reference/gpu_quick_start.md`
 - Next steps: `NEXT_STEPS.md`
 - Phase reports: `doc/report/*_phase*_complete_2026-02-09.md`
