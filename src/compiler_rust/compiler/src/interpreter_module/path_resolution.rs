@@ -130,7 +130,7 @@ fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
 }
 
 /// Try to resolve the last segment from a given directory.
-/// Checks .spl file, .ssh file, __init__.spl, and numbered directory variants.
+/// Checks .spl file, .shs file, __init__.spl, and numbered directory variants.
 fn try_resolve_last_segment(current: &Path, last: &str) -> Option<PathBuf> {
     // Try .spl file
     let file_path = current.join(format!("{}.spl", last));
@@ -138,10 +138,10 @@ fn try_resolve_last_segment(current: &Path, last: &str) -> Option<PathBuf> {
         return Some(file_path);
     }
 
-    // Try .ssh file
-    let ssh_path = current.join(format!("{}.ssh", last));
-    if ssh_path.exists() && ssh_path.is_file() {
-        return Some(ssh_path);
+    // Try .shs file
+    let shs_path = current.join(format!("{}.shs", last));
+    if shs_path.exists() && shs_path.is_file() {
+        return Some(shs_path);
     }
 
     // Try directory with __init__.spl
@@ -343,8 +343,8 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         return Ok(resolved);
     }
 
-    // Try .ssh extension (Simple shell scripts)
-    resolved.set_extension("ssh");
+    // Try .shs extension (Simple shell scripts)
+    resolved.set_extension("shs");
     if resolved.exists() && resolved.is_file() {
         return Ok(resolved);
     }

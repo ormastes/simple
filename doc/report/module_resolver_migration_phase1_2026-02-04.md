@@ -31,7 +31,7 @@ Phase 1 of the Module Resolution system has been **successfully migrated from Ru
 - ✅ `CompilerBackend` enum (Interpreted, Cranelift)
 - ✅ `FileMode` enum (Standard, Shell, Data)
 - ✅ `ExtensionConfig` struct (extension, backend, mode, description)
-- ✅ Extension configuration registry (5 configs: .spl, .simple, .sscript, .ssh, .sdn)
+- ✅ Extension configuration registry (5 configs: .spl, .simple, .sscript, .shs, .sdn)
 - ✅ Extension lookup functions (get_extension_config, get_file_mode, get_compiler_backend)
 - ✅ `DirectoryManifest` struct (manifest structure for __init__.spl)
 - ✅ `ChildModule` struct (child module declarations)
@@ -64,7 +64,7 @@ ModuleResolver.with_profiles(profiles)
 - ✅ Absolute path resolution (crate.*)
 - ✅ Relative path resolution (from current file)
 - ✅ Stdlib fallback (tries stdlib if relative fails)
-- ✅ Multi-extension support (.spl, .ssh)
+- ✅ Multi-extension support (.spl, .shs)
 - ✅ Directory module detection (__init__.spl)
 - ✅ `get_exports()` - Extract exported symbols from manifest
 - ✅ `get_common_uses()` - Walk directory tree for common uses
@@ -79,7 +79,7 @@ ModuleResolver.with_profiles(profiles)
 4. Resolve last segment:
    a. Try directory/__init__.spl
    b. Try segment.spl
-   c. Try segment.ssh
+   c. Try segment.shs
    d. Error if none found
 5. Fallback to stdlib if relative resolution fails
 ```
@@ -120,7 +120,7 @@ Effect → Capability mapping:
 ### ✅ All Core Features Implemented
 
 **File Extension Handling:**
-- [x] 5 extension configs (.spl, .simple, .sscript, .ssh, .sdn)
+- [x] 5 extension configs (.spl, .simple, .sscript, .shs, .sdn)
 - [x] Extension to backend mapping
 - [x] Extension to file mode mapping
 - [x] Fallback to default (Standard, Interpreted)
@@ -234,7 +234,7 @@ Every file includes:
 - [x] Absolute path resolution (crate.* uses source_root)
 - [x] Relative path resolution (uses from_file parent)
 - [x] Stdlib fallback (tries stdlib if relative fails)
-- [x] Extension priority (.spl → .ssh)
+- [x] Extension priority (.spl → .shs)
 - [x] Directory priority (__init__.spl before .spl file)
 - [x] Manifest caching (avoids re-parsing)
 - [x] Capability subset checking (child ⊆ parent)

@@ -116,7 +116,7 @@ Created FILE.md documentation for all major directories, providing quick referen
 **Key Sections:**
 - Directory structure
 - Category-by-category overview (100+ scripts)
-- Script conventions (.spl, .ssh, naming patterns)
+- Script conventions (.spl, .shs, naming patterns)
 - Common use cases (building, testing, migration)
 - Script template
 - Statistics (100+ scripts, 90% Pure Simple)

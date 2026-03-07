@@ -33,6 +33,6 @@ Pre-built ELF binaries in `examples/09_embedded/baremetal/baremetal/`:
 | `hello_riscv32_semihost.elf` | RV32I | Basic semihosting hello world |
 | `hello_riscv32_sspec.elf` | RV32I | SSpec-format output for test runner |
 
-Build with: `examples/09_embedded/baremetal/baremetal/build.ssh`
+Build with: `examples/09_embedded/baremetal/baremetal/build.shs`
 
 Run: `qemu-system-riscv32 -M virt -bios none -kernel <elf> -nographic -semihosting-config enable=on,target=native`

@@ -401,8 +401,8 @@ pub fn load_module_with_imports_validated(
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
 
-    // Auto-import std.shell.* for .ssh files
-    if path.extension().and_then(|e| e.to_str()) == Some("ssh") {
+    // Auto-import std.shell.* for .shs files
+    if path.extension().and_then(|e| e.to_str()) == Some("shs") {
         use simple_parser::ast::{UseStmt, ModulePath, ImportTarget};
         use simple_parser::token::Span;
         let shell_import = Node::UseStmt(UseStmt {

@@ -36,7 +36,7 @@ These rules apply to all contributors. Overrides require an ADR (see `doc/adr/`)
 ## 2. Language Rules
 
 ### 2.1 Code Language
-- **ALL source code in `.spl` or `.ssh`** — No Python, Rust, or Bash except 3 bootstrap scripts in `scripts/`
+- **ALL source code in `.spl` or `.shs`** — No Python, Rust, or Bash except 3 bootstrap scripts in `scripts/`
 - **Generics:** `<>` not `[]` — `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
 - **NO inheritance** — use composition, traits, or mixins

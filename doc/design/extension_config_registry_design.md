@@ -20,7 +20,7 @@ extension_config:
         prelude: none
         mode: data
 
-    .ssh:
+    .shs:
         compiler: simple_compiler
         prelude: std.prelude
         default_imports: [std.shell.*]
@@ -37,7 +37,7 @@ Currently, file type behavior is scattered across convention-based checks:
 - `_spec.spl` files: BDD functions auto-registered via thread-local storage
 - `_test.spl` files: test harness context
 
-Adding `.ssh` (Simple Shell) requires yet another special case. Instead, a registry maps extensions to their configuration, making the system explicit and extensible.
+Adding `.shs` (Simple Shell) requires yet another special case. Instead, a registry maps extensions to their configuration, making the system explicit and extensible.
 
 ## Design
 
@@ -45,7 +45,7 @@ Adding `.ssh` (Simple Shell) requires yet another special case. Instead, a regis
 
 ```simple
 struct ExtensionConfig:
-    extension: text                    # ".spl", ".sdn", ".ssh"
+    extension: text                    # ".spl", ".sdn", ".shs"
     compiler: CompilerBackend          # which compiler/parser
     prelude: Option<text>              # prelude module path (or none)
     default_imports: [text]            # auto-imported packages
@@ -87,8 +87,8 @@ val EXTENSION_REGISTRY = {
         interpreter: false,
         lint_profile: None,
     ),
-    ".ssh": ExtensionConfig(
-        extension: ".ssh",
+    ".shs": ExtensionConfig(
+        extension: ".shs",
         compiler: CompilerBackend.SimpleCompiler,
         prelude: Some("std.prelude"),
         default_imports: ["std.shell.*"],
@@ -135,18 +135,18 @@ val PATTERN_OVERRIDES = {
 - The SDN compiler parses the data format and returns structured values
 - Script config files (`simple.sdn`) are loaded via this path
 
-This unifies `.sdn` handling under the same dispatch mechanism as `.spl` and `.ssh`.
+This unifies `.sdn` handling under the same dispatch mechanism as `.spl` and `.shs`.
 
-## How `.ssh` Connects
+## How `.shs` Connects
 
-`.ssh` files use the full Simple compiler but with:
+`.shs` files use the full Simple compiler but with:
 
 - `default_imports: ["std.shell.*"]` — shell DSL package auto-imported
 - `mode: Script` — top-level statements allowed (no `fn main` required)
 - `interpreter: true` — run via interpreter, not codegen
 - Task syntax (`task`, `depends_on:`, `phony`) enabled by shell compiler mode
 
-See `doc/design/simple_shell_design.md` for full `.ssh` DSL design.
+See `doc/design/simple_shell_design.md` for full `.shs` DSL design.
 
 ## Structured Export: EasyFix Integration
 
@@ -253,7 +253,7 @@ Projects can override or extend the registry in `simple.sdn`:
 
 ```sdn
 extensions:
-    .ssh:
+    .shs:
         default_imports: [std.shell.*, myproject.shell_helpers.*]
         lint_profile: shell_strict
 
@@ -275,5 +275,5 @@ extensions:
 Fully backward compatible:
 - Existing `.spl` and `.sdn` behavior unchanged
 - Registry formalizes what is already convention-based
-- New extensions (`.ssh`) register cleanly
+- New extensions (`.shs`) register cleanly
 - Project-level overrides are optional

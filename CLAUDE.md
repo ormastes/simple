@@ -88,8 +88,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - Fetch: `jj git fetch && jj rebase -d main@origin`
 
 ### Language
-- **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
-- **Scripts:** Use `.ssh` for shell scripts that need to remain shell (e.g., container entrypoints)
+- **ALL code in `.spl` or `.shs`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
+- **Scripts:** Use `.shs` for shell scripts that need to remain shell (e.g., container entrypoints)
 - **Generics:** `<>` not `[]` - `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
 - **Constructors:** `Point(x: 3, y: 4)` not `.new()`
