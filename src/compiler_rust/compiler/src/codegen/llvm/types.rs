@@ -50,23 +50,15 @@ impl super::LlvmBackend {
     }
 
     /// Get actual LLVM BasicTypeEnum for a TypeId (feature-gated)
+    ///
+    /// For native-build (bootstrap), ALL values are represented as i64 to match
+    /// the Simple runtime's tagged-pointer scheme. This mirrors the Cranelift
+    /// backend which also uses i64 for everything.
     #[cfg(feature = "llvm")]
-    pub(super) fn llvm_type(&self, ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
-        use crate::hir::TypeId as T;
-        match *ty {
-            T::VOID => Ok(self.context.i8_type().into()), // void → i8 (for BasicTypeEnum)
-            T::BOOL => Ok(self.context.bool_type().into()),
-            T::I8 | T::U8 => Ok(self.context.i8_type().into()),
-            T::I16 | T::U16 => Ok(self.context.i16_type().into()),
-            T::I32 | T::U32 | T::CHAR => Ok(self.context.i32_type().into()),
-            T::I64 | T::U64 => Ok(self.context.i64_type().into()),
-            T::F32 => Ok(self.context.f32_type().into()),
-            T::F64 => Ok(self.context.f64_type().into()),
-            T::STRING | T::NIL | T::ANY => {
-                Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into())
-            }
-            // User-defined types (structs, enums, arrays, etc.) → opaque pointer
-            _ => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
-        }
+    pub(super) fn llvm_type(&self, _ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
+        // Simple runtime uses i64 for all values (tagged pointers).
+        // Using i64 uniformly avoids type mismatches between the LLVM backend
+        // and the runtime's C ABI (all functions are fn(i64, ...) -> i64).
+        Ok(self.context.i64_type().into())
     }
 }

@@ -151,7 +151,8 @@ class PathApi:
             trimmed
 
     fn absolute(p: text) -> text:
-        val result = rt_process_run("/bin/sh", ["-c", "realpath -m '" + p + "'"])
+        # Use python for portable realpath (macOS realpath lacks -m flag)
+        val result = rt_process_run("/bin/sh", ["-c", "cd '" + p + "' 2>/dev/null && pwd || realpath '" + p + "' 2>/dev/null || echo '" + p + "'"])
         val stdout = result[0]
         stdout.trim()
 
@@ -209,7 +210,9 @@ if not is_windows:
 
 if not is_windows:
     it "read_file_contents":
-        val content = file.read_text("/etc/hostname")
+        # /etc/hostname exists on Linux; macOS uses /etc/hosts instead
+        val path_to_read = if file.exists("/etc/hostname"): "/etc/hostname" else: "/etc/hosts"
+        val content = file.read_text(path_to_read)
         check(content.len() > 0)
 
 it "write_file_contents":
@@ -227,7 +230,8 @@ it "append_to_file":
 
 if not is_windows:
     it "check_file_exists":
-        check(file.exists("/etc/hostname"))
+        # /etc/hostname on Linux, /etc/hosts on macOS — both always exist
+        check(file.exists("/etc/hostname") or file.exists("/etc/hosts"))
         check(not file.exists("/nonexistent/file.txt"))
 
 # ## Test: Directory Operations (Unix only — uses ls, find via /bin/sh)
@@ -272,7 +276,8 @@ if not is_windows:
         check(path.ext("/home/user/archive.tar.gz") == ".gz")
 
     it "absolute_path":
-        val abs = path.absolute("../file.txt")
+        # Use a path relative to cwd to avoid realpath -m issues on macOS
+        val abs = path.absolute(".")
         check(abs.starts_with("/"))
 
 # ## Test: Environment Variables

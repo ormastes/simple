@@ -11,7 +11,7 @@ Use `bootstrap-from-scratch-qemu_freebsd.sh` when you want FreeBSD bootstrap ins
 ## Quick Start
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full2 --deploy
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --deploy
 ```
 
 The wrapper configures QEMU/SSH/rsync, syncs this repository to the VM, then runs:
@@ -38,14 +38,13 @@ All other options are passed through to `bootstrap-from-scratch.sh`.
 # Use explicit VM image
 scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh \
   --qemu-vm=/data/vms/freebsd.qcow2 \
-  --step=full2 \
   --deploy
 
 # Fast build without full reproducibility
-scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full1 --deploy
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --no-verify --deploy
 
 # Keep VM up for repeated runs
-scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --keep-vm-running --step=core1
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --keep-vm-running --skip-download
 ```
 
 ## Prerequisites

@@ -7,8 +7,9 @@ use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_wri
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, aot_vhdl_file, compile_to_smf}
+use compiler.driver.driver_api.{aot_native_file_with_backend}
 use app.compile.native.{compile_native}
-use compiler.driver.driver_types.{CompileOptions, CompileOptions__default, CompileMode, CompileResult, OutputFormat}
+use compiler.driver.driver_types.{CompileOptions, CompileOptions__default, CompileMode, CompileResult, CompileResult__get_errors, OutputFormat}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_native_build(args: [text]) -> i64
@@ -65,7 +66,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
                 _cli_eprint("[Pure Simple Compiler] Compilation successful: {out}")
             return 0
         case _:
-            val errors = result.get_errors()
+            val errors = CompileResult__get_errors(result)
             if errors.len() > 0:
                 for err in errors:
                     _cli_eprint("error: {err}")
@@ -210,6 +211,23 @@ fn cli_compile(args: [text]) -> i64:
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
         return compile_c_backend(source_file, output_file, verbose)
+
+    # LLVM backends: bootstrap-safe route via native-build runtime bridge for native output.
+    # This avoids frontend method-resolution gaps in self-host bootstrap binaries.
+    if (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm") and (emit == "native" or output_format == "native" or output_format == ""):
+        var out = output_file
+        if out == "":
+            out = source_file.replace(".spl", "")
+        var nb_args = ["native-build",
+            "--source", "src/compiler",
+            "--source", "src/lib",
+            "--source", "src/app",
+            "--entry", source_file,
+            "-o", out,
+            "--backend", "llvm"]
+        if verbose:
+            nb_args = nb_args + ["--verbose"]
+        return rt_native_build(nb_args)
 
     # LLVM backends always go through native compilation pipeline
     if backend == "llvm" or backend == "llvm-lib" or backend == "llvmlib" or emit == "native":
@@ -384,7 +402,7 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
             print "Build with: clang -std=gnu11 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
             return 0
         case _:
-            val errors = aot_result.get_errors()
+            val errors = CompileResult__get_errors(aot_result)
             for err in errors:
                 _cli_eprint("error: {err}")
             _cli_eprint("Error: C backend generation failed")
@@ -405,14 +423,78 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
             print "Output: {out}"
             return 0
         case _:
-            val errors = aot_result.get_errors()
+            val errors = CompileResult__get_errors(aot_result)
             for err in errors:
                 _cli_eprint("error: {err}")
             _cli_eprint("Error: VHDL compilation failed")
             return 1
 
-# Native build: compile entire project to native binary via Rust NativeProjectBuilder FFI
+# Native build: compile entire project to native binary
+# Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
+# otherwise delegates to Rust NativeProjectBuilder FFI.
 fn cli_native_build(args: [text]) -> i64:
-    return rt_native_build(args)
+    # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
+    var backend = ""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+        i = i + 1
+
+    if backend == "llvm-lib" or backend == "llvmlib":
+        # Pure Simple path: use CompilerDriver with LLVM lib backend
+        # Parse native-build args: --source, --entry, -o, etc.
+        var entry_point = ""
+        var output = "a.out"
+        var verbose = false
+        var j = 0
+        # Skip "native-build" command name
+        if args.len() > 0 and args[0] == "native-build":
+            j = 1
+        while j < args.len():
+            val a = args[j]
+            if a.starts_with("--entry"):
+                if a.contains("="):
+                    entry_point = a.substring(a.index_of("=").unwrap() + 1)
+                elif j + 1 < args.len():
+                    j = j + 1
+                    entry_point = args[j]
+            elif a == "-o":
+                if j + 1 < args.len():
+                    j = j + 1
+                    output = args[j]
+            elif a.starts_with("-o"):
+                output = a.substring(2)
+            elif a == "--verbose" or a == "-v":
+                verbose = true
+            elif a.starts_with("--backend="):
+                pass  # Already handled above
+            elif not a.starts_with("-") and entry_point == "":
+                entry_point = a
+            j = j + 1
+
+        if entry_point == "":
+            _cli_eprint("Error: No entry point specified for llvm-lib backend")
+            _cli_eprint("Usage: simple native-build --backend=llvm-lib --entry <file.spl> -o <output>")
+            return 1
+
+        if verbose:
+            _cli_eprint("[native-build] Using pure Simple LLVM lib backend")
+            _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
+
+        val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
+        match result:
+            case CompileResult.Success(_):
+                if verbose:
+                    _cli_eprint("[native-build] Build successful: {output}")
+                return 0
+            case _:
+                val errors = CompileResult__get_errors(result)
+                for err in errors:
+                    _cli_eprint("error: {err}")
+                return 1
+    else:
+        return rt_native_build(args)
 
 export cli_compile, compile_baremetal, compile_vhdl, cli_native_build

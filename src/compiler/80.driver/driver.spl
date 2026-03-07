@@ -35,6 +35,8 @@ use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # Lightweight logging helpers to avoid bootstrap method lookups
 fn log_debug(msg: text):
@@ -91,11 +93,19 @@ fn _driver_collect_sources(p: text) -> [SourceFile]:
             return result
         if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
             return result
-        match SourceFile.load(p):
-            case Ok(source):
-                result.push(source)
-            case Err(e):
-                ()  # errors will be detected later
+        val content = rt_file_read_text(p) ?? ""
+        if content != "":
+            var mod_path = p
+            if mod_path.starts_with("src/"):
+                mod_path = mod_path.substring(4)
+            mod_path = mod_path.replace(".spl", "")
+            mod_path = mod_path.replace(".sdn", "")
+            val module_name = mod_path.replace("/", ".")
+            result = result.push(SourceFile(
+                path: p,
+                content: content,
+                module_name: module_name
+            ))
     else:
         # Treat as directory — depth-first traversal with pruning
         val entries = rt_dir_list(p) ?? []
@@ -108,8 +118,26 @@ fn _driver_collect_sources(p: text) -> [SourceFile]:
                 continue
             val child_sources = _driver_collect_sources(child_path)
             for s in child_sources:
-                result.push(s)
+                result = result.push(s)
             idx = idx + 1
+    result
+
+fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
+    var result: [SourceFile] = []
+    val cmd = "find src/app src/lib src/compiler src/runtime -type f -name '*.spl' 2>/dev/null"
+    val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0 or stdout == "":
+        return result
+    val lines = stdout.split("\n")
+    for line in lines:
+        val path = line.trim()
+        if path == "":
+            continue
+        if path.contains("/test/") or path.contains("/tests/") or path.contains("/doc/") or path.contains("/examples/") or path.contains("/verification/"):
+            continue
+        val loaded = _driver_collect_sources(path)
+        for s in loaded:
+            result = result.push(s)
     result
 
 # ------------------------------------------------------------------------------
@@ -234,7 +262,7 @@ class CompilerDriver:
             val loaded = _driver_collect_sources(input_path)
             print "[DRIVER] collected {loaded.len()} sources from {input_path}"
             for s in loaded:
-                all_sources.push(s)
+                all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
             i = i + 1
@@ -242,17 +270,22 @@ class CompilerDriver:
         # Add core source roots only when compiling project sources (self-hosted build)
         if has_project_source:
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
-            for p in paths:
-                val loaded = _driver_collect_sources(p)
-                for s in loaded:
-                    all_sources.push(s)
+            val bulk_loaded = _driver_collect_sources_via_find(paths)
+            if bulk_loaded.len() > 0:
+                for s in bulk_loaded:
+                    all_sources = all_sources.push(s)
+            else:
+                for p in paths:
+                    val loaded = _driver_collect_sources(p)
+                    for s in loaded:
+                        all_sources = all_sources.push(s)
 
         print "[DRIVER] total sources collected: {all_sources.len()}"
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources
         print "[DRIVER] after assign: {self.ctx.sources.len()}"
 
-        not self.ctx.has_errors()
+        self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
     # Phase 2: Parse
@@ -272,7 +305,7 @@ class CompilerDriver:
             src_idx = src_idx + 1
 
         log_debug("parsing done, modules={self.ctx.modules.keys().len()}")
-        not self.ctx.has_errors()
+        self.ctx.errors.len() == 0
 
     fn parse_source(source: SourceFile) -> Module:
         parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
@@ -355,7 +388,7 @@ class CompilerDriver:
         log_debug("effect inference done, {effect_warnings.len()} warnings")
 
         log_debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
-        not self.ctx.has_errors()
+        self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)
@@ -439,7 +472,7 @@ class CompilerDriver:
         log_debug("  call sites: {stats.call_sites_found}")
         log_debug("  specializations created: {stats.specializations_created}")
 
-        not self.ctx.has_errors()
+        self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
     # Mode: SDN (Data only)
@@ -645,7 +678,7 @@ class CompilerDriver:
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = mir_module
 
-        not self.ctx.has_errors()
+        self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
     # Borrow Checking

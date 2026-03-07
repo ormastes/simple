@@ -70,6 +70,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
+    let mut backend = "cranelift".to_string();
 
     // Parse arguments (skip "native-build" at index 0)
     let mut i = 1;
@@ -92,6 +93,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");
                 println!("  --no-mangle         Disable name mangling");
+                println!("  --backend <name>    Codegen backend: cranelift (default) or llvm");
                 return 0;
             }
             "--source" => {
@@ -180,6 +182,15 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 no_mangle = true;
                 i += 1;
             }
+            "--backend" => {
+                if i + 1 < args_vec.len() {
+                    backend = args_vec[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("error: --backend requires a value (cranelift or llvm)");
+                    return 1;
+                }
+            }
             other => {
                 source_dirs.push(PathBuf::from(other));
                 i += 1;
@@ -229,6 +240,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         eprintln!("  Timeout: {}s", timeout);
         eprintln!("  Incremental: {}", incremental);
         eprintln!("  Mangle: {}", !no_mangle);
+        eprintln!("  Backend: {}", backend);
     }
 
     let mut config = NativeBuildConfig::default();
@@ -240,6 +252,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.clean = clean;
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
+    config.backend = backend.clone();
+
+    // Also set env var so compile_file_to_object can read it
+    if backend != "cranelift" {
+        std::env::set_var("SIMPLE_BACKEND", &backend);
+    }
 
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {

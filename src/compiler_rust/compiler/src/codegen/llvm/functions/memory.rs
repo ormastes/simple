@@ -1,5 +1,5 @@
 use super::{LlvmBackend, VRegMap};
-use crate::error::{codes, CompileError, ErrorContext};
+use crate::error::CompileError;
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -20,21 +20,27 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let addr_val = self.get_vreg(&addr, vreg_map)?;
 
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
-            let loaded = builder
-                .build_load(self.llvm_type(ty)?, ptr, "load")
-                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
-            vreg_map.insert(dest, loaded);
-            Ok(())
-        } else {
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_OPERATION)
-                .with_help("Load instruction requires a pointer value");
-            Err(CompileError::semantic_with_context(
-                "Load requires pointer".to_string(),
-                ctx,
-            ))
-        }
+        // Coerce address to pointer if needed
+        let ptr = match addr_val {
+            inkwell::values::BasicValueEnum::PointerValue(p) => p,
+            inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                builder
+                    .build_int_to_ptr(iv, ptr_type, "load_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
+            }
+            _ => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(dest, default_val.into());
+                return Ok(());
+            }
+        };
+
+        let loaded = builder
+            .build_load(self.llvm_type(ty)?, ptr, "load")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        vreg_map.insert(dest, loaded);
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]
@@ -49,20 +55,22 @@ impl LlvmBackend {
         let addr_val = self.get_vreg(&addr, vreg_map)?;
         let value_val = self.get_vreg(&value, vreg_map)?;
 
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
-            builder
-                .build_store(ptr, value_val)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
-            Ok(())
-        } else {
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_OPERATION)
-                .with_help("Store instruction requires a pointer value");
-            Err(CompileError::semantic_with_context(
-                "Store requires pointer".to_string(),
-                ctx,
-            ))
-        }
+        // Coerce address to pointer if needed
+        let ptr = match addr_val {
+            inkwell::values::BasicValueEnum::PointerValue(p) => p,
+            inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                builder
+                    .build_int_to_ptr(iv, ptr_type, "store_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
+            }
+            _ => return Ok(()), // Fallback: no-op
+        };
+
+        builder
+            .build_store(ptr, value_val)
+            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]

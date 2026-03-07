@@ -44,7 +44,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
-        vreg_map.insert(dest, alloc.into());
+        // Convert array pointer to i64 (tagged-value ABI)
+        let arr_i64 = builder
+            .build_ptr_to_int(alloc, i64_type, "arr_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+        vreg_map.insert(dest, arr_i64.into());
         Ok(())
     }
 
@@ -77,7 +81,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
-        vreg_map.insert(dest, alloc.into());
+        // Convert tuple pointer to i64 (tagged-value ABI)
+        let tuple_i64 = builder
+            .build_ptr_to_int(alloc, i64_type, "tuple_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+        vreg_map.insert(dest, tuple_i64.into());
         Ok(())
     }
 
@@ -146,26 +154,28 @@ impl LlvmBackend {
         index: crate::mir::VReg,
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
+        let i64_type = self.context.i64_type();
         let coll_val = self.get_vreg(&collection, vreg_map)?;
         let idx_val = self.get_vreg(&index, vreg_map)?;
 
-        // Collection should be a pointer to array
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = coll_val {
-            if let inkwell::values::BasicValueEnum::IntValue(idx) = idx_val {
-                let i64_type = self.context.i64_type();
-                let arr_type = i64_type.array_type(0); // Dynamic size
+        let coll_i64 = self.coerce_value_to_type(coll_val, Some(i64_type.into()), builder)?;
+        let idx_i64 = self.coerce_value_to_type(idx_val, Some(i64_type.into()), builder)?;
 
-                let indices = [self.context.i32_type().const_int(0, false), idx];
-                let gep = unsafe { builder.build_gep(arr_type, ptr, &indices, "elem_ptr") }
-                    .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        // Call rt_index_get(collection, index) runtime function
+        let rt_func = module.get_function("rt_index_get").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+            module.add_function("rt_index_get", fn_type, None)
+        });
+        let call_site = builder
+            .build_call(rt_func, &[coll_i64.into(), idx_i64.into()], "idx_get")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_index_get", &e))?;
 
-                let loaded = builder
-                    .build_load(i64_type, gep, "elem")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
-
-                vreg_map.insert(dest, loaded);
-            }
+        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            vreg_map.insert(dest, ret_val);
+        } else {
+            vreg_map.insert(dest, i64_type.const_int(0, false).into());
         }
         Ok(())
     }
@@ -178,26 +188,28 @@ impl LlvmBackend {
         value: crate::mir::VReg,
         vreg_map: &VRegMap,
         builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
+        let i64_type = self.context.i64_type();
         let coll_val = self.get_vreg(&collection, vreg_map)?;
         let idx_val = self.get_vreg(&index, vreg_map)?;
         let val = self.get_vreg(&value, vreg_map)?;
 
-        // Collection should be a pointer to array
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = coll_val {
-            if let inkwell::values::BasicValueEnum::IntValue(idx) = idx_val {
-                let i64_type = self.context.i64_type();
-                let arr_type = i64_type.array_type(0);
+        let coll_i64 = self.coerce_value_to_type(coll_val, Some(i64_type.into()), builder)?;
+        let idx_i64 = self.coerce_value_to_type(idx_val, Some(i64_type.into()), builder)?;
+        let val_i64 = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
 
-                let indices = [self.context.i32_type().const_int(0, false), idx];
-                let gep = unsafe { builder.build_gep(arr_type, ptr, &indices, "elem_ptr") }
-                    .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-
-                builder
-                    .build_store(gep, val)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
-            }
-        }
+        // Call rt_index_set(collection, index, value) runtime function
+        let rt_func = module.get_function("rt_index_set").unwrap_or_else(|| {
+            let fn_type = self.context.void_type().fn_type(
+                &[i64_type.into(), i64_type.into(), i64_type.into()],
+                false,
+            );
+            module.add_function("rt_index_set", fn_type, None)
+        });
+        builder
+            .build_call(rt_func, &[coll_i64.into(), idx_i64.into(), val_i64.into()], "")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_index_set", &e))?;
         Ok(())
     }
 
@@ -258,6 +270,9 @@ impl LlvmBackend {
 
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             vreg_map.insert(dest, ret_val);
+        } else {
+            let default_val = self.context.i64_type().const_int(0, false);
+            vreg_map.insert(dest, default_val.into());
         }
 
         Ok(())

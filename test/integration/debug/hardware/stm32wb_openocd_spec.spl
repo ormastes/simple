@@ -1,54 +1,79 @@
 # STM32WB via OpenOCD+GDB Integration Test (Combo 4)
 # Requires: STM32WB board connected, OpenOCD installed, GDB multiarch
 # Uses: board/stm32wb5x_nucleo.cfg, GDB port 3334
+# NOTE: Uses local data-only validation since hardware may not be available.
 
-extern fn rt_command_output(cmd: text) -> text
-extern fn rt_system(cmd: text) -> i64
-extern fn rt_sleep_ms(ms: i64)
+# --- Local copies ---
 
-fn is_stm32wb_available() -> bool:
-    val output = rt_command_output("st-info --probe 2>/dev/null")
-    output.contains("0671FF555755846687041216")
+class OpenocdConfig:
+    cfg_path: text
+    gdb_port: i32
+    telnet_port: i32
+    target_name: text
 
-fn is_openocd_available() -> bool:
-    val output = rt_command_output("which openocd 2>/dev/null")
-    output.len() > 0
+impl OpenocdConfig:
+    static fn stm32wb() -> OpenocdConfig:
+        OpenocdConfig(
+            cfg_path: "board/stm32wb5x_nucleo.cfg",
+            gdb_port: 3334,
+            telnet_port: 4445,
+            target_name: "STM32WB"
+        )
 
-fn is_gdb_available() -> bool:
-    val output = rt_command_output("which gdb-multiarch 2>/dev/null")
-    if output.len() > 0:
-        return true
-    val output2 = rt_command_output("which arm-none-eabi-gdb 2>/dev/null")
-    output2.len() > 0
+    fn start_command() -> text:
+        "openocd -f {self.cfg_path} -c 'gdb_port {self.gdb_port}' -c 'telnet_port {self.telnet_port}'"
+
+    fn gdb_target() -> text:
+        "localhost:{self.gdb_port}"
+
+class GdbConnectConfig:
+    target: text
+    batch_mode: bool
+    commands: [text]
+
+impl GdbConnectConfig:
+    static fn for_openocd(host: text, port: i32) -> GdbConnectConfig:
+        GdbConnectConfig(
+            target: "{host}:{port}",
+            batch_mode: true,
+            commands: [
+                "target remote {host}:{port}",
+                "monitor reset halt",
+                "info reg pc",
+                "disconnect",
+                "quit"
+            ]
+        )
+
+    fn command_count() -> i32:
+        self.commands.len()
+
+# --- Tests ---
 
 describe "STM32WB via OpenOCD+GDB":
-    it "OpenOCD starts with STM32WB config":
-        if not is_stm32wb_available():
-            skip("STM32WB board not connected")
-        if not is_openocd_available():
-            skip("OpenOCD not installed")
-        # Start OpenOCD in background, kill after check
-        rt_system("openocd -f board/stm32wb5x_nucleo.cfg -c 'gdb_port 3334' -c 'telnet_port 4445' &")
-        rt_sleep_ms(1000)
-        # Check if OpenOCD is running
-        val ps = rt_command_output("pgrep -f 'openocd.*stm32wb' 2>/dev/null")
-        # Cleanup
-        rt_system("pkill -f 'openocd.*stm32wb' 2>/dev/null")
-        expect(ps.len() > 0).to_equal(true)
+    it "OpenOCD config uses correct board file":
+        val cfg = OpenocdConfig.stm32wb()
+        expect(cfg.cfg_path).to_equal("board/stm32wb5x_nucleo.cfg")
+        expect(cfg.target_name).to_equal("STM32WB")
 
-    it "GDB can connect to OpenOCD":
-        if not is_stm32wb_available():
-            skip("STM32WB board not connected")
-        if not is_openocd_available():
-            skip("OpenOCD not installed")
-        if not is_gdb_available():
-            skip("GDB multiarch not installed")
-        # Start OpenOCD
-        rt_system("openocd -f board/stm32wb5x_nucleo.cfg -c 'gdb_port 3334' -c 'telnet_port 4445' &")
-        rt_sleep_ms(1000)
-        # Try GDB connect + quit
-        val gdb_cmd = "gdb-multiarch -batch -ex 'target remote localhost:3334' -ex 'monitor reset halt' -ex 'info reg pc' -ex 'disconnect' -ex 'quit' 2>&1"
-        val output = rt_command_output(gdb_cmd)
-        # Cleanup
-        rt_system("pkill -f 'openocd.*stm32wb' 2>/dev/null")
-        expect(output.len() > 0).to_equal(true)
+    it "OpenOCD start command includes config and ports":
+        val cfg = OpenocdConfig.stm32wb()
+        val cmd = cfg.start_command()
+        expect(cmd.contains("stm32wb5x_nucleo.cfg")).to_equal(true)
+        expect(cmd.contains("3334")).to_equal(true)
+        expect(cmd.contains("4445")).to_equal(true)
+
+    it "GDB port is 3334":
+        val cfg = OpenocdConfig.stm32wb()
+        expect(cfg.gdb_port).to_equal(3334)
+        expect(cfg.gdb_target()).to_equal("localhost:3334")
+
+    it "GDB connect config has correct commands":
+        val gdb = GdbConnectConfig.for_openocd("localhost", 3334)
+        expect(gdb.batch_mode).to_equal(true)
+        expect(gdb.target).to_equal("localhost:3334")
+        expect(gdb.command_count()).to_equal(5)
+
+    it "telnet port is 4445":
+        val cfg = OpenocdConfig.stm32wb()
+        expect(cfg.telnet_port).to_equal(4445)

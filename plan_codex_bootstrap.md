@@ -1,5 +1,44 @@
 # Codex Bootstrap Status (2026-03-01)
 
+## Replan Update (2026-03-08, macOS arm64)
+
+### Requested constraint
+- Stage 1 can use Rust backend.
+- Pure Simple stages must use `llvm-lib` backend.
+
+### Executed on macOS
+1. Verified Rust seed works on macOS:
+   - `src/compiler_rust/target/bootstrap/simple --version` -> `Simple Language v0.8.1`
+2. Built Stage 1 (Rust seed -> Simple binary, full CLI entry):
+   - `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl -o build/bootstrap/stage1_full/simple --strip`
+   - Result: success (`build/bootstrap/stage1_full/simple`, Mach-O arm64).
+3. Tried Stage 2 with pure Simple `llvm-lib` from Stage 1:
+   - `build/bootstrap/stage1_full/simple compile examples/01_getting_started/hello_native.spl --format=native --backend=llvm-lib -o /tmp/hello_stage2_from_stage1`
+   - Result: fails at runtime:
+     - `Runtime error: Function 'CompilerDriver.compile' not found`
+     - `Runtime error: Function 'get_errors' not found`
+
+### Root blocker
+- Stage 1 produced by Rust `native-build` links with large unresolved-symbol auto-stubs.
+- The resulting binary starts and handles basic CLI, but does not contain required runtime symbols for pure-Simple `llvm-lib` compilation path.
+- Therefore Stage 2/Stage 3 cannot currently be completed under the required "pure Simple + llvm-lib" constraint.
+
+### Current status
+- `bin/simple` wrapper is unusable on this macOS workspace because it points to Linux ELF (`bin/release/simple`).
+- Rust seed is healthy.
+- Pure-Simple `llvm-lib` bootstrap chain is blocked by missing symbols in Rust-seeded Stage 1 artifact.
+
+### Next fix targets
+1. Build a non-stubbed Stage 1 full CLI binary from Rust seed (must include `CompilerDriver.compile` and related driver API symbols).
+2. Re-run Stage 2/3 with:
+   - `stage1_full/simple compile src/app/cli/main.spl --format=native --backend=llvm-lib -o build/bootstrap/stage2_llvm`
+   - `build/bootstrap/stage2_llvm compile src/app/cli/main.spl --format=native --backend=llvm-lib -o build/bootstrap/stage3_llvm`
+3. Validate:
+   - `--version`, `--help`
+   - compile/run smoke sample
+   - bootstrap hash comparison (stage2 vs stage3)
+4. Then run bootstrap test scripts/specs.
+
 ## Summary
 - Stage1 compiler still builds clean.
 - Stage2/Stage3 bootstrap **now link successfully**; native binary is at `./tmp/simple_stage3_native` (links against `libsimple_runtime.so`).

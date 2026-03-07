@@ -222,11 +222,11 @@ scripts/
 # Complete bootstrap
 scripts/bootstrap/bootstrap-from-scratch.sh
 
-# FreeBSD target (native or cross)
+# FreeBSD target (native FreeBSD host)
 scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
-# QEMU FreeBSD wrapper
-scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full2
+# FreeBSD from Linux/macOS via QEMU wrapper
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --deploy
 ```
 
 ### Running Tests
@@ -269,7 +269,7 @@ scripts/setup/download_images.spl
 ### File Extensions
 - **`.spl`** - Simple scripts (Pure Simple)
 - **`.shs`** - Simple shell scripts (Unix-compatible)
-- **`.sh`** - Bash scripts (3 bootstrap scripts only)
+- **`.sh`** - Bash scripts (bootstrap scripts and selected tooling)
 - **`.bat`** - Windows batch scripts
 
 ### Naming Conventions
@@ -280,7 +280,7 @@ scripts/setup/download_images.spl
 ### Shebang Lines
 ```bash
 #!/usr/bin/env simple       # For .spl scripts
-#!/bin/bash                 # For .sh scripts (3 only)
+#!/bin/bash                 # For .sh scripts
 ```
 
 ---

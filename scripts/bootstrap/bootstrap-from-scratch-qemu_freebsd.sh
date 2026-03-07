@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+SHARED_BOOTSTRAP_SH="scripts/bootstrap/bootstrap-from-scratch.sh"
 QEMU_VM_PATH=""
 QEMU_PORT=10022
 QEMU_USER="freebsd"
@@ -26,7 +27,7 @@ QEMU options:
   --help                 Show this help
 
 All non-QEMU options are forwarded to:
-  scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
+  ${SHARED_BOOTSTRAP_SH} --target=freebsd-x86_64
 USAGE
 }
 
@@ -135,7 +136,7 @@ sync_to_vm() {
 }
 
 run_bootstrap_in_vm() {
-    local -a cmd=("scripts/bootstrap/bootstrap-from-scratch.sh" "--target=freebsd-x86_64")
+    local -a cmd=("${SHARED_BOOTSTRAP_SH}" "--target=freebsd-x86_64")
     local has_target=false
 
     for arg in "${FORWARD_ARGS[@]}"; do
@@ -147,7 +148,7 @@ run_bootstrap_in_vm() {
 
     if [ "$has_target" = true ]; then
         # User-provided target wins.
-        cmd=("scripts/bootstrap/bootstrap-from-scratch.sh" "${FORWARD_ARGS[@]}")
+        cmd=("${SHARED_BOOTSTRAP_SH}" "${FORWARD_ARGS[@]}")
     fi
 
     local quoted_cmd=""
@@ -155,7 +156,7 @@ run_bootstrap_in_vm() {
 
     log "Running bootstrap inside VM..."
     ssh -o StrictHostKeyChecking=no -p "$QEMU_PORT" "$QEMU_USER@localhost" \
-        "cd ~/simple && chmod +x scripts/bootstrap/bootstrap-from-scratch.sh &&${quoted_cmd}"
+        "cd ~/simple && chmod +x ${SHARED_BOOTSTRAP_SH} &&${quoted_cmd}"
 }
 
 sync_back_binary() {
@@ -194,6 +195,10 @@ cleanup_vm() {
 main() {
     check_tool qemu-system-x86_64
     check_tool ssh
+    if [ ! -f "${SHARED_BOOTSTRAP_SH}" ]; then
+        err "Shared bootstrap script not found: ${SHARED_BOOTSTRAP_SH}"
+        exit 1
+    fi
 
     if [ -z "$QEMU_VM_PATH" ]; then
         detect_vm

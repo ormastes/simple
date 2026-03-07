@@ -43,6 +43,8 @@ pub struct NativeBuildConfig {
     pub clean: bool,
     /// Disable name mangling for cross-module resolution (default: false = mangling enabled).
     pub no_mangle: bool,
+    /// Codegen backend: "cranelift" (default) or "llvm".
+    pub backend: String,
 }
 
 impl Default for NativeBuildConfig {
@@ -58,6 +60,7 @@ impl Default for NativeBuildConfig {
             cache_dir: None,
             clean: false,
             no_mangle: false,
+            backend: "cranelift".to_string(),
         }
     }
 }
@@ -535,16 +538,23 @@ impl NativeProjectBuilder {
             .collect()
     }
 
-    /// Compile the C main stub to an object file.
+    /// Compile the C++ main stub to an object file.
+    ///
+    /// Uses C++ (clang++) so that the linker inserts C++ runtime initialization
+    /// hooks (crtbegin/crtend, __cxa_atexit registration). This is required
+    /// because libsimple_native_all.a contains LLVM C++ objects that need
+    /// proper static constructor/destructor ordering.
     fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
-        let main_c = temp_dir.join("_main_stub.c");
+        let main_cpp = temp_dir.join("_main_stub.cpp");
         std::fs::write(
-            &main_c,
+            &main_cpp,
             r#"
-extern int __attribute__((weak)) spl_main(void);
-extern void __attribute__((weak)) rt_set_args(int argc, char** argv);
-extern void __attribute__((weak)) __simple_runtime_init(void);
-extern void __attribute__((weak)) __simple_runtime_shutdown(void);
+extern "C" {
+    int __attribute__((weak)) spl_main(void);
+    void __attribute__((weak)) rt_set_args(int argc, char** argv);
+    void __attribute__((weak)) __simple_runtime_init(void);
+    void __attribute__((weak)) __simple_runtime_shutdown(void);
+}
 int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
     if (rt_set_args) rt_set_args(argc, argv);
@@ -557,19 +567,20 @@ int main(int argc, char** argv) {
         .map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        let cc = find_c_compiler();
-        let status = if cc.contains("clang-cl") {
-            std::process::Command::new(&cc)
+        // Use clang++ to compile C++ main stub — ensures C++ runtime init hooks
+        let cxx = find_cxx_compiler();
+        let status = if cxx.contains("clang-cl") {
+            std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(&format!("/Fo{}", main_o.display()))
-                .arg(&main_c)
+                .arg(&main_cpp)
                 .status()
                 .map_err(|e| format!("compile main stub: {e}"))?
         } else {
-            std::process::Command::new(&cc)
+            std::process::Command::new(&cxx)
                 .args(["-c", "-o"])
                 .arg(&main_o)
-                .arg(&main_c)
+                .arg(&main_cpp)
                 .status()
                 .map_err(|e| format!("compile main stub: {e}"))?
         };
@@ -595,9 +606,15 @@ int main(int argc, char** argv) {
         // Compile the C main stub (defines main() which calls spl_main())
         let main_o = self.compile_main_stub(temp_dir)?;
 
-        // Use clang as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
+        // Use clang/clang++ as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
         // libc initialization, and library paths automatically.
-        let cc = find_c_compiler();
+        // When libsimple_native_all.a is present (always contains LLVM C++ objects),
+        // use clang++ to ensure proper C++ runtime initialization ordering.
+        let cc = if find_native_all_library().is_some() {
+            find_cxx_compiler()
+        } else {
+            find_c_compiler()
+        };
         let is_clang_cl = cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
         if !is_clang_cl {
@@ -735,6 +752,19 @@ int main(int argc, char** argv) {
             cmd.arg("-lm");
             // Link libSystem explicitly for completeness
             cmd.arg("-lSystem");
+            // libsimple_native_all.a always contains LLVM C++ objects
+            // (native_all/Cargo.toml hard-codes features=["llvm"]),
+            // so we always need -lc++ when it's linked.
+            if find_native_all_library().is_some() {
+                // Link against Homebrew LLVM's libc++ to avoid Apple libc++ TMO
+                // (typed memory operations) init-order crash. Homebrew's libc++
+                // doesn't enable TMO, so LLVM static constructors work correctly.
+                if let Some(llvm_lib) = find_homebrew_llvm_lib() {
+                    cmd.arg(format!("-L{}", llvm_lib));
+                    cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
+                }
+                cmd.arg("-lc++");
+            }
         }
         #[cfg(target_os = "freebsd")]
         {
@@ -1387,7 +1417,50 @@ fn compile_file_to_object(
     // MIR
     let mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
 
-    // Codegen
+    // Codegen — select backend via SIMPLE_BACKEND env var
+    let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+
+    if use_llvm {
+        #[cfg(feature = "llvm")]
+        {
+            use crate::codegen::backend_trait::NativeBackend;
+            use crate::codegen::llvm::LlvmBackend;
+
+            // Rename main → spl_main for entry module
+            let mut mir = mir;
+            if is_entry {
+                for func in &mut mir.functions {
+                    if func.name == "main" {
+                        func.name = "spl_main".to_string();
+                    }
+                }
+            }
+
+            let mut llvm = LlvmBackend::new(simple_common::target::Target::host())
+                .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
+            let obj = llvm
+                .compile(&mir)
+                .map_err(|e| format!("{}: llvm codegen: {e}", file_path.display()))?;
+
+            // Dump LLVM IR for entry module if debug enabled
+            if is_entry && std::env::var("SIMPLE_DEBUG_LLVM").is_ok() {
+                if let Ok(ir) = llvm.get_ir() {
+                    let ir_path = file_path.with_extension("ll");
+                    let _ = std::fs::write(&ir_path, &ir);
+                    eprintln!("[llvm] IR dumped to {}", ir_path.display());
+                }
+            }
+
+            return Ok(obj);
+        }
+        #[cfg(not(feature = "llvm"))]
+        return Err(format!(
+            "{}: LLVM backend requested but 'llvm' feature not enabled",
+            file_path.display()
+        ));
+    }
+
+    // Cranelift backend (default)
     let mut codegen = Codegen::new().map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
     codegen.set_import_map(import_map.clone());
@@ -1698,6 +1771,22 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
     let boot_trace = sanitize_mangled("compiler__driver__driver_types__BootLogger.trace".to_string());
     map.entry("BootLogger.trace".to_string())
         .or_insert_with(|| boot_trace.clone());
+
+    // Critical compiler driver symbols used during self-host bootstrap.
+    // Keep explicit aliases so method calls resolve even if parser indexing
+    // misses the source file in a partial/compatibility parse.
+    let driver_compile =
+        sanitize_mangled("compiler__driver__driver__CompilerDriver.compile".to_string());
+    map.entry("CompilerDriver.compile".to_string())
+        .or_insert_with(|| driver_compile.clone());
+
+    let compile_result_get_errors = sanitize_mangled(
+        "compiler__driver__driver_types__CompileResult.get_errors".to_string(),
+    );
+    map.entry("CompileResult.get_errors".to_string())
+        .or_insert_with(|| compile_result_get_errors.clone());
+    map.entry("get_errors".to_string())
+        .or_insert_with(|| compile_result_get_errors.clone());
 
     ImportMapResult {
         map,
@@ -2052,6 +2141,44 @@ fn find_archive_tool() -> String {
     {
         "ar".to_string()
     }
+}
+
+/// Find Homebrew LLVM lib directory for linking against its libc++.
+/// Returns the lib path (e.g., "/opt/homebrew/opt/llvm@18/lib") if found.
+#[cfg(target_os = "macos")]
+fn find_homebrew_llvm_lib() -> Option<String> {
+    let candidates = [
+        "/opt/homebrew/opt/llvm@18/lib",
+        "/opt/homebrew/opt/llvm/lib",
+        "/usr/local/opt/llvm@18/lib",
+        "/usr/local/opt/llvm/lib",
+    ];
+    for path in &candidates {
+        let libc_path = format!("{}/libc++.dylib", path);
+        if std::path::Path::new(&libc_path).exists() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_homebrew_llvm_lib() -> Option<String> {
+    None
+}
+
+fn find_cxx_compiler() -> String {
+    if let Ok(cxx) = std::env::var("CXX") {
+        return cxx;
+    }
+    if std::process::Command::new("clang++")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return "clang++".to_string();
+    }
+    "g++".to_string()
 }
 
 #[cfg(test)]

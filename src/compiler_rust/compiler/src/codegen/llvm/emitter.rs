@@ -174,7 +174,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let rhs = self.get(right)?;
         let result = self
             .backend
-            .compile_binop(op, lhs, rhs, self.builder)
+            .compile_binop(op, lhs, rhs, self.builder, self.module)
             .map_err(|e| e.to_string())?;
         self.set(dest, result);
         Ok(())

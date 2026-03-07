@@ -47,6 +47,7 @@ SKIP_RUST_BUILD=false
 DOWNLOAD_VERSION=""
 BACKEND="auto"
 VERIFY_HASH=true
+TARGET=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -57,17 +58,19 @@ for arg in "$@"; do
         --skip-rust-build) SKIP_RUST_BUILD=true ;;
         --download-version=*) DOWNLOAD_VERSION="${arg#--download-version=}" ;;
         --backend=*) BACKEND="${arg#--backend=}" ;;
+        --target=*) TARGET="${arg#--target=}" ;;
         --no-verify) VERIFY_HASH=false ;;
         --help|-h)
             echo "Usage: $0 [--deploy] [--update-release] [--keep-artifacts] [--jobs=N]"
             echo "         [--skip-download] [--skip-rust-build] [--download-version=X.Y.Z]"
-            echo "         [--backend=auto|c|llvm|cranelift] [--no-verify]"
+            echo "         [--backend=auto|c|llvm|cranelift] [--target=<os-arch>] [--no-verify]"
             echo ""
             echo "Options:"
             echo "  --skip-download          Skip release binary download, force Rust bootstrap"
             echo "  --skip-rust-build        Reuse existing Rust seed binary (skip cargo build)"
             echo "  --download-version=X.Y.Z Pin release download to a specific version"
             echo "  --backend=BACKEND        Backend for self-host compilation (default: auto)"
+            echo "  --target=OS-ARCH         Build target (linux|macos|freebsd)-(x86_64|aarch64)"
             echo "  --deploy, --update-release  Copy result to bin/release/simple"
             echo "  --keep-artifacts         Keep build directory after completion"
             echo "  --no-verify              Skip stage1 vs stage2 hash verification"
@@ -118,9 +121,50 @@ detect_platform
 
 RUST_SEED_BIN="${RUST_SEED_DIR}/target/bootstrap/simple${EXE_EXT}"
 
+normalize_target() {
+    local raw_os raw_arch
+    raw_os="${1%-*}"
+    raw_arch="${1#*-}"
+
+    case "${raw_os}" in
+        linux) TARGET_OS="linux" ;;
+        macos|darwin) TARGET_OS="macos" ;;
+        freebsd) TARGET_OS="freebsd" ;;
+        *)
+            echo "Error: Unsupported target OS: ${raw_os}"
+            exit 1
+            ;;
+    esac
+
+    case "${raw_arch}" in
+        x86_64|amd64) TARGET_ARCH="x86_64" ;;
+        aarch64|arm64) TARGET_ARCH="aarch64" ;;
+        *)
+            echo "Error: Unsupported target architecture: ${raw_arch}"
+            exit 1
+            ;;
+    esac
+}
+
+HOST_TARGET="${HOST_OS}-${HOST_ARCH}"
+if [[ -z "${TARGET}" ]]; then
+    TARGET="${HOST_TARGET}"
+fi
+normalize_target "${TARGET}"
+TARGET="${TARGET_OS}-${TARGET_ARCH}"
+
+if [[ "${TARGET}" != "${HOST_TARGET}" ]]; then
+    echo "Error: Cross-target bootstrap is not supported in this script."
+    echo "Host:   ${HOST_TARGET}"
+    echo "Target: ${TARGET}"
+    echo "Use native host bootstrap or scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh for FreeBSD from Linux/macOS."
+    exit 1
+fi
+
 echo "=== Simple Bootstrap (Rust Seed + Self-Host) ==="
 echo "Project:    ${PROJECT_DIR}"
-echo "Platform:   ${HOST_OS}-${HOST_ARCH}"
+echo "Host:       ${HOST_TARGET}"
+echo "Target:     ${TARGET}"
 echo "Build:      ${BUILD_DIR}"
 echo "Backend:    ${BACKEND}"
 echo "Jobs:       ${JOBS}"

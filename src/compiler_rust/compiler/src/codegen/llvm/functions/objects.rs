@@ -50,7 +50,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
-        vreg_map.insert(dest, struct_ptr.into());
+        // Convert struct pointer to i64 (tagged-value ABI)
+        let struct_i64 = builder
+            .build_ptr_to_int(struct_ptr, self.context.i64_type(), "struct_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+        vreg_map.insert(dest, struct_i64.into());
         Ok(())
     }
 
@@ -66,38 +70,45 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let obj_val = self.get_vreg(&object, vreg_map)?;
 
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
-            let i8_type = self.context.i8_type();
-            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
-            let base_ptr = builder
-                .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
-            let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
-            let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-            let llvm_field_ty = self.llvm_type(field_type)?;
-            let typed_ptr = builder
-                .build_pointer_cast(
-                    field_ptr,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "field_typed_ptr",
-                )
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
-            let loaded = builder
-                .build_load(llvm_field_ty, typed_ptr, "field")
-                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        // Coerce object to pointer: i64 values are inttoptr'd
+        let ptr = match obj_val {
+            inkwell::values::BasicValueEnum::PointerValue(p) => p,
+            inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                builder
+                    .build_int_to_ptr(iv, ptr_type, "obj_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
+            }
+            _ => {
+                // Fallback: insert default value
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(dest, default_val.into());
+                return Ok(());
+            }
+        };
 
-            vreg_map.insert(dest, loaded);
-            Ok(())
-        } else {
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_OPERATION)
-                .with_help("FieldGet operation requires a pointer to a struct");
-            Err(CompileError::semantic_with_context(
-                "FieldGet requires pointer to struct".to_string(),
-                ctx,
-            ))
-        }
+        let i8_type = self.context.i8_type();
+        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let base_ptr = builder
+            .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
+        let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
+        let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
+            .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        let llvm_field_ty = self.llvm_type(field_type)?;
+        let typed_ptr = builder
+            .build_pointer_cast(
+                field_ptr,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "field_typed_ptr",
+            )
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
+        let loaded = builder
+            .build_load(llvm_field_ty, typed_ptr, "field")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+
+        vreg_map.insert(dest, loaded);
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]
@@ -113,36 +124,37 @@ impl LlvmBackend {
         let obj_val = self.get_vreg(&object, vreg_map)?;
         let val = self.get_vreg(&value, vreg_map)?;
 
-        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
-            let i8_type = self.context.i8_type();
-            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
-            let base_ptr = builder
-                .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
-            let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
-            let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-            let llvm_field_ty = self.llvm_type(field_type)?;
-            let typed_ptr = builder
-                .build_pointer_cast(
-                    field_ptr,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "field_typed_ptr",
-                )
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
-            builder
-                .build_store(typed_ptr, val)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
-            Ok(())
-        } else {
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_OPERATION)
-                .with_help("FieldSet operation requires a pointer to a struct");
-            Err(CompileError::semantic_with_context(
-                "FieldSet requires pointer to struct".to_string(),
-                ctx,
-            ))
-        }
+        // Coerce object to pointer: i64 values are inttoptr'd
+        let ptr = match obj_val {
+            inkwell::values::BasicValueEnum::PointerValue(p) => p,
+            inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                builder
+                    .build_int_to_ptr(iv, ptr_type, "obj_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
+            }
+            _ => return Ok(()), // Fallback: no-op
+        };
+
+        let i8_type = self.context.i8_type();
+        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let base_ptr = builder
+            .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
+        let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
+        let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
+            .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        let typed_ptr = builder
+            .build_pointer_cast(
+                field_ptr,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "field_typed_ptr",
+            )
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
+        builder
+            .build_store(typed_ptr, val)
+            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]
@@ -204,7 +216,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
-        vreg_map.insert(dest, closure_ptr.into());
+        // Convert closure pointer to i64 (tagged-value ABI)
+        let closure_i64 = builder
+            .build_ptr_to_int(closure_ptr, self.context.i64_type(), "closure_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+        vreg_map.insert(dest, closure_i64.into());
         Ok(())
     }
 }

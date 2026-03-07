@@ -18,9 +18,14 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn file_exists(path: text) -> bool:
     rt_file_exists(path)
+
+fn qemu_available() -> bool:
+    val result = rt_process_run("which", [QEMU_BIN])
+    result[2] == 0
 
 fn read_file_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path) ?? []
@@ -168,63 +173,53 @@ fn decode_binary_output(bin_path: text, smt_path: text) -> text:
         i = i + 1
     result
 
+val _can_run = qemu_available() and file_exists(V3_ELF)
+
 describe "Compressed Logging v3 (SYS_WRITEC)":
     it "QEMU produces binary protocol output":
-        if not file_exists(V3_ELF):
-            print "SKIP: V3 ELF not built: {V3_ELF}"
-            return
-
-        run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
-        expect(file_exists(OUTPUT_FILE)).to_equal(true)
-
-        val bytes = read_file_bytes(OUTPUT_FILE)
-        # Should have at least two frames (14 bytes each = 28 bytes)
-        expect(bytes.len()).to_be_greater_than(20)
-        # First byte should be protocol magic 0xAB = 171
-        expect(bytes[0] as i64).to_equal(171)
+        if _can_run:
+            run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
+            expect(file_exists(OUTPUT_FILE)).to_equal(true)
+            val bytes = read_file_bytes(OUTPUT_FILE)
+            expect(bytes.len()).to_be_greater_than(20)
+            expect(bytes[0] as i64).to_equal(171)
+        else:
+            print "SKIP: QEMU or V3 ELF not available"
 
     it "binary output contains valid frame structure":
-        if not file_exists(V3_ELF):
-            print "SKIP: V3 ELF not built"
-            return
-
-        run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
-        val bytes = read_file_bytes(OUTPUT_FILE)
-        # Two frames of 14 bytes each
-        expect(bytes.len()).to_equal(28)
-        # Frame 1: magic=0xAB, version=0x01
-        expect(bytes[0] as i64).to_equal(171)
-        expect(bytes[1] as i64).to_equal(1)
-        # Frame 2: magic=0xAB, version=0x01
-        expect(bytes[14] as i64).to_equal(171)
-        expect(bytes[15] as i64).to_equal(1)
+        if _can_run:
+            run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
+            val bytes = read_file_bytes(OUTPUT_FILE)
+            expect(bytes.len()).to_equal(28)
+            expect(bytes[0] as i64).to_equal(171)
+            expect(bytes[1] as i64).to_equal(1)
+            expect(bytes[14] as i64).to_equal(171)
+            expect(bytes[15] as i64).to_equal(1)
+        else:
+            print "SKIP: QEMU or V3 ELF not available"
 
     it "decoder resolves handles to Hello message":
-        if not file_exists(V3_ELF):
-            print "SKIP: V3 ELF not built"
-            return
-
-        run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
-        val decoded = decode_binary_output(OUTPUT_FILE, SMT_FILE)
-        expect(decoded).to_contain("Hello, RISC-V 32!")
+        if _can_run:
+            run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
+            val decoded = decode_binary_output(OUTPUT_FILE, SMT_FILE)
+            expect(decoded).to_contain("Hello, RISC-V 32!")
+        else:
+            print "SKIP: QEMU or V3 ELF not available"
 
     it "decoder resolves all messages":
-        if not file_exists(V3_ELF):
-            print "SKIP: V3 ELF not built"
-            return
-
-        run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
-        val decoded = decode_binary_output(OUTPUT_FILE, SMT_FILE)
-        expect(decoded).to_contain("Hello, RISC-V 32!")
-        expect(decoded).to_contain("SEMIHOST TEST")
-        expect(decoded).to_contain("Success")
+        if _can_run:
+            run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
+            val decoded = decode_binary_output(OUTPUT_FILE, SMT_FILE)
+            expect(decoded).to_contain("Hello, RISC-V 32!")
+            expect(decoded).to_contain("SEMIHOST TEST")
+            expect(decoded).to_contain("Success")
+        else:
+            print "SKIP: QEMU or V3 ELF not available"
 
     it "compressed binary data is smaller than text strings":
-        if not file_exists(V3_ELF):
-            print "SKIP: V3 ELF not built"
-            return
-
-        run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
-        val bytes = read_file_bytes(OUTPUT_FILE)
-        # 28 bytes of binary protocol vs ~57+ bytes of raw text
-        expect(bytes.len()).to_be_less_than(50)
+        if _can_run:
+            run_qemu_to_file(V3_ELF, OUTPUT_FILE, 10000)
+            val bytes = read_file_bytes(OUTPUT_FILE)
+            expect(bytes.len()).to_be_less_than(50)
+        else:
+            print "SKIP: QEMU or V3 ELF not available"

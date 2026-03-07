@@ -211,6 +211,38 @@ impl LlvmBackend {
         Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
+    /// Declare a function with appropriate linkage.
+    /// Functions with bodies get WeakAny linkage (like Cranelift's Preemptible) to avoid
+    /// duplicate symbol errors in multi-file builds with --no-mangle.
+    /// Functions without bodies (extern declarations) get External linkage.
+    #[cfg(feature = "llvm")]
+    pub fn declare_function_with_linkage(
+        &self,
+        name: &str,
+        param_types: &[TypeId],
+        return_type: &TypeId,
+        has_body: bool,
+    ) -> Result<(), CompileError> {
+        let func = self.create_function_signature(name, param_types, return_type)?;
+        if has_body {
+            func.set_linkage(inkwell::module::Linkage::WeakAny);
+        } else {
+            func.set_linkage(inkwell::module::Linkage::External);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn declare_function_with_linkage(
+        &self,
+        _name: &str,
+        _param_types: &[TypeId],
+        _return_type: &TypeId,
+        _has_body: bool,
+    ) -> Result<(), CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
     /// Get LLVM IR as string (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn get_ir(&self) -> Result<String, CompileError> {
@@ -316,13 +348,31 @@ impl NativeBackend for LlvmBackend {
         // This is necessary so that functions can call each other regardless of compilation order
         for func in &module.functions {
             let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
-            self.create_function_signature(&func.name, &param_types, &func.return_type)?;
+            self.declare_function_with_linkage(&func.name, &param_types, &func.return_type, !func.blocks.is_empty())?;
         }
 
         // Second pass: compile all function bodies
         for func in &module.functions {
             self.compile_function(func)?;
         }
+
+        // Fix linkage: declarations (no body) must have External linkage, not WeakAny.
+        // This can happen when auto-renamed functions get WeakAny from forward-declaration.
+        #[cfg(feature = "llvm")]
+        {
+            let m = self.module.borrow();
+            if let Some(m) = m.as_ref() {
+                let mut func_opt = m.get_first_function();
+                while let Some(f) = func_opt {
+                    if f.count_basic_blocks() == 0 {
+                        // No body — must be External
+                        f.set_linkage(inkwell::module::Linkage::External);
+                    }
+                    func_opt = f.get_next_function();
+                }
+            }
+        }
+
         self.verify()?;
         self.emit_object(module)
     }
