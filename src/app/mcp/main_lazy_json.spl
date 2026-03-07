@@ -297,23 +297,53 @@ fn make_tool_error(id: text, code: i64, msg: text) -> text:
 # Uses rt_process_run (returns tuple). Note: val (a,b) = expr is broken
 # in interpreter, so we use var + assignment destructuring instead.
 
+fn _mcp_detect_shell() -> text:
+    # On Windows, /bin/sh doesn't resolve for native PE binaries.
+    # Use "sh" (found on PATH via Git Bash/MSYS2) or fall back to "cmd".
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        # Check for sh on PATH (Git Bash / MSYS2)
+        var sh_out = ""
+        var sh_err = ""
+        var sh_rc: i64 = 0
+        (sh_out, sh_err, sh_rc) = rt_process_run("sh", ["-c", "echo ok"])
+        if sh_rc == 0 and sh_out.trim() == "ok":
+            return "sh"
+        return "cmd"
+    "/bin/sh"
+
+var _SHELL_CMD = ""
+
+fn _get_shell() -> text:
+    if _SHELL_CMD == "":
+        _SHELL_CMD = _mcp_detect_shell()
+    _SHELL_CMD
+
 fn strip_ansi(s: text) -> text:
-    # Get ESC character (0x1b) via printf subprocess since rt_char_from_code
-    # is not available in the runtime binary.
+    val shell = _get_shell()
+    if shell == "cmd":
+        # No ANSI stripping needed on Windows cmd
+        return s
     var e_out = ""
     var e_err = ""
     var e_rc: i64 = 0
-    (e_out, e_err, e_rc) = rt_process_run("/bin/sh", ["-c", r"printf '\033'"])
+    (e_out, e_err, e_rc) = rt_process_run(shell, ["-c", r"printf '\033'"])
     if e_out == "" or not s.contains(e_out):
         return s
-    # Remove ESC bytes to prevent invalid JSON control characters
     s.replace(e_out, "")
 
 fn shell_cmd(command: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    val shell = _get_shell()
+    if shell == "cmd":
+        (stdout, stderr, code) = rt_process_run("cmd", ["/C", command])
+    elif shell == "sh":
+        # Windows Git Bash: < /dev/null breaks piped commands, so omit it
+        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+    else:
+        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
     if stdout != "":
         stdout = strip_ansi(stdout)
     (stdout, code)
