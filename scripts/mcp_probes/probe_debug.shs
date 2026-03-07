@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# MCP Debug Server Probe — full Content-Length framed JSON-RPC
+# Replaces probe_debug_rust.rs and probe_debug_typescript.ts
+#
+# Usage: bash scripts/mcp_probes/probe_debug.shs
+#
+# Tests: initialize, tools/list, debug_create_session,
+#        debug_list_sessions, debug_log_enable, debug_log_status, shutdown
+
+set -euo pipefail
+
+PASS=0
+FAIL=0
+
+assert_contains() {
+    local body="$1" needle="$2" label="$3"
+    if [[ "$body" == *"$needle"* ]]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $label — expected to contain '$needle'" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Start MCP server as coprocess
+coproc MCP { bin/simple_mcp_server 2>/dev/null; }
+trap 'kill $MCP_PID 2>/dev/null || true; wait $MCP_PID 2>/dev/null || true' EXIT
+
+send_msg() {
+    local body="$1"
+    local len=${#body}
+    printf 'Content-Length: %d\r\n\r\n%s' "$len" "$body" >&"${MCP[1]}"
+}
+
+read_msg() {
+    local line="" content_length=0
+
+    # Read headers until blank line
+    while IFS= read -r line <&"${MCP[0]}"; do
+        line="${line%%$'\r'}"
+        if [[ -z "$line" ]]; then
+            break
+        fi
+        if [[ "$line" =~ ^Content-Length:\ *([0-9]+) ]]; then
+            content_length="${BASH_REMATCH[1]}"
+        fi
+    done
+
+    # Read exactly content_length bytes
+    local body=""
+    if (( content_length > 0 )); then
+        IFS= read -r -N "$content_length" body <&"${MCP[0]}"
+    fi
+    REPLY="$body"
+}
+
+echo "MCP Debug Server Probe (shs)"
+echo "============================="
+echo ""
+
+# 1. Initialize
+send_msg '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe-shs","version":"1.0"}}}'
+read_msg
+assert_contains "$REPLY" '"result"' "initialize"
+
+# 2. Initialized notification
+send_msg '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+
+# 3. tools/list
+send_msg '{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+read_msg
+TOOLS_RESP="$REPLY"
+assert_contains "$TOOLS_RESP" 'debug_create_session' "tools/list has debug_create_session"
+assert_contains "$TOOLS_RESP" 'debug_log_status' "tools/list has debug_log_status"
+
+# 4. debug_create_session
+send_msg '{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"debug_create_session","arguments":{"program":"src/app/mcp/main.spl"}}}'
+read_msg
+CREATE_RESP="$REPLY"
+assert_contains "$CREATE_RESP" 'session_' "debug_create_session returns session id"
+
+# Extract session_id (session_NNN pattern)
+SESSION_ID=""
+if [[ "$CREATE_RESP" =~ (session_[0-9]+) ]]; then
+    SESSION_ID="${BASH_REMATCH[1]}"
+fi
+if [[ -z "$SESSION_ID" ]]; then
+    echo "FAIL: could not extract session_id" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 5. debug_list_sessions
+send_msg '{"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"debug_list_sessions","arguments":{}}}'
+read_msg
+assert_contains "$REPLY" "$SESSION_ID" "debug_list_sessions includes created session"
+
+# 6. debug_log_enable
+send_msg '{"jsonrpc":"2.0","id":"5","method":"tools/call","params":{"name":"debug_log_enable","arguments":{"pattern":"*"}}}'
+read_msg
+assert_contains "$REPLY" 'enabled' "debug_log_enable"
+
+# 7. debug_log_status
+send_msg '{"jsonrpc":"2.0","id":"6","method":"tools/call","params":{"name":"debug_log_status","arguments":{}}}'
+read_msg
+assert_contains "$REPLY" 'enabled' "debug_log_status reports enabled"
+
+# 8. Shutdown
+send_msg '{"jsonrpc":"2.0","id":"7","method":"shutdown","params":{}}'
+read_msg
+
+echo ""
+if (( FAIL > 0 )); then
+    echo "shs probe: FAIL ($PASS passed, $FAIL failed)"
+    exit 1
+else
+    echo "shs probe: OK ($PASS passed, session=$SESSION_ID)"
+fi
