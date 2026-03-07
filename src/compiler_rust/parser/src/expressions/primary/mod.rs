@@ -122,7 +122,9 @@ impl<'a> Parser<'a> {
             | TokenKind::On
             | TokenKind::Into
             | TokenKind::Bind
-            | TokenKind::Unwrap => self.parse_primary_identifier(),
+            | TokenKind::Unwrap
+            | TokenKind::Lazy
+            | TokenKind::Skip => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions

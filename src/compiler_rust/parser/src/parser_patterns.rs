@@ -226,6 +226,8 @@ impl<'a> Parser<'a> {
             TokenKind::Not => self.parse_keyword_as_pattern("not"),
             TokenKind::In => self.parse_keyword_as_pattern("in"),
             TokenKind::Is => self.parse_keyword_as_pattern("is"),
+            TokenKind::Lazy => self.parse_keyword_as_pattern("lazy"),
+            TokenKind::Skip => self.parse_keyword_as_pattern("skip"),
             TokenKind::Identifier { name, .. } => {
                 let name = name.clone();
                 self.advance();

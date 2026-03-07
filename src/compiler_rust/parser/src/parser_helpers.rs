@@ -738,6 +738,9 @@ impl<'a> Parser<'a> {
             TokenKind::Use => "use".to_string(),
             TokenKind::Bind => "bind".to_string(),
             TokenKind::Unwrap => "unwrap".to_string(),
+            TokenKind::Lazy => "lazy".to_string(),
+            TokenKind::Skip => "skip".to_string(),
+            TokenKind::Old => "old".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -903,6 +906,9 @@ impl<'a> Parser<'a> {
             TokenKind::Where => "where",
             TokenKind::Self_ => "self",
             TokenKind::Import => "import",
+            TokenKind::Lazy => "lazy",
+            TokenKind::Skip => "skip",
+            TokenKind::Old => "old",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(
@@ -1078,6 +1084,9 @@ impl<'a> Parser<'a> {
             TokenKind::Self_ => "self",
             TokenKind::Super => "super",
             TokenKind::Pass => "pass",
+            TokenKind::Lazy => "lazy",
+            TokenKind::Skip => "skip",
+            TokenKind::Old => "old",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
