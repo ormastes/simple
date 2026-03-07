@@ -137,6 +137,14 @@ fn get_system_free_memory_gb() -> i64:
         val total = get_macos_memory_total_mb()
         val used = get_macos_memory_used_mb()
         return (total - used) / 1024
+    if is_freebsd():
+        val total = get_freebsd_memory_total_mb()
+        val used = get_freebsd_memory_used_mb()
+        return (total - used) / 1024
+    if is_windows():
+        val total = get_windows_memory_total_mb()
+        val used = get_windows_memory_used_mb()
+        return (total - used) / 1024
     0
 
 fn system_free_memory_low(threshold_gb: i64) -> (bool, text):
@@ -301,25 +309,30 @@ fn get_macos_memory_total_mb() -> i64:
 fn get_macos_memory_used_mb() -> i64:
     """Get used memory on macOS using 'vm_stat'
 
-    vm_stat reports pages. Page size is typically 4096 bytes.
+    vm_stat reports pages. Page size varies: 4096 on Intel, 16384 on Apple Silicon.
+    Includes active + wired + compressed pages for accurate pressure measurement.
     """
     val output = shell_output("vm_stat", "")
 
     if output == "":
         return 0
 
-    # Parse "Pages active" line
+    # Get actual page size from sysctl (4096 Intel, 16384 Apple Silicon)
+    val page_size = shell_int("sysctl -n hw.pagesize", 4096)
+
+    # Parse page counts
     val active_line = shell_output("vm_stat | grep 'Pages active' | awk '{print $3}' | tr -d '.'", "")
     val wired_line = shell_output("vm_stat | grep 'Pages wired down' | awk '{print $4}' | tr -d '.'", "")
+    val compressed_line = shell_output("vm_stat | grep 'Pages occupied by compressor' | awk '{print $5}' | tr -d '.'", "")
 
     if active_line == "" or wired_line == "":
         return 0
 
     val active_pages = shell_int("echo {active_line.trim()}", 0)
     val wired_pages = shell_int("echo {wired_line.trim()}", 0)
+    val compressed_pages = shell_int("echo {compressed_line.trim()}", 0)
 
-    val total_pages = active_pages + wired_pages
-    val page_size = 4096
+    val total_pages = active_pages + wired_pages + compressed_pages
 
     val used_bytes = total_pages * page_size
     used_bytes / (1024 * 1024)
@@ -399,20 +412,24 @@ fn get_freebsd_memory_percent() -> f64:
 # ============================================================================
 
 fn get_windows_cpu_percent() -> f64:
-    """Use 'wmic' to get CPU usage on Windows"""
-    val output = shell_output("wmic cpu get loadpercentage", "")
+    """Get CPU usage on Windows using PowerShell (wmic fallback)"""
+    # PowerShell: preferred, works on Windows 10+
+    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\"", "")
+    if ps_output != "":
+        val cpu_i = shell_int("echo {ps_output.trim()}", 0)
+        return cpu_i * 1.0
 
+    # Fallback: wmic (deprecated but still available on older systems)
+    val output = shell_output("wmic cpu get loadpercentage", "")
     if output == "":
         return 0.0
 
-    # Parse output (second line contains the number)
     val lines = output.split("\n")
     if lines.len() < 2:
         return 0.0
 
     val value_line = lines[1].trim()
     val cpu_i = shell_int("echo {value_line}", 0)
-
     cpu_i * 1.0
 
 fn get_windows_memory_percent() -> f64:
@@ -427,37 +444,50 @@ fn get_windows_memory_percent() -> f64:
     percent * 1.0
 
 fn get_windows_memory_total_mb() -> i64:
-    """Get total memory on Windows using 'wmic'"""
-    val output = shell_output("wmic os get totalvisiblememorysize", "")
+    """Get total memory on Windows using PowerShell (wmic fallback)"""
+    # PowerShell: returns KB
+    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
+    if ps_output != "":
+        val kb = shell_int("echo {ps_output.trim()}", 0)
+        if kb > 0:
+            return kb / 1024
 
+    # Fallback: wmic
+    val output = shell_output("wmic os get totalvisiblememorysize", "")
     if output == "":
         return 0
 
-    # Parse output (second line contains the number in KB)
     val lines = output.split("\n")
     if lines.len() < 2:
         return 0
 
     val value_line = lines[1].trim()
     val kb = shell_int("echo {value_line}", 0)
-
     kb / 1024
 
 fn get_windows_memory_used_mb() -> i64:
-    """Get used memory on Windows using 'wmic'"""
+    """Get used memory on Windows using PowerShell (wmic fallback)"""
+    # PowerShell: get total and free in one call
+    val ps_total = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
+    val ps_free = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory\"", "")
+    if ps_total != "" and ps_free != "":
+        val total_kb = shell_int("echo {ps_total.trim()}", 0)
+        val free_kb = shell_int("echo {ps_free.trim()}", 0)
+        if total_kb > 0:
+            return (total_kb - free_kb) / 1024
+
+    # Fallback: wmic
     val total_line = shell_output("wmic os get totalvisiblememorysize", "")
     val free_line = shell_output("wmic os get freephysicalmemory", "")
 
     if total_line == "" or free_line == "":
         return 0
 
-    # Parse total
     val total_lines = total_line.split("\n")
     if total_lines.len() < 2:
         return 0
     val total_kb = shell_int("echo {total_lines[1].trim()}", 0)
 
-    # Parse free
     val free_lines = free_line.split("\n")
     if free_lines.len() < 2:
         return 0

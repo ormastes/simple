@@ -1,12 +1,18 @@
 # Resource Governor — Limits parallel test runner to a percentage of system resources
 #
-# Decides whether to spawn more test processes based on system memory and CPU usage.
-# Default: 25% of total system RAM and CPU cores.
+# Two separate controls:
+#   1. resource_limit_pct (default 75%) — budget: max CPU cores and memory the runner may use
+#   2. MIN_FREE_PCT (fixed 25%) — safety floor: block spawning when free mem or CPU < 25%
+#
+# The safety floor is always enforced regardless of resource_limit_pct.
 
 use app.test_runner_new.system_monitor.{get_system_resources, get_system_memory_total_mb}
 use std.io.sysinfo_ops.{cpu_count}
 
 extern fn rt_thread_sleep(millis: i64)
+
+# Safety floor: always keep at least 25% of memory and CPU free
+val MIN_FREE_PCT = 25.0
 
 # ============================================================================
 # Resource Governor
@@ -45,11 +51,13 @@ fn governor_can_spawn(gov: ResourceGovernor, active_count: i64) -> bool:
     if active_count >= gov.max_cpu_cores:
         return false
 
-    # Soft limit: check current memory usage
+    # Safety floor: block when free system resources drop below 25%
     val res = get_system_resources()
-    val free_pct = 100.0 - res.memory_percent
-    val limit_f = gov.resource_limit_pct * 1.0
-    if free_pct < limit_f:
+    val free_mem_pct = 100.0 - res.memory_percent
+    val free_cpu_pct = 100.0 - res.cpu_percent
+    if free_mem_pct < MIN_FREE_PCT:
+        return false
+    if free_cpu_pct < MIN_FREE_PCT:
         return false
 
     true
@@ -72,7 +80,9 @@ fn governor_wait_until_ready(gov: ResourceGovernor, active_count: i64):
         # Log status every 5th iteration
         if iteration % 5 == 0:
             val res = get_system_resources()
-            print "  [governor] waiting for resources (mem: {res.memory_percent}%, active: {active_count}, limit: {gov.resource_limit_pct}%)"
+            val free_mem = 100.0 - res.memory_percent
+            val free_cpu = 100.0 - res.cpu_percent
+            print "  [governor] waiting for resources (free mem: {free_mem}%, free cpu: {free_cpu}%, active: {active_count}, min_free: {MIN_FREE_PCT}%)"
 
 # ============================================================================
 # Exports
