@@ -70,7 +70,7 @@ This roadmap provides complete implementation guides for activating Phase 1 feat
 
 ### 2. Phase 2: Native Binary Compilation (Weeks 2-4)
 
-**Guide:** `doc/guide/phase2_native_binary_guide.md`
+**Guide:** `doc/guide/backend/phase2_native_linker.md`
 **Language:** Simple
 **Lines:** ~1,330 LOC
 
@@ -120,7 +120,7 @@ This roadmap provides complete implementation guides for activating Phase 1 feat
 
 ### 3. Phase 3: LLVM Backend (Weeks 5-9)
 
-**Guide:** `doc/guide/phase3_llvm_backend_guide.md`
+**Guide:** `doc/guide/backend/phase3_llvm.md`
 **Language:** Simple
 **Lines:** ~2,800 LOC
 
@@ -212,8 +212,8 @@ This roadmap provides complete implementation guides for activating Phase 1 feat
 | `doc/report/phase1_verification_2026-02-13.md` | Phase 1 verification | ✅ Complete |
 | `doc/report/async_process_api_implementation_2026-02-13.md` | Async process guide | ✅ Complete |
 | `doc/guide/runtime_implementation_guide_cpp.md` | C++ runtime guide | ✅ Complete |
-| `doc/guide/phase2_native_binary_guide.md` | Phase 2 implementation | ✅ Complete |
-| `doc/guide/phase3_llvm_backend_guide.md` | Phase 3 implementation | ✅ Complete |
+| `doc/guide/backend/phase2_native_linker.md` | Phase 2 implementation | ✅ Complete |
+| `doc/guide/backend/phase3_llvm.md` | Phase 3 implementation | ✅ Complete |
 | `doc/guide/implementation_roadmap_complete.md` | This roadmap | ✅ Complete |
 
 ### Code Files to Modify/Create
@@ -325,14 +325,14 @@ file test.arm  # Should show "ELF 32-bit ARM"
 5. **Unlock:** 3-5x test speedup
 
 ### Option B: Start Phase 2 Implementation
-1. Read `doc/guide/phase2_native_binary_guide.md`
+1. Read `doc/guide/backend/phase2_native_linker.md`
 2. Start with Sub-phase 2.1 (Direct ELF Linking)
 3. Implement `write_elf_bytes_to_file()` (~50 LOC, 1-2 hours)
 4. Test: Link static "Hello World"
 5. **Progress:** Feature #101 → 75%
 
 ### Option C: Plan Phase 3 Implementation
-1. Read `doc/guide/phase3_llvm_backend_guide.md`
+1. Read `doc/guide/backend/phase3_llvm.md`
 2. Set up LLVM development environment
 3. Start Track A Week 1 (Core IR)
 4. Implement function translation (~800 LOC, 3-5 days)

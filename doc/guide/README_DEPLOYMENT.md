@@ -190,7 +190,7 @@ actor Counter:
         count
 ```
 
-See `doc/guide/async_guide.md` for complete examples.
+See `doc/guide/sync_async/async/async_guide.md` for complete examples.
 
 ### Use ML/Physics/Games
 ```simple

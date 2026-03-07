@@ -426,7 +426,7 @@ fn main():
 
 ## Related Documentation
 
-- Full API (compiler): `doc/guide/gpu_quick_start.md`
+- Full API (compiler): `doc/guide/quick_reference/gpu_quick_start.md`
 - Implementation details: `doc/report/gpu_unified_interface_complete_2026-02-09.md`
 - Examples: `examples/gpu/runtime_example.spl`
 - API reference: This document

@@ -37,9 +37,9 @@
 - [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive codebase inventory** (2,649 files, 623K lines)
 
 ### User Guides (4,700+ lines)
-- [guide/async_guide.md](guide/async_guide.md) - Async programming
+- [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) - Async programming
 - [guide/lsp_integration.md](guide/lsp_integration.md) - Editor setup
-- [guide/backend_capabilities.md](guide/backend_capabilities.md) - Compiler backends
+- [guide/backend/capabilities.md](guide/backend/capabilities.md) - Compiler backends
 
 ### Technical Analysis
 - [IMPLEMENTATION_FIXES.md](IMPLEMENTATION_FIXES.md) - Recent fixes

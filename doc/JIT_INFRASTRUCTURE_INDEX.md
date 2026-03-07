@@ -7,7 +7,7 @@
 
 | Document | Purpose | Status |
 |----------|---------|--------|
-| **[Quick Start Guide](guide/jit_infrastructure_quick_start.md)** | Developer guide with examples | ✅ Complete |
+| **[JIT Guide](guide/backend/jit.md)** | Developer guide with examples | ✅ Complete |
 | **[Implementation Report](report/jit_infrastructure_implementation_2026-02-04.md)** | Technical details and architecture | ✅ Complete |
 | **[Rust FFI Plan](plan/rust_ffi_implementation_plan.md)** | Next steps for Rust implementation | 📋 Ready |
 
@@ -83,7 +83,7 @@ src/
 doc/
 ├── JIT_INFRASTRUCTURE_INDEX.md       # ✅ This file
 ├── guide/
-│   └── jit_infrastructure_quick_start.md  # ✅ Developer guide
+│   └── backend/jit.md                    # ✅ Developer guide
 ├── report/
 │   └── jit_infrastructure_implementation_2026-02-04.md  # ✅ Details
 └── plan/
@@ -172,7 +172,7 @@ get_function_pointer(addr)                  # Get fn pointer
 
 ### For Simple Developers
 
-See [Quick Start Guide](guide/jit_infrastructure_quick_start.md) for:
+See [JIT Guide](guide/backend/jit.md) for:
 - Using SmfCache
 - Using JitInstantiator
 - Direct mmap operations

@@ -150,10 +150,18 @@ doc/
 │   └── FEATURES_THAT_WORK.md          # Working features catalog
 │
 ├── 📖 User Guides (guide/)
-│   ├── syntax_quick_reference.md       # Language syntax
+│   ├── quick_reference/                # Quick reference guides
+│   │   ├── syntax_quick_reference.md   # Language syntax
+│   │   └── ...                         # Other quick references
 │   ├── async_guide.md                  # Async programming
 │   ├── lsp_integration.md              # Editor setup
-│   ├── backend_capabilities.md         # Compiler backends
+│   ├── backend/                        # Compiler backends
+│   │   ├── capabilities.md            # Backend selection & capabilities
+│   │   ├── shared_components.md       # Shared type mapping utilities
+│   │   ├── phase2_native_linker.md    # Native linker implementation
+│   │   ├── phase3_llvm.md             # LLVM backend implementation
+│   │   ├── vhdl.md                    # VHDL/FPGA backend
+│   │   └── vulkan.md                  # Vulkan GPU backend
 │   └── folder_file.md                  # This file!
 │
 ├── 🏗️ Architecture (architecture/)

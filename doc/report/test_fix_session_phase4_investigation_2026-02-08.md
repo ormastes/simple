@@ -319,8 +319,8 @@ Phase 4 investigation **complete**. Implementation **blocked** by 4 issues requi
 
 ### Documentation
 - `doc/design/sffi_external_library_pattern.md` - Three-tier pattern
-- `doc/guide/wrapper_gen_quick_start.md` - Generator usage
-- `doc/guide/sffi_external_libraries_quick_start.md` - SFFI setup
+- `doc/guide/quick_reference/wrapper_gen_quick_start.md` - Generator usage
+- `doc/guide/quick_reference/sffi_external_libraries_quick_start.md` - SFFI setup
 
 ### Code
 - `src/app/wrapper_gen/` - Wrapper generator modules

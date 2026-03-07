@@ -105,7 +105,7 @@ simple build baremetal --list-targets      # List available targets
 
 ### Phase 4: User Guide ✅
 
-**File:** `doc/guide/baremetal_quick_start.md` (467 lines)
+**File:** `doc/guide/quick_reference/baremetal_quick_start.md` (467 lines)
 
 **Contents:**
 1. **Prerequisites** - Toolchain installation for each platform
@@ -302,7 +302,7 @@ Total: 20/20 tests passing (100%)
 - `src/compiler/baremetal/x86_64/linker.ld` (66 lines)
 - `src/compiler/baremetal/riscv/linker.ld` (103 lines)
 - `test/integration/baremetal_build_spec.spl` (117 lines)
-- `doc/guide/baremetal_quick_start.md` (467 lines)
+- `doc/guide/quick_reference/baremetal_quick_start.md` (467 lines)
 
 **Modified:**
 - `src/app/build/baremetal.spl` (339 lines, complete rewrite)

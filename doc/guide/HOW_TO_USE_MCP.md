@@ -201,7 +201,7 @@ Want to add more tools? Edit:
 ## Resources
 
 - **Installation Guide:** `MCP_INSTALLATION_GUIDE.md`
-- **Quick Start:** `MCP_QUICK_START.md`
+- **Quick Start:** `quick_reference/MCP_QUICK_START.md`
 - **Verification Report:** `MCP_VERIFICATION_COMPLETE.md`
 - **Implementation Report:** `doc/report/cleanup_and_mcp_completion_2026-02-13.md`
 

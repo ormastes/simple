@@ -578,7 +578,7 @@ docker run --tmpfs /tmp:rw,size=512m ...
 
 ## See Also
 
-- **Container Testing Guide:** `doc/guide/container_testing.md`
+- **Container Testing Guide:** `doc/guide/test/container.md`
 - **Test Configuration:** `simple.test.sdn`
-- **Test Writing:** `doc/guide/test.md`
+- **Test Writing:** `doc/guide/test/policy.md`
 - **CI/CD Integration:** `.github/workflows/containerized-tests.yml`

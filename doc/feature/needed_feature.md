@@ -141,7 +141,7 @@ All 8 tests that were timing out at 120+ seconds now complete in 4-6ms:
 - Actor model
 - Async iterators
 
-**Documentation:** `doc/guide/async_guide.md` (1,220 lines)
+**Documentation:** `doc/guide/sync_async/async/async_guide.md` (1,220 lines)
 
 **Action Needed:** Remove @skip/@pending annotations from test files
 
@@ -514,7 +514,7 @@ fn get_level(): rt_env_get("LOG")  # Lazy evaluation
 ## Documentation Created
 
 **Comprehensive Guides (4,700+ lines):**
-- doc/guide/async_guide.md (1,220 lines)
+- doc/guide/sync_async/async/async_guide.md (1,220 lines)
 - doc/guide/lsp_integration.md (1,100 lines)
 - doc/guide/backend_capabilities.md (1,410 lines)
 - doc/FEATURES_THAT_WORK.md (510 lines)

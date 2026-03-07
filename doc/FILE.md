@@ -66,7 +66,7 @@ RULES (doc/rule/) ← enforced via CI + review
 **Audience:** Users learning Simple
 
 **Key guides:**
-- `syntax_quick_reference.md` - Complete syntax reference
+- `quick_reference/syntax_quick_reference.md` - Complete syntax reference
 - `getting_started.md` - First steps
 - `container_testing.md` - Docker testing guide
 - `folder_file.md` - Project organization

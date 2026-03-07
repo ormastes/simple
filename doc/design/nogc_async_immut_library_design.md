@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-03
 **Status:** Draft - Research & Architecture
-**Prereqs:** `doc/design/lib_variant_architecture_plan.md`, `doc/guide/nogc_async_mut_architecture.md`, `doc/design/gc_nogc_module_parity.md`
+**Prereqs:** `doc/design/lib_variant_architecture_plan.md`, `doc/guide/sync_async/async/nogc_async_mut_architecture.md`, `doc/design/gc_nogc_module_parity.md`
 
 ---
 
@@ -634,6 +634,6 @@ val map2 = map.set("key", "value")  # Returns new version
 
 - [Library Variant Architecture Plan](lib_variant_architecture_plan.md) — Parent architecture
 - [GC/NoGC Module Parity](gc_nogc_module_parity.md) — Parity tracking
-- [Async Architecture](../guide/nogc_async_mut_architecture.md) — Async runtime details
+- [Async Architecture](../guide/sync_async/async/nogc_async_mut_architecture.md) — Async runtime details
 - [Baremetal Resources](baremetal_async_resources_v0.3.md) — NoAlloc patterns
 - [Manual Memory Safety Plan](../plan/manual_memory_safety_plan.md) — Pointer type system

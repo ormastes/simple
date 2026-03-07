@@ -1010,6 +1010,26 @@ fn is_system_symbol(sym: &str) -> bool {
 }
 
 /// Compile a single .spl file to object code.
+/// Find the matching `>` for a string starting with `<...>`, handling nested `<>`.
+/// Returns the index of the closing `>` relative to the input string.
+fn find_balanced_gt(s: &str) -> Option<usize> {
+    if !s.starts_with('<') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        if c == '<' {
+            depth += 1;
+        } else if c == '>' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
 fn compile_file_to_object(
     source: &str,
     file_path: &Path,
@@ -1065,49 +1085,258 @@ fn compile_file_to_object(
         s = s.replace(" ~> ", " |> ");
 
         // Function-type parameters not yet supported in Rust parser.
-        // Replace common fn-type patterns with `any`:
-        //   fn(text) -> i64  → any
-        //   fn() -> bool     → any
-        //   ": fn\n"         → ": any\n" (bare fn as field type)
-        // Use regex-like iterative replacement for fn(...) -> Type patterns
-        while let Some(pos) = s.find(": fn(") {
-            // Find the closing ) then optional -> RetType
-            if let Some(rparen) = s[pos..].find(')') {
-                let after_rparen = pos + rparen + 1;
-                // Check for -> return type
-                let end = if s[after_rparen..].starts_with(" -> ") {
-                    // Find end of return type (next comma, rparen, colon, or newline)
-                    let type_start = after_rparen + 4;
-                    let mut end = type_start;
-                    for (i, c) in s[type_start..].char_indices() {
-                        if c == ',' || c == ')' || c == ':' || c == '\n' || c == '\r' {
-                            end = type_start + i;
+        // Replace `fn(...)` type annotations with `any`.
+        // Must handle: fn(text) -> i64, fn([text]) -> Result<T,E>, fn() -> (), fn(m): body
+        // Strategy: find `: fn(`, match balanced parens, skip optional `-> RetType`
+        {
+            let mut result = String::new();
+            let bytes = s.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                // Look for `: fn(` pattern (field/param fn-type annotation)
+                // Also match `= fn(` for assignment lambdas like `run_fn: fn(m): body`
+                let is_fn_type = i + 5 < bytes.len()
+                    && (bytes[i] == b':' || bytes[i] == b'=')
+                    && bytes[i + 1] == b' '
+                    && bytes[i + 2] == b'f'
+                    && bytes[i + 3] == b'n'
+                    && bytes[i + 4] == b'(';
+                if !is_fn_type {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                // Keep the `: ` or `= ` prefix
+                result.push(bytes[i] as char);
+                result.push(' ');
+                let fn_start = i + 2; // position of 'f' in 'fn('
+                // Find matching ')' with balanced parens
+                let mut depth = 0i32;
+                let mut j = fn_start + 2; // skip 'fn'
+                // j now points at '('
+                depth += 1;
+                j += 1;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'(' || bytes[j] == b'[' {
+                        depth += 1;
+                    } else if bytes[j] == b')' || bytes[j] == b']' {
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                // j is now past the matching ')'
+                // Check for optional ` -> RetType`
+                if j + 4 <= bytes.len() && &s[j..j+4] == " -> " {
+                    j += 4;
+                    // Skip return type: handle balanced <>, (), []
+                    let mut type_depth = 0i32;
+                    while j < bytes.len() {
+                        let c = bytes[j];
+                        if c == b'<' || c == b'(' || c == b'[' {
+                            type_depth += 1;
+                        } else if c == b'>' || c == b')' || c == b']' {
+                            if type_depth > 0 {
+                                type_depth -= 1;
+                            } else {
+                                break;
+                            }
+                        } else if type_depth == 0 && (c == b',' || c == b':' || c == b'\n' || c == b'\r') {
                             break;
                         }
-                        end = type_start + i + c.len_utf8();
+                        j += 1;
                     }
-                    end
+                }
+                // Check what follows: if it's `:` (lambda body), emit `fn()` to keep lambda syntax
+                // Otherwise emit `any` for type annotation
+                if j < bytes.len() && bytes[j] == b':' {
+                    // Lambda: fn(params): body — keep as fn(): body (strip param types)
+                    result.push_str("fn()");
                 } else {
-                    after_rparen
-                };
-                s = format!("{}: any{}", &s[..pos], &s[end..]);
-            } else {
-                break;
+                    result.push_str("any");
+                }
+                i = j;
             }
+            s = result;
         }
         // Bare `fn` as field type (e.g., `_validator: fn`)
         s = s.replace(": fn\n", ": any\n");
         s = s.replace(": fn\r\n", ": any\r\n");
-        // Inline lambda `fn() -> Type:` in call args — replace just the type part
-        // fn() -> bool: expr  →  fn(): expr (parser handles fn() lambdas)
-        // Actually these become `any` above, but handle edge cases
 
         // `cli Name:` blocks are not supported — comment out the entire block
-        // by replacing `cli ` at line start with `# cli `
-        s = s.replace("\ncli ", "\n# cli ");
-        if s.starts_with("cli ") {
-            s = format!("# {}", s);
+        // (the declaration line AND all indented body lines)
+        {
+            let mut result = String::new();
+            let mut in_cli_block = false;
+            let mut cli_indent: Option<usize> = None;
+            for line in s.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("cli ") && trimmed.contains(':') && !trimmed.starts_with('#') {
+                    in_cli_block = true;
+                    cli_indent = Some(line.len() - trimmed.len());
+                    result.push_str("# ");
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+                if in_cli_block {
+                    let line_indent = line.len() - line.trim_start().len();
+                    if trimmed.is_empty() || line_indent > cli_indent.unwrap_or(0) {
+                        result.push_str("# ");
+                        result.push_str(line);
+                        result.push('\n');
+                        continue;
+                    } else {
+                        in_cli_block = false;
+                        cli_indent = None;
+                    }
+                }
+                result.push_str(line);
+                result.push('\n');
+            }
+            // Remove trailing newline added by iteration if original didn't have one
+            if !s.ends_with('\n') && result.ends_with('\n') {
+                result.pop();
+            }
+            s = result;
         }
+
+        // Generic impl blocks: `impl<T, E> Result<T, E>:` → `impl Result:`
+        // Strip the `<...>` after `impl` and after the type name
+        {
+            let mut result = String::new();
+            for line in s.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("impl<") {
+                    let indent = &line[..line.len() - trimmed.len()];
+                    // Strip `<...>` after impl
+                    let rest = &trimmed[4..]; // skip "impl"
+                    let after_generic = if let Some(gt) = find_balanced_gt(rest) {
+                        &rest[gt + 1..]
+                    } else {
+                        rest
+                    };
+                    // Strip `<...>` from the type name too
+                    let after_generic = after_generic.trim_start();
+                    let clean_type = if let Some(lt_pos) = after_generic.find('<') {
+                        if let Some(rest_after) = after_generic.get(lt_pos..) {
+                            if let Some(gt) = find_balanced_gt(rest_after) {
+                                format!("{}{}", &after_generic[..lt_pos], &rest_after[gt + 1..])
+                            } else {
+                                after_generic.to_string()
+                            }
+                        } else {
+                            after_generic.to_string()
+                        }
+                    } else {
+                        after_generic.to_string()
+                    };
+                    // Also strip `where` clauses
+                    let clean_type = if let Some(w) = clean_type.find(" where ") {
+                        format!("{}:", &clean_type[..w])
+                    } else {
+                        clean_type
+                    };
+                    result.push_str(indent);
+                    result.push_str("impl ");
+                    result.push_str(&clean_type);
+                    result.push('\n');
+                } else {
+                    result.push_str(line);
+                    result.push('\n');
+                }
+            }
+            if !s.ends_with('\n') && result.ends_with('\n') {
+                result.pop();
+            }
+            s = result;
+        }
+
+        // Enum variants with named fields: `Local(id: i64)` → `Local(i64)`
+        // Strip the `name: ` prefix from enum variant fields
+        {
+            let mut result = String::new();
+            let mut in_enum = false;
+            for line in s.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("enum ") && trimmed.ends_with(':') {
+                    in_enum = true;
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+                if in_enum && !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("\"\"\"") {
+                    // Check if this line is still inside the enum (indented)
+                    let indent = line.len() - trimmed.len();
+                    if indent == 0 && !trimmed.is_empty() {
+                        in_enum = false;
+                    }
+                }
+                if in_enum && trimmed.contains('(') && trimmed.contains(':') {
+                    // Strip `name: ` from variant fields: Variant(name: Type) → Variant(Type)
+                    let mut cleaned = String::new();
+                    let mut chars = line.chars().peekable();
+                    let mut inside_parens = false;
+                    while let Some(c) = chars.next() {
+                        if c == '(' {
+                            inside_parens = true;
+                            cleaned.push(c);
+                            // Process fields inside parens
+                            let mut field = String::new();
+                            let mut paren_depth = 1i32;
+                            for c in chars.by_ref() {
+                                if c == '(' { paren_depth += 1; }
+                                if c == ')' {
+                                    paren_depth -= 1;
+                                    if paren_depth == 0 {
+                                        // Process last field
+                                        let f = field.trim();
+                                        if let Some(colon_pos) = f.find(": ") {
+                                            cleaned.push_str(f[colon_pos + 2..].trim());
+                                        } else {
+                                            cleaned.push_str(f);
+                                        }
+                                        cleaned.push(')');
+                                        inside_parens = false;
+                                        break;
+                                    }
+                                }
+                                if c == ',' && paren_depth == 1 {
+                                    let f = field.trim();
+                                    if let Some(colon_pos) = f.find(": ") {
+                                        cleaned.push_str(f[colon_pos + 2..].trim());
+                                    } else {
+                                        cleaned.push_str(f);
+                                    }
+                                    cleaned.push_str(", ");
+                                    field.clear();
+                                } else {
+                                    field.push(c);
+                                }
+                            }
+                        } else {
+                            cleaned.push(c);
+                        }
+                    }
+                    result.push_str(&cleaned);
+                    result.push('\n');
+                } else {
+                    result.push_str(line);
+                    result.push('\n');
+                }
+            }
+            if !s.ends_with('\n') && result.ends_with('\n') {
+                result.pop();
+            }
+            s = result;
+        }
+
+        // for (a, b) in collection: → for _pair in collection:\n    a = _pair.0\n    b = _pair.1
+        // This is complex to do at text level — instead, rewrite destructuring to simple var
+        // Actually the Rust parser should handle this; let's add it to the parser instead.
+        // For now, comment out for-destructuring lines as a simple workaround:
+        // `for (_, unit) in X:` → `for unit in X.values():`
+        // `for (id, _) in X:` → `for id in X.keys():`
+        // `for (k, v) in X:` → multiple lines (complex, skip for now)
 
         s
     } else {

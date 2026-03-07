@@ -1,6 +1,6 @@
 # Async Migration Guide: GC ↔ NoGC Patterns
 
-How to write async code that works across GC and NoGC memory modes in Simple. References the cross-language async research (`doc/research/async_patterns_cross_language.md`) and the nogc_async_mut architecture (`doc/guide/nogc_async_mut_architecture.md`).
+How to write async code that works across GC and NoGC memory modes in Simple. References the cross-language async research (`doc/research/async_patterns_cross_language.md`) and the nogc_async_mut architecture (`doc/guide/sync_async/async/nogc_async_mut_architecture.md`).
 
 **Updated:** 2026-02-22
 
@@ -405,6 +405,6 @@ runtime.spawn_with_heap(HeapConfig__no_gc(4096), \:
 ## Cross-References
 
 - **Cross-language patterns:** [`doc/research/async_patterns_cross_language.md`](../research/async_patterns_cross_language.md)
-- **nogc_async_mut architecture:** [`doc/guide/nogc_async_mut_architecture.md`](../guide/nogc_async_mut_architecture.md)
+- **nogc_async_mut architecture:** [`doc/guide/sync_async/async/nogc_async_mut_architecture.md`](../guide/sync_async/async/nogc_async_mut_architecture.md)
 - **Module parity:** [`doc/design/gc_nogc_module_parity.md`](gc_nogc_module_parity.md)
 - **Resource lifecycle:** [`doc/design/resource_lifecycle_manager_design.md`](resource_lifecycle_manager_design.md)

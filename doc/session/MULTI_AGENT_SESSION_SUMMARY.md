@@ -218,7 +218,7 @@ fn get_level(): rt_env_get("LOG")
 3. **doc/TEST_STATUS_AUDIT.md** - Complete test audit results
 
 ### Comprehensive Guides (4 files, 4,700+ lines)
-4. **doc/guide/async_guide.md** (1,220 lines)
+4. **doc/guide/sync_async/async/async_guide.md** (1,220 lines)
 5. **doc/guide/lsp_integration.md** (1,100 lines)
 6. **doc/guide/backend_capabilities.md** (1,410 lines)
 7. **doc/FEATURES_THAT_WORK.md** (510 lines)

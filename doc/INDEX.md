@@ -46,9 +46,9 @@
 ### For Users
 
 **Comprehensive Guides (4,700+ lines):**
-- [guide/async_guide.md](guide/async_guide.md) - Async/await programming (1,220 lines)
+- [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) - Async/await programming (1,220 lines)
 - [guide/lsp_integration.md](guide/lsp_integration.md) - Editor setup (1,100 lines)
-- [guide/backend_capabilities.md](guide/backend_capabilities.md) - Compiler backends (1,410 lines)
+- [guide/backend/capabilities.md](guide/backend/capabilities.md) - Compiler backends (1,410 lines)
 
 **Quick References:**
 - [guide/quick_reference/syntax_quick_reference.md](guide/quick_reference/syntax_quick_reference.md) - Language syntax
@@ -78,7 +78,7 @@
 ### Language Features ✅ (100% Working)
 
 **Async/Concurrency:**
-- [guide/async_guide.md](guide/async_guide.md) - Complete guide
+- [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) - Complete guide
 - Tests: 9/9 passing (100%)
 - Features: async/await, generators, actors, coroutines
 
@@ -97,7 +97,7 @@
 - Features: go-to-def, references, hover, completion, diagnostics
 
 **Compiler Backends:**
-- [guide/backend_capabilities.md](guide/backend_capabilities.md)
+- [guide/backend/capabilities.md](guide/backend/capabilities.md)
 - Tests: 9/9 passing (100%)
 - Backends: Cranelift, LLVM, Native
 
@@ -136,9 +136,9 @@
 - [FEATURES_THAT_WORK.md](FEATURES_THAT_WORK.md) - Working features catalog
 
 ### Implementation Guides (4,700 lines)
-- [guide/async_guide.md](guide/async_guide.md)
+- [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md)
 - [guide/lsp_integration.md](guide/lsp_integration.md)
-- [guide/backend_capabilities.md](guide/backend_capabilities.md)
+- [guide/backend/capabilities.md](guide/backend/capabilities.md)
 
 ### Technical Analysis (2,000 lines)
 - [IMPLEMENTATION_FIXES.md](IMPLEMENTATION_FIXES.md)
@@ -188,7 +188,7 @@
 → [FEATURES_THAT_WORK.md](FEATURES_THAT_WORK.md)
 
 **...learn async programming**
-→ [guide/async_guide.md](guide/async_guide.md)
+→ [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md)
 
 **...setup my editor**
 → [guide/lsp_integration.md](guide/lsp_integration.md)
@@ -238,7 +238,8 @@ doc/
 │
 ├── guide/                            ← User guides, runbooks (4,700 lines)
 │   ├── async_guide.md
-│   ├── syntax_quick_reference.md
+│   ├── quick_reference/              ← Quick reference guides
+│   │   ├── syntax_quick_reference.md
 │   └── README.md
 │
 ├── test/                             ← Test documentation (auto-generated)

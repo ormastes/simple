@@ -568,9 +568,9 @@ describe "UserService":
 
 ## Related Documentation
 
-- [sspec_writing.md](sspec_writing.md) - SSpec test writing guide with doctest
+- [sspec_writing.md](test/sspec_writing.md) - SSpec test writing guide with doctest
 - [coding.md](../../.claude/skills/coding.md) - Additional coding rules
-- [test.md](test.md) - Testing conventions
+- [test policy](test/policy.md) - Testing conventions
 - [module_system.md](module_system.md) - Module organization
 - [doc/spec/types.md](../spec/types.md) - Type system specification
 - [doc/spec/doctest_readme.md](../spec/doctest_readme.md) - README-based doctest spec

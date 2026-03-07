@@ -265,6 +265,6 @@ bin/simple test --self-protect test/
 
 - **Complete Guide:** `doc/guide/robust_process_cleanup.md`
 - **Integration Examples:** `doc/guide/process_cleanup_integration_example.md`
-- **Container Testing:** `doc/guide/container_testing.md`
+- **Container Testing:** `doc/guide/test/container.md`
 - **Resource Limits:** `doc/guide/resource_limits.md`
 - **Implementation Report:** `doc/report/robust_cleanup_implementation_2026-02-14.md`

@@ -94,7 +94,7 @@ All async-related tests pass:
 
 ### Usage Guide
 
-**See:** [doc/guide/async_guide.md](guide/async_guide.md) for complete async/await programming guide.
+**See:** [doc/guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) for complete async/await programming guide.
 
 ---
 
@@ -617,7 +617,7 @@ arch {
 ### 1. Documentation (High Priority)
 
 Create user guides for working features:
-- ✅ [doc/guide/async_guide.md](guide/async_guide.md) - Async/await programming
+- ✅ [doc/guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) - Async/await programming
 - ✅ [doc/guide/lsp_integration.md](guide/lsp_integration.md) - LSP editor setup
 - ✅ [doc/guide/backend_capabilities.md](guide/backend_capabilities.md) - Backend selection
 
@@ -680,6 +680,6 @@ All tests should pass in <10ms each.
 ---
 
 **For detailed usage of working features, see:**
-- [doc/guide/async_guide.md](guide/async_guide.md)
+- [doc/guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md)
 - [doc/guide/lsp_integration.md](guide/lsp_integration.md)
 - [doc/guide/backend_capabilities.md](guide/backend_capabilities.md)

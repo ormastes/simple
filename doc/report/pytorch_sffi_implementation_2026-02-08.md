@@ -444,7 +444,7 @@ The pattern is ready for use with any external C/C++ library and demonstrates ho
 
 - **Design**: `doc/design/sffi_external_library_pattern.md`
 - **PyTorch Design**: `doc/design/pytorch_thin_wrapper_design.md`
-- **Quick Start**: `doc/guide/sffi_external_libraries_quick_start.md`
+- **Quick Start**: `doc/guide/quick_reference/sffi_external_libraries_quick_start.md`
 - **Tier 1**: `.build/rust/ffi_torch/`
 - **Tier 2**: `src/lib/torch/ffi.spl`
 - **Tier 3**: `src/lib/torch/mod.spl`

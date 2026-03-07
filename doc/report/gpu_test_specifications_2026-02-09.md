@@ -471,6 +471,6 @@ The GPU interface is now fully specified and ready for testing when compiler/FFI
 
 - **Implementation:** `doc/report/gpu_unified_interface_complete_2026-02-09.md`
 - **Runtime API Guide:** `doc/guide/gpu_runtime_api.md`
-- **Quick Start:** `doc/guide/gpu_quick_start.md`
+- **Quick Start:** `doc/guide/quick_reference/gpu_quick_start.md`
 - **Testing Session:** `doc/report/gpu_testing_session_2026-02-09.md`
 - **Examples:** `examples/gpu/*.spl`

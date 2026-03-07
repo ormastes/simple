@@ -48,7 +48,7 @@ Successfully implemented a comprehensive two-tier async runtime system for Simpl
    - Comparison demos
    - Parses successfully
 
-6. **`doc/guide/async_runtime_guide.md`** ✅
+6. **`doc/guide/sync_async/async/async_runtime_guide.md`** ✅
    - Comprehensive user guide
    - API reference
    - Quick start examples
@@ -459,7 +459,7 @@ Optimize hot paths:
 - `examples/async_demo.spl`
 - `test/std/async_embedded_spec.spl`
 - `test/std/async_host_spec.spl`
-- `doc/guide/async_runtime_guide.md`
+- `doc/guide/sync_async/async/async_runtime_guide.md`
 - `doc/report/async_two_tier_implementation_2026-02-05.md` (this file)
 
 ### Modified

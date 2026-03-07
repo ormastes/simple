@@ -841,7 +841,7 @@ The tool will be a **force multiplier** for integrating external libraries into 
 
 - [SFFI External Library Pattern](sffi_external_library_pattern.md)
 - [PyTorch Wrapper Design](pytorch_thin_wrapper_design.md)
-- [SFFI Quick Start Guide](../guide/sffi_external_libraries_quick_start.md)
+- [SFFI Quick Start Guide](../guide/quick_reference/sffi_external_libraries_quick_start.md)
 - [SFFI Three-Tier Complete Report](../report/sffi_three_tier_pattern_complete_2026-02-08.md)
 
 ## Appendix: Spec Format Reference
