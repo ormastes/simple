@@ -4,7 +4,7 @@
 # Manages worker pool, stdout/stderr capture via temp files, and result collection.
 
 use app.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running}
-use app.io.process_ops.{shell_int}
+use app.io.process_ops.{shell_int, shell_output}
 use app.io.file_ops.{file_write, file_read, file_delete, file_exists}
 use app.io.time_ops.{time_now_unix_micros}
 use app.test_runner_new.test_runner_types.{TestFileResult, TestOptions}
@@ -30,6 +30,16 @@ struct AsyncTestRun:
 # Temp File Management
 # ============================================================================
 
+fn _get_temp_dir() -> text:
+    """Get platform-appropriate temp directory"""
+    val os = _detect_os()
+    if os == "windows":
+        val temp_env = shell_output("echo %TEMP%", "")
+        if temp_env != "" and temp_env.trim() != "%TEMP%":
+            return temp_env.trim()
+        return "C:\\Temp"
+    "/tmp"
+
 fn create_temp_files(file_path: text) -> (text, text):
     """
     Create temp files for stdout/stderr capture.
@@ -44,17 +54,24 @@ fn create_temp_files(file_path: text) -> (text, text):
     var i = 0
     while i < base.len():
         val ch = base[i:i + 1]
-        if ch == "/":
+        if ch == "/" or ch == "\\":
             temp = temp + "_"
         elif ch == ".":
+            temp = temp + "_"
+        elif ch == ":":
             temp = temp + "_"
         else:
             temp = temp + ch
         i = i + 1
     base = temp
 
-    val stdout_file = "/tmp/simple_test_{base}_{timestamp}_out.txt"
-    val stderr_file = "/tmp/simple_test_{base}_{timestamp}_err.txt"
+    val tmp_dir = _get_temp_dir()
+    val os = _detect_os()
+    var sep = "/"
+    if os == "windows":
+        sep = "\\"
+    val stdout_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_out.txt"
+    val stderr_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_err.txt"
 
     # Initialize empty files
     file_write(stdout_file, "")
@@ -102,8 +119,13 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
 
     val shell_cmd = "{binary} {args_str} > {stdout_file} 2> {stderr_file}"
 
-    # Spawn via shell
-    val pid = process_spawn_async("/bin/sh", ["-c", shell_cmd])
+    # Spawn via platform-appropriate shell
+    val os = _detect_os()
+    var pid = 0
+    if os == "windows":
+        pid = process_spawn_async("cmd.exe", ["/c", shell_cmd])
+    else:
+        pid = process_spawn_async("/bin/sh", ["-c", shell_cmd])
 
     val start_time = time_now_unix_micros()
 
@@ -324,16 +346,44 @@ fn run_tests_parallel_with_monitoring(
 
 fn get_cpu_count() -> i64:
     """
-    Detect number of CPU cores.
+    Detect number of CPU cores on Linux, macOS, FreeBSD, and Windows.
 
     Returns: CPU count, or 4 if detection fails
     """
-    # nproc works on Linux; fallback to sysctl on macOS
+    val os = _detect_os()
+    if os == "windows":
+        # Windows: use NUMBER_OF_PROCESSORS env var or wmic
+        val env_count = shell_int("echo %NUMBER_OF_PROCESSORS%", 0)
+        if env_count > 0:
+            return env_count
+        val wmic_out = shell_output("wmic cpu get NumberOfLogicalProcessors", "")
+        if wmic_out != "":
+            val lines = wmic_out.split("\n")
+            if lines.len() >= 2:
+                val count = shell_int("echo {lines[1].trim()}", 0)
+                if count > 0:
+                    return count
+        return 4
+    # Linux: nproc; macOS/FreeBSD: sysctl -n hw.ncpu
     val count = shell_int("nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null", 4)
     if count > 0:
         count
     else:
         4
+
+fn _detect_os() -> text:
+    """Detect current OS for platform-specific logic"""
+    val uname = shell_output("uname -s 2>/dev/null", "")
+    if uname == "":
+        return "windows"
+    val trimmed = uname.trim()
+    if trimmed == "Linux":
+        return "linux"
+    if trimmed == "Darwin":
+        return "macos"
+    if trimmed == "FreeBSD":
+        return "freebsd"
+    trimmed.lower()
 
 # ============================================================================
 # Exports
