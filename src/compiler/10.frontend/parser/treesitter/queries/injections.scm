@@ -365,7 +365,7 @@
  (#set! injection.language "custom"))
 
 ;; ============================================================================
-;; Shebang Support (for .ssh scripts)
+;; Shebang Support (for .shs scripts)
 ;; ============================================================================
 
 ;; Shebang line at top of file

@@ -238,7 +238,7 @@ Since both binaries perform identically, optimizations should target the **share
 | File | Purpose |
 |------|---------|
 | `test/perf/rust_vs_simple_comparison_spec.spl` | Benchmark suite (23 benchmarks) |
-| `test/perf/run_comparison.ssh` | Runner script for side-by-side comparison |
+| `test/perf/run_comparison.shs` | Runner script for side-by-side comparison |
 | `doc/report/performance_baseline_2026-02-04.md` | Previous Rust interpreter baselines |
 | `src/lib/nogc_sync_mut/src/hash.spl` | Hash trait implementations (FNV-1a, MurmurHash3) |
 | `src/runtime/runtime.c` | C runtime — `spl_str_hash()` FNV-1a, `spl_dict_*` |

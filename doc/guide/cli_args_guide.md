@@ -183,7 +183,7 @@ and `args.file_path` will be `"src/main.spl"` regardless of where it appears in 
 Multiple extensions can be specified:
 
 ```simple
-file: ".spl", ".smf", ".ssh"
+file: ".spl", ".smf", ".shs"
 ```
 
 ### The `prefetch:` Directive

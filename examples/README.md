@@ -105,7 +105,7 @@ bin/simple run --jit examples/07_ml/pure_nn/01_basics/autograd.spl
 
 - **`.spl`** - Standard Simple source files
 - **`.smf`** - Simple Module Format (compiled modules)
-- **`.ssh`** - Simple shell scripts
+- **`.shs`** - Simple shell scripts
 
 ## 🗂️ Organization
 

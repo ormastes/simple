@@ -224,7 +224,7 @@ test/
 - audit/ - Code auditing
 - setup/ - Environment setup
 
-**All scripts in `.spl` or `.ssh` format (Pure Simple!)**
+**All scripts in `.spl` or `.shs` format (Pure Simple!)**
 
 **See:** [scripts/FILE.md](scripts/FILE.md)
 
@@ -538,7 +538,7 @@ bin/simple build --help        # Build help
 ## 📝 File Naming Conventions
 
 **Simple source:** `.spl`
-**Shell scripts:** `.ssh` (Simple shell script)
+**Shell scripts:** `.shs` (Simple shell script)
 **Module format:** `.smf` (Simple module format - compiled)
 **Configuration:** `.sdn` (Simple Data Notation)
 **Documentation:** `.md` (Markdown)

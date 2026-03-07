@@ -15,7 +15,7 @@ Reference for the project's mandatory engineering, architectural, testing, and o
 - Domain logic must NOT depend on infrastructure
 
 ### Language
-- ALL code in `.spl` / `.ssh` — no Python, Rust, Bash (except 3 bootstrap scripts)
+- ALL code in `.spl` / `.shs` — no Python, Rust, Bash (except 3 bootstrap scripts)
 - Generics: `<>` not `[]` — `Option<T>`, `List<Int>`
 - Pattern binding: `if val` not `if let`
 - NO inheritance (`class Child(Parent)` is unsupported) — use composition, traits, mixins

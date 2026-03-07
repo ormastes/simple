@@ -1,7 +1,7 @@
 # scripts/ Directory - Automation Scripts
 
 **Purpose:** Build, test, and migration automation
-**Language:** 100% Pure Simple (.spl) and shell scripts (.ssh)
+**Language:** 100% Pure Simple (.spl) and shell scripts (.shs)
 **Organization:** By function (build, test, migration, audit, setup)
 
 ---
@@ -268,7 +268,7 @@ scripts/setup/download_images.spl
 
 ### File Extensions
 - **`.spl`** - Simple scripts (Pure Simple)
-- **`.ssh`** - Simple shell scripts (Unix-compatible)
+- **`.shs`** - Simple shell scripts (Unix-compatible)
 - **`.sh`** - Bash scripts (3 bootstrap scripts only)
 - **`.bat`** - Windows batch scripts
 
@@ -359,7 +359,7 @@ main()
 **Categories:** 15 subdirectories
 **Language Breakdown:**
 - Pure Simple (.spl): ~90%
-- Shell scripts (.ssh/.sh): ~10%
+- Shell scripts (.shs/.sh): ~10%
 - Batch scripts (.bat): 1 file
 
 **By Category:**

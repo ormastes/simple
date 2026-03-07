@@ -67,7 +67,7 @@ pub static EXTENSION_CONFIGS: &[ExtensionConfig] = &[
         description: "Simple script",
     },
     ExtensionConfig {
-        extension: "ssh",
+        extension: "shs",
         backend: CompilerBackend::Interpreted,
         mode: FileMode::Shell,
         description: "Simple shell script",

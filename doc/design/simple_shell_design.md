@@ -1,11 +1,11 @@
-# Simple Shell (SSH) DSL Design
+# Simple Shell (SHS) DSL Design
 
 **Date:** 2026-02-01
 **Status:** Proposal
 
 ## Summary
 
-`.ssh` files (Simple Shell) are Simple code with `std.shell.*` auto-imported, providing a unified shell scripting + build automation DSL that is shorter than bash and replaces both bash scripts and Makefiles.
+`.shs` files (Simple Shell) are Simple code with `std.shell.*` auto-imported, providing a unified shell scripting + build automation DSL that is shorter than bash and replaces both bash scripts and Makefiles.
 
 ```simple
 #!/usr/bin/env simple-shell
@@ -28,13 +28,13 @@ task clean phony:
 4. **Fail-fast by default** (unlike bash's "keep going")
 5. **Typed errors** via `Result<T, ShellError>`
 
-## Extension: `.ssh`
+## Extension: `.shs`
 
 **Mnemonic:** Simple Shell
 
-**Conflict with SSH protocol:** Minimal risk. SSH protocol uses no file extension (config in `~/.ssh/` directory). Context distinguishes: `script.ssh` is a file, `ssh user@host` is a command.
+**No conflict:** `.shs` is unique — doesn't clash with SSH protocol (`~/.ssh/` directory) or any common extension.
 
-Alternative extensions considered: `.shs` (looks like typo), `.simple.sh` (verbose). `.ssh` is short and clear.
+Previously `.ssh` was considered but conflicts with SSH protocol. `.simple.sh` was too verbose. `.shs` (Simple Shell) is short and clear.
 
 ## Command Execution
 
@@ -196,9 +196,9 @@ task all depends_on: [build, test, docs] parallel:
 ### Task Invocation
 
 ```bash
-simple build.ssh            # Runs 'default' task
-simple build.ssh test       # Runs 'test' task
-simple build.ssh deploy env=production
+simple build.shs            # Runs 'default' task
+simple build.shs test       # Runs 'test' task
+simple build.shs deploy env=production
 ```
 
 ## Control Flow
@@ -221,7 +221,7 @@ match $(command):
 
 ## Standard Library (`std.shell`)
 
-Auto-imported in `.ssh` files:
+Auto-imported in `.shs` files:
 
 ```simple
 # Types
@@ -311,7 +311,7 @@ task coverage:
 
 ## Execution Model
 
-- `.ssh` files are interpreted by Simple runtime (same as `.spl`)
+- `.shs` files are interpreted by Simple runtime (same as `.spl`)
 - `std.shell.*` auto-imported (no manual `use` needed)
 - Shebang: `#!/usr/bin/env simple-shell`
 - Task graph: topological sort, parallel execution via `//` operator
@@ -333,4 +333,4 @@ task coverage:
 - `rust/compiler/src/parser/` - task syntax, command execution
 - `rust/runtime/src/shell/` - shell execution engine (new)
 - `src/lib/src/shell.spl` - standard library module (new)
-- `src/app/cli/main.spl` - CLI integration for `.ssh` files
+- `src/app/cli/main.spl` - CLI integration for `.shs` files
