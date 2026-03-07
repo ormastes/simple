@@ -356,7 +356,6 @@ COMPILE_ARGS=(
     "--source" "${PROJECT_DIR}/src/app"
     "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
     "-o" "${STAGE1_BIN}"
-    "--strip"
 )
 
 if [[ "${BACKEND}" != "auto" ]]; then
@@ -372,6 +371,12 @@ if [[ ! -x "${STAGE1_BIN}" ]]; then
 fi
 
 echo "Stage 1 built: ${STAGE1_BIN}"
+
+# Strip externally (Rust seed's --strip flag corrupts the binary)
+if command -v strip &>/dev/null; then
+    strip "${STAGE1_BIN}"
+    echo "Stage 1 stripped"
+fi
 ls -lh "${STAGE1_BIN}"
 
 # Quick sanity check
@@ -398,7 +403,6 @@ SELFHOST_ARGS=(
     "--source" "${PROJECT_DIR}/src/app"
     "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
     "-o" "${STAGE2_BIN}"
-    "--strip"
 )
 
 if [[ "${BACKEND}" != "auto" ]]; then
@@ -414,6 +418,12 @@ if [[ ! -x "${STAGE2_BIN}" ]]; then
 fi
 
 echo "Stage 2 built: ${STAGE2_BIN}"
+
+# Strip externally
+if command -v strip &>/dev/null; then
+    strip "${STAGE2_BIN}"
+    echo "Stage 2 stripped"
+fi
 ls -lh "${STAGE2_BIN}"
 
 # Verify stage2 works

@@ -2,8 +2,11 @@
 # Monitors CPU and memory usage across all processes (not just self)
 # Part of self-protecting test runner
 
-use app.io.process_ops.{shell_output, shell_int}
+use app.io.process_ops.{shell_output, shell_int, shell_bool}
 use app.io.env_ops.{host_os}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 
 extern fn rt_thread_sleep(millis: i64)
 
@@ -18,31 +21,59 @@ struct SystemResources:
     memory_total_mb: i64
 
 # ============================================================================
-# Platform Detection
+# Platform Detection (cached — host_os() called once)
 # ============================================================================
 
-fn is_linux() -> bool:
+var _platform_detected = false
+var _platform_linux = false
+var _platform_macos = false
+var _platform_windows = false
+var _platform_freebsd = false
+
+fn detect_platform():
+    if _platform_detected:
+        return
     val os = host_os()
-    os == "linux"
+    # Windows detection FIRST — mingw/msys2/cygwin have /proc but are NOT Linux
+    val is_win_env = (os == "windows" or os.contains("windows") or
+        os.starts_with("mingw") or os.starts_with("msys") or
+        os.starts_with("cygwin") or os.contains("msvc"))
+    if is_win_env:
+        _platform_windows = true
+    if os == "darwin" or os == "macos" or os.contains("darwin") or os.contains("osx"):
+        _platform_macos = true
+    if os == "freebsd" or os.contains("freebsd"):
+        _platform_freebsd = true
+    # Linux: only if not already detected as another platform
+    if not _platform_windows and not _platform_macos and not _platform_freebsd:
+        if os == "linux" or os.contains("linux") or os.contains("gnu/linux"):
+            _platform_linux = true
+        else:
+            if rt_file_exists("/proc/stat"):
+                _platform_linux = true
+    _platform_detected = true
+
+fn is_linux() -> bool:
+    detect_platform()
+    _platform_linux
 
 fn is_macos() -> bool:
-    val os = host_os()
-    os == "darwin" or os == "macos"
+    detect_platform()
+    _platform_macos
 
 fn is_windows() -> bool:
-    val os = host_os()
-    os == "windows"
+    detect_platform()
+    _platform_windows
 
 fn is_freebsd() -> bool:
-    val os = host_os()
-    os == "freebsd"
+    detect_platform()
+    _platform_freebsd
 
 # ============================================================================
 # System Resource Monitoring
 # ============================================================================
 
 fn get_system_resources() -> SystemResources:
-    """Get current system-wide resource usage"""
     val cpu = get_system_cpu_percent()
     val mem_pct = get_system_memory_percent()
     val mem_used = get_system_memory_used_mb()
@@ -56,7 +87,6 @@ fn get_system_resources() -> SystemResources:
     )
 
 fn get_system_cpu_percent() -> f64:
-    """Get system-wide CPU usage (0-100)"""
     if is_linux():
         return get_linux_cpu_percent()
     if is_macos():
@@ -68,7 +98,6 @@ fn get_system_cpu_percent() -> f64:
     0.0
 
 fn get_system_memory_percent() -> f64:
-    """Get system-wide memory usage (0-100)"""
     if is_linux():
         return get_linux_memory_percent()
     if is_macos():
@@ -80,7 +109,6 @@ fn get_system_memory_percent() -> f64:
     0.0
 
 fn get_system_memory_used_mb() -> i64:
-    """Get system memory used in MB"""
     if is_linux():
         return get_linux_memory_used_mb()
     if is_macos():
@@ -92,7 +120,6 @@ fn get_system_memory_used_mb() -> i64:
     0
 
 fn get_system_memory_total_mb() -> i64:
-    """Get system total memory in MB"""
     if is_linux():
         return get_linux_memory_total_mb()
     if is_macos():
@@ -108,30 +135,28 @@ fn get_system_memory_total_mb() -> i64:
 # ============================================================================
 
 fn system_exceeds_threshold(cpu_limit: f64, mem_limit: f64) -> (bool, text):
-    """Check if system resources exceed thresholds
+    """Check if system resources exceed thresholds.
 
-    Returns (violated, reason) where reason is 'cpu' or 'memory'
+    Returns (violated, reason).
+    Requires BOTH CPU AND memory to exceed their limits simultaneously.
+    This prevents false shutdowns from momentary CPU spikes during compilation
+    when memory is fine, or from high memory usage when CPU is idle.
     """
     val sys = get_system_resources()
 
-    # Check CPU first
-    if sys.cpu_percent > cpu_limit:
-        return (true, "cpu")
+    val cpu_over = sys.cpu_percent > cpu_limit
+    val mem_over = sys.memory_percent > mem_limit
 
-    # Check memory
-    if sys.memory_percent > mem_limit:
-        return (true, "memory")
+    # Both must be exceeded to trigger
+    if cpu_over and mem_over:
+        return (true, "cpu={sys.cpu_percent}%>{cpu_limit}% AND memory={sys.memory_percent}%>{mem_limit}%")
 
-    # No violations
     (false, "")
 
 fn get_system_free_memory_gb() -> i64:
-    """Get system free (available) memory in GB"""
     if is_linux():
-        val avail_line = shell_output("cat /proc/meminfo | grep MemAvailable | awk '{print $2}'", "")
-        if avail_line == "":
-            return 0
-        val avail_kb = shell_int("echo {avail_line.trim()}", 0)
+        # Single awk command — no subshell per value
+        val avail_kb = shell_int("awk '/MemAvailable/ {print $2}' /proc/meminfo", 0)
         return avail_kb / 1024 / 1024
     if is_macos():
         val total = get_macos_memory_total_mb()
@@ -162,31 +187,24 @@ fn system_free_memory_low(threshold_gb: i64) -> (bool, text):
 # ============================================================================
 
 fn read_proc_stat_totals() -> (i64, i64):
-    """Read /proc/stat and return (total_ticks, idle_ticks)"""
-    val output = shell_output("cat /proc/stat | head -n 1", "")
+    """Read /proc/stat and return (total_ticks, idle_ticks).
+    Uses single awk call instead of spawning shell per value.
+    """
+    # awk prints: total idle
+    val output = shell_output("awk '/^cpu / {t=0; for(i=2;i<=NF;i++) t+=$i; print t, $5}' /proc/stat", "")
     if output == "":
         return (0, 0)
 
-    val parts = output.split(" ")
-    var values: [i64] = []
-    for part in parts:
-        val trimmed = part.trim()
-        if trimmed != "" and trimmed != "cpu":
-            val value = shell_int("echo {trimmed}", 0)
-            values.push(value)
-
-    if values.len() < 4:
+    val parts = output.trim().split(" ")
+    if parts.len() < 2:
         return (0, 0)
 
-    # values[0]=user, [1]=nice, [2]=system, [3]=idle, [4]=iowait...
-    var total = 0
-    for v in values:
-        total = total + v
-    val idle = values[3]
+    val total = shell_int("echo {parts[0]}", 0)
+    val idle = shell_int("echo {parts[1]}", 0)
     (total, idle)
 
 fn get_linux_cpu_percent() -> f64:
-    """Measure instantaneous CPU usage via two /proc/stat samples 100ms apart"""
+    """Measure CPU usage via two /proc/stat samples 100ms apart"""
     val (total1, idle1) = read_proc_stat_totals()
     rt_thread_sleep(100)
     val (total2, idle2) = read_proc_stat_totals()
@@ -201,42 +219,34 @@ fn get_linux_cpu_percent() -> f64:
     percent * 1.0
 
 fn get_linux_memory_percent() -> f64:
-    """Parse /proc/meminfo for memory usage
-
-    We use: 100 * (MemTotal - MemAvailable) / MemTotal
+    """Parse /proc/meminfo for memory usage: 100 * (Total - Available) / Total.
+    Single awk call reads both values.
     """
-    val total = get_linux_memory_total_mb()
-    if total == 0:
+    # awk prints: total_kb avail_kb
+    val output = shell_output("awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {print t, a}' /proc/meminfo", "")
+    if output == "":
         return 0.0
 
-    val used = get_linux_memory_used_mb()
+    val parts = output.trim().split(" ")
+    if parts.len() < 2:
+        return 0.0
 
-    val percent = (used * 100) / total
+    val total_kb = shell_int("echo {parts[0]}", 0)
+    val avail_kb = shell_int("echo {parts[1]}", 0)
+    if total_kb == 0:
+        return 0.0
+
+    val used_kb = total_kb - avail_kb
+    val percent = (used_kb * 100) / total_kb
     percent * 1.0
 
 fn get_linux_memory_total_mb() -> i64:
-    """Get total memory in MB from /proc/meminfo"""
-    val output = shell_output("cat /proc/meminfo | grep MemTotal | awk '{print $2}'", "")
-
-    if output == "":
-        return 0
-
-    # Output is in KB, convert to MB
-    val kb = shell_int("echo {output.trim()}", 0)
+    val kb = shell_int("awk '/MemTotal/ {print $2}' /proc/meminfo", 0)
     kb / 1024
 
 fn get_linux_memory_used_mb() -> i64:
-    """Get used memory in MB from /proc/meminfo"""
-    val total_line = shell_output("cat /proc/meminfo | grep MemTotal | awk '{print $2}'", "")
-    val avail_line = shell_output("cat /proc/meminfo | grep MemAvailable | awk '{print $2}'", "")
-
-    if total_line == "" or avail_line == "":
-        return 0
-
-    val total_kb = shell_int("echo {total_line.trim()}", 0)
-    val avail_kb = shell_int("echo {avail_line.trim()}", 0)
-
-    val used_kb = total_kb - avail_kb
+    # Single awk: total - available
+    val used_kb = shell_int("awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {print t-a}' /proc/meminfo", 0)
     used_kb / 1024
 
 # ============================================================================
@@ -244,22 +254,31 @@ fn get_linux_memory_used_mb() -> i64:
 # ============================================================================
 
 fn get_macos_cpu_percent() -> f64:
-    """Use 'top' to get CPU usage on macOS
-
-    Command: top -l 1 | grep "CPU usage"
-    Output: CPU usage: 5.12% user, 3.45% sys, 91.43% idle
+    """Get CPU usage on macOS using iostat (fast, ~0.1s) instead of top -l 1 (~2-3s).
+    iostat -c 2 outputs two samples; we use the second for instantaneous reading.
+    Falls back to top if iostat unavailable.
     """
-    val output = shell_output("top -l 1 | grep 'CPU usage'", "")
+    # Try iostat first (fast: ~0.1s)
+    # iostat output line: "          disk0       cpu    load average"
+    # Data line: "  0.00  0  0.00    2  1 97"  (us sy id)
+    val output = shell_output("iostat -c 2 -w 1 2>/dev/null | tail -1", "")
+    if output != "":
+        # Last 3 numbers are: user sys idle
+        val idle_val = shell_int("echo '{output}' | awk '{print $NF}'", -1)
+        if idle_val >= 0 and idle_val <= 100:
+            val used = 100 - idle_val
+            return used * 1.0
 
-    if output == "":
+    # Fallback: top -l 2 (slow but reliable)
+    val top_output = shell_output("top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage' | tail -1", "")
+    if top_output == "":
         return 0.0
 
-    # Parse idle percentage
+    # Parse idle percentage from "CPU usage: X% user, Y% sys, Z% idle"
     var idle_str = ""
-    val parts = output.split(",")
+    val parts = top_output.split(",")
     for part in parts:
         if part.contains("idle"):
-            # Extract number before '%'
             val trimmed = part.trim()
             var num_str = ""
             for ch in trimmed:
@@ -275,7 +294,6 @@ fn get_macos_cpu_percent() -> f64:
     if idle_str == "":
         return 0.0
 
-    # Convert to integer (truncate decimal)
     val idle_i = shell_int("echo {idle_str} | cut -d. -f1", 0)
     val used = 100 - idle_i
 
@@ -285,7 +303,6 @@ fn get_macos_cpu_percent() -> f64:
     used * 1.0
 
 fn get_macos_memory_percent() -> f64:
-    """Use 'vm_stat' to get memory usage on macOS"""
     val total = get_macos_memory_total_mb()
     if total == 0:
         return 0.0
@@ -296,53 +313,42 @@ fn get_macos_memory_percent() -> f64:
     percent * 1.0
 
 fn get_macos_memory_total_mb() -> i64:
-    """Get total memory on macOS using 'sysctl'"""
-    val output = shell_output("sysctl -n hw.memsize", "")
-
-    if output == "":
-        return 0
-
-    # Output is in bytes, convert to MB
-    val bytes = shell_int("echo {output.trim()}", 0)
-    bytes / (1024 * 1024)
+    val bytes_val = shell_int("sysctl -n hw.memsize", 0)
+    bytes_val / (1024 * 1024)
 
 fn get_macos_memory_used_mb() -> i64:
-    """Get used memory on macOS using 'vm_stat'
-
-    vm_stat reports pages. Page size varies: 4096 on Intel, 16384 on Apple Silicon.
-    Includes active + wired + compressed pages for accurate pressure measurement.
+    """Get used memory on macOS using vm_stat.
+    Computes in MB to avoid i64 overflow on large-RAM Apple Silicon systems.
+    Includes active + wired + compressed pages.
     """
-    val output = shell_output("vm_stat", "")
+    val page_size = shell_int("sysctl -n hw.pagesize", 4096)
+    # Pages per MB — divide early to prevent overflow
+    val pages_per_mb = (1024 * 1024) / page_size
 
+    # Single awk call to parse all three values from vm_stat
+    val output = shell_output("vm_stat | awk '/Pages active/ {a=$3} /Pages wired down/ {w=$4} /Pages occupied by compressor/ {c=$5} END {gsub(/\\./,\"\",a); gsub(/\\./,\"\",w); gsub(/\\./,\"\",c); print a+0, w+0, c+0}'", "")
     if output == "":
         return 0
 
-    # Get actual page size from sysctl (4096 Intel, 16384 Apple Silicon)
-    val page_size = shell_int("sysctl -n hw.pagesize", 4096)
-
-    # Parse page counts
-    val active_line = shell_output("vm_stat | grep 'Pages active' | awk '{print $3}' | tr -d '.'", "")
-    val wired_line = shell_output("vm_stat | grep 'Pages wired down' | awk '{print $4}' | tr -d '.'", "")
-    val compressed_line = shell_output("vm_stat | grep 'Pages occupied by compressor' | awk '{print $5}' | tr -d '.'", "")
-
-    if active_line == "" or wired_line == "":
+    val parts = output.trim().split(" ")
+    if parts.len() < 3:
         return 0
 
-    val active_pages = shell_int("echo {active_line.trim()}", 0)
-    val wired_pages = shell_int("echo {wired_line.trim()}", 0)
-    val compressed_pages = shell_int("echo {compressed_line.trim()}", 0)
+    val active = shell_int("echo {parts[0]}", 0)
+    val wired = shell_int("echo {parts[1]}", 0)
+    val compressed = shell_int("echo {parts[2]}", 0)
 
-    val total_pages = active_pages + wired_pages + compressed_pages
-
-    val used_bytes = total_pages * page_size
-    used_bytes / (1024 * 1024)
+    val total_pages = active + wired + compressed
+    if pages_per_mb > 0:
+        return total_pages / pages_per_mb
+    0
 
 # ============================================================================
 # FreeBSD Implementation
 # ============================================================================
 
 fn read_freebsd_cp_time() -> (i64, i64):
-    """Read kern.cp_time and return (total_ticks, idle_ticks)
+    """Read kern.cp_time and return (total_ticks, idle_ticks).
     Format: user nice sys intr idle
     """
     val output = shell_output("sysctl -n kern.cp_time", "")
@@ -368,7 +374,7 @@ fn read_freebsd_cp_time() -> (i64, i64):
     (total, idle)
 
 fn get_freebsd_cpu_percent() -> f64:
-    """Measure instantaneous CPU usage via two kern.cp_time samples 100ms apart"""
+    """Measure CPU usage via two kern.cp_time samples 100ms apart"""
     val (total1, idle1) = read_freebsd_cp_time()
     rt_thread_sleep(100)
     val (total2, idle2) = read_freebsd_cp_time()
@@ -384,22 +390,27 @@ fn get_freebsd_cpu_percent() -> f64:
 
 fn get_freebsd_memory_total_mb() -> i64:
     """Get total memory on FreeBSD using sysctl hw.physmem (returns bytes)"""
-    val output = shell_output("sysctl -n hw.physmem", "")
-    if output == "":
-        return 0
-    val bytes = shell_int("echo {output.trim()}", 0)
-    bytes / (1024 * 1024)
+    val bytes_val = shell_int("sysctl -n hw.physmem", 0)
+    bytes_val / (1024 * 1024)
 
 fn get_freebsd_memory_used_mb() -> i64:
-    """Get used memory on FreeBSD using vm page counts"""
+    """Get used memory on FreeBSD using vm page counts.
+    Includes active + wired + laundry pages for accurate measurement.
+    """
+    val page_size = shell_int("sysctl -n hw.pagesize", 4096)
+    val pages_per_mb = (1024 * 1024) / page_size
+
     val active = shell_int("sysctl -n vm.stats.vm.v_active_count", 0)
     val wired = shell_int("sysctl -n vm.stats.vm.v_wire_count", 0)
-    val page_size = shell_int("sysctl -n hw.pagesize", 4096)
-    val used_bytes = (active + wired) * page_size
-    used_bytes / (1024 * 1024)
+    # v_laundry_count: pages being laundered (FreeBSD 11+), fallback 0
+    val laundry = shell_int("sysctl -n vm.stats.vm.v_laundry_count 2>/dev/null || echo 0", 0)
+
+    val total_pages = active + wired + laundry
+    if pages_per_mb > 0:
+        return total_pages / pages_per_mb
+    0
 
 fn get_freebsd_memory_percent() -> f64:
-    """Get memory usage percentage on FreeBSD"""
     val total = get_freebsd_memory_total_mb()
     if total == 0:
         return 0.0
@@ -411,29 +422,54 @@ fn get_freebsd_memory_percent() -> f64:
 # Windows Implementation
 # ============================================================================
 
+fn strip_cr(s: text) -> text:
+    """Strip carriage returns from Windows command output (\r\n -> \n)"""
+    var result = ""
+    for ch in s:
+        if ch != "\r":
+            result = result + ch
+    result
+
 fn get_windows_cpu_percent() -> f64:
-    """Get CPU usage on Windows using PowerShell (wmic fallback)"""
-    # PowerShell: preferred, works on Windows 10+
-    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\"", "")
+    """Get CPU usage on Windows.
+    Tries: PowerShell → wmic → typeperf (for MinGW/MSVC where PS may be unavailable).
+    """
+    # 1) PowerShell (preferred, Windows 10+)
+    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\" 2>nul", "")
     if ps_output != "":
-        val cpu_i = shell_int("echo {ps_output.trim()}", 0)
-        return cpu_i * 1.0
+        val cleaned = strip_cr(ps_output).trim()
+        if cleaned != "":
+            val cpu_i = shell_int("echo {cleaned}", 0)
+            return cpu_i * 1.0
 
-    # Fallback: wmic (deprecated but still available on older systems)
-    val output = shell_output("wmic cpu get loadpercentage", "")
-    if output == "":
-        return 0.0
+    # 2) wmic (deprecated but available on older Windows, also works in MinGW)
+    val wmic_output = shell_output("wmic cpu get loadpercentage 2>nul", "")
+    if wmic_output != "":
+        val lines = strip_cr(wmic_output).split("\n")
+        if lines.len() >= 2:
+            val value_line = lines[1].trim()
+            if value_line != "":
+                val cpu_i = shell_int("echo {value_line}", 0)
+                return cpu_i * 1.0
 
-    val lines = output.split("\n")
-    if lines.len() < 2:
-        return 0.0
+    # 3) typeperf (available in all Windows environments including MSVC dev shell)
+    val tp_output = shell_output("typeperf \"\\Processor(_Total)\\% Processor Time\" -sc 1 2>nul | findstr /v \"Time Path\" | findstr \",\"", "")
+    if tp_output != "":
+        # Output: "MM/DD/YYYY HH:MM:SS.fff","12.345"
+        val cleaned = strip_cr(tp_output).trim()
+        # Extract number after last comma+quote
+        val parts = cleaned.split(",")
+        if parts.len() >= 2:
+            val val_part = parts[parts.len() - 1].trim()
+            # Strip surrounding quotes
+            val stripped = val_part.replace("\"", "")
+            val cpu_i = shell_int("echo {stripped} | cut -d. -f1", 0)
+            if cpu_i >= 0 and cpu_i <= 100:
+                return cpu_i * 1.0
 
-    val value_line = lines[1].trim()
-    val cpu_i = shell_int("echo {value_line}", 0)
-    cpu_i * 1.0
+    0.0
 
 fn get_windows_memory_percent() -> f64:
-    """Calculate memory percentage on Windows"""
     val total = get_windows_memory_total_mb()
     if total == 0:
         return 0.0
@@ -444,57 +480,132 @@ fn get_windows_memory_percent() -> f64:
     percent * 1.0
 
 fn get_windows_memory_total_mb() -> i64:
-    """Get total memory on Windows using PowerShell (wmic fallback)"""
-    # PowerShell: returns KB
-    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
+    """Get total memory on Windows.
+    Tries: PowerShell → wmic → systeminfo (MinGW/MSVC compatible).
+    """
+    # 1) PowerShell
+    val ps_output = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\" 2>nul", "")
     if ps_output != "":
-        val kb = shell_int("echo {ps_output.trim()}", 0)
+        val cleaned = strip_cr(ps_output).trim()
+        val kb = shell_int("echo {cleaned}", 0)
         if kb > 0:
             return kb / 1024
 
-    # Fallback: wmic
-    val output = shell_output("wmic os get totalvisiblememorysize", "")
-    if output == "":
-        return 0
+    # 2) wmic
+    val wmic_output = shell_output("wmic os get totalvisiblememorysize 2>nul", "")
+    if wmic_output != "":
+        val lines = strip_cr(wmic_output).split("\n")
+        if lines.len() >= 2:
+            val value_line = lines[1].trim()
+            if value_line != "":
+                val kb = shell_int("echo {value_line}", 0)
+                if kb > 0:
+                    return kb / 1024
 
-    val lines = output.split("\n")
-    if lines.len() < 2:
-        return 0
+    # 3) systeminfo (slowest, but works everywhere including MSVC dev shell)
+    val si_output = shell_output("systeminfo 2>nul | findstr /C:\"Total Physical Memory\"", "")
+    if si_output != "":
+        # Format: "Total Physical Memory:     32,678 MB"
+        val cleaned = strip_cr(si_output).trim()
+        # Remove commas, extract number before MB
+        val no_commas = cleaned.replace(",", "")
+        val mb = shell_int("echo '{no_commas}' | grep -oE '[0-9]+' | tail -1", 0)
+        if mb > 0:
+            return mb
 
-    val value_line = lines[1].trim()
-    val kb = shell_int("echo {value_line}", 0)
-    kb / 1024
+    0
 
 fn get_windows_memory_used_mb() -> i64:
-    """Get used memory on Windows using PowerShell (wmic fallback)"""
-    # PowerShell: get total and free in one call
-    val ps_total = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
-    val ps_free = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory\"", "")
+    """Get used memory on Windows.
+    Tries: PowerShell → wmic → systeminfo (MinGW/MSVC compatible).
+    """
+    # 1) PowerShell
+    val ps_total = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\" 2>nul", "")
+    val ps_free = shell_output("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory\" 2>nul", "")
     if ps_total != "" and ps_free != "":
-        val total_kb = shell_int("echo {ps_total.trim()}", 0)
-        val free_kb = shell_int("echo {ps_free.trim()}", 0)
+        val total_kb = shell_int("echo {strip_cr(ps_total).trim()}", 0)
+        val free_kb = shell_int("echo {strip_cr(ps_free).trim()}", 0)
         if total_kb > 0:
             return (total_kb - free_kb) / 1024
 
-    # Fallback: wmic
-    val total_line = shell_output("wmic os get totalvisiblememorysize", "")
-    val free_line = shell_output("wmic os get freephysicalmemory", "")
+    # 2) wmic
+    val wmic_total = shell_output("wmic os get totalvisiblememorysize 2>nul", "")
+    val wmic_free = shell_output("wmic os get freephysicalmemory 2>nul", "")
+    if wmic_total != "" and wmic_free != "":
+        val total_lines = strip_cr(wmic_total).split("\n")
+        val free_lines = strip_cr(wmic_free).split("\n")
+        if total_lines.len() >= 2 and free_lines.len() >= 2:
+            val total_kb = shell_int("echo {total_lines[1].trim()}", 0)
+            val free_kb = shell_int("echo {free_lines[1].trim()}", 0)
+            if total_kb > 0:
+                return (total_kb - free_kb) / 1024
 
-    if total_line == "" or free_line == "":
-        return 0
+    # 3) systeminfo — parse both Total and Available
+    val si_total = shell_output("systeminfo 2>nul | findstr /C:\"Total Physical Memory\"", "")
+    val si_avail = shell_output("systeminfo 2>nul | findstr /C:\"Available Physical Memory\"", "")
+    if si_total != "" and si_avail != "":
+        val total_mb = shell_int("echo '{strip_cr(si_total).replace(\",\", \"\")}' | grep -oE '[0-9]+' | tail -1", 0)
+        val avail_mb = shell_int("echo '{strip_cr(si_avail).replace(\",\", \"\")}' | grep -oE '[0-9]+' | tail -1", 0)
+        if total_mb > 0:
+            return total_mb - avail_mb
 
-    val total_lines = total_line.split("\n")
-    if total_lines.len() < 2:
-        return 0
-    val total_kb = shell_int("echo {total_lines[1].trim()}", 0)
+    0
 
-    val free_lines = free_line.split("\n")
-    if free_lines.len() < 2:
-        return 0
-    val free_kb = shell_int("echo {free_lines[1].trim()}", 0)
+# ============================================================================
+# Kill Monitor Safeguard
+# ============================================================================
 
-    val used_kb = total_kb - free_kb
-    used_kb / 1024
+fn is_mingw_or_msys() -> bool:
+    """Check if running under MinGW/MSYS2/Cygwin (has bash + can run .sh)"""
+    val os = host_os()
+    os.starts_with("mingw") or os.starts_with("msys") or os.starts_with("cygwin")
+
+fn ensure_kill_monitor_running():
+    """Launch kill_simple_monitor in background if not already running.
+
+    Detection: uses PID file (/tmp/kill_simple_monitor.pid on Unix,
+    %TEMP%\\kill_simple_monitor.pid on Windows) + validates the PID is alive.
+    The scripts write this file on startup and clean it on exit.
+
+    Platform logic:
+    - Linux/macOS/FreeBSD: run .sh via sh
+    - MinGW/MSYS2/Cygwin: run .sh via sh (has bash, can see native Windows procs via cmd.exe)
+    - Native Windows (cmd/MSVC): run .bat via cmd /c
+    """
+    val sh_path = "scripts/resource/kill_simple_monitor.sh"
+    val bat_path = "scripts/resource/kill_simple_monitor.bat"
+
+    # Check if already running via PID file + process liveness
+    if is_windows() and not is_mingw_or_msys():
+        # Native Windows: check PID file in %TEMP%
+        val pidfile_check = shell_output("if exist \"%TEMP%\\kill_simple_monitor.pid\" (echo alive) else (echo dead)", "dead")
+        if pidfile_check.trim() == "alive":
+            return
+    else:
+        # Unix / MinGW / MSYS2: check PID file and validate process alive
+        val pid_str = shell_output("cat /tmp/kill_simple_monitor.pid 2>/dev/null", "")
+        if pid_str.trim() != "":
+            val alive = shell_output("kill -0 {pid_str.trim()} 2>/dev/null && echo alive || echo dead", "dead")
+            if alive.trim() == "alive":
+                return
+            # Stale PID file — process died, remove and re-launch
+            shell_output("rm -f /tmp/kill_simple_monitor.pid", "")
+
+    # Launch the monitor
+    if is_windows() and not is_mingw_or_msys():
+        # Native Windows (cmd.exe / MSVC Developer Prompt): use .bat
+        if rt_file_exists(bat_path):
+            rt_process_spawn_async("cmd", ["/c", bat_path])
+            print "[safeguard] Started kill_simple_monitor.bat in background"
+        else:
+            print "[safeguard] WARNING: {bat_path} not found, skipping resource monitor"
+    else:
+        # Linux / macOS / FreeBSD / MinGW / MSYS2 / Cygwin: use .sh
+        if rt_file_exists(sh_path):
+            rt_process_spawn_async("sh", [sh_path])
+            print "[safeguard] Started kill_simple_monitor.sh in background"
+        else:
+            print "[safeguard] WARNING: {sh_path} not found, skipping resource monitor"
 
 # ============================================================================
 # Exports
@@ -507,3 +618,4 @@ export get_system_memory_percent
 export system_exceeds_threshold
 export get_system_free_memory_gb
 export system_free_memory_low
+export ensure_kill_monitor_running

@@ -43,7 +43,7 @@ use test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cl
 # use sdoctest.doc_gen.generate_sdoctest_report
 # GROUP 6: Self-protection imports
 use app.test_runner_new.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
-use app.test_runner_new.system_monitor.{system_exceeds_threshold}
+use app.test_runner_new.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running}
 use app.test_runner_new.shutdown.{shutdown_graceful}
 # GROUP 7: Parallel execution imports
 use app.test_runner_new.test_runner_async.{run_tests_parallel_with_monitoring, get_cpu_count}
@@ -162,7 +162,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if options.self_protect:
         val free_cpu = 100.0 - options.cpu_threshold
         val free_mem = 100.0 - options.mem_threshold
-        print "Self-protection enabled (stops when free CPU < {free_cpu}% or free RAM < {free_mem}%)"
+        print "Self-protection enabled (stops when free CPU < {free_cpu}% AND free RAM < {free_mem}%)"
     if options.max_mem_gb > 0 and not options.no_limits:
         print "  Max memory per test: {options.max_mem_gb}GB"
     print ""
@@ -350,6 +350,9 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
 fn main() -> i64:
     report_free_mem("START")
 
+    # Start resource safeguard (kills runaway simple processes when CPU+MEM exhausted)
+    ensure_kill_monitor_running()
+
     val all_args = get_cli_args()
     var args: [text] = []
     var skip_first = all_args.len() > 0 and all_args[0] == "test"
@@ -363,100 +366,47 @@ fn main() -> i64:
     val options = parse_test_args(args)
     report_free_mem("AFTER_PARSE_ARGS")
 
+    # Set recursion guard so child processes use Rust runner
+    env_set("SIMPLE_TEST_RUNNER_RUST", "1")
+
+    # Handle run management commands (status/stop/etc.)
+    if has_run_management_flag(args):
+        return handle_run_management(args)
+
+    # Load test configuration to determine what to run
+    val config = TestConfig__load()
+    var run_spec = config.run_spec_tests
+    var run_sdoc = config.run_sdoctests
+
+    # NOTE: sdoctest/combined modes remain disabled while memory triage is active
+
+    if not run_spec and not run_sdoc:
+        print "Error: No test types enabled. Check config/simple.test.sdn configuration."
+        print "  run_spec_tests: {config.run_spec_tests}"
+        print "  run_sdoctests: {config.run_sdoctests}"
+        return 1
+
     propagate_env_vars(options)
 
-    val use_cache = not options.no_cache
-    val files = discover_test_files_fast(options.path, options, use_cache)
-    report_free_mem("AFTER_DISCOVER_{files.len()}_files")
+    # Run spec tests (default path) with self-protection enabled in run_tests()
+    if run_spec:
+        print "Simple Test Runner v0.8.1"
+        print ""
 
-    print "Running {files.len()} test files with memory tracking..."
-    var idx = 0
-    var total_passed = 0
-    var total_failed = 0
-    for f in files:
-        val result = run_single_test(f, options)
-        print_result(result, options.format)
-        total_passed = total_passed + result.passed
-        total_failed = total_failed + result.failed
-        idx = idx + 1
-        # MEMORY TRACKING: report every 10 tests (was 50) to catch leaks faster
-        if idx % 10 == 0:
-            report_free_mem("AFTER_TEST_{idx}")
-        if options.fail_fast and result.failed > 0:
-            print "Stopping early (--fail-fast)"
-            break
+        val run_start = time_now_unix_micros()
+        val result = run_tests(options)
+        val run_end = time_now_unix_micros()
 
-    report_free_mem("DONE_{idx}_tests")
-    print ""
-    print "Total: {total_passed} passed, {total_failed} failed"
-    return 0
+        report_free_mem("AFTER_RUN_{result.files.len()}_files")
+        print_summary(result, options.format)
 
-    # MEMORY DEBUG: original main() body commented out below
-    # # Set recursion guard so child processes use Rust runner
-    # env_set("SIMPLE_TEST_RUNNER_RUST", "1")
-    #
-    # # Handle run management commands
-    # if has_run_management_flag(args):
-    #     return handle_run_management(args)
-    #
-    # # Load test configuration to determine what to run
-    # val config = TestConfig__load()
-    #
-    # # Determine which test types to run
-    # var run_spec = config.run_spec_tests
-    # var run_sdoc = config.run_sdoctests
-    #
-    # # MEMORY DEBUG: spl-doctest disabled (GROUP 5)
-    # # if options.spl_doctest:
-    # #     ...
-    #
-    # # MEMORY DEBUG: sdoctest disabled (GROUP 5)
-    # # if options.sdoctest:
-    # #     run_spec = false
-    # #     run_sdoc = true
-    #
-    # # MEMORY DEBUG: sdoctest-only mode disabled (GROUP 5)
-    # # if run_sdoc and not run_spec:
-    # #     ...
-    #
-    # # MEMORY DEBUG: combined mode disabled (GROUP 4, 5)
-    # # if run_spec and run_sdoc:
-    # #     return run_combined_mode(options, config)
-    #
-    # # Handle spec-only mode (default)
-    # if run_spec:
-    #     print "Simple Test Runner v0.4.0"
-    #     print ""
-    #
-    #     val run_start = time_now_unix_micros()
-    #     val result = run_tests(options)
-    #     val run_end = time_now_unix_micros()
-    #
-    #     print_summary(result, options.format)
-    #
-    #     # MEMORY DEBUG: closure warnings disabled (GROUP 9)
-    #     # if options.closure_warnings:
-    #     #     display_closure_warnings()
-    #     #     display_call_graph_warnings()
-    #
-    #     # MEMORY DEBUG: coverage disabled (GROUP 3)
-    #     var coverage_passed = true
-    #     # if options.coverage:
-    #     #     ...
-    #
-    #     # MEMORY DEBUG: test DB disabled (GROUP 4)
-    #     # if not options.list and not options.no_db and result.files.len() > 0:
-    #     #     update_test_database(result, run_start, run_end)
-    #
-    #     if result.is_ok() and coverage_passed:
-    #         return 0
-    #     return 1
-    #
-    # # If neither spec nor sdoc is enabled, print error
-    # print "Error: No test types enabled. Check config/simple.test.sdn configuration."
-    # print "  run_spec_tests: {config.run_spec_tests}"
-    # print "  run_sdoctests: {config.run_sdoctests}"
-    # return 1
+        if result.is_ok():
+            return 0
+        return 1
+
+    # If only sdoctest were enabled (currently disabled), exit gracefully
+    print "Sdoctest-only mode is currently disabled."
+    1
 
 # =========================================================================
 # Exports

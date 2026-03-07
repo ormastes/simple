@@ -1,0 +1,30 @@
+#!/bin/bash
+# Resource safeguard: kills all 'simple' processes when free memory or CPU < 10%
+# Usage: scripts/resource/safeguard.shs [&]
+# Checks every 1 second, runs until killed.
+
+THRESHOLD=10
+
+while true; do
+    # Free memory percentage
+    mem_free_pct=$(free | awk '/^Mem:/ { printf "%.0f", ($7 / $2) * 100 }')
+
+    # Free CPU percentage (100 - usage from /proc/stat, 1-second sample)
+    read -r _ u1 n1 s1 i1 _ < /proc/stat
+    sleep 1
+    read -r _ u2 n2 s2 i2 _ < /proc/stat
+    total=$(( (u2 + n2 + s2 + i2) - (u1 + n1 + s1 + i1) ))
+    idle=$(( i2 - i1 ))
+    if [ "$total" -gt 0 ]; then
+        cpu_free_pct=$(( idle * 100 / total ))
+    else
+        cpu_free_pct=100
+    fi
+
+    if [ "$mem_free_pct" -lt "$THRESHOLD" ] || [ "$cpu_free_pct" -lt "$THRESHOLD" ]; then
+        echo "[safeguard] mem_free=${mem_free_pct}% cpu_free=${cpu_free_pct}% — killing all simple processes"
+        pkill -9 -f 'bin/release.*simple' 2>/dev/null
+        pkill -9 -f 'build/simple' 2>/dev/null
+        pkill -9 -f 'bin/simple' 2>/dev/null
+    fi
+done
