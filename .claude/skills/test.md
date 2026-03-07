@@ -78,7 +78,7 @@ docker-compose down                 # Stop services
 docker system prune -a              # Remove all containers/images
 ```
 
-**Full Guide:** `doc/guide/container_testing.md` | **Resource Limits:** `doc/guide/resource_limits.md` | **Test Config:** `simple.test.sdn`
+**Full Guide:** `doc/guide/testing/container_testing.md` | **Test Config:** `simple.test.sdn`
 
 ## Writing Simple BDD Tests
 
@@ -200,5 +200,5 @@ Reports are generated at `doc/test/test_result.md` after every test run.
 
 - `/sspec` skill - Full SSpec BDD framework details
 - `.claude/templates/sspec_template.spl` - Template for new specs
-- `doc/guide/sspec_complete_example.md` - Complete workflow example
+- `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
 - `doc/spec/testing/` - Testing framework specs

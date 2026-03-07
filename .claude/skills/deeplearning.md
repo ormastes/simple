@@ -487,7 +487,7 @@ fn update_lr(engine: Engine):
 
 ## References
 
-- **Deep Learning Guide**: `simple/doc/guide/deeplearning.md`
+- **Deep Learning Guide**: `doc/guide/deep_learning/deep_learning.md`
 - **Example Project**: `simple/example/medgemma_korean/`
 - **Config System**: `src/lib/src/config/`
 - **Tracking System**: `src/lib/src/ml/tracking/`
@@ -980,7 +980,7 @@ val encoder: Layer<[batch, 784], [batch, 64]> =
 ## Related Documentation
 
 - **Design Document**: `doc/design/pipeline_operators_design.md`
-- **Error Guide**: `doc/guide/dimension_errors_guide.md`
+- **Error Guide**: `doc/guide/deep_learning/tensor_dimensions.md`
 - **Syntax Reference**: `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Test Specs**: `src/compiler/test/dim_constraints_spec.spl`
 

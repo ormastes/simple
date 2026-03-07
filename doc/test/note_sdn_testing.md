@@ -492,6 +492,6 @@ assert!(sdn.contains("dependencies |from_inst, to_inst, dep_kind"));
 
 ## See Also
 
-- [note.sdn Usage Guide](../guide/note_sdn_usage_guide.md)
+- [Library SMF Guide](../guide/apps/library_smf.md)
 - [note.sdn API Reference](../api/note_sdn_api.md)
 - [SMF Testing Guide](smf_testing_guide.md)

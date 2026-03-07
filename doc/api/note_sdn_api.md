@@ -574,6 +574,6 @@ val y = x * 2
 
 ## See Also
 
-- [note.sdn Usage Guide](../guide/note_sdn_usage_guide.md)
+- [Library SMF Guide](../guide/apps/library_smf.md)
 - [SMF Format Specification](smf_format_spec.md)
 - [Monomorphization Guide](../guide/monomorphization_guide.md)

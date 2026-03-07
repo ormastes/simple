@@ -486,10 +486,9 @@ bin/simple gen-lean write --force     # Regenerate Lean files
 
 ## See Also
 
-- **[Complete Example](../../doc/guide/sspec_complete_example.md)** - Full workflow walkthrough
 - **[Template](../../.claude/templates/sspec_template.spl)** - Spec file template
 - `doc/spec/sspec_format.md` - Format details
-- `doc/guide/sspec_writing.md` - Writing guide
+- `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
 - `doc/spec/sspec_manual.md` - User manual
 - `doc/test.md` - Test policy
 - `doc/FILE.md` - Document relationship model (PLAN → REQ → FEATURE → TESTS)

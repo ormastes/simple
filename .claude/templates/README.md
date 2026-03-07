@@ -43,7 +43,7 @@ cp .claude/templates/sspec_template.spl \
 
 ## Complete Workflow
 
-See `doc/guide/sspec_complete_example.md` for a full end-to-end example.
+See `doc/guide/testing/testing.md` for full testing guide.
 
 ### Quick Steps
 
@@ -110,6 +110,5 @@ describe "MyFeature":
 ## See Also
 
 - `/sspec` skill - Quick reference
-- `doc/guide/sspec_complete_example.md` - Complete walkthrough
-- `doc/guide/sspec_writing.md` - Writing guide
+- `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
 - `doc/spec/sspec_format.md` - Format specification

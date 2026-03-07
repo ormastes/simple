@@ -9,8 +9,8 @@
 ## 🚀 Start Here
 
 **Quick Links:**
-- **[INDEX.md](INDEX.md)** - Complete documentation index
-- **[EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md)** - 10-minute project overview
+- **[FILE.md](FILE.md)** - Complete documentation hub
+- **[report/EXECUTIVE_SUMMARY.md](report/EXECUTIVE_SUMMARY.md)** - 10-minute project overview
 - **[../README_DEPLOYMENT.md](../README_DEPLOYMENT.md)** - Quick deployment guide
 
 ---
@@ -27,10 +27,10 @@
 ## 📚 Documentation Structure
 
 ### Core Reports
-- [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) - High-level overview
-- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) - Deployment assessment
-- [needed_feature.md](needed_feature.md) - Feature status (updated)
-- [FEATURES_THAT_WORK.md](FEATURES_THAT_WORK.md) - Working features
+- [report/EXECUTIVE_SUMMARY.md](report/EXECUTIVE_SUMMARY.md) - High-level overview
+- [release/PRODUCTION_READINESS.md](release/PRODUCTION_READINESS.md) - Deployment assessment
+- [feature/needed_feature.md](feature/needed_feature.md) - Feature status (updated)
+- [feature/FEATURES_THAT_WORK.md](feature/FEATURES_THAT_WORK.md) - Working features
 
 ### Architecture
 - [architecture/overview.md](architecture/overview.md) - High-level architecture
@@ -42,8 +42,8 @@
 - [guide/backend/capabilities.md](guide/backend/capabilities.md) - Compiler backends
 
 ### Technical Analysis
-- [IMPLEMENTATION_FIXES.md](IMPLEMENTATION_FIXES.md) - Recent fixes
-- [TEST_STATUS_AUDIT.md](TEST_STATUS_AUDIT.md) - Complete test audit
+- [report/IMPLEMENTATION_FIXES.md](report/IMPLEMENTATION_FIXES.md) - Recent fixes
+- [report/TEST_STATUS_AUDIT.md](report/TEST_STATUS_AUDIT.md) - Complete test audit
 - [test/HANG_ANALYSIS.md](test/HANG_ANALYSIS.md) - Root cause analysis
 
 ---
@@ -65,7 +65,7 @@
 
 ## 📖 Full Index
 
-See **[INDEX.md](INDEX.md)** for complete documentation index with 20+ documents organized by purpose, feature, and audience.
+See **[FILE.md](FILE.md)** for complete documentation hub with all categories, relationship model, and navigation.
 
 ---
 

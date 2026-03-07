@@ -596,7 +596,7 @@ bin/simple src/lib/test/features/generate_docs.spl
 - Alternatives considered
 
 ### Good: User Guide
-`doc/guide/tensor_dimensions_guide.md`
+`doc/guide/deep_learning/tensor_dimensions.md`
 - Quick start example
 - Core concepts explained
 - Common patterns shown

@@ -583,6 +583,6 @@ kernel fn loss_kernel(pred: [f32]_gpu, target: [f32]_gpu) -> f32:
 
 ## See Also
 
-- [GPU Programming Guide](../guide/gpu_programming.md) - User guide
+- [GPU Programming Guide](../guide/apps/gpu.md) - User guide
 - [GPU API Reference](../api/gpu_api.md) - API documentation
 - [Pipeline Operators Design](pipeline_operators_design.md) - Related: `~>` layer connect

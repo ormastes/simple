@@ -379,7 +379,7 @@
 - **Technical Lead:** Review IMPLEMENTATION_FIXES.md
 - **Project Manager:** Review PRODUCTION_READINESS.md
 - **Security:** Review security audit report (when ready)
-- **Documentation:** Review doc/INDEX.md
+- **Documentation:** Review doc/FILE.md
 
 ---
 

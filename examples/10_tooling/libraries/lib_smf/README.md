@@ -230,7 +230,7 @@ To complete the integration:
 ## Documentation
 
 - **Specification:** `doc/format/lib_smf_specification.md`
-- **Integration Guide:** `doc/guide/lib_smf_integration.md`
+- **Integration Guide:** `doc/guide/apps/library_smf.md`
 - **Implementation Report:** `doc/report/lib_smf_implementation_2026-02-09.md`
 
 ## Notes

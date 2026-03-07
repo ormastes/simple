@@ -664,5 +664,5 @@ enum CodegenTarget:
 
 ## See Also
 
-- [GPU Programming Guide](../guide/gpu_programming.md) - Tutorial and examples
+- [GPU Programming Guide](../guide/apps/gpu.md) - Tutorial and examples
 - [GPU Backend Design](../design/gpu_backend_design.md) - Architecture details

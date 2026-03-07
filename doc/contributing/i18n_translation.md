@@ -489,7 +489,7 @@ Before submitting, verify:
 ### Technical Issues
 - **Build errors**: File an issue with label `i18n`
 - **Syntax errors**: Run `simple build src/i18n/your_file.spl` for details
-- **Testing**: See `doc/guide/i18n.md` for usage guide
+- **Testing**: See `doc/guide/apps/cli_tools.md` for usage guide
 
 ### Getting Review
 - **Find reviewers**: Ask in #i18n channel
@@ -535,7 +535,7 @@ See `src/i18n/parser.ko.spl` for a complete example of all E0001-E0012 errors tr
 
 ## Related Documentation
 
-- **User Guide**: `doc/guide/i18n.md` - How to use i18n in Simple
+- **User Guide**: `doc/guide/apps/cli_tools.md` - How to use i18n in Simple
 - **Specification**: `doc/design/i18n_complete_specification.md` - Technical details
 - **Progress Report**: `doc/report/i18n_implementation_progress.md` - Implementation status
 
