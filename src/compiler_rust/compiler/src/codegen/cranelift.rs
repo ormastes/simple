@@ -73,6 +73,11 @@ impl Codegen {
         self.backend.set_use_map(map);
     }
 
+    /// Get a reference to the inner backend for accessing mangling and resolution state.
+    pub fn backend(&self) -> &CodegenBackend<ObjectModule> {
+        &self.backend
+    }
+
     /// Compile a MIR module to object code.
     pub fn compile_module(mut self, mir: &MirModule) -> CodegenResult<Vec<u8>> {
         // Compile all functions

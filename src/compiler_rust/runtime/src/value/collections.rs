@@ -812,6 +812,87 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     }
 }
 
+/// Find first occurrence of needle in string
+/// Returns the byte index, or -1 if not found
+#[no_mangle]
+pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> i64 {
+    let str_len = rt_string_len(string);
+    let needle_len = rt_string_len(needle);
+
+    if str_len < 0 || needle_len < 0 {
+        return -1;
+    }
+
+    if needle_len == 0 {
+        return 0;
+    }
+
+    if needle_len > str_len {
+        return -1;
+    }
+
+    let str_data = rt_string_data(string);
+    let needle_data = rt_string_data(needle);
+
+    if str_data.is_null() || needle_data.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
+        let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
+        for i in 0..=(str_len - needle_len) as usize {
+            if &haystack[i..i + needle_len as usize] == needle_bytes {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// Find last occurrence of needle in string
+/// Returns the byte index, or -1 if not found
+#[no_mangle]
+pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) -> i64 {
+    let str_len = rt_string_len(string);
+    let needle_len = rt_string_len(needle);
+
+    if str_len < 0 || needle_len < 0 {
+        return -1;
+    }
+
+    if needle_len == 0 {
+        return str_len;
+    }
+
+    if needle_len > str_len {
+        return -1;
+    }
+
+    let str_data = rt_string_data(string);
+    let needle_data = rt_string_data(needle);
+
+    if str_data.is_null() || needle_data.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
+        let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
+        let mut i = (str_len - needle_len) as usize;
+        loop {
+            if &haystack[i..i + needle_len as usize] == needle_bytes {
+                return i as i64;
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        -1
+    }
+}
+
 /// Find index of a substring in a string
 /// Returns Option<i64> as enum: Some(index) or None
 #[no_mangle]

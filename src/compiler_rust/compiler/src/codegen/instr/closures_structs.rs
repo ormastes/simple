@@ -2,7 +2,7 @@
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::Module;
+use cranelift_module::{Linkage, Module};
 
 use crate::hir::TypeId;
 use crate::mir::VReg;
@@ -33,13 +33,55 @@ pub(crate) fn compile_closure_create<M: Module>(
         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
         builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
     } else {
-        eprintln!(
-            "[WARN] ClosureCreate: function '{}' not found in func_ids ({} entries), storing NULL",
-            func_name,
-            ctx.func_ids.len()
-        );
-        let null = builder.ins().iconst(types::I64, 0);
-        builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
+        // Cross-module closure: resolve via use_map → import_map
+        let mut resolved_name = ctx.use_map.get(func_name)
+            .or_else(|| ctx.import_map.get(func_name))
+            .map(|s| s.as_str());
+
+        // Try: TypeName__method → typename_method (factory/constructor convention)
+        let mut dunder_storage = String::new();
+        if resolved_name.is_none() {
+            if let Some((type_part, method_part)) = func_name.split_once("__") {
+                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    dunder_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
+                    resolved_name = ctx.use_map.get(&dunder_storage)
+                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .map(|s| s.as_str());
+                }
+            }
+        }
+
+        if let Some(resolved) = resolved_name {
+            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+                std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
+            } else {
+                std::borrow::Cow::Borrowed(resolved)
+            };
+            // Declare as import with a generic i64 → i64 signature (closure body)
+            let call_conv = platform_call_conv();
+            let mut sig = Signature::new(call_conv);
+            sig.params.push(AbiParam::new(types::I64)); // closure pointer
+            sig.returns.push(AbiParam::new(types::I64));
+            match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
+                Ok(fid) => {
+                    let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
+                    let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                    builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                }
+                Err(_) => {
+                    let null = builder.ins().iconst(types::I64, 0);
+                    builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
+                }
+            }
+        } else {
+            eprintln!(
+                "[WARN] ClosureCreate: function '{}' not found in func_ids ({} entries), storing NULL",
+                func_name,
+                ctx.func_ids.len()
+            );
+            let null = builder.ins().iconst(types::I64, 0);
+            builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
+        }
     }
 
     for (i, offset) in capture_offsets.iter().enumerate() {
@@ -169,15 +211,103 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
     } else {
-        let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
+        // Cross-module method: resolve via use_map → import_map
+        let mut resolved_name = ctx.use_map.get(func_name)
+            .or_else(|| ctx.import_map.get(func_name))
+            .map(|s| s.as_str());
 
-        let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
-        let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-        let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+        // If not found and func_name contains '.', try additional name variants
+        let mut type_prefixed_storage = String::new();
+        let mut dunder_storage = String::new();
+        if resolved_name.is_none() {
+            if let Some(dot_pos) = func_name.rfind('.') {
+                let type_name = &func_name[..dot_pos];
+                let method = &func_name[dot_pos + 1..];
 
-        if let Some(d) = dest {
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*d, result);
+                // Try: bare method name
+                resolved_name = ctx.use_map.get(method)
+                    .or_else(|| ctx.import_map.get(method))
+                    .map(|s| s.as_str());
+
+                // Try: lowercase_type_method (Simple convention)
+                if resolved_name.is_none() {
+                    type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
+                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                        .map(|s| s.as_str());
+                }
+
+                // Try: Type__method (double underscore variant)
+                if resolved_name.is_none() {
+                    dunder_storage = format!("{}__{}", type_name, method);
+                    resolved_name = ctx.use_map.get(&dunder_storage)
+                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .map(|s| s.as_str());
+                }
+            }
+        }
+
+        // Try: TypeName__method → typename_method (factory/constructor convention)
+        // e.g., TreeSitter__new → treesitter_new
+        if resolved_name.is_none() {
+            if let Some((type_part, method_part)) = func_name.split_once("__") {
+                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
+                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                        .map(|s| s.as_str());
+                }
+            }
+        }
+
+        if let Some(resolved) = resolved_name {
+            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+                std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
+            } else {
+                std::borrow::Cow::Borrowed(resolved)
+            };
+            let call_conv = platform_call_conv();
+            let mut sig = Signature::new(call_conv);
+            // receiver + args: all i64
+            for _ in 0..args.len() + 1 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
+                Ok(fid) => {
+                    let fref = ctx.module.declare_func_in_func(fid, builder.func);
+                    let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
+                    for a in args { call_args.push(get_vreg_or_default(ctx, builder, a)); }
+                    let call_args = super::calls::adapt_args_to_signature(builder, fref, call_args);
+                    let call = adapted_call(builder, fref, &call_args);
+                    if let Some(d) = dest {
+                        let results = builder.inst_results(call);
+                        if !results.is_empty() {
+                            ctx.vreg_values.insert(*d, results[0]);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Fallback: rt_function_not_found
+                    let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
+                    let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
+                    let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+                    let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+                    if let Some(d) = dest {
+                        let result = builder.inst_results(call)[0];
+                        ctx.vreg_values.insert(*d, result);
+                    }
+                }
+            }
+        } else {
+            let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
+            let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
+            let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+            let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+            if let Some(d) = dest {
+                let result = builder.inst_results(call)[0];
+                ctx.vreg_values.insert(*d, result);
+            }
         }
     }
     Ok(())
@@ -333,7 +463,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
-        "index_of" | "find" | "find_str" => "rt_string_index_of",
+        "index_of" | "find_str" => "rt_string_find",
+        "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "str" => "rt_to_string",
         // Dict/collection methods
         "get" => "rt_index_get",

@@ -8,7 +8,7 @@ use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_wri
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver.{CompilerDriver, aot_file, aot_c_file, aot_cuda_file, aot_vhdl_file, compile_to_smf}
-use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.driver.driver_api.{aot_native_file_with_backend, aot_native_project_with_backend}
 use app.compile.native.{compile_native}
 use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
 
@@ -461,10 +461,12 @@ fn cli_native_build(args: [text]) -> i64:
 
     if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
         # Pure Simple path: use CompilerDriver with LLVM lib backend
-        # Parse native-build args: --source, --entry, -o, etc.
+        # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
         var entry_point = ""
         var output = "a.out"
         var verbose = false
+        var strip = false
+        var source_dirs: [text] = []
         var j = 0
         # Skip "native-build" command name
         if args.len() > 0 and args[0] == "native-build":
@@ -477,6 +479,12 @@ fn cli_native_build(args: [text]) -> i64:
                 elif j + 1 < args.len():
                     j = j + 1
                     entry_point = args[j]
+            elif a == "--source":
+                if j + 1 < args.len():
+                    j = j + 1
+                    source_dirs = source_dirs.push(args[j])
+            elif a.starts_with("--source="):
+                source_dirs = source_dirs.push(a.substring(9))
             elif a == "-o":
                 if j + 1 < args.len():
                     j = j + 1
@@ -485,22 +493,35 @@ fn cli_native_build(args: [text]) -> i64:
                 output = a.substring(2)
             elif a == "--verbose" or a == "-v":
                 verbose = true
-            elif a.starts_with("--backend="):
-                pass  # Already handled above
+            elif a == "--strip":
+                strip = true
+            elif a == "--no-mangle":
+                pass  # Accepted but not used in llvm-lib path
+            elif a == "--clean":
+                pass  # Accepted but not used in llvm-lib path
+            elif a.starts_with("--backend=") or a == "--backend":
+                if a == "--backend" and j + 1 < args.len():
+                    j = j + 1
+                # Already handled above
             elif not a.starts_with("-") and entry_point == "":
                 entry_point = a
             j = j + 1
 
         if entry_point == "":
             _cli_eprint("Error: No entry point specified for llvm-lib backend")
-            _cli_eprint("Usage: simple native-build --backend=llvm-lib --entry <file.spl> -o <output>")
+            _cli_eprint("Usage: simple native-build --backend=llvm-lib --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
         if verbose:
             _cli_eprint("[native-build] Using pure Simple LLVM lib backend")
             _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
+            if source_dirs.len() > 0:
+                _cli_eprint("[native-build] Source dirs: {source_dirs}")
 
-        val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
+        val result = if source_dirs.len() > 0:
+            aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip)
+        else:
+            aot_native_file_with_backend(entry_point, output, "llvm-lib")
         match result:
             case CompileResult.Success(_):
                 if verbose:

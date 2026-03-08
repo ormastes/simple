@@ -582,6 +582,19 @@ impl CallTarget {
         }
     }
 
+    /// Set the function name, preserving the effect variant.
+    pub fn set_name(&mut self, new_name: String) {
+        match self {
+            CallTarget::Pure(n) => *n = new_name,
+            CallTarget::Io(n) => *n = new_name,
+            CallTarget::Blocking(n) => *n = new_name,
+            CallTarget::GcAllocating(n) => *n = new_name,
+            CallTarget::Net(n) => *n = new_name,
+            CallTarget::Fs(n) => *n = new_name,
+            CallTarget::Unsafe(n) => *n = new_name,
+        }
+    }
+
     /// Get the effect of this call.
     pub fn effect(&self) -> Effect {
         match self {

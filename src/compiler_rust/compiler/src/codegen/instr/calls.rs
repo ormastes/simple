@@ -369,6 +369,31 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
 
+    // Handle __get_global_<name> calls (from lower_lvalue GPU path)
+    // These return the ADDRESS of the global data object for subsequent Store.
+    if let Some(global_name) = func_name.strip_prefix("__get_global_") {
+        if let Some(global_id) = ctx.global_ids.get(global_name) {
+            let global_ref = ctx.module.declare_data_in_func(*global_id, builder.func);
+            let global_addr = builder.ins().global_value(types::I64, global_ref);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, global_addr);
+            }
+            return Ok(());
+        }
+        // Try with module prefix (mangled globals: "module__varname")
+        let mangled_suffix = format!("__{}", global_name);
+        let found = ctx.global_ids.iter().find(|(key, _)| key.ends_with(&mangled_suffix));
+        if let Some((_, id)) = found {
+            let global_ref = ctx.module.declare_data_in_func(*id, builder.func);
+            let global_addr = builder.ins().global_value(types::I64, global_ref);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, global_addr);
+            }
+            return Ok(());
+        }
+        // Fall through to normal call resolution (will auto-stub if not found)
+    }
+
     // Check if this is a built-in I/O function (print, println, etc.)
     // Use ffi_name for builtin/runtime checks since these match on short names
     if let Some(result) = compile_builtin_io_call(ctx, builder, ffi_name, args, dest)? {
@@ -492,6 +517,7 @@ pub fn compile_call<M: Module>(
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
                 "index_of" | "find" | "find_str" => Some("rt_string_index_of"),
+                "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
                 "get" => Some("rt_index_get"),
@@ -534,12 +560,57 @@ pub fn compile_call<M: Module>(
         // Cross-module function: declare as import, resolve at link time.
         // Resolution order: 1) per-module use_map (from `use` statements),
         // 2) global import_map (unique names), 3) raw name fallback.
-        let resolved_name = ctx
+        let mut resolved_name = ctx
             .use_map
             .get(func_name)
             .or_else(|| ctx.import_map.get(func_name))
-            .map(|s| s.as_str())
-            .unwrap_or(func_name);
+            .map(|s| s.as_str());
+
+        // If not found and func_name contains '.', try additional name variants
+        let mut type_prefixed_storage = String::new();
+        let mut dunder_storage = String::new();
+        if resolved_name.is_none() {
+            if let Some(dot_pos) = func_name.rfind('.') {
+                let type_name = &func_name[..dot_pos];
+                let method = &func_name[dot_pos + 1..];
+
+                // Try: bare method name
+                resolved_name = ctx.use_map.get(method)
+                    .or_else(|| ctx.import_map.get(method))
+                    .map(|s| s.as_str());
+
+                // Try: lowercase_type_method (Simple convention)
+                if resolved_name.is_none() {
+                    type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
+                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                        .map(|s| s.as_str());
+                }
+
+                // Try: Type__method (double underscore variant)
+                if resolved_name.is_none() {
+                    dunder_storage = format!("{}__{}", type_name, method);
+                    resolved_name = ctx.use_map.get(&dunder_storage)
+                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .map(|s| s.as_str());
+                }
+            }
+        }
+
+        // Try: TypeName__method → typename_method (factory/constructor convention)
+        // e.g., TreeSitter__new → treesitter_new
+        if resolved_name.is_none() {
+            if let Some((type_part, method_part)) = func_name.split_once("__") {
+                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
+                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                        .map(|s| s.as_str());
+                }
+            }
+        }
+
+        let resolved_name = resolved_name.unwrap_or(func_name);
 
         // Sanitize symbol name for macOS: Mach-O does not support dots in symbols.
         // Apple ld crashes on dot-containing symbol names.

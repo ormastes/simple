@@ -1,10 +1,11 @@
 // Builtin method compilation for codegen.
 
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::Module;
+use cranelift_module::{Linkage, Module};
 
-use super::helpers::{adapted_call, declare_named_bytes};
+use super::super::shared::platform_call_conv;
+use super::helpers::{adapted_call, declare_named_bytes, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 use crate::mir::VReg;
 
@@ -214,23 +215,72 @@ pub(crate) fn compile_builtin_method<M: Module>(
             Some(builder.inst_results(call)[0])
         }
         _ => {
-            // Unknown method - call rt_method_not_found
-            let type_bytes = receiver_type.as_bytes();
-            let type_data_id = declare_named_bytes(ctx, type_bytes)?;
-            let type_global = ctx.module.declare_data_in_func(type_data_id, builder.func);
-            let type_ptr = builder.ins().global_value(types::I64, type_global);
-            let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+            // Try cross-module resolution before falling back to rt_method_not_found.
+            // Build name variants to look up in use_map / import_map.
+            let dot_name = format!("{}.{}", receiver_type, method);
+            let lower_name = format!("{}_{}", receiver_type.to_lowercase(), method);
+            let dunder_name = format!("{}__{}", receiver_type, method);
 
-            let method_bytes = method.as_bytes();
-            let method_data_id = declare_named_bytes(ctx, method_bytes)?;
-            let method_global = ctx.module.declare_data_in_func(method_data_id, builder.func);
-            let method_ptr = builder.ins().global_value(types::I64, method_global);
-            let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
+            let resolved_name = ctx.use_map.get(method)
+                .or_else(|| ctx.import_map.get(method))
+                .or_else(|| ctx.use_map.get(&dot_name))
+                .or_else(|| ctx.import_map.get(&dot_name))
+                .or_else(|| ctx.use_map.get(&lower_name))
+                .or_else(|| ctx.import_map.get(&lower_name))
+                .or_else(|| ctx.use_map.get(&dunder_name))
+                .or_else(|| ctx.import_map.get(&dunder_name))
+                .cloned();
 
-            let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
-            let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-            let call = adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
-            Some(builder.inst_results(call)[0])
+            if let Some(resolved) = resolved_name {
+                let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+                    std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
+                } else {
+                    std::borrow::Cow::Borrowed(resolved.as_str())
+                };
+                let call_conv = platform_call_conv();
+                let mut sig = Signature::new(call_conv);
+                // receiver + args: all i64
+                for _ in 0..args.len() + 1 {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                sig.returns.push(AbiParam::new(types::I64));
+                match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
+                    Ok(fid) => {
+                        let fref = ctx.module.declare_func_in_func(fid, builder.func);
+                        let mut call_args = vec![receiver_val];
+                        for a in args {
+                            call_args.push(get_vreg_or_default(ctx, builder, a));
+                        }
+                        let call_args = super::calls::adapt_args_to_signature(builder, fref, call_args);
+                        let call = adapted_call(builder, fref, &call_args);
+                        Some(builder.inst_results(call)[0])
+                    }
+                    Err(_) => {
+                        // declare_function failed, fall through to rt_method_not_found
+                        None
+                    }
+                }
+            } else {
+                None
+            }.or_else(|| {
+                // Fallback: call rt_method_not_found
+                let type_bytes = receiver_type.as_bytes();
+                let type_data_id = declare_named_bytes(ctx, type_bytes).ok()?;
+                let type_global = ctx.module.declare_data_in_func(type_data_id, builder.func);
+                let type_ptr = builder.ins().global_value(types::I64, type_global);
+                let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+
+                let method_bytes = method.as_bytes();
+                let method_data_id = declare_named_bytes(ctx, method_bytes).ok()?;
+                let method_global = ctx.module.declare_data_in_func(method_data_id, builder.func);
+                let method_ptr = builder.ins().global_value(types::I64, method_global);
+                let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
+
+                let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
+                let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+                let call = adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+                Some(builder.inst_results(call)[0])
+            })
         }
     };
 

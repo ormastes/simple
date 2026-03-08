@@ -8,10 +8,175 @@ use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
 
+/// Map Simple builtin names to runtime FFI function names.
+/// Mirrors the Cranelift backend's name mapping in codegen/instr/calls.rs.
+fn map_ffi_name(func_name: &str) -> &str {
+    // Strip module prefix to find the base function name
+    let base = func_name
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .unwrap_or(func_name);
+    match base {
+        "sys_get_args" => "rt_get_args",
+        "sys_exit" => "rt_exit",
+        "rt_file_read_text" => "rt_file_read_text_rv",
+        "rt_println" => "rt_println_value",
+        "rt_print" => "rt_print_value",
+        _ => base,
+    }
+}
+
+/// Returns which Simple-level argument indices are text parameters for a given
+/// runtime FFI function. Text arguments are RuntimeValue strings that must be
+/// expanded to (ptr, len) pairs when calling the C-ABI FFI function.
+/// Mirrors the Cranelift backend's text_arg_indices in codegen/instr/calls.rs.
+fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
+    match func_name {
+        // Print/IO (text → ptr, len)
+        "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
+
+        // Environment variables
+        "rt_env_get" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
+        "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
+
+        // File I/O (single path)
+        "rt_file_exists"
+        | "rt_file_canonicalize"
+        | "rt_file_read_text"
+        | "rt_file_read_text_rv"
+        | "rt_file_remove"
+        | "rt_file_read_lines"
+        | "rt_file_read_bytes" => Some(&[0]),
+        // File I/O (two text params: path + content, or src + dest)
+        "rt_file_write_text"
+        | "rt_file_copy"
+        | "rt_file_rename"
+        | "rt_file_append_text"
+        | "rt_file_write_bytes"
+        | "rt_file_move" => Some(&[0, 1]),
+
+        // Directory operations
+        "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
+        | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
+        "rt_file_find" => Some(&[0, 1]),
+
+        // Path operations (single path)
+        "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
+        // Path operations (two paths)
+        "rt_path_relative" | "rt_path_join" => Some(&[0, 1]),
+
+        // Process execution (cmd is text, args is RuntimeValue array)
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" => Some(&[0]),
+        "rt_process_run_timeout" => Some(&[0]),
+
+        // Contract checking (func_name is text at different positions)
+        "simple_contract_check" => Some(&[2]),
+        "simple_contract_check_msg" => Some(&[2, 3]),
+        "rt_contract_violation_new" => Some(&[1, 2]),
+
+        // Interpreter bridge
+        "rt_interp_call" => Some(&[0]),
+
+        // FFI object system (method name at index 1)
+        "rt_ffi_call_method" | "rt_ffi_has_method" | "rt_ffi_object_call_method" | "rt_ffi_object_has_method" => {
+            Some(&[1])
+        }
+        "rt_ffi_type_register" => Some(&[0]),
+
+        // BDD test framework
+        "rt_bdd_describe_start" | "rt_bdd_it_start" | "rt_bdd_expect_fail" => Some(&[0]),
+
+        // Networking (address is text)
+        "native_tcp_bind" | "native_tcp_connect" | "native_udp_bind" => Some(&[0]),
+        "native_tcp_connect_timeout" => Some(&[0]),
+        "native_tcp_read"
+        | "native_tcp_write"
+        | "native_tcp_peek"
+        | "native_udp_recv_from"
+        | "native_udp_recv"
+        | "native_udp_send"
+        | "native_udp_peek_from"
+        | "native_udp_peek" => Some(&[1]),
+        "native_udp_connect" => Some(&[1]),
+        "native_udp_send_to" => Some(&[1, 2]),
+
+        // Regex (pattern and text)
+        "ffi_regex_is_match" | "ffi_regex_find" | "ffi_regex_find_all" | "ffi_regex_captures" | "ffi_regex_split" => {
+            Some(&[0, 1])
+        }
+        "ffi_regex_replace" | "ffi_regex_replace_all" => Some(&[0, 1, 2]),
+        "ffi_regex_split_n" => Some(&[0, 1]),
+
+        // Cranelift self-hosting
+        "rt_cranelift_new_module" | "rt_cranelift_new_aot_module" => Some(&[0]),
+        "rt_cranelift_begin_function" => Some(&[1]),
+        "rt_cranelift_get_function_ptr" => Some(&[1]),
+
+        // File stat (path is text, rest are output pointers)
+        "rt_file_stat" => Some(&[0]),
+
+        // Native build (takes args RuntimeValue, not text)
+        // rt_native_build does NOT have text args — its single arg is a RuntimeValue array
+
+        _ => None,
+    }
+}
+
 impl LlvmBackend {
     // ============================================================================
     // Call Instructions
     // ============================================================================
+
+    /// Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
+    /// Calls rt_string_data and rt_string_len at runtime on each text argument.
+    #[cfg(feature = "llvm")]
+    fn expand_text_args_llvm(
+        &self,
+        arg_vals: &[inkwell::values::BasicMetadataValueEnum<'static>],
+        text_indices: &[usize],
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'static>>, CompileError> {
+        let i64_type = self.context.i64_type();
+
+        // Declare rt_string_data and rt_string_len if not already declared
+        let string_data_fn = module.get_function("rt_string_data").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_string_data", fn_type, None)
+        });
+        let string_len_fn = module.get_function("rt_string_len").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_string_len", fn_type, None)
+        });
+
+        let mut expanded = Vec::with_capacity(arg_vals.len() + text_indices.len());
+        for (i, val) in arg_vals.iter().enumerate() {
+            if text_indices.contains(&i) {
+                // Expand text RuntimeValue to (ptr, len) pair
+                let ptr_call = builder
+                    .build_call(string_data_fn, &[*val], "str_data")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
+                let ptr = ptr_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+
+                let len_call = builder
+                    .build_call(string_len_fn, &[*val], "str_len")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
+                let len = len_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+
+                expanded.push(ptr.into());
+                expanded.push(len.into());
+            } else {
+                expanded.push(*val);
+            }
+        }
+        Ok(expanded)
+    }
 
     #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn compile_call(
@@ -23,13 +188,14 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let func_name = target.name();
+        let func_name_raw = target.name();
+        let ffi_name = map_ffi_name(func_name_raw);
         let i64_type = self.context.i64_type();
 
         // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions.
         // Accepts both bare names and spl_ prefixed names (safe symbol exports).
         if matches!(
-            func_name,
+            func_name_raw,
             "print"
                 | "println"
                 | "eprint"
@@ -45,7 +211,7 @@ impl LlvmBackend {
                 | "spl_eprint_raw"
                 | "spl_dprint"
         ) {
-            let (value_fn, ln_value_fn) = match func_name {
+            let (value_fn, ln_value_fn) = match func_name_raw {
                 "print" | "println" | "spl_print" | "spl_println" => ("rt_print_value", "rt_println_value"),
                 "eprint" | "eprintln" | "spl_eprint" | "spl_eprintln" => ("rt_eprint_value", "rt_eprintln_value"),
                 "print_raw" | "spl_print_raw" => ("rt_print_value", "rt_print_value"),
@@ -77,7 +243,7 @@ impl LlvmBackend {
 
         // Special case: substring(text, start) → rt_slice(text, start, rt_len(text), 1)
         // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
-        if func_name == "substring" && args.len() == 2 {
+        if func_name_raw == "substring" && args.len() == 2 {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
             let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
             let start_val = self.get_vreg(&args[1], vreg_map)?;
@@ -128,7 +294,7 @@ impl LlvmBackend {
         // Redirect bare builtin method names to runtime functions.
         // When MIR emits Call { target: "starts_with" } instead of BuiltinMethod,
         // we must map these to rt_* functions. The first arg is the receiver.
-        let bare_rt_redirect: Option<&str> = match func_name {
+        let bare_rt_redirect: Option<&str> = match func_name_raw {
             // String methods (all verified as T symbols in runtime)
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
@@ -185,34 +351,21 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        // Map Simple builtin names to runtime FFI names (same as Cranelift backend)
-        let ffi_name: &str = match func_name {
-            "sys_get_args" => "rt_get_args",
-            "sys_exit" => "rt_exit",
-            "rt_file_read_text" => "rt_file_read_text_rv",
-            "rt_println" => "rt_println_value",
-            "rt_print" => "rt_print_value",
-            _ => {
-                // Strip module prefix for FFI matching
-                func_name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(func_name)
-            }
-        };
-
         // Resolve through use_map/import_map before declaring (matches Cranelift behavior)
         let resolved_name = self
             .use_map
-            .get(func_name)
-            .or_else(|| self.import_map.get(func_name))
+            .get(func_name_raw)
+            .or_else(|| self.import_map.get(func_name_raw))
             .map(|s| s.as_str())
-            .unwrap_or(func_name);
+            .unwrap_or(func_name_raw);
 
         // Get or declare the called function (with suffix matching safety net)
         let called_func = module
             .get_function(resolved_name)
-            .or_else(|| module.get_function(func_name))
+            .or_else(|| module.get_function(func_name_raw))
             .or_else(|| {
                 // Suffix matching: scan module for functions ending with ".{func_name}"
-                let suffix = format!(".{}", func_name);
+                let suffix = format!(".{}", func_name_raw);
                 let mut func_opt = module.get_first_function();
                 let mut best: Option<inkwell::values::FunctionValue> = None;
                 while let Some(f) = func_opt {
@@ -231,13 +384,13 @@ impl LlvmBackend {
             })
             .or_else(|| {
                 // Split at underscores right-to-left: "tokens_push" → try ".push"
-                for (i, _) in func_name.match_indices('_').rev() {
-                    let method = &func_name[i + 1..];
+                for (i, _) in func_name_raw.match_indices('_').rev() {
+                    let method = &func_name_raw[i + 1..];
                     if method.is_empty() {
                         continue;
                     }
                     let suffix = format!(".{}", method);
-                    let prefix_part = func_name[..i].to_lowercase();
+                    let prefix_part = func_name_raw[..i].to_lowercase();
                     let mut func_opt = module.get_first_function();
                     let mut best: Option<inkwell::values::FunctionValue> = None;
                     while let Some(f) = func_opt {
@@ -405,17 +558,25 @@ impl LlvmBackend {
 
             if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
                 let i64_type = self.context.i64_type();
-                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                // Prepend closure pointer (coerced to i64) as implicit first argument
+                // This matches Cranelift's behavior in closures_structs.rs:67-78
+                let closure_as_i64 = builder
+                    .build_ptr_to_int(closure_ptr, self.context.i64_type(), "closure_i64")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
+                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![closure_as_i64.into()];
                 for arg in args {
                     let val = self.get_vreg(arg, vreg_map)?;
                     let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                     arg_vals.push(casted.into());
                 }
 
+                // Prepend i64 type for the implicit closure pointer parameter.
                 // Use actual arg count for function type (param_types from HIR may differ).
                 // All args are coerced to i64 matching the tagged-value ABI.
-                let llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                let mut llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.context.i64_type().into()];
+                let user_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     args.iter().map(|_| i64_type.into()).collect();
+                llvm_param_types.extend(user_param_types);
 
                 // Default to i64 return (tagged value) — void is rare for indirect calls
                 let fn_type = if *return_type == TypeId::VOID {
