@@ -706,7 +706,12 @@ int main(int argc, char** argv) {
             }
             #[cfg(target_os = "windows")]
             {
-                cmd.arg("-Wl,/WHOLEARCHIVE").arg(&archive_path);
+                if is_clang_cl {
+                    // clang-cl: pass MSVC linker flags via -Xlinker
+                    cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
+                } else {
+                    cmd.arg("-Wl,--whole-archive").arg(&archive_path).arg("-Wl,--no-whole-archive");
+                }
             }
         } else {
             for obj in object_paths {
@@ -745,9 +750,16 @@ int main(int argc, char** argv) {
         }
         #[cfg(target_os = "windows")]
         {
-            // Windows with clang/MinGW: link against Windows system libraries
-            for lib in &["kernel32", "ws2_32", "bcrypt", "userenv"] {
-                cmd.arg(format!("-l{}", lib));
+            if is_clang_cl {
+                // clang-cl: pass .lib names directly (MSVC linker convention)
+                for lib in &["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib"] {
+                    cmd.arg(lib);
+                }
+            } else {
+                // MinGW clang/gcc: use -l flags
+                for lib in &["kernel32", "ws2_32", "bcrypt", "userenv"] {
+                    cmd.arg(format!("-l{}", lib));
+                }
             }
         }
 
@@ -766,7 +778,11 @@ int main(int argc, char** argv) {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-Wl,--unresolved-symbols=ignore-all");
         #[cfg(target_os = "windows")]
-        cmd.arg("-Wl,/FORCE:UNRESOLVED");
+        if is_clang_cl {
+            cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
+        } else {
+            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+        }
 
         if self.config.strip {
             #[cfg(target_os = "macos")]
@@ -774,7 +790,11 @@ int main(int argc, char** argv) {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
-            cmd.arg("-Wl,/DEBUG:NONE");
+            if is_clang_cl {
+                cmd.arg("-Xlinker").arg("/DEBUG:NONE");
+            } else {
+                cmd.arg("-Wl,-s");
+            }
         }
 
         if self.config.verbose {
