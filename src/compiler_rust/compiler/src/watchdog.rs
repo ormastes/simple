@@ -40,7 +40,25 @@ fn read_rss_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn read_rss_bytes() -> u64 {
+    // Use `ps` to read RSS on macOS (returns KB)
+    let pid = std::process::id();
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn read_rss_bytes() -> u64 {
     0
 }

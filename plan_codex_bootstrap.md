@@ -2,6 +2,73 @@
 
 ## Replan Update (2026-03-08, macOS arm64)
 
+## Execution Update (2026-03-08, Stage 3 full + default llvm-lib)
+
+### Code changes applied
+- Updated compile defaults to prefer pure Simple LLVM lib backend:
+  - `src/app/io/cli_compile.spl`
+    - `backend` default changed from `auto` -> `llvm-lib`
+    - help text updated to show default `llvm-lib`
+    - native bridge changed from `--backend llvm` -> `--backend llvm-lib`
+    - added support for `--backend <value>` form in `cli_native_build`
+    - `cli_native_build` now uses pure llvm-lib path only when backend is explicitly set to llvm-lib
+      (default native-build path stays on `rt_native_build` for stability)
+
+### Stage builds executed
+1. Canonical bootstrap script:
+   - `scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --skip-rust-build --keep-artifacts --jobs=7`
+   - Result:
+     - `build/bootstrap/stage1/simple`
+     - `build/bootstrap/stage2/simple`
+     - Stage1/Stage2 reproducible hash:
+       - `ade36639f7821f75507bfc7198500fc34bbd7f31f9582beeba7eacb851578bfa`
+
+2. Stage3 full attempt (requested full entry + llvm-lib):
+   - `build/bootstrap/stage2/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend llvm-lib -o build/bootstrap/stage3_full/simple --strip`
+   - Result: binary builds and links, but runtime identity is still bootstrap CLI:
+     - `build/bootstrap/stage3_full/simple --version` -> `simple-bootstrap 0.8.0`
+     - `build/bootstrap/stage3_full/simple --help` -> `Simple Bootstrap Compiler v0.8.0`
+
+3. Stage4 rebuild from Stage3 (stable path):
+   - `build/bootstrap/stage3_full/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --clean -o build/bootstrap/stage4_full/simple --strip`
+   - Hashes now match:
+     - Stage3: `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`
+     - Stage4: `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`
+
+### Smoke results (interpreter / loader / native)
+- Stage3 full candidate (`build/bootstrap/stage3_full/simple`) behavior:
+  - `--help` / `--version`: full CLI works (`Simple Language v0.8.0`, full command list).
+  - Interpreter path: `simple /tmp/stage3_hello.spl` exits 139 with runtime missing symbols:
+    `Logger.trace`, `parse_outline`, `with_file`, `with_module`, `resolve`, `parse`.
+  - Native path (default backend): `simple compile /tmp/stage3_hello.spl -o /tmp/h.native` succeeds (exit 0),
+    but running `/tmp/h.native` exits 3 with no output.
+  - Loader path: `simple compile /tmp/stage3_hello.spl --format=smf -o /tmp/h.smf` exits 139
+    with the same missing symbols; `/tmp/h.smf` run fails.
+
+### Current blocker for Stage 3 full
+- Stage3 full binary is now full CLI and Stage3/Stage4 are reproducible.
+- Remaining blocker is runtime completeness in pure-Simple interpreter/SMF compile paths
+  (missing symbols at runtime in Stage3 binary).
+
+### TODO status (compact checklist)
+- [x] Default backend switched to `llvm-lib` in full compile path code.
+- [x] `--backend` override preserved.
+- [x] Stage3 binary built from Stage2 with requested entry/backend flags.
+- [x] Stage4 binary rebuilt from Stage3 and hashes compared.
+- [x] Stage3 full binary verified as full CLI (`simple --help` full command set).
+- [ ] Interpreter smoke on Stage3 full binary (currently fails with missing symbols).
+- [ ] Loader smoke on Stage3 full binary (currently fails with missing symbols).
+- [ ] Native smoke on Stage3 full binary with default backend (compile works; produced binary exits 3).
+- [x] Focused CLI checks run and logged on Stage3 full binary.
+
+## Mac Progress Notes (2026-03-08)
+- Stage1/Stage2 bootstrap via `scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --skip-rust-build --keep-artifacts --jobs=7` completed with reproducible hash `ade36639f7821f75507bfc7198500fc34bbd7f31f9582beeba7eacb851578bfa`.
+- Stage3 full CLI (`build/bootstrap/stage3_full/simple`) is now built from Stage2 with `native-build --entry src/app/cli/main.spl --backend llvm-lib` and reports the same CLI help/version text as the release compiler.
+- Stage4 (rebuild from Stage3 with `native-build --clean`) matches Stage3 hash `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`.
+- Interpreter/loader paths crash with `Runtime error: Function 'Logger.trace' not found` etc., blocking pure-Simple execution tests.
+- `simple compile /tmp/stage3_hello.spl -o /tmp/h.native` succeeds but the produced binary exits with code 3; SMF compilation fails for the same missing-symbol reason.
+- Next focus: restore the missing runtime symbols for `Logger.trace`, parser helpers, and module resolution so interpreter/loader invocations complete.
+
 ### Requested constraint
 - Stage 1 can use Rust backend.
 - Pure Simple stages must use `llvm-lib` backend.

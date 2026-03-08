@@ -152,7 +152,15 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
-        Ok(content) => Ok(make_some(Value::Str(content))),
+        Ok(content) => {
+            // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
+            let content = if content.contains('\r') {
+                content.replace('\r', "")
+            } else {
+                content
+            };
+            Ok(make_some(Value::Str(content)))
+        }
         Err(_) => Ok(make_none()),
     }
 }

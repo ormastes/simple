@@ -384,6 +384,10 @@ pub fn load_module_with_imports_validated(
     }
 
     let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we

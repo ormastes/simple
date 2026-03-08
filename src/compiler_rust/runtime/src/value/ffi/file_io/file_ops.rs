@@ -66,6 +66,12 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 
     match std::fs::read_to_string(path_str) {
         Ok(content) => {
+            // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
+            let content = if content.contains('\r') {
+                content.replace('\r', "")
+            } else {
+                content
+            };
             let bytes = content.as_bytes();
             rt_string_new(bytes.as_ptr(), bytes.len() as u64)
         }
