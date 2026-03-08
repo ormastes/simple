@@ -1,14 +1,77 @@
 //! Test discovery and summarization.
 //!
-//! Handles discovering test files and printing discovery summaries.
+//! Handles discovering test files, doctest examples, and printing discovery summaries.
+//! Doctest discovery happens once and is cached for both display and execution.
 
 use std::path::PathBuf;
 
-use crate::doctest::{discover_doctests, discover_md_doctests};
+use crate::doctest::{discover_doctests, discover_md_doctests, DoctestExample};
 use super::types::TestOptions;
 
-/// Print test discovery summary
-pub fn print_discovery_summary(test_files: &[PathBuf], options: &TestOptions, quiet: bool) {
+/// Cached doctest discovery results to avoid walking the filesystem twice.
+pub struct DoctestCache {
+    /// Doctests from src directories (.spl, .sdt files)
+    pub src_examples: Vec<DoctestExample>,
+    /// Doctests from doc directory (.md files)
+    pub doc_examples: Vec<DoctestExample>,
+    /// Doctests from README.md hierarchy
+    pub md_examples: Vec<DoctestExample>,
+}
+
+/// Discover all doctest examples once, returning a cache for later use.
+pub fn discover_all_doctests(options: &TestOptions) -> DoctestCache {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let src_examples = if options.doctest_src {
+        let src_dir = options.doctest_src_dir.clone().unwrap_or_else(|| {
+            for dir in &["src", "simple/std_lib", "lib"] {
+                let p = cwd.join(dir);
+                if p.is_dir() {
+                    return p;
+                }
+            }
+            cwd.join("src")
+        });
+        if src_dir.is_dir() {
+            discover_doctests(&src_dir).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let doc_examples = if options.doctest_doc {
+        let doc_dir = options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc"));
+        if doc_dir.is_dir() {
+            discover_doctests(&doc_dir).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let md_examples = if options.doctest_md {
+        let md_dir = options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc"));
+        if md_dir.is_dir() {
+            discover_md_doctests(&md_dir).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    DoctestCache {
+        src_examples,
+        doc_examples,
+        md_examples,
+    }
+}
+
+/// Print test discovery summary including doctest counts from cache.
+pub fn print_discovery_summary(test_files: &[PathBuf], cache: &DoctestCache, quiet: bool) {
     if quiet {
         return;
     }
@@ -30,46 +93,16 @@ pub fn print_discovery_summary(test_files: &[PathBuf], options: &TestOptions, qu
     println!("  Spec files (*_spec.spl):  {}", spec_count);
     println!("  Test files (*_test.spl):  {}", test_count);
 
-    // Count doctests if enabled
-    print_doctest_counts(options);
+    if !cache.src_examples.is_empty() {
+        println!("  Src doctests (.spl/.sdt): {}", cache.src_examples.len());
+    }
+    if !cache.doc_examples.is_empty() {
+        println!("  Doc doctests (.md):       {}", cache.doc_examples.len());
+    }
+    if !cache.md_examples.is_empty() {
+        println!("  MD doctests (README.md):  {}", cache.md_examples.len());
+    }
 
     println!("───────────────────────────────────────────────────────────────");
     println!();
-}
-
-/// Print doctest counts
-fn print_doctest_counts(options: &TestOptions) {
-    if options.doctest_src || options.doctest_doc {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let src_dir = options
-            .doctest_src_dir
-            .clone()
-            .unwrap_or_else(|| cwd.join("src/std/src"));
-        let doc_dir = options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc"));
-
-        if options.doctest_src && src_dir.is_dir() {
-            if let Ok(examples) = discover_doctests(&src_dir) {
-                let count: usize = examples.len();
-                println!("  Src doctests (.spl):      {}", count);
-            }
-        }
-        if options.doctest_doc && doc_dir.is_dir() {
-            if let Ok(examples) = discover_doctests(&doc_dir) {
-                let count: usize = examples.len();
-                println!("  Doc doctests (.md):       {}", count);
-            }
-        }
-    }
-
-    if options.doctest_md {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let md_dir = options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc"));
-
-        if md_dir.is_dir() {
-            if let Ok(examples) = discover_md_doctests(&md_dir) {
-                let count: usize = examples.len();
-                println!("  MD doctests (README.md):  {}", count);
-            }
-        }
-    }
 }

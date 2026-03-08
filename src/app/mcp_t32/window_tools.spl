@@ -1,0 +1,315 @@
+# T32 MCP — Window tool handlers
+# Handles: window_list, window_open, window_capture, window_describe, screenshot
+
+# --- Hardcoded window catalog ---
+# In production, these would be loaded from SDN catalog files.
+# This provides the built-in TRACE32 windows.
+
+fn t32_get_window_catalog() -> [text]:
+    # Each entry is: key|title|kind|open_cmd|capture_cmd
+    var catalog: [text] = []
+    catalog.push("register|Register|built_in|Register.view|PRinTer.FILE tmp.txt AREA Register.view")
+    catalog.push("data_list|Data.List|built_in|Data.List|PRinTer.FILE tmp.txt AREA Data.List")
+    catalog.push("data_dump|Data.dump|built_in|Data.dump|PRinTer.FILE tmp.txt AREA Data.dump")
+    catalog.push("var_local|Var.Local|built_in|Var.Local|PRinTer.FILE tmp.txt AREA Var.Local")
+    catalog.push("var_watch|Var.Watch|built_in|Var.Watch|PRinTer.FILE tmp.txt AREA Var.Watch")
+    catalog.push("frame|Frame /Locals /Caller|built_in|Frame /Locals /Caller|PRinTer.FILE tmp.txt AREA Frame")
+    catalog.push("break_list|Break.List|built_in|Break.List|PRinTer.FILE tmp.txt AREA Break.List")
+    catalog.push("symbol_browse|Symbol.Browse|built_in|sYmbol.Browse|PRinTer.FILE tmp.txt AREA sYmbol.Browse")
+    catalog.push("trace_list|Trace.List|built_in|Trace.List|PRinTer.FILE tmp.txt AREA Trace.List")
+    catalog.push("perf_list|Perf.ListMODULE|built_in|Perf.ListMODULE|PRinTer.FILE tmp.txt AREA Perf.ListMODULE")
+    catalog.push("coverage_list|Coverage.ListModule|built_in|Coverage.ListModule|PRinTer.FILE tmp.txt AREA Coverage.ListModule")
+    catalog.push("task_list|TASK.List|built_in|TASK.List|PRinTer.FILE tmp.txt AREA TASK.List")
+    catalog.push("mmu_list|MMU.List|built_in|MMU.List|PRinTer.FILE tmp.txt AREA MMU.List")
+    catalog.push("per_view|PER.view|built_in|PER.view|PRinTer.FILE tmp.txt AREA PER.view")
+    catalog.push("area|AREA|built_in|AREA|PRinTer.FILE tmp.txt AREA AREA")
+    catalog
+
+fn t32_parse_catalog_entry(entry: text) -> (text, text, text, text, text):
+    # Parse "key|title|kind|open_cmd|capture_cmd"
+    var parts: [text] = []
+    var current: [text] = []
+    for ch in entry:
+        if ch == "|":
+            parts.push(current.join(""))
+            current = []
+        else:
+            current.push(ch)
+    parts.push(current.join(""))
+    var key = ""
+    var title = ""
+    var kind = ""
+    var open_cmd = ""
+    var capture_cmd = ""
+    var idx = 0
+    for p in parts:
+        if idx == 0:
+            key = p
+        elif idx == 1:
+            title = p
+        elif idx == 2:
+            kind = p
+        elif idx == 3:
+            open_cmd = p
+        elif idx == 4:
+            capture_cmd = p
+        idx = idx + 1
+    (key, title, kind, open_cmd, capture_cmd)
+
+# --- Window action/field catalogs ---
+
+fn t32_get_window_actions(window_key: text) -> [text]:
+    # Returns actions as "action_key|label|type|command_template"
+    var actions: [text] = []
+    if window_key == "register":
+        actions.push("refresh|Refresh Registers|execute|Register.view")
+        actions.push("view_all|View All Registers|execute|Register.view /ALL")
+        actions.push("set_register|Set Register Value|set_field_then_execute|Register.Set %0 %1")
+    elif window_key == "data_list":
+        actions.push("refresh|Refresh Listing|execute|Data.List")
+        actions.push("goto_address|Go to Address|set_field_then_execute|Data.List %0")
+        actions.push("goto_symbol|Go to Symbol|set_field_then_execute|Data.List %0")
+    elif window_key == "break_list":
+        actions.push("refresh|Refresh Breakpoints|execute|Break.List")
+        actions.push("set_break|Set Breakpoint|set_field_then_execute|Break.Set %0")
+        actions.push("delete_break|Delete Breakpoint|set_field_then_execute|Break.Delete %0")
+        actions.push("delete_all|Delete All Breakpoints|execute|Break.Delete /ALL")
+    elif window_key == "var_local":
+        actions.push("refresh|Refresh Local Variables|execute|Var.Local")
+    elif window_key == "var_watch":
+        actions.push("refresh|Refresh Watch|execute|Var.Watch")
+        actions.push("add_watch|Add Watch Expression|set_field_then_execute|Var.AddWatch %0")
+    elif window_key == "trace_list":
+        actions.push("refresh|Refresh Trace|execute|Trace.List")
+        actions.push("clear|Clear Trace|execute|Trace.CLEAR")
+    elif window_key == "coverage_list":
+        actions.push("refresh|Refresh Coverage|execute|Coverage.ListModule")
+        actions.push("reset|Reset Coverage|execute|Coverage.RESet")
+    actions
+
+fn t32_get_window_fields(window_key: text) -> [text]:
+    # Returns fields as "field_key|label|value_type|scope"
+    var fields: [text] = []
+    if window_key == "register":
+        fields.push("register_name|Register Name|string|window")
+        fields.push("register_value|Register Value|hex|window")
+    elif window_key == "data_list":
+        fields.push("address|Address|hex|window")
+        fields.push("symbol|Symbol|string|window")
+    elif window_key == "break_list":
+        fields.push("bp_address|Breakpoint Address|hex|window")
+        fields.push("bp_type|Breakpoint Type|enum|window")
+    elif window_key == "var_watch":
+        fields.push("watch_expression|Watch Expression|string|window")
+    fields
+
+# --- Tool handlers ---
+
+fn handle_t32_window_list(id: text, body: text) -> text:
+    val catalog = t32_get_window_catalog()
+    var arr = t32_SB_L()
+    var first = true
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = t32_LB()
+        obj = obj + t32_jp("window_key", t32_js(key))
+        obj = obj + "," + t32_jp("title", t32_js(title))
+        obj = obj + "," + t32_jp("kind", t32_js(kind))
+        obj = obj + "," + t32_jp("open_command", t32_js(open_cmd))
+        obj = obj + t32_RB()
+        arr = arr + obj
+    arr = arr + t32_SB_R()
+    t32_make_tool_result(id, arr)
+
+fn handle_t32_window_open(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+    # Find the window in catalog
+    val catalog = t32_get_window_catalog()
+    var found_cmd = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_cmd = open_cmd
+            found_title = title
+    if found_cmd == "":
+        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        Some(session):
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, found_cmd)
+            t32_add_history(found_cmd, "opened", session.id, MCP_T32_CURRENT_CORE)
+            var r = t32_LB()
+            r = r + t32_jp("window", t32_js(window_key))
+            r = r + "," + t32_jp("title", t32_js(found_title))
+            r = r + "," + t32_jp("command", t32_js(found_cmd))
+            r = r + "," + t32_jp("status", t32_js("opened"))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_window_capture(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+    val catalog = t32_get_window_catalog()
+    var found_capture = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_capture = capture_cmd
+            found_title = title
+    if found_capture == "":
+        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        Some(session):
+            # Execute capture command (PRinTer.FILE ...)
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, found_capture)
+            # The capture command writes to a temp file, then we'd read it.
+            # For now, we return the stdout which may contain the captured text.
+            # In practice, t32rem returns the printed area content.
+            t32_add_history("capture " + window_key, "captured", session.id, MCP_T32_CURRENT_CORE)
+            var r = t32_LB()
+            r = r + t32_jp("window", t32_js(window_key))
+            r = r + "," + t32_jp("title", t32_js(found_title))
+            r = r + "," + t32_jp("content", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("capture_command", t32_js(found_capture))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_window_describe(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+    # Find window in catalog
+    val catalog = t32_get_window_catalog()
+    var found_title = ""
+    var found_kind = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_title = title
+            found_kind = kind
+    if found_title == "":
+        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+    # Build actions array
+    val action_entries = t32_get_window_actions(window_key)
+    var actions_arr = t32_SB_L()
+    var first_a = true
+    for aentry in action_entries:
+        var aparts: [text] = []
+        var acurrent: [text] = []
+        for ch in aentry:
+            if ch == "|":
+                aparts.push(acurrent.join(""))
+                acurrent = []
+            else:
+                acurrent.push(ch)
+        aparts.push(acurrent.join(""))
+        var akey = ""
+        var alabel = ""
+        var atype = ""
+        var atemplate = ""
+        var aidx = 0
+        for ap in aparts:
+            if aidx == 0:
+                akey = ap
+            elif aidx == 1:
+                alabel = ap
+            elif aidx == 2:
+                atype = ap
+            elif aidx == 3:
+                atemplate = ap
+            aidx = aidx + 1
+        if not first_a:
+            actions_arr = actions_arr + ","
+        first_a = false
+        var aobj = t32_LB()
+        aobj = aobj + t32_jp("action_key", t32_js(akey))
+        aobj = aobj + "," + t32_jp("label", t32_js(alabel))
+        aobj = aobj + "," + t32_jp("action_type", t32_js(atype))
+        aobj = aobj + "," + t32_jp("command_template", t32_js(atemplate))
+        aobj = aobj + t32_RB()
+        actions_arr = actions_arr + aobj
+    actions_arr = actions_arr + t32_SB_R()
+    # Build fields array
+    val field_entries = t32_get_window_fields(window_key)
+    var fields_arr = t32_SB_L()
+    var first_f = true
+    for fentry in field_entries:
+        var fparts: [text] = []
+        var fcurrent: [text] = []
+        for ch in fentry:
+            if ch == "|":
+                fparts.push(fcurrent.join(""))
+                fcurrent = []
+            else:
+                fcurrent.push(ch)
+        fparts.push(fcurrent.join(""))
+        var fkey = ""
+        var flabel = ""
+        var fvtype = ""
+        var fscope = ""
+        var fidx = 0
+        for fp in fparts:
+            if fidx == 0:
+                fkey = fp
+            elif fidx == 1:
+                flabel = fp
+            elif fidx == 2:
+                fvtype = fp
+            elif fidx == 3:
+                fscope = fp
+            fidx = fidx + 1
+        if not first_f:
+            fields_arr = fields_arr + ","
+        first_f = false
+        var fobj = t32_LB()
+        fobj = fobj + t32_jp("field_key", t32_js(fkey))
+        fobj = fobj + "," + t32_jp("label", t32_js(flabel))
+        fobj = fobj + "," + t32_jp("value_type", t32_js(fvtype))
+        fobj = fobj + "," + t32_jp("scope", t32_js(fscope))
+        fobj = fobj + t32_RB()
+        fields_arr = fields_arr + fobj
+    fields_arr = fields_arr + t32_SB_R()
+    # Build full result
+    var r = t32_LB()
+    r = r + t32_jp("window_key", t32_js(window_key))
+    r = r + "," + t32_jp("title", t32_js(found_title))
+    r = r + "," + t32_jp("kind", t32_js(found_kind))
+    r = r + "," + t32_jp("actions", actions_arr)
+    r = r + "," + t32_jp("fields", fields_arr)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)

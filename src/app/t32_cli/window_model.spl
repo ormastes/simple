@@ -1,0 +1,109 @@
+# T32 CLI — Window commands
+# Operations on window model: list, open, show, describe
+
+use app.t32_cli.types.{T32Catalogs, T32WindowNode, T32Action, T32Field, T32WindowSnapshot}
+use app.t32_cli.text_parser.{format_table}
+
+# List all windows from catalogs as a formatted table
+fn cli_windows_list(catalogs: T32Catalogs) -> text:
+    if catalogs.windows.len() == 0:
+        return "No windows loaded. Check catalog path."
+
+    var out = "Windows:\n"
+    out = out + "  Key                Title                      Kind         Open Command\n"
+    out = out + "  -----------------  -------------------------  -----------  -------------------------\n"
+
+    for w in catalogs.windows:
+        out = out + "  {w.window_key}"
+        out = out + pad_to(w.window_key, 17)
+        out = out + "  {w.title}"
+        out = out + pad_to(w.title, 25)
+        out = out + "  {w.kind}"
+        out = out + pad_to(w.kind, 11)
+        out = out + "  {w.open_command}\n"
+
+    out
+
+# Pad helper for alignment
+fn pad_to(s: text, width: i64) -> text:
+    var padding = ""
+    var needed = width - s.len()
+    while needed > 0:
+        padding = padding + " "
+        needed = needed - 1
+    padding
+
+# Execute a window's open command
+fn cli_window_open(window_key: text, catalogs: T32Catalogs) -> Result<text, text>:
+    val found = catalogs.find_window(window_key)
+    match found:
+        Some(w):
+            if w.open_command == "":
+                return Err("Window '{window_key}' has no open command.")
+            var out = "Opening '{w.title}'...\n"
+            out = out + "Command: {w.open_command}\n"
+            out = out + "Window '{w.title}' opened."
+            Ok(out)
+        nil:
+            Err("Window '{window_key}' not found in catalogs.")
+
+# Capture + parse + format a window's content
+fn cli_window_show(window_key: text, catalogs: T32Catalogs) -> Result<text, text>:
+    val found = catalogs.find_window(window_key)
+    match found:
+        Some(w):
+            if w.capture_command == "":
+                return Err("Window '{window_key}' has no capture command.")
+            var out = "# {w.title}\n"
+            out = out + "Capture: {w.capture_command}\n"
+            out = out + "Mode: {w.capture_mode}\n"
+            out = out + "\n"
+            # In a real implementation, we would:
+            # 1. Send capture_command to TRACE32 API
+            # 2. Get raw text output
+            # 3. Parse with the appropriate parser
+            # 4. Format as table
+            out = out + "(No live connection — capture command shown above)\n"
+            out = out + "Use 'cmm' to run scripts that populate window content."
+            Ok(out)
+        nil:
+            Err("Window '{window_key}' not found in catalogs.")
+
+# Show detailed description of a window including its actions and fields
+fn cli_window_describe(window_key: text, catalogs: T32Catalogs) -> text:
+    val found = catalogs.find_window(window_key)
+    match found:
+        Some(w):
+            var out = "Window: {w.window_key}\n"
+            out = out + "  Title:   {w.title}\n"
+            out = out + "  Kind:    {w.kind}\n"
+            out = out + "  Capture: {w.capture_mode}\n"
+            out = out + "  Open:    {w.open_command}\n"
+            out = out + "  Capture: {w.capture_command}\n"
+            out = out + "\n"
+
+            # Show actions associated with this window
+            var action_count = 0
+            var actions_text = ""
+            for a in catalogs.actions:
+                if a.target_window_key == w.window_key:
+                    action_count = action_count + 1
+                    actions_text = actions_text + "    {a.action_key} — {a.label} ({a.action_type})\n"
+                    actions_text = actions_text + "      Command: {a.command_template}\n"
+
+            if action_count > 0:
+                out = out + "  Actions ({action_count}):\n"
+                out = out + actions_text
+            else:
+                out = out + "  Actions: (none directly targeted)\n"
+
+            out = out + "\n"
+
+            # Show fields
+            out = out + "  Available fields:\n"
+            for f in catalogs.fields:
+                out = out + "    {f.field_key} ({f.value_type}, {f.scope}): {f.label}\n"
+
+            out
+        nil:
+            "Window '{window_key}' not found in catalogs."

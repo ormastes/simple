@@ -641,7 +641,11 @@ impl NativeBinaryBuilder {
 
         // Entry point and bootstrap stubs.
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
-        let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+        // FreeBSD's ld-elf.so.1 eagerly resolves all symbols at load time, so
+        // --unresolved-symbols=ignore-all doesn't help. Always use bootstrap mode
+        // (two-pass linking with stubs) on FreeBSD.
+        let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
+            || matches!(self.options.target.os, TargetOS::FreeBSD);
         let mut require_crypto = false;
         let ret_insn = asm_ret_instruction(&self.options.target);
 
@@ -684,12 +688,20 @@ int main(int argc, char** argv) {
             // 2) common missing-symbol stub
             let miss_c = temp_path.join("_bootstrap_missing.c");
             let miss_o = temp_path.join("_bootstrap_missing.o");
-            let is_windows = matches!(self.options.target.os, TargetOS::Windows);
-            // On Windows COFF, weak symbols don't satisfy undefined refs from other .o files.
-            // Use strong definitions; --allow-multiple-definition ensures runtime wins.
-            let weak_attr = if is_windows { "" } else { "__attribute__((weak)) " };
-            let weak_vis = if is_windows { "" } else { "__attribute__((weak, visibility(\"default\"))) " };
-            let asm_section = if is_windows {
+            let use_strong = matches!(self.options.target.os, TargetOS::Windows | TargetOS::FreeBSD);
+            // On Windows/FreeBSD use strong definitions (weak doesn't satisfy
+            // FreeBSD's strict ld-elf.so.1 resolver). --allow-multiple-definition
+            // ensures the runtime library's definitions take precedence.
+            let weak_attr = if use_strong { "" } else { "__attribute__((weak)) " };
+            let weak_vis = if use_strong { "" } else { "__attribute__((weak, visibility(\"default\"))) " };
+            let asm_section = if matches!(self.options.target.os, TargetOS::FreeBSD) {
+                // FreeBSD: strong .globl stubs for dotted symbols
+                format!(
+                    "__asm__(\".globl SCOPE_LEVELS.contains_key\\nSCOPE_LEVELS.contains_key:\\n  {ret_insn}\\n\");\n",
+                    ret_insn = ret_insn
+                )
+            } else if use_strong {
+                // Windows: skip asm (no dotted symbols expected)
                 String::new()
             } else {
                 format!(
@@ -1007,10 +1019,11 @@ static inline int64_t _rt_now_nanos(void) {{
                     let auto_c = temp_path.join("_bootstrap_auto.c");
                     let auto_o = temp_path.join("_bootstrap_auto.o");
                     let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
-                    // On Windows COFF, weak attribute doesn't satisfy undefined references.
-                    // Use strong definitions; --allow-multiple-definition ensures runtime wins.
-                    let is_windows = matches!(self.options.target.os, TargetOS::Windows);
-                    let attr = if is_windows { "" } else { "__attribute__((weak)) " };
+                    // On Windows/FreeBSD use strong definitions (weak doesn't satisfy
+                    // FreeBSD's strict ld-elf.so.1 resolver). --allow-multiple-definition
+                    // ensures the runtime library's definitions take precedence.
+                    let use_strong = matches!(self.options.target.os, TargetOS::Windows | TargetOS::FreeBSD);
+                    let attr = if use_strong { "" } else { "__attribute__((weak)) " };
                     for sym in &symbols {
                         let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
                         let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
@@ -1021,15 +1034,17 @@ static inline int64_t _rt_now_nanos(void) {{
                                 "{1}int64_t {0}(void) {{ return 0; }}\n",
                                 sym, attr
                             ));
-                        } else if !is_windows {
+                        } else if matches!(self.options.target.os, TargetOS::FreeBSD) {
+                            // FreeBSD: use strong .globl asm stubs for non-identifier symbols
                             let clean = sym.replace('\"', "");
-                            // macOS Mach-O uses .weak_definition + underscore prefix
+                            code.push_str(&format!("__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                        } else if !use_strong {
+                            // Weak asm stubs for Linux/macOS (not needed on Windows)
+                            let clean = sym.replace('\"', "");
                             #[cfg(target_os = "macos")]
                             code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
-                            // ELF (Linux/FreeBSD) uses .weak without underscore prefix
                             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                             code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
-                            // Windows: use __attribute__((weak)) instead of inline asm
                             #[cfg(target_os = "windows")]
                             code.push_str(&format!("__attribute__((weak)) void {0}(void) {{}}\n", clean));
                         }
@@ -1494,16 +1509,17 @@ static inline int64_t _rt_now_nanos(void) {{
                             "{1}int64_t {0}(void) {{ return 0; }}\n",
                             sym, attr
                         ));
-                    } else if !use_strong {
-                        // Inline asm .weak directive only works on ELF, skip on Windows/FreeBSD
+                    } else if matches!(self.options.target.os, TargetOS::FreeBSD) {
+                        // FreeBSD: use strong .globl asm stubs for non-identifier symbols
                         let clean = sym.replace('\"', "");
-                        // macOS Mach-O uses .weak_definition + underscore prefix
+                        code.push_str(&format!("__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                    } else if !use_strong {
+                        // Weak asm stubs for Linux/macOS (not needed on Windows)
+                        let clean = sym.replace('\"', "");
                         #[cfg(target_os = "macos")]
                         code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
-                        // ELF (Linux/FreeBSD) uses .weak without underscore prefix
                         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                         code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
-                        // Windows: use __attribute__((weak)) instead of inline asm
                         #[cfg(target_os = "windows")]
                         code.push_str(&format!("__attribute__((weak)) void {0}(void) {{}}\n", clean));
                     }

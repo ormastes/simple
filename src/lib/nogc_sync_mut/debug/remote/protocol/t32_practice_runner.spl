@@ -1,0 +1,63 @@
+# T32 PRACTICE Runner — execute CMM scripts and poll for completion
+# Provides PRACTICE script execution, state polling, expression evaluation,
+# and message area access for TRACE32 automation.
+
+use app.io.{shell, ProcessResult}
+use std.nogc_sync_mut.debug.remote.protocol.trace32.Trace32Client
+
+# Execute a PRACTICE/CMM script (fire-and-forget)
+fn t32_run_cmm(client: Trace32Client, script_path: text) -> Result<text, text>:
+    client.do_script(script_path)
+
+# Execute a PRACTICE/CMM script with arguments
+fn t32_run_cmm_with_args(client: Trace32Client, script_path: text, args: [text]) -> Result<text, text>:
+    var arg_str = ""
+    for a in args:
+        arg_str = "{arg_str} {a}"
+    client.run_command("DO {script_path}{arg_str}")
+
+# Poll PRACTICE execution state via PRACTICE.STATE()
+# Returns "running", "idle", "dialog", or other state strings
+fn t32_poll_practice_state(client: Trace32Client) -> Result<text, text>:
+    # Use EVAL to query PRACTICE.STATE()
+    client.run_command("EVAL PRACTICE.STATE()")?
+    client.eval_string()
+
+# Wait for PRACTICE script to finish by polling state in a loop
+# Returns Ok when script completes, Err on timeout
+fn t32_wait_practice_done(client: Trace32Client, timeout_ms: i64) -> Result<text, text>:
+    var elapsed: i64 = 0
+    val poll_interval_ms: i64 = 200
+
+    while elapsed < timeout_ms:
+        val state = t32_poll_practice_state(client)?
+        val trimmed = state.trim()
+        # PRACTICE.STATE() returns 0 when idle (not running)
+        if (trimmed == "0" or
+            trimmed == "idle" or
+            trimmed == "stopped"):
+            return Ok("practice done after {elapsed}ms")
+
+        # Sleep for poll interval
+        val sleep_sec = "0.{poll_interval_ms}"
+        shell("sleep {sleep_sec}")
+        elapsed = elapsed + poll_interval_ms
+
+    Err("practice script timed out after {timeout_ms}ms")
+
+# Execute a CMM script and wait for it to complete
+fn t32_run_cmm_and_wait(client: Trace32Client, script_path: text, timeout_ms: i64) -> Result<text, text>:
+    t32_run_cmm(client, script_path)?
+    t32_wait_practice_done(client, timeout_ms)
+
+# Evaluate a TRACE32 expression and return the string result
+# Uses EVAL to compute, then EVAL.STRing() to read back the result
+fn t32_eval_expression(client: Trace32Client, expr: text) -> Result<text, text>:
+    client.eval_expr(expr)?
+    client.eval_string()
+
+# Read the TRACE32 message area (status/error messages)
+fn t32_get_message_line(client: Trace32Client) -> Result<text, text>:
+    client.run_command("AREA.Select A000")?
+    client.run_command("EVAL MESSAGE.STRing()")?
+    client.eval_string()

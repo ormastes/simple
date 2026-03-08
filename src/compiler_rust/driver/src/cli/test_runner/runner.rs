@@ -13,10 +13,10 @@ use super::types::{
     TestFileResult, TestExecutionMode, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log,
 };
 use super::build_cache::BuildCache;
-use super::doctest::{run_doctests, run_md_doctests};
+use super::doctest::run_cached_doctests;
 use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
-use super::discovery::print_discovery_summary;
+use super::discovery::{discover_all_doctests, print_discovery_summary};
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
 use super::test_db_update::{update_test_database, update_rust_test_database};
@@ -135,6 +135,9 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
 
+    // Discover doctests once (used for both summary display and execution)
+    let doctest_cache = discover_all_doctests(&options);
+
     // Handle --list-skip-features: show features from .skip files
     if options.list_skip_features {
         return run_list_skip_features(&test_files, options.skip_features_planned_only, quiet);
@@ -171,8 +174,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Runner is now created fresh per test in run_test_file() to prevent memory leaks.
     // No shared runner needed.
 
-    // Print discovery summary
-    print_discovery_summary(&test_files, &options, quiet);
+    // Print discovery summary (uses cached doctest counts)
+    print_discovery_summary(&test_files, &doctest_cache, quiet);
 
     // Start test run tracking
     let db_path = PathBuf::from("doc/test/test_db.sdn");
@@ -273,8 +276,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             }
         }
 
-        // Run doctests
-        run_all_doctests(&options, &mut results, &mut total_passed, &mut total_failed, quiet);
+        // Run doctests (using cached discovery — no re-walk)
+        run_all_doctests(&doctest_cache, &mut results, &mut total_passed, &mut total_failed, quiet);
     }
 
     let start = Instant::now();
@@ -732,30 +735,19 @@ fn print_result(result: &TestFileResult, quiet: bool) {
     }
 }
 
-/// Run all enabled doctest types
+/// Run all cached doctests
 fn run_all_doctests(
-    options: &TestOptions,
+    cache: &super::discovery::DoctestCache,
     results: &mut Vec<TestFileResult>,
     total_passed: &mut usize,
     total_failed: &mut usize,
     quiet: bool,
 ) {
-    if options.doctest_src || options.doctest_doc {
-        let doctest_results = run_doctests(options, quiet);
-        for result in doctest_results {
-            *total_passed += result.passed;
-            *total_failed += result.failed;
-            results.push(result);
-        }
-    }
-
-    if options.doctest_md {
-        let md_results = run_md_doctests(options, quiet);
-        for result in md_results {
-            *total_passed += result.passed;
-            *total_failed += result.failed;
-            results.push(result);
-        }
+    let doctest_results = run_cached_doctests(cache, quiet);
+    for result in doctest_results {
+        *total_passed += result.passed;
+        *total_failed += result.failed;
+        results.push(result);
     }
 }
 
