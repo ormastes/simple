@@ -14,6 +14,18 @@ use crate::mir::{lower_generator, LocalKind, MirFunction, MirInst, MirLocal, Mir
 
 use super::types_util::type_to_cranelift;
 
+/// Return the platform-appropriate calling convention.
+///
+/// On Windows, Cranelift JIT-compiled code must use WindowsFastcall to match
+/// the ABI that Rust `fn()` pointers expect. On other platforms, SystemV is used.
+pub fn platform_call_conv() -> CallConv {
+    if cfg!(target_os = "windows") {
+        CallConv::WindowsFastcall
+    } else {
+        CallConv::SystemV
+    }
+}
+
 /// Body kind for outlined functions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyKind {
@@ -30,7 +42,7 @@ pub fn create_body_stub<M: Module>(
     ctx: &mut cranelift_codegen::Context,
     name: &str,
 ) -> Result<cranelift_module::FuncId, String> {
-    let call_conv = CallConv::SystemV;
+    let call_conv = platform_call_conv();
     let sig = Signature::new(call_conv);
 
     let func_id = module
@@ -96,7 +108,7 @@ pub fn declare_functions<M: Module>(
 
 /// Build a Cranelift signature for a MIR function
 pub fn build_mir_signature(func: &MirFunction) -> Signature {
-    let call_conv = CallConv::SystemV;
+    let call_conv = platform_call_conv();
     let mut sig = Signature::new(call_conv);
 
     // Add parameters

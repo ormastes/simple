@@ -306,7 +306,7 @@ impl<M: Module> CodegenBackend<M> {
     /// Declare external runtime functions for FFI using shared specifications.
     pub fn declare_runtime_functions(module: &mut M) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
-        let call_conv = CallConv::SystemV;
+        let call_conv = super::shared::platform_call_conv();
 
         for spec in RUNTIME_FUNCS {
             let sig = spec.build_signature(call_conv);
@@ -438,7 +438,7 @@ impl<M: Module> CodegenBackend<M> {
                     existing
                 } else {
                     let sig = {
-                        let call_conv = CallConv::SystemV;
+                        let call_conv = super::shared::platform_call_conv();
                         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));

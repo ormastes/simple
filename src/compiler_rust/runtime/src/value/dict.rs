@@ -58,6 +58,18 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
     }
 }
 
+/// Free a heap-allocated dictionary.
+#[no_mangle]
+pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
+    let ptr = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, ());
+    unsafe {
+        let size = std::mem::size_of::<RuntimeDict>()
+            + (*ptr).capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}
+
 /// Get the length of a dictionary
 #[no_mangle]
 pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {

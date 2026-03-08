@@ -548,7 +548,7 @@ pub fn compile_call<M: Module>(
         };
 
         // All Simple values are i64-tagged, so use a uniform i64 signature.
-        let call_conv = cranelift_codegen::isa::CallConv::SystemV;
+        let call_conv = crate::codegen::shared::platform_call_conv();
         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         for _ in 0..arg_vals.len() {

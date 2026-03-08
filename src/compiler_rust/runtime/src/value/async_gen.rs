@@ -175,6 +175,17 @@ pub extern "C" fn rt_async_mark_done(future: RuntimeValue) {
     }
 }
 
+/// Free a heap-allocated future.
+#[no_mangle]
+pub extern "C" fn rt_future_free(future: RuntimeValue) {
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, ());
+    unsafe {
+        let size = std::mem::size_of::<RuntimeFuture>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(f as *mut u8, layout);
+    }
+}
+
 // ============================================================================
 // Generator type and operations
 // ============================================================================
@@ -316,6 +327,21 @@ pub extern "C" fn rt_generator_next(generator: RuntimeValue) -> RuntimeValue {
         let func: extern "C" fn(RuntimeValue) -> RuntimeValue = std::mem::transmute((*gen).body_func as usize);
         let gen_val = RuntimeValue::from_heap_ptr(gen as *mut HeapHeader);
         func(gen_val)
+    }
+}
+
+/// Free a heap-allocated generator, including its slot vector.
+#[no_mangle]
+pub extern "C" fn rt_generator_free(generator: RuntimeValue) {
+    let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, ());
+    unsafe {
+        // Free the slots Vec
+        if !(*gen).slots.is_null() {
+            let _ = Box::from_raw((*gen).slots);
+        }
+        let size = std::mem::size_of::<RuntimeGenerator>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(gen as *mut u8, layout);
     }
 }
 

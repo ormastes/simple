@@ -154,6 +154,20 @@ pub extern "C" fn rt_object_field_count(object: RuntimeValue) -> i64 {
     get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object).map_or(-1, |p| unsafe { (*p).field_count as i64 })
 }
 
+/// Free a heap-allocated object.
+#[no_mangle]
+pub extern "C" fn rt_object_free(object: RuntimeValue) {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeObject>(object, HeapObjectType::Object) else {
+        return;
+    };
+    unsafe {
+        let size = std::mem::size_of::<RuntimeObject>()
+            + (*ptr).field_count as usize * std::mem::size_of::<RuntimeValue>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}
+
 // ============================================================================
 // Closure FFI functions
 // ============================================================================
@@ -213,6 +227,20 @@ pub extern "C" fn rt_closure_get_capture(closure: RuntimeValue, index: u32) -> R
 pub extern "C" fn rt_closure_func_ptr(closure: RuntimeValue) -> *const u8 {
     get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure)
         .map_or(std::ptr::null(), |p| unsafe { (*p).func_ptr })
+}
+
+/// Free a heap-allocated closure.
+#[no_mangle]
+pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
+        return;
+    };
+    unsafe {
+        let size = std::mem::size_of::<RuntimeClosure>()
+            + (*ptr).capture_count as usize * std::mem::size_of::<RuntimeValue>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
 }
 
 // ============================================================================

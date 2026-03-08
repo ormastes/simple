@@ -345,7 +345,8 @@ mod tests {
         assert!(result.is_ok(), "Should get cache directory");
 
         let path = result.unwrap();
-        assert!(path.to_string_lossy().contains(".simple/tools/upx"));
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        assert!(path_str.contains(".simple/tools/upx"));
     }
 
     #[test]

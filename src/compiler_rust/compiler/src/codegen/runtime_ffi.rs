@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn build_signature_works() {
         let spec = RuntimeFuncSpec::new("test", &[I64, I64], &[I64]);
-        let sig = spec.build_signature(CallConv::SystemV);
+        let sig = spec.build_signature(crate::codegen::shared::platform_call_conv());
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.returns.len(), 1);
     }

@@ -1,13 +1,13 @@
 // Closure and struct initialization helpers.
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
-use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
+use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{adapted_call, create_string_constant, get_vreg_or_default, indirect_call_with_result};
 use super::{InstrContext, InstrResult};
@@ -64,8 +64,7 @@ pub(crate) fn compile_indirect_call<M: Module>(
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
 
-    let call_conv = CallConv::SystemV;
-    let mut sig = Signature::new(call_conv);
+    let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
         sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
@@ -410,8 +409,7 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
-    let call_conv = CallConv::SystemV;
-    let mut sig = Signature::new(call_conv);
+    let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
         sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));

@@ -168,12 +168,28 @@ unsafe fn parse_socket_addr(addr_ptr: i64, addr_len: i64) -> Result<SocketAddr, 
 }
 
 /// Allocate and return a string representation of a socket address
-/// Returns a pointer to the string (caller must free)
+/// Returns a pointer to the string (caller must free via `rt_net_free_addr_string`)
 fn addr_to_string_ptr(addr: &SocketAddr) -> i64 {
     let s = addr.to_string();
     let boxed = s.into_boxed_str();
     let ptr = Box::into_raw(boxed) as *const str as *const u8 as i64;
     ptr
+}
+
+/// Free a string previously allocated by `addr_to_string_ptr`.
+///
+/// # Safety
+/// `ptr` must be a value returned by a network function that allocates address strings,
+/// and `len` must be the length of that string.
+#[no_mangle]
+pub extern "C" fn rt_net_free_addr_string(ptr: i64, len: i64) {
+    if ptr == 0 || len <= 0 {
+        return;
+    }
+    unsafe {
+        let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr as *mut u8, len as usize);
+        let _ = Box::from_raw(slice_ptr as *mut str);
+    }
 }
 
 // ============================================================================

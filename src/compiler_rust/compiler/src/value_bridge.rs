@@ -252,9 +252,24 @@ impl BridgeValue {
                     self.extended = std::ptr::null_mut();
                 }
             }
+            bridge_tags::OBJECT | bridge_tags::ENUM | bridge_tags::FUNCTION | bridge_tags::CONSTRUCTOR => {
+                // These store a CString::into_raw() pointer
+                if !self.extended.is_null() {
+                    let _ = CString::from_raw(self.extended as *mut c_char);
+                    self.extended = std::ptr::null_mut();
+                }
+            }
+            bridge_tags::UNIQUE | bridge_tags::SHARED | bridge_tags::BORROW | bridge_tags::BORROW_MUT => {
+                // These store a Box<BridgeValue> with a recursive inner value
+                if !self.extended.is_null() {
+                    let mut inner = Box::from_raw(self.extended as *mut BridgeValue);
+                    inner.free();
+                    self.extended = std::ptr::null_mut();
+                }
+            }
             _ => {
-                // Other types may have complex cleanup needs
-                // For now, just null the pointer
+                // LAMBDA, ACTOR, FUTURE, GENERATOR, WEAK, HANDLE, DICT, etc.
+                // have null extended pointers — nothing to free
                 self.extended = std::ptr::null_mut();
             }
         }

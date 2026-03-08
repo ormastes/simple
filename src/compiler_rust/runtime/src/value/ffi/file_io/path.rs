@@ -384,14 +384,14 @@ mod tests {
             let (p1_ptr, p1_len) = str_to_ptr("/home/user");
             let (p2_ptr, p2_len) = str_to_ptr("file.txt");
             let result = rt_path_join(p1_ptr, p1_len, p2_ptr, p2_len);
-            let joined = extract_string(result);
+            let joined = extract_string(result).replace('\\', "/");
             assert_eq!(joined, "/home/user/file.txt");
 
             // Join with nested path
             let (p3_ptr, p3_len) = str_to_ptr("/home");
             let (p4_ptr, p4_len) = str_to_ptr("user/docs");
             let result2 = rt_path_join(p3_ptr, p3_len, p4_ptr, p4_len);
-            let joined2 = extract_string(result2);
+            let joined2 = extract_string(result2).replace('\\', "/");
             assert_eq!(joined2, "/home/user/docs");
 
             // Second path is absolute (replaces first)

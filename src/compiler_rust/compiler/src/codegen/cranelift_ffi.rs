@@ -353,7 +353,7 @@ pub unsafe extern "C" fn rt_cranelift_new_signature(call_conv: i64) -> i64 {
         0 => CallConv::SystemV,
         1 => CallConv::WindowsFastcall,
         2 => CallConv::Fast,
-        _ => CallConv::SystemV,
+        _ => super::shared::platform_call_conv(),
     };
     let sig = Signature::new(cc);
     let handle = next_handle();
