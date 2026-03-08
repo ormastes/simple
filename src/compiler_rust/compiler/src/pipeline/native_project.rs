@@ -634,12 +634,12 @@ int main(int argc, char** argv) {
             let mut ar_ok = true;
             for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
                 let status = if is_msvc_lib {
-                    // MSVC lib.exe: lib /OUT:archive.lib obj1.o obj2.o ...
+                    // MSVC lib.exe: lib /OUT:archive.lib [existing.lib] obj1.o obj2.o ...
+                    // lib.exe has no append mode — always recreate with /OUT: and include
+                    // the existing archive as input on subsequent batches.
                     let mut lib_cmd = std::process::Command::new(&ar_tool);
-                    if i == 0 {
-                        lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
-                    } else {
-                        // Append to existing archive
+                    lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
+                    if i > 0 {
                         lib_cmd.arg(&archive_path);
                     }
                     lib_cmd.args(chunk)
@@ -2011,16 +2011,18 @@ fn find_c_compiler() -> String {
 fn find_archive_tool() -> String {
     #[cfg(target_os = "windows")]
     {
-        for tool in &["llvm-ar", "ar", "lib"] {
-            if let Ok(out) = std::process::Command::new(tool).arg("/?").output() {
-                let _ = out; // just checking it exists
-                return tool.to_string();
-            }
-            // llvm-ar and ar use --version, not /?
+        // Prefer llvm-ar (supports ar syntax), then ar (MinGW), then lib.exe (MSVC)
+        for tool in &["llvm-ar", "ar"] {
             if let Ok(out) = std::process::Command::new(tool).arg("--version").output() {
                 if out.status.success() {
                     return tool.to_string();
                 }
+            }
+        }
+        // lib.exe: check via `where` since lib /? returns nonzero
+        if let Ok(out) = std::process::Command::new("where").arg("lib").output() {
+            if out.status.success() {
+                return "lib".to_string();
             }
         }
         "ar".to_string()
