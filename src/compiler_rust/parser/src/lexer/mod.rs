@@ -135,7 +135,7 @@ impl<'a> Lexer<'a> {
                 // Still need to skip whitespace at line start when inside brackets
                 while let Some(ch) = self.peek() {
                     match ch {
-                        ' ' | '\t' => {
+                        ' ' | '\t' | '\r' => {
                             self.advance();
                         }
                         '\n' => {

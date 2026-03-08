@@ -20,6 +20,10 @@ impl<'a> super::Lexer<'a> {
                     indent += 4; // Tab = 4 spaces
                     self.advance();
                 }
+                '\r' => {
+                    // Skip carriage return (CRLF line endings)
+                    self.advance();
+                }
                 '\n' => {
                     // Empty line, skip
                     self.advance();
