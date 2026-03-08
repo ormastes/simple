@@ -81,8 +81,12 @@ impl WebCompiler {
 
     /// Compile a .sui file from path
     pub fn compile_sui_file(&mut self, path: impl AsRef<Path>) -> Result<SuiCompilationResult, CompileError> {
-        let source = std::fs::read_to_string(path.as_ref())
+        let mut source = std::fs::read_to_string(path.as_ref())
             .map_err(|e| CompileError::Io(format!("Failed to read .sui file: {}", e)))?;
+        // Normalize CRLF → LF for cross-platform compatibility
+        if source.contains('\r') {
+            source = source.replace('\r', "");
+        }
 
         self.compile_sui_source(&source)
     }

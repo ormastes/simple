@@ -306,6 +306,8 @@ impl ExecCore {
     pub fn compile_file(&self, path: &Path, out: &Path) -> Result<(), String> {
         // Parse source to collect error hints
         let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        // Normalize CRLF → LF
+        let source = if source.contains('\r') { source.replace('\r', "") } else { source };
         let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
 

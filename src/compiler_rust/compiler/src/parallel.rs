@@ -101,8 +101,12 @@ pub fn discover_files(root: &Path) -> Result<HashSet<PathBuf>, CompileError> {
         }
 
         // Quick scan for imports
-        let source = fs::read_to_string(&canonical)
+        let mut source = fs::read_to_string(&canonical)
             .map_err(|e| CompileError::Io(format!("Failed to read {}: {}", canonical.display(), e)))?;
+        // Normalize CRLF → LF for cross-platform compatibility
+        if source.contains('\r') {
+            source = source.replace('\r', "");
+        }
 
         // Extract imports with a lightweight scan
         let imports = extract_imports_quick(&source, canonical.parent().unwrap_or(Path::new(".")));
@@ -183,8 +187,12 @@ fn extract_use_path(line: &str, base_dir: &Path) -> Option<PathBuf> {
 
 /// Parse a single file and extract its imports.
 fn parse_file(path: &Path, base_dir: &Path) -> Result<ParsedFile, CompileError> {
-    let source =
+    let mut source =
         fs::read_to_string(path).map_err(|e| CompileError::Io(format!("Failed to read {}: {}", path.display(), e)))?;
+    // Normalize CRLF → LF so indentation-sensitive parsing works on Windows/FreeBSD
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
 
     let mut parser = simple_parser::Parser::new(&source);
     let module = parser

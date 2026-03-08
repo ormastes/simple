@@ -187,8 +187,12 @@ impl ModuleResolver {
             return Ok(DirectoryManifest::default());
         }
 
-        let source = std::fs::read_to_string(&init_path)
+        let mut source = std::fs::read_to_string(&init_path)
             .map_err(|e| crate::error::factory::failed_to_read_file(&init_path, &e))?;
+        // Normalize CRLF → LF for cross-platform compatibility
+        if source.contains('\r') {
+            source = source.replace('\r', "");
+        }
 
         let manifest = self.parse_manifest(&source, dir_path)?;
         self.manifests.insert(init_path, manifest.clone());

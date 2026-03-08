@@ -37,7 +37,10 @@ pub fn compile_file(
         println!("Cross-compiling for target: {}", target);
         // For cross-compilation, we still need to read the source content
         let source_content = match std::fs::read_to_string(source) {
-            Ok(content) => content,
+            Ok(content) => {
+                // Normalize CRLF → LF for cross-platform compatibility
+                if content.contains('\r') { content.replace('\r', "") } else { content }
+            }
             Err(e) => {
                 eprintln!("error: cannot read {}: {}", source.display(), e);
                 return 1;

@@ -53,9 +53,13 @@ impl Lowerer {
         self.loaded_modules.insert(resolved.path.clone());
 
         // Read and parse the module file
-        let source = std::fs::read_to_string(&resolved.path).map_err(|e| {
+        let mut source = std::fs::read_to_string(&resolved.path).map_err(|e| {
             LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e))
         })?;
+        // Normalize CRLF → LF for cross-platform compatibility
+        if source.contains('\r') {
+            source = source.replace('\r', "");
+        }
 
         let mut parser = simple_parser::Parser::new(&source);
         let imported_module = parser

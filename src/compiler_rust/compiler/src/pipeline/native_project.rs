@@ -204,9 +204,13 @@ impl NativeProjectBuilder {
         let compile_start = Instant::now();
         let mut file_sources: Vec<(PathBuf, String)> = Vec::new();
         for path in &files {
-            let source = std::fs::read_to_string(path)
+            let mut source = std::fs::read_to_string(path)
                 .map_err(|e| (path.clone(), format!("read: {e}")))
                 .map_err(|(p, m)| format!("{}: {}", p.display(), m))?;
+            // Normalize CRLF → LF for cross-platform compatibility
+            if source.contains('\r') {
+                source = source.replace('\r', "");
+            }
             file_sources.push((path.clone(), source));
         }
 
