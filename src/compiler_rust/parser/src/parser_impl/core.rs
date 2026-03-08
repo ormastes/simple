@@ -783,6 +783,33 @@ impl<'a> Parser<'a> {
                     self.parse_expression_or_assignment()
                 }
             }
+            // pass_do_nothing, pass_dn, pass_todo — lexed as identifiers but are
+            // semantic keywords meaning "no-op / not yet implemented".  Handle them
+            // as Pass statements so they don't cause "expected expression, found Indent".
+            TokenKind::Identifier { ref name, .. }
+                if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo" =>
+            {
+                let start_span = self.current.span;
+                self.advance();
+                // Optional parenthesised argument: pass_todo("reason")
+                if self.check(&TokenKind::LParen) {
+                    self.advance();
+                    if !self.check(&TokenKind::RParen) {
+                        let _ = self.parse_expression();
+                    }
+                    if self.check(&TokenKind::RParen) {
+                        self.advance();
+                    }
+                }
+                Ok(Node::Pass(PassStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                }))
+            }
             // Note: Implicit val/var (`name = expr`) is experimental/future.
             // Currently disabled because it conflicts with assignment syntax.
             // When enabled, it needs scope analysis to distinguish new bindings from reassignment.

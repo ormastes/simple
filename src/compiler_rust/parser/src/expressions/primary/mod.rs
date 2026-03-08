@@ -41,6 +41,23 @@ impl<'a> Parser<'a> {
             | TokenKind::Atom(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
             TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
+            // pass_do_nothing / pass_dn / pass_todo in expression position → unit ()
+            TokenKind::Identifier { name, .. }
+                if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo" =>
+            {
+                self.advance();
+                // Optional parenthesised argument: pass_todo("reason")
+                if self.check(&TokenKind::LParen) {
+                    self.advance();
+                    if !self.check(&TokenKind::RParen) {
+                        let _ = self.parse_expression();
+                    }
+                    if self.check(&TokenKind::RParen) {
+                        self.advance();
+                    }
+                }
+                Ok(Expr::Tuple(vec![]))
+            }
             TokenKind::Result
             | TokenKind::Identifier { .. }
             | TokenKind::Self_
