@@ -656,8 +656,9 @@ impl NativeBinaryBuilder {
                 &stub_c,
                 r#"
 extern int spl_main(void);
+extern void rt_set_args(int argc, char** argv);
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    rt_set_args(argc, argv);
     return spl_main();
 }
 "#,

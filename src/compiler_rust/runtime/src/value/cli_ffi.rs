@@ -47,15 +47,13 @@ pub extern "C" fn rt_cli_print_version() {
     println!("Simple v{}", CLI_VERSION);
 }
 
-/// Get command line arguments as a RuntimeValue array
+/// Get command line arguments as a RuntimeValue array.
+/// Delegates to rt_get_args() which uses the PROGRAM_ARGS mutex
+/// (set at startup via rt_set_args). This is reliable on all platforms
+/// including FreeBSD where std::env::args() may not work for native binaries.
 #[no_mangle]
 pub extern "C" fn rt_cli_get_args() -> RuntimeValue {
-    let args: Vec<String> = std::env::args().collect();
-    let arr = rt_array_new(args.len() as u64);
-    for arg in &args {
-        rt_array_push(arr, rt_string_new(arg.as_ptr(), arg.len() as u64));
-    }
-    arr
+    super::rt_get_args()
 }
 
 /// Check if a file exists (cli version)
