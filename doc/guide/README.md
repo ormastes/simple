@@ -48,6 +48,13 @@ User-facing guides for the Simple programming language. For specifications see `
 | [ffi/sffi.md](ffi/sffi.md) | SFFI patterns, gen guide, syscalls |
 | [ffi/wrapper_gen.md](ffi/wrapper_gen.md) | C++/Rust wrapper generation |
 
+## Tools
+
+| Guide | Description |
+|-------|-------------|
+| [tools/t32_cli.md](tools/t32_cli.md) | T32 CLI — TRACE32 GUI-to-CLI converter, interactive shell |
+| [tools/mcp_t32.md](tools/mcp_t32.md) | T32 MCP Server — 20-tool MCP for TRACE32 debug sessions |
+
 ## Backend
 
 | Guide | Description |
