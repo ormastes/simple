@@ -1479,8 +1479,11 @@ static inline int64_t _rt_now_nanos(void) {{
                 // On Windows COFF, weak attribute doesn't satisfy undefined references,
                 // so use strong definitions. --allow-multiple-definition ensures the
                 // runtime library's definitions (linked first) take precedence.
-                let is_windows = matches!(self.options.target.os, TargetOS::Windows);
-                let attr = if is_windows { "" } else { "__attribute__((weak)) " };
+                // On Windows/FreeBSD use strong definitions (weak doesn't satisfy
+                // FreeBSD's strict ld-elf.so.1 resolver). --allow-multiple-definition
+                // ensures the runtime library's definitions take precedence.
+                let use_strong = matches!(self.options.target.os, TargetOS::Windows | TargetOS::FreeBSD);
+                let attr = if use_strong { "" } else { "__attribute__((weak)) " };
                 for sym in &symbols {
                     let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
                     let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
@@ -1491,8 +1494,8 @@ static inline int64_t _rt_now_nanos(void) {{
                             "{1}int64_t {0}(void) {{ return 0; }}\n",
                             sym, attr
                         ));
-                    } else if !is_windows {
-                        // Inline asm .weak directive only works on ELF, skip on Windows
+                    } else if !use_strong {
+                        // Inline asm .weak directive only works on ELF, skip on Windows/FreeBSD
                         let clean = sym.replace('\"', "");
                         // macOS Mach-O uses .weak_definition + underscore prefix
                         #[cfg(target_os = "macos")]
