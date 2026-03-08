@@ -1,5 +1,8 @@
-//! ELF object file parsing and relocation utilities.
+//! Object file parsing and relocation utilities.
+//!
+//! Supports both ELF (Linux) and COFF (Windows) object formats via the `object` crate.
 
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind};
 use simple_runtime::value;
 
 /// Helper to extract a null-terminated section name from the string table.
@@ -16,18 +19,32 @@ pub(crate) fn get_section_name(shstrtab: &[u8], sh_name: usize) -> Option<&str> 
 }
 
 /// Extract code from an object file.
-/// Tries to parse as ELF and extract .text section, with relocation support.
+/// Uses the `object` crate to handle both ELF and COFF formats.
+/// Falls back to manual ELF parsing with relocation support for ELF objects.
 pub(crate) fn extract_code_from_object(object_code: &[u8]) -> Vec<u8> {
-    // Try to parse as ELF and extract .text section
+    // Try ELF first with full relocation support
     if object_code.len() > 4 && &object_code[0..4] == b"\x7fELF" {
-        // This is ELF format - try to extract .text
         if let Some(text) = extract_elf_text_section(object_code) {
             return text;
         }
     }
 
-    // Fallback: assume it's raw code or return a stub
-    // Return a simple "mov eax, 0; ret" as fallback
+    // Use `object` crate for any format (COFF, Mach-O, etc.)
+    if let Ok(obj) = object::File::parse(object_code) {
+        for section in obj.sections() {
+            if section.kind() == SectionKind::Text {
+                if let Ok(data) = section.data() {
+                    if !data.is_empty() {
+                        let mut code = data.to_vec();
+                        apply_object_relocations(&mut code, &obj, &section);
+                        return code;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: return a stub "mov eax, 0; ret"
     vec![0xB8, 0x00, 0x00, 0x00, 0x00, 0xC3]
 }
 
@@ -245,68 +262,108 @@ fn apply_elf_relocations(
     }
 }
 
-/// Find the offset of a named symbol within the .text section of an ELF object.
+/// Find the offset of a named symbol within the .text section of an object file.
+/// Supports both ELF and COFF formats via the `object` crate.
 /// Returns the symbol's value (offset within .text) or None if not found.
 pub(crate) fn find_symbol_offset_in_object(object_code: &[u8], symbol_name: &str) -> Option<u64> {
-    if object_code.len() < 64 || &object_code[0..4] != b"\x7fELF" {
-        return None;
-    }
-
-    let e_shoff = u64::from_le_bytes(object_code[40..48].try_into().ok()?) as usize;
-    let e_shentsize = u16::from_le_bytes(object_code[58..60].try_into().ok()?) as usize;
-    let e_shnum = u16::from_le_bytes(object_code[60..62].try_into().ok()?) as usize;
-
-    if e_shoff == 0 || e_shnum == 0 {
-        return None;
-    }
-
-    // Find .symtab and .strtab sections
-    let mut symtab: Option<(usize, usize, u32)> = None; // (offset, size, link)
-    for i in 0..e_shnum {
-        let sh_offset = e_shoff + i * e_shentsize;
-        if sh_offset + e_shentsize > object_code.len() {
-            continue;
-        }
-        let sh_type = u32::from_le_bytes(object_code[sh_offset + 4..sh_offset + 8].try_into().ok()?);
-        // SHT_SYMTAB = 2
-        if sh_type == 2 {
-            let offset = u64::from_le_bytes(object_code[sh_offset + 24..sh_offset + 32].try_into().ok()?) as usize;
-            let size = u64::from_le_bytes(object_code[sh_offset + 32..sh_offset + 40].try_into().ok()?) as usize;
-            let link = u32::from_le_bytes(object_code[sh_offset + 40..sh_offset + 44].try_into().ok()?);
-            symtab = Some((offset, size, link));
-            break;
-        }
-    }
-
-    let (symtab_off, symtab_size, strtab_idx) = symtab?;
-
-    // Get strtab offset from linked section
-    let strtab_sh_offset = e_shoff + strtab_idx as usize * e_shentsize;
-    if strtab_sh_offset + e_shentsize > object_code.len() {
-        return None;
-    }
-    let strtab_off = u64::from_le_bytes(
-        object_code[strtab_sh_offset + 24..strtab_sh_offset + 32]
-            .try_into()
-            .ok()?,
-    ) as usize;
-
-    // Iterate symbols (ELF64 symbol entry = 24 bytes)
-    const SYM_ENTRY_SIZE: usize = 24;
-    let num_syms = symtab_size / SYM_ENTRY_SIZE;
-    for i in 0..num_syms {
-        let sym_entry = symtab_off + i * SYM_ENTRY_SIZE;
-        if sym_entry + SYM_ENTRY_SIZE > object_code.len() {
-            continue;
-        }
-        let st_name = u32::from_le_bytes(object_code[sym_entry..sym_entry + 4].try_into().ok()?) as usize;
-        let st_value = u64::from_le_bytes(object_code[sym_entry + 8..sym_entry + 16].try_into().ok()?);
-        let name = get_elf_string(object_code, strtab_off, st_name);
-        if name == symbol_name {
-            return Some(st_value);
+    if let Ok(obj) = object::File::parse(object_code) {
+        for sym in obj.symbols() {
+            if let Ok(name) = sym.name() {
+                // On Windows/COFF, symbols may have a leading underscore
+                let matches = name == symbol_name
+                    || name.strip_prefix('_') == Some(symbol_name);
+                if matches {
+                    // For COFF, the symbol value is the offset within the section
+                    return Some(sym.address());
+                }
+            }
         }
     }
     None
+}
+
+/// Apply relocations from a parsed object file (COFF, Mach-O, etc.) to extracted code.
+///
+/// Uses the `object` crate's relocation iterator to handle relocations portably.
+/// For COFF objects on Windows, handles IMAGE_REL_AMD64_REL32 including `.refptr.*`
+/// reference pointers (Windows equivalent of GOT entries).
+fn apply_object_relocations<'a>(
+    code: &mut Vec<u8>,
+    obj: &object::File<'a>,
+    text_section: &object::Section<'a, 'a>,
+) {
+    use object::RelocationKind;
+
+    let original_code_len = code.len();
+
+    for (offset, reloc) in text_section.relocations() {
+        let offset = offset as usize;
+        if offset + 4 > original_code_len {
+            continue;
+        }
+
+        // Get the target symbol name
+        let sym_name = match reloc.target() {
+            RelocationTarget::Symbol(sym_idx) => {
+                if let Ok(sym) = obj.symbol_by_index(sym_idx) {
+                    sym.name().unwrap_or("").to_string()
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+
+        // Strip leading underscore on Windows COFF symbols
+        let clean_name = sym_name.strip_prefix('_').unwrap_or(&sym_name);
+
+        // Handle Windows `.refptr.SYMBOL` references (COFF GOT-like entries).
+        // The code references `.refptr.rt_foo` which is an 8-byte pointer in .rdata
+        // that holds the address of `rt_foo`. We inline the pointer at the end of
+        // the code buffer and patch the displacement.
+        let runtime_name = clean_name
+            .strip_prefix(".refptr.")
+            .unwrap_or(clean_name);
+
+        match reloc.kind() {
+            RelocationKind::Relative => {
+                if let Some(sym_addr) = resolve_runtime_symbol(runtime_name) {
+                    if clean_name.starts_with(".refptr.") {
+                        // Indirect reference: append 8-byte pointer, patch disp to it
+                        let inline_offset = code.len();
+                        code.extend_from_slice(&(sym_addr as u64).to_le_bytes());
+                        // disp32 = target - (patch_addr + 4)
+                        // The addend from COFF is -4, so: disp = inline_offset + addend - offset
+                        let disp = (inline_offset as i64) + reloc.addend() - (offset as i64);
+                        code[offset..offset + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+                    } else {
+                        // Direct call: patch PC-relative displacement
+                        let code_ptr = code.as_ptr() as usize;
+                        let patch_addr = code_ptr + offset;
+                        let value = ((sym_addr as i64) + reloc.addend() - (patch_addr as i64)) as i32;
+                        code[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+            RelocationKind::Got | RelocationKind::GotRelative | RelocationKind::PltRelative => {
+                if let Some(sym_addr) = resolve_runtime_symbol(runtime_name) {
+                    let got_offset = code.len();
+                    code.extend_from_slice(&(sym_addr as u64).to_le_bytes());
+                    let disp = (got_offset as i64) - ((offset + 4) as i64);
+                    code[offset..offset + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+                }
+            }
+            RelocationKind::Absolute => {
+                if offset + 8 <= original_code_len {
+                    if let Some(sym_addr) = resolve_runtime_symbol(runtime_name) {
+                        let value = (sym_addr as i64 + reloc.addend()) as u64;
+                        code[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Handle GOT-relative relocations (R_X86_64_GOTPCREL = 9, GOTPCRELX = 41, REX_GOTPCRELX = 42).

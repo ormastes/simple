@@ -15,18 +15,15 @@ lazy_static::lazy_static! {
     static ref SHA1_MAP: Mutex<HashMap<i64, Sha1>> = Mutex::new(HashMap::new());
 }
 
-static mut SHA1_COUNTER: i64 = 1;
+static SHA1_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create new SHA1 hasher
 #[no_mangle]
 pub extern "C" fn rt_sha1_new() -> i64 {
-    unsafe {
-        let handle = SHA1_COUNTER;
-        SHA1_COUNTER += 1;
-        let hasher = Sha1::new();
-        SHA1_MAP.lock().unwrap().insert(handle, hasher);
-        handle
-    }
+    let handle = SHA1_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let hasher = Sha1::new();
+    SHA1_MAP.lock().unwrap().insert(handle, hasher);
+    handle
 }
 
 /// Write bytes to SHA1 hasher

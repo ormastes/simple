@@ -320,7 +320,7 @@ if /i "!BACKEND!"=="llvm-lib" (
         set "LLVM_ARGS=!LLVM_ARGS! --entry src\app\cli\bootstrap_main.spl"
         set "LLVM_ARGS=!LLVM_ARGS! -o !STAGE3_BIN!"
         set "LLVM_ARGS=!LLVM_ARGS! --strip"
-        set "LLVM_ARGS=!LLVM_ARGS! --backend=llvm-lib"
+        set "LLVM_ARGS=!LLVM_ARGS! --backend llvm"
 
         echo [bootstrap] Running: !STAGE2_BIN! !LLVM_ARGS!
         "!STAGE2_BIN!" !LLVM_ARGS!

@@ -50,18 +50,15 @@ lazy_static::lazy_static! {
     static ref ARENA_MAP: Mutex<HashMap<i64, Box<Arena>>> = Mutex::new(HashMap::new());
 }
 
-static mut ARENA_COUNTER: i64 = 1;
+static ARENA_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a new arena allocator with given capacity
 #[no_mangle]
 pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
     let arena = Box::new(Arena::new(capacity as usize));
-    unsafe {
-        let handle = ARENA_COUNTER;
-        ARENA_COUNTER += 1;
-        ARENA_MAP.lock().unwrap().insert(handle, arena);
-        handle
-    }
+    let handle = ARENA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ARENA_MAP.lock().unwrap().insert(handle, arena);
+    handle
 }
 
 /// Allocate memory from arena

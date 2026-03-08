@@ -9,8 +9,9 @@
 #   Phase 1: Build Rust seed (cargo build --profile bootstrap -p simple-driver)
 #   Phase 2: Use Rust seed to compile Simple compiler (stage1)
 #   Phase 3: Self-host — stage1 recompiles itself (stage2)
-#   Phase 4: Verify reproducibility (stage1 vs stage2 hash comparison)
-#   Phase 5: Deploy to bin/release/simple
+#   Phase 4: (Optional) Recompile with LLVM backend (stage3)
+#   Phase 5: Verify reproducibility (stage1 vs stage2 hash comparison)
+#   Phase 6: Deploy to bin/release/simple
 #
 # Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, arm64), FreeBSD,
 #                     Windows (via MSYS2/Git Bash/Cygwin)
@@ -20,12 +21,14 @@
 #   scripts/bootstrap/bootstrap-from-scratch.sh --skip-download     # Skip release download, force Rust build
 #   scripts/bootstrap/bootstrap-from-scratch.sh --skip-rust-build   # Reuse existing Rust seed binary
 #   scripts/bootstrap/bootstrap-from-scratch.sh --deploy            # Copy result to bin/release/
+#   scripts/bootstrap/bootstrap-from-scratch.sh --skip-llvm         # Skip LLVM Phase 4
 #   scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts    # Keep build dir
 #   scripts/bootstrap/bootstrap-from-scratch.sh --jobs=4            # Parallel jobs
 #
 # Outputs:
 #   build/bootstrap/stage1/simple  — Stage 1 binary (compiled by Rust seed)
 #   build/bootstrap/stage2/simple  — Stage 2 binary (self-hosted)
+#   build/bootstrap/stage3/simple  — Stage 3 binary (LLVM-optimized, optional)
 #   bin/release/simple             — (with --deploy) deployed binary
 
 set -euo pipefail
@@ -44,6 +47,7 @@ KEEP_ARTIFACTS=false
 JOBS=7
 SKIP_DOWNLOAD=false
 SKIP_RUST_BUILD=false
+SKIP_LLVM=false
 DOWNLOAD_VERSION=""
 BACKEND="auto"
 VERIFY_HASH=true
@@ -56,18 +60,21 @@ for arg in "$@"; do
         --jobs=*) JOBS="${arg#--jobs=}" ;;
         --skip-download) SKIP_DOWNLOAD=true ;;
         --skip-rust-build) SKIP_RUST_BUILD=true ;;
+        --skip-llvm) SKIP_LLVM=true ;;
         --download-version=*) DOWNLOAD_VERSION="${arg#--download-version=}" ;;
         --backend=*) BACKEND="${arg#--backend=}" ;;
         --target=*) TARGET="${arg#--target=}" ;;
         --no-verify) VERIFY_HASH=false ;;
         --help|-h)
             echo "Usage: $0 [--deploy] [--update-release] [--keep-artifacts] [--jobs=N]"
-            echo "         [--skip-download] [--skip-rust-build] [--download-version=X.Y.Z]"
+            echo "         [--skip-download] [--skip-rust-build] [--skip-llvm]"
+            echo "         [--download-version=X.Y.Z]"
             echo "         [--backend=auto|c|llvm|cranelift] [--target=<os-arch>] [--no-verify]"
             echo ""
             echo "Options:"
             echo "  --skip-download          Skip release binary download, force Rust bootstrap"
             echo "  --skip-rust-build        Reuse existing Rust seed binary (skip cargo build)"
+            echo "  --skip-llvm              Skip Phase 4 LLVM-optimized build"
             echo "  --download-version=X.Y.Z Pin release download to a specific version"
             echo "  --backend=BACKEND        Backend for self-host compilation (default: auto)"
             echo "  --target=OS-ARCH         Build target (linux|macos|freebsd)-(x86_64|aarch64)"
@@ -479,10 +486,128 @@ fi
 echo ""
 
 # ================================================================
-# Phase 4: Verify reproducibility (stage1 vs stage2 hash)
+# Phase 4: (Optional) LLVM-optimized build (stage2 → stage3)
+# ================================================================
+STAGE3_BIN=""
+
+detect_llvm() {
+    local llvm_found=false
+
+    case "${HOST_OS}" in
+        linux)
+            # Check ldconfig cache
+            if ldconfig -p 2>/dev/null | grep -q libLLVM; then
+                llvm_found=true
+            # Check common lib paths
+            elif ls /usr/lib/libLLVM*.so 2>/dev/null | head -1 | grep -q libLLVM; then
+                llvm_found=true
+            elif ls /usr/lib64/libLLVM*.so 2>/dev/null | head -1 | grep -q libLLVM; then
+                llvm_found=true
+            elif ls /usr/lib/x86_64-linux-gnu/libLLVM*.so 2>/dev/null | head -1 | grep -q libLLVM; then
+                llvm_found=true
+            elif ls /usr/lib/aarch64-linux-gnu/libLLVM*.so 2>/dev/null | head -1 | grep -q libLLVM; then
+                llvm_found=true
+            fi
+            ;;
+        macos)
+            # Homebrew paths (Apple Silicon + Intel)
+            for brew_path in \
+                /opt/homebrew/opt/llvm/lib \
+                /opt/homebrew/opt/llvm@18/lib \
+                /opt/homebrew/opt/llvm@17/lib \
+                /usr/local/opt/llvm/lib \
+                /usr/local/opt/llvm@18/lib \
+                /usr/local/opt/llvm@17/lib; do
+                if ls "${brew_path}"/libLLVM*.dylib 2>/dev/null | head -1 | grep -q libLLVM; then
+                    llvm_found=true
+                    export DYLD_LIBRARY_PATH="${brew_path}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+                    break
+                fi
+            done
+            ;;
+        windows)
+            # MSYS2/MinGW/Clang64/UCRT64 or standalone LLVM
+            for win_path in \
+                "/c/Program Files/LLVM" \
+                "/c/LLVM" \
+                "/c/msys64/mingw64" \
+                "/c/msys64/clang64" \
+                "/c/msys64/ucrt64"; do
+                if [[ -f "${win_path}/bin/LLVM-C.dll" ]]; then
+                    llvm_found=true
+                    export SIMPLE_LLVM_PATH="${win_path}"
+                    break
+                fi
+            done
+            # Check LLVM_DIR env var
+            if [[ "${llvm_found}" != "true" && -n "${LLVM_DIR:-}" ]]; then
+                if [[ -f "${LLVM_DIR}/bin/LLVM-C.dll" ]]; then
+                    llvm_found=true
+                    export SIMPLE_LLVM_PATH="${LLVM_DIR}"
+                fi
+            fi
+            ;;
+    esac
+
+    [[ "${llvm_found}" == "true" ]]
+}
+
+if [[ "${SKIP_LLVM}" == "true" ]]; then
+    echo "--- Phase 4: Skipped (--skip-llvm) ---"
+    echo ""
+elif detect_llvm; then
+    echo "--- Phase 4: LLVM-optimized build (stage2 → stage3) ---"
+
+    STAGE3_DIR="${BOOTSTRAP_DIR}/stage3"
+    STAGE3_BIN="${STAGE3_DIR}/simple${EXE_EXT}"
+    mkdir -p "${STAGE3_DIR}"
+
+    LLVM_ARGS=(
+        "native-build"
+        "--source" "${PROJECT_DIR}/src/compiler"
+        "--source" "${PROJECT_DIR}/src/lib"
+        "--source" "${PROJECT_DIR}/src/app"
+        "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
+        "-o" "${STAGE3_BIN}"
+        "--backend" "llvm"
+    )
+
+    echo "Running: ${STAGE2_BIN} ${LLVM_ARGS[*]}"
+    if "${STAGE2_BIN}" "${LLVM_ARGS[@]}" 2>&1; then
+        if [[ -x "${STAGE3_BIN}" ]]; then
+            echo "Stage 3 built: ${STAGE3_BIN}"
+
+            # Strip externally
+            if command -v strip &>/dev/null; then
+                strip "${STAGE3_BIN}"
+                echo "Stage 3 stripped"
+            fi
+            ls -lh "${STAGE3_BIN}"
+
+            if "${STAGE3_BIN}" --version &>/dev/null; then
+                echo "Stage 3 verification: $("${STAGE3_BIN}" --version 2>&1)"
+            else
+                echo "Warning: Stage 3 binary does not respond to --version"
+            fi
+        else
+            echo "Warning: stage3 binary not found, using stage2 as final binary"
+            STAGE3_BIN=""
+        fi
+    else
+        echo "Warning: LLVM build failed, using stage2 as final binary"
+        STAGE3_BIN=""
+    fi
+    echo ""
+else
+    echo "--- Phase 4: Skipped (LLVM not detected) ---"
+    echo ""
+fi
+
+# ================================================================
+# Phase 5: Verify reproducibility (stage1 vs stage2 hash)
 # ================================================================
 if [[ "${VERIFY_HASH}" == "true" ]]; then
-    echo "--- Phase 4: Reproducibility verification ---"
+    echo "--- Phase 5: Reproducibility verification ---"
 
     # Use shasum on macOS, sha256sum on Linux/FreeBSD, certutil on Windows
     HASH_CMD=""
@@ -519,18 +644,22 @@ if [[ "${VERIFY_HASH}" == "true" ]]; then
     fi
     echo ""
 else
-    echo "--- Phase 4: Skipped (--no-verify) ---"
+    echo "--- Phase 5: Skipped (--no-verify) ---"
     echo ""
 fi
 
 # ================================================================
-# Phase 5: Deploy to bin/release/simple
+# Phase 6: Deploy to bin/release/simple
 # ================================================================
-# Use stage2 as the final binary (self-hosted)
-FINAL_BIN="${STAGE2_BIN}"
+# Select final binary: stage3 (LLVM) if available, else stage2
+if [[ -n "${STAGE3_BIN}" && -x "${STAGE3_BIN}" ]]; then
+    FINAL_BIN="${STAGE3_BIN}"
+else
+    FINAL_BIN="${STAGE2_BIN}"
+fi
 
 if [[ "${DEPLOY}" == "true" ]]; then
-    echo "--- Phase 5: Deploy ---"
+    echo "--- Phase 6: Deploy ---"
     mkdir -p "${RELEASE_DIR}"
     cp "${FINAL_BIN}" "${RELEASE_DIR}/simple${EXE_EXT}"
     chmod +x "${RELEASE_DIR}/simple${EXE_EXT}"
@@ -549,5 +678,9 @@ if [[ "${KEEP_ARTIFACTS}" != "true" ]]; then
 fi
 
 echo ""
-echo "=== Bootstrap complete (Rust seed → stage1 → stage2) ==="
+if [[ -n "${STAGE3_BIN}" && -x "${STAGE3_BIN}" ]]; then
+    echo "=== Bootstrap complete (Rust seed → stage1 → stage2 → stage3 LLVM) ==="
+else
+    echo "=== Bootstrap complete (Rust seed → stage1 → stage2) ==="
+fi
 echo "Final binary: ${FINAL_BIN}"

@@ -231,14 +231,18 @@ pub fn generate_smf_from_object_for_target(
     gc: Option<&Arc<dyn GcAllocator>>,
     target: Target,
 ) -> Vec<u8> {
-    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "main").unwrap_or(0);
+    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "spl_main")
+        .or_else(|| crate::elf_utils::find_symbol_offset_in_object(object_code, "main"))
+        .unwrap_or(0);
     let code_bytes = extract_code_from_object(object_code);
     build_smf_with_code_for_target(&code_bytes, entry_offset, gc, target)
 }
 
 /// Generate SMF from Cranelift object code (using current host target).
 pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "main").unwrap_or(0);
+    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "spl_main")
+        .or_else(|| crate::elf_utils::find_symbol_offset_in_object(object_code, "main"))
+        .unwrap_or(0);
     let code_bytes = extract_code_from_object(object_code);
     build_smf_with_code_entry(&code_bytes, entry_offset, gc)
 }

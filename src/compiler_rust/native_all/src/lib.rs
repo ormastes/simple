@@ -191,6 +191,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            other if other.starts_with("--backend=") => {
+                backend = other["--backend=".len()..].to_string();
+                i += 1;
+            }
             other => {
                 source_dirs.push(PathBuf::from(other));
                 i += 1;
@@ -252,6 +256,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.clean = clean;
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
+
+    // Normalize backend aliases
+    if backend == "llvm-lib" {
+        backend = "llvm".to_string();
+    }
+
     config.backend = backend.clone();
 
     // Also set env var so compile_file_to_object can read it

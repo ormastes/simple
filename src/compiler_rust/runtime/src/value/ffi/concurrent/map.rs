@@ -23,18 +23,15 @@ lazy_static::lazy_static! {
     static ref CONCURRENT_MAP_MAP: Mutex<HashMap<i64, Box<ConcurrentMap>>> = Mutex::new(HashMap::new());
 }
 
-static mut CONCURRENT_MAP_COUNTER: i64 = 1;
+static CONCURRENT_MAP_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a new concurrent map
 #[no_mangle]
 pub extern "C" fn rt_concurrent_map_new() -> i64 {
     let map = Box::new(ConcurrentMap::new());
-    unsafe {
-        let handle = CONCURRENT_MAP_COUNTER;
-        CONCURRENT_MAP_COUNTER += 1;
-        CONCURRENT_MAP_MAP.lock().unwrap().insert(handle, map);
-        handle
-    }
+    let handle = CONCURRENT_MAP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    CONCURRENT_MAP_MAP.lock().unwrap().insert(handle, map);
+    handle
 }
 
 /// Insert key-value pair into concurrent map

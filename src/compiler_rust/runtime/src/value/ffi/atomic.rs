@@ -22,10 +22,10 @@ lazy_static::lazy_static! {
     static ref ONCE_MAP: Mutex<HashMap<i64, Box<StdOnce>>> = Mutex::new(HashMap::new());
 }
 
-static mut ATOMIC_BOOL_COUNTER: i64 = 1;
-static mut ATOMIC_INT_COUNTER: i64 = 1;
-static mut ATOMIC_FLAG_COUNTER: i64 = 1;
-static mut ONCE_COUNTER: i64 = 1;
+static ATOMIC_BOOL_COUNTER: AtomicI64 = AtomicI64::new(1);
+static ATOMIC_INT_COUNTER: AtomicI64 = AtomicI64::new(1);
+static ATOMIC_FLAG_COUNTER: AtomicI64 = AtomicI64::new(1);
+static ONCE_COUNTER: AtomicI64 = AtomicI64::new(1);
 
 // ============================================================================
 // AtomicBool Operations
@@ -35,12 +35,9 @@ static mut ONCE_COUNTER: i64 = 1;
 #[no_mangle]
 pub extern "C" fn rt_atomic_bool_new(initial: bool) -> i64 {
     let atomic = Box::new(AtomicBool::new(initial));
-    unsafe {
-        let handle = ATOMIC_BOOL_COUNTER;
-        ATOMIC_BOOL_COUNTER += 1;
-        ATOMIC_BOOL_MAP.lock().insert(handle, atomic);
-        handle
-    }
+    let handle = ATOMIC_BOOL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ATOMIC_BOOL_MAP.lock().insert(handle, atomic);
+    handle
 }
 
 /// Load value from atomic boolean
@@ -85,12 +82,9 @@ pub extern "C" fn rt_atomic_bool_free(handle: i64) {
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_new(initial: i64) -> i64 {
     let atomic = Box::new(AtomicI64::new(initial));
-    unsafe {
-        let handle = ATOMIC_INT_COUNTER;
-        ATOMIC_INT_COUNTER += 1;
-        ATOMIC_INT_MAP.lock().insert(handle, atomic);
-        handle
-    }
+    let handle = ATOMIC_INT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ATOMIC_INT_MAP.lock().insert(handle, atomic);
+    handle
 }
 
 /// Load value from atomic integer
@@ -199,12 +193,9 @@ pub extern "C" fn rt_atomic_int_free(handle: i64) {
 #[no_mangle]
 pub extern "C" fn rt_atomic_flag_new() -> i64 {
     let flag = Box::new(AtomicBool::new(false));
-    unsafe {
-        let handle = ATOMIC_FLAG_COUNTER;
-        ATOMIC_FLAG_COUNTER += 1;
-        ATOMIC_FLAG_MAP.lock().insert(handle, flag);
-        handle
-    }
+    let handle = ATOMIC_FLAG_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ATOMIC_FLAG_MAP.lock().insert(handle, flag);
+    handle
 }
 
 /// Test and set atomic flag
@@ -240,12 +231,9 @@ pub extern "C" fn rt_atomic_flag_free(handle: i64) {
 #[no_mangle]
 pub extern "C" fn rt_once_new() -> i64 {
     let once = Box::new(StdOnce::new());
-    unsafe {
-        let handle = ONCE_COUNTER;
-        ONCE_COUNTER += 1;
-        ONCE_MAP.lock().insert(handle, once);
-        handle
-    }
+    let handle = ONCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ONCE_MAP.lock().insert(handle, once);
+    handle
 }
 
 /// Call function once (takes function pointer)

@@ -26,18 +26,15 @@ lazy_static::lazy_static! {
     static ref POOL_MAP: Mutex<HashMap<i64, Box<ResourcePool>>> = Mutex::new(HashMap::new());
 }
 
-static mut POOL_COUNTER: i64 = 1;
+static POOL_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a new resource pool with given capacity
 #[no_mangle]
 pub extern "C" fn rt_pool_new(capacity: i64) -> i64 {
     let pool = Box::new(ResourcePool::new(capacity as usize));
-    unsafe {
-        let handle = POOL_COUNTER;
-        POOL_COUNTER += 1;
-        POOL_MAP.lock().unwrap().insert(handle, pool);
-        handle
-    }
+    let handle = POOL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    POOL_MAP.lock().unwrap().insert(handle, pool);
+    handle
 }
 
 /// Acquire a resource from the pool

@@ -20,18 +20,15 @@ lazy_static::lazy_static! {
     static ref CONDVAR_MAP: Mutex<HashMap<i64, Box<StdCondvar>>> = Mutex::new(HashMap::new());
 }
 
-static mut CONDVAR_COUNTER: i64 = 1;
+static CONDVAR_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a new condition variable
 #[no_mangle]
 pub extern "C" fn rt_condvar_new() -> i64 {
     let condvar = Box::new(StdCondvar::new());
-    unsafe {
-        let handle = CONDVAR_COUNTER;
-        CONDVAR_COUNTER += 1;
-        CONDVAR_MAP.lock().insert(handle, condvar);
-        handle
-    }
+    let handle = CONDVAR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    CONDVAR_MAP.lock().insert(handle, condvar);
+    handle
 }
 
 /// Wait on condvar (note: simplified, real impl needs mutex integration)
@@ -124,17 +121,14 @@ lazy_static::lazy_static! {
     static ref THREAD_LOCAL_HANDLES: Mutex<HashSet<i64>> = Mutex::new(HashSet::new());
 }
 
-static mut THREAD_LOCAL_COUNTER: i64 = 1;
+static THREAD_LOCAL_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create new thread-local storage slot
 #[no_mangle]
 pub extern "C" fn rt_thread_local_new() -> i64 {
-    unsafe {
-        let handle = THREAD_LOCAL_COUNTER;
-        THREAD_LOCAL_COUNTER += 1;
-        THREAD_LOCAL_HANDLES.lock().insert(handle);
-        handle
-    }
+    let handle = THREAD_LOCAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    THREAD_LOCAL_HANDLES.lock().insert(handle);
+    handle
 }
 
 /// Get value from thread-local storage

@@ -23,18 +23,15 @@ lazy_static::lazy_static! {
     static ref TLS_MAP: Mutex<HashMap<i64, Box<ThreadLocalStorage>>> = Mutex::new(HashMap::new());
 }
 
-static mut TLS_COUNTER: i64 = 1;
+static TLS_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create a new thread-local storage
 #[no_mangle]
 pub extern "C" fn rt_tls_new() -> i64 {
     let tls = Box::new(ThreadLocalStorage::new());
-    unsafe {
-        let handle = TLS_COUNTER;
-        TLS_COUNTER += 1;
-        TLS_MAP.lock().unwrap().insert(handle, tls);
-        handle
-    }
+    let handle = TLS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    TLS_MAP.lock().unwrap().insert(handle, tls);
+    handle
 }
 
 /// Set thread-local value

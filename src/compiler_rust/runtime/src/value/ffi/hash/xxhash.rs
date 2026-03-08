@@ -13,30 +13,24 @@ lazy_static::lazy_static! {
     static ref XXHASH_MAP: Mutex<HashMap<i64, Xxh3>> = Mutex::new(HashMap::new());
 }
 
-static mut XXHASH_COUNTER: i64 = 1;
+static XXHASH_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 /// Create new XXHash hasher
 #[no_mangle]
 pub extern "C" fn rt_xxhash_new() -> i64 {
-    unsafe {
-        let handle = XXHASH_COUNTER;
-        XXHASH_COUNTER += 1;
-        let hasher = Xxh3::new();
-        XXHASH_MAP.lock().unwrap().insert(handle, hasher);
-        handle
-    }
+    let handle = XXHASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let hasher = Xxh3::new();
+    XXHASH_MAP.lock().unwrap().insert(handle, hasher);
+    handle
 }
 
 /// Create new XXHash hasher with seed
 #[no_mangle]
 pub extern "C" fn rt_xxhash_new_with_seed(seed: u64) -> i64 {
-    unsafe {
-        let handle = XXHASH_COUNTER;
-        XXHASH_COUNTER += 1;
-        let hasher = Xxh3::with_seed(seed);
-        XXHASH_MAP.lock().unwrap().insert(handle, hasher);
-        handle
-    }
+    let handle = XXHASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let hasher = Xxh3::with_seed(seed);
+    XXHASH_MAP.lock().unwrap().insert(handle, hasher);
+    handle
 }
 
 /// Write bytes to XXHash hasher

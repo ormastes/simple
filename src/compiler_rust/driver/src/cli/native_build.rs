@@ -129,6 +129,19 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 no_mangle = true;
                 i += 1;
             }
+            "--backend" => {
+                // Accept and ignore --backend (Rust seed always uses Cranelift)
+                if i + 1 < args.len() {
+                    i += 2;
+                } else {
+                    eprintln!("error: --backend requires a value (cranelift or llvm)");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--backend=") => {
+                // Accept and ignore --backend=value (Rust seed always uses Cranelift)
+                i += 1;
+            }
             other => {
                 // Treat as source directory
                 source_dirs.push(PathBuf::from(other));
