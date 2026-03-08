@@ -770,7 +770,10 @@ int main(int argc, char** argv) {
         {
             // FreeBSD: dlopen is in libc (no -ldl), needs -lexecinfo for backtraces,
             // pthread and m are separate libraries.
-            for lib in &["pthread", "m", "execinfo"] {
+            // -lz provides crc32 needed by LLVM, -lzstd for LLVM compression.
+            // -L/usr/local/lib for packages installed via pkg (zstd, execinfo).
+            cmd.arg("-L/usr/local/lib");
+            for lib in &["pthread", "m", "execinfo", "z", "zstd", "util"] {
                 cmd.arg(format!("-l{}", lib));
             }
         }
@@ -797,7 +800,9 @@ int main(int argc, char** argv) {
         // On macOS, -undefined,dynamic_lookup defers resolution to runtime (dyld), which
         // crashes on missing symbols.  Instead, we scan the archive for undefined symbols
         // that have no definition, then generate weak stub functions that return 0/nil.
-        // On Linux/FreeBSD we still use --unresolved-symbols=ignore-all (cheaper).
+        // On FreeBSD, ld-elf.so.1 eagerly resolves ALL symbols at load time, so
+        // --unresolved-symbols=ignore-all doesn't help — we must generate stubs too.
+        // On Linux we still use --unresolved-symbols=ignore-all (cheaper).
         #[cfg(target_os = "macos")]
         {
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
@@ -805,7 +810,13 @@ int main(int argc, char** argv) {
             // Still allow any remaining undefined symbols (e.g., system dylib symbols)
             cmd.arg("-Wl,-undefined,dynamic_lookup");
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(target_os = "freebsd")]
+        {
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            cmd.arg(&stubs_o);
+            cmd.arg("-Wl,--allow-multiple-definition");
+        }
+        #[cfg(target_os = "linux")]
         cmd.arg("-Wl,--unresolved-symbols=ignore-all");
         #[cfg(target_os = "windows")]
         if is_clang_cl {
@@ -851,7 +862,7 @@ int main(int argc, char** argv) {
 /// Scans the given object files / archive for undefined symbols that have no definition,
 /// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], main_o: &std::path::Path) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
@@ -950,13 +961,41 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
             }
         }
     }
+    #[cfg(target_os = "freebsd")]
+    {
+        // Scan FreeBSD system shared libraries for defined symbols
+        let system_libs = [
+            "/lib/libc.so.7",
+            "/lib/libm.so.5",
+            "/lib/libthr.so.3",
+            "/usr/lib/libexecinfo.so.1",
+        ];
+        for lib_path in &system_libs {
+            if std::path::Path::new(lib_path).exists() {
+                if let Ok(output) = std::process::Command::new("nm")
+                    .arg("-D").arg("-g").arg("-p").arg(lib_path)
+                    .output()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let [_addr, sym_type, name] = parts.as_slice() {
+                            if *sym_type != "U" {
+                                defined.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Symbols that are undefined and not defined anywhere → need stubs
     let needs_stub: Vec<String> = undefined
         .into_iter()
         .filter(|s| !defined.contains(s))
         // Skip system/dyld symbols only
-        .filter(|s| !s.starts_with("_dyld_") && *s != "_main")
+        .filter(|s| !s.starts_with("_dyld_") && *s != "_main" && *s != "main")
         // Skip known C standard library / system builtins
         .filter(|s| !is_system_symbol(s))
         .collect();
@@ -978,30 +1017,35 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
     eprintln!("Generating {} stub functions for unresolved symbols...", needs_stub.len());
 
     // Generate pure assembly stubs. This avoids all C keyword/builtin conflicts.
-    // Each stub is a weak global symbol that returns 0 (x0 = 0 on ARM64, rax = 0 on x86_64).
-    // For __builtin_* symbols, generate trampolines to the real C library function.
+    // Each stub is a global symbol that returns 0/nil.
+    // On macOS: weak_definition (Mach-O), on FreeBSD: strong .globl (ELF) with
+    // --allow-multiple-definition so runtime definitions take precedence.
     let mut asm_code = String::with_capacity(needs_stub.len() * 100);
-    asm_code.push_str("/* Auto-generated weak stubs for bootstrap linking */\n");
+    asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
     // ARM64: return tagged nil (3) — Simple uses tag bits, 0 is not a valid nil.
-    // mov x0, #3 means "tagged nil" in the Simple runtime value system.
     #[cfg(target_arch = "aarch64")]
+    #[allow(unused)]
     let (ret_nil, jmp_prefix) = ("mov x0, #3\n  ret", "b");
     // x86_64: return tagged nil (3)
     #[cfg(target_arch = "x86_64")]
+    #[allow(unused)]
     let (ret_nil, jmp_prefix) = ("movq $3, %rax\n  retq", "jmp");
 
     for sym in &needs_stub {
-        // sym already includes the macOS _ prefix (e.g., "_AABB", "___bdd_clear_contexts")
-        // In assembly, we use the symbol name as-is (no stripping needed)
-
-        // Skip symbols with characters not valid in assembly labels
-        // Assembly labels can contain alphanumerics, _, and $ (on macOS)
-        if sym.is_empty() || !sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+        // Skip symbols with characters not valid in assembly labels.
+        // macOS: alphanumerics, _, $ (Mach-O)
+        // FreeBSD/ELF: also allows dots (Simple uses dots in symbol names like Arch.from_u8)
+        #[cfg(not(target_os = "freebsd"))]
+        let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+        #[cfg(target_os = "freebsd")]
+        let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$');
+        if !valid {
             continue;
         }
 
-        // __builtin_* symbols (mangled: ___builtin_* on macOS) → trampoline to real function
+        // __builtin_* symbols → trampoline to real function
+        #[cfg(target_os = "macos")]
         if sym.starts_with("___builtin_") {
             let real_fn = format!("_{}", &sym["___builtin_".len()..]);
             asm_code.push_str(&format!(
@@ -1011,9 +1055,16 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
             continue;
         }
 
-        // Regular stub: weak symbol returning tagged nil (3)
+        // Regular stub
+        #[cfg(target_os = "macos")]
         asm_code.push_str(&format!(
             ".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n",
+            sym, ret_nil
+        ));
+        // FreeBSD ELF: strong .globl stubs (--allow-multiple-definition lets runtime win)
+        #[cfg(target_os = "freebsd")]
+        asm_code.push_str(&format!(
+            ".globl {0}\n{0}:\n  {1}\n\n",
             sym, ret_nil
         ));
     }
@@ -1039,9 +1090,9 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn is_system_symbol(sym: &str) -> bool {
-    // Strip leading underscore (macOS C ABI prepends _)
+    // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
     matches!(name,
         // Memory
