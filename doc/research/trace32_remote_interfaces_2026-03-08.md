@@ -142,6 +142,17 @@ Observed locally in this workspace:
   - `/opt/t32/stm32wb_startup.cmm`
   - `/opt/t32/config_stm32h7.t32`
   - `/opt/t32/stm32h7_startup.cmm`
+- the repo now ships its own automation-oriented overlay files:
+  - `config/t32_stm_linux_hidden.t32`
+  - `config/t32/stm32wb_native_start.cmm`
+  - `config/t32/stm32h7_native_start.cmm`
+  - `config/t32/stm32wb_gdb_start.cmm`
+  - `config/t32/stm32h7_gdb_start.cmm`
+  - `scripts/t32_start_stm.shs`
+  - `scripts/t32_check_ready.shs`
+  - `scripts/t32_enable_gdb.shs`
+  - `test/fixtures/baremetal/stm_semihost_smoke.s`
+  - `test/fixtures/baremetal/stm_semihost_smoke.ld`
 - The shipped board configs currently contain only the hardware-side connection basics:
 
 ```text
@@ -156,8 +167,26 @@ FONT=SMALL
 
 Current practical blockers on this machine:
 
-- Raw `t32rem localhost:20000 PING` returns `error initializing TRACE32`
+- Raw `t32rem localhost port=20000 PING` returns `error initializing TRACE32`
 - `t32usbchecker` reports no usable TRACE32 devices
+- `strace` shows `t32usbchecker` probes `/dev/lauterbach` and legacy `/proc/bus/usb`, not `/dev/bus/usb`
+- the vendor-shipped Linux udev rule under `/opt/t32/bin/pc_linux64/udev.conf/kernel_starting_2.6.32/10-lauterbach.rules` is not what is effectively active on this host
+- that shipped rule is supposed to create `/dev/lauterbach/trace32/%k` with mode `0666`
+- on this host there is no `/dev/lauterbach/trace32` path and the raw device node remains `664 root:plugdev`
+- after fixing config syntax, `t32marm` now gets past parsing and fails later with:
+
+```text
+FATAL ERROR from PODBUS-driver: TRACE32 not connected or not accessible
+```
+- a privileged Docker workaround that creates `/dev/lauterbach/trace32/3-3` proves the probe is reachable:
+  - `t32usbchecker` reports `Basic communication...CONNECT request OK`
+  - `USB communication OK`
+- inside the container, the non-Qt front-end can be kept alive longer under `Xvfb` with `SCREEN=INVISIBLE`, which narrows the remaining failure to the PowerView runtime/API layer rather than USB detection alone
+- but a real PowerView launch still fails even with `Xvfb`:
+
+```text
+Error: XtCreatePopupShell requires non-NULL parent
+```
 - the account cannot install missing host packages with `sudo`
 - there is no available X server helper like `xvfb-run`
 - the non-Qt binary still wants a display in our local startup attempts
@@ -165,9 +194,20 @@ Current practical blockers on this machine:
 
 Inference:
 
-- The repo-side config and test-runner work is mostly in the right direction.
+- The repo-side config and test-runner work is in the right direction.
 - The remaining T32 blocker is host/runtime setup for a real PowerView session, not the Simple test runner itself.
-- More specifically, the shipped local `.t32` configs are not yet sufficient for `t32rem` automation because they do not expose the Remote API port.
+- More specifically, the shipped local `.t32` configs are not yet sufficient for `t32rem` automation because they do not expose the Remote API port, and the host USB access path still does not satisfy TRACE32's own Linux requirements.
+- Even after working around the USB path in Docker, the installed TRACE32 Linux build still does not reach a stable hidden PowerView session in this environment.
+
+Repo readiness conclusion:
+
+- The repo now has a stable T32 automation baseline:
+  - a Linux config accepted by `t32marm`
+  - board-specific startup wrappers for native and GDB-backed lanes
+  - shell helpers for bring-up, readiness checks, and GDB enablement
+  - a shared STM Cortex-M smoke fixture intended for both OpenOCD and TRACE32 lanes
+- That means the remaining work is operational, not architectural.
+- Once a host TRACE32 session becomes usable, the next step is execution, not more repo plumbing.
 
 ## 5. Recommended Repo Model
 
@@ -190,22 +230,34 @@ It also matches Lauterbach's recommendation that external applications should pr
 
 To complete real hardware validation for the T32 lanes on this machine:
 
-1. Start a real TRACE32 PowerView instance with:
+1. Fix Linux device visibility for TRACE32 itself:
+   - apply Lauterbach's shipped `10-lauterbach.rules`
+   - reconnect the probe or reload udev
+   - verify `/dev/lauterbach/trace32/*`
+   - verify `t32usbchecker`
+2. Start a real TRACE32 PowerView instance with:
    - `PBI=USB`
    - `SCREEN=OFF`
-   - `RCL=NETTCP`
+   - `RCL=NETASSIST` or `RCL=NETTCP`
    - `PORT=20000`
-2. Verify `t32rem localhost port=20000 protocol=NETTCP PING`
-3. Run the target startup script, for example `stm32wb_startup.cmm`
-4. For the GDB path, enable:
+3. Verify `t32rem localhost port=20000 PING`
+4. Start a repo-managed STM lane:
 
 ```text
-SETUP.API.GDB.Enable /PORT 20331
+./scripts/t32_start_stm.shs stm32wb native
+./scripts/t32_start_stm.shs stm32h7 native
 ```
 
-5. Attach GDB to `localhost:20331`
+5. For the GDB path, enable:
 
-Until step 2 works, `t32_native` and `t32_gdb` cannot be considered hardware-verified.
+```text
+./scripts/t32_enable_gdb.shs localhost 20000 2331
+```
+
+6. Attach GDB to `localhost:2331`
+7. Promote the current readiness specs to real on-device smoke runs using the shared STM fixture.
+
+Until step 1 works, `t32_native` and `t32_gdb` cannot be considered hardware-verified.
 
 ## Sources
 

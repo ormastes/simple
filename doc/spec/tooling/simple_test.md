@@ -2,7 +2,16 @@
 
 ## Overview
 
-Runs BDD-style spec tests with nice formatted output, timing, and summary.
+Runs BDD-style spec tests with formatted output, timing, and summary.
+
+In the current repo, the user-facing entrypoint is normally:
+
+```bash
+bin/simple test ...
+```
+
+This document also covers the remote baremetal lanes exercised through that
+command.
 
 ## Usage
 
@@ -27,6 +36,52 @@ simple_test --json                 # JSON output for CI
 | `--parallel` | Run tests in parallel |
 | `--timeout <ms>` | Test timeout (default: 5000) |
 | `--fail-fast` | Stop on first failure |
+
+## Remote Baremetal Usage
+
+For remote-interpreter and hardware-backed lanes, use environment selection
+instead of treating `--target` as the runtime selector.
+
+Recommended forms:
+
+```bash
+# QEMU RV32 compatibility path
+bin/simple test test/integration/baremetal/qemu_baremetal_lib_smoke_spec.spl \
+  '--mode=interpreter(remote(baremetal(riscv32)))'
+
+# OpenOCD STM readiness lanes
+bin/simple test test/integration/debug/hardware/stm32wb_openocd_spec.spl
+bin/simple test test/integration/debug/hardware/stm32h7_openocd_spec.spl
+
+# TRACE32 STM readiness lanes
+bin/simple test test/integration/debug/hardware/t32_native_spec.spl
+bin/simple test test/integration/debug/hardware/t32_gdb_bridge_spec.spl
+```
+
+### Current Meaning Of The TRACE32 Specs
+
+Today the TRACE32 specs are readiness specs, not full hardware verification.
+They validate:
+
+- repo-managed helper files
+- expected launcher paths
+- expected Remote API and GDB port commands
+- shared STM smoke fixture presence
+
+They do not yet prove real on-device execution because that still depends on a
+working local TRACE32 PowerView session.
+
+### TRACE32 Bring-Up Helpers
+
+The repo-managed bring-up sequence is:
+
+```bash
+./scripts/t32_start_stm.shs stm32wb native
+./scripts/t32_check_ready.shs
+./scripts/t32_enable_gdb.shs localhost 20000 2331
+```
+
+See `doc/guide/backend/trace32_linux_setup.md` for the host-side setup.
 
 ## Output Format
 
@@ -128,6 +183,13 @@ describe "JSON.stringify":
 4. Format results with colors (if terminal)
 5. Calculate summary statistics
 6. Return exit code (0 = pass, 1 = fail)
+
+### Important Current Caveat
+
+Interpreter-mode test execution still has limitations in this repo. Some remote
+hardware specs are therefore used primarily to verify loading, helper wiring,
+and command construction until the relevant backend session is actually
+available.
 
 ## Watch Mode
 

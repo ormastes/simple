@@ -7,7 +7,9 @@
 
 ## Overview
 
-Simple supports bare-metal programming for embedded targets. Write programs in Simple or assembly, test in QEMU, and deploy to real hardware via OpenOCD, J-Link, or Trace32.
+Simple supports bare-metal programming for embedded targets. Write programs in
+Simple or assembly, test in QEMU, and deploy to real hardware via OpenOCD or
+TRACE32.
 
 **Supported Targets:**
 
@@ -343,12 +345,13 @@ describe "Calculator Tests":
 
 | Target | Debug Probe | Connection | Status |
 |--------|------------|------------|--------|
-| STM32F4 | ST-LINK V2 | OpenOCD | Production |
-| STM32F4 | Trace32 | Lauterbach | Production |
-| STM32F4 | J-Link | OpenOCD | Development |
-| ARM Cortex-M | QEMU | GDB stub | Production |
-| RISC-V | QEMU | GDB stub | Production |
-| RISC-V | OpenOCD | JTAG | Development |
+| RISC-V32 `virt` | QEMU | Remote interpreter | Verified |
+| STM32WB | ST-LINK | OpenOCD | Repo-ready readiness spec |
+| STM32H7 | ST-LINK | OpenOCD | Repo-ready readiness spec |
+| STM32WB | Lauterbach Power Debug | TRACE32 Remote API | Repo-ready, waiting for usable TRACE32 session |
+| STM32WB | Lauterbach Power Debug | TRACE32 GDB bridge | Repo-ready, waiting for usable TRACE32 session |
+| STM32H7 | Lauterbach Power Debug | TRACE32 Remote API | Repo-ready, waiting for usable TRACE32 session |
+| STM32H7 | Lauterbach Power Debug | TRACE32 GDB bridge | Repo-ready, waiting for usable TRACE32 session |
 
 ### OpenOCD Setup
 
@@ -356,11 +359,11 @@ describe "Calculator Tests":
 # Install
 sudo apt install openocd
 
-# Connect to STM32F4 via ST-LINK
-openocd -f interface/stlink.cfg -f target/stm32f4x.cfg
+# Connect to STM32WB via ST-LINK
+openocd -f interface/stlink.cfg -f target/stm32wbx.cfg
 
 # Flash and debug
-openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
+openocd -f interface/stlink.cfg -f target/stm32wbx.cfg \
     -c "program my_program.elf verify reset exit"
 ```
 
@@ -377,32 +380,58 @@ riscv64-unknown-elf-gdb program.elf
 (gdb) continue
 ```
 
-### Trace32 (Lauterbach)
+### TRACE32 (Lauterbach)
 
-For professional embedded debugging with the Lauterbach Trace32 system:
+The repo is now prepared for both TRACE32 control paths:
+
+- `t32_native`: control PowerView directly through `t32rem`
+- `t32_gdb`: use `t32rem` to prepare PowerView, then attach external GDB to
+  the TRACE32 GDB server
+
+Repo-managed bring-up helpers:
 
 ```bash
-# Configure connection
-# Hardware: Lauterbach PowerTrace -> JTAG -> STM32F4 board
-
-# Load PRACTICE script
-t32 -s startup.cmm
+./scripts/t32_start_stm.shs stm32wb native
+./scripts/t32_start_stm.shs stm32wb gdb
+./scripts/t32_check_ready.shs
+./scripts/t32_enable_gdb.shs localhost 20000 2331
 ```
 
-Key Trace32 features:
-- Real-time trace capture
-- Flash programming
-- RTOS-aware debugging
-- Code coverage analysis
+Repo-managed TRACE32 files:
 
-### Hardware Inventory
+- `config/t32_stm_linux_hidden.t32`
+- `config/t32/stm32wb_native_start.cmm`
+- `config/t32/stm32h7_native_start.cmm`
+- `config/t32/stm32wb_gdb_start.cmm`
+- `config/t32/stm32h7_gdb_start.cmm`
 
-| Item | Model | Connection |
-|------|-------|------------|
-| Target board | STM32F4-Discovery | USB + JTAG |
-| Debug probe (basic) | ST-LINK V2 | USB |
-| Debug probe (advanced) | Lauterbach PowerTrace | USB + JTAG |
-| Debug probe (alt) | SEGGER J-Link | USB + SWD/JTAG |
+Current reality:
+
+- the repo-side T32 setup is ready
+- the remaining blocker is the local Linux TRACE32 runtime and device access
+- until the host session is usable, TRACE32 lanes remain readiness-validated but
+  not hardware-verified
+
+See:
+
+- `doc/guide/backend/trace32_linux_setup.md`
+- `doc/research/trace32_remote_interfaces_2026-03-08.md`
+
+### Shared STM Smoke Fixture
+
+The first common Cortex-M smoke workload for OpenOCD and TRACE32 lives in:
+
+- `test/fixtures/baremetal/stm_semihost_smoke.s`
+- `test/fixtures/baremetal/stm_semihost_smoke.ld`
+
+This is the repo-managed starting point for harmonizing:
+
+- STM32WB OpenOCD smoke
+- STM32H7 OpenOCD smoke
+- STM32WB TRACE32 native smoke
+- STM32WB TRACE32 GDB smoke
+- STM32H7 TRACE32 native smoke
+- STM32H7 TRACE32 GDB smoke
 
 ---
 

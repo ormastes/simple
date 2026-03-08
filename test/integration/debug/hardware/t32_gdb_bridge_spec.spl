@@ -1,12 +1,17 @@
-# T32 GDB Bridge Integration Test (Combo 6)
-# Requires: Lauterbach Power Debug II + T32 GDB server enabled
-# Uses: GDB via T32 GDB server on port 2331
-# NOTE: Uses local data-only validation since hardware may not be available.
+# T32 GDB Bridge Integration Test
+# Verifies the repo-managed TRACE32 GDB bridge lane is wired for STM targets.
 
-# --- Local copies ---
+extern fn rt_file_exists(path: text) -> bool
 
 class T32GdbConfig:
     t32rem_path: text
+    launcher_path: text
+    gdb_enable_path: text
+    hidden_cfg_path: text
+    wb_gdb_cmm: text
+    h7_gdb_cmm: text
+    fixture_asm: text
+    fixture_ld: text
     host: text
     t32_port: i32
     gdb_port: i32
@@ -15,6 +20,13 @@ impl T32GdbConfig:
     static fn default_config() -> T32GdbConfig:
         T32GdbConfig(
             t32rem_path: "/opt/t32/bin/pc_linux64/t32rem",
+            launcher_path: "scripts/t32_start_stm.shs",
+            gdb_enable_path: "scripts/t32_enable_gdb.shs",
+            hidden_cfg_path: "config/t32_stm_linux_hidden.t32",
+            wb_gdb_cmm: "config/t32/stm32wb_gdb_start.cmm",
+            h7_gdb_cmm: "config/t32/stm32h7_gdb_start.cmm",
+            fixture_asm: "test/fixtures/baremetal/stm_semihost_smoke.s",
+            fixture_ld: "test/fixtures/baremetal/stm_semihost_smoke.ld",
             host: "localhost",
             t32_port: 20000,
             gdb_port: 2331
@@ -23,57 +35,60 @@ impl T32GdbConfig:
     fn t32rem_command(cmd: text) -> text:
         "{self.t32rem_path} {self.host} port={self.t32_port} {cmd}"
 
+    fn launcher(board: text) -> text:
+        "{self.launcher_path} {board} gdb"
+
     fn enable_gdb_server_command() -> text:
-        self.t32rem_command("System.Option GDBSERVER ON")
-
-    fn set_gdb_port_command() -> text:
-        self.t32rem_command("GDBSERVER.PORT {self.gdb_port}")
-
-    fn disable_gdb_server_command() -> text:
-        self.t32rem_command("System.Option GDBSERVER OFF")
+        "{self.gdb_enable_path} {self.host} {self.t32_port} {self.gdb_port}"
 
     fn gdb_target() -> text:
         "{self.host}:{self.gdb_port}"
 
-class GdbBreakpointConfig:
-    address: text
-    bp_id: i32
+describe "T32 GDB bridge repo readiness":
+    it "ships the shared hidden Linux config":
+        val cfg = T32GdbConfig.default_config()
+        expect(rt_file_exists(cfg.hidden_cfg_path)).to_equal(true)
 
-impl GdbBreakpointConfig:
-    static fn at_address(addr: text) -> GdbBreakpointConfig:
-        GdbBreakpointConfig(address: addr, bp_id: 1)
+    it "ships both board-specific GDB startup scripts":
+        val cfg = T32GdbConfig.default_config()
+        expect(rt_file_exists(cfg.wb_gdb_cmm)).to_equal(true)
+        expect(rt_file_exists(cfg.h7_gdb_cmm)).to_equal(true)
 
-    fn set_command() -> text:
-        "break *{self.address}"
+    it "ships the GDB enable helper":
+        val cfg = T32GdbConfig.default_config()
+        expect(rt_file_exists(cfg.gdb_enable_path)).to_equal(true)
 
-    fn delete_command() -> text:
-        "delete {self.bp_id}"
+    it "ships the shared STM smoke fixture":
+        val cfg = T32GdbConfig.default_config()
+        expect(rt_file_exists(cfg.fixture_asm)).to_equal(true)
+        expect(rt_file_exists(cfg.fixture_ld)).to_equal(true)
 
-# --- Tests ---
+    it "launcher command is well-formed for STM32WB":
+        val cfg = T32GdbConfig.default_config()
+        val cmd = cfg.launcher("stm32wb")
+        expect(cmd.contains("scripts/t32_start_stm.shs")).to_equal(true)
+        expect(cmd.contains("stm32wb gdb")).to_equal(true)
 
-describe "T32 GDB Bridge via T32 server":
-    it "enable GDB server command is well-formed":
+    it "launcher command is well-formed for STM32H7":
+        val cfg = T32GdbConfig.default_config()
+        val cmd = cfg.launcher("stm32h7")
+        expect(cmd.contains("stm32h7 gdb")).to_equal(true)
+
+    it "enable GDB helper command is well-formed":
         val cfg = T32GdbConfig.default_config()
         val cmd = cfg.enable_gdb_server_command()
-        expect(cmd.contains("GDBSERVER ON")).to_equal(true)
-        expect(cmd.contains("t32rem")).to_equal(true)
+        expect(cmd.contains("scripts/t32_enable_gdb.shs")).to_equal(true)
+        expect(cmd.contains("20000")).to_equal(true)
+        expect(cmd.contains("2331")).to_equal(true)
 
-    it "GDB target points to port 2331":
+    it "GDB target points to the repo default port":
         val cfg = T32GdbConfig.default_config()
         expect(cfg.gdb_target()).to_equal("localhost:2331")
-        expect(cfg.gdb_port).to_equal(2331)
 
-    it "set and delete breakpoint commands are well-formed":
-        val bp = GdbBreakpointConfig.at_address("0x08000000")
-        expect(bp.set_command()).to_equal("break *0x08000000")
-        expect(bp.delete_command()).to_equal("delete 1")
-
-    it "disable GDB server command is well-formed":
+    it "t32rem command is well-formed":
         val cfg = T32GdbConfig.default_config()
-        val cmd = cfg.disable_gdb_server_command()
-        expect(cmd.contains("GDBSERVER OFF")).to_equal(true)
-
-    it "set GDB port command includes port number":
-        val cfg = T32GdbConfig.default_config()
-        val cmd = cfg.set_gdb_port_command()
-        expect(cmd.contains("GDBSERVER.PORT 2331")).to_equal(true)
+        val cmd = cfg.t32rem_command("PING")
+        expect(cmd.contains("t32rem")).to_equal(true)
+        expect(cmd.contains("PING")).to_equal(true)
+        expect(cmd.contains("localhost")).to_equal(true)
+        expect(cmd.contains("port=20000")).to_equal(true)

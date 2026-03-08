@@ -1,12 +1,18 @@
-# T32 Native Integration Test (Combo 5)
-# Requires: Lauterbach Power Debug II connected, t32rem available
-# Uses: t32rem PRACTICE commands via USB PODBUS
-# NOTE: Uses local data-only validation since hardware may not be available.
+# T32 Native Integration Test
+# Verifies the repo-managed TRACE32 native lane is wired for STM targets.
 
-# --- Local copies ---
+extern fn rt_file_exists(path: text) -> bool
 
 class T32Config:
     t32rem_path: text
+    launcher_path: text
+    hidden_cfg_path: text
+    wb_startup_path: text
+    h7_startup_path: text
+    wb_native_cmm: text
+    h7_native_cmm: text
+    fixture_asm: text
+    fixture_ld: text
     host: text
     port: i32
 
@@ -14,6 +20,14 @@ impl T32Config:
     static fn default_config() -> T32Config:
         T32Config(
             t32rem_path: "/opt/t32/bin/pc_linux64/t32rem",
+            launcher_path: "scripts/t32_start_stm.shs",
+            hidden_cfg_path: "config/t32_stm_linux_hidden.t32",
+            wb_startup_path: "/opt/t32/stm32wb_startup.cmm",
+            h7_startup_path: "/opt/t32/stm32h7_startup.cmm",
+            wb_native_cmm: "config/t32/stm32wb_native_start.cmm",
+            h7_native_cmm: "config/t32/stm32h7_native_start.cmm",
+            fixture_asm: "test/fixtures/baremetal/stm_semihost_smoke.s",
+            fixture_ld: "test/fixtures/baremetal/stm_semihost_smoke.ld",
             host: "localhost",
             port: 20000
         )
@@ -21,26 +35,51 @@ impl T32Config:
     fn command(cmd: text) -> text:
         "{self.t32rem_path} {self.host} port={self.port} {cmd}"
 
+    fn launcher(board: text) -> text:
+        "{self.launcher_path} {board} native"
+
     fn ping_command() -> text:
         self.command("PING")
 
     fn system_up_command() -> text:
         self.command("SYStem.Up")
 
-    fn register_get_command(reg: text) -> text:
-        self.command("Register.Get {reg}")
-
-    fn break_command() -> text:
-        self.command("Break")
-
-# --- Tests ---
-
-describe "T32 Native via t32rem":
-    it "t32rem path is correct":
+describe "T32 native repo readiness":
+    it "uses the installed t32rem path":
         val cfg = T32Config.default_config()
         expect(cfg.t32rem_path).to_equal("/opt/t32/bin/pc_linux64/t32rem")
 
-    it "ping command is well-formed":
+    it "ships the shared hidden Linux config":
+        val cfg = T32Config.default_config()
+        expect(rt_file_exists(cfg.hidden_cfg_path)).to_equal(true)
+
+    it "ships both board-specific native startup scripts":
+        val cfg = T32Config.default_config()
+        expect(rt_file_exists(cfg.wb_native_cmm)).to_equal(true)
+        expect(rt_file_exists(cfg.h7_native_cmm)).to_equal(true)
+
+    it "requires the Lauterbach startup scripts already present on host":
+        val cfg = T32Config.default_config()
+        expect(rt_file_exists(cfg.wb_startup_path)).to_equal(true)
+        expect(rt_file_exists(cfg.h7_startup_path)).to_equal(true)
+
+    it "ships the shared STM smoke fixture":
+        val cfg = T32Config.default_config()
+        expect(rt_file_exists(cfg.fixture_asm)).to_equal(true)
+        expect(rt_file_exists(cfg.fixture_ld)).to_equal(true)
+
+    it "launcher command is well-formed for STM32WB":
+        val cfg = T32Config.default_config()
+        val cmd = cfg.launcher("stm32wb")
+        expect(cmd.contains("scripts/t32_start_stm.shs")).to_equal(true)
+        expect(cmd.contains("stm32wb native")).to_equal(true)
+
+    it "launcher command is well-formed for STM32H7":
+        val cfg = T32Config.default_config()
+        val cmd = cfg.launcher("stm32h7")
+        expect(cmd.contains("stm32h7 native")).to_equal(true)
+
+    it "remote API ping command is well-formed":
         val cfg = T32Config.default_config()
         val cmd = cfg.ping_command()
         expect(cmd.contains("t32rem")).to_equal(true)
@@ -48,17 +87,7 @@ describe "T32 Native via t32rem":
         expect(cmd.contains("localhost")).to_equal(true)
         expect(cmd.contains("port=20000")).to_equal(true)
 
-    it "SYStem.Up command is well-formed":
+    it "system up command is well-formed":
         val cfg = T32Config.default_config()
         val cmd = cfg.system_up_command()
         expect(cmd.contains("SYStem.Up")).to_equal(true)
-
-    it "register get PC command is well-formed":
-        val cfg = T32Config.default_config()
-        val cmd = cfg.register_get_command("PC")
-        expect(cmd.contains("Register.Get PC")).to_equal(true)
-
-    it "break command is well-formed":
-        val cfg = T32Config.default_config()
-        val cmd = cfg.break_command()
-        expect(cmd.contains("Break")).to_equal(true)

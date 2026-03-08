@@ -233,43 +233,56 @@ When a positional argument ends with the specified extension, it is captured as 
 
 ---
 
-## Execution Targets
+## Test Runner Environments
 
-The test runner supports running tests on different execution targets using `--target`:
+For baremetal and remote-interpreter work, prefer `simple test` environment
+selection over raw build targets.
+
+Use `--target=...` for compilation output. Use `simple test` environment flags
+to choose where and how the test runs.
+
+### Recommended Forms
 
 ```bash
-# Local execution (default)
+# Local execution
 bin/simple test test/my_spec.spl
 
-# QEMU x86_64
-bin/simple test test/my_spec.spl --target=x86_64-qemu
+# Legacy compatibility syntax still accepted for the QEMU RV32 lane
+bin/simple test test/integration/baremetal/qemu_baremetal_lib_smoke_spec.spl \
+  '--mode=interpreter(remote(baremetal(riscv32)))'
 
-# QEMU RISC-V 32
-bin/simple test test/my_spec.spl --target=riscv32-qemu
-
-# Custom GDB port
-bin/simple test test/my_spec.spl --target=riscv32-qemu --gdb-port=5555
+# Repo readiness specs for hardware-backed lanes
+bin/simple test test/integration/debug/hardware/stm32wb_openocd_spec.spl
+bin/simple test test/integration/debug/hardware/stm32h7_openocd_spec.spl
+bin/simple test test/integration/debug/hardware/t32_native_spec.spl
+bin/simple test test/integration/debug/hardware/t32_gdb_bridge_spec.spl
 ```
 
-### Available Targets
+### Current Remote Matrix
 
-| Target | Description |
-|--------|-------------|
-| `local` | Local interpreter (default) |
-| `x86_64-qemu` | QEMU x86_64 emulator |
-| `riscv32-qemu` | QEMU RISC-V 32-bit emulator |
+| Selector | Backend | Status |
+|----------|---------|--------|
+| `--mode='interpreter(remote(baremetal(riscv32)))'` | QEMU RISC-V32 | Verified |
+| `test/integration/debug/hardware/stm32wb_openocd_spec.spl` | STM32WB + OpenOCD | Repo-ready readiness spec |
+| `test/integration/debug/hardware/stm32h7_openocd_spec.spl` | STM32H7 + OpenOCD | Repo-ready readiness spec |
+| `test/integration/debug/hardware/t32_native_spec.spl` | STM32WB/STM32H7 + TRACE32 Remote API | Repo-ready readiness spec, waiting for usable TRACE32 session |
+| `test/integration/debug/hardware/t32_gdb_bridge_spec.spl` | STM32WB/STM32H7 + TRACE32 GDB bridge | Repo-ready readiness spec, waiting for usable TRACE32 session |
 
-### Programmatic Execution
+### TRACE32 Host Helpers
 
-```simple
-use lib.execution.mod.{ExecutionConfig, TestExecutor}
+The repo-managed host helpers for the T32 lanes are:
 
-fn main():
-    val config = ExecutionConfig.qemu_x86_64("test.elf", gdb_port: 1234)
-    val executor = TestExecutor.create(config)?
-    val result = executor.execute()?
-    executor.cleanup()
+```bash
+./scripts/t32_start_stm.shs stm32wb native
+./scripts/t32_start_stm.shs stm32wb gdb
+./scripts/t32_check_ready.shs
+./scripts/t32_enable_gdb.shs localhost 20000 2331
 ```
+
+See:
+
+- `doc/guide/backend/trace32_linux_setup.md`
+- `doc/research/trace32_remote_interfaces_2026-03-08.md`
 
 ---
 
