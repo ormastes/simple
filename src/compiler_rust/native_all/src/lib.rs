@@ -191,12 +191,37 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
-            other if other.starts_with("--backend=") => {
-                backend = other["--backend=".len()..].to_string();
-                i += 1;
-            }
             other => {
-                source_dirs.push(PathBuf::from(other));
+                // Handle --key=value forms for flags that take values
+                if let Some(val) = other.strip_prefix("--backend=") {
+                    backend = val.to_string();
+                } else if let Some(val) = other.strip_prefix("--entry=") {
+                    entry_file = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--output=") {
+                    output = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--threads=") {
+                    match val.parse() {
+                        Ok(n) => threads = Some(n),
+                        Err(_) => {
+                            eprintln!("error: --threads requires a number");
+                            return 1;
+                        }
+                    }
+                } else if let Some(val) = other.strip_prefix("--timeout=") {
+                    match val.parse() {
+                        Ok(t) => timeout = t,
+                        Err(_) => {
+                            eprintln!("error: --timeout requires a number");
+                            return 1;
+                        }
+                    }
+                } else if let Some(val) = other.strip_prefix("--cache-dir=") {
+                    cache_dir = Some(PathBuf::from(val));
+                } else if other.starts_with("--") {
+                    eprintln!("warning: unknown option '{}', ignoring", other);
+                } else {
+                    source_dirs.push(PathBuf::from(other));
+                }
                 i += 1;
             }
         }
