@@ -3,9 +3,37 @@
 //! Handles updating the test database from test results.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::test_db::{self, TestStatus, TestFailure};
 use super::types::{TestFileResult, DebugLevel, debug_log};
+
+/// Load test database with a timeout to prevent hanging on large SDN files.
+fn load_test_db_with_timeout(db_path: &Path, timeout: Duration) -> Result<test_db::TestDb, String> {
+    let path = db_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::Builder::new()
+        .name("sdn-parse".to_string())
+        .spawn(move || {
+            let _ = tx.send(test_db::load_test_db(&path));
+        })
+        .map_err(|e| format!("Failed to spawn SDN parse thread: {}", e))?;
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!(
+                "SDN parser timed out after {}s on {}",
+                timeout.as_secs(),
+                db_path.display()
+            ))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("SDN parse thread panicked".to_string())
+        }
+    }
+}
 
 /// Update test database from test results
 pub fn update_test_database(
@@ -28,8 +56,8 @@ pub fn update_test_database(
         test_files.len()
     );
 
-    // Load existing database - NEVER silently create empty on error
-    let mut test_db = match test_db::load_test_db(db_path) {
+    // Load existing database with 10s timeout - NEVER silently create empty on error
+    let mut test_db = match load_test_db_with_timeout(db_path, Duration::from_secs(10)) {
         Ok(db) => {
             debug_log!(
                 DebugLevel::Detailed,
@@ -40,7 +68,6 @@ pub fn update_test_database(
             db
         }
         Err(e) => {
-            // Only create new DB if file doesn't exist
             if !db_path.exists() {
                 debug_log!(
                     DebugLevel::Basic,
@@ -48,11 +75,14 @@ pub fn update_test_database(
                     "  Creating new test database (file not found)"
                 );
                 test_db::TestDb::new()
+            } else if e.contains("timed out") {
+                eprintln!("[WARNING] {}", e);
+                eprintln!("[WARNING] Skipping test database update to avoid hang.");
+                return Ok(());
             } else {
                 // File exists but failed to parse - this is an error, don't lose data!
                 eprintln!("[WARNING] Failed to load test database: {}", e);
                 eprintln!("[WARNING] Existing records will be preserved. Fix the database format manually.");
-                // Try to backup the corrupted file
                 let backup_path = db_path.with_extension("sdn.backup");
                 if let Err(backup_err) = std::fs::copy(db_path, &backup_path) {
                     eprintln!("[WARNING] Failed to create backup: {}", backup_err);
@@ -180,8 +210,8 @@ pub fn update_rust_test_database(results: &[TestFileResult]) -> Result<(), Strin
         db_path.display()
     );
 
-    // Load existing database - NEVER silently create empty on error
-    let mut test_db = match test_db::load_test_db(db_path) {
+    // Load existing database with timeout - NEVER silently create empty on error
+    let mut test_db = match load_test_db_with_timeout(db_path, Duration::from_secs(10)) {
         Ok(db) => {
             debug_log!(
                 DebugLevel::Detailed,
@@ -199,6 +229,10 @@ pub fn update_rust_test_database(results: &[TestFileResult]) -> Result<(), Strin
                     "  Creating new test database (file not found)"
                 );
                 test_db::TestDb::new()
+            } else if e.contains("timed out") {
+                eprintln!("[WARNING] {}", e);
+                eprintln!("[WARNING] Skipping Rust test database update to avoid hang.");
+                return Ok(());
             } else {
                 eprintln!("[WARNING] Failed to load test database: {}", e);
                 eprintln!("[WARNING] Existing records will be preserved.");
