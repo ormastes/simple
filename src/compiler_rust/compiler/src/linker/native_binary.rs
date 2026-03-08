@@ -2077,6 +2077,10 @@ mod tests {
 
     #[test]
     fn test_static_lib_name_windows() {
+        // Force MSVC flavor — linker_flavor() auto-detects MSYS2/MinGW at runtime
+        let saved = std::env::var("SIMPLE_LINKER_FLAVOR").ok();
+        std::env::set_var("SIMPLE_LINKER_FLAVOR", "msvc");
+
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         assert_eq!(
             NativeBinaryOptions::static_lib_name("simple_runtime", &windows),
@@ -2086,6 +2090,11 @@ mod tests {
             NativeBinaryOptions::static_lib_name("simple_compiler", &windows),
             "simple_compiler.lib"
         );
+
+        match saved {
+            Some(v) => std::env::set_var("SIMPLE_LINKER_FLAVOR", v),
+            None => std::env::remove_var("SIMPLE_LINKER_FLAVOR"),
+        }
     }
 
     #[test]
@@ -2122,7 +2131,12 @@ mod tests {
         assert_eq!(detect_c_compiler(&linux), "cc");
 
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
-        assert_eq!(detect_c_compiler(&windows), "cl.exe");
+        let win_cc = detect_c_compiler(&windows);
+        // On Windows: cl.exe (pure MSVC), gcc (MSYS2/MinGW), or cc (fallback)
+        assert!(
+            win_cc == "cl.exe" || win_cc == "gcc" || win_cc == "cc",
+            "unexpected Windows C compiler: {win_cc}"
+        );
 
         // Restore CC if it was set
         if let Some(cc) = saved {

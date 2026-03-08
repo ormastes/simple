@@ -747,10 +747,18 @@ mod tests {
         use simple_common::target::{TargetArch, TargetOS};
 
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
-
         assert_eq!(NativeLinker::Lld.command_for_target(&linux), "ld.lld");
+
+        // Force MSVC flavor for this test — linker_flavor() auto-detects MSYS2/MinGW
+        // at runtime which would return GNU flavor on MSYS2 shells
+        let saved = std::env::var("SIMPLE_LINKER_FLAVOR").ok();
+        std::env::set_var("SIMPLE_LINKER_FLAVOR", "msvc");
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         assert_eq!(NativeLinker::Lld.command_for_target(&windows), "lld-link");
+        match saved {
+            Some(v) => std::env::set_var("SIMPLE_LINKER_FLAVOR", v),
+            None => std::env::remove_var("SIMPLE_LINKER_FLAVOR"),
+        }
     }
 
     #[test]
