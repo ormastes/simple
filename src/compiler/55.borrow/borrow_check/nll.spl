@@ -383,27 +383,53 @@ class NLLChecker:
     me check_statement(stmt_id: i64, point: i64):
         """Check a statement for borrow violations.
 
-        This would dispatch based on statement kind in a full implementation.
+        Checks the borrow graph at each program point for conflicts.
+        Statements are identified by ID; the borrow graph tracks
+        borrows, uses, and moves at each point.
         """
-        # Simplified: statements are just IDs here
-        # In full implementation, would check:
-        # - Borrows being created
-        # - Uses of borrowed places
-        # - Moves invalidating borrows
-        pass_do_nothing
+        # Propagate borrows from previous point to current
+        if point > 0:
+            self.borrow_graph_propagate_borrows(borrow_graph, point - 1, point)
+
+        # Check for borrow conflicts at this point
+        val borrow_set = self.borrow_graph_get_or_create_borrows(borrow_graph, point)
+        val active = borrow_set_active_borrows(borrow_set)
+        for borrow in active:
+            match borrow_set_has_conflicting_borrow(borrow_set, borrow.place, borrow.kind):
+                case conflict:
+                    self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict))
+                case nil:
+                    pass
 
     me check_terminator(term: Terminator, point: i64, liveness: LivenessResult):
         """Check terminator for borrow violations."""
         match term:
             case Return:
-                pass_do_nothing
+                # On return, all borrows must have ended
+                val borrow_set = self.borrow_graph_get_or_create_borrows(borrow_graph, point)
+                val active = borrow_set_active_borrows(borrow_set)
+                for borrow in active:
+                    self.errors = self.errors.push(NLLError(
+                        message: "borrow of `{borrow.place.to_text()}` may still be active at return",
+                        has_primary_span: true,
+                        primary_span: point,
+                        secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow created here")],
+                        has_help: true,
+                        help: "ensure borrow ends before returning"
+                    ))
             case Call(target, unwind):
-                # Check borrows during call
-                pass
+                # Propagate borrows through call; check for conflicts
+                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
             case Drop(target, unwind):
-                # Check drop doesn't conflict with borrows
-                pass
-            case _:
+                # Propagate borrows through drop; check for conflicts
+                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
+            case Goto(target):
+                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
+            case SwitchInt(targets, otherwise):
+                for t in targets:
+                    self.borrow_graph_propagate_borrows(borrow_graph, point, t)
+                self.borrow_graph_propagate_borrows(borrow_graph, point, otherwise)
+            case Unreachable:
                 pass
 
     me record_borrow(point: i64, place: Place, kind: BorrowKind) -> bool:
