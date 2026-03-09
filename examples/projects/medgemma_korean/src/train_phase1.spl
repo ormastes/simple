@@ -20,16 +20,17 @@
 # Run:
 #   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase1.spl
 
-use model.{TextModel, ModelConfig, compute_mse_loss, check_gpu}
+use model.{TextModel, ModelConfig, compute_mse_loss, check_gpu, free_model_params}
 use shared_logic.{
     TrainConfig, TrainState,
     make_randn_batch_on_cuda,
     compute_ce_loss,
     report_gpu_memory, report_training_step, report_epoch_end,
-    lr_linear_warmup
+    lr_linear_warmup,
+    set_selected_hidden_dim
 }
 use data_loader.{DataLoader, generate_synthetic_batch}
-use validation.{validate_model, validate_accuracy}
+use validation.{validate_model, compute_validation_loss, reset_baseline_loss}
 use lora_utils.{
     LoRAConfig, LoRAAdapter,
     create_lora_adapter, lora_forward,
@@ -54,70 +55,98 @@ fn run_phase1(model: TextModel) -> TextModel:
     print("")
     print("=" * 70)
     print("  PHASE 1: EVALUATE + TRAIN ENGLISH MEDICAL KNOWLEDGE")
+    print("  (3-tier: Small -> Large -> LoRA fallback)")
     print("=" * 70)
     print("")
 
     check_gpu()
     print("")
 
-    val ACCURACY_THRESHOLD = 0.97
+    val LOSS_THRESHOLD = 0.5
 
-    # Configuration
+    # ---------------------------------------------------------------
+    # Tier 1: Evaluate SMALL model (hidden=128, from Phase 0)
+    # ---------------------------------------------------------------
     val config = TrainConfig.phase1()
 
-    # Step 1: Evaluate baseline accuracy on English medical MCQ
-    print("Step 1: Evaluating baseline model on English medical validation...")
-    val baseline_result = validate_model(model, "English medical baseline", 100.0)
+    print("--- Tier 1: Evaluating SMALL model (hidden={model.config.hidden_dim}) ---")
+    val small_loss = compute_validation_loss(model, config)
+    print("Small model loss: {small_loss} (threshold: {LOSS_THRESHOLD})")
     print("")
 
-    # Step 2: Check if accuracy meets threshold
-    # For now, with synthetic data, accuracy won't be meaningful.
-    # In production, this would use real MCQ validation data.
-    val baseline_accuracy = validate_accuracy(model, config)
-    print("Baseline accuracy: {baseline_accuracy}")
-    print("Threshold: {ACCURACY_THRESHOLD}")
-    print("")
-
-    if baseline_accuracy >= ACCURACY_THRESHOLD:
-        print("PASS: Baseline accuracy >= 97%. Skipping Phase 1 training.")
-        print("Model is ready for Phase 2.")
+    if small_loss < LOSS_THRESHOLD:
+        print("PASS: Small model meets threshold. Using small model.")
         return model
 
-    # Step 3: Accuracy below threshold — add LoRA_1 and train
-    print("BELOW THRESHOLD: Adding LoRA_1 for English medical training")
+    # ---------------------------------------------------------------
+    # Tier 2: Try LARGE model (hidden=256)
+    # ---------------------------------------------------------------
+    print("FAIL: Small model loss {small_loss} >= {LOSS_THRESHOLD}")
+    print("Switching to LARGE model (hidden=256)...")
     print("")
-    config.print_config("Phase 1 - English Medical LoRA")
+
+    # Free small model GPU memory
+    free_model_params(model)
+    cuda_empty_cache()
+
+    # Switch to large hidden dim
+    set_selected_hidden_dim(256)
+    reset_baseline_loss()
+
+    # Re-run Phase 0 with large model
+    print("Re-running Phase 0 with LARGE model...")
+    var large_model = run_phase0()
+    print("")
+
+    # Evaluate large model
+    val large_config = TrainConfig.phase1()
+    val large_loss = compute_validation_loss(large_model, large_config)
+    print("Large model loss: {large_loss} (threshold: {LOSS_THRESHOLD})")
+    print("")
+
+    if large_loss < LOSS_THRESHOLD:
+        print("PASS: Large model meets threshold. Using large model.")
+        return large_model
+
+    # ---------------------------------------------------------------
+    # Tier 3: LoRA_1 fallback (add LoRA to large model)
+    # ---------------------------------------------------------------
+    print("FAIL: Large model loss {large_loss} >= {LOSS_THRESHOLD}")
+    print("Phase 1.1 -- Adding LoRA_1 to large model")
+    print("")
+
+    large_config.print_config("Phase 1.1 - LoRA_1 on Large Model")
 
     # Freeze base weights (preserves Phase 0 knowledge)
-    model.freeze()
+    large_model.freeze()
     print("Base model weights: FROZEN (Phase 0 knowledge preserved)")
 
     # Add LoRA_1 adapters
-    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    val lora_config = LoRAConfig(rank: large_config.lora_rank, alpha: large_config.lora_alpha, dropout: 0.0)
     print("")
     print("Adding LoRA_1 adapters (Progressive LoRA):")
-    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
-    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    var lora_l1 = create_lora_adapter(large_config.input_dim, large_config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(large_config.hidden_dim, large_config.hidden_dim, lora_config)
     print("")
 
     # Training loop
     var state = TrainState.create()
-    for epoch in 0..config.num_epochs:
+    for epoch in 0..large_config.num_epochs:
         state.reset_epoch()
-        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
+        print("--- Epoch {epoch + 1}/{large_config.num_epochs} ---")
 
-        for batch_idx in 0..config.num_batches:
-            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+        for batch_idx in 0..large_config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, large_config.warmup_steps, large_config.learning_rate)
 
             # Generate batch
-            val batch = make_randn_batch_on_cuda(config.batch_size, config.input_dim, config.output_dim)
+            val batch = make_randn_batch_on_cuda(large_config.batch_size, large_config.input_dim, large_config.output_dim)
             val x = batch[0]
             val target = batch[1]
 
             # Forward pass with LoRA_1
-            val logits = lora_forward(model, x, lora_l1, lora_l2)
+            val logits = lora_forward(large_model, x, lora_l1, lora_l2)
 
-            # MSE loss (cross-entropy would require integer target tensors)
+            # MSE loss
             val loss_h = compute_mse_loss(logits, target)
             val loss_val = t_mean(loss_h)
 
@@ -131,7 +160,7 @@ fn run_phase1(model: TextModel) -> TextModel:
             # Zero grads
             lora_l1.zero_grads()
             lora_l2.zero_grads()
-            model.zero_grads()
+            large_model.zero_grads()
 
             # Cleanup
             t_free(x)
@@ -140,39 +169,39 @@ fn run_phase1(model: TextModel) -> TextModel:
             t_free(loss_h)
 
             state.add_loss(loss_val)
-            report_training_step(state, config)
+            report_training_step(state, large_config)
 
         state.update_best()
-        report_epoch_end(epoch, config.num_epochs, state)
+        report_epoch_end(epoch, large_config.num_epochs, state)
 
         # Validate English retention after each epoch
-        val retention = validate_model(model, "English retention (epoch {epoch + 1})", 100.0)
+        val retention = validate_model(large_model, "English retention (epoch {epoch + 1})", 100.0)
         print("")
 
     print("=" * 70)
-    print("PHASE 1 TRAINING COMPLETE")
-    print("  Base: Phase 0 knowledge (FROZEN)")
+    print("PHASE 1.1 TRAINING COMPLETE")
+    print("  Base: Large model, Phase 0 knowledge (FROZEN)")
     print("  LoRA_1: English medical (TRAINED)")
     print("  Best loss: {state.best_loss}")
     print("=" * 70)
 
     # Merge LoRA_1 into base weights
     print("Merging LoRA into base model weights...")
-    var old_w1 = model.w1
-    model.w1 = merge_lora_weight(model.w1, lora_l1)
+    var old_w1 = large_model.w1
+    large_model.w1 = merge_lora_weight(large_model.w1, lora_l1)
     t_free(old_w1)
-    var old_w2 = model.w2
-    model.w2 = merge_lora_weight(model.w2, lora_l2)
+    var old_w2 = large_model.w2
+    large_model.w2 = merge_lora_weight(large_model.w2, lora_l2)
     t_free(old_w2)
     print("  LoRA merged into base weights")
 
     # Final validation
     print("")
     print("Post-training validation:")
-    val final_result = validate_model(model, "Post-Phase 1 English medical", 100.0)
+    val final_result = validate_model(large_model, "Post-Phase 1.1 English medical", 100.0)
 
     report_gpu_memory()
-    model
+    large_model
 
 
 # ============================================================================

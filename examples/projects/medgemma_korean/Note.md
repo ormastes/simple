@@ -14,14 +14,14 @@
 * decide small medgemma can score more than 97% score in validation
  - test english version of med kore exam validation it is over 97%
  - use large if can not pass.
-* **Implementation:** `train_phase1.spl` — evaluates baseline accuracy, skips training if >= 97%. Otherwise adds LoRA_1 and trains. `validation.spl` has `validate_accuracy()` and `check_english_retention()`.
+* **Implementation:** `train_phase1.spl` — 3-tier model selection: (1) evaluate small model (hidden=128), if loss < 0.5 pass; (2) free small, switch to large model (hidden=256), re-run Phase 0, evaluate; (3) if large still fails, add LoRA_1 and train. `shared_logic.spl` has `_selected_hidden_dim` module variable read by all `phaseN()` configs. `model.spl` has `free_model_params()` for GPU cleanup. `validation.spl` has `reset_baseline_loss()`.
 
 
 ## 1.1. if neither small or large can not meet 97%. ✅ IMPLEMENTED
 * add lora1
 * translate train data to english too.
 * train medgemma in eglish with cross entrophy loss.
-* **Implementation:** Handled in `train_phase1.spl` — when accuracy < 97%, automatically adds LoRA_1 and trains. Cross-entropy loss available in `shared_logic.spl` (`compute_ce_loss`).
+* **Implementation:** Tier 3 of `train_phase1.spl` — when both small and large models fail threshold, adds LoRA_1 to the large model and trains. Cross-entropy loss available in `shared_logic.spl` (`compute_ce_loss`).
 
 ## 2. create embedding. ✅ IMPLEMENTED
 * but add two more embedding to it distinguish korean/english.

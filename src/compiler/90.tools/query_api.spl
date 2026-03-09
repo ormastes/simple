@@ -523,65 +523,381 @@ class CompilerQueryContext:
     # --- Signature Help ---
 
     fn signature_help(file_path: text, pos: Position) -> Option<SignatureHelp>:
-        pass_todo
+        # Find the function being called at the cursor position
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+        if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
+            return nil
+
+        # Build parameter info from type signature
+        var params: [ParameterInfo] = []
+        if symbol.type_info.?:
+            val sig = symbol.type_info.unwrap()
+            # Parse parameter names from type signature (e.g., "fn(x: i64, y: text) -> bool")
+            params.push(ParameterInfo(label: sig, documentation: nil))
+
+        val sig_info = SignatureInfo(
+            label: symbol.name + (if symbol.type_info.?: ": " + symbol.type_info.unwrap() else: ""),
+            documentation: symbol.doc_comment,
+            parameters: params
+        )
+
+        Some(SignatureHelp(
+            signatures: [sig_info],
+            active_signature: 0,
+            active_parameter: 0
+        ))
 
     # --- Rename ---
 
     fn prepare_rename(file_path: text, pos: Position) -> Option<Range>:
-        pass_todo
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+        # Return the range of the symbol name at the definition
+        Some(Range(
+            start: symbol.location.start,
+            end: Position(
+                line: symbol.location.start.line,
+                column: symbol.location.start.column + symbol.name.len()
+            )
+        ))
 
     me rename(file_path: text, pos: Position, new_name: text) -> Option<WorkspaceEdit>:
-        pass_todo
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+        val refs = self.find_references(file_path, symbol)
+
+        var edits: [RenameEdit] = []
+        for loc in refs:
+            edits.push(RenameEdit(
+                file: loc.file,
+                range: Range(start: loc.start, end: loc.end),
+                new_text: new_name
+            ))
+
+        Some(WorkspaceEdit(edits: edits))
 
     # --- Code Actions ---
 
     fn code_actions(file_path: text, range_val: Range) -> [CodeAction]:
-        pass_todo
+        var actions: [CodeAction] = []
+
+        # Check diagnostics in range to offer quick fixes
+        val diagnostics = self.get_diagnostics(file_path)
+        for diag in diagnostics:
+            if diag.range.start.line >= range_val.start.line and diag.range.end.line <= range_val.end.line:
+                # Offer "add import" action for "not found" errors
+                if diag.message.contains("not found"):
+                    actions.push(CodeAction(
+                        title: "Add import for missing symbol",
+                        kind: "quickfix",
+                        edits: [],
+                        is_preferred: true,
+                        diagnostics: [diag]
+                    ))
+
+        actions
 
     # --- Call Hierarchy ---
 
     fn call_hierarchy_prepare(file_path: text, pos: Position) -> [CallHierarchyItem]:
-        pass_todo
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return []
+
+        val symbol = symbol_opt.unwrap()
+        if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
+            return []
+
+        [CallHierarchyItem(
+            name: symbol.name,
+            kind: symbol.kind,
+            location: symbol.location,
+            detail: symbol.type_info
+        )]
 
     fn call_hierarchy_incoming(item: CallHierarchyItem) -> [CallHierarchyIncomingCall]:
-        pass_todo
+        # Search all files for call sites of this function
+        val all_files = find_source_files(self.project_root)
+        var incoming: [CallHierarchyIncomingCall] = []
+
+        for file in all_files:
+            val symbol_table_result = self.get_symbol_table(file)
+            if symbol_table_result.ok.?:
+                val table = symbol_table_result.unwrap()
+                val refs = find_symbol_references(table, item.name)
+                for ref_loc in refs:
+                    # Each reference is a potential call site
+                    val caller = CallHierarchyItem(
+                        name: file,
+                        kind: SymbolKind.Function,
+                        location: ref_loc,
+                        detail: nil
+                    )
+                    incoming.push(CallHierarchyIncomingCall(
+                        from_item: caller,
+                        from_ranges: [Range(start: ref_loc.start, end: ref_loc.end)]
+                    ))
+
+        incoming
 
     fn call_hierarchy_outgoing(item: CallHierarchyItem) -> [CallHierarchyOutgoingCall]:
-        pass_todo
+        # Find functions called within this function's body
+        val file_path = item.location.file
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.ok.?:
+            return []
+
+        val table = symbol_table_result.unwrap()
+        val all_symbols = extract_all_symbols(table)
+
+        var outgoing: [CallHierarchyOutgoingCall] = []
+        for sym in all_symbols:
+            if sym.kind == SymbolKind.Function or sym.kind == SymbolKind.Method:
+                val refs = find_symbol_references(table, sym.name)
+                for ref_loc in refs:
+                    # Check if reference is within the item's function body
+                    if (ref_loc.start.line >= item.location.start.line and
+                        ref_loc.end.line <= item.location.end.line):
+                        val callee = CallHierarchyItem(
+                            name: sym.name,
+                            kind: sym.kind,
+                            location: sym.location,
+                            detail: sym.type_info
+                        )
+                        outgoing.push(CallHierarchyOutgoingCall(
+                            to_item: callee,
+                            from_ranges: [Range(start: ref_loc.start, end: ref_loc.end)]
+                        ))
+
+        outgoing
 
     # --- Type Hierarchy ---
 
     fn type_hierarchy_prepare(file_path: text, pos: Position) -> [TypeHierarchyItem]:
-        pass_todo
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return []
+
+        val symbol = symbol_opt.unwrap()
+        match symbol.kind:
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
+                [TypeHierarchyItem(
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    location: symbol.location,
+                    detail: symbol.type_info
+                )]
+            case _:
+                []
 
     fn type_hierarchy_supertypes(item: TypeHierarchyItem) -> [TypeHierarchyItem]:
-        pass_todo
+        # Search for trait implementations (impl Trait for Type)
+        val all_files = find_source_files(self.project_root)
+        var supertypes: [TypeHierarchyItem] = []
+
+        for file in all_files:
+            if io.file_exists(file):
+                val content = io.file_read(file)
+                # Look for "impl TraitName for item.name" patterns
+                if content.contains("impl ") and content.contains(item.name):
+                    val symbol_table_result = self.get_symbol_table(file)
+                    if symbol_table_result.ok.?:
+                        val table = symbol_table_result.unwrap()
+                        val symbols = extract_all_symbols(table)
+                        for sym in symbols:
+                            if sym.kind == SymbolKind.Trait:
+                                supertypes.push(TypeHierarchyItem(
+                                    name: sym.name,
+                                    kind: sym.kind,
+                                    location: sym.location,
+                                    detail: sym.type_info
+                                ))
+
+        supertypes
 
     fn type_hierarchy_subtypes(item: TypeHierarchyItem) -> [TypeHierarchyItem]:
-        pass_todo
+        # Search for types implementing this trait
+        val all_files = find_source_files(self.project_root)
+        var subtypes: [TypeHierarchyItem] = []
+
+        for file in all_files:
+            if io.file_exists(file):
+                val content = io.file_read(file)
+                # Look for "impl item.name for TypeName" patterns
+                if content.contains("impl {item.name}"):
+                    val symbol_table_result = self.get_symbol_table(file)
+                    if symbol_table_result.ok.?:
+                        val table = symbol_table_result.unwrap()
+                        val symbols = extract_all_symbols(table)
+                        for sym in symbols:
+                            if (sym.kind == SymbolKind.Class or
+                                sym.kind == SymbolKind.Struct or
+                                sym.kind == SymbolKind.Enum):
+                                subtypes.push(TypeHierarchyItem(
+                                    name: sym.name,
+                                    kind: sym.kind,
+                                    location: sym.location,
+                                    detail: sym.type_info
+                                ))
+
+        subtypes
 
     # --- Semantic Tokens ---
 
     fn semantic_tokens_full(file_path: text) -> [SemanticToken]:
-        pass_todo
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.ok.?:
+            return []
+
+        val table = symbol_table_result.unwrap()
+        val symbols = extract_all_symbols(table)
+
+        var tokens: [SemanticToken] = []
+        var prev_line: i64 = 0
+        var prev_start: i64 = 0
+
+        for sym in symbols:
+            val token_type = match sym.kind:
+                case SymbolKind.Function | SymbolKind.Method: SemanticTokenType.Function
+                case SymbolKind.Class: SemanticTokenType.Class
+                case SymbolKind.Struct: SemanticTokenType.Struct
+                case SymbolKind.Enum: SemanticTokenType.Enum
+                case SymbolKind.Trait: SemanticTokenType.Type
+                case SymbolKind.Variable: SemanticTokenType.Variable
+                case SymbolKind.Parameter: SemanticTokenType.Parameter
+                case SymbolKind.Field: SemanticTokenType.Property
+                case SymbolKind.EnumVariant: SemanticTokenType.EnumMember
+                case SymbolKind.Module: SemanticTokenType.Namespace
+                case _: SemanticTokenType.Variable
+
+            val delta_line = sym.location.start.line - prev_line
+            val delta_start = if delta_line == 0: sym.location.start.column - prev_start else: sym.location.start.column
+
+            tokens.push(SemanticToken(
+                delta_line: delta_line,
+                delta_start: delta_start,
+                length: sym.name.len(),
+                token_type: token_type,
+                token_modifiers: 0
+            ))
+
+            prev_line = sym.location.start.line
+            prev_start = sym.location.start.column
+
+        tokens
 
     fn semantic_tokens_range(file_path: text, range_val: Range) -> [SemanticToken]:
-        pass_todo
+        val all_tokens = self.semantic_tokens_full(file_path)
+        # Filter tokens within range by reconstructing absolute positions
+        var filtered: [SemanticToken] = []
+        var current_line: i64 = 0
+        var current_start: i64 = 0
+
+        for token in all_tokens:
+            current_line = current_line + token.delta_line
+            current_start = if token.delta_line == 0: current_start + token.delta_start else: token.delta_start
+
+            if (current_line >= range_val.start.line and
+                current_line <= range_val.end.line):
+                filtered.push(token)
+
+        filtered
 
     # --- Inlay Hints ---
 
     fn inlay_hints(file_path: text, range_val: Range) -> [InlayHint]:
-        pass_todo
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.ok.?:
+            return []
+
+        val table = symbol_table_result.unwrap()
+        val symbols = extract_all_symbols(table)
+
+        var hints: [InlayHint] = []
+        for sym in symbols:
+            # Only emit type hints for variables with inferred types
+            if sym.kind == SymbolKind.Variable and sym.type_info.?:
+                val line = sym.location.start.line
+                if line >= range_val.start.line and line <= range_val.end.line:
+                    hints.push(InlayHint(
+                        position: Position(
+                            line: line,
+                            column: sym.location.end.column
+                        ),
+                        label: ": " + sym.type_info.unwrap(),
+                        kind: InlayHintKind.TypeHint
+                    ))
+
+        hints
 
     # --- Selection Range ---
 
     fn selection_ranges(file_path: text, positions: [Position]) -> [SelectionRangeEntry]:
-        pass_todo
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            return []
+
+        var entries: [SelectionRangeEntry] = []
+
+        for pos in positions:
+            # Find the innermost symbol at this position and build hierarchy
+            val symbol_opt = self.symbol_at(file_path, pos)
+            if symbol_opt.?:
+                val sym = symbol_opt.unwrap()
+                # Innermost range: the symbol itself
+                val inner_idx = entries.len()
+                entries.push(SelectionRangeEntry(
+                    range: Range(start: sym.location.start, end: sym.location.end),
+                    parent_index: -1
+                ))
+            else:
+                # No symbol found — return the full line range
+                entries.push(SelectionRangeEntry(
+                    range: Range(
+                        start: Position(line: pos.line, column: 0),
+                        end: Position(line: pos.line + 1, column: 0)
+                    ),
+                    parent_index: -1
+                ))
+
+        entries
 
     # --- Document Formatting ---
 
     fn format_document(file_path: text) -> [LspTextEdit]:
-        pass_todo
+        # Read file and apply basic formatting: normalize indentation and trailing whitespace
+        if not io.file_exists(file_path):
+            return []
+
+        val content = io.file_read(file_path)
+        val lines = content.split("\n")
+        var edits: [LspTextEdit] = []
+
+        var line_num: i64 = 0
+        for line in lines:
+            # Trim trailing whitespace
+            val trimmed = line.trim_end()
+            if trimmed != line:
+                edits.push(LspTextEdit(
+                    range: Range(
+                        start: Position(line: line_num, column: trimmed.len()),
+                        end: Position(line: line_num, column: line.len())
+                    ),
+                    new_text: ""
+                ))
+            line_num = line_num + 1
+
+        edits
 
 # --- Helper Functions ---
 

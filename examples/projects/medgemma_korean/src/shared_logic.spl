@@ -15,6 +15,7 @@ use src.torch_dyn.{
     t_add, t_sub, t_mul, t_mul_scalar, t_neg,
     t_log_softmax, t_gather,
     t_sum_dim, t_mean, t_mean_dim, t_argmax,
+    t_matmul,
     t_cuda, t_free, t_clone,
     autograd_backward, autograd_no_grad_begin, autograd_no_grad_end,
     cuda_memory_allocated, cuda_max_memory_allocated, cuda_empty_cache
@@ -25,6 +26,20 @@ export make_batch_on_cuda, make_randn_batch_on_cuda
 export compute_ce_loss, compute_mse_loss
 export report_gpu_memory, report_training_step, report_epoch_end
 export lr_linear_warmup
+export set_selected_hidden_dim, selected_hidden_dim
+
+# ============================================================================
+# Model Size Selection (Small vs Large)
+# ============================================================================
+
+var _selected_hidden_dim: i64 = 128
+
+fn set_selected_hidden_dim(dim: i64):
+    _selected_hidden_dim = dim
+    print("Selected hidden_dim: {dim}")
+
+fn selected_hidden_dim() -> i64:
+    _selected_hidden_dim
 
 # ============================================================================
 # Training Configuration
@@ -47,7 +62,7 @@ class TrainConfig:
     static fn default_config() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 20,
@@ -63,7 +78,7 @@ class TrainConfig:
     static fn phase0() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 20,
@@ -79,7 +94,7 @@ class TrainConfig:
     static fn phase1() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 20,
@@ -95,7 +110,7 @@ class TrainConfig:
     static fn phase3() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 20,
@@ -111,7 +126,7 @@ class TrainConfig:
     static fn phase4() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 25,
@@ -127,7 +142,7 @@ class TrainConfig:
     static fn phase5() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 25,
@@ -143,7 +158,7 @@ class TrainConfig:
     static fn phase6() -> TrainConfig:
         TrainConfig(
             input_dim: 64,
-            hidden_dim: 128,
+            hidden_dim: _selected_hidden_dim,
             output_dim: 32,
             batch_size: 16,
             num_batches: 30,
@@ -210,34 +225,57 @@ class TrainState:
 
 
 # ============================================================================
-# Batch Creation
+# Batch Creation (correlated: target = x @ W_true + noise * 0.1)
 # ============================================================================
 
-# Create a pair of random tensors on CUDA: [input, target]
+# Module-level projection matrix for correlated synthetic data
+var _w_true: i64 = 0
+
+fn _ensure_w_true(input_dim: i64, target_dim: i64):
+    if _w_true == 0:
+        val w_cpu = tensor_randn_2d(input_dim, target_dim)
+        _w_true = t_cuda(w_cpu, 0)
+        t_free(w_cpu)
+
+# Create a pair of correlated tensors on CUDA: [input, target]
+# target = x @ W_true + noise * 0.1 (learnable relationship)
 fn make_randn_batch_on_cuda(batch_size: i64, input_dim: i64, target_dim: i64) -> [i64]:
+    _ensure_w_true(input_dim, target_dim)
     val x_cpu = tensor_randn_2d(batch_size, input_dim)
     val x = t_cuda(x_cpu, 0)
     t_free(x_cpu)
-    val tgt_cpu = tensor_randn_2d(batch_size, target_dim)
-    val tgt = t_cuda(tgt_cpu, 0)
-    t_free(tgt_cpu)
+    # target = x @ W_true + noise * 0.1
+    val clean_tgt = t_matmul(x, _w_true)
+    val noise_cpu = tensor_randn_2d(batch_size, target_dim)
+    val noise = t_cuda(noise_cpu, 0)
+    t_free(noise_cpu)
+    val scaled_noise = t_mul_scalar(noise, 0.1)
+    t_free(noise)
+    val tgt = t_add(clean_tgt, scaled_noise)
+    t_free(clean_tgt)
+    t_free(scaled_noise)
     [x, tgt]
 
-# Create tensors on CUDA using random data (dynamic FFI cannot pass arrays).
-# Real data loading from f64 arrays requires compiled mode with static FFI.
-# This generates synthetic random tensors with the requested shapes instead.
+# Create tensors on CUDA using correlated synthetic data.
 fn make_batch_on_cuda(input_data: [f64], input_dims: [i64], target_data: [f64], target_dims: [i64]) -> [i64]:
-    # Extract 2D shape from dims arrays (batch_size, feature_dim)
     val in_d0 = input_dims[0]
     val in_d1 = input_dims[1]
     val tgt_d0 = target_dims[0]
     val tgt_d1 = target_dims[1]
+    _ensure_w_true(in_d1, tgt_d1)
     val x_cpu = tensor_randn_2d(in_d0, in_d1)
     val x = t_cuda(x_cpu, 0)
     t_free(x_cpu)
-    val tgt_cpu = tensor_randn_2d(tgt_d0, tgt_d1)
-    val tgt = t_cuda(tgt_cpu, 0)
-    t_free(tgt_cpu)
+    # target = x @ W_true + noise * 0.1
+    val clean_tgt = t_matmul(x, _w_true)
+    val noise_cpu = tensor_randn_2d(tgt_d0, tgt_d1)
+    val noise = t_cuda(noise_cpu, 0)
+    t_free(noise_cpu)
+    val scaled_noise = t_mul_scalar(noise, 0.1)
+    t_free(noise)
+    val tgt = t_add(clean_tgt, scaled_noise)
+    t_free(clean_tgt)
+    t_free(scaled_noise)
     [x, tgt]
 
 
@@ -265,7 +303,7 @@ fn compute_mse_loss(pred: i64, target: i64) -> i64:
     val diff = t_sub(pred, target)
     val sq = t_mul(diff, diff)
     t_free(diff)
-    val per_sample = t_sum_dim(sq, 1, false)
+    val per_sample = t_mean_dim(sq, 1, false)
     t_free(sq)
     val loss = t_mean_dim(per_sample, 0, false)
     t_free(per_sample)

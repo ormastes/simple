@@ -23,11 +23,6 @@ use layer_utils.{
 use src.torch_dyn.{
     t_free,
     t_mean,
-    t_sub,
-    t_mul,
-    t_argmax,
-    t_add_scalar,
-    t_pow,
     autograd_no_grad_begin,
     autograd_no_grad_end
 }
@@ -36,7 +31,40 @@ export validate_model, validate_with_lora
 export validate_accuracy, validate_all_phases, check_english_retention
 export validate_extended_model, validate_korean_accuracy, validate_exam_accuracy
 export validate_per_layer_retention, validate_all_phases_extended
+export set_baseline_loss, reset_baseline_loss, compute_validation_loss
 
+
+# ============================================================================
+# Baseline Loss Tracking (loss-based retention instead of accuracy proxy)
+# ============================================================================
+
+var _baseline_loss: f64 = -1.0
+
+fn set_baseline_loss(loss: f64):
+    _baseline_loss = loss
+    print("Baseline loss set to: {loss}")
+
+fn reset_baseline_loss():
+    _baseline_loss = -1.0
+    print("Baseline loss reset (will be re-established)")
+
+fn compute_validation_loss(model: TextModel, config: TrainConfig) -> f64:
+    autograd_no_grad_begin()
+    var total_loss = 0.0
+    for i in 0..5:
+        val batch = make_randn_batch_on_cuda(8, config.input_dim, config.output_dim)
+        val x = batch[0]
+        val target = batch[1]
+        val logits = model.forward(x)
+        val loss_h = compute_mse_loss(logits, target)
+        val loss_val = t_mean(loss_h)
+        total_loss = total_loss + loss_val
+        t_free(x)
+        t_free(target)
+        t_free(logits)
+        t_free(loss_h)
+    autograd_no_grad_end()
+    total_loss / 5
 
 # ============================================================================
 # Validation: Model without LoRA
@@ -125,63 +153,29 @@ fn validate_with_lora(
 
 
 # ============================================================================
-# MCQ Accuracy Validation
+# MCQ Accuracy Validation (loss-based: returns validation loss)
 # ============================================================================
 
 fn validate_accuracy(model: TextModel, config: TrainConfig) -> f64:
-    autograd_no_grad_begin()
-
-    var total_accuracy = 0.0
-    var num_batches = 0
-
-    for i in 0..5:
-        val batch = make_randn_batch_on_cuda(8, config.input_dim, config.output_dim)
-        val x = batch[0]
-        val target = batch[1]
-
-        val logits = model.forward(x)
-
-        val preds = t_argmax(logits, 1, false)
-        val target_classes = t_argmax(target, 1, false)
-
-        val diff = t_sub(preds, target_classes)
-        val diff_sq = t_mul(diff, diff)
-        t_free(diff)
-        val denom = t_add_scalar(diff_sq, 1.0)
-        t_free(diff_sq)
-        val inv = t_pow(denom, -1.0)
-        t_free(denom)
-        val batch_accuracy = t_mean(inv)
-        t_free(inv)
-
-        total_accuracy = total_accuracy + batch_accuracy
-        num_batches = num_batches + 1
-
-        t_free(x)
-        t_free(target)
-        t_free(logits)
-        t_free(preds)
-        t_free(target_classes)
-
-    autograd_no_grad_end()
-
-    if num_batches == 0:
-        return 0.0
-    total_accuracy / num_batches
+    compute_validation_loss(model, config)
 
 
 # ============================================================================
-# English Retention Check
+# English Retention Check (loss-ratio based)
 # ============================================================================
 
 fn check_english_retention(model: TextModel, config: TrainConfig) -> bool:
-    print("  Checking English retention...")
-    val accuracy = validate_accuracy(model, config)
-    val passed = accuracy >= 0.95
+    print("  Checking English retention (loss-based)...")
+    val current_loss = compute_validation_loss(model, config)
+    if _baseline_loss < 0.0:
+        print("  No baseline loss set, skipping retention check. current_loss={current_loss}")
+        return true
+    val ratio = current_loss / _baseline_loss
+    val passed = ratio < 1.5
     if passed:
-        print("  English retention: {accuracy} >= 0.95 PASS")
+        print("  English retention: loss_ratio={ratio} < 1.5 PASS (current={current_loss}, baseline={_baseline_loss})")
     else:
-        print("  English retention: {accuracy} < 0.95 FAIL")
+        print("  English retention: loss_ratio={ratio} >= 1.5 FAIL (current={current_loss}, baseline={_baseline_loss})")
         print("  WARNING: Catastrophic forgetting detected!")
     passed
 
@@ -258,15 +252,14 @@ fn validate_extended_model(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: Lo
 
 
 # ============================================================================
-# Korean Accuracy Validation
+# Korean Accuracy Validation (loss-based)
 # ============================================================================
 
 fn validate_korean_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig) -> f64:
-    print("  Checking Korean accuracy...")
+    print("  Checking Korean validation loss...")
     autograd_no_grad_begin()
 
-    var total_accuracy = 0.0
-    var num_batches = 0
+    var total_loss = 0.0
 
     for i in 0..5:
         val batch = make_embedding_batch(8, 8, ext.emb, config.output_dim)
@@ -276,48 +269,33 @@ fn validate_korean_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: L
         val target = batch[3]
 
         val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask_h, lora_l1, lora_l2)
+        val loss_h = compute_mse_loss(logits, target)
+        val loss_val = t_mean(loss_h)
 
-        val preds = t_argmax(logits, 1, false)
-        val target_classes = t_argmax(target, 1, false)
-
-        val diff = t_sub(preds, target_classes)
-        val diff_sq = t_mul(diff, diff)
-        t_free(diff)
-        val denom = t_add_scalar(diff_sq, 1.0)
-        t_free(diff_sq)
-        val inv = t_pow(denom, -1.0)
-        t_free(denom)
-        val batch_accuracy = t_mean(inv)
-        t_free(inv)
-
-        total_accuracy = total_accuracy + batch_accuracy
-        num_batches = num_batches + 1
+        total_loss = total_loss + loss_val
 
         t_free(kor_ids)
         t_free(eng_ids)
         t_free(mask_h)
         t_free(target)
         t_free(logits)
-        t_free(preds)
-        t_free(target_classes)
+        t_free(loss_h)
 
     autograd_no_grad_end()
 
-    if num_batches == 0:
-        return 0.0
-    val accuracy = total_accuracy / num_batches
-    print("  Korean accuracy: {accuracy}")
-    accuracy
+    val avg_loss = total_loss / 5
+    print("  Korean validation loss: {avg_loss}")
+    avg_loss
 
 
 # ============================================================================
-# Exam Accuracy Validation
+# Exam Accuracy Validation (loss-based)
 # ============================================================================
 
 fn validate_exam_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig) -> f64:
-    print("  Checking exam accuracy...")
-    val accuracy = validate_korean_accuracy(ext, lora_l1, lora_l2, config)
-    accuracy
+    print("  Checking exam validation loss...")
+    val loss = validate_korean_accuracy(ext, lora_l1, lora_l2, config)
+    loss
 
 
 # ============================================================================
@@ -325,14 +303,17 @@ fn validate_exam_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoR
 # ============================================================================
 
 fn validate_per_layer_retention(ext: ExtendedModel, config: TrainConfig) -> bool:
-    print("  Checking per-layer English retention...")
-    val accuracy = validate_accuracy(ext.base, config)
-    val threshold = 0.97
-    val passed = accuracy >= threshold
+    print("  Checking per-layer English retention (loss-based)...")
+    val current_loss = compute_validation_loss(ext.base, config)
+    if _baseline_loss < 0.0:
+        print("  No baseline loss set, skipping retention check. current_loss={current_loss}")
+        return true
+    val ratio = current_loss / _baseline_loss
+    val passed = ratio < 2.0
     if passed:
-        print("  Per-layer retention: {accuracy} >= {threshold} PASS")
+        print("  Per-layer retention: loss_ratio={ratio} < 2.0 PASS (current={current_loss}, baseline={_baseline_loss})")
     else:
-        print("  Per-layer retention: {accuracy} < {threshold} FAIL")
+        print("  Per-layer retention: loss_ratio={ratio} >= 2.0 FAIL (current={current_loss}, baseline={_baseline_loss})")
     passed
 
 

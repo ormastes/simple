@@ -324,7 +324,37 @@ fn run_phase6(ext_model: ExtendedModel) -> ExtendedModel:
         val exam_acc = validate_exam_accuracy(ext_model, lora_l1, lora_l2, config)
         val retained = validate_per_layer_retention(ext_model, config)
         if not retained:
-            print("  WARNING: English retention dropping in Sub-C")
+            print("  WARNING: English retention dropping in Sub-C! Running recovery...")
+            val half_lr_c = config.learning_rate * 0.5
+            for _ri in 0..5:
+                val rbatch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
+                val rkor = rbatch[0]
+                val reng = rbatch[1]
+                val rmask = rbatch[2]
+                val rtgt = rbatch[3]
+                val rlogits = extended_lora_forward(ext_model, rkor, reng, rmask, lora_l1, lora_l2)
+                val rloss = compute_mse_loss(rlogits, rtgt)
+                autograd_backward(rloss)
+                lora_l1.sgd_step(half_lr_c)
+                lora_l2.sgd_step(half_lr_c)
+                autograd_no_grad_begin()
+                var old_kor_rc = ext_model.emb.kor_weight
+                ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, half_lr_c)
+                t_free(old_kor_rc)
+                var old_eng_rc = ext_model.emb.eng_weight
+                ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, half_lr_c)
+                t_free(old_eng_rc)
+                autograd_no_grad_end()
+                autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+                autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+                extended_zero_grads(ext_model, lora_l1, lora_l2)
+                t_free(rkor)
+                t_free(reng)
+                t_free(rmask)
+                t_free(rtgt)
+                t_free(rlogits)
+                t_free(rloss)
+            print("  Sub-C recovery complete (5 batches at half lr)")
         print("")
 
     print("  Sub-Phase C complete. Best loss: {state_c.best_loss}")

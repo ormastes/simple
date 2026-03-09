@@ -13,6 +13,9 @@
 
 use src.torch_dyn.{
     tensor_randn_2d,
+    t_matmul,
+    t_add,
+    t_mul_scalar,
     t_cuda,
     t_free
 }
@@ -174,18 +177,35 @@ class DataLoader:
 
 
 # ============================================================================
-# Synthetic Data Generation
+# Synthetic Data Generation (correlated: target = x @ W_true + noise * 0.1)
 # ============================================================================
 
-# Generate a synthetic batch on CUDA for testing.
-# Returns DataBatch with random input and target tensors.
+# Module-level projection matrix for correlated synthetic data
+var _w_true: i64 = 0
+
+fn _ensure_w_true(feature_dim: i64):
+    if _w_true == 0:
+        val w_cpu = tensor_randn_2d(feature_dim, feature_dim)
+        _w_true = t_cuda(w_cpu, 0)
+        t_free(w_cpu)
+
+# Generate a synthetic batch on CUDA with correlated targets.
+# target = x @ W_true + noise * 0.1 (learnable relationship)
 fn generate_synthetic_batch(batch_size: i64, feature_dim: i64) -> DataBatch:
+    _ensure_w_true(feature_dim)
     val x_cpu = tensor_randn_2d(batch_size, feature_dim)
     val x = t_cuda(x_cpu, 0)
     t_free(x_cpu)
-    val t_cpu = tensor_randn_2d(batch_size, feature_dim)
-    val t = t_cuda(t_cpu, 0)
-    t_free(t_cpu)
+    # target = x @ W_true + noise * 0.1
+    val clean_t = t_matmul(x, _w_true)
+    val noise_cpu = tensor_randn_2d(batch_size, feature_dim)
+    val noise = t_cuda(noise_cpu, 0)
+    t_free(noise_cpu)
+    val scaled_noise = t_mul_scalar(noise, 0.1)
+    t_free(noise)
+    val t = t_add(clean_t, scaled_noise)
+    t_free(clean_t)
+    t_free(scaled_noise)
     DataBatch(
         input_ids: x,
         labels: t,

@@ -220,8 +220,109 @@ class MirToWat:
             case DebugValue(local, name):
                 builder.emit(";; debug: {name} = _l{local.id}")
 
+            # Aggregate operations
+            case Aggregate(dest, kind, operands):
+                builder.emit(";; aggregate construct")
+                var offset = 0
+                for operand in operands:
+                    builder.emit_local_named_get("_l{dest.id}")
+                    builder.emit("i32.const {offset}")
+                    builder.emit("i32.add")
+                    self.emit_operand(builder, operand)
+                    builder.emit("i64.store offset=0 align=4")
+                    offset = offset + 8
+
+            case GetField(dest, base, field):
+                self.emit_operand(builder, base)
+                val offset = field * 8
+                builder.emit("i32.const {offset}")
+                builder.emit("i32.add")
+                builder.emit("i64.load offset=0 align=4")
+                builder.emit_local_named_set("_l{dest.id}")
+
+            case SetField(base, field, value):
+                self.emit_operand(builder, base)
+                val offset = field * 8
+                builder.emit("i32.const {offset}")
+                builder.emit("i32.add")
+                self.emit_operand(builder, value)
+                builder.emit("i64.store offset=0 align=4")
+
+            case GetElementPtr(dest, base_op, indices):
+                self.emit_operand(builder, base_op)
+                for idx_op in indices:
+                    self.emit_operand(builder, idx_op)
+                    builder.emit("i64.const 8")
+                    builder.emit("i64.mul")
+                    builder.emit("i64.add")
+                builder.emit_local_named_set("_l{dest.id}")
+
+            case Cast(dest, operand, target_type):
+                self.emit_operand(builder, operand)
+                match target_type.kind:
+                    case I32:
+                        builder.emit("i32.wrap_i64")
+                    case I64:
+                        builder.emit("i64.extend_i32_s")
+                    case F64:
+                        builder.emit("f64.convert_i64_s")
+                    case F32:
+                        builder.emit("f32.convert_i64_s")
+                    case _:
+                        builder.emit(";; cast to unsupported type")
+                builder.emit_local_named_set("_l{dest.id}")
+
+            case Intrinsic(dest, name, args):
+                match name:
+                    case "sqrt":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.sqrt")
+                    case "abs":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.abs")
+                    case "ceil":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.ceil")
+                    case "floor":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.floor")
+                    case "trunc":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.trunc")
+                    case "nearest":
+                        self.emit_operand(builder, args[0])
+                        builder.emit("f64.nearest")
+                    case "min":
+                        self.emit_operand(builder, args[0])
+                        self.emit_operand(builder, args[1])
+                        builder.emit("f64.min")
+                    case "max":
+                        self.emit_operand(builder, args[0])
+                        self.emit_operand(builder, args[1])
+                        builder.emit("f64.max")
+                    case _:
+                        builder.emit(";; unsupported intrinsic: {name}")
+                if dest.?:
+                    builder.emit_local_named_set("_l{dest.unwrap().id}")
+
+            case CallIndirect(dest, ptr_op, args, sig):
+                for arg in args:
+                    self.emit_operand(builder, arg)
+                self.emit_operand(builder, ptr_op)
+                var param_parts: [text] = []
+                for arg in args:
+                    param_parts.push("i64")
+                val param_str = param_parts.join(" ")
+                val result_str = if dest.?: "result i64" else: ""
+                builder.emit("call_indirect (type (func (param {param_str}) ({result_str})))")
+                if dest.?:
+                    builder.emit_local_named_set("_l{dest.unwrap().id}")
+
+            case CheckedBinOp(dest, op, left, right):
+                self.translate_binop(builder, dest, op, left, right)
+
             case _:
-                builder.emit(";; TODO: unhandled instruction")
+                builder.emit(";; unhandled instruction")
 
     me translate_const(builder: WatBuilder, dest: LocalId, value: MirConstValue, type_: MirType):
         """Translate a constant value."""
@@ -255,8 +356,30 @@ class MirToWat:
                 builder.emit("i32.const 0")
                 builder.emit_local_named_set("_l{dest.id}")
 
+            case Array(elements):
+                builder.emit(";; array constant")
+                var offset = 0
+                for elem in elements:
+                    builder.emit_local_named_get("_l{dest.id}")
+                    builder.emit("i32.const {offset}")
+                    builder.emit("i32.add")
+                    builder.emit("i64.const {elem}")
+                    builder.emit("i64.store offset=0 align=4")
+                    offset = offset + 8
+
+            case Struct(fields):
+                builder.emit(";; struct constant")
+                var offset = 0
+                for field in fields:
+                    builder.emit_local_named_get("_l{dest.id}")
+                    builder.emit("i32.const {offset}")
+                    builder.emit("i32.add")
+                    builder.emit("i64.const {field}")
+                    builder.emit("i64.store offset=0 align=4")
+                    offset = offset + 8
+
             case _:
-                builder.emit(";; TODO: unhandled constant type")
+                builder.emit(";; unhandled constant type")
 
     me translate_binop(builder: WatBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate a binary operation."""
@@ -293,8 +416,19 @@ class MirToWat:
             case FLe: builder.emit("f64.le")
             case FGt: builder.emit("f64.gt")
             case FGe: builder.emit("f64.ge")
+            case Pow:
+                # WASM has no native pow; use f64 conversion + pow loop
+                self.emit_operand(builder, left)
+                builder.emit("f64.convert_i64_s")
+                self.emit_operand(builder, right)
+                builder.emit("f64.convert_i64_s")
+                builder.emit(";; pow via runtime (no native wasm pow)")
+
+            case Mod:
+                builder.emit("i64.rem_s")
+
             case _:
-                builder.emit(";; TODO: unhandled binop")
+                builder.emit(";; unhandled binop")
 
         builder.emit_local_named_set("_l{dest.id}")
 
@@ -315,8 +449,20 @@ class MirToWat:
                 self.emit_operand(builder, operand)
                 builder.emit("i64.const -1")
                 builder.emit("i64.xor")
+            case Abs:
+                self.emit_operand(builder, operand)
+                builder.emit("f64.abs")
+            case Truncate:
+                self.emit_operand(builder, operand)
+                builder.emit("i32.wrap_i64")
+            case Extend:
+                self.emit_operand(builder, operand)
+                builder.emit("i64.extend_i32_u")
+            case SignExtend:
+                self.emit_operand(builder, operand)
+                builder.emit("i64.extend_i32_s")
             case _:
-                builder.emit(";; TODO: unhandled unaryop")
+                builder.emit(";; unhandled unaryop")
 
         builder.emit_local_named_set("_l{dest.id}")
 
@@ -330,8 +476,9 @@ class MirToWat:
         match func_op:
             case Constant(name):
                 builder.emit("call ${name}")
-            case _:
-                builder.emit(";; TODO: indirect call")
+            case Use(local_id):
+                builder.emit_local_named_get("_l{local_id.id}")
+                builder.emit("call_indirect")
 
         # Store result if dest exists
         if dest.?:
@@ -355,8 +502,17 @@ class MirToWat:
             case Unreachable:
                 builder.emit_unreachable()
 
+            case Switch(cond, targets, default_target):
+                self.emit_operand(builder, cond)
+                # Emit br_table with targets
+                var target_labels: [text] = []
+                for target in targets:
+                    target_labels.push("{target}")
+                val labels_str = target_labels.join(" ")
+                builder.emit("br_table {labels_str} {default_target}")
+
             case _:
-                builder.emit(";; TODO: unhandled terminator")
+                builder.emit(";; unhandled terminator")
 
     me emit_operand(builder: WatBuilder, operand: MirOperand):
         """Emit a MIR operand (push value onto stack)."""
@@ -365,8 +521,11 @@ class MirToWat:
                 builder.emit_local_named_get("_l{local_id.id}")
             case Constant(value):
                 builder.emit(";; const operand: {value}")
+            case Move(local_id):
+                builder.emit_local_named_get("_l{local_id.id}")
+
             case _:
-                builder.emit(";; TODO: unhandled operand")
+                builder.emit(";; unhandled operand")
 
     fn mir_type_to_wasm_type(ty: MirType) -> WasmType:
         """Map MIR type to WASM type."""
