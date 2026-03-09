@@ -206,6 +206,9 @@ val LSR_TRANSMITTER_EMPTY: u8 = 0x40 # Transmitter empty
 fn uart_init(base_addr: u32, baudrate: u32):
     """Initialize UART peripheral.
 
+    Configures a 16550-style UART for 8N1 with FIFO enabled.
+    Assumes a 115200 Hz input clock for divisor calculation.
+
     Args:
         base_addr: UART peripheral base address
         baudrate: Baud rate (e.g., 9600, 115200)
@@ -214,10 +217,26 @@ fn uart_init(base_addr: u32, baudrate: u32):
         # STM32F4 USART1 at 0x40011000
         uart_init(0x40011000, 115200)
     """
-    # TODO: Calculate divisor from baudrate and clock frequency
-    # TODO: Configure line control register (8N1)
-    # TODO: Enable FIFO
-    pass_do_nothing
+    # Calculate divisor: clock_freq / baudrate (assume 115200 base clock)
+    val divisor: u32 = 115200 / baudrate
+
+    # Set DLAB bit (bit 7) in LCR to access divisor latch registers
+    val lcr_val = mem_read_u8(base_addr + UART_LCR)
+    mem_write_u8(base_addr + UART_LCR, lcr_val | 0x80)
+
+    # Write divisor low byte to RBR offset (DLL when DLAB=1)
+    val divisor_low: u8 = (divisor & 0xFF) as u8
+    mem_write_u8(base_addr + UART_RBR, divisor_low)
+
+    # Write divisor high byte to IER offset (DLM when DLAB=1)
+    val divisor_high: u8 = ((divisor >> 8) & 0xFF) as u8
+    mem_write_u8(base_addr + UART_IER, divisor_high)
+
+    # Clear DLAB and set 8N1: 8 data bits, no parity, 1 stop bit (LCR = 0x03)
+    mem_write_u8(base_addr + UART_LCR, 0x03)
+
+    # Enable FIFO and clear both RX/TX FIFOs (FCR = 0x07)
+    mem_write_u8(base_addr + UART_FCR, 0x07)
 
 fn uart_write_byte(base_addr: u32, byte: u8):
     """Write single byte to UART.
@@ -297,6 +316,9 @@ val TIMER_CR1: u32 = 0x00     # Control register 1
 fn timer_init(base_addr: u32, frequency: u32):
     """Initialize hardware timer.
 
+    Configures prescaler from a 1 MHz system clock, sets auto-reload
+    to maximum range, and enables the timer.
+
     Args:
         base_addr: Timer peripheral base address
         frequency: Desired timer frequency in Hz
@@ -305,10 +327,16 @@ fn timer_init(base_addr: u32, frequency: u32):
         # STM32 TIM2 at 0x40000000, 1MHz
         timer_init(0x40000000, 1000000)
     """
-    # TODO: Calculate prescaler from system clock
-    # TODO: Configure auto-reload value
-    # TODO: Enable timer
-    pass_do_nothing
+    # Calculate prescaler: assumes 1 MHz system clock
+    val prescaler: u32 = (1000000 / frequency) - 1
+    mem_write_u32(base_addr + TIMER_PSC, prescaler)
+
+    # Set auto-reload to maximum range
+    mem_write_u32(base_addr + TIMER_ARR, 0xFFFFFFFF)
+
+    # Enable timer by setting bit 0 in CR1
+    val cr1 = mem_read_u32(base_addr + TIMER_CR1)
+    mem_write_u32(base_addr + TIMER_CR1, cr1 | 0x01)
 
 fn timer_read(base_addr: u32) -> u32:
     """Read current timer counter value.
@@ -321,26 +349,40 @@ fn timer_read(base_addr: u32) -> u32:
 fn timer_delay_ms(base_addr: u32, milliseconds: u32):
     """Delay for specified milliseconds using timer.
 
-    Blocking delay using timer counter.
+    Blocking busy-wait delay using timer counter.
+    Assumes 1 MHz tick rate after prescaler (1 tick = 1 us).
 
     Args:
         base_addr: Timer peripheral base address
         milliseconds: Delay duration in milliseconds
     """
-    # TODO: Calculate ticks from frequency
-    # TODO: Busy-wait loop reading timer
-    pass_do_nothing
+    val start = mem_read_u32(base_addr + TIMER_CNT)
+    # 1 ms = 1000 ticks at 1 MHz
+    val target_ticks: u32 = milliseconds * 1000
+    while true:
+        val current = mem_read_u32(base_addr + TIMER_CNT)
+        val elapsed = current - start
+        if elapsed >= target_ticks:
+            break
 
 fn timer_delay_us(base_addr: u32, microseconds: u32):
     """Delay for specified microseconds using timer.
+
+    Blocking busy-wait delay using timer counter.
+    Assumes 1 MHz tick rate after prescaler (1 tick = 1 us).
 
     Args:
         base_addr: Timer peripheral base address
         microseconds: Delay duration in microseconds
     """
-    # TODO: Calculate ticks from frequency
-    # TODO: Busy-wait loop reading timer
-    pass_do_nothing
+    val start = mem_read_u32(base_addr + TIMER_CNT)
+    # At 1 MHz, 1 tick = 1 microsecond
+    val target_ticks: u32 = microseconds
+    while true:
+        val current = mem_read_u32(base_addr + TIMER_CNT)
+        val elapsed = current - start
+        if elapsed >= target_ticks:
+            break
 
 # ============================================================================
 # Debug Output Helpers
@@ -349,11 +391,9 @@ fn timer_delay_us(base_addr: u32, microseconds: u32):
 fn debug_putc(c: u8):
     """Write single character to debug output.
 
-    Uses semihosting if available, otherwise UART.
+    Uses semihosting SYS_WRITEC to write a single character.
     """
-    # TODO: Check if semihosting is available
-    # TODO: Fall back to UART if not
-    pass_do_nothing
+    semi_host_call(SYS_WRITEC, c as u32)
 
 fn debug_puts(message: text):
     """Write string to debug output.
@@ -362,13 +402,80 @@ fn debug_puts(message: text):
     """
     semi_write_string(message)
 
+fn debug_printf_u32_to_dec(value: u32) -> text:
+    """Convert u32 to decimal string for debug_printf."""
+    if value == 0:
+        return "0"
+    var result = ""
+    var remaining = value
+    while remaining > 0:
+        val digit = remaining % 10
+        val hex_chars = "0123456789"
+        result = "{hex_chars[digit]}" + result
+        remaining = remaining / 10
+    result
+
+fn debug_printf_u32_to_hex(value: u32) -> text:
+    """Convert u32 to hexadecimal string for debug_printf."""
+    if value == 0:
+        return "0"
+    var result = ""
+    var remaining = value
+    while remaining > 0:
+        val nibble = remaining % 16
+        val hex_chars = "0123456789ABCDEF"
+        result = "{hex_chars[nibble]}" + result
+        remaining = remaining / 16
+    result
+
 fn debug_printf(format: text, args: [u32]):
     """Formatted debug output (simple printf).
 
     Supports: %d (decimal), %x (hex), %s (string), %c (char)
+
+    Args:
+        format: Format string with % specifiers
+        args: Array of u32 arguments consumed in order
     """
-    # TODO: Parse format string and convert arguments
-    pass_do_nothing
+    val fmt_bytes = format.bytes()
+    val fmt_len = fmt_bytes.len()
+    var i = 0
+    var arg_idx = 0
+    while i < fmt_len:
+        val ch = fmt_bytes[i]
+        if ch == 0x25:
+            # '%' character — check next char for specifier
+            i = i + 1
+            if i < fmt_len:
+                val spec = fmt_bytes[i]
+                if spec == 0x64:
+                    # %d — decimal
+                    if arg_idx < args.len():
+                        semi_write_string(debug_printf_u32_to_dec(args[arg_idx]))
+                        arg_idx = arg_idx + 1
+                elif spec == 0x78:
+                    # %x — hexadecimal
+                    if arg_idx < args.len():
+                        semi_write_string(debug_printf_u32_to_hex(args[arg_idx]))
+                        arg_idx = arg_idx + 1
+                elif spec == 0x73:
+                    # %s — treat arg as string address, output placeholder
+                    if arg_idx < args.len():
+                        semi_write_string("<str@" + debug_printf_u32_to_hex(args[arg_idx]) + ">")
+                        arg_idx = arg_idx + 1
+                elif spec == 0x63:
+                    # %c — character
+                    if arg_idx < args.len():
+                        val char_byte = (args[arg_idx] & 0xFF) as u8
+                        debug_putc(char_byte)
+                        arg_idx = arg_idx + 1
+                elif spec == 0x25:
+                    # %% — literal percent
+                    debug_putc(0x25)
+        else:
+            # Regular character — output directly
+            debug_putc(ch)
+        i = i + 1
 
 # ============================================================================
 # Memory-Mapped I/O Helpers
