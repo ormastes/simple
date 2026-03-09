@@ -1,0 +1,213 @@
+# Exercise 19: Memory API
+#
+# Demonstrates the full GPU memory lifecycle:
+# gpu_alloc, gpu_upload, gpu_download, gpu_free, gpu_memset, gpu_copy
+
+use std.gpu.{
+    gpu_alloc, gpu_upload, gpu_download, gpu_free,
+    gpu_memset, gpu_copy,
+    gpu_block_id_x, gpu_block_dim_x, gpu_local_id_x,
+    gpu_launch, GpuBuffer, GpuError
+}
+
+# --------------------------------------------------------------------------
+# Simple kernel: scale each element by a constant
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn scale_kernel(data: GpuBuffer<f32>, scale: f32, n: i32):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if idx < n:
+        data[idx] = data[idx] * scale
+
+# --------------------------------------------------------------------------
+# Simple kernel: add two buffers element-wise
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn add_kernel(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if idx < n:
+        c[idx] = a[idx] + b[idx]
+
+# --------------------------------------------------------------------------
+# Demo 1: Basic alloc -> upload -> compute -> download -> free
+# --------------------------------------------------------------------------
+
+fn demo_basic_lifecycle(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 1: Basic Memory Lifecycle ==="
+
+    # Step 1: Prepare host data
+    var host_data = List<f32>()
+    var i = 0
+    while i < n:
+        host_data.push(i * 1.0f32)
+        i = i + 1
+    print "  Host data prepared: {n} elements"
+
+    # Step 2: Allocate device memory
+    val dev_buf = gpu_alloc<f32>(n)?
+    print "  Device buffer allocated: {n} f32 elements"
+
+    # Step 3: Upload host -> device
+    gpu_upload(dev_buf, host_data)?
+    print "  Data uploaded to device"
+
+    # Step 4: Run kernel (scale by 2.0)
+    val block_size = 256
+    val grid_size = (n + block_size - 1) / block_size
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(dev_buf, 2.0f32, n)
+    print "  Kernel executed: scale by 2.0"
+
+    # Step 5: Download device -> host
+    val result = gpu_download<f32>(dev_buf, n)?
+    print "  Data downloaded from device"
+
+    # Step 6: Free device memory
+    gpu_free(dev_buf)?
+    print "  Device buffer freed"
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Demo 2: gpu_memset -- zero-initialize device memory
+# --------------------------------------------------------------------------
+
+fn demo_memset(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 2: gpu_memset ==="
+
+    val dev_buf = gpu_alloc<f32>(n)?
+    print "  Allocated {n} f32 elements"
+
+    # memset to zero (byte value 0 = 0.0 in IEEE 754)
+    gpu_memset(dev_buf, 0, n)?
+    print "  Memset to 0 (zero-initialized)"
+
+    val result = gpu_download<f32>(dev_buf, n)?
+    gpu_free(dev_buf)?
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Demo 3: gpu_copy -- device-to-device copy
+# --------------------------------------------------------------------------
+
+fn demo_device_copy(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 3: Device-to-Device Copy ==="
+
+    # Create source buffer with known data
+    var src_data = List<f32>()
+    var i = 0
+    while i < n:
+        src_data.push(42.0f32)
+        i = i + 1
+
+    val src_dev = gpu_alloc<f32>(n)?
+    val dst_dev = gpu_alloc<f32>(n)?
+
+    gpu_upload(src_dev, src_data)?
+    print "  Source buffer uploaded with value 42.0"
+
+    # Device-to-device copy
+    gpu_copy(dst_dev, src_dev, n)?
+    print "  Copied source -> destination on device"
+
+    val result = gpu_download<f32>(dst_dev, n)?
+
+    gpu_free(src_dev)?
+    gpu_free(dst_dev)?
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Demo 4: Multiple buffers -- add two arrays
+# --------------------------------------------------------------------------
+
+fn demo_multi_buffer(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 4: Multiple Buffers ==="
+
+    var a_host = List<f32>()
+    var b_host = List<f32>()
+    var i = 0
+    while i < n:
+        a_host.push(3.0f32)
+        b_host.push(7.0f32)
+        i = i + 1
+
+    val a_dev = gpu_alloc<f32>(n)?
+    val b_dev = gpu_alloc<f32>(n)?
+    val c_dev = gpu_alloc<f32>(n)?
+
+    gpu_upload(a_dev, a_host)?
+    gpu_upload(b_dev, b_host)?
+    print "  Uploaded two input buffers"
+
+    val block_size = 256
+    val grid_size = (n + block_size - 1) / block_size
+    add_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(a_dev, b_dev, c_dev, n)
+    print "  Kernel: a + b -> c"
+
+    val result = gpu_download<f32>(c_dev, n)?
+
+    gpu_free(a_dev)?
+    gpu_free(b_dev)?
+    gpu_free(c_dev)?
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Demo 5: Error handling -- allocate too much memory
+# --------------------------------------------------------------------------
+
+fn demo_error_handling() -> Result<text, GpuError>:
+    print "=== Demo 5: Error Handling ==="
+
+    # Try to allocate a reasonable amount
+    val small_buf = gpu_alloc<f32>(1024)?
+    gpu_free(small_buf)?
+    print "  Small allocation: OK"
+
+    # The Result type ensures we handle failures gracefully
+    # In production, gpu_alloc returns Err(GpuError) on failure
+    print "  All allocations handled via Result<T, GpuError>"
+
+    Ok("Error handling demo complete")
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+fn main() -> Result<i32, GpuError>:
+    val n = 1024
+
+    # Demo 1: Basic lifecycle
+    val r1 = demo_basic_lifecycle(n)?
+    print "  Verify: r1[0]={r1[0]} (expect 0.0), r1[5]={r1[5]} (expect 10.0)"
+
+    print ""
+
+    # Demo 2: Memset
+    val r2 = demo_memset(n)?
+    print "  Verify: r2[0]={r2[0]} (expect 0.0), r2[100]={r2[100]} (expect 0.0)"
+
+    print ""
+
+    # Demo 3: Device copy
+    val r3 = demo_device_copy(n)?
+    print "  Verify: r3[0]={r3[0]} (expect 42.0), r3[500]={r3[500]} (expect 42.0)"
+
+    print ""
+
+    # Demo 4: Multi buffer
+    val r4 = demo_multi_buffer(n)?
+    print "  Verify: r4[0]={r4[0]} (expect 10.0), r4[999]={r4[999]} (expect 10.0)"
+
+    print ""
+
+    # Demo 5: Error handling
+    val r5 = demo_error_handling()?
+    print "  {r5}"
+
+    print ""
+    print "All memory API demos complete."
+    Ok(0)

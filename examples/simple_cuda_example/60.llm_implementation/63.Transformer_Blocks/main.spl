@@ -1,0 +1,188 @@
+use std.gpu.{GpuDevice, GpuBuffer}
+use std.ml.{Tensor, Layer, Linear, LayerNorm, GELU, Residual, MultiHeadAttention}
+use std.io.{print}
+use std.math.{sqrt}
+
+# GPU kernel: layer normalization
+@gpu_kernel
+fn layer_norm_kernel(input: &[f32], output: &mut [f32],
+                     gamma: &[f32], beta: &[f32],
+                     seq_len: i64, d_model: i64, eps: f32):
+    val row = block_idx_x()
+    if row < seq_len:
+        # Compute mean
+        var mean = 0.0f32
+        var i = 0
+        while i < d_model:
+            mean = mean + input[row * d_model + i]
+            i = i + 1
+        mean = mean / d_model.to_f32()
+
+        # Compute variance
+        var variance = 0.0f32
+        i = 0
+        while i < d_model:
+            val diff = input[row * d_model + i] - mean
+            variance = variance + diff * diff
+            i = i + 1
+        variance = variance / d_model.to_f32()
+
+        # Normalize
+        val inv_std = 1.0 / sqrt(variance + eps)
+        i = 0
+        while i < d_model:
+            val offset = row * d_model + i
+            output[offset] = gamma[i] * (input[offset] - mean) * inv_std + beta[i]
+            i = i + 1
+
+# GPU kernel: GELU activation
+@gpu_kernel
+fn gelu_kernel(input: &[f32], output: &mut [f32], n: i64):
+    val idx = thread_idx_x() + block_idx_x() * block_dim_x()
+    if idx < n:
+        val x = input[idx]
+        # Approximate GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        val c = 0.7978845608  # sqrt(2/pi)
+        val inner = c * (x + 0.044715 * x * x * x)
+        output[idx] = 0.5 * x * (1.0 + tanh(inner))
+
+# GPU kernel: residual addition
+@gpu_kernel
+fn residual_add_kernel(x: &[f32], residual: &[f32], output: &mut [f32], n: i64):
+    val idx = thread_idx_x() + block_idx_x() * block_dim_x()
+    if idx < n:
+        output[idx] = x[idx] + residual[idx]
+
+# Feed-forward network: Linear(d_model, d_ff) -> GELU -> Linear(d_ff, d_model)
+class FeedForward:
+    d_model: i64
+    d_ff: i64
+    w1: Tensor<f32>  # [d_model, d_ff]
+    b1: Tensor<f32>  # [d_ff]
+    w2: Tensor<f32>  # [d_ff, d_model]
+    b2: Tensor<f32>  # [d_model]
+
+    static fn create(d_model: i64, d_ff: i64) -> FeedForward:
+        FeedForward(
+            d_model: d_model,
+            d_ff: d_ff,
+            w1: Tensor.randn([d_model, d_ff]),
+            b1: Tensor.zeros([d_ff]),
+            w2: Tensor.randn([d_ff, d_model]),
+            b2: Tensor.zeros([d_model])
+        )
+
+    fn forward(self, x: Tensor<f32>) -> Result<Tensor<f32>, GpuError>:
+        val dev = GpuDevice.get(0)?
+        val n = x.shape[0]
+
+        # Linear 1: x @ w1 + b1
+        val hidden = x.matmul(self.w1)?.add_bias(self.b1)?
+
+        # GELU activation
+        val total = hidden.data.len()
+        val buf_in = dev.alloc_copy(hidden.data)?
+        var buf_out = dev.alloc_f32(total)?
+        val block_size = 256
+        val grid_size = (total + block_size - 1) / block_size
+        dev.launch(gelu_kernel, grid: grid_size, block: block_size,
+            args: (buf_in, buf_out, total))
+        dev.sync()?
+        val gelu_data = buf_out.to_host()?
+        val activated = Tensor(shape: hidden.shape, data: gelu_data)
+
+        # Linear 2: activated @ w2 + b2
+        activated.matmul(self.w2)?.add_bias(self.b2)
+
+# Layer normalization wrapper
+class LNorm:
+    d_model: i64
+    gamma: [f32]
+    beta: [f32]
+    eps: f32
+
+    static fn create(d_model: i64) -> LNorm:
+        LNorm(
+            d_model: d_model,
+            gamma: [f32].fill(d_model, 1.0),
+            beta: [f32].fill(d_model, 0.0),
+            eps: 1.0e-5
+        )
+
+    fn forward(self, x: Tensor<f32>) -> Result<Tensor<f32>, GpuError>:
+        val seq_len = x.shape[0]
+        val dev = GpuDevice.get(0)?
+        val buf_in = dev.alloc_copy(x.data)?
+        var buf_out = dev.alloc_f32(x.data.len())?
+        val buf_gamma = dev.alloc_copy(self.gamma)?
+        val buf_beta = dev.alloc_copy(self.beta)?
+
+        dev.launch(layer_norm_kernel, grid: seq_len, block: 1,
+            args: (buf_in, buf_out, buf_gamma, buf_beta,
+                   seq_len, self.d_model, self.eps))
+        dev.sync()?
+
+        val data = buf_out.to_host()?
+        Ok(Tensor(shape: x.shape, data: data))
+
+# Full transformer block
+class TransformerBlock:
+    d_model: i64
+    num_heads: i64
+    d_ff: i64
+    attention: MultiHeadAttention
+    ffn: FeedForward
+    ln1: LNorm
+    ln2: LNorm
+
+    static fn create(d_model: i64, num_heads: i64, d_ff: i64) -> TransformerBlock:
+        TransformerBlock(
+            d_model: d_model,
+            num_heads: num_heads,
+            d_ff: d_ff,
+            attention: MultiHeadAttention.create(d_model, num_heads),
+            ffn: FeedForward.create(d_model, d_ff),
+            ln1: LNorm.create(d_model),
+            ln2: LNorm.create(d_model)
+        )
+
+    fn forward(self, x: Tensor<f32>, causal: bool) -> Result<Tensor<f32>, GpuError>:
+        # Pre-norm architecture: LN -> Attention -> Residual -> LN -> FFN -> Residual
+        val normed1 = self.ln1.forward(x)?
+        val attn_out = self.attention.forward(normed1, normed1, normed1, causal)?
+        val residual1 = x.add(attn_out)?
+
+        val normed2 = self.ln2.forward(residual1)?
+        val ffn_out = self.ffn.forward(normed2)?
+        residual1.add(ffn_out)
+
+# Build transformer block as pipeline using ~> operator
+fn build_transformer_pipeline(d_model: i64, num_heads: i64, d_ff: i64) -> Layer:
+    Residual(
+        LayerNorm(d_model) ~> MultiHeadAttention(d_model, num_heads)
+    ) ~> Residual(
+        LayerNorm(d_model) ~> Linear(d_model, d_ff) ~> GELU() ~> Linear(d_ff, d_model)
+    )
+
+fn main():
+    val d_model = 512
+    val num_heads = 8
+    val d_ff = 2048
+    val seq_len = 32
+
+    print "Transformer block: d_model={d_model}, heads={num_heads}, d_ff={d_ff}"
+
+    val block = TransformerBlock.create(d_model, num_heads, d_ff)
+    val input = Tensor.randn([seq_len, d_model])
+
+    val result = block.forward(input, causal: true)
+    match result:
+        Ok(out):
+            print "Output shape: [{out.shape[0]}, {out.shape[1]}]"
+            print "First 4 values: [{out.data[0]}, {out.data[1]}, {out.data[2]}, {out.data[3]}]"
+        Err(e):
+            print "Error: {e.message}"
+
+    # Pipeline version
+    val pipeline = build_transformer_pipeline(d_model, num_heads, d_ff)
+    print "Pipeline: {pipeline.describe()}"

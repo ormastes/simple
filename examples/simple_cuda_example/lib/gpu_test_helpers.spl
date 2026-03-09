@@ -1,0 +1,76 @@
+# GPU Test Helpers
+#
+# Shared utilities for CUDA example tests.
+# Provides GPU availability checks, convenience alloc/download wrappers,
+# and floating-point comparison.
+
+use std.nogc_sync_mut.gpu.{Context, GpuArray, gpu_alloc_upload, gpu_alloc, GpuBackend, detect_backends}
+
+# ============================================================================
+# GPU Availability
+# ============================================================================
+
+# Check whether a GPU is available. Prints a warning and returns false if not.
+# Call this at the top of any example that requires a real device.
+fn assert_gpu_available() -> bool:
+    val backends = detect_backends()
+    var has_gpu = false
+    for backend in backends:
+        match backend:
+            case GpuBackend.Cuda:
+                has_gpu = true
+            case GpuBackend.Vulkan:
+                has_gpu = true
+            case _:
+                pass_dn
+
+    if not has_gpu:
+        eprint("WARNING: No GPU detected. Running in CPU-fallback mode.")
+        eprint("         Results may differ from real GPU execution.")
+    has_gpu
+
+# ============================================================================
+# Convenience Alloc / Download Wrappers
+# ============================================================================
+
+# Allocate a GPU array and upload host data in one step.
+# Returns a Result: Ok with the GpuArray, or Err with a GpuError message.
+fn alloc_and_upload(data: [f32]) -> Result<GpuArray<f32>, text>:
+    val ctx = Context.default()
+    if not ctx.is_valid():
+        return Err("GPU context not available")
+
+    val arr = ctx.alloc_upload(data)
+    Ok(arr)
+
+# Download data from a GpuArray and free the device memory.
+# `size` is the expected number of f32 elements.
+# Returns a Result: Ok with the host array, or Err with a message.
+fn download_and_free(arr: GpuArray<f32>, size: i64) -> Result<[f32], text>:
+    if arr.count != size:
+        return Err("Size mismatch: expected {size}, got {arr.count}")
+
+    val host_data = arr.download()
+    # GpuArray.drop() is called automatically when arr goes out of scope (RAII)
+    Ok(host_data)
+
+# ============================================================================
+# Floating-Point Comparison
+# ============================================================================
+
+# Return true if |a - b| <= epsilon.
+# Use this instead of exact equality for GPU results that may have rounding.
+fn close_enough(a: f32, b: f32, epsilon: f32) -> bool:
+    val diff = a - b
+    var abs_diff = diff
+    if abs_diff < 0.0:
+        abs_diff = 0.0 - abs_diff
+    abs_diff <= epsilon
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export assert_gpu_available
+export alloc_and_upload, download_and_free
+export close_enough

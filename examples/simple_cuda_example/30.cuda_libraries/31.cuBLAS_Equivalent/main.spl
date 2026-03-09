@@ -1,0 +1,163 @@
+use std.gpu.{GpuDevice, GpuBuffer, gpu_kernel_launch}
+use std.io.{print}
+
+val TILE_SIZE = 16
+
+# GPU matrix multiply kernel with shared memory tiling
+@gpu_kernel
+fn gemm_kernel(a: &[f32], b: &[f32], c: &mut [f32], m: i64, n: i64, k: i64):
+    @shared var tile_a: [f32; TILE_SIZE * TILE_SIZE]
+    @shared var tile_b: [f32; TILE_SIZE * TILE_SIZE]
+
+    val row = block_idx_y() * TILE_SIZE + thread_idx_y()
+    val col = block_idx_x() * TILE_SIZE + thread_idx_x()
+    var sum = 0.0f32
+
+    var t = 0
+    while t < (k + TILE_SIZE - 1) / TILE_SIZE:
+        val a_col = t * TILE_SIZE + thread_idx_x()
+        val b_row = t * TILE_SIZE + thread_idx_y()
+
+        if row < m and a_col < k:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = a[row * k + a_col]
+        else:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        if b_row < k and col < n:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = b[b_row * n + col]
+        else:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        sync_threads()
+
+        var i = 0
+        while i < TILE_SIZE:
+            sum = sum + tile_a[thread_idx_y() * TILE_SIZE + i] * tile_b[i * TILE_SIZE + thread_idx_x()]
+            i = i + 1
+
+        sync_threads()
+        t = t + 1
+
+    if row < m and col < n:
+        c[row * n + col] = sum
+
+# Vector dot product kernel using parallel reduction
+@gpu_kernel
+fn dot_product_kernel(a: &[f32], b: &[f32], partial: &mut [f32], n: i64):
+    @shared var sdata: [f32; 256]
+    val tid = thread_idx_x()
+    val idx = block_idx_x() * block_dim_x() + tid
+
+    if idx < n:
+        sdata[tid] = a[idx] * b[idx]
+    else:
+        sdata[tid] = 0.0
+
+    sync_threads()
+
+    # Parallel reduction
+    var s = block_dim_x() / 2
+    while s > 0:
+        if tid < s:
+            sdata[tid] = sdata[tid] + sdata[tid + s]
+        sync_threads()
+        s = s / 2
+
+    if tid == 0:
+        partial[block_idx_x()] = sdata[0]
+
+# AXPY: y = alpha * x + y
+@gpu_kernel
+fn axpy_kernel(alpha: f32, x: &[f32], y: &mut [f32], n: i64):
+    val idx = thread_idx_x() + block_idx_x() * block_dim_x()
+    if idx < n:
+        y[idx] = alpha * x[idx] + y[idx]
+
+# High-level matrix multiply
+fn gpu_gemm(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val dev = GpuDevice.get(0)?
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_c = dev.alloc_f32(m * n)?
+
+    val grid_x = (n + TILE_SIZE - 1) / TILE_SIZE
+    val grid_y = (m + TILE_SIZE - 1) / TILE_SIZE
+
+    dev.launch(gemm_kernel,
+        grid: (grid_x, grid_y),
+        block: (TILE_SIZE, TILE_SIZE),
+        args: (buf_a, buf_b, buf_c, m, n, k))
+    dev.sync()?
+
+    buf_c.to_host()
+
+# High-level dot product
+fn gpu_dot(a: [f32], b: [f32]) -> Result<f32, GpuError>:
+    val n = a.len()
+    val dev = GpuDevice.get(0)?
+    val block_size = 256
+    val num_blocks = (n + block_size - 1) / block_size
+
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_partial = dev.alloc_f32(num_blocks)?
+
+    dev.launch(dot_product_kernel, grid: num_blocks, block: block_size,
+        args: (buf_a, buf_b, buf_partial, n))
+    dev.sync()?
+
+    val partial = buf_partial.to_host()?
+    var result = 0.0f32
+    var i = 0
+    while i < partial.len():
+        result = result + partial[i]
+        i = i + 1
+
+    Ok(result)
+
+# High-level AXPY
+fn gpu_axpy(alpha: f32, x: [f32], y: [f32]) -> Result<[f32], GpuError>:
+    val n = x.len()
+    val dev = GpuDevice.get(0)?
+    val block_size = 256
+    val num_blocks = (n + block_size - 1) / block_size
+
+    val buf_x = dev.alloc_copy(x)?
+    var buf_y = dev.alloc_copy(y)?
+
+    dev.launch(axpy_kernel, grid: num_blocks, block: block_size,
+        args: (alpha, buf_x, buf_y, n))
+    dev.sync()?
+
+    buf_y.to_host()
+
+fn main():
+    # Matrix multiply: 2x3 * 3x2 = 2x2
+    val a = [1.0, 2.0, 3.0,
+             4.0, 5.0, 6.0]
+    val b = [7.0,  8.0,
+             9.0,  10.0,
+             11.0, 12.0]
+
+    val c = gpu_gemm(a, b, 2, 2, 3)
+    match c:
+        Ok(result):
+            print "GEMM result (2x2):"
+            print "  [{result[0]}, {result[1]}]"
+            print "  [{result[2]}, {result[3]}]"
+        Err(e):
+            print "GEMM error: {e.message}"
+
+    # Dot product
+    val x = [1.0, 2.0, 3.0, 4.0]
+    val y = [5.0, 6.0, 7.0, 8.0]
+    val dot = gpu_dot(x, y)
+    match dot:
+        Ok(v): print "Dot product: {v}"
+        Err(e): print "Dot error: {e.message}"
+
+    # AXPY: y = 2.0 * x + y
+    val axpy_result = gpu_axpy(2.0, x, y)
+    match axpy_result:
+        Ok(r): print "AXPY result: [{r[0]}, {r[1]}, {r[2]}, {r[3]}]"
+        Err(e): print "AXPY error: {e.message}"

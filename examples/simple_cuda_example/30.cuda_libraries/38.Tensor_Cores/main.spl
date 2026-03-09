@@ -1,0 +1,127 @@
+use std.gpu.{GpuDevice, TensorFragment, tensor_load, tensor_store, tensor_mma}
+use std.io.{print}
+
+val WMMA_M = 16
+val WMMA_N = 16
+val WMMA_K = 16
+
+# Tensor core matrix multiply kernel
+# Uses WMMA-style fragments: A(16x16,f16) * B(16x16,f16) + C(16x16,f32) -> D(16x16,f32)
+@gpu_kernel
+fn tensor_gemm_kernel(a: &[f16], b: &[f16], c: &mut [f32],
+                      m: i64, n: i64, k: i64):
+    val warp_m = (block_idx_x() * block_dim_x() + thread_idx_x()) / 32 * WMMA_M
+    val warp_n = block_idx_y() * WMMA_N
+
+    if warp_m >= m or warp_n >= n:
+        return
+
+    # Declare fragments
+    var frag_a = TensorFragment<WMMA_M, WMMA_K, f16>.zero()
+    var frag_b = TensorFragment<WMMA_K, WMMA_N, f16>.zero()
+    var frag_acc = TensorFragment<WMMA_M, WMMA_N, f32>.zero()
+
+    # Accumulate tiles along k dimension
+    var t = 0
+    while t < k:
+        val a_offset = warp_m * k + t
+        val b_offset = t * n + warp_n
+
+        # Load fragments from global memory
+        tensor_load(frag_a, a, a_offset, k)
+        tensor_load(frag_b, b, b_offset, n)
+
+        # Matrix multiply-accumulate: acc = a * b + acc
+        tensor_mma(frag_acc, frag_a, frag_b, frag_acc)
+
+        t = t + WMMA_K
+
+    # Store result
+    val c_offset = warp_m * n + warp_n
+    tensor_store(c, frag_acc, c_offset, n)
+
+# High-level tensor core GEMM
+fn tensor_gemm(a: [f16], b: [f16], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val dev = GpuDevice.get(0)?
+
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_c = dev.alloc_f32(m * n)?
+
+    # Grid/block configuration for tensor cores
+    # Each warp handles one WMMA_M x WMMA_N tile
+    val warps_m = (m + WMMA_M - 1) / WMMA_M
+    val warps_n = (n + WMMA_N - 1) / WMMA_N
+    val block_size = 128  # 4 warps per block
+    val grid_x = (warps_m * 32 + block_size - 1) / block_size
+    val grid_y = warps_n
+
+    dev.launch(tensor_gemm_kernel,
+        grid: (grid_x, grid_y),
+        block: block_size,
+        args: (buf_a, buf_b, buf_c, m, n, k))
+    dev.sync()?
+
+    buf_c.to_host()
+
+# Mixed-precision matrix multiply for ML: f16 compute, f32 accumulate
+fn ml_matmul(weights: [f16], activations: [f16],
+             batch: i64, in_features: i64, out_features: i64) -> Result<[f32], GpuError>:
+    # weights: [out_features, in_features] in f16
+    # activations: [batch, in_features] in f16
+    # output: [batch, out_features] in f32
+    tensor_gemm(activations, weights, batch, out_features, in_features)
+
+# Convert f32 array to f16 for tensor core input
+fn to_f16(data: [f32]) -> [f16]:
+    var result: [f16] = []
+    var i = 0
+    while i < data.len():
+        result = result + [data[i].to_f16()]
+        i = i + 1
+    result
+
+fn main():
+    # 16x16 identity-like test
+    val m = 16
+    val n = 16
+    val k = 16
+
+    # Create simple test matrices in f16
+    var a_f32: [f32] = [f32].fill(m * k, 0.0)
+    var b_f32: [f32] = [f32].fill(k * n, 0.0)
+
+    # Set diagonal of A to 1.0
+    var i = 0
+    while i < m:
+        a_f32[i * k + i] = 1.0
+        i = i + 1
+
+    # Set B to sequential values
+    i = 0
+    while i < k * n:
+        b_f32[i] = (i + 1).to_f32()
+        i = i + 1
+
+    val a_f16 = to_f16(a_f32)
+    val b_f16 = to_f16(b_f32)
+
+    val result = tensor_gemm(a_f16, b_f16, m, n, k)
+    match result:
+        Ok(c):
+            print "Tensor core GEMM result (first row):"
+            print "  [{c[0]}, {c[1]}, {c[2]}, {c[3]}, ...]"
+        Err(e):
+            print "Error: {e.message}"
+
+    # ML use case: batch of 32, 512->256 features
+    print "ML matmul: batch=32, 512->256 features"
+    val weights = [f16].fill(256 * 512, 0.01.to_f16())
+    val acts = [f16].fill(32 * 512, 1.0.to_f16())
+    val ml_result = ml_matmul(weights, acts, 32, 512, 256)
+    match ml_result:
+        Ok(out):
+            print "  Output shape: 32x256 ({out.len()} elements)"
+            print "  First element: {out[0]}"
+        Err(e):
+            print "  Error: {e.message}"

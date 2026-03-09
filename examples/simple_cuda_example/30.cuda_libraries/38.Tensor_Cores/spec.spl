@@ -1,0 +1,58 @@
+use std.gpu.{GpuDevice, TensorFragment, tensor_load, tensor_store, tensor_mma}
+
+describe "Tensor core operations":
+    it "should multiply identity by matrix":
+        val m = 16
+        val n = 16
+        val k = 16
+        # Identity matrix A
+        var a_f32 = [f32].fill(m * k, 0.0)
+        var i = 0
+        while i < m:
+            a_f32[i * k + i] = 1.0
+            i = i + 1
+        # Sequential matrix B
+        var b_f32 = [f32].fill(k * n, 0.0)
+        i = 0
+        while i < k * n:
+            b_f32[i] = (i + 1).to_f32()
+            i = i + 1
+        val a = to_f16(a_f32)
+        val b = to_f16(b_f32)
+        val c = tensor_gemm(a, b, m, n, k)?
+        # I * B = B, so first element should be 1.0
+        expect(c[0]).to_equal(1.0)
+        expect(c[1]).to_equal(2.0)
+
+    it "should accumulate with f32 precision":
+        # Even though inputs are f16, accumulator is f32
+        val m = 16
+        val n = 16
+        val k = 16
+        val a = [f16].fill(m * k, 1.0.to_f16())
+        val b = [f16].fill(k * n, 1.0.to_f16())
+        val c = tensor_gemm(a, b, m, n, k)?
+        # Each element = sum of k ones = 16.0
+        expect(c[0]).to_equal(16.0)
+
+    it "should handle zero matrices":
+        val m = 16
+        val n = 16
+        val k = 16
+        val a = [f16].fill(m * k, 0.0.to_f16())
+        val b = [f16].fill(k * n, 1.0.to_f16())
+        val c = tensor_gemm(a, b, m, n, k)?
+        expect(c[0]).to_equal(0.0)
+
+    it "should perform ML matmul":
+        val weights = [f16].fill(4 * 8, 0.5.to_f16())
+        val acts = [f16].fill(2 * 8, 1.0.to_f16())
+        val result = ml_matmul(weights, acts, 2, 8, 4)?
+        # Each output = sum of 8 * (0.5 * 1.0) = 4.0
+        expect(result[0]).to_equal(4.0)
+        expect(result.len()).to_equal(8)
+
+    it "should create zero fragment":
+        val frag = TensorFragment<16, 16, f32>.zero()
+        expect(frag.rows()).to_equal(16)
+        expect(frag.cols()).to_equal(16)

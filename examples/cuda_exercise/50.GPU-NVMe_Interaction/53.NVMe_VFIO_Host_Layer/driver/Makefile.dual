@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: GPL-2.0
+# Top-level Makefile for Dual-Driver GPU P2P System
+#
+# This builds:
+# 1. GPL Core Driver (gpu_p2p_core.ko)
+# 2. Proprietary NVIDIA Bridge (gpu_p2p_nvidia.ko)
+# 3. Userspace Wrapper Library (libgpu_p2p_wrapper.so)
+
+REPO_ROOT := $(abspath ../../..)
+BUILD_ROOT_DEFAULT := $(REPO_ROOT)/build/50.GPU-NVMe_Interaction/56.GPU_Queue_GPU_Buffer/driver
+BUILD_ROOT ?= $(if $(BUILD_DIR),$(abspath $(BUILD_DIR)),$(BUILD_ROOT_DEFAULT))
+CORE_BUILD := $(BUILD_ROOT)/gpu_p2p_core
+NV_BUILD := $(BUILD_ROOT)/gpu_p2p_nvidia
+WRAPPER_BUILD := $(BUILD_ROOT)/libgpu_p2p_wrapper
+CORE_KO := $(CORE_BUILD)/gpu_p2p_core.ko
+NV_KO := $(NV_BUILD)/gpu_p2p_nvidia.ko
+
+.PHONY: all core nvidia wrapper clean install uninstall test info help
+
+# Default target: build all components
+all: core nvidia wrapper
+
+# Build GPL core driver
+core:
+	@echo "=== Building GPL Core Driver ==="
+	$(MAKE) -C gpu_p2p_core BUILD_DIR=$(CORE_BUILD)
+
+# Build NVIDIA bridge driver
+nvidia:
+	@echo "=== Building NVIDIA Bridge Driver ==="
+	$(MAKE) -C gpu_p2p_nvidia BUILD_DIR=$(NV_BUILD)
+
+# Build userspace wrapper library
+wrapper:
+	@echo "=== Building Userspace Wrapper Library ==="
+	$(MAKE) -C libgpu_p2p_wrapper BUILD_DIR=$(WRAPPER_BUILD)
+
+# Clean all components
+clean:
+	@echo "=== Cleaning All Components ==="
+	$(MAKE) -C gpu_p2p_core BUILD_DIR=$(CORE_BUILD) clean
+	$(MAKE) -C gpu_p2p_nvidia BUILD_DIR=$(NV_BUILD) clean
+	$(MAKE) -C libgpu_p2p_wrapper BUILD_DIR=$(WRAPPER_BUILD) clean
+	rm -rf $(BUILD_ROOT)
+
+# Install all components (requires root)
+install: all
+	@echo "=== Installing Dual-Driver GPU P2P System ==="
+	@echo ""
+	@echo "Step 1: Loading GPL Core Driver..."
+	sudo insmod $(CORE_KO)
+	@echo ""
+	@echo "Step 2: Loading NVIDIA Bridge Driver..."
+	sudo insmod $(NV_KO)
+	@echo ""
+	@echo "Step 3: Creating device nodes..."
+	@CORE_MAJOR=$$(cat /proc/devices | grep gpu_p2p_core | awk '{print $$1}'); \
+	NV_MAJOR=$$(cat /proc/devices | grep gpu_p2p_nvidia | awk '{print $$1}'); \
+	echo "Core driver major: $$CORE_MAJOR"; \
+	echo "NVIDIA driver major: $$NV_MAJOR"; \
+	sudo mknod /dev/gpu_p2p_nvidia c $$NV_MAJOR 0 2>/dev/null || true; \
+	sudo chmod 666 /dev/gpu_p2p_nvidia; \
+	sudo chmod 666 /dev/gpu_p2p_core
+	@echo ""
+	@echo "Step 4: Installing wrapper library..."
+	sudo cp $(WRAPPER_BUILD)/libgpu_p2p_wrapper.so /usr/local/lib/
+	sudo ldconfig
+	@echo ""
+	@echo "=== Installation Complete ==="
+	@$(MAKE) info
+
+# Uninstall all components (requires root)
+uninstall:
+	@echo "=== Uninstalling Dual-Driver GPU P2P System ==="
+	@echo "Removing kernel modules..."
+	sudo rmmod gpu_p2p_nvidia 2>/dev/null || true
+	sudo rmmod gpu_p2p_core 2>/dev/null || true
+	@echo "Removing device nodes..."
+	sudo rm -f /dev/gpu_p2p_nvidia /dev/gpu_p2p_core
+	@echo "Removing wrapper library..."
+	sudo rm -f /usr/local/lib/libgpu_p2p_wrapper.so
+	sudo ldconfig
+	@echo "=== Uninstall Complete ==="
+
+# Run basic tests
+test: install
+	@echo "=== Testing Dual-Driver System ==="
+	@echo ""
+	@echo "Checking device nodes..."
+	@ls -l /dev/gpu_p2p_core /dev/gpu_p2p_nvidia
+	@echo ""
+	@echo "Checking kernel modules..."
+	@lsmod | grep gpu_p2p
+	@echo ""
+	@echo "Checking wrapper library..."
+	@ldconfig -p | grep libgpu_p2p_wrapper || echo "Warning: Library not in cache"
+	@echo ""
+	@echo "Checking exported symbols..."
+	@nm -D $(WRAPPER_BUILD)/libgpu_p2p_wrapper.so | grep " T " | grep gpu_p2p
+	@echo ""
+	@echo "=== Tests Complete ==="
+
+# Show system info
+info:
+	@echo "=== Dual-Driver GPU P2P System Status ==="
+	@echo ""
+	@echo "Kernel Modules:"
+	@lsmod | grep -E "^gpu_p2p|^Module" || echo "  No modules loaded"
+	@echo ""
+	@echo "Device Nodes:"
+	@ls -l /dev/gpu_p2p_core 2>/dev/null || echo "  /dev/gpu_p2p_core: not found"
+	@ls -l /dev/gpu_p2p_nvidia 2>/dev/null || echo "  /dev/gpu_p2p_nvidia: not found"
+	@echo ""
+	@echo "Wrapper Library:"
+	@ls -l /usr/local/lib/libgpu_p2p_wrapper.so 2>/dev/null || echo "  libgpu_p2p_wrapper.so: not installed"
+	@echo ""
+	@echo "Recent Kernel Messages:"
+	@sudo dmesg | grep -E "gpu_p2p_(core|nvidia)" | tail -5 || echo "  No recent messages"
+
+# Help message
+help:
+	@echo "Dual-Driver GPU P2P Build System"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all        - Build all components (default)"
+	@echo "  core       - Build GPL core driver only"
+	@echo "  nvidia     - Build NVIDIA bridge driver only"
+	@echo "  wrapper    - Build userspace wrapper library only"
+	@echo "  install    - Build and install all components (requires root)"
+	@echo "  uninstall  - Remove all installed components (requires root)"
+	@echo "  clean      - Clean build artifacts"
+	@echo "  test       - Run basic tests"
+	@echo "  info       - Show system status"
+	@echo "  help       - Show this help message"
+	@echo ""
+	@echo "Components:"
+	@echo "  1. GPL Core Driver (gpu_p2p_core.ko)"
+	@echo "     - Character device: /dev/gpu_p2p_core"
+	@echo "     - Handles: DMA mapping, doorbell MMIO"
+	@echo ""
+	@echo "  2. NVIDIA Bridge Driver (gpu_p2p_nvidia.ko)"
+	@echo "     - Character device: /dev/gpu_p2p_nvidia"
+	@echo "     - Handles: NVIDIA P2P API calls"
+	@echo ""
+	@echo "  3. Userspace Wrapper Library (libgpu_p2p_wrapper.so)"
+	@echo "     - Installed to: /usr/local/lib/"
+	@echo "     - Provides unified API matching original driver"

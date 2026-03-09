@@ -1,0 +1,70 @@
+use std.gpu.{GpuDevice}
+use std.ml.{Tensor}
+use std.math.{abs}
+
+describe "Transformer blocks":
+    it "should apply layer normalization":
+        val ln = LNorm.create(4)
+        val input = Tensor(shape: [2, 4], data: [1.0, 2.0, 3.0, 4.0,
+                                                  5.0, 6.0, 7.0, 8.0])
+        val result = ln.forward(input)?
+        # After layer norm, each row should have mean ~0, variance ~1
+        val row0_mean = (result.data[0] + result.data[1] + result.data[2] + result.data[3]) / 4.0
+        expect(abs(row0_mean)).to_be_less_than(0.01)
+
+    it "should apply GELU activation":
+        val dev = GpuDevice.get(0)?
+        val input = [0.0, 1.0, -1.0, 2.0]
+        val buf_in = dev.alloc_copy(input)?
+        var buf_out = dev.alloc_f32(4)?
+        dev.launch(gelu_kernel, grid: 1, block: 4, args: (buf_in, buf_out, 4))
+        dev.sync()?
+        val result = buf_out.to_host()?
+        # GELU(0) = 0
+        expect(abs(result[0])).to_be_less_than(0.01)
+        # GELU(1) ~ 0.841
+        expect(abs(result[1] - 0.841)).to_be_less_than(0.01)
+        # GELU(-1) ~ -0.159
+        expect(abs(result[2] - (-0.159))).to_be_less_than(0.01)
+
+    it "should compute feed-forward network":
+        val ffn = FeedForward.create(8, 32)
+        val input = Tensor.randn([4, 8])
+        val result = ffn.forward(input)?
+        expect(result.shape[0]).to_equal(4)
+        expect(result.shape[1]).to_equal(8)
+
+    it "should add residual connection":
+        val dev = GpuDevice.get(0)?
+        val x = [1.0, 2.0, 3.0, 4.0]
+        val r = [0.1, 0.2, 0.3, 0.4]
+        val buf_x = dev.alloc_copy(x)?
+        val buf_r = dev.alloc_copy(r)?
+        var buf_out = dev.alloc_f32(4)?
+        dev.launch(residual_add_kernel, grid: 1, block: 4,
+            args: (buf_x, buf_r, buf_out, 4))
+        dev.sync()?
+        val result = buf_out.to_host()?
+        expect(result[0]).to_equal(1.1)
+        expect(result[3]).to_equal(4.4)
+
+    it "should run full transformer block":
+        val block = TransformerBlock.create(16, 4, 64)
+        val input = Tensor.randn([8, 16])
+        val result = block.forward(input, causal: true)?
+        expect(result.shape[0]).to_equal(8)
+        expect(result.shape[1]).to_equal(16)
+
+    it "should preserve input dimensions through block":
+        val block = TransformerBlock.create(32, 8, 128)
+        val input = Tensor.randn([16, 32])
+        val result = block.forward(input, causal: false)?
+        expect(result.shape[0]).to_equal(input.shape[0])
+        expect(result.shape[1]).to_equal(input.shape[1])
+
+    it "should build pipeline with ~> operator":
+        val pipeline = build_transformer_pipeline(64, 4, 256)
+        val desc = pipeline.describe()
+        expect(desc).to_contain("Residual")
+        expect(desc).to_contain("LayerNorm")
+        expect(desc).to_contain("GELU")
