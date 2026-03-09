@@ -1,6 +1,8 @@
 # T32 MCP — Window tool handlers
 # Handles: window_list, window_open, window_capture, window_describe, screenshot
 
+use app.t32_cli.error_codes.{T4030, T4082, t32_err_window_not_found, t32_err_missing_param, t32_err_no_session_mcp}
+
 # --- Hardcoded window catalog ---
 # In production, these would be loaded from SDN catalog files.
 # This provides the built-in TRACE32 windows.
@@ -103,6 +105,15 @@ fn t32_get_window_fields(window_key: text) -> [text]:
         fields.push("watch_expression|Watch Expression|string|window")
     fields
 
+# --- Helper for window key list ---
+
+fn t32_mcp_window_keys() -> [text]:
+    val catalog = t32_get_window_catalog()
+    var keys: [text] = []
+    for entry in catalog:
+        keys.push(t32_key_before_pipe(entry))
+    keys
+
 # --- Tool handlers ---
 
 fn handle_t32_window_list(id: text, body: text) -> text:
@@ -132,7 +143,7 @@ fn handle_t32_window_list(id: text, body: text) -> text:
 fn handle_t32_window_open(id: text, body: text) -> text:
     val window_key = t32_extract_field(body, "window")
     if window_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_window_open", "t32_window_open(window: \"<key>\")", "t32_window_open(window: \"register\")"))
     # Find the window in catalog
     val catalog = t32_get_window_catalog()
     var found_cmd = ""
@@ -148,10 +159,10 @@ fn handle_t32_window_open(id: text, body: text) -> text:
             found_cmd = open_cmd
             found_title = title
     if found_cmd == "":
-        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+        return t32_make_tool_error(id, -32602, t32_err_window_not_found(window_key, t32_mcp_window_keys()))
     val session_opt = t32_find_current_session()
     match session_opt:
-        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
             var stdout = ""
             var rc: i64 = 0
@@ -168,7 +179,7 @@ fn handle_t32_window_open(id: text, body: text) -> text:
 fn handle_t32_window_capture(id: text, body: text) -> text:
     val window_key = t32_extract_field(body, "window")
     if window_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_window_capture", "t32_window_capture(window: \"<key>\")", "t32_window_capture(window: \"register\")"))
     val catalog = t32_get_window_catalog()
     var found_capture = ""
     var found_title = ""
@@ -183,10 +194,10 @@ fn handle_t32_window_capture(id: text, body: text) -> text:
             found_capture = capture_cmd
             found_title = title
     if found_capture == "":
-        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+        return t32_make_tool_error(id, -32602, t32_err_window_not_found(window_key, t32_mcp_window_keys()))
     val session_opt = t32_find_current_session()
     match session_opt:
-        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
             # Execute capture command (PRinTer.FILE ...)
             var stdout = ""
@@ -207,7 +218,7 @@ fn handle_t32_window_capture(id: text, body: text) -> text:
 fn handle_t32_window_describe(id: text, body: text) -> text:
     val window_key = t32_extract_field(body, "window")
     if window_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_window_describe", "t32_window_describe(window: \"<key>\")", "t32_window_describe(window: \"register\")"))
     # Find window in catalog
     val catalog = t32_get_window_catalog()
     var found_title = ""
@@ -223,7 +234,7 @@ fn handle_t32_window_describe(id: text, body: text) -> text:
             found_title = title
             found_kind = kind
     if found_title == "":
-        return t32_make_tool_error(id, -32602, "Window not found: " + window_key)
+        return t32_make_tool_error(id, -32602, t32_err_window_not_found(window_key, t32_mcp_window_keys()))
     # Build actions array
     val action_entries = t32_get_window_actions(window_key)
     var actions_arr = t32_SB_L()

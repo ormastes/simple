@@ -2,6 +2,38 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.8.8c] - 2026-03-09
+
+### Added
+- **TRACE32 GUI-to-CLI converter** + MCP servers — 2 implementations, 1 converter, 2 MCP servers
+- **Resource safeguard monitor** — cross-platform `kill_simple_monitor` (Linux/macOS/FreeBSD/Windows/MinGW/MSVC), test runner integration
+- **Platform-specific MCP config** — auto-detect OS for `.mcp.json` install
+
+### Fixed
+- **Comprehensive CRLF→LF normalization** at all source file read points — resolves 1054 stage1→stage2 parse failures
+- **CRLF handling in Rust lexer** + stale jj conflict markers
+- **Rust parser** — handle `pass_do_nothing`/`pass_dn`/`pass_todo` as keywords
+- **FreeBSD bootstrap** — stub generation, library linking, main shim args, `rt_cli_get_args`
+- **Windows COFF object support** + atomic handle counters
+- **Windows Cranelift calling convention** + memory leak fixes
+- **Windows bootstrap** — rewrite `.bat` for Rust seed pipeline, fix `native_project.rs` for MSVC
+- **MCP server** — file URI parsing, getcwd crash, shape string interpolation, Windows compatibility
+- **Test runner** — resource check (25% free threshold), self-protection, sequential execution on non-Linux platforms
+- **49 test failures** resolved — macOS compat, QEMU guards, interpreter-mode skip patterns
+- **5 pre-existing test failures** — capability tests for bootstrap mode, env-dependent tests
+- **`native_project.rs`** — handle `--key=value` arg forms, differentiate clang-cl vs MinGW linker flags
+
+### Changed
+- **Unified DAP server** via `DebugAdapter` trait — eliminated 17 conditional branches
+- **Reorganized `doc/guide/`** — merged 175 files into 42, topical subdirectories
+- **Cleaned `test/` folder** — removed 3343 SMF build artifacts, 11 stale dirs
+- **Renamed `.ssh` → `.shs`** extension (Simple Shell) to avoid SSH protocol confusion
+- **Removed obsolete seed/C bootstrap** — CI now Rust-only
+- **Removed `.mcp.json`** files from tracking (gitignored)
+
+### Security
+- Removed server credentials file from repo
+
 ## [0.8.1] - 2026-03-05
 
 ### Added

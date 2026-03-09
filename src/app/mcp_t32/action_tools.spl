@@ -2,6 +2,8 @@
 # Handles: action_invoke, field_get, field_set, screenshot, history_tail,
 #          resources_list, resource_read, dispatch_tool
 
+use app.t32_cli.error_codes.{T4050, T4082, T4090, t32_err_action_not_found, t32_err_missing_param, t32_err_no_session_mcp, t32_err_unknown_tool, t32_err_missing_tool_name, t32_err_resource_not_found}
+
 # --- Action/field state ---
 # Field state is stored per-session in a flat Dict<text, text>
 # keyed as "session_id:field_key"
@@ -29,16 +31,42 @@ fn t32_field_state_set(session_id: text, field_key: text, value: text):
     MCP_T32_FIELD_STATE = MCP_T32_FIELD_STATE + [lookup]
     MCP_T32_FIELD_VALUES = MCP_T32_FIELD_VALUES + [value]
 
+# --- Helpers for error suggestions ---
+
+fn t32_key_before_pipe(entry: text) -> text:
+    var i = 0
+    while i < entry.len():
+        if entry[i] == "|":
+            return entry.slice(0, i)
+        i = i + 1
+    entry
+
+fn t32_mcp_action_keys() -> [text]:
+    val catalog = t32_get_window_catalog()
+    var keys: [text] = []
+    for entry in catalog:
+        val wkey = t32_key_before_pipe(entry)
+        val actions = t32_get_window_actions(wkey)
+        for aentry in actions:
+            keys.push(t32_key_before_pipe(aentry))
+    keys
+
+fn t32_mcp_session_ids() -> [text]:
+    var ids: [text] = []
+    for s in MCP_T32_SESSIONS:
+        ids.push(s.id)
+    ids
+
 # --- Tool handlers ---
 
 fn handle_t32_action_invoke(id: text, body: text) -> text:
     val action_key = t32_extract_field(body, "action_key")
     val args = t32_extract_field(body, "args")
     if action_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: action_key")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("action_key", "t32_action_invoke", "t32_action_invoke(action_key: \"<key>\", args: \"<args>\")", "t32_action_invoke(action_key: \"set_break\", args: \"main\")"))
     val session_opt = t32_find_current_session()
     match session_opt:
-        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
             # Search for action in all window catalogs
             val catalog = t32_get_window_catalog()
@@ -83,7 +111,7 @@ fn handle_t32_action_invoke(id: text, body: text) -> text:
                         found_label = alabel
                         found_type = atype
             if found_template == "":
-                return t32_make_tool_error(id, -32602, "Action not found: " + action_key)
+                return t32_make_tool_error(id, -32602, t32_err_action_not_found(action_key, t32_mcp_action_keys()))
             # Substitute args (%0, %1, ...) with provided arguments
             var final_cmd = found_template
             if args != "":
@@ -108,10 +136,10 @@ fn handle_t32_action_invoke(id: text, body: text) -> text:
 fn handle_t32_field_get(id: text, body: text) -> text:
     val field_key = t32_extract_field(body, "field_key")
     if field_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: field_key")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("field_key", "t32_field_get", "t32_field_get(field_key: \"<key>\")", "t32_field_get(field_key: \"symbol\")"))
     val session_id = MCP_T32_CURRENT_SESSION
     if session_id == "":
-        return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
     val value = t32_field_state_get(session_id, field_key)
     var r = t32_LB()
     r = r + t32_jp("field_key", t32_js(field_key))
@@ -124,10 +152,10 @@ fn handle_t32_field_set(id: text, body: text) -> text:
     val field_key = t32_extract_field(body, "field_key")
     val value = t32_extract_field(body, "value")
     if field_key == "" or value == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameters: field_key, value")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("field_key, value", "t32_field_set", "t32_field_set(field_key: \"<key>\", value: \"<value>\")", "t32_field_set(field_key: \"symbol\", value: \"main\")"))
     val session_id = MCP_T32_CURRENT_SESSION
     if session_id == "":
-        return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
     t32_field_state_set(session_id, field_key, value)
     var r = t32_LB()
     r = r + t32_jp("field_key", t32_js(field_key))
@@ -141,10 +169,10 @@ fn handle_t32_screenshot(id: text, body: text) -> text:
     val window_key = t32_extract_field(body, "window")
     val output_path = t32_extract_field(body, "output_path")
     if window_key == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: window")
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_screenshot", "t32_screenshot(window: \"<key>\")", "t32_screenshot(window: \"register\")"))
     val session_opt = t32_find_current_session()
     match session_opt:
-        nil: return t32_make_tool_error(id, -32602, "No active session. Open a session first.")
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
             var out_file = output_path
             if out_file == "":
@@ -284,7 +312,7 @@ fn t32_handle_resource_read(id: text, body: text) -> text:
     if uri == "t32:///history":
         # Reuse history_tail logic
         return handle_t32_history_tail(id, body)
-    t32_make_error(id, -32002, "Resource not found: " + uri)
+    t32_make_error(id, -32002, t32_err_resource_not_found(uri))
 
 # --- Master dispatcher ---
 
@@ -292,7 +320,7 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
     val tool_name = t32_extract_nested(body, "name")
     val args_raw = t32_extract_field_raw(body, "arguments")
     if tool_name == "":
-        return t32_make_error(id, -32602, "Missing tool name")
+        return t32_make_error(id, -32602, t32_err_missing_tool_name())
 
     # Session tools
     if tool_name == "t32_sessions_list":
@@ -340,4 +368,4 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
     elif tool_name == "t32_resource_read":
         return t32_handle_resource_read(id, body)
 
-    t32_make_error(id, -32602, "Unknown tool: " + tool_name)
+    t32_make_error(id, -32602, t32_err_unknown_tool(tool_name))
