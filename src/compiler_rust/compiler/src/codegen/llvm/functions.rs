@@ -505,6 +505,16 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
 
+            // GPU memory load/store (not used in LLVM AOT path — stub)
+            MirInst::GpuLoadF64 { dest, .. }
+            | MirInst::GpuLoadI64 { dest, .. } => {
+                let default_val = self.context.i64_type().const_int(0, false);
+                vreg_map.insert(*dest, default_val.into());
+            }
+            MirInst::GpuStoreF64 { .. }
+            | MirInst::GpuStoreI64 { .. } => {
+            }
+
             // =====================================================================
             // Unsupported instruction categories
             // =====================================================================

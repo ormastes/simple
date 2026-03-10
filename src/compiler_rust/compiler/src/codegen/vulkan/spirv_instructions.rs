@@ -214,6 +214,10 @@ impl SpirvModule {
             | MirInst::GpuMemFence { .. }
             | MirInst::GpuAtomicCmpXchg { .. }
             | MirInst::GpuSharedAlloc { .. }
+            | MirInst::GpuLoadF64 { .. }
+            | MirInst::GpuStoreF64 { .. }
+            | MirInst::GpuLoadI64 { .. }
+            | MirInst::GpuStoreI64 { .. }
             | MirInst::NeighborLoad { .. } => {
                 return Err(CompileError::Codegen(format!(
                     "GPU instruction not yet implemented in SPIR-V backend: {:?}. Coming soon!",

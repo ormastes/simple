@@ -347,6 +347,10 @@ pub trait CodegenEmitter {
         expected: VReg,
         desired: VReg,
     ) -> Result<(), Self::Error>;
+    fn emit_gpu_load_f64(&mut self, dest: VReg, ptr: VReg, index: VReg) -> Result<(), Self::Error>;
+    fn emit_gpu_store_f64(&mut self, ptr: VReg, index: VReg, value: VReg) -> Result<(), Self::Error>;
+    fn emit_gpu_load_i64(&mut self, dest: VReg, ptr: VReg, index: VReg) -> Result<(), Self::Error>;
+    fn emit_gpu_store_i64(&mut self, ptr: VReg, index: VReg, value: VReg) -> Result<(), Self::Error>;
 
     // =========================================================================
     // Parallel iterators

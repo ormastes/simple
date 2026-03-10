@@ -100,4 +100,12 @@ pub enum GpuIntrinsicKind {
     SimdMaxVec,
     /// SIMD clamp: v.clamp(lo, hi) -> element-wise clamp to range
     SimdClamp,
+    /// GPU memory load f64: gpu.load_f64(ptr, index) -> f64
+    GpuLoadF64,
+    /// GPU memory store f64: gpu.store_f64(ptr, index, value)
+    GpuStoreF64,
+    /// GPU memory load i64: gpu.load_i64(ptr, index) -> i64
+    GpuLoadI64,
+    /// GPU memory store i64: gpu.store_i64(ptr, index, value)
+    GpuStoreI64,
 }

@@ -3,6 +3,7 @@
 
 use app.t32_cli.types.{T32Catalogs, T32WindowNode, T32Action, T32Field, T32WindowSnapshot}
 use app.t32_cli.text_parser.{format_table}
+use app.t32_cli.session.{cli_current_session_info, cli_run_t32rem}
 use app.t32_cli.error_codes.{t32_err_window_not_found, t32_err_no_open_cmd, t32_err_no_capture_cmd}
 
 # List all windows from catalogs as a formatted table
@@ -43,7 +44,20 @@ fn cli_window_open(window_key: text, catalogs: T32Catalogs) -> Result<text, text
                 return Err(t32_err_no_open_cmd(window_key))
             var out = "Opening '{w.title}'...\n"
             out = out + "Command: {w.open_command}\n"
-            out = out + "Window '{w.title}' opened."
+            # Try live execution via t32rem if session available
+            val session = cli_current_session_info()
+            match session:
+                Some(s):
+                    val result = cli_run_t32rem(s, w.open_command)
+                    match result:
+                        Ok(output):
+                            out = out + "Window '{w.title}' opened."
+                            if output != "":
+                                out = out + "\n" + output
+                        Err(e):
+                            out = out + "Window '{w.title}' open failed: {e}"
+                nil:
+                    out = out + "Window '{w.title}' opened (no live session)."
             Ok(out)
         nil:
             Err(t32_err_window_not_found(window_key, catalogs.window_keys()))
@@ -56,19 +70,37 @@ fn cli_window_show(window_key: text, catalogs: T32Catalogs) -> Result<text, text
             if w.capture_command == "":
                 return Err(t32_err_no_capture_cmd(window_key))
             var out = "# {w.title}\n"
-            out = out + "Capture: {w.capture_command}\n"
-            out = out + "Mode: {w.capture_mode}\n"
-            out = out + "\n"
-            # In a real implementation, we would:
-            # 1. Send capture_command to TRACE32 API
-            # 2. Get raw text output
-            # 3. Parse with the appropriate parser
-            # 4. Format as table
-            out = out + "(No live connection — capture command shown above)\n"
-            out = out + "Use 'cmm' to run scripts that populate window content."
+            # Try live capture via t32rem if session available
+            val session = cli_current_session_info()
+            match session:
+                Some(s):
+                    val result = cli_run_t32rem(s, w.capture_command)
+                    match result:
+                        Ok(raw_output):
+                            if raw_output != "":
+                                # Parse based on window type and format as table
+                                val parsed = cli_parse_window_output(window_key, raw_output)
+                                out = out + parsed
+                            else:
+                                out = out + "(empty output)\n"
+                        Err(e):
+                            out = out + "Capture failed: {e}\n"
+                            out = out + "Command: {w.capture_command}\n"
+                nil:
+                    out = out + "Capture: {w.capture_command}\n"
+                    out = out + "Mode: {w.capture_mode}\n"
+                    out = out + "\n"
+                    out = out + "(No live connection — capture command shown above)\n"
+                    out = out + "Use 'cmm' to run scripts that populate window content."
             Ok(out)
         nil:
             Err(t32_err_window_not_found(window_key, catalogs.window_keys()))
+
+# Parse window output based on window type and format as table
+fn cli_parse_window_output(window_key: text, raw: text) -> text:
+    # For now, return raw output directly
+    # Specific parsers will be routed here as they mature
+    raw + "\n"
 
 # Show detailed description of a window including its actions and fields
 fn cli_window_describe(window_key: text, catalogs: T32Catalogs) -> text:

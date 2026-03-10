@@ -388,6 +388,10 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             expected,
             desired,
         } => emitter.emit_gpu_atomic_cmpxchg(*dest, *ptr, *expected, *desired),
+        MirInst::GpuLoadF64 { dest, ptr, index } => emitter.emit_gpu_load_f64(*dest, *ptr, *index),
+        MirInst::GpuStoreF64 { ptr, index, value } => emitter.emit_gpu_store_f64(*ptr, *index, *value),
+        MirInst::GpuLoadI64 { dest, ptr, index } => emitter.emit_gpu_load_i64(*dest, *ptr, *index),
+        MirInst::GpuStoreI64 { ptr, index, value } => emitter.emit_gpu_store_i64(*ptr, *index, *value),
 
         // =====================================================================
         // Parallel iterators

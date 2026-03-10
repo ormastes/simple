@@ -20,6 +20,7 @@ use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # ============================================================================
 # Configuration
@@ -49,8 +50,8 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
     val cc = find_c_compiler()
     if cc == "":
         return Err("No C compiler found")
-    val entry_c = "/tmp/simple_entry_{pid}.c"
-    val entry_o = "/tmp/simple_entry_{pid}.o"
+    val entry_c = "/tmp/simple_entry.c"
+    val entry_o = "/tmp/simple_entry.o"
     val c_source = "extern void __simple_runtime_init(void);\n" +
         "extern long long __simple_main(void);\n" +
         "extern void __simple_runtime_shutdown(void);\n" +
@@ -61,10 +62,17 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
         "    return (int)result;\n" +
         "}\n"
     rt_file_write_text(entry_c, c_source)
-    val (ep_out, ep_err, ep_code) = shell("{cc} -c -fPIC -O2 -o {entry_o} {entry_c} 2>&1")
+    val (ep_out, ep_err, ep_code) = rt_process_run(cc, [
+        "-c",
+        "-fPIC",
+        "-O2",
+        "-o",
+        entry_o,
+        entry_c
+    ])
     rt_file_delete(entry_c)
     if ep_code != 0:
-        return Err("Entry point compilation failed: {ep_out}")
+        return Err("Entry point compilation failed: {ep_out}{ep_err}")
     Ok(entry_o)
 
 # ============================================================================
@@ -91,9 +99,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     print "[LLVM-LINK] step 1: compile_runtime_objects..."
     val rt_result = compile_runtime_objects(verbose)
     print "[LLVM-LINK] compile_runtime_objects returned"
-    if rt_result.is_err():
-        return Err("Runtime compilation failed: {rt_result.unwrap_err()}")
-    val runtime_objects = rt_result.unwrap()
+    val runtime_objects = match rt_result:
+        case Ok(paths):
+            paths
+        case Err(err):
+            return Err("Runtime compilation failed: {err}")
     print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
     # Step 2: Generate and compile entry point
@@ -101,9 +111,12 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val entry_obj_path = "/tmp/simple_entry_{pid}.o"
     val c_result = compile_entry_point_c(pid, verbose)
     print "[LLVM-LINK] entry point compiled"
-    if c_result.is_err():
-        cleanup_runtime_objects(runtime_objects)
-        return Err("Entry point compilation failed: {c_result.unwrap_err()}")
+    match c_result:
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            return Err("Entry point compilation failed: {err}")
+        case _:
+            pass
 
     # Step 3: Combine all objects and link
     print "[LLVM-LINK] step 3: combining objects..."

@@ -98,12 +98,14 @@
 //! - UnitWiden, UnitNarrow - Type conversions
 //! - UnitSaturate - Saturation arithmetic
 //!
-//! ## GPU (11 instructions)
+//! ## GPU (15 instructions)
 //! - GpuGlobalId, GpuLocalId, GpuGroupId - Work item IDs
 //! - GpuGlobalSize, GpuLocalSize, GpuNumGroups - Work group info
 //! - GpuBarrier, GpuMemFence - Synchronization
 //! - GpuAtomic, GpuAtomicCmpXchg - Atomic operations
 //! - GpuSharedAlloc - Shared memory allocation
+//! - GpuLoadF64, GpuStoreF64 - GPU memory f64 load/store
+//! - GpuLoadI64, GpuStoreI64 - GPU memory i64 load/store
 //! - NeighborLoad - SIMD neighbor access
 //!
 //! ## Parallel Iterators (4 instructions)

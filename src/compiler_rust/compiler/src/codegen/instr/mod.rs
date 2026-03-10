@@ -768,6 +768,22 @@ pub fn compile_instruction<M: Module>(
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
         }
 
+        MirInst::GpuLoadF64 { dest, ptr, index } => {
+            super::instr_gpu::compile_gpu_load_f64(ctx, builder, *dest, *ptr, *index)?;
+        }
+
+        MirInst::GpuStoreF64 { ptr, index, value } => {
+            super::instr_gpu::compile_gpu_store_f64(ctx, builder, *ptr, *index, *value)?;
+        }
+
+        MirInst::GpuLoadI64 { dest, ptr, index } => {
+            super::instr_gpu::compile_gpu_load_i64(ctx, builder, *dest, *ptr, *index)?;
+        }
+
+        MirInst::GpuStoreI64 { ptr, index, value } => {
+            super::instr_gpu::compile_gpu_store_i64(ctx, builder, *ptr, *index, *value)?;
+        }
+
         MirInst::NeighborLoad { dest, array, direction } => {
             compile_neighbor_load(ctx, builder, *dest, *array, *direction)?;
         }

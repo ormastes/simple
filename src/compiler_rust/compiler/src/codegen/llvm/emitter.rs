@@ -1688,6 +1688,26 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         self.set(dest, result);
         Ok(())
     }
+    fn emit_gpu_load_f64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), String> {
+        // GPU memory ops not used in LLVM AOT path — stub
+        let val = self.backend.context.i64_type().const_int(0, false);
+        self.set(dest, val.into());
+        Ok(())
+    }
+    fn emit_gpu_store_f64(&mut self, _ptr: VReg, _index: VReg, _value: VReg) -> Result<(), String> {
+        // GPU memory ops not used in LLVM AOT path — stub
+        Ok(())
+    }
+    fn emit_gpu_load_i64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), String> {
+        // GPU memory ops not used in LLVM AOT path — stub
+        let val = self.backend.context.i64_type().const_int(0, false);
+        self.set(dest, val.into());
+        Ok(())
+    }
+    fn emit_gpu_store_i64(&mut self, _ptr: VReg, _index: VReg, _value: VReg) -> Result<(), String> {
+        // GPU memory ops not used in LLVM AOT path — stub
+        Ok(())
+    }
 
     // =========================================================================
     // Parallel iterators — delegate to runtime

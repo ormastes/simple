@@ -302,8 +302,8 @@ impl Lowerer {
     fn lower_gpu_function_intrinsic(
         &mut self,
         name: &str,
-        _args: &[ast::Argument],
-        _ctx: &mut FunctionContext,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         let (kind, dim) = match name {
             "gpu_global_id_x" => (GpuIntrinsicKind::GlobalId, 0u8),
@@ -324,6 +324,53 @@ impl Lowerer {
                     kind: HirExprKind::GpuIntrinsic {
                         intrinsic: GpuIntrinsicKind::Barrier,
                         args: vec![],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            // GPU memory load/store intrinsics with arguments
+            "gpu_load_f64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuLoadF64,
+                        args: vec![ptr_arg, index_arg],
+                    },
+                    ty: TypeId::F64,
+                }));
+            }
+            "gpu_store_f64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                let value_arg = self.lower_expr(&args[2].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuStoreF64,
+                        args: vec![ptr_arg, index_arg, value_arg],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            "gpu_load_i64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuLoadI64,
+                        args: vec![ptr_arg, index_arg],
+                    },
+                    ty: TypeId::I64,
+                }));
+            }
+            "gpu_store_i64" => {
+                let ptr_arg = self.lower_expr(&args[0].value, ctx)?;
+                let index_arg = self.lower_expr(&args[1].value, ctx)?;
+                let value_arg = self.lower_expr(&args[2].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::GpuStoreI64,
+                        args: vec![ptr_arg, index_arg, value_arg],
                     },
                     ty: TypeId::NIL,
                 }));

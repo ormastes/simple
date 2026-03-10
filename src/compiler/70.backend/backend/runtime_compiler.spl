@@ -13,6 +13,7 @@
 use app.io.mod (shell, file_exists, getpid)
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # ============================================================================
 # C Compiler Discovery
@@ -24,6 +25,13 @@ fn find_c_compiler() -> text:
     Tries clang variants first (better LLVM compatibility), then gcc, then cc.
     Returns the command name or empty string if none found.
     """
+    if rt_file_exists("/usr/bin/clang"):
+        return "clang"
+    if rt_file_exists("/usr/bin/gcc"):
+        return "gcc"
+    if rt_file_exists("/usr/bin/cc"):
+        return "cc"
+
     val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
     for candidate in candidates:
         val (out, err, code) = shell("which {candidate} 2>/dev/null")
@@ -82,8 +90,6 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
     if rt_dir == "":
         return Err("Runtime source directory not found. Expected src/runtime/runtime.c")
 
-    val pid = getpid()
-    print "[RT-COMPILE] pid={pid}"
     val sources = ["runtime", "runtime_native", "runtime_thread", "runtime_memtrack"]
     var object_files: [text] = []
     print "[RT-COMPILE] starting loop over {sources.len()} sources"
@@ -96,17 +102,28 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
             print "[RT-COMPILE] not found, skipping {name}"
             continue
 
-        val obj_path = "/tmp/simple_rt_{pid}_{name}.o"
-        val cmd = "{cc} -c -fPIC -O2 -std=gnu11 -I {rt_dir} -I {rt_dir}/platform -o {obj_path} {src_path} 2>&1"
+        val obj_path = "/tmp/simple_rt_{name}.o"
         print "[RT-COMPILE] compiling: {name}.c"
 
-        val (comp_out, comp_err, comp_code) = shell(cmd)
+        val (comp_out, comp_err, comp_code) = rt_process_run(cc, [
+            "-c",
+            "-fPIC",
+            "-O2",
+            "-std=gnu11",
+            "-I",
+            rt_dir,
+            "-I",
+            "{rt_dir}/platform",
+            "-o",
+            obj_path,
+            src_path
+        ])
         print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
             # Clean up already-compiled objects
             for obj in object_files:
                 shell("rm -f {obj}")
-            return Err("Failed to compile {name}.c:\n{comp_out}")
+            return Err("Failed to compile {name}.c:\n{comp_out}{comp_err}")
 
         object_files.push(obj_path)
 

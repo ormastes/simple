@@ -160,19 +160,22 @@ fn emit_ptx_function(out: &mut String, func: &MirFunction) {
             MirInst::BinOp { dest, .. } => Some(dest.0),
             MirInst::GpuGlobalId { dest, .. } | MirInst::GpuLocalId { dest, .. }
             | MirInst::GpuGroupId { dest, .. } => Some(dest.0),
+            MirInst::GpuLoadF64 { dest, .. } | MirInst::GpuLoadI64 { dest, .. } => Some(dest.0),
             MirInst::Load { dest, .. } | MirInst::TupleLit { dest, .. } => Some(dest.0),
             _ => None,
         })
         .max()
         .unwrap_or(0);
 
-    // Register declarations — size to actual usage + headroom for GPU temp regs (500-530 zone)
-    let reg_count = (max_vreg + 1).max(256).max(531);
+    // Register declarations — size to actual usage + headroom for GPU temp regs (500+ zone)
+    // temp_counter may grow during emission, so we allocate generously here.
+    // The initial temp_counter starts at 528 and grows per GpuLoad/GpuStore.
+    let reg_count = (max_vreg + 1).max(256).max(600);
     out.push_str(&format!("    .reg .s64 %rd<{}>;\n", reg_count));
     out.push_str(&format!("    .reg .s32 %r<{}>;\n", reg_count));
-    out.push_str("    .reg .f64 %fd<256>;\n");
-    out.push_str("    .reg .f32 %f<256>;\n");
-    out.push_str(&format!("    .reg .pred %p<{}>;\n", (max_vreg + 1).max(256)));
+    out.push_str(&format!("    .reg .f64 %fd<{}>;\n", reg_count));
+    out.push_str(&format!("    .reg .f32 %f<{}>;\n", reg_count));
+    out.push_str(&format!("    .reg .pred %p<{}>;\n", reg_count));
 
     // Local memory for function locals (used by LocalAddr + Load/Store pattern)
     let num_locals = func.params.len() + func.locals.len();
@@ -208,24 +211,91 @@ fn emit_ptx_function(out: &mut String, func: &MirFunction) {
     out.push_str("}\n\n");
 }
 
-/// Track which VRegs hold local addresses (from LocalAddr) vs global addresses (from params/GEP).
-/// Used to determine whether Load/Store should use .local or .global state space.
+/// Virtual register type for PTX code generation.
+/// PTX uses distinct register files for integers, floats, and predicates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PtxVRegType {
+    I64,
+    F64,
+    Pred,
+}
+
+/// Track which VRegs hold local addresses (from LocalAddr) vs global addresses (from params/GEP),
+/// and the type of each VReg for correct register file selection in PTX.
 struct PtxRegInfo {
     /// VRegs that hold local memory addresses (produced by LocalAddr)
     local_regs: std::collections::HashSet<u32>,
+    /// Type of each VReg (I64, F64, or Pred)
+    vreg_types: std::collections::HashMap<u32, PtxVRegType>,
+    /// Counter for temporary registers, starts at 528 to avoid collisions with
+    /// the 500-527 zone used by GPU intrinsics (GpuGlobalId, GpuLocalId, etc.)
+    temp_counter: u32,
+    /// Maps LocalAddr vregs to their byte offset in __locals
+    local_vreg_offset: std::collections::HashMap<u32, usize>,
+    /// Maps local byte offsets to the type stored there (for f64 propagation)
+    local_offset_types: std::collections::HashMap<usize, PtxVRegType>,
 }
 
 impl PtxRegInfo {
     fn new() -> Self {
-        Self { local_regs: std::collections::HashSet::new() }
+        Self {
+            local_regs: std::collections::HashSet::new(),
+            vreg_types: std::collections::HashMap::new(),
+            temp_counter: 528,
+            local_vreg_offset: std::collections::HashMap::new(),
+            local_offset_types: std::collections::HashMap::new(),
+        }
     }
 
-    fn mark_local(&mut self, vreg: u32) {
+    fn mark_local(&mut self, vreg: u32, offset: usize) {
         self.local_regs.insert(vreg);
+        self.local_vreg_offset.insert(vreg, offset);
     }
 
     fn is_local(&self, vreg: u32) -> bool {
         self.local_regs.contains(&vreg)
+    }
+
+    /// Record that a local offset holds a particular type.
+    fn set_local_type(&mut self, addr_vreg: u32, ty: PtxVRegType) {
+        if let Some(&offset) = self.local_vreg_offset.get(&addr_vreg) {
+            self.local_offset_types.insert(offset, ty);
+        }
+    }
+
+    /// Get the type stored at a local offset (via addr vreg), defaulting to I64.
+    fn get_local_type(&self, addr_vreg: u32) -> PtxVRegType {
+        self.local_vreg_offset
+            .get(&addr_vreg)
+            .and_then(|offset| self.local_offset_types.get(offset))
+            .copied()
+            .unwrap_or(PtxVRegType::I64)
+    }
+
+    /// Set the type of a virtual register.
+    fn set_type(&mut self, vreg: u32, ty: PtxVRegType) {
+        self.vreg_types.insert(vreg, ty);
+    }
+
+    /// Get the type of a virtual register, defaulting to I64.
+    fn get_type(&self, vreg: u32) -> PtxVRegType {
+        self.vreg_types.get(&vreg).copied().unwrap_or(PtxVRegType::I64)
+    }
+
+    /// Allocate a temporary register index and return it, incrementing the counter.
+    fn next_temp(&mut self) -> u32 {
+        let t = self.temp_counter;
+        self.temp_counter += 1;
+        t
+    }
+
+    /// Return the PTX register name prefix for a given VReg based on its type.
+    fn reg_name(&self, vreg: u32) -> String {
+        match self.get_type(vreg) {
+            PtxVRegType::I64 => format!("%rd{}", vreg),
+            PtxVRegType::F64 => format!("%fd{}", vreg),
+            PtxVRegType::Pred => format!("%p{}", vreg),
+        }
     }
 }
 
@@ -240,66 +310,133 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             // PTX requires double-precision hex or decimal float notation
             let bits = value.to_bits();
             out.push_str(&format!("    mov.f64 %fd{}, 0d{:016X};\n", dest.0, bits));
+            reg_info.set_type(dest.0, PtxVRegType::F64);
         }
         MirInst::ConstBool { dest, value } => {
             let val = if *value { 1 } else { 0 };
             out.push_str(&format!("    setp.ne.s32 %p{}, {}, 0;\n", dest.0, val));
+            reg_info.set_type(dest.0, PtxVRegType::Pred);
         }
 
         // ---- Copy ----
         MirInst::Copy { dest, src } => {
-            out.push_str(&format!("    mov.s64 %rd{}, %rd{};\n", dest.0, src.0));
+            match reg_info.get_type(src.0) {
+                PtxVRegType::F64 => {
+                    out.push_str(&format!("    mov.f64 %fd{}, %fd{};\n", dest.0, src.0));
+                    reg_info.set_type(dest.0, PtxVRegType::F64);
+                }
+                PtxVRegType::Pred => {
+                    out.push_str(&format!("    mov.pred %p{}, %p{};\n", dest.0, src.0));
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
+                }
+                PtxVRegType::I64 => {
+                    out.push_str(&format!("    mov.s64 %rd{}, %rd{};\n", dest.0, src.0));
+                }
+            }
         }
 
         // ---- Binary operations ----
         MirInst::BinOp { dest, op, left, right } => {
+            let is_float = reg_info.get_type(left.0) == PtxVRegType::F64
+                || reg_info.get_type(right.0) == PtxVRegType::F64;
+
             match op {
                 // Comparison ops: emit setp instruction, result in predicate register
                 BinOp::Lt => {
-                    out.push_str(&format!("    setp.lt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.lt.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.lt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::LtEq => {
-                    out.push_str(&format!("    setp.le.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.le.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.le.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::Gt => {
-                    out.push_str(&format!("    setp.gt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.gt.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.gt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::GtEq => {
-                    out.push_str(&format!("    setp.ge.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.ge.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.ge.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::Eq => {
-                    out.push_str(&format!("    setp.eq.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.eq.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.eq.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::NotEq => {
-                    out.push_str(&format!("    setp.ne.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    if is_float {
+                        out.push_str(&format!("    setp.ne.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                    } else {
+                        out.push_str(&format!("    setp.ne.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                    }
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::And => {
                     out.push_str(&format!("    and.pred %p{}, %p{}, %p{};\n", dest.0, left.0, right.0));
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::Or => {
                     out.push_str(&format!("    or.pred %p{}, %p{}, %p{};\n", dest.0, left.0, right.0));
+                    reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 _ => {
-                    let ptx_op = match op {
-                        BinOp::Add => "add.s64",
-                        BinOp::Sub => "sub.s64",
-                        BinOp::Mul => "mul.lo.s64",
-                        BinOp::Div => "div.s64",
-                        BinOp::Mod => "rem.s64",
-                        BinOp::BitAnd => "and.b64",
-                        BinOp::BitOr => "or.b64",
-                        BinOp::BitXor => "xor.b64",
-                        BinOp::ShiftLeft => "shl.b64",
-                        BinOp::ShiftRight => "shr.s64",
-                        other => {
-                            out.push_str(&format!("    // unsupported binop: {:?}\n", other));
-                            return;
-                        }
-                    };
-                    out.push_str(&format!(
-                        "    {} %rd{}, %rd{}, %rd{};\n",
-                        ptx_op, dest.0, left.0, right.0
-                    ));
+                    if is_float {
+                        let ptx_op = match op {
+                            BinOp::Add => "add.f64",
+                            BinOp::Sub => "sub.f64",
+                            BinOp::Mul => "mul.f64",
+                            BinOp::Div => "div.rn.f64",
+                            other => {
+                                out.push_str(&format!("    // unsupported float binop: {:?}\n", other));
+                                return;
+                            }
+                        };
+                        out.push_str(&format!(
+                            "    {} %fd{}, %fd{}, %fd{};\n",
+                            ptx_op, dest.0, left.0, right.0
+                        ));
+                        reg_info.set_type(dest.0, PtxVRegType::F64);
+                    } else {
+                        let ptx_op = match op {
+                            BinOp::Add => "add.s64",
+                            BinOp::Sub => "sub.s64",
+                            BinOp::Mul => "mul.lo.s64",
+                            BinOp::Div => "div.s64",
+                            BinOp::Mod => "rem.s64",
+                            BinOp::BitAnd => "and.b64",
+                            BinOp::BitOr => "or.b64",
+                            BinOp::BitXor => "xor.b64",
+                            BinOp::ShiftLeft => "shl.b64",
+                            BinOp::ShiftRight => "shr.s64",
+                            other => {
+                                out.push_str(&format!("    // unsupported binop: {:?}\n", other));
+                                return;
+                            }
+                        };
+                        out.push_str(&format!(
+                            "    {} %rd{}, %rd{}, %rd{};\n",
+                            ptx_op, dest.0, left.0, right.0
+                        ));
+                    }
                 }
             }
         }
@@ -351,7 +488,7 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             if offset > 0 {
                 out.push_str(&format!("    add.s64 %rd{}, %rd{}, {};\n", dest.0, dest.0, offset));
             }
-            reg_info.mark_local(dest.0);
+            reg_info.mark_local(dest.0, offset);
         }
 
         // ---- Global loads/stores ----
@@ -489,20 +626,69 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             out.push_str(&format!("    .shared .align 8 .b8 __shared_{}[{}];\n", dest.0, size));
         }
 
+        // ---- GPU typed memory access ----
+        MirInst::GpuLoadF64 { dest, ptr, index } => {
+            let addr_tmp = reg_info.next_temp();
+            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!("    ld.global.f64 %fd{}, [%rd{}];\n", dest.0, addr_tmp));
+            reg_info.set_type(dest.0, PtxVRegType::F64);
+        }
+        MirInst::GpuStoreF64 { ptr, index, value } => {
+            let addr_tmp = reg_info.next_temp();
+            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!("    st.global.f64 [%rd{}], %fd{};\n", addr_tmp, value.0));
+        }
+        MirInst::GpuLoadI64 { dest, ptr, index } => {
+            let addr_tmp = reg_info.next_temp();
+            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!("    ld.global.s64 %rd{}, [%rd{}];\n", dest.0, addr_tmp));
+        }
+        MirInst::GpuStoreI64 { ptr, index, value } => {
+            let addr_tmp = reg_info.next_temp();
+            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!("    st.global.s64 [%rd{}], %rd{};\n", addr_tmp, value.0));
+        }
+
         // ---- Memory ----
         MirInst::Load { dest, addr, .. } => {
             // Use local state space for LocalAddr-derived addresses, global otherwise
             if reg_info.is_local(addr.0) {
-                out.push_str(&format!("    ld.local.s64 %rd{}, [%rd{}];\n", dest.0, addr.0));
+                let local_type = reg_info.get_local_type(addr.0);
+                match local_type {
+                    PtxVRegType::F64 => {
+                        out.push_str(&format!("    ld.local.f64 %fd{}, [%rd{}];\n", dest.0, addr.0));
+                        reg_info.set_type(dest.0, PtxVRegType::F64);
+                    }
+                    _ => {
+                        out.push_str(&format!("    ld.local.s64 %rd{}, [%rd{}];\n", dest.0, addr.0));
+                    }
+                }
             } else {
                 out.push_str(&format!("    ld.global.s64 %rd{}, [%rd{}];\n", dest.0, addr.0));
             }
         }
         MirInst::Store { addr, value, .. } => {
+            let val_type = reg_info.get_type(value.0);
             if reg_info.is_local(addr.0) {
-                out.push_str(&format!("    st.local.s64 [%rd{}], %rd{};\n", addr.0, value.0));
+                // Track type stored at this local offset for later Load
+                reg_info.set_local_type(addr.0, val_type);
+                match val_type {
+                    PtxVRegType::F64 => {
+                        out.push_str(&format!("    st.local.f64 [%rd{}], %fd{};\n", addr.0, value.0));
+                    }
+                    _ => {
+                        out.push_str(&format!("    st.local.s64 [%rd{}], %rd{};\n", addr.0, value.0));
+                    }
+                }
             } else {
-                out.push_str(&format!("    st.global.s64 [%rd{}], %rd{};\n", addr.0, value.0));
+                match val_type {
+                    PtxVRegType::F64 => {
+                        out.push_str(&format!("    st.global.f64 [%rd{}], %fd{};\n", addr.0, value.0));
+                    }
+                    _ => {
+                        out.push_str(&format!("    st.global.s64 [%rd{}], %rd{};\n", addr.0, value.0));
+                    }
+                }
             }
         }
         MirInst::GetElementPtr { dest, base, index } => {
@@ -510,8 +696,10 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             // GEP from a global base produces a global address
             out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", dest.0, index.0, base.0));
             // Propagate memory space: if base is local, result is local; otherwise global
+            // Use usize::MAX as sentinel offset — GEP-derived addresses won't match
+            // specific local offsets for type propagation, falling back to s64
             if reg_info.is_local(base.0) {
-                reg_info.mark_local(dest.0);
+                reg_info.mark_local(dest.0, usize::MAX);
             }
         }
 

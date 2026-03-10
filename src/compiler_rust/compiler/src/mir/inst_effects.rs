@@ -154,6 +154,11 @@ impl HasEffects for MirInst {
             MirInst::GpuAtomic { .. } | MirInst::GpuAtomicCmpXchg { .. } => Effect::Io,
             MirInst::GpuSharedAlloc { .. } => Effect::Compute,
 
+            // GPU memory loads are pure compute (from kernel perspective)
+            MirInst::GpuLoadF64 { .. } | MirInst::GpuLoadI64 { .. } => Effect::Compute,
+            // GPU memory stores have side effects
+            MirInst::GpuStoreF64 { .. } | MirInst::GpuStoreI64 { .. } => Effect::Io,
+
             // Parallel iterator operations - all have Compute effect (parallel execution)
             MirInst::ParMap { .. }
             | MirInst::ParReduce { .. }

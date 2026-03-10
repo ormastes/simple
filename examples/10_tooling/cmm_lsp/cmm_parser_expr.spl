@@ -1,0 +1,655 @@
+# CMM (PRACTICE Script) Expression Parser
+# Recursive descent expression parser with 13 operator precedence levels.
+#
+# Extends CmmParser (defined in cmm_parser.spl) via impl block.
+# Follows the precedence-climbing pattern from src/lib/common/parser/parser_expr.spl.
+#
+# Precedence (lowest → highest):
+#   13: ||           LogicalOr
+#   12: ^^           LogicalXor
+#   11: &&           LogicalAnd
+#   10: |            BitOr
+#    9: ^            BitXor
+#    8: &            BitAnd
+#    7: == != >= <= > <  Comparison
+#    6: + -          Add/Sub/Concat
+#    5: * / %        Mul/Div/Mod
+#    4: << >>        Shift
+#    3: - ~ !        Unary
+#    2: -- ++ ..     Range
+#    1: ( ) { }      Primary (highest)
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_ast.{CmmExpr, CmmBinOp, CmmUnaryOp, CmmLiteral, CmmSpan, span}
+use cmm_parser.{CmmParser, CmmParseError}
+
+# ---------------------------------------------------------------------------
+# Access class detection helper
+# ---------------------------------------------------------------------------
+
+# Check if a name is a known CMM memory access class.
+# CMM is case-insensitive, so we check both upper and lower forms.
+fn is_access_class(name: text) -> bool:
+    (name == "P" or name == "p" or
+    name == "D" or name == "d" or
+    name == "C" or name == "c" or
+    name == "E" or name == "e" or
+    name == "EP" or name == "ep" or
+    name == "ED" or name == "ed" or
+    name == "A" or name == "a" or
+    name == "AD" or name == "ad" or
+    name == "AP" or name == "ap" or
+    name == "SP" or name == "sp" or
+    name == "UD" or name == "ud" or
+    name == "VM" or name == "vm")
+
+# ---------------------------------------------------------------------------
+# Expression parsing methods — added to CmmParser via impl block
+# ---------------------------------------------------------------------------
+
+impl CmmParser:
+
+    # ===== Top-level entry point =====
+
+    # Parse a full CMM expression starting at the lowest precedence.
+    me parse_expression() -> Result<CmmExpr, CmmParseError>:
+        self.parse_logical_or()
+
+    # ===== Level 13: || (Logical OR) =====
+
+    me parse_logical_or() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_logical_xor():
+            case Ok(left):
+                var current = left
+                while self.check_kind("LogicalOr") or self.check_classic_or():
+                    self.advance()
+                    match self.parse_logical_xor():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.LogOr, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 12: ^^ (Logical XOR) =====
+
+    me parse_logical_xor() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_logical_and():
+            case Ok(left):
+                var current = left
+                while self.check_kind("LogicalXor") or self.check_classic_xor():
+                    self.advance()
+                    match self.parse_logical_and():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.LogXor, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 11: && (Logical AND) =====
+
+    me parse_logical_and() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_bitwise_or():
+            case Ok(left):
+                var current = left
+                while self.check_kind("LogicalAnd") or self.check_classic_and():
+                    self.advance()
+                    match self.parse_bitwise_or():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.LogAnd, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 10: | (Bitwise OR) =====
+
+    me parse_bitwise_or() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_bitwise_xor():
+            case Ok(left):
+                var current = left
+                while self.check_kind("Pipe"):
+                    self.advance()
+                    match self.parse_bitwise_xor():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.BitOr, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 9: ^ (Bitwise XOR) =====
+
+    me parse_bitwise_xor() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_bitwise_and():
+            case Ok(left):
+                var current = left
+                while self.check_kind("Caret"):
+                    self.advance()
+                    match self.parse_bitwise_and():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.BitXor, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 8: & (Bitwise AND) =====
+
+    me parse_bitwise_and() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_comparison():
+            case Ok(left):
+                var current = left
+                while self.check_kind("Ampersand"):
+                    self.advance()
+                    match self.parse_comparison():
+                        case Ok(right):
+                            current = CmmExpr.Binary(CmmBinOp.BitAnd, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 7: == != >= <= > < (Comparison) =====
+
+    me parse_comparison() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_addition():
+            case Ok(left):
+                var current = left
+                while self.check_comparison_op():
+                    val op_token = self.advance()
+                    val op = self.token_to_comparison_op(op_token)
+                    match self.parse_addition():
+                        case Ok(right):
+                            current = CmmExpr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 6: + - (Addition / Subtraction / String Concat) =====
+
+    me parse_addition() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_multiplication():
+            case Ok(left):
+                var current = left
+                while self.check_kind("Plus") or self.check_kind("Minus"):
+                    val op_token = self.advance()
+                    val op = self.token_to_add_op(op_token)
+                    match self.parse_multiplication():
+                        case Ok(right):
+                            current = CmmExpr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 5: * / % (Multiplication / Division / Modulo) =====
+
+    me parse_multiplication() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_shift():
+            case Ok(left):
+                var current = left
+                while self.check_kind("Star") or self.check_kind("Slash") or self.check_kind("Percent"):
+                    val op_token = self.advance()
+                    val op = self.token_to_mul_op(op_token)
+                    match self.parse_shift():
+                        case Ok(right):
+                            current = CmmExpr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 4: << >> (Shift) =====
+
+    me parse_shift() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_unary():
+            case Ok(left):
+                var current = left
+                while self.check_kind("ShiftLeft") or self.check_kind("ShiftRight"):
+                    val op_token = self.advance()
+                    val op = self.token_to_shift_op(op_token)
+                    match self.parse_unary():
+                        case Ok(right):
+                            current = CmmExpr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 3: - ~ ! N: N# (Unary prefix) =====
+
+    me parse_unary() -> Result<CmmExpr, CmmParseError>:
+        # Unary minus
+        if self.check_kind("Minus"):
+            self.advance()
+            match self.parse_unary():
+                case Ok(operand):
+                    return Ok(CmmExpr.Unary(CmmUnaryOp.Neg, operand))
+                case Err(e):
+                    return Err(e)
+
+        # Bitwise NOT (~)
+        if self.check_kind("Tilde"):
+            self.advance()
+            match self.parse_unary():
+                case Ok(operand):
+                    return Ok(CmmExpr.Unary(CmmUnaryOp.BitNot, operand))
+                case Err(e):
+                    return Err(e)
+
+        # Logical NOT (!)
+        if self.check_kind("Bang"):
+            self.advance()
+            match self.parse_unary():
+                case Ok(operand):
+                    return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, operand))
+                case Err(e):
+                    return Err(e)
+
+        # Classic NOT (N: or N#)
+        if self.check_classic_not():
+            self.advance()
+            match self.parse_unary():
+                case Ok(operand):
+                    return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, operand))
+                case Err(e):
+                    return Err(e)
+
+        self.parse_range()
+
+    # ===== Level 2: -- ++ .. (Range) =====
+
+    me parse_range() -> Result<CmmExpr, CmmParseError>:
+        match self.parse_primary():
+            case Ok(left):
+                # Check for range operators
+                if self.check_kind("RangeTo"):
+                    self.advance()
+                    match self.parse_primary():
+                        case Ok(right):
+                            return Ok(CmmExpr.Binary(CmmBinOp.RangeTo, left, right))
+                        case Err(e):
+                            return Err(e)
+                if self.check_kind("RangeOffset"):
+                    self.advance()
+                    match self.parse_primary():
+                        case Ok(right):
+                            return Ok(CmmExpr.Binary(CmmBinOp.RangeOffset, left, right))
+                        case Err(e):
+                            return Err(e)
+                if self.check_kind("RangeDots"):
+                    self.advance()
+                    match self.parse_primary():
+                        case Ok(right):
+                            return Ok(CmmExpr.Binary(CmmBinOp.RangeDots, left, right))
+                        case Err(e):
+                            return Err(e)
+                Ok(left)
+            case Err(e):
+                Err(e)
+
+    # ===== Level 1: Primary expressions =====
+
+    me parse_primary() -> Result<CmmExpr, CmmParseError>:
+        if self.is_at_end():
+            return Err(CmmParseError(message: "Unexpected end of input, expected expression", line: 0, column: 0))
+
+        val token = self.peek()
+
+        # --- Literals ---
+
+        # Hex number: 0x1000
+        match token.kind:
+            case CmmTokenKind.HexNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.HexInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.BinNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.BinInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.DecNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.DecInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.FloatNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Float(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.IntNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.PlainInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.HexMask(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.HexMask(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.BinMask(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.BinMask(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.TimeLiteral(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Time(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.StringLit(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Str(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.CharLiteral(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Char(v)))
+            case _:
+                pass_dn
+
+        # --- Macro references ---
+
+        match token.kind:
+            case CmmTokenKind.MacroRef(name):
+                self.advance()
+                return Ok(CmmExpr.MacroRef(name))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.MacroRecRef(name):
+                self.advance()
+                return Ok(CmmExpr.MacroRecRef(name))
+            case _:
+                pass_dn
+
+        # --- Parenthesized expression: (expr) ---
+
+        match token.kind:
+            case CmmTokenKind.LParen:
+                self.advance()
+                match self.parse_expression():
+                    case Ok(inner):
+                        if self.check_kind("RParen"):
+                            self.advance()
+                            return Ok(CmmExpr.Parenthesized(inner))
+                        else:
+                            return Err(CmmParseError(message: "Expected ')' after expression", line: self.peek().line, column: self.peek().column))
+                    case Err(e):
+                        return Err(e)
+            case _:
+                pass_dn
+
+        # --- Braced expression: {expr} (constant conversion) ---
+
+        match token.kind:
+            case CmmTokenKind.LBrace:
+                self.advance()
+                match self.parse_expression():
+                    case Ok(inner):
+                        if self.check_kind("RBrace"):
+                            self.advance()
+                            return Ok(CmmExpr.Braced(inner))
+                        else:
+                            return Err(CmmParseError(message: "Expected '}' after expression", line: self.peek().line, column: self.peek().column))
+                    case Err(e):
+                        return Err(e)
+            case _:
+                pass_dn
+
+        # --- File channel: #N ---
+
+        match token.kind:
+            case CmmTokenKind.FileChannel(n):
+                self.advance()
+                return Ok(CmmExpr.FileChannel(n))
+            case _:
+                pass_dn
+
+        # --- Option flag: /Write, /Read ---
+
+        match token.kind:
+            case CmmTokenKind.Option(name):
+                self.advance()
+                return Ok(CmmExpr.OptionFlag(name))
+            case _:
+                pass_dn
+
+        # --- DotCommand: could be function call or dot path ---
+        #     Data.dump  → DotPath
+        #     Register(PC) → FunctionCall (but Register is Identifier, not DotCommand)
+        #     STRing.UPpeR("abc") → FunctionCall
+
+        match token.kind:
+            case CmmTokenKind.DotCommand(name):
+                self.advance()
+                # Check if followed by ( — function call
+                if self.check_kind("LParen"):
+                    self.advance()
+                    match self.parse_call_args():
+                        case Ok(args):
+                            if self.check_kind("RParen"):
+                                self.advance()
+                                return Ok(CmmExpr.FunctionCall(name, args))
+                            else:
+                                return Err(CmmParseError(message: "Expected ')' after function arguments", line: self.peek().line, column: self.peek().column))
+                        case Err(e):
+                            return Err(e)
+                else:
+                    return Ok(CmmExpr.DotPath(name))
+            case _:
+                pass_dn
+
+        # --- Identifier: could be function call, address expression, or bare identifier ---
+
+        match token.kind:
+            case CmmTokenKind.Identifier(name):
+                self.advance()
+
+                # Check for function call: Identifier(
+                if self.check_kind("LParen"):
+                    self.advance()
+                    match self.parse_call_args():
+                        case Ok(args):
+                            if self.check_kind("RParen"):
+                                self.advance()
+                                return Ok(CmmExpr.FunctionCall(name, args))
+                            else:
+                                return Err(CmmParseError(message: "Expected ')' after function arguments", line: self.peek().line, column: self.peek().column))
+                        case Err(e):
+                            return Err(e)
+
+                # Check for address expression: AccessClass:expr (e.g. D:0x1000)
+                if is_access_class(name) and self.check_kind("Colon"):
+                    self.advance()
+                    match self.parse_unary():
+                        case Ok(addr_expr):
+                            return Ok(CmmExpr.Address(name, addr_expr))
+                        case Err(e):
+                            return Err(e)
+
+                # Bare identifier
+                return Ok(CmmExpr.Ident(name))
+            case _:
+                pass_dn
+
+        # --- Classic NOT as unary in primary position ---
+        # Already handled in parse_unary, but catch if it appears here as a fallthrough
+        match token.kind:
+            case CmmTokenKind.ClassicNot(v):
+                self.advance()
+                match self.parse_unary():
+                    case Ok(operand):
+                        return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, operand))
+                    case Err(e):
+                        return Err(e)
+            case _:
+                pass_dn
+
+        # --- Nothing matched — error ---
+        Err(CmmParseError(message: "Expected expression, found '{token.text}'", line: token.line, column: token.column))
+
+    # ===== Function call argument parsing =====
+
+    # Parse comma-separated argument list (between parens, parens already consumed).
+    # Returns when RParen is seen (does NOT consume it).
+    me parse_call_args() -> Result<[CmmExpr], CmmParseError>:
+        var args: [CmmExpr] = []
+
+        # Empty argument list
+        if self.check_kind("RParen"):
+            return Ok(args)
+
+        # Parse first argument
+        match self.parse_expression():
+            case Ok(arg):
+                args.push(arg)
+            case Err(e):
+                return Err(e)
+
+        # Parse remaining comma-separated arguments
+        while self.check_kind("Comma"):
+            self.advance()
+            # Allow trailing comma
+            if self.check_kind("RParen"):
+                return Ok(args)
+            match self.parse_expression():
+                case Ok(arg):
+                    args.push(arg)
+                case Err(e):
+                    return Err(e)
+
+        Ok(args)
+
+    # ===== Classic operator detection helpers =====
+
+    # Check if current token is a ClassicOr (:O: or #O#)
+    fn check_classic_or() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicOr(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicXor (:X: or #X#)
+    fn check_classic_xor() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicXor(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicAnd (:A: or #A#)
+    fn check_classic_and() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicAnd(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicNot (N: or N#)
+    fn check_classic_not() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicNot(v):
+                true
+            case _:
+                false
+
+    # ===== Comparison operator detection =====
+
+    # Check if current token is any comparison operator
+    fn check_comparison_op() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.Eq: true
+            case CmmTokenKind.NotEq: true
+            case CmmTokenKind.GtEq: true
+            case CmmTokenKind.LtEq: true
+            case CmmTokenKind.Gt: true
+            case CmmTokenKind.Lt: true
+            case _: false
+
+    # Convert a comparison token to the corresponding CmmBinOp
+    fn token_to_comparison_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Eq: CmmBinOp.Eq
+            case CmmTokenKind.NotEq: CmmBinOp.NotEq
+            case CmmTokenKind.GtEq: CmmBinOp.GtEq
+            case CmmTokenKind.LtEq: CmmBinOp.LtEq
+            case CmmTokenKind.Gt: CmmBinOp.Gt
+            case CmmTokenKind.Lt: CmmBinOp.Lt
+            case _: CmmBinOp.Eq
+
+    # ===== Addition/subtraction operator mapping =====
+
+    # Convert a Plus/Minus token to the corresponding CmmBinOp
+    fn token_to_add_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Plus: CmmBinOp.Add
+            case CmmTokenKind.Minus: CmmBinOp.Sub
+            case _: CmmBinOp.Add
+
+    # ===== Multiplication operator mapping =====
+
+    # Convert a Star/Slash/Percent token to the corresponding CmmBinOp
+    fn token_to_mul_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Star: CmmBinOp.Mul
+            case CmmTokenKind.Slash: CmmBinOp.Div
+            case CmmTokenKind.Percent: CmmBinOp.Mod
+            case _: CmmBinOp.Mul
+
+    # ===== Shift operator mapping =====
+
+    # Convert a ShiftLeft/ShiftRight token to the corresponding CmmBinOp
+    fn token_to_shift_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.ShiftLeft: CmmBinOp.Shl
+            case CmmTokenKind.ShiftRight: CmmBinOp.Shr
+            case _: CmmBinOp.Shl

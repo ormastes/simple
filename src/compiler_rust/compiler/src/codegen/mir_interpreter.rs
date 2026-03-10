@@ -808,6 +808,20 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, 0);
         Ok(())
     }
+    fn emit_gpu_load_f64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), Self::Error> {
+        self.set(dest, 0);
+        Ok(())
+    }
+    fn emit_gpu_store_f64(&mut self, _ptr: VReg, _index: VReg, _value: VReg) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn emit_gpu_load_i64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), Self::Error> {
+        self.set(dest, 0);
+        Ok(())
+    }
+    fn emit_gpu_store_i64(&mut self, _ptr: VReg, _index: VReg, _value: VReg) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     // =========================================================================
     // Parallel (stubs)

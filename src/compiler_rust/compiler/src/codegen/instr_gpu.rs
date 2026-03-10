@@ -208,6 +208,126 @@ pub fn compile_gpu_atomic<M: Module>(
     Ok(())
 }
 
+/// Compile GpuLoadF64 instruction: load f64 from ptr[index]
+pub fn compile_gpu_load_f64<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    ptr: VReg,
+    index: VReg,
+) -> InstrResult<()> {
+    let ptr_val = ctx
+        .vreg_values
+        .get(&ptr)
+        .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
+    let index_val = ctx
+        .vreg_values
+        .get(&index)
+        .ok_or_else(|| format!("index vreg {:?} not found", index))?;
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_load_f64")
+        .ok_or_else(|| "rt_gpu_load_f64 not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    let call = builder.ins().call(func_ref, &[*ptr_val, *index_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile GpuStoreF64 instruction: store f64 value to ptr[index]
+pub fn compile_gpu_store_f64<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    ptr: VReg,
+    index: VReg,
+    value: VReg,
+) -> InstrResult<()> {
+    let ptr_val = ctx
+        .vreg_values
+        .get(&ptr)
+        .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
+    let index_val = ctx
+        .vreg_values
+        .get(&index)
+        .ok_or_else(|| format!("index vreg {:?} not found", index))?;
+    let value_val = ctx
+        .vreg_values
+        .get(&value)
+        .ok_or_else(|| format!("value vreg {:?} not found", value))?;
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_store_f64")
+        .ok_or_else(|| "rt_gpu_store_f64 not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    builder.ins().call(func_ref, &[*ptr_val, *index_val, *value_val]);
+    Ok(())
+}
+
+/// Compile GpuLoadI64 instruction: load i64 from ptr[index]
+pub fn compile_gpu_load_i64<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    ptr: VReg,
+    index: VReg,
+) -> InstrResult<()> {
+    let ptr_val = ctx
+        .vreg_values
+        .get(&ptr)
+        .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
+    let index_val = ctx
+        .vreg_values
+        .get(&index)
+        .ok_or_else(|| format!("index vreg {:?} not found", index))?;
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_load_i64")
+        .ok_or_else(|| "rt_gpu_load_i64 not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    let call = builder.ins().call(func_ref, &[*ptr_val, *index_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile GpuStoreI64 instruction: store i64 value to ptr[index]
+pub fn compile_gpu_store_i64<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    ptr: VReg,
+    index: VReg,
+    value: VReg,
+) -> InstrResult<()> {
+    let ptr_val = ctx
+        .vreg_values
+        .get(&ptr)
+        .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
+    let index_val = ctx
+        .vreg_values
+        .get(&index)
+        .ok_or_else(|| format!("index vreg {:?} not found", index))?;
+    let value_val = ctx
+        .vreg_values
+        .get(&value)
+        .ok_or_else(|| format!("value vreg {:?} not found", value))?;
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_store_i64")
+        .ok_or_else(|| "rt_gpu_store_i64 not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    builder.ins().call(func_ref, &[*ptr_val, *index_val, *value_val]);
+    Ok(())
+}
+
 /// Compile GpuSharedAlloc instruction
 pub fn compile_gpu_shared_alloc<M: Module>(
     ctx: &mut InstrContext<'_, M>,

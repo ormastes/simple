@@ -770,6 +770,18 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::collections::compile_gpu_atomic_cmpxchg(self.ctx, self.builder, dest, ptr, expected, desired);
         Ok(())
     }
+    fn emit_gpu_load_f64(&mut self, dest: VReg, ptr: VReg, index: VReg) -> Result<(), String> {
+        super::instr_gpu::compile_gpu_load_f64(self.ctx, self.builder, dest, ptr, index)
+    }
+    fn emit_gpu_store_f64(&mut self, ptr: VReg, index: VReg, value: VReg) -> Result<(), String> {
+        super::instr_gpu::compile_gpu_store_f64(self.ctx, self.builder, ptr, index, value)
+    }
+    fn emit_gpu_load_i64(&mut self, dest: VReg, ptr: VReg, index: VReg) -> Result<(), String> {
+        super::instr_gpu::compile_gpu_load_i64(self.ctx, self.builder, dest, ptr, index)
+    }
+    fn emit_gpu_store_i64(&mut self, ptr: VReg, index: VReg, value: VReg) -> Result<(), String> {
+        super::instr_gpu::compile_gpu_store_i64(self.ctx, self.builder, ptr, index, value)
+    }
 
     // =========================================================================
     // Parallel iterators

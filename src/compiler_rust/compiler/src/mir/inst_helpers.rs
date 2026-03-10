@@ -105,6 +105,8 @@ impl MirInst {
             | MirInst::GpuLocalSize { dest, .. }
             | MirInst::GpuNumGroups { dest, .. }
             | MirInst::GpuSharedAlloc { dest, .. }
+            | MirInst::GpuLoadF64 { dest, .. }
+            | MirInst::GpuLoadI64 { dest, .. }
             | MirInst::NeighborLoad { dest, .. }
             | MirInst::ParMap { dest, .. }
             | MirInst::ParReduce { dest, .. }
@@ -347,6 +349,10 @@ impl MirInst {
             | MirInst::GpuBarrier
             | MirInst::GpuMemFence { .. }
             | MirInst::GpuSharedAlloc { .. } => vec![],
+            MirInst::GpuLoadF64 { ptr, index, .. }
+            | MirInst::GpuLoadI64 { ptr, index, .. } => vec![*ptr, *index],
+            MirInst::GpuStoreF64 { ptr, index, value }
+            | MirInst::GpuStoreI64 { ptr, index, value } => vec![*ptr, *index, *value],
             MirInst::NeighborLoad { array, .. } => vec![*array],
             // Parallel iterator instructions
             MirInst::ParMap { input, closure, .. } => vec![*input, *closure],

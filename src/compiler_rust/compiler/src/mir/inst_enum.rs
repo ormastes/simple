@@ -807,6 +807,18 @@ pub enum MirInst {
         size: u32,
     },
 
+    /// GPU memory load f64: load f64 value from ptr[index]
+    GpuLoadF64 { dest: VReg, ptr: VReg, index: VReg },
+
+    /// GPU memory store f64: store f64 value to ptr[index]
+    GpuStoreF64 { ptr: VReg, index: VReg, value: VReg },
+
+    /// GPU memory load i64: load i64 value from ptr[index]
+    GpuLoadI64 { dest: VReg, ptr: VReg, index: VReg },
+
+    /// GPU memory store i64: store i64 value to ptr[index]
+    GpuStoreI64 { ptr: VReg, index: VReg, value: VReg },
+
     // =========================================================================
     // Parallel Iterator Instructions (#415)
     // =========================================================================

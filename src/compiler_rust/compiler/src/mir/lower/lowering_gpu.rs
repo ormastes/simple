@@ -360,6 +360,52 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
+            GpuIntrinsicKind::GpuLoadF64 => {
+                // gpu.load_f64(ptr, index) -> f64
+                let ptr = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLoadF64 { dest, ptr, index });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GpuStoreF64 => {
+                // gpu.store_f64(ptr, index, value)
+                let ptr = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                let value = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuStoreF64 { ptr, index, value });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GpuLoadI64 => {
+                // gpu.load_i64(ptr, index) -> i64
+                let ptr = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLoadI64 { dest, ptr, index });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GpuStoreI64 => {
+                // gpu.store_i64(ptr, index, value)
+                let ptr = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                let value = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuStoreI64 { ptr, index, value });
+                    dest
+                })
+            }
         }
     }
 
