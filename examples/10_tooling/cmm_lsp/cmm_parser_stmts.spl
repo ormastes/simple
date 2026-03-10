@@ -208,19 +208,16 @@ impl CmmParser:
     # GOTO label
     me parse_goto() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume GOTO
-        match self.expect_identifier("label name after GOTO"):
-            case Ok(label):
-                Ok(CmmStmt.Goto(label, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # GOTO can have: label, macro ref, or empty (for ON ERROR GOTO to clear handler)
+        val label = self.consume_label_or_macro()
+        Ok(CmmStmt.Goto(label, span(start_tok.line, start_tok.column)))
 
-    # GOSUB label [args...]
+    # GOSUB label [args...] — target can be identifier, dot-command, or macro ref
     me parse_gosub() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume GOSUB
-        match self.expect_identifier("label name after GOSUB"):
-            case Ok(label):
-                var args = self.collect_remaining_exprs()
-                Ok(CmmStmt.Gosub(label, args, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        val label = self.consume_label_or_macro()
+        var args = self.collect_remaining_exprs()
+        Ok(CmmStmt.Gosub(label, args, span(start_tok.line, start_tok.column)))
 
     # RETURN [values...]
     me parse_return() -> Result<CmmStmt, CmmParseError>:
@@ -773,6 +770,37 @@ impl CmmParser:
     # Helper methods
     # =========================================================================
 
+    # Advance and push a comment statement into the stmts list.
+    # Extracts comment text from the current Comment token.
+    me push_comment_stmt(stmts: [CmmStmt]):
+        val c_tok = self.peek()
+        val c_text = self.extract_comment_text()
+        self.advance()
+        stmts.push(CmmStmt.CommentLine(c_text, span(c_tok.line, c_tok.column)))
+
+    # Parse a statement inside a block, push result into stmts, handle errors.
+    # Also consumes trailing newline or comment after the statement.
+    me parse_block_statement_into(stmts: [CmmStmt]):
+        match self.parse_statement():
+            case Ok(stmt):
+                stmts.push(stmt)
+            case Err(e):
+                self.errors.push("Line {e.line}: {e.message}")
+                stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
+                self.skip_to_next_line()
+        # Consume trailing newline or comment
+        if not self.is_at_end():
+            if self.check_kind("Newline"):
+                self.advance()
+            else if self.check_kind("Comment"):
+                self.push_comment_stmt(stmts)
+
+    # Extract comment text from the current token (must be Comment kind).
+    fn extract_comment_text() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Comment(c): c
+            case _: ""
+
     # Extract the label name from the current token, or "" if not a Label token.
     fn extract_label_name() -> text:
         match self.peek().kind:
@@ -909,6 +937,27 @@ impl CmmParser:
 
     # Consume and return a command name (Identifier or DotCommand text).
     # Returns empty string if current token is not a command name.
+    # Consume a label/target for GOTO/GOSUB. Accepts identifier, dot-command, or macro ref.
+    # Returns empty string if nothing to consume (e.g. bare GOTO to clear handler).
+    me consume_label_or_macro() -> text:
+        if self.at_stmt_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                self.advance()
+                return name
+            case CmmTokenKind.DotCommand(name):
+                self.advance()
+                return name
+            case CmmTokenKind.MacroRef(name):
+                self.advance()
+                return "&" + name
+            case CmmTokenKind.MacroRecRef(name):
+                self.advance()
+                return "&&" + name
+            case _:
+                return ""
+
     me consume_command_name() -> text:
         match self.peek().kind:
             case CmmTokenKind.Identifier(name):
