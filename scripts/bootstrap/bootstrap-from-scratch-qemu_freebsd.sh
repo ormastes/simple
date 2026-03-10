@@ -171,6 +171,16 @@ sync_back_binary() {
     chmod +x bin/release/simple 2>/dev/null || true
 }
 
+sync_back_artifacts() {
+    check_tool rsync
+    mkdir -p build/freebsd
+    log "Retrieving build/bootstrap artifacts and logs from VM..."
+    rsync -az \
+        -e "ssh -p $QEMU_PORT -o StrictHostKeyChecking=no" \
+        "$QEMU_USER@localhost:~/simple/build/bootstrap/" \
+        "build/freebsd/bootstrap/"
+}
+
 cleanup_vm() {
     if [ "$KEEP_VM_RUNNING" = true ]; then
         log "Keeping VM running (--keep-vm-running)"
@@ -210,10 +220,12 @@ main() {
     start_vm
     sync_to_vm
     run_bootstrap_in_vm
+    sync_back_artifacts
     sync_back_binary
     cleanup_vm
 
     log "Done. Deployed binary: bin/release/simple"
+    log "Artifacts copied to: build/freebsd/bootstrap"
 }
 
 main "$@"

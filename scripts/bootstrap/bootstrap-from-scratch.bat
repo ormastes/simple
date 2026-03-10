@@ -7,10 +7,10 @@ REM
 REM Bootstrap chain:
 REM   Phase 0: (reserved for future release download)
 REM   Phase 1: Build Rust seed (cargo build --profile bootstrap -p simple-driver)
-REM   Phase 2: Use Rust seed to compile Simple compiler (stage1)
-REM   Phase 3: Self-host — stage1 recompiles itself (stage2)
-REM   Phase 4: (Optional) Recompile with --backend=llvm-lib (stage3)
-REM   Phase 5: Verify reproducibility (hash comparison)
+REM   Phase 2: Stage 1 Rust-base Simple (full CLI)
+REM   Phase 3: Stage 2 pure Simple via llvm-lib
+REM   Phase 4: Stage 3 full pure-Simple self-host via llvm-lib
+REM   Phase 5: Verify reproducibility (stage2 vs stage3 hash comparison)
 REM   Phase 6: Deploy to bin\release\simple.exe
 REM
 REM Usage:
@@ -30,7 +30,7 @@ set "KEEP_ARTIFACTS=false"
 set "JOBS=%NUMBER_OF_PROCESSORS%"
 set "SKIP_RUST_BUILD=false"
 set "SKIP_LLVM=false"
-set "BACKEND=auto"
+set "BACKEND=llvm-lib"
 set "VERIFY_HASH=true"
 set "VERBOSE=false"
 
@@ -71,8 +71,8 @@ echo.
 echo Options:
 echo   --deploy              Copy final binary to bin\release\simple.exe
 echo   --skip-rust-build     Reuse existing Rust seed binary (skip cargo build)
-echo   --skip-llvm           Skip LLVM-lib stage even if LLVM is available
-echo   --backend=BACKEND     Backend: auto, cranelift, llvm-lib (default: auto)
+echo   --skip-llvm           Skip Stage 2 and Stage 3 llvm-lib builds
+echo   --backend=BACKEND     Backend: llvm-lib, llvm, cranelift, auto (default: llvm-lib)
 echo   --no-verify           Skip hash verification
 echo   --keep-artifacts      Keep build\bootstrap artifacts
 echo   --jobs=N              Parallel build jobs (default: %NUMBER_OF_PROCESSORS%)
@@ -169,7 +169,7 @@ if /i not "!SKIP_LLVM!"=="true" (
 
 REM Resolve backend
 if /i "!BACKEND!"=="auto" (
-    set "BACKEND=cranelift"
+    set "BACKEND=llvm-lib"
 )
 if /i "!BACKEND!"=="llvm-lib" (
     if /i "!LLVM_FOUND!"=="false" (
@@ -221,10 +221,10 @@ REM Verify seed responds
 echo.
 
 REM ================================================================
-REM  Phase 2: Rust seed → stage1
+REM  Phase 2: Stage 1 Rust-base Simple
 REM ================================================================
 echo [bootstrap] ----------------------------------------------------------------
-echo [bootstrap] Phase 2: Compile Simple compiler with Rust seed (stage1)
+echo [bootstrap] Phase 2: Build Stage 1 Rust-base Simple
 echo [bootstrap] ----------------------------------------------------------------
 echo.
 
@@ -239,9 +239,9 @@ set "COMPILE_ARGS=native-build"
 set "COMPILE_ARGS=!COMPILE_ARGS! --source src\compiler"
 set "COMPILE_ARGS=!COMPILE_ARGS! --source src\lib"
 set "COMPILE_ARGS=!COMPILE_ARGS! --source src\app"
-set "COMPILE_ARGS=!COMPILE_ARGS! --entry src\app\cli\bootstrap_main.spl"
+set "COMPILE_ARGS=!COMPILE_ARGS! --entry src\app\cli\main.spl"
 set "COMPILE_ARGS=!COMPILE_ARGS! -o !STAGE1_BIN!"
-set "COMPILE_ARGS=!COMPILE_ARGS! --strip"
+set "COMPILE_ARGS=!COMPILE_ARGS! --clean"
 
 echo [bootstrap] Running: !RUST_SEED_BIN! !COMPILE_ARGS!
 "!RUST_SEED_BIN!" !COMPILE_ARGS!
@@ -260,10 +260,10 @@ echo [bootstrap] Stage 1 built: !STAGE1_BIN!
 echo.
 
 REM ================================================================
-REM  Phase 3: stage1 → stage2 (self-host)
+REM  Phase 3: Stage 2 pure Simple via llvm-lib
 REM ================================================================
 echo [bootstrap] ----------------------------------------------------------------
-echo [bootstrap] Phase 3: Self-host verification (stage1 -> stage2)
+echo [bootstrap] Phase 3: Build Stage 2 pure Simple via !BACKEND!
 echo [bootstrap] ----------------------------------------------------------------
 echo.
 
@@ -275,9 +275,10 @@ set "SELFHOST_ARGS=native-build"
 set "SELFHOST_ARGS=!SELFHOST_ARGS! --source src\compiler"
 set "SELFHOST_ARGS=!SELFHOST_ARGS! --source src\lib"
 set "SELFHOST_ARGS=!SELFHOST_ARGS! --source src\app"
-set "SELFHOST_ARGS=!SELFHOST_ARGS! --entry src\app\cli\bootstrap_main.spl"
+set "SELFHOST_ARGS=!SELFHOST_ARGS! --entry src\app\cli\main.spl"
 set "SELFHOST_ARGS=!SELFHOST_ARGS! -o !STAGE2_BIN!"
-set "SELFHOST_ARGS=!SELFHOST_ARGS! --strip"
+set "SELFHOST_ARGS=!SELFHOST_ARGS! --backend !BACKEND!"
+set "SELFHOST_ARGS=!SELFHOST_ARGS! --clean"
 
 echo [bootstrap] Running: !STAGE1_BIN! !SELFHOST_ARGS!
 "!STAGE1_BIN!" !SELFHOST_ARGS!
@@ -296,13 +297,13 @@ echo [bootstrap] Stage 2 built: !STAGE2_BIN!
 echo.
 
 REM ================================================================
-REM  Phase 4: (Optional) stage2 → stage3 with LLVM-lib backend
+REM  Phase 4: Stage 3 full pure-Simple self-host
 REM ================================================================
 set "STAGE3_BIN="
-if /i "!BACKEND!"=="llvm-lib" (
+if /i not "!SKIP_LLVM!"=="true" (
     if /i "!LLVM_FOUND!"=="true" (
         echo [bootstrap] ----------------------------------------------------------------
-        echo [bootstrap] Phase 4: LLVM-lib backend build (stage2 -> stage3)
+        echo [bootstrap] Phase 4: Build Stage 3 full pure-Simple self-host
         echo [bootstrap] ----------------------------------------------------------------
         echo.
 
@@ -317,15 +318,15 @@ if /i "!BACKEND!"=="llvm-lib" (
         set "LLVM_ARGS=!LLVM_ARGS! --source src\compiler"
         set "LLVM_ARGS=!LLVM_ARGS! --source src\lib"
         set "LLVM_ARGS=!LLVM_ARGS! --source src\app"
-        set "LLVM_ARGS=!LLVM_ARGS! --entry src\app\cli\bootstrap_main.spl"
+        set "LLVM_ARGS=!LLVM_ARGS! --entry src\app\cli\main.spl"
         set "LLVM_ARGS=!LLVM_ARGS! -o !STAGE3_BIN!"
-        set "LLVM_ARGS=!LLVM_ARGS! --strip"
-        set "LLVM_ARGS=!LLVM_ARGS! --backend llvm"
+        set "LLVM_ARGS=!LLVM_ARGS! --backend !BACKEND!"
+        set "LLVM_ARGS=!LLVM_ARGS! --clean"
 
         echo [bootstrap] Running: !STAGE2_BIN! !LLVM_ARGS!
         "!STAGE2_BIN!" !LLVM_ARGS!
         if errorlevel 1 (
-            echo [bootstrap] WARNING: LLVM-lib build failed, using stage2 as final binary
+            echo [bootstrap] WARNING: Stage 3 build failed, using stage2 as final binary
             set "STAGE3_BIN="
         ) else (
             if not exist "!STAGE3_BIN!" (
@@ -337,14 +338,17 @@ if /i "!BACKEND!"=="llvm-lib" (
             )
         )
         echo.
+    ) else (
+        echo [bootstrap] Phase 4: Skipped (LLVM not found)
+        echo.
     )
 ) else (
-    echo [bootstrap] Phase 4: Skipped (backend=!BACKEND!)
+    echo [bootstrap] Phase 4: Skipped (--skip-llvm)
     echo.
 )
 
 REM ================================================================
-REM  Phase 5: Verify reproducibility (hash comparison)
+REM  Phase 5: Verify reproducibility (stage2 vs stage3)
 REM ================================================================
 if /i "!VERIFY_HASH!"=="true" (
     echo [bootstrap] ----------------------------------------------------------------
@@ -354,23 +358,25 @@ if /i "!VERIFY_HASH!"=="true" (
 
     set "HASH1="
     set "HASH2="
-    for /f "skip=1 delims=" %%h in ('certutil -hashfile "!STAGE1_BIN!" SHA256 2^>nul ^| findstr /r /v "hash CertUtil"') do (
+    for /f "skip=1 delims=" %%h in ('certutil -hashfile "!STAGE2_BIN!" SHA256 2^>nul ^| findstr /r /v "hash CertUtil"') do (
         if not "%%h"=="" if "!HASH1!"=="" set "HASH1=%%h"
     )
-    for /f "skip=1 delims=" %%h in ('certutil -hashfile "!STAGE2_BIN!" SHA256 2^>nul ^| findstr /r /v "hash CertUtil"') do (
+    for /f "skip=1 delims=" %%h in ('certutil -hashfile "!STAGE3_BIN!" SHA256 2^>nul ^| findstr /r /v "hash CertUtil"') do (
         if not "%%h"=="" if "!HASH2!"=="" set "HASH2=%%h"
     )
 
-    echo [bootstrap] Stage 1 SHA-256: !HASH1!
-    echo [bootstrap] Stage 2 SHA-256: !HASH2!
+    echo [bootstrap] Stage 2 SHA-256: !HASH1!
+    echo [bootstrap] Stage 3 SHA-256: !HASH2!
 
     if not "!HASH1!"=="" if not "!HASH2!"=="" (
         if /i "!HASH1!"=="!HASH2!" (
-            echo [bootstrap] Reproducibility check PASSED — stage1 and stage2 are identical.
+            echo [bootstrap] Reproducibility check PASSED — stage2 and stage3 are identical.
         ) else (
-            echo [bootstrap] Note: stage1 and stage2 differ (expected if timestamps/paths are embedded).
-            echo [bootstrap] Both binaries are functional — using stage2 as the final binary.
+            echo [bootstrap] Note: stage2 and stage3 differ (expected if timestamps/paths are embedded).
+            echo [bootstrap] Both binaries are functional — using stage3 when available.
         )
+    ) else (
+        echo [bootstrap] Skipping reproducibility hash check because stage3 is unavailable.
     )
     echo.
 ) else (
@@ -428,7 +434,7 @@ REM  Summary
 REM ================================================================
 echo.
 echo ================================================================
-echo   Bootstrap Complete (Rust seed -^> stage1 -^> stage2)
+echo   Bootstrap Complete (Rust seed -^> stage1 -^> stage2 llvm-lib)
 echo ================================================================
 echo   Final binary: !FINAL_BIN!
 if /i "!DEPLOY!"=="true" (

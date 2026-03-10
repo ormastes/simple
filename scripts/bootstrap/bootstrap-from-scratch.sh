@@ -7,10 +7,10 @@
 # Bootstrap chain:
 #   Phase 0: Try downloading release binary (optional)
 #   Phase 1: Build Rust seed (cargo build --profile bootstrap -p simple-driver)
-#   Phase 2: Use Rust seed to compile Simple compiler (stage1)
-#   Phase 3: Self-host — stage1 recompiles itself (stage2)
-#   Phase 4: (Optional) Recompile with LLVM backend (stage3)
-#   Phase 5: Verify reproducibility (stage1 vs stage2 hash comparison)
+#   Phase 2: Stage 1 Rust-base Simple (full CLI)
+#   Phase 3: Stage 2 pure Simple via llvm-lib
+#   Phase 4: Stage 3 full pure-Simple self-host via llvm-lib
+#   Phase 5: Verify reproducibility (stage2 vs stage3 hash comparison)
 #   Phase 6: Deploy to bin/release/simple
 #
 # Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, arm64), FreeBSD,
@@ -21,14 +21,14 @@
 #   scripts/bootstrap/bootstrap-from-scratch.sh --skip-download     # Skip release download, force Rust build
 #   scripts/bootstrap/bootstrap-from-scratch.sh --skip-rust-build   # Reuse existing Rust seed binary
 #   scripts/bootstrap/bootstrap-from-scratch.sh --deploy            # Copy result to bin/release/
-#   scripts/bootstrap/bootstrap-from-scratch.sh --skip-llvm         # Skip LLVM Phase 4
+#   scripts/bootstrap/bootstrap-from-scratch.sh --skip-llvm         # Skip Stage 2/3 llvm-lib phases
 #   scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts    # Keep build dir
 #   scripts/bootstrap/bootstrap-from-scratch.sh --jobs=4            # Parallel jobs
 #
 # Outputs:
-#   build/bootstrap/stage1/simple  — Stage 1 binary (compiled by Rust seed)
-#   build/bootstrap/stage2/simple  — Stage 2 binary (self-hosted)
-#   build/bootstrap/stage3/simple  — Stage 3 binary (LLVM-optimized, optional)
+#   build/bootstrap/stage1/simple  — Stage 1 Rust-base Simple
+#   build/bootstrap/stage2/simple  — Stage 2 pure Simple via llvm-lib
+#   build/bootstrap/stage3/simple  — Stage 3 full pure-Simple self-host
 #   bin/release/simple             — (with --deploy) deployed binary
 
 set -euo pipefail
@@ -49,7 +49,7 @@ SKIP_DOWNLOAD=false
 SKIP_RUST_BUILD=false
 SKIP_LLVM=false
 DOWNLOAD_VERSION=""
-BACKEND="auto"
+BACKEND="llvm-lib"
 VERIFY_HASH=true
 TARGET=""
 
@@ -69,14 +69,14 @@ for arg in "$@"; do
             echo "Usage: $0 [--deploy] [--update-release] [--keep-artifacts] [--jobs=N]"
             echo "         [--skip-download] [--skip-rust-build] [--skip-llvm]"
             echo "         [--download-version=X.Y.Z]"
-            echo "         [--backend=auto|c|llvm|cranelift] [--target=<os-arch>] [--no-verify]"
+            echo "         [--backend=llvm-lib|llvm|cranelift|auto] [--target=<os-arch>] [--no-verify]"
             echo ""
             echo "Options:"
             echo "  --skip-download          Skip release binary download, force Rust bootstrap"
             echo "  --skip-rust-build        Reuse existing Rust seed binary (skip cargo build)"
-            echo "  --skip-llvm              Skip Phase 4 LLVM-optimized build"
+            echo "  --skip-llvm              Skip Stage 2/3 pure-Simple llvm-lib builds"
             echo "  --download-version=X.Y.Z Pin release download to a specific version"
-            echo "  --backend=BACKEND        Backend for self-host compilation (default: auto)"
+            echo "  --backend=BACKEND        Backend for Stage 2/3 (default: llvm-lib)"
             echo "  --target=OS-ARCH         Build target (linux|macos|freebsd)-(x86_64|aarch64)"
             echo "  --deploy, --update-release  Copy result to bin/release/simple"
             echo "  --keep-artifacts         Keep build directory after completion"
@@ -387,9 +387,9 @@ ls -lh "${RUST_SEED_BIN}"
 echo ""
 
 # ================================================================
-# Phase 2: Use Rust seed to compile Simple compiler (stage1)
+# Phase 2: Stage 1 Rust-base Simple
 # ================================================================
-echo "--- Phase 2: Compile Simple compiler with Rust seed (stage1) ---"
+echo "--- Phase 2: Build Stage 1 Rust-base Simple ---"
 
 STAGE1_DIR="${BOOTSTRAP_DIR}/stage1"
 STAGE1_BIN="${STAGE1_DIR}/simple${EXE_EXT}"
@@ -400,21 +400,18 @@ export SIMPLE_LIB="${PROJECT_DIR}/src"
 # Signal bootstrap mode for parser compatibility hacks
 export SIMPLE_BOOTSTRAP=1
 
-COMPILE_ARGS=(
+STAGE1_ARGS=(
     "native-build"
     "--source" "${PROJECT_DIR}/src/compiler"
     "--source" "${PROJECT_DIR}/src/lib"
     "--source" "${PROJECT_DIR}/src/app"
-    "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
+    "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
     "-o" "${STAGE1_BIN}"
+    "--clean"
 )
 
-if [[ "${BACKEND}" != "auto" ]]; then
-    COMPILE_ARGS+=("--backend=${BACKEND}")
-fi
-
-echo "Running: ${RUST_SEED_BIN} ${COMPILE_ARGS[*]}"
-"${RUST_SEED_BIN}" "${COMPILE_ARGS[@]}" 2>&1
+echo "Running: ${RUST_SEED_BIN} ${STAGE1_ARGS[*]}"
+"${RUST_SEED_BIN}" "${STAGE1_ARGS[@]}" 2>&1
 
 if [[ ! -x "${STAGE1_BIN}" ]]; then
     echo "Error: Stage 1 compilation failed — binary not found at: ${STAGE1_BIN}"
@@ -439,29 +436,27 @@ fi
 echo ""
 
 # ================================================================
-# Phase 3: Self-host — stage1 recompiles itself (stage2)
+# Phase 3: Stage 2 pure Simple via llvm-lib
 # ================================================================
-echo "--- Phase 3: Self-host verification (stage1 → stage2) ---"
+echo "--- Phase 3: Build Stage 2 pure Simple via ${BACKEND} ---"
 
 STAGE2_DIR="${BOOTSTRAP_DIR}/stage2"
 STAGE2_BIN="${STAGE2_DIR}/simple${EXE_EXT}"
 mkdir -p "${STAGE2_DIR}"
 
-SELFHOST_ARGS=(
+STAGE2_ARGS=(
     "native-build"
     "--source" "${PROJECT_DIR}/src/compiler"
     "--source" "${PROJECT_DIR}/src/lib"
     "--source" "${PROJECT_DIR}/src/app"
-    "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
+    "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
     "-o" "${STAGE2_BIN}"
+    "--backend" "${BACKEND}"
+    "--clean"
 )
 
-if [[ "${BACKEND}" != "auto" ]]; then
-    SELFHOST_ARGS+=("--backend=${BACKEND}")
-fi
-
-echo "Running: ${STAGE1_BIN} ${SELFHOST_ARGS[*]}"
-"${STAGE1_BIN}" "${SELFHOST_ARGS[@]}" 2>&1
+echo "Running: ${STAGE1_BIN} ${STAGE2_ARGS[*]}"
+"${STAGE1_BIN}" "${STAGE2_ARGS[@]}" 2>&1
 
 if [[ ! -x "${STAGE2_BIN}" ]]; then
     echo "Error: Stage 2 self-host compilation failed — binary not found at: ${STAGE2_BIN}"
@@ -486,7 +481,7 @@ fi
 echo ""
 
 # ================================================================
-# Phase 4: (Optional) LLVM-optimized build (stage2 → stage3)
+# Phase 4: Stage 3 full pure-Simple self-host
 # ================================================================
 STAGE3_BIN=""
 
@@ -556,24 +551,25 @@ if [[ "${SKIP_LLVM}" == "true" ]]; then
     echo "--- Phase 4: Skipped (--skip-llvm) ---"
     echo ""
 elif detect_llvm; then
-    echo "--- Phase 4: LLVM-optimized build (stage2 → stage3) ---"
+    echo "--- Phase 4: Build Stage 3 full pure-Simple self-host ---"
 
     STAGE3_DIR="${BOOTSTRAP_DIR}/stage3"
     STAGE3_BIN="${STAGE3_DIR}/simple${EXE_EXT}"
     mkdir -p "${STAGE3_DIR}"
 
-    LLVM_ARGS=(
+    STAGE3_ARGS=(
         "native-build"
         "--source" "${PROJECT_DIR}/src/compiler"
         "--source" "${PROJECT_DIR}/src/lib"
         "--source" "${PROJECT_DIR}/src/app"
-        "--entry" "${PROJECT_DIR}/src/app/cli/bootstrap_main.spl"
+        "--entry" "${PROJECT_DIR}/src/app/cli/main.spl"
         "-o" "${STAGE3_BIN}"
-        "--backend" "llvm"
+        "--backend" "${BACKEND}"
+        "--clean"
     )
 
-    echo "Running: ${STAGE2_BIN} ${LLVM_ARGS[*]}"
-    if "${STAGE2_BIN}" "${LLVM_ARGS[@]}" 2>&1; then
+    echo "Running: ${STAGE2_BIN} ${STAGE3_ARGS[*]}"
+    if "${STAGE2_BIN}" "${STAGE3_ARGS[@]}" 2>&1; then
         if [[ -x "${STAGE3_BIN}" ]]; then
             echo "Stage 3 built: ${STAGE3_BIN}"
 
@@ -594,7 +590,7 @@ elif detect_llvm; then
             STAGE3_BIN=""
         fi
     else
-        echo "Warning: LLVM build failed, using stage2 as final binary"
+        echo "Warning: Stage 3 build failed, using stage2 as final binary"
         STAGE3_BIN=""
     fi
     echo ""
@@ -604,7 +600,7 @@ else
 fi
 
 # ================================================================
-# Phase 5: Verify reproducibility (stage1 vs stage2 hash)
+# Phase 5: Verify reproducibility (stage2 vs stage3 hash)
 # ================================================================
 if [[ "${VERIFY_HASH}" == "true" ]]; then
     echo "--- Phase 5: Reproducibility verification ---"
@@ -623,23 +619,27 @@ if [[ "${VERIFY_HASH}" == "true" ]]; then
     fi
 
     if [[ "${VERIFY_HASH}" == "true" ]]; then
-        if [[ "${HASH_CMD}" == "certutil" ]]; then
-            # certutil outputs hash on line 2; extract it
-            HASH1=$(certutil -hashfile "${STAGE1_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
-            HASH2=$(certutil -hashfile "${STAGE2_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
-        else
-            HASH1=$(${HASH_CMD} "${STAGE1_BIN}" | awk '{print $1}')
-            HASH2=$(${HASH_CMD} "${STAGE2_BIN}" | awk '{print $1}')
-        fi
+        if [[ -n "${STAGE3_BIN}" && -x "${STAGE3_BIN}" ]]; then
+            if [[ "${HASH_CMD}" == "certutil" ]]; then
+                # certutil outputs hash on line 2; extract it
+                HASH1=$(certutil -hashfile "${STAGE2_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
+                HASH2=$(certutil -hashfile "${STAGE3_BIN}" SHA256 2>/dev/null | sed -n '2p' | tr -d ' ')
+            else
+                HASH1=$(${HASH_CMD} "${STAGE2_BIN}" | awk '{print $1}')
+                HASH2=$(${HASH_CMD} "${STAGE3_BIN}" | awk '{print $1}')
+            fi
 
-        echo "Stage 1 SHA-256: ${HASH1}"
-        echo "Stage 2 SHA-256: ${HASH2}"
+            echo "Stage 2 SHA-256: ${HASH1}"
+            echo "Stage 3 SHA-256: ${HASH2}"
 
-        if [[ "${HASH1}" == "${HASH2}" ]]; then
-            echo "Reproducibility check PASSED — stage1 and stage2 are identical."
+            if [[ "${HASH1}" == "${HASH2}" ]]; then
+                echo "Reproducibility check PASSED — stage2 and stage3 are identical."
+            else
+                echo "Note: stage2 and stage3 differ (expected if timestamps/paths are embedded)."
+                echo "Both binaries are functional — using stage3 when available."
+            fi
         else
-            echo "Note: stage1 and stage2 differ (expected if timestamps/paths are embedded)."
-            echo "Both binaries are functional — using stage2 as the final binary."
+            echo "Skipping reproducibility hash check because stage3 is unavailable."
         fi
     fi
     echo ""
@@ -679,7 +679,7 @@ fi
 
 echo ""
 if [[ -n "${STAGE3_BIN}" && -x "${STAGE3_BIN}" ]]; then
-    echo "=== Bootstrap complete (Rust seed → stage1 → stage2 → stage3 LLVM) ==="
+    echo "=== Bootstrap complete (Rust seed → stage1 → stage2 llvm-lib → stage3 llvm-lib) ==="
 else
     echo "=== Bootstrap complete (Rust seed → stage1 → stage2) ==="
 fi

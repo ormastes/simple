@@ -1,372 +1,146 @@
-# Bootstrap Multi-Platform Build System
+# Multi-Platform Bootstrap
 
-This document describes the multi-platform bootstrap system for Simple Language.
+Updated: 2026-03-10
 
-## Overview
+This document tracks the executable bootstrap flow that matches the root plan in `plan_codex_bootstrap.md`.
 
-The bootstrap system provides pre-built runtime binaries for multiple platforms, enabling:
-- Fast setup without Rust toolchain
-- Cross-platform development
-- Consistent runtime across platforms
-- Easy distribution
+## Scope
 
-## Architecture
+The supported bootstrap levels are:
 
-### Binary Naming Convention
+1. Stage 1: Rust-base Simple
+2. Stage 2: pure Simple with `llvm-lib`
+3. Stage 3: full pure-Simple self-host
 
-```
-bin/release/<os>-<arch>/simple[.exe]
-```
+The target host matrix is:
 
-Examples:
-- `bin/release/linux-x86_64/simple`
-- `bin/release/macos-arm64/simple`
-- `bin/release/windows-x86_64/simple.exe`
+| Platform | Status | Execution mode |
+|----------|--------|----------------|
+| Linux x86_64 | Active | Native |
+| FreeBSD x86_64 | Active | QEMU guest from Linux host |
+| macOS arm64/x86_64 | Prepared | Native host or CI later |
+| Windows x86_64 MinGW | Prepared | Native host or CI later |
+| Windows x86_64 MSVC | Prepared | Native host or CI later |
 
-### Platform Auto-Detection
+## Canonical Commands
 
-The `bin/simple` wrapper automatically:
-1. Detects current OS and architecture
-2. Finds appropriate bootstrap binary
-3. Falls back to alternative locations if needed
-4. Executes Simple CLI with the runtime
-
-### Supported Platforms
-
-| Platform | Status | Build Method | Notes |
-|----------|--------|--------------|-------|
-| `linux-x86_64` | ✅ Production | Native | Primary development platform |
-| `linux-arm64` | ✅ Tested | Cross | Raspberry Pi, ARM servers |
-| `linux-riscv64` | 🔄 Experimental | Cross | Emerging RISC-V hardware |
-| `macos-x86_64` | ✅ Tested | Native | Intel Macs |
-| `macos-arm64` | ✅ Tested | Native | M1/M2/M3 Macs |
-| `windows-x86_64` | ✅ Builds | Native/Cross | Standard Windows |
-| `windows-arm64` | 🔄 Experimental | Cross | ARM Windows devices |
-
-## Build Methods
-
-### 1. Local Multi-Platform Build
-
-Build all platforms locally (requires `cross`):
+### Linux native
 
 ```bash
-# Install cross-compilation tool
-cargo install cross --git https://github.com/cross-rs/cross
-
-# Build all platforms
-scripts/build-bootstrap-multi-platform.sh
+scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts --deploy
 ```
 
-Output:
-```
-bin/release/
-├── linux-x86_64/simple (32 MB)
-├── linux-arm64/simple (32 MB)
-├── macos-arm64/simple (32 MB)
-└── windows-x86_64/simple.exe (32 MB)
-```
+The shell bootstrap script now uses:
 
-### 2. GitHub Actions CI/CD
+- `src/app/cli/main.spl` for Stage 1
+- `--backend llvm-lib` for Stage 2
+- `--backend llvm-lib` for Stage 3
+- `--clean` on each stage boundary
 
-Automated builds on every push to `main`:
+Artifacts:
 
-**Workflow:** `.github/workflows/bootstrap-build.yml`
+- `build/bootstrap/stage1/simple`
+- `build/bootstrap/stage2/simple`
+- `build/bootstrap/stage3/simple`
+- `bin/release/simple`
 
-**Jobs:**
-1. **build-bootstrap** - Builds for all platforms in parallel
-2. **create-release-package** - Combines binaries into release
-
-**Runners:**
-- Ubuntu (Linux x86_64, cross-compile ARM64/RISC-V)
-- macOS-13 (Intel Mac)
-- macOS-14 (Apple Silicon)
-- Windows (x86_64, cross-compile ARM64)
-
-**Artifacts:**
-- Individual platform binaries (30-day retention)
-- Multi-platform tarball (90-day retention)
-
-### 3. Manual Platform-Specific Build
-
-Build for a specific target:
+### FreeBSD via QEMU
 
 ```bash
-# Add target
-rustup target add aarch64-unknown-linux-gnu
-
-# Build (native)
-cargo build --release --target aarch64-unknown-linux-gnu
-
-# Build (cross)
-cross build --release --target aarch64-unknown-linux-gnu
-
-# Copy to bootstrap directory
-mkdir -p bin/release/linux-arm64
-cp target/aarch64-unknown-linux-gnu/release/simple_runtime \
-   bin/release/linux-arm64/simple
-chmod +x bin/release/linux-arm64/simple
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --deploy
 ```
 
-## Integration with Simple Build System
+The QEMU wrapper:
 
-### Build Commands
+- starts or reuses the FreeBSD guest
+- syncs the repo into `~/simple`
+- runs the shared bootstrap script inside the guest
+- copies back `bin/release/simple`
+- copies back `build/bootstrap` into `build/freebsd/bootstrap`
 
-The Simple build system integrates with bootstrap:
+Host-side outputs:
 
-```bash
-# Use bootstrap for build system commands
-bin/simple build                # Build project
-bin/simple build test           # Run tests
-bin/simple build bootstrap      # Rebuild bootstrap binaries
-bin/simple build package        # Create release package
-```
-
-### Bootstrap Rebuild Workflow
-
-```bash
-# 1. Build new runtime from source
-bin/simple build --release
-
-# 2. Copy to bootstrap directory
-cp target/release/simple_runtime bin/release/linux-x86_64/simple
-
-# 3. Test new bootstrap
-bin/release/linux-x86_64/simple --version
-
-# 4. Rebuild entire system with new bootstrap
-bin/simple build bootstrap-rebuild
-```
-
-## Release Process
-
-### Creating Multi-Platform Release
-
-1. **Build all platforms:**
-   ```bash
-   scripts/build-bootstrap-multi-platform.sh
-   ```
-
-2. **Create release package:**
-   ```bash
-   bin/simple build package
-   ```
-
-3. **Upload to GitHub:**
-   ```bash
-   gh release create v0.5.0 \
-     release/simple-multi-platform-*.tar.gz \
-     --title "Simple v0.5.0 - Multi-Platform" \
-     --notes "See CHANGELOG.md for details"
-   ```
-
-### Release Package Contents
-
-```
-simple-multi-platform-20260206.tar.gz (71 MB)
-└── simple-multi-platform/
-    ├── bin/
-    │   ├── simple (wrapper script)
-    │   └── release/
-    │       ├── linux-x86_64/simple
-    │       ├── linux-arm64/simple
-    │       ├── macos-x86_64/simple
-    │       ├── macos-arm64/simple
-    │       ├── windows-x86_64/simple.exe
-    │       └── windows-arm64/simple.exe
-    ├── src/ (Simple source code)
-    ├── doc/ (Documentation)
-    ├── README.md
-    ├── CLAUDE.md
-    └── PLATFORMS.md
-```
-
-## Platform-Specific Notes
-
-### Linux
-
-**Dependencies:**
-- GLIBC 2.17+ (CentOS 7+, Ubuntu 14.04+)
-- Dynamic linking to libc, libm, libpthread
-
-**Distribution:**
-- Works on all major distros (Ubuntu, Debian, Fedora, Arch, etc.)
-- AppImage format planned for future
-
-### macOS
-
-**Compatibility:**
-- Intel Macs: macOS 10.12+
-- Apple Silicon: macOS 11.0+
-
-**Code Signing:**
-- Unsigned binaries require: System Preferences → Security → Allow
-- Signed binaries planned for future releases
+- `bin/release/simple`
+- `build/freebsd/bootstrap/stage1/simple`
+- `build/freebsd/bootstrap/stage2/simple`
+- `build/freebsd/bootstrap/stage3/simple`
 
 ### Windows
 
-**Requirements:**
-- Windows 10+ (x86_64)
-- Windows 11+ (ARM64)
-- MSVC runtime (usually pre-installed)
-
-**PowerShell Support:**
-- Full support via `bin/simple.exe` wrapper
-- Git Bash also works
-
-### RISC-V (Experimental)
-
-**Status:** Builds successfully, limited testing
-**Hardware:** Tested on QEMU, awaiting real hardware testing
-**Issues:** None known
-
-## Binary Size Optimization
-
-Current bootstrap size: **~32 MB** per platform
-
-**Optimization Techniques Used:**
-- LTO (Link-Time Optimization)
-- Strip debug symbols
-- Optimize for size + speed balance
-- Dead code elimination
-
-**Future Optimizations:**
-- UPX compression: ~15 MB (-53%)
-- Static linking: Larger but more portable
-- Split runtime: Core + plugins
-
-## Troubleshooting
-
-### Build Failures
-
-**Cross-compilation fails:**
-```bash
-# Install Docker (required by cross)
-sudo apt-get install docker.io
-sudo usermod -aG docker $USER
-newgrp docker
-
-# Retry build
-scripts/build-bootstrap-multi-platform.sh
+```bat
+scripts\bootstrap\bootstrap-from-scratch.bat --deploy
 ```
 
-**Target not found:**
-```bash
-# Add missing target
-rustup target add <target-triple>
-```
+The batch bootstrap entry is prepared for both Windows lanes:
 
-### Runtime Issues
+- MinGW or MSYS2 environments with LLVM available
+- MSVC environments where `clang-cl` and Visual Studio tooling are on `PATH`
 
-**Wrong platform detected:**
-```bash
-# Force specific platform
-export SIMPLE_BOOTSTRAP_PLATFORM=linux-x86_64
-bin/simple --version
-```
+It follows the same three-stage contract and uses `src\app\cli\main.spl`.
 
-**Binary not executable:**
-```bash
-# Fix permissions
-chmod +x bin/release/*/simple*
-```
+## Platform Preparation
 
-### GitHub Actions Failures
+### macOS
 
-**Timeout:**
-- Increase timeout in workflow YAML
-- Split jobs into smaller units
+Required:
 
-**Artifact upload fails:**
-- Check artifact size limits (10 GB max)
-- Compress binaries if needed
+- Xcode Command Line Tools
+- clang toolchain
+- Homebrew or equivalent LLVM installation for `llvm-lib`
 
-## Performance Characteristics
+Expected LLVM locations already handled in scripts:
 
-### Build Times (GitHub Actions)
+- `/opt/homebrew/opt/llvm/lib`
+- `/usr/local/opt/llvm/lib`
+- versioned Homebrew LLVM prefixes
 
-| Platform | Runner | Time | Notes |
-|----------|--------|------|-------|
-| linux-x86_64 | ubuntu-latest | ~5 min | Native |
-| linux-arm64 | ubuntu-latest | ~15 min | Cross + QEMU |
-| linux-riscv64 | ubuntu-latest | ~20 min | Cross + QEMU |
-| macos-x86_64 | macos-13 | ~8 min | Native |
-| macos-arm64 | macos-14 | ~6 min | Native |
-| windows-x86_64 | windows-latest | ~10 min | Native |
-| windows-arm64 | windows-latest | ~18 min | Cross |
+### Windows MinGW
 
-### Runtime Performance
+Required:
 
-All platforms have similar performance characteristics:
-- Startup: <100ms
-- JIT compilation: ~50ms per function
-- Interpretation: 5-10x slower than native
-- Memory: 10-50 MB typical usage
+- MSYS2 with `mingw64`, `clang64`, or `ucrt64`
+- LLVM `LLVM-C.dll`
+- `clang`, `gcc`, or `clang-cl`
 
-## Future Enhancements
+### Windows MSVC
 
-### Planned Features
-- [ ] Static linking option (musl for Linux)
-- [ ] WebAssembly target (browser + server)
-- [ ] Android ARM64 support
-- [ ] iOS ARM64 support
-- [ ] FreeBSD x86_64 support
-- [ ] Smaller binary sizes (UPX, upx-ucl)
+Required:
 
-### Under Consideration
-- [ ] ARM32 (armv7) for older devices
-- [ ] PowerPC64 for IBM systems
-- [ ] s390x for mainframes
-- [ ] MIPS64 for routers
+- Visual Studio Build Tools
+- `link.exe` or `lld-link.exe`
+- LLVM install exposing `LLVM-C.dll`
 
-### Bootstrap Evolution
-- [ ] Self-extracting executables
-- [ ] Incremental updates (delta patches)
-- [ ] Binary verification (checksums, signatures)
-- [ ] Download-on-demand from CDN
+Keep MinGW and MSVC as separate validation lanes. Do not treat one as proof for the other.
 
-## Contributing
+## Success Criteria
 
-### Adding New Platform
+Each platform is only green when:
 
-1. **Test feasibility:**
-   ```bash
-   rustup target add <target-triple>
-   cargo build --release --target <target-triple>
-   ```
+- Stage 1 builds the full CLI
+- Stage 2 builds from Stage 1 with `llvm-lib`
+- Stage 3 rebuilds from Stage 2 with `llvm-lib`
+- final binary passes:
+  - `--version`
+  - `--help`
+  - native hello-world compile and run
 
-2. **Update build scripts:**
-   - Add to `scripts/build-bootstrap-multi-platform.sh`
-   - Add to `.github/workflows/bootstrap-build.yml`
+Additional Linux and FreeBSD requirement:
 
-3. **Update documentation:**
-   - Add to platform table
-   - Document any special requirements
+- Stage 2 and Stage 3 hashes are compared and any mismatch is explained
 
-4. **Test thoroughly:**
-   - Native testing on target platform
-   - Cross-compilation testing
-   - CI/CD integration testing
+## Current Status
 
-5. **Submit PR:**
-   - Include test results
-   - Update CHANGELOG.md
-   - Add platform-specific notes
+### Linux
 
-### Testing Checklist
+- Stage 1 full CLI bootstrap is working
+- Stage 2 is still blocked in the pure-Simple frontend/runtime path
 
-For each new platform:
-- [ ] Binary builds successfully
-- [ ] Binary runs without errors
-- [ ] `--version` shows correct info
-- [ ] Basic scripts execute
-- [ ] Build system works
-- [ ] Test suite passes
-- [ ] Size is reasonable (<50 MB)
-- [ ] Performance is acceptable
+### FreeBSD
 
-## References
+- QEMU execution path and artifact retrieval are wired
+- validation depends on the same Stage 2 pure-Simple unblock
 
-- Rust Platform Support: https://doc.rust-lang.org/nightly/rustc/platform-support.html
-- Cross Tool: https://github.com/cross-rs/cross
-- GitHub Actions Runners: https://docs.github.com/en/actions/using-github-hosted-runners
-- Target Triples: https://rust-lang.github.io/rfcs/0131-target-specification.html
+### macOS and Windows
+
+- scripts and toolchain assumptions are prepared
+- final validation is pending after the Linux Stage 2 unblock
