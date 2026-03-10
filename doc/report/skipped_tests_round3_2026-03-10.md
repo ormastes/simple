@@ -62,11 +62,12 @@ These require `extern fn rt_*()` symbols that are **not compiled into the binary
 | `loader_exec_memory_spec.spl` | 1 | Native exec memory |
 | `jit_probe_spec.spl` | 1 | JIT only |
 
-### Module/Closure Limitations (23 tests, 4 files)
+### Module/Closure/Interpreter Limitations (29 tests, 5 files)
 | File | Tests | Reason |
 |------|-------|--------|
-| `index_spec.spl` | 11 | Multi-struct construction / enum methods |
-| `experiment_tracking_spec.spl` | 6 | Enum variant construction / path calls |
+| `index_spec.spl` | 11 | `function 'VersionEntry' not found` — multi-struct constructor (only 1st struct registered) |
+| `experiment_tracking_spec.spl` | 6 | `unsupported path call ["ConfigValue", "Float"]` — enum variant construction via path |
+| `hashset_basic_spec.spl` | 6 | `type mismatch: cannot convert string to int` — HashSet method dispatch |
 | `implicit_context_spec.spl` | 6 | Closure mutation of module vars in `it` blocks |
 
 ### External Tools Required (17 tests, 2 files)
@@ -87,10 +88,9 @@ These require `extern fn rt_*()` symbols that are **not compiled into the binary
 | `app_mcp_intensive_spec.spl` | 7 | Compiled mode server |
 | `mcp_bugdb_spec.spl` | 1 | MCP bugdb integration |
 
-### HashSet / Other (9 tests, 3 files)
+### Other (3 tests, 3 files)
 | File | Tests | Reason |
 |------|-------|--------|
-| `hashset_basic_spec.spl` | 6 | FFI class dispatch limitation |
 | `native_ops_dir_create_spec.spl` | 1 | Compiled mode |
 | `bug_tracking_scenario_spec.spl` | 1 | Integration dependency |
 
@@ -108,18 +108,27 @@ These require `extern fn rt_*()` symbols that are **not compiled into the binary
 
 ---
 
+## FFI Symbol Availability (investigated 2026-03-10)
+
+| Symbol prefix | In binary? | In .so? | Resolvable via dlopen? |
+|---------------|-----------|---------|----------------------|
+| `rt_ts_*` (TreeSitter) | No | No `.so` exists | **No** — need to build `libspl_treesitter.so` |
+| `rt_torch_*` (Tensor) | 3 stubs | 66 in `libsimple_runtime.so`, 202 in `libspl_torch.so` | **Yes** via `dynamic_ffi.rs` or `DynLoader` |
+| `ts_parser_*` (raw C) | No | No | **No** — need `libtree-sitter.so` |
+
+The `dynamic_ffi.rs` dlopen mechanism works for torch if `libsimple_runtime.so` is findable.
+TreeSitter has SFFI spec but no shared library built yet.
+
 ## What Could Still Be Fixed
 
 | Category | Tests | Effort | Approach |
 |----------|-------|--------|----------|
-| TreeSitter FFI | 43 | M | Link tree-sitter into runtime, export `rt_ts_*` symbols |
-| Tensor FFI | 12 | M | Same — link tensor ops, export `rt_tensor_*` |
-| Index/Experiment | 17 | S | May work with module-var fix — needs testing |
-| HashSet | 6 | S | Self-contained rewrite possible |
+| TreeSitter FFI | 43 | L | Build `libspl_treesitter.so` wrapping tree-sitter C library |
+| Tensor FFI | 12 | S | `libsimple_runtime.so` already has 66 `rt_torch_*` symbols — ensure it's findable |
 | Implicit mul | 19 | L | Math block evaluator needs scope resolution |
 | Generators codegen | 8 | L | Generator state machine in interpreter |
 
-**Genuinely unfixable in interpreter mode:** ~48 tests (Vulkan 9, VHDL 8, Baremetal 17, MCP 8, Perf 2, JIT 1, native ops 1, loader exec 1, class invariant 1)
+**Genuinely unfixable in interpreter mode:** ~48 tests (Vulkan 9, VHDL 8, Baremetal 17, MCP 8, Perf 2, JIT 1, native ops 1, loader exec 1, class invariant 1, default fields 1)
 
 ---
 
