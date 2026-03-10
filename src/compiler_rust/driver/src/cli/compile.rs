@@ -208,6 +208,32 @@ pub fn compile_file_native(
     }
 }
 
+/// Compile a source file to PTX (NVIDIA GPU assembly) output
+pub fn compile_file_to_ptx(source: &PathBuf, output: Option<PathBuf>) -> i32 {
+    use simple_compiler::pipeline::CompilerPipeline;
+
+    let out_path = output.unwrap_or_else(|| source.with_extension("ptx"));
+
+    let mut pipeline = match CompilerPipeline::new() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: failed to create compiler pipeline: {}", e);
+            return 1;
+        }
+    };
+
+    match pipeline.compile_file_to_ptx(source, &out_path) {
+        Ok(()) => {
+            println!("Compiled {} -> {}", source.display(), out_path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            1
+        }
+    }
+}
+
 /// List available native linkers and their status
 pub fn list_linkers() -> i32 {
     use simple_compiler::linker::NativeLinker;

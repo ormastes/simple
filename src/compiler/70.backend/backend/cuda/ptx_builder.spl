@@ -27,16 +27,16 @@ class PtxBuilder:
     """
 
     type_mapper: CudaTypeMapper
-    compute_capability: [i64]
+    compute_capability: (i64, i64)
     output: [text]
     next_reg: i64
     next_label: i64
     indent_level: i64
 
-    static fn create(compute_cap: [i64]) -> PtxBuilder:
+    static fn create(compute_cap: (i64, i64)) -> PtxBuilder:
         """Create PTX builder for specific compute capability."""
         PtxBuilder(
-            type_mapper: cudatypemapper_create_sm(compute_cap[0], compute_cap[1]),
+            type_mapper: CudaTypeMapper__create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
             output: [],
             next_reg: 0,
@@ -48,10 +48,9 @@ class PtxBuilder:
 
     me emit_module_header(name: text):
         """Emit PTX module header."""
-        val _destruct_0 = self.compute_capability
-        val major = _destruct_0[0]
-        val minor = _destruct_0[1]
-        self.emit_line(".version 7[8]")
+        val major = self.compute_capability.0
+        val minor = self.compute_capability.1
+        self.emit_line(".version 7.8")
         self.emit_line(".target sm_{major}{minor}")
         self.emit_line(".address_size 64")
         self.emit_line("")
@@ -63,11 +62,13 @@ class PtxBuilder:
         self.emit_line(".visible .entry {name}(")
         self.indent_level = self.indent_level + 1
 
-        for _for_item_0 in params_enumerate(params):
-            val i = _for_item_0[0]
-            val param = _for_item_0[1]
-            val ty = self.type_mapper_ptx_type(type_mapper, param.type_.kind)
-            val comma = if i < params.length - 1: "," else: ""
+        val params_len = params.len()
+        for item in params.enumerate():
+            val i = item.0
+            val param = item.1
+            val tm = self.type_mapper
+            val ty = tm.ptx_type(param.type_.kind)
+            val comma = if i < params_len - 1: "," else: ""
             self.emit_line(".param {ty} param_{i}{comma}")
 
         self.indent_level = self.indent_level - 1
@@ -81,17 +82,26 @@ class PtxBuilder:
         self.emit_line("}")
         self.emit_line("")
 
+    me emit_function_end():
+        """Emit function end (same as kernel end)."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("}")
+        self.emit_line("")
+
     me emit_device_function(name: text, params: [MirLocal], ret_type: MirType):
         """Emit device function declaration."""
-        val ret = self.type_mapper_ptx_type(type_mapper, ret_type.kind)
+        val tm = self.type_mapper
+        val ret = tm.ptx_type(ret_type.kind)
         self.emit_line(".visible .func ({ret} retval) {name}(")
         self.indent_level = self.indent_level + 1
 
-        for _for_item_1 in params_enumerate(params):
-            val i = _for_item_1[0]
-            val param = _for_item_1[1]
-            val ty = self.type_mapper_ptx_type(type_mapper, param.type_.kind)
-            val comma = if i < params.length - 1: "," else: ""
+        val params_len = params.len()
+        for item in params.enumerate():
+            val i = item.0
+            val param = item.1
+            val tm2 = self.type_mapper
+            val ty = tm2.ptx_type(param.type_.kind)
+            val comma = if i < params_len - 1: "," else: ""
             self.emit_line(".param {ty} param_{i}{comma}")
 
         self.indent_level = self.indent_level - 1
@@ -105,7 +115,6 @@ class PtxBuilder:
         """Allocate a virtual register."""
         val reg_num = self.next_reg
         self.next_reg = self.next_reg + 1
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
         "%r{reg_num}"
 
     me alloc_pred_reg() -> text:
@@ -116,7 +125,8 @@ class PtxBuilder:
 
     me emit_reg_decl(reg: text, ty: PrimitiveType):
         """Emit register declaration."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line(".reg {ptx_ty} {reg};")
 
     me emit_pred_decl(reg: text):
@@ -183,7 +193,8 @@ class PtxBuilder:
 
     me emit_add(dest: text, ty: PrimitiveType, a: text, b: text):
         """Emit add instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         match ty:
             case F32:
                 self.emit_line("add{ptx_ty} {dest}, {a}, {b};")
@@ -194,12 +205,14 @@ class PtxBuilder:
 
     me emit_sub(dest: text, ty: PrimitiveType, a: text, b: text):
         """Emit subtract instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line("sub{ptx_ty} {dest}, {a}, {b};")
 
     me emit_mul(dest: text, ty: PrimitiveType, a: text, b: text):
         """Emit multiply instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         match ty:
             case F32:
                 self.emit_line("mul{ptx_ty} {dest}, {a}, {b};")
@@ -210,7 +223,8 @@ class PtxBuilder:
 
     me emit_div(dest: text, ty: PrimitiveType, a: text, b: text):
         """Emit divide instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         match ty:
             case F32:
                 self.emit_line("div.approx{ptx_ty} {dest}, {a}, {b};")
@@ -221,33 +235,44 @@ class PtxBuilder:
 
     me emit_neg(dest: text, ty: PrimitiveType, src: text):
         """Emit negate instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line("neg{ptx_ty} {dest}, {src};")
 
     # === Memory Operations ===
 
     me emit_load(dest: text, ty: PrimitiveType, addr: text, space: MemorySpace):
         """Emit load instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("ld{space_str}{ptx_ty} {dest}, [{addr}];")
 
     me emit_store(ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit store instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("st{space_str}{ptx_ty} [{addr}], {value};")
 
     me emit_shared_memory(name: text, ty: PrimitiveType, count: i64):
         """Emit shared memory allocation."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line(".shared {ptx_ty} {name}[{count}];")
+
+    me emit_local_alloc(name: text, ty: PrimitiveType, count: i64):
+        """Emit local memory allocation."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line(".local {ptx_ty} {name}[{count}];")
 
     # === Comparison and Branching ===
 
     me emit_compare(dest: text, op: text, ty: PrimitiveType, a: text, b: text):
         """Emit comparison instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line("setp.{op}{ptx_ty} {dest}, {a}, {b};")
 
     me emit_branch(label: text):
@@ -294,34 +319,53 @@ class PtxBuilder:
 
     me emit_atomic_add(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic add instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("atom{space_str}.add{ptx_ty} {dest}, [{addr}], {value};")
 
     me emit_atomic_min(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic min instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("atom{space_str}.min{ptx_ty} {dest}, [{addr}], {value};")
 
     me emit_atomic_max(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic max instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("atom{space_str}.max{ptx_ty} {dest}, [{addr}], {value};")
 
     me emit_atomic_cas(dest: text, ty: PrimitiveType, addr: text, compare: text, value: text, space: MemorySpace):
         """Emit atomic compare-and-swap instruction."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
-        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val space_str = tm.ptx_state_space(space)
         self.emit_line("atom{space_str}.cas{ptx_ty} {dest}, [{addr}], {compare}, {value};")
+
+    # === Function Calls ===
+
+    me emit_call(dest: text, ty: PrimitiveType, func_name: text, args: [text]):
+        """Emit PTX function call with return value."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        val args_str = args.join(", ")
+        self.emit_line("call ({dest}), {func_name}, ({args_str});")
+
+    me emit_call_void(func_name: text, args: [text]):
+        """Emit PTX void function call."""
+        val args_str = args.join(", ")
+        self.emit_line("call {func_name}, ({args_str});")
 
     # === Conversion ===
 
     me emit_convert(dest: text, dest_ty: PrimitiveType, src: text, src_ty: PrimitiveType):
         """Emit type conversion instruction."""
-        val dest_ptx = self.type_mapper_ptx_type(type_mapper, dest_ty)
-        val src_ptx = self.type_mapper_ptx_type(type_mapper, src_ty)
+        val tm = self.type_mapper
+        val dest_ptx = tm.ptx_type(dest_ty)
+        val src_ptx = tm.ptx_type(src_ty)
 
         # Float to float
         if ((dest_ty == PrimitiveType.F32 or dest_ty == PrimitiveType.F64) and
@@ -341,12 +385,14 @@ class PtxBuilder:
 
     me emit_const_int(dest: text, ty: PrimitiveType, value: i64):
         """Emit integer constant load."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         self.emit_line("mov{ptx_ty} {dest}, {value};")
 
     me emit_const_float(dest: text, ty: PrimitiveType, value: f64):
         """Emit float constant load."""
-        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
         # PTX uses 0F/0D prefix for float/double literals
         match ty:
             case F32:
@@ -355,6 +401,68 @@ class PtxBuilder:
                 self.emit_line("mov{ptx_ty} {dest}, 0D{value.to_hex()};")
             case _:
                 error("Invalid float type: {ty}")
+
+    # === Intrinsics ===
+
+    me emit_intrinsic_sin(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX sin approximation instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("sin.approx{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_cos(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX cos approximation instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("cos.approx{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_sqrt(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX sqrt instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("sqrt.approx{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_abs(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX abs instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("abs{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_min(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit PTX min instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("min{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_intrinsic_max(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit PTX max instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("max{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_intrinsic_fma(dest: text, ty: PrimitiveType, a: text, b: text, c: text):
+        """Emit PTX fused multiply-add instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("fma.rn{ptx_ty} {dest}, {a}, {b}, {c};")
+
+    me emit_intrinsic_ex2(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX exp2 (2^x) approximation instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("ex2.approx{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_lg2(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX log2 approximation instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("lg2.approx{ptx_ty} {dest}, {src};")
+
+    me emit_intrinsic_rcp(dest: text, ty: PrimitiveType, src: text):
+        """Emit PTX reciprocal approximation instruction."""
+        val tm = self.type_mapper
+        val ptx_ty = tm.ptx_type(ty)
+        self.emit_line("rcp.approx{ptx_ty} {dest}, {src};")
 
     # === Return ===
 

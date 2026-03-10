@@ -1,0 +1,72 @@
+#!/bin/sh
+# TRACE32 host setup — installs udev rules, fonts, Xvfb for headless T32
+# Run once per host. Requires sudo.
+set -eu
+
+T32SYS="${T32SYS:-/opt/t32}"
+
+echo "[1/4] Installing Lauterbach udev rule"
+sudo cp "$T32SYS/bin/pc_linux64/udev.conf/kernel_starting_2.6.32/10-lauterbach.rules" \
+        /etc/udev/rules.d/10-lauterbach.rules
+sudo udevadm control --reload-rules
+
+echo "[2/4] Enabling PCF bitmap fonts for TRACE32"
+# Remove bitmap font rejection if present
+if [ -f /etc/fonts/conf.d/70-no-bitmaps.conf ]; then
+    sudo rm /etc/fonts/conf.d/70-no-bitmaps.conf
+fi
+if [ -f /etc/fonts/conf.d/70-no-bitmaps-except-emoji.conf ]; then
+    sudo rm /etc/fonts/conf.d/70-no-bitmaps-except-emoji.conf
+fi
+# Add T32 font directory to fontconfig
+sudo tee /etc/fonts/conf.d/99-t32-fonts.conf > /dev/null << 'FONTCFG'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>/opt/t32/fonts</dir>
+  <selectfont>
+    <acceptfont>
+      <glob>/opt/t32/fonts/*</glob>
+    </acceptfont>
+  </selectfont>
+</fontconfig>
+FONTCFG
+sudo fc-cache -f
+
+echo "[3/4] Installing Xvfb"
+sudo apt-get install -y xvfb xdotool > /dev/null 2>&1
+
+echo "[4/4] Triggering USB re-enumeration"
+# Find the Lauterbach device and trigger udev
+for d in /sys/bus/usb/devices/*/; do
+    if [ -f "$d/idVendor" ] && grep -q 0897 "$d/idVendor" 2>/dev/null; then
+        DEVNAME=$(basename "$d")
+        echo "  Found Lauterbach at $DEVNAME"
+        # Reset USB device if usbreset is available
+        if command -v usbreset > /dev/null 2>&1; then
+            sudo usbreset "0897:0002" 2>/dev/null || true
+            sleep 2
+        fi
+        sudo udevadm trigger --action=add "/sys/bus/usb/devices/$DEVNAME"
+        sleep 1
+        break
+    fi
+done
+
+# Verify
+if [ -d /dev/lauterbach/trace32 ]; then
+    echo ""
+    echo "OK: /dev/lauterbach/trace32/ exists"
+    ls -la /dev/lauterbach/trace32/
+else
+    echo ""
+    echo "WARN: /dev/lauterbach/trace32/ not found"
+    echo "  Try: physically unplug and replug the TRACE32 probe"
+fi
+
+echo ""
+echo "Setup complete. To start T32 headless:"
+echo "  xvfb-run -a scripts/t32_start_stm.shs stm32wb native"
+echo ""
+echo "To verify:"
+echo "  scripts/t32_check_ready.shs localhost 20000"

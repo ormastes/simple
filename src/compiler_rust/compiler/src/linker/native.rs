@@ -312,25 +312,43 @@ impl NativeLinker {
             cmd.arg(obj);
         }
 
-        // Add libraries
-        for lib in &options.libraries {
-            cmd.arg(format!("-l{}", lib));
-        }
-
-        // Add library search paths
+        // Add library search paths (before libraries so -L paths are available for -l)
         for path in &options.library_paths {
             cmd.arg("-L").arg(path);
         }
 
-        // Add rpath for runtime library loading
-        // macOS Apple ld uses -rpath <path> (not --rpath=); GNU ld uses --rpath=
+        // Add libraries, forcing simple_runtime to link statically.
+        // The runtime dir may contain both libsimple_runtime.a and .so;
+        // the .so has weak __libc_start_main stubs that break the binary.
+        let has_static_runtime_lib = options.libraries.iter().any(|l| l.starts_with("simple_"));
+        for lib in &options.libraries {
+            if lib.starts_with("simple_") {
+                // Force static linking for Simple runtime libraries
+                if !matches!(self, Self::Ld) || !cfg!(target_os = "macos") {
+                    cmd.arg("-Bstatic");
+                }
+                cmd.arg(format!("-l{}", lib));
+                if !matches!(self, Self::Ld) || !cfg!(target_os = "macos") {
+                    cmd.arg("-Bdynamic");
+                }
+            } else {
+                cmd.arg(format!("-l{}", lib));
+            }
+        }
+
+        // Add rpath for runtime library loading — skip paths that only
+        // contain Simple runtime libraries (they are statically linked).
         #[cfg(target_os = "macos")]
         for path in &options.library_paths {
-            cmd.arg("-rpath").arg(path);
+            if !has_static_runtime_lib || !Self::is_simple_runtime_only_path(path) {
+                cmd.arg("-rpath").arg(path);
+            }
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         for path in &options.library_paths {
-            cmd.arg(format!("--rpath={}", path.display()));
+            if !has_static_runtime_lib || !Self::is_simple_runtime_only_path(path) {
+                cmd.arg(format!("--rpath={}", path.display()));
+            }
         }
 
         // Add extra flags
@@ -358,6 +376,16 @@ impl NativeLinker {
             let exit_code = output_result.status.code().unwrap_or(-1);
             self.classify_link_error(exit_code, &stderr)
         }
+    }
+
+    /// Check if a library path contains only Simple runtime libraries
+    /// (and therefore doesn't need an rpath entry when statically linked).
+    fn is_simple_runtime_only_path(path: &Path) -> bool {
+        // If the path contains "compiler_rust/target" or "target/release" etc.
+        // and has libsimple_runtime.a, it's a Simple-only runtime path.
+        let path_str = path.to_string_lossy();
+        (path_str.contains("compiler_rust/target") || path_str.contains("target/bootstrap"))
+            && path.join("libsimple_runtime.a").exists()
     }
 
     /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.

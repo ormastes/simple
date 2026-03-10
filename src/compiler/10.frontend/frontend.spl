@@ -7,17 +7,14 @@
 # (check/interpret/jit/aot) all consume exactly one parse pipeline.
 
 use compiler.frontend.parser_types.{Module}
-use compiler.frontend.treesitter.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.tools.desugar_async.{desugar_module}
-use compiler.core.parser.*
 # Fallback: if parser_preprocessor fails to import, use passthrough
 fn preprocess_conditionals(source: text) -> text:
     source
 # Try to import real preprocessor (overwrites fallback if successful)
 use compiler.core.parser_preprocessor.{preprocess_conditionals}
-use compiler.blocks.blocks.*
 use compiler.common.config.{Logger}
-use compiler.driver.driver_types.{create_block_resolver}
 
 fn frontend_log_trace(log: Logger, message: text):
     if log.level >= 20:
@@ -26,26 +23,8 @@ fn frontend_log_trace(log: Logger, message: text):
 fn parse_full_frontend(source: text, file_path: text, module_name: text, log: Logger) -> Module:
     val preprocessed = preprocess_conditionals(source)
 
-    # Phase 2a: Outline parsing (TreeSitter)
-    frontend_log_trace(log, "2a: outline parsing...")
-    var ts = TreeSitter__new(preprocessed)
-    val outline = ts.parse_outline()
-
-    # Phase 2b: Block resolution
-    frontend_log_trace(log, "2b: resolving blocks...")
-    var resolver = create_block_resolver()
-    resolver = resolver.with_file(file_path)
-    resolver = resolver.with_module(module_name)
-    val (resolved, block_diagnostics) = resolver.resolve(outline)
-
-    # Keep behavior unchanged: diagnostics are gathered for future wiring.
-    if block_diagnostics.len() > 0:
-        frontend_log_trace(log, "2b: block diagnostics={block_diagnostics.len()}")
-
-    # Phase 2c: Full parse with resolved blocks
-    frontend_log_trace(log, "2c: full parse...")
-    var parser = Parser__with_resolved_blocks(preprocessed, resolved)
-    val module = parser.parse()
+    frontend_log_trace(log, "2: core parser bridge...")
+    val module = parse_and_build_module(preprocessed, file_path)
 
     # Phase 2d: Desugar async/await/spawn/actor syntax
     frontend_log_trace(log, "2d: desugaring...")

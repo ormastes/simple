@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use simple_common::target::{Target, TargetArch};
 use simple_compiler::linker::NativeLinker;
-use crate::cli::compile::{compile_file, compile_file_native, list_linkers, list_targets};
+use crate::cli::compile::{compile_file, compile_file_native, compile_file_to_ptx, list_linkers, list_targets};
 use crate::CompileOptions;
 
 /// Handle 'compile' command - compile source to SMF or native binary
@@ -23,6 +23,19 @@ pub fn handle_compile(args: &[String]) -> i32 {
     // Parse flags
     let native = args.iter().any(|a| a == "--native");
     let snapshot = args.iter().any(|a| a == "--snapshot");
+
+    // Parse backend
+    let backend = args.iter()
+        .find(|a| a.starts_with("--backend="))
+        .and_then(|a| a.strip_prefix("--backend="))
+        .map(|s| s.to_string());
+
+    // CUDA/PTX backend - generate PTX output
+    if let Some(ref b) = backend {
+        if b == "cuda" || b == "ptx" {
+            return compile_file_to_ptx(&source, output);
+        }
+    }
 
     // Parse target architecture
     let target = parse_target_flag(args);
@@ -105,12 +118,13 @@ fn parse_linker_flag(args: &[String]) -> Option<NativeLinker> {
 fn print_compile_help() {
     eprintln!("error: compile requires a source file");
     eprintln!(
-        "Usage: simple compile <source.spl> [-o <output>] [--native] [--target <arch>] [--linker <name>] [--snapshot]"
+        "Usage: simple compile <source.spl> [-o <output>] [--native] [--backend=<name>] [--target <arch>] [--linker <name>] [--snapshot]"
     );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
+    eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output)");
     eprintln!("  --target <arch>     Target architecture (x86_64, aarch64, etc.)");
     eprintln!("  --linker <name>     Native linker to use (mold, lld, ld)");
     eprintln!("  --layout-optimize   Enable 4KB page layout optimization");

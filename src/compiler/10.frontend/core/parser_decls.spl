@@ -28,7 +28,7 @@ use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE}
 use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
 use compiler.core.tokens.{TOK_KW_BITFIELD}
-use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE}
+use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
@@ -38,6 +38,7 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
+use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd}
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
@@ -537,6 +538,33 @@ fn parse_module_body():
             parser_advance()
             val ce_d = parse_ce_decl()
             module_add_decl(ce_d)
+        elif par_kind == TOK_AT:
+            # Decorator: @gpu_kernel, @simd, @bounds(...), etc.
+            parser_advance()
+            var decorator_name = ""
+            if par_kind == TOK_IDENT:
+                decorator_name = par_text
+                parser_advance()
+            if par_kind == TOK_LPAREN:
+                parser_advance()
+                for dec_j in 0..100:
+                    val dec_end1: bool = par_kind == TOK_RPAREN
+                    val dec_end2: bool = par_kind == TOK_EOF
+                    if dec_end1 or dec_end2:
+                        break
+                    parser_advance()
+                parser_expect(TOK_RPAREN)
+            parser_skip_newlines_and_semicolons()
+            if decorator_name == "gpu_kernel":
+                if par_kind == TOK_KW_FN or par_kind == TOK_KW_ME:
+                    val d = parse_fn_decl(0)
+                    decl_is_gpu_kernel[d] = 1
+                    module_add_decl(d)
+            elif decorator_name == "simd":
+                if par_kind == TOK_KW_FN or par_kind == TOK_KW_ME:
+                    val d = parse_fn_decl(0)
+                    decl_is_simd[d] = 1
+                    module_add_decl(d)
         elif par_kind == TOK_KW_NEWTYPE:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             parser_advance()

@@ -273,6 +273,120 @@ fn gpu_sync() -> Result<(), GpuError>:
         return Err(GpuError__from_code(result))
     Ok(())
 
+
+# ============================================================================
+# Device Info Wrappers
+# ============================================================================
+
+fn gpu_device_name(device_id: i64) -> text:
+    """Get GPU device name by ID."""
+    cuda_device_name(cuda_device_get(device_id))
+
+fn gpu_device_compute_capability(device_id: i64) -> (i64, i64):
+    """Get compute capability as (major, minor) tuple."""
+    val cap = cuda_device_compute_capability(cuda_device_get(device_id))
+    (cap / 10, cap % 10)
+
+fn gpu_device_total_memory(device_id: i64) -> i64:
+    """Get total device memory in bytes.
+    Note: Returns 0 until memory query FFI is added."""
+    0
+
+fn gpu_set_device(device_id: i64) -> Result<(), GpuError>:
+    """Set the active GPU device (creates context)."""
+    val handle = cuda_ctx_create(cuda_device_get(device_id))
+    if handle < 0:
+        return Err(GpuError.from_code(handle))
+    Ok(())
+
+fn gpu_device_count() -> i64:
+    """Get number of available GPU devices."""
+    cuda_device_count()
+
+# ============================================================================
+# Typed Memory Transfer
+# ============================================================================
+
+fn gpu_upload_f32(gpu_ptr: GpuPtr, data: [f32]) -> Result<(), GpuError>:
+    """Upload f32 array from host to device."""
+    val byte_size = data.len() * 4  # f32 = 4 bytes
+    gpu_upload(gpu_ptr, data.data_ptr(), byte_size)
+
+fn gpu_download_f32(gpu_ptr: GpuPtr, count: i64) -> Result<[f32], GpuError>:
+    """Download f32 array from device to host."""
+    var result: [f32] = []
+    for i in 0..count:
+        result = result + [0.0]
+    val byte_size = count * 4
+    val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
+    match dl_result:
+        case Ok(_):
+            Ok(result)
+        case Err(e):
+            Err(e)
+
+# ============================================================================
+# GPU Intrinsic Stubs (interpreter mode)
+# These are recognized as intrinsics by the MIR->PTX backend at compile time.
+# In interpreter mode, they return dummy values for testing.
+# ============================================================================
+
+fn gpu_block_id_x() -> i64:
+    """Block ID in X dimension. PTX: %ctaid.x"""
+    0  # Stub for interpreter mode
+
+fn gpu_block_id_y() -> i64:
+    """Block ID in Y dimension. PTX: %ctaid.y"""
+    0
+
+fn gpu_block_dim_x() -> i64:
+    """Block dimension in X. PTX: %ntid.x"""
+    1
+
+fn gpu_block_dim_y() -> i64:
+    """Block dimension in Y. PTX: %ntid.y"""
+    1
+
+fn gpu_local_id_x() -> i64:
+    """Thread ID within block, X. PTX: %tid.x"""
+    0
+
+fn gpu_local_id_y() -> i64:
+    """Thread ID within block, Y. PTX: %tid.y"""
+    0
+
+fn gpu_grid_dim_x() -> i64:
+    """Grid dimension in X. PTX: %nctaid.x"""
+    1
+
+fn gpu_grid_dim_y() -> i64:
+    """Grid dimension in Y. PTX: %nctaid.y"""
+    1
+
+fn gpu_global_id_x() -> i64:
+    """Global thread ID in X = blockIdx.x * blockDim.x + threadIdx.x"""
+    0
+
+fn gpu_global_id_y() -> i64:
+    """Global thread ID in Y = blockIdx.y * blockDim.y + threadIdx.y"""
+    0
+
+fn gpu_syncthreads():
+    """Synchronize threads within a block. PTX: bar.sync 0"""
+    pass_dn  # No-op in interpreter mode
+
+fn gpu_load_f32(ptr: GpuPtr, index: i64) -> f32:
+    """Load f32 from device memory at index. PTX: ld.global.f32"""
+    0.0  # Stub for interpreter mode
+
+fn gpu_store_f32(ptr: GpuPtr, index: i64, value: f32):
+    """Store f32 to device memory at index. PTX: st.global.f32"""
+    pass_dn  # Stub for interpreter mode
+
+fn gpu_atomic_add_i64(ptr: GpuPtr, index: i64, value: i64) -> i64:
+    """Atomic add on device memory. PTX: atom.global.add"""
+    0  # Stub for interpreter mode
+
 # ============================================================================
 # Export
 # ============================================================================
@@ -280,3 +394,10 @@ fn gpu_sync() -> Result<(), GpuError>:
 export GpuError, GpuDevice, GpuContext, GpuPtr, GpuModule, GpuLaunchConfig
 export gpu_init, gpu_alloc, gpu_free, gpu_upload, gpu_download
 export gpu_memset, gpu_launch, gpu_sync
+export gpu_device_name, gpu_device_compute_capability, gpu_device_total_memory
+export gpu_set_device, gpu_device_count
+export gpu_upload_f32, gpu_download_f32
+export gpu_block_id_x, gpu_block_id_y, gpu_block_dim_x, gpu_block_dim_y
+export gpu_local_id_x, gpu_local_id_y, gpu_grid_dim_x, gpu_grid_dim_y
+export gpu_global_id_x, gpu_global_id_y, gpu_syncthreads
+export gpu_load_f32, gpu_store_f32, gpu_atomic_add_i64

@@ -68,7 +68,7 @@ class CudaBackend:
                     "Target is not a CUDA target"
                 ))
 
-    fn compile(module: MirModule) -> Result<CudaCompiledModule, CompileError>:
+    me compile(module: MirModule) -> Result<CudaCompiledModule, CompileError>:
         """Compile MIR module to PTX."""
         val builder = PtxBuilder__create(self.compute_capability)
 
@@ -107,7 +107,7 @@ class CudaBackend:
             compute_capability: self.compute_capability
         ))
 
-    fn compile_function(builder: PtxBuilder, func: MirFunction) -> Result<CompiledFunction, CompileError>:
+    me compile_function(builder: PtxBuilder, func: MirFunction) -> Result<CompiledFunction, CompileError>:
         """Compile a single function."""
         val is_kernel = self.is_kernel_function(func)
 
@@ -138,7 +138,7 @@ class CudaBackend:
                 if result.is_err():
                     return Err(result.unwrap_err())
 
-            self.compile_terminator(builder, block.terminator)
+            self.compile_terminator(builder, block.terminator, is_kernel)
 
         if is_kernel:
             builder.emit_kernel_end()
@@ -153,7 +153,9 @@ class CudaBackend:
 
     fn is_kernel_function(func: MirFunction) -> bool:
         """Check if function should be compiled as a kernel."""
-        # For now, functions with GPU instructions are kernels
+        if func.is_kernel:
+            return true
+        # Fallback: heuristic for functions with GPU instructions
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
@@ -180,7 +182,7 @@ class CudaBackend:
             case Bool: builder.emit_pred_decl(reg)
             case _: ()
 
-    fn compile_instruction(builder: PtxBuilder, inst: MirInst) -> Result<(), CompileError>:
+    me compile_instruction(builder: PtxBuilder, inst: MirInst) -> Result<(), CompileError>:
         """Compile a single MIR instruction to PTX."""
         match inst.kind:
             case Const(dest, value, ty):
@@ -282,7 +284,7 @@ class CudaBackend:
             case Bitcast(dest, operand, target):
                 # Bitcast is a reinterpretation, use mov in PTX
                 val dest_reg = "%r{dest.id}"
-                val src_reg = self.operand_to_reg(operand)
+                val src_reg = self.operand_to_reg(builder, operand)
                 builder.emit_line("mov.b64 {dest_reg}, {src_reg};")
 
             # --- Memory Allocation ---
@@ -320,7 +322,7 @@ class CudaBackend:
 
         Ok(())
 
-    fn compile_const(builder: PtxBuilder, dest: LocalId, value: MirConstValue, ty: MirType):
+    me compile_const(builder: PtxBuilder, dest: LocalId, value: MirConstValue, ty: MirType):
         """Compile constant load."""
         val reg = "%r{dest.id}"
         match value:
@@ -336,18 +338,18 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported constant type")
 
-    fn compile_copy(builder: PtxBuilder, dest: LocalId, src: LocalId):
+    me compile_copy(builder: PtxBuilder, dest: LocalId, src: LocalId):
         """Compile copy/move."""
         val dest_reg = "%r{dest.id}"
         val src_reg = "%r{src.id}"
         # Use mov instruction
         builder.emit_line("mov.u64 {dest_reg}, {src_reg};")
 
-    fn compile_binop(builder: PtxBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
+    me compile_binop(builder: PtxBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Compile binary operation."""
         val dest_reg = "%r{dest.id}"
-        val left_reg = self.operand_to_reg(left)
-        val right_reg = self.operand_to_reg(right)
+        val left_reg = self.operand_to_reg(builder, left)
+        val right_reg = self.operand_to_reg(builder, right)
 
         # Determine type from left operand
         val ty = PrimitiveType.I64  # Default, should be inferred
@@ -376,10 +378,10 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported binop: {op}")
 
-    fn compile_unaryop(builder: PtxBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand):
+    me compile_unaryop(builder: PtxBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Compile unary operation."""
         val dest_reg = "%r{dest.id}"
-        val src_reg = self.operand_to_reg(operand)
+        val src_reg = self.operand_to_reg(builder, operand)
         val ty = PrimitiveType.I64
 
         match op:
@@ -390,23 +392,23 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported unaryop: {op}")
 
-    fn compile_load(builder: PtxBuilder, dest: LocalId, ptr: MirOperand):
+    me compile_load(builder: PtxBuilder, dest: LocalId, ptr: MirOperand):
         """Compile load instruction."""
         val dest_reg = "%r{dest.id}"
-        val addr_reg = self.operand_to_reg(ptr)
+        val addr_reg = self.operand_to_reg(builder, ptr)
         builder.emit_load(dest_reg, PrimitiveType.I64, addr_reg, MemorySpace.Global)
 
-    fn compile_store(builder: PtxBuilder, ptr: MirOperand, value: MirOperand):
+    me compile_store(builder: PtxBuilder, ptr: MirOperand, value: MirOperand):
         """Compile store instruction."""
-        val addr_reg = self.operand_to_reg(ptr)
-        val value_reg = self.operand_to_reg(value)
+        val addr_reg = self.operand_to_reg(builder, ptr)
+        val value_reg = self.operand_to_reg(builder, value)
         builder.emit_store(PrimitiveType.I64, addr_reg, value_reg, MemorySpace.Global)
 
-    fn compile_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
+    me compile_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
         """Compile atomic operation."""
         val dest_reg = "%r{dest.id}"
-        val addr_reg = self.operand_to_reg(ptr)
-        val value_reg = self.operand_to_reg(value)
+        val addr_reg = self.operand_to_reg(builder, ptr)
+        val value_reg = self.operand_to_reg(builder, value)
         val ty = PrimitiveType.I64
 
         match op:
@@ -421,12 +423,12 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported atomic op: {op}")
 
-    fn compile_call(builder: PtxBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]):
+    me compile_call(builder: PtxBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]):
         """Compile device function call."""
-        val arg_regs = args.map(\a: self.operand_to_reg(a))
+        val arg_regs = args.map(\a: self.operand_to_reg(builder, a))
 
         # Get function name from operand
-        val func_name = self.operand_to_reg(func)
+        val func_name = self.operand_to_reg(builder, func)
 
         if dest.?:
             val dest_reg = "%r{dest.unwrap().id}"
@@ -434,42 +436,42 @@ class CudaBackend:
         else:
             builder.emit_call_void(func_name, arg_regs)
 
-    fn compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+    me compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
         """Compile aggregate construction via local memory."""
         val dest_reg = "%r{dest.id}"
         # Store each field to local memory at offset
         builder.emit_comment("aggregate construct -> {dest_reg}")
         var offset = 0
         for i, operand in operands.enumerate():
-            val src_reg = self.operand_to_reg(operand)
+            val src_reg = self.operand_to_reg(builder, operand)
             # Store field value at base + offset in local memory
             builder.emit_line("st.local.u64 [{dest_reg}+{offset}], {src_reg};")
             offset = offset + 8
 
-    fn compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64):
+    me compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64):
         """Compile field access via offset load."""
         val dest_reg = "%r{dest.id}"
-        val base_reg = self.operand_to_reg(base)
+        val base_reg = self.operand_to_reg(builder, base)
         val offset = field * 8
         builder.emit_line("ld.local.u64 {dest_reg}, [{base_reg}+{offset}];")
 
-    fn compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand):
+    me compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand):
         """Compile field write via offset store."""
-        val base_reg = self.operand_to_reg(base)
-        val value_reg = self.operand_to_reg(value)
+        val base_reg = self.operand_to_reg(builder, base)
+        val value_reg = self.operand_to_reg(builder, value)
         val offset = field * 8
         builder.emit_line("st.local.u64 [{base_reg}+{offset}], {value_reg};")
 
-    fn compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType):
+    me compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType):
         """Compile type conversion using PTX cvt instruction."""
         val dest_reg = "%r{dest.id}"
-        val src_reg = self.operand_to_reg(operand)
+        val src_reg = self.operand_to_reg(builder, operand)
         val dest_ty = self.mir_type_to_primitive(target)
         # Infer source type - default to I64
         val src_ty = PrimitiveType.I64
         builder.emit_convert(dest_reg, dest_ty, src_reg, src_ty)
 
-    fn compile_alloc(builder: PtxBuilder, dest: LocalId, type_: MirType):
+    me compile_alloc(builder: PtxBuilder, dest: LocalId, type_: MirType):
         """Compile local memory allocation."""
         val dest_reg = "%r{dest.id}"
         val prim_ty = self.mir_type_to_primitive(type_)
@@ -479,13 +481,13 @@ class CudaBackend:
         # Load address of local allocation into dest register
         builder.emit_line("mov.u64 {dest_reg}, {alloc_name};")
 
-    fn compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand]):
+    me compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand]):
         """Compile GetElementPtr - pointer arithmetic with indices."""
         val dest_reg = "%r{dest.id}"
-        val base_reg = self.operand_to_reg(base)
+        val base_reg = self.operand_to_reg(builder, base)
         # For simple single-index GEP, compute base + index * element_size
-        if indices.length > 0:
-            val idx_reg = self.operand_to_reg(indices.get(0))
+        if indices.len() > 0:
+            val idx_reg = self.operand_to_reg(builder, indices[0])
             val tmp = builder.alloc_reg(PrimitiveType.U64)
             builder.emit_reg_decl(tmp, PrimitiveType.U64)
             # Assume 8-byte elements (i64/ptr)
@@ -494,67 +496,70 @@ class CudaBackend:
         else:
             builder.emit_line("mov.u64 {dest_reg}, {base_reg};")
 
-    fn compile_intrinsic(builder: PtxBuilder, dest: LocalId?, name: text, args: [MirOperand]):
+    me compile_intrinsic(builder: PtxBuilder, dest: LocalId?, name: text, args: [MirOperand]):
         """Compile math and GPU intrinsics."""
         val ty = PrimitiveType.F32  # Default to F32 for math intrinsics
 
         match name:
             case "sin":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_sin(d, ty, src)
             case "cos":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_cos(d, ty, src)
             case "sqrt":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_sqrt(d, ty, src)
             case "abs":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_abs(d, ty, src)
             case "min":
                 val d = "%r{dest.unwrap().id}"
-                val a = self.operand_to_reg(args.get(0))
-                val b = self.operand_to_reg(args.get(1))
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
                 builder.emit_intrinsic_min(d, ty, a, b)
             case "max":
                 val d = "%r{dest.unwrap().id}"
-                val a = self.operand_to_reg(args.get(0))
-                val b = self.operand_to_reg(args.get(1))
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
                 builder.emit_intrinsic_max(d, ty, a, b)
             case "fma":
                 val d = "%r{dest.unwrap().id}"
-                val a = self.operand_to_reg(args.get(0))
-                val b = self.operand_to_reg(args.get(1))
-                val c = self.operand_to_reg(args.get(2))
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
+                val c = self.operand_to_reg(builder, args[2])
                 builder.emit_intrinsic_fma(d, ty, a, b, c)
             case "exp2":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_ex2(d, ty, src)
             case "log2":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_lg2(d, ty, src)
             case "rcp":
                 val d = "%r{dest.unwrap().id}"
-                val src = self.operand_to_reg(args.get(0))
+                val src = self.operand_to_reg(builder, args[0])
                 builder.emit_intrinsic_rcp(d, ty, src)
             case _:
                 builder.emit_comment("Unknown intrinsic: {name}")
 
-    fn compile_terminator(builder: PtxBuilder, term: MirTerminator):
+    me compile_terminator(builder: PtxBuilder, term: MirTerminator, is_kernel: bool):
         """Compile block terminator."""
         match term:
             case Return(_):
-                builder.emit_ret()
+                if is_kernel:
+                    builder.emit_exit()
+                else:
+                    builder.emit_ret()
             case Goto(target):
                 builder.emit_branch("BB{target.id}")
             case Branch(cond, true_target, false_target):
-                val cond_reg = self.operand_to_reg(cond)
+                val cond_reg = self.operand_to_reg(builder, cond)
                 builder.emit_branch_if(cond_reg, "BB{true_target.id}")
                 builder.emit_branch("BB{false_target.id}")
             case Unreachable:
@@ -562,14 +567,27 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported terminator")
 
-    fn operand_to_reg(operand: MirOperand) -> text:
-        """Convert operand to register name."""
+    me operand_to_reg(builder: PtxBuilder, operand: MirOperand) -> text:
+        """Convert operand to register name, materializing constants into temp registers."""
         match operand.kind:
             case Copy(local): "%r{local.id}"
             case Move(local): "%r{local.id}"
             case Const(value, ty):
-                # Constants should be loaded into temporaries
-                "%const"
+                # Emit mov to a temp register for constant values
+                val prim_ty = self.mir_type_to_primitive(ty)
+                val tmp = builder.alloc_reg(prim_ty)
+                builder.emit_reg_decl(tmp, prim_ty)
+                match value:
+                    case Int(v):
+                        builder.emit_const_int(tmp, prim_ty, v)
+                    case Float(v):
+                        builder.emit_const_float(tmp, prim_ty, v)
+                    case Bool(v):
+                        val int_val = if v: 1 else: 0
+                        builder.emit_const_int(tmp, PrimitiveType.Bool, int_val)
+                    case _:
+                        builder.emit_const_int(tmp, PrimitiveType.I64, 0)
+                tmp
 
     fn mir_type_to_primitive(ty: MirType) -> PrimitiveType:
         """Convert MIR type to PrimitiveType."""
@@ -626,7 +644,7 @@ impl Codegen for CudaBackend:
     fn supports_target(target: CodegenTarget) -> bool: true
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.GpuCode
 
-    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+    me compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
         val result = self.compile(module)
         match result:
             case Ok(cuda_module):
@@ -639,7 +657,7 @@ impl Codegen for CudaBackend:
 # ============================================================================
 
 impl GpuCodegen for CudaBackend:
-    fn compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
+    me compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val builder = PtxBuilder__create(self.compute_capability)
         val func = MirFunction(name: func_name, body: body, is_extern: false, signature: body.signature)
         val result = self.compile_function(builder, func)
@@ -649,7 +667,7 @@ impl GpuCodegen for CudaBackend:
             case Err(e):
                 Err(e)
 
-    fn compile_device_function(func_name: text, body: MirBody) -> Result<text, CompileError>:
+    me compile_device_function(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val builder = PtxBuilder__create(self.compute_capability)
         val func = MirFunction(name: func_name, body: body, is_extern: false, signature: body.signature)
         val result = self.compile_function(builder, func)

@@ -71,6 +71,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `mcp` | MCP server implementation |
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
+| `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
 | `rule` | Engineering rules, doc folder map, ADR process |
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`

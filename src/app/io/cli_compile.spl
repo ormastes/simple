@@ -6,7 +6,7 @@
 use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
-use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, aot_vhdl_file, compile_to_smf}
+use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, aot_cuda_file, aot_vhdl_file, compile_to_smf}
 use compiler.driver.driver_api.{aot_native_file_with_backend}
 use app.compile.native.{compile_native}
 use compiler.driver.driver_types.{CompileOptions, CompileOptions__default, CompileMode, CompileResult, CompileResult__get_errors, OutputFormat}
@@ -110,7 +110,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
-            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c (default: auto)"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c, cuda, vulkan (default: auto)"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
             print "  --coverage-output=<p> Coverage output file path"
@@ -208,6 +208,9 @@ fn cli_compile(args: [text]) -> i64:
 
     if backend == "vhdl":
         return compile_vhdl(source_file, output_file, verbose)
+
+    if backend == "cuda" or backend == "ptx":
+        return compile_cuda(source_file, output_file, verbose)
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
         return compile_c_backend(source_file, output_file, verbose)
@@ -408,6 +411,27 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
             _cli_eprint("Error: C backend generation failed")
             return 1
 
+fn compile_cuda(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".ptx")
+
+    if verbose:
+        print "Compiling {source_file} to PTX (CUDA backend)"
+        print "  Output: {out}"
+
+    val aot_result = aot_cuda_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = CompileResult__get_errors(aot_result)
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: CUDA/PTX compilation failed")
+            return 1
+
 fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
     var out = output_file
     if out == "":
@@ -503,4 +527,4 @@ fn cli_native_build(args: [text]) -> i64:
     else:
         return rt_native_build(args)
 
-export cli_compile, compile_baremetal, compile_vhdl, cli_native_build
+export cli_compile, compile_baremetal, compile_cuda, compile_vhdl, cli_native_build

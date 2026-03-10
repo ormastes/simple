@@ -14,6 +14,7 @@ use hir.*
 use lexer.Span
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 # ============================================================================
 # Expression Lowering
@@ -331,7 +332,17 @@ impl MirLowering:
         """Lower function call.
 
         Handles both direct calls (Var) and indirect calls (closures, function pointers).
+        Intercepts GPU intrinsic calls (gpu_global_id, etc.) and emits MIR GPU instructions.
         """
+        # Check for GPU intrinsic calls before lowering arguments
+        match callee.kind:
+            case Var(symbol):
+                val sym = self.symbols.get(symbol)
+                val callee_name = if sym.?: sym.name else: ""
+                if is_gpu_intrinsic(callee_name):
+                    return self.lower_gpu_intrinsic_call(callee_name, args)
+            case _: ()
+
         var arg_operands: [MirOperand] = []
         for arg in args:
             val arg_local = self.lower_expr(arg.value)
@@ -383,7 +394,35 @@ impl MirLowering:
         """Lower method call based on resolution.
 
         UFCS: For FreeFunction resolution, receiver becomes first argument.
+        Handles this.index()/thread_index()/group_index() for @simd kernels.
         """
+        # Handle this.index() / this.thread_index() / this.group_index() for @simd
+        match receiver.kind:
+            case Var(sym):
+                val recv_name = if self.symbols.get(sym).?: self.symbols.get(sym).name else: ""
+                if recv_name == "this":
+                    match method:
+                        case "index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuGlobalId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case "thread_index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuLocalId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case "group_index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuBlockId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case _: ()
+            case _: ()
+
         match resolution:
             case InstanceMethod(type_id, method_id):
                 # Direct method call on type
@@ -448,6 +487,57 @@ impl MirLowering:
                 val temp = b.new_temp(MirType.unit())
                 self.builder = b
                 temp
+
+    me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
+        """Lower GPU intrinsic function call to MIR GPU instruction."""
+        # Resolve dimension argument (default 0)
+        val dim = if args.len() > 0:
+            # Lower first arg; for now assume constant dim 0/1/2
+            val dim_local = self.lower_expr(args[0].value)
+            # TODO: extract constant value from dim_local
+            0
+        else:
+            0
+
+        var b = self.builder
+        val dest = b.new_temp(MirType.i64())
+
+        match name:
+            case "gpu_global_id":
+                b.emit(MirInst(kind: MirInstKind.GpuGlobalId(dest, dim), span: nil))
+            case "gpu_local_id":
+                b.emit(MirInst(kind: MirInstKind.GpuLocalId(dest, dim), span: nil))
+            case "gpu_block_id":
+                b.emit(MirInst(kind: MirInstKind.GpuBlockId(dest, dim), span: nil))
+            case "gpu_block_dim":
+                b.emit(MirInst(kind: MirInstKind.GpuBlockDim(dest, dim), span: nil))
+            case "gpu_grid_dim":
+                b.emit(MirInst(kind: MirInstKind.GpuGridDim(dest, dim), span: nil))
+            case "gpu_sync" | "gpu_barrier":
+                b.emit(MirInst(kind: MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup), span: nil))
+            case "gpu_mem_fence":
+                b.emit(MirInst(kind: MirInstKind.GpuMemFence(GpuMemoryScope.Workgroup), span: nil))
+            case _:
+                # Atomic ops and others — fall through to regular call
+                self.builder = b
+                var arg_operands: [MirOperand] = []
+                for arg in args:
+                    val arg_local = self.lower_expr(arg.value)
+                    arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                val func_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(name),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b2 = self.builder
+                val call_result = b2.emit_call(func_op, arg_operands, MirType.i64())
+                self.builder = b2
+                if call_result.?:
+                    return call_result.unwrap()
+                else:
+                    return dest
+
+        self.builder = b
+        dest
 
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
         """Convert a symbol to a function pointer operand."""

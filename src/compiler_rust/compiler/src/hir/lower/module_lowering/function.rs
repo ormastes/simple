@@ -293,8 +293,18 @@ impl Lowerer {
             });
         }
 
-        // Extract attributes for AOP predicate matching
-        let attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
+        // Extract attributes for AOP predicate matching.
+        // Include both #[attr] attributes and @decorator decorators (that aren't effects).
+        let mut attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
+        for dec in &f.decorators {
+            if let ast::Expr::Identifier(name) = &dec.name {
+                if ast::Effect::from_decorator_name(name).is_none()
+                    && !attributes.contains(name)
+                {
+                    attributes.push(name.clone());
+                }
+            }
+        }
 
         // Extract layout hint from #[layout(...)] attribute
         let layout_hint = self.extract_layout_hint(&f.attributes);

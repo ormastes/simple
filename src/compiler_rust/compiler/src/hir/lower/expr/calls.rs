@@ -117,6 +117,11 @@ impl Lowerer {
                 });
             }
 
+            // GPU intrinsics: gpu_global_id_x, gpu_local_id_x, gpu_syncthreads, etc.
+            if let Some(gpu_result) = self.lower_gpu_function_intrinsic(name, args, ctx)? {
+                return Ok(gpu_result);
+            }
+
             // CTR-030-032: Check for impure function calls in contract expressions
             if ctx.contract_ctx.is_some() {
                 self.check_contract_purity(name)?;
@@ -291,5 +296,52 @@ impl Lowerer {
             });
         }
         Ok(())
+    }
+
+    /// Recognize gpu_*_x/y/z function calls as GPU intrinsics.
+    fn lower_gpu_function_intrinsic(
+        &mut self,
+        name: &str,
+        _args: &[ast::Argument],
+        _ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let (kind, dim) = match name {
+            "gpu_global_id_x" => (GpuIntrinsicKind::GlobalId, 0u8),
+            "gpu_global_id_y" => (GpuIntrinsicKind::GlobalId, 1),
+            "gpu_global_id_z" => (GpuIntrinsicKind::GlobalId, 2),
+            "gpu_local_id_x" => (GpuIntrinsicKind::LocalId, 0),
+            "gpu_local_id_y" => (GpuIntrinsicKind::LocalId, 1),
+            "gpu_local_id_z" => (GpuIntrinsicKind::LocalId, 2),
+            "gpu_block_id_x" => (GpuIntrinsicKind::GroupId, 0),
+            "gpu_block_id_y" => (GpuIntrinsicKind::GroupId, 1),
+            "gpu_block_id_z" => (GpuIntrinsicKind::GroupId, 2),
+            "gpu_block_dim_x" => (GpuIntrinsicKind::LocalSize, 0),
+            "gpu_block_dim_y" => (GpuIntrinsicKind::LocalSize, 1),
+            "gpu_grid_dim_x" => (GpuIntrinsicKind::NumGroups, 0),
+            "gpu_grid_dim_y" => (GpuIntrinsicKind::NumGroups, 1),
+            "gpu_syncthreads" => {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::GpuIntrinsic {
+                        intrinsic: GpuIntrinsicKind::Barrier,
+                        args: vec![],
+                    },
+                    ty: TypeId::NIL,
+                }));
+            }
+            _ => return Ok(None),
+        };
+
+        // Create a constant dimension argument
+        let dim_arg = HirExpr {
+            kind: HirExprKind::Integer(dim as i64),
+            ty: TypeId::I64,
+        };
+        Ok(Some(HirExpr {
+            kind: HirExprKind::GpuIntrinsic {
+                intrinsic: kind,
+                args: vec![dim_arg],
+            },
+            ty: TypeId::I64,
+        }))
     }
 }
