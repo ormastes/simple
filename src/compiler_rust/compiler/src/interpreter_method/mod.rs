@@ -6,7 +6,8 @@ mod special;
 
 use super::{
     eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, exec_function_with_values,
-    find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
+    find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods, BLANKET_IMPL_METHODS,
+    BLOCK_SCOPED_ENUMS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -876,6 +877,86 @@ pub(crate) fn evaluate_method_call(
             }
         }
         _ => {}
+    }
+
+    // Trait impl dispatch fallback for built-in types.
+    // When a method isn't found by the type-specific handler above, check TRAIT_IMPLS
+    // for user-defined trait implementations on built-in types (e.g., `impl MyTrait for text:`).
+    {
+        // Map Value type to the possible type names used in `impl Trait for TypeName:`
+        let type_names: &[&str] = match &recv_val {
+            Value::Str(_) => &["text", "str", "String"],
+            Value::Int(_) => &["i64", "i32", "int"],
+            Value::Float(_) => &["f64", "f32", "float"],
+            Value::Bool(_) => &["bool"],
+            Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
+            Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
+            Value::Tuple(_) => &["tuple", "Tuple"],
+            _ => &[],
+        };
+
+        if !type_names.is_empty() {
+            // Search TRAIT_IMPLS for a method matching this type
+            let trait_method: Option<FunctionDef> = TRAIT_IMPLS.with(|cell| {
+                let trait_impls = cell.borrow();
+                for type_alias in type_names {
+                    for ((_trait_name, impl_type), methods) in trait_impls.iter() {
+                        if impl_type == type_alias {
+                            if let Some(func) = methods.iter().find(|m| m.name == method) {
+                                return Some(func.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            });
+
+            if let Some(func) = trait_method {
+                // For built-in types, set self to the value directly (like enum methods)
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                let type_name = type_names[0];
+                return exec_function(
+                    &func,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    Some((type_name, &self_fields)),
+                );
+            }
+
+            // Also check blanket impls for built-in types
+            let blanket_method: Option<FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+                let blanket_impls = cell.borrow();
+                for (_trait_name, methods) in blanket_impls.iter() {
+                    if let Some(func) = methods.iter().find(|m| m.name == method) {
+                        return Some(func.clone());
+                    }
+                }
+                None
+            });
+
+            if let Some(func) = blanket_method {
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                let type_name = type_names[0];
+                return exec_function(
+                    &func,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    Some((type_name, &self_fields)),
+                );
+            }
+        }
     }
 
     // UFCS Fallback: Try to find a free function with the method name

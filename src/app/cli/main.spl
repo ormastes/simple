@@ -19,7 +19,7 @@ val stdout = ""
 val stderr = ""
 
 # Direct sub-module imports (bypass app.io.mod hub for faster startup)
-use app.io.env_ops.{env_get, env_set}
+use app.io.env_ops.{env_get}
 use app.io.cli_ops.{cli_file_exists, cli_get_args,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -31,7 +31,6 @@ use app.io.cli_ops.{cli_file_exists, cli_get_args,
     fault_set_stack_overflow_detection, fault_set_max_recursion_depth,
     fault_set_timeout, fault_set_execution_limit}
 use app.io.jit_ffi.{jit_available}
-use app.io.cli_compile.{cli_native_build}
 use app.io.cli_commands.{cli_test_daemon}
 use app.build.cli_entry.{handle_build}
 use app.cli.check.{run_check}
@@ -116,17 +115,31 @@ use app.leak_check.main.{run_leak_check}
 
 use app.cli.cli_helpers (print_cli_help, handle_init, read_sdn_run_config, sdn_line_indent, strip_sdn_quotes, check_self_contained)
 
+extern fn rt_env_set(key: text, value: text) -> bool
+use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.driver.driver_types.{CompileResult, CompileResult__get_errors}
+
 # Extract CLI args, skipping program name and script path
 fn get_cli_args() -> [text]:
     val all_args = cli_get_args()
-    var args = []
+    print "[CLI-ARGS] raw_len={all_args.len()}"
+    var raw_i = 0
+    while raw_i < all_args.len() and raw_i < 20:
+        print "[CLI-ARGS] raw[{raw_i}]={all_args[raw_i]}"
+        raw_i = raw_i + 1
     var start_idx = 1
     if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
         start_idx = 2
-    var i = start_idx
-    while i < all_args.len():
-        args.push(all_args[i])
-        i = i + 1
+    print "[CLI-ARGS] start_idx={start_idx}"
+    val args = if start_idx < all_args.len():
+        all_args.slice(start_idx, all_args.len())
+    else:
+        []
+    print "[CLI-ARGS] normalized_len={args.len()}"
+    var norm_i = 0
+    while norm_i < args.len() and norm_i < 20:
+        print "[CLI-ARGS] normalized[{norm_i}]={args[norm_i]}"
+        norm_i = norm_i + 1
     args
 
 # =========================================================================
@@ -349,12 +362,68 @@ fn apply_fault_detection(flags: GlobalFlags):
 
 fn apply_jit_env_vars(flags: GlobalFlags):
     if flags.no_jit:
-        env_set("SIMPLE_NO_JIT", "1")
+        rt_env_set("SIMPLE_NO_JIT", "1")
     if flags.jit_threshold != 10:
         val t = "{flags.jit_threshold}"
-        env_set("SIMPLE_JIT_THRESHOLD", t)
+        rt_env_set("SIMPLE_JIT_THRESHOLD", t)
     if flags.backend != "auto":
-        env_set("SIMPLE_JIT_BACKEND", flags.backend)
+        rt_env_set("SIMPLE_JIT_BACKEND", flags.backend)
+
+fn run_native_build_bootstrap(args: [text]) -> i64:
+    var backend = ""
+    var backend_explicit = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        i = i + 1
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
+        var entry_point = ""
+        var output = "a.out"
+        var j = 0
+        if args.len() > 0 and args[0] == "native-build":
+            j = 1
+        while j < args.len():
+            val a = args[j]
+            if a.starts_with("--entry="):
+                entry_point = a.substring(8)
+            elif a == "--entry" and j + 1 < args.len():
+                j = j + 1
+                entry_point = args[j]
+            elif a == "-o" and j + 1 < args.len():
+                j = j + 1
+                output = args[j]
+            elif a.starts_with("-o"):
+                output = a.substring(2)
+            elif a == "native-build":
+                pass
+            elif not a.starts_with("-") and entry_point == "":
+                entry_point = a
+            j = j + 1
+
+        if entry_point == "":
+            print "Error: No entry point specified for llvm-lib backend"
+            return 1
+
+        print "[cli_native_build] pure-simple llvm-lib path"
+        val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
+        match result:
+            case CompileResult.Success(_):
+                return 0
+            case _:
+                val errors = CompileResult__get_errors(result)
+                for err in errors:
+                    print "error: {err}"
+                return 1
+
+    return cli_run_file("src/app/compile/native.spl", args, false, false)
 
 fn filter_internal_flags(args: [text]) -> [text]:
     var result = []
@@ -367,7 +436,7 @@ fn filter_internal_flags(args: [text]) -> [text]:
         elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret" and arg != "--interpret-optimized" and arg != "--no-jit":
             if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config") and not arg.starts_with("--jit-threshold="):
                 # Keep --backend flags (used by both JIT and compile commands)
-                result.push(arg)
+                result = result.push(arg)
     result
 
 
@@ -384,7 +453,7 @@ fn main() -> i64:
 
     # native-build: pass raw args directly (bypass filter_internal_flags)
     if args.len() > 0 and args[0] == "native-build":
-        return cli_native_build(args)
+        return run_native_build_bootstrap(args)
 
     val filtered_args = filter_internal_flags(args)
 

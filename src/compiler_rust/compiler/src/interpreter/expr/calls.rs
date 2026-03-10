@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS,
+    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS,
 };
 
 pub(super) fn eval_call_expr(
@@ -23,6 +23,17 @@ pub(super) fn eval_call_expr(
     match expr {
         Expr::Call { callee, args } => Ok(Some(evaluate_call(
             callee,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
+        // CUDA kernel launch: kernel<<<grid, block>>>(args)
+        // Desugar to regular function call in interpreter mode (grid/block ignored)
+        Expr::KernelLaunch { kernel, args, .. } => Ok(Some(evaluate_call(
+            kernel,
             args,
             env,
             functions,
@@ -47,7 +58,16 @@ pub(super) fn eval_call_expr(
                 )?;
                 // If self was updated (from a me method), update the variable in env
                 if let Some(new_self) = updated_self {
-                    env.insert(var_name.clone(), new_self);
+                    env.insert(var_name.clone(), new_self.clone());
+                    // Sync mutating method updates to MODULE_GLOBALS so that
+                    // module-level vars (e.g., arrays used as global state)
+                    // persist across function calls within an imported module.
+                    MODULE_GLOBALS.with(|cell| {
+                        let mut globals = cell.borrow_mut();
+                        if globals.contains_key(var_name) {
+                            globals.insert(var_name.clone(), new_self);
+                        }
+                    });
                 }
                 Ok(Some(result))
             } else if let Expr::FieldAccess {

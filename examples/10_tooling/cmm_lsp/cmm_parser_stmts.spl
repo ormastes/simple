@@ -16,6 +16,19 @@ use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
 use cmm_ast.{span, span_range, merge_spans}
 use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
 
+# Helper struct for flattened macro assignment detection.
+# Avoids nested match with return in parse_statement.
+struct MacroAssignInfo:
+    is_assign: bool
+    name: text
+    is_recursive: bool
+
+# Helper struct for flattened %LINE option detection.
+# Avoids nested match with mutation in parse_entry and parse_read.
+struct PercentLineInfo:
+    found: bool
+    tokens_to_skip: i64
+
 impl CmmParser:
 
     # =========================================================================
@@ -39,18 +52,11 @@ impl CmmParser:
             case _: ()
 
         # --- Macro assignment: &name=expr or &&name=expr ---
-        match tok.kind:
-            case CmmTokenKind.MacroRef(name):
-                match self.peek_ahead(1).kind:
-                    case CmmTokenKind.Assign:
-                        return self.parse_macro_assign(name, false)
-                    case _: ()
-            case CmmTokenKind.MacroRecRef(name):
-                match self.peek_ahead(1).kind:
-                    case CmmTokenKind.Assign:
-                        return self.parse_macro_assign(name, true)
-                    case _: ()
-            case _: ()
+        # Flattened to avoid nested match with return (return inside nested match
+        # does not propagate to the outer function in Simple's runtime).
+        val macro_info = self.check_macro_assign()
+        if macro_info.is_assign:
+            return self.parse_macro_assign(macro_info.name, macro_info.is_recursive)
 
         # --- Block: ( stmt1  stmt2  ... ) ---
         match tok.kind:
@@ -110,39 +116,48 @@ impl CmmParser:
 
     # IF condition body [ELSE else_body]
     # Body is either a single statement on the same line or a ( ... ) block.
+    # Flattened to avoid nested match with return/mutation (3+ levels deep).
     me parse_if() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume IF
 
         # Parse condition expression (everything up to newline or block-open)
-        match self.parse_expression():
-            case Ok(condition):
-                # Parse then-body
-                match self.parse_body_or_next():
-                    case Ok(then_body):
-                        # Check for ELSE
-                        val saved = self.current
-                        self.skip_newlines()
-                        var else_body: CmmStmt? = nil
-                        if self.check_cmm_keyword("ELSE"):
-                            self.advance()  # consume ELSE
-                            # Check for ELSE IF
-                            if self.check_cmm_keyword("IF"):
-                                match self.parse_if():
-                                    case Ok(elif_stmt):
-                                        else_body = elif_stmt
-                                    case Err(e): return Err(e)
-                            else:
-                                match self.parse_body_or_next():
-                                    case Ok(eb):
-                                        else_body = eb
-                                    case Err(e): return Err(e)
-                        else:
-                            # No ELSE found — rewind
-                            self.current = saved
-                        val sp = span(start_tok.line, start_tok.column)
-                        Ok(CmmStmt.IfElse(condition, then_body, else_body, sp))
-                    case Err(e): Err(e)
-            case Err(e): Err(e)
+        val cond_result = self.parse_expression()
+        match cond_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val condition = self.unwrap_expr(cond_result)
+
+        # Parse then-body
+        val body_result = self.parse_body_or_next()
+        match body_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val then_body = self.unwrap_stmt(body_result)
+
+        # Check for ELSE
+        val saved = self.current
+        self.skip_newlines()
+        var else_body: CmmStmt? = nil
+        if self.check_cmm_keyword("ELSE"):
+            self.advance()  # consume ELSE
+            # Check for ELSE IF
+            if self.check_cmm_keyword("IF"):
+                val elif_result = self.parse_if()
+                match elif_result:
+                    case Err(e): return Err(e)
+                    case _: ()
+                else_body = self.unwrap_stmt(elif_result)
+            else:
+                val eb_result = self.parse_body_or_next()
+                match eb_result:
+                    case Err(e): return Err(e)
+                    case _: ()
+                else_body = self.unwrap_stmt(eb_result)
+        else:
+            # No ELSE found — rewind
+            self.current = saved
+        val sp = span(start_tok.line, start_tok.column)
+        Ok(CmmStmt.IfElse(condition, then_body, else_body, sp))
 
     # Standalone ELSE without preceding IF is an error.
     me parse_else_error() -> Result<CmmStmt, CmmParseError>:
@@ -150,16 +165,22 @@ impl CmmParser:
         Err(self.make_error("ELSE without matching IF"))
 
     # WHILE condition body
+    # Flattened to avoid nested match chains.
     me parse_while() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume WHILE
 
-        match self.parse_expression():
-            case Ok(condition):
-                match self.parse_body_or_next():
-                    case Ok(body):
-                        Ok(CmmStmt.WhileLoop(condition, body, span(start_tok.line, start_tok.column)))
-                    case Err(e): Err(e)
-            case Err(e): Err(e)
+        val cond_result = self.parse_expression()
+        match cond_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val condition = self.unwrap_expr(cond_result)
+
+        val body_result = self.parse_body_or_next()
+        match body_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val body = self.unwrap_stmt(body_result)
+        Ok(CmmStmt.WhileLoop(condition, body, span(start_tok.line, start_tok.column)))
 
     # RePeaT [count] body
     # count is optional — nil means infinite.
@@ -169,31 +190,15 @@ impl CmmParser:
         # Try to parse a count expression before the body.
         # Count is typically a number literal. If the next token is a number,
         # consume it as count; otherwise count is nil (infinite).
+        # Flattened: detect numeric/macro token first, then parse outside the match.
         var count: CmmExpr? = nil
         if not self.at_stmt_end():
-            # Peek: if this looks like a number or macro, parse as count + body
-            match self.peek().kind:
-                case CmmTokenKind.IntNumber(n):
-                    match self.parse_expression():
-                        case Ok(c):
-                            count = c
-                        case Err(e): return Err(e)
-                case CmmTokenKind.DecNumber(n):
-                    match self.parse_expression():
-                        case Ok(c):
-                            count = c
-                        case Err(e): return Err(e)
-                case CmmTokenKind.HexNumber(n):
-                    match self.parse_expression():
-                        case Ok(c):
-                            count = c
-                        case Err(e): return Err(e)
-                case CmmTokenKind.MacroRef(n):
-                    match self.parse_expression():
-                        case Ok(c):
-                            count = c
-                        case Err(e): return Err(e)
-                case _: ()
+            val has_count = self.check_repeat_count_start()
+            if has_count:
+                match self.parse_expression():
+                    case Ok(c):
+                        count = c
+                    case Err(e): return Err(e)
 
         match self.parse_body_or_next():
             case Ok(body):
@@ -311,19 +316,12 @@ impl CmmParser:
     me parse_entry() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume ENTRY
 
-        # Check for %LINE option
-        var has_line = false
-        match self.peek().kind:
-            case CmmTokenKind.Percent:
-                # Look ahead for "LINE" identifier
-                match self.peek_ahead(1).kind:
-                    case CmmTokenKind.Identifier(name):
-                        if to_upper_cmm(name) == "LINE":
-                            self.advance()  # consume %
-                            self.advance()  # consume LINE
-                            has_line = true
-                    case _: ()
-            case _: ()
+        # Check for %LINE option (flattened — no nested match mutation)
+        val pct_line = self.check_percent_line()
+        var has_line = pct_line.found
+        if has_line:
+            self.advance()  # consume %
+            self.advance()  # consume LINE
 
         var names = self.collect_macro_names()
 
@@ -345,51 +343,55 @@ impl CmmParser:
     # =========================================================================
 
     # ON ERROR GOTO label / ON STOP GOSUB handler / ON ERROR CONTinue / etc.
+    # Flattened to avoid nested match chains.
     me parse_on_event() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume ON
 
         # Parse event type: ERROR, STOP, ALWAYS, etc.
-        match self.expect_identifier("event type after ON"):
-            case Ok(event_name):
-                val event_upper = to_upper_cmm(event_name)
+        val ev_result = self.expect_identifier("event type after ON")
+        match ev_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val event_upper = to_upper_cmm(self.unwrap_text(ev_result))
 
-                # Parse action: GOTO, GOSUB, CONTinue, DO, NOTHING, etc.
-                match self.parse_event_action():
-                    case Ok(action_stmt):
-                        Ok(CmmStmt.OnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
-                    case Err(e): Err(e)
-            case Err(e): Err(e)
+        # Parse action: GOTO, GOSUB, CONTinue, DO, NOTHING, etc.
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.OnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
 
     # GLOBALON ERROR DO handler.cmm / GLOBALON TIME 1.s DO periodic.cmm
+    # Flattened to avoid nested match with return (3 levels deep).
     me parse_globalon() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume GLOBALON
 
         # Parse event type
-        match self.expect_identifier("event type after GLOBALON"):
-            case Ok(event_name):
-                val event_upper = to_upper_cmm(event_name)
+        val ev_result = self.expect_identifier("event type after GLOBALON")
+        match ev_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val event_name = self.unwrap_text(ev_result)
+        val event_upper = to_upper_cmm(event_name)
 
-                # For TIME event, there may be a time expression before the action
-                if event_upper == "TIME":
-                    # Parse time expression
-                    if not self.at_stmt_end():
-                        match self.parse_expression():
-                            case Ok(time_expr):
-                                # Now parse the action
-                                match self.parse_event_action():
-                                    case Ok(action_stmt):
-                                        Ok(CmmStmt.GlobalOnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
-                                    case Err(e): Err(e)
-                            case Err(e): Err(e)
-                    else:
-                        Err(self.make_error("Expected time expression after GLOBALON TIME"))
-                else:
-                    # Parse action directly
-                    match self.parse_event_action():
-                        case Ok(action_stmt):
-                            Ok(CmmStmt.GlobalOnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
-                        case Err(e): Err(e)
-            case Err(e): Err(e)
+        # For TIME event, there may be a time expression before the action
+        if event_upper == "TIME":
+            if self.at_stmt_end():
+                return Err(self.make_error("Expected time expression after GLOBALON TIME"))
+            # Parse time expression (consumed but not used in AST node)
+            val time_result = self.parse_expression()
+            match time_result:
+                case Err(e): return Err(e)
+                case _: ()
+
+        # Parse the action
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.GlobalOnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
 
     # Parse event action: GOTO label, GOSUB label, CONTinue, DO file, NOTHING
     me parse_event_action() -> Result<CmmStmt, CmmParseError>:
@@ -420,27 +422,30 @@ impl CmmParser:
     # =========================================================================
 
     # OPEN #n file /mode
+    # Flattened to avoid nested match with mutation (3 levels deep).
     me parse_open() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume OPEN
 
         # Parse file channel (#n)
-        match self.parse_expression():
-            case Ok(channel_expr):
-                # Parse file path
-                if self.at_stmt_end():
-                    return Err(self.make_error("Expected filename after OPEN #n"))
-                match self.parse_expression():
-                    case Ok(file_expr):
-                        # Parse optional /mode option
-                        var mode = ""
-                        match self.peek().kind:
-                            case CmmTokenKind.Option(opt):
-                                self.advance()
-                                mode = opt
-                            case _: ()
-                        Ok(CmmStmt.OpenFile(channel_expr, file_expr, mode, span(start_tok.line, start_tok.column)))
-                    case Err(e): Err(e)
-            case Err(e): Err(e)
+        val ch_result = self.parse_expression()
+        match ch_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val channel_expr = self.unwrap_expr(ch_result)
+
+        # Parse file path
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected filename after OPEN #n"))
+
+        val file_result = self.parse_expression()
+        match file_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val file_expr = self.unwrap_expr(file_result)
+
+        # Parse optional /mode option
+        var mode = self.consume_option_or_empty()
+        Ok(CmmStmt.OpenFile(channel_expr, file_expr, mode, span(start_tok.line, start_tok.column)))
 
     # CLOSE #n
     me parse_close() -> Result<CmmStmt, CmmParseError>:
@@ -458,16 +463,11 @@ impl CmmParser:
         # Parse file channel
         match self.parse_expression():
             case Ok(channel_expr):
-                # Check for %LINE option
-                match self.peek().kind:
-                    case CmmTokenKind.Percent:
-                        match self.peek_ahead(1).kind:
-                            case CmmTokenKind.Identifier(name):
-                                if to_upper_cmm(name) == "LINE":
-                                    self.advance()  # consume %
-                                    self.advance()  # consume LINE
-                            case _: ()
-                    case _: ()
+                # Check for %LINE option (flattened — no nested match mutation)
+                val read_pct = self.check_percent_line()
+                if read_pct.found:
+                    self.advance()  # consume %
+                    self.advance()  # consume LINE
 
                 # Collect macro names to read into
                 var names = self.collect_macro_names()
@@ -515,15 +515,14 @@ impl CmmParser:
         val start_tok = self.advance()  # consume PRINT
 
         # Check for % format specifier (e.g. %ERROR, %WARNING)
-        match self.peek().kind:
-            case CmmTokenKind.Percent:
-                # Consume % and the keyword, then treat rest as expressions
-                self.advance()
-                match self.peek().kind:
-                    case CmmTokenKind.Identifier(name):
-                        self.advance()  # consume format keyword (ERROR, WARNING, etc.)
-                    case _: ()
-            case _: ()
+        # Flattened: detect %+Identifier first, then consume outside the match.
+        val has_pct_fmt = self.check_percent_format()
+        if has_pct_fmt:
+            self.advance()  # consume %
+            # Check if next is identifier keyword (ERROR, WARNING, etc.)
+            val has_fmt_kw = self.check_kind("Identifier")
+            if has_fmt_kw:
+                self.advance()  # consume format keyword
 
         var exprs = self.collect_remaining_exprs()
         Ok(CmmStmt.PrintStmt(exprs, span(start_tok.line, start_tok.column)))
@@ -550,102 +549,63 @@ impl CmmParser:
 
     # DIALOG ( items... )
     # Parses a dialog block with simplified item recognition.
+    # Flattened to avoid nested match with return/mutation.
     me parse_dialog() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume DIALOG
 
         # Expect a block next (possibly after newline)
         self.skip_newlines()
 
-        match self.peek().kind:
-            case CmmTokenKind.LParen:
-                self.advance()  # consume (
-                var items: [CmmDialogItem] = []
-                self.skip_newlines()
+        val has_lparen = self.check_kind("LParen")
+        if not has_lparen:
+            # DIALOG without block — treat as generic command
+            return self.parse_generic_command()
 
-                while not self.is_at_end():
-                    match self.peek().kind:
-                        case CmmTokenKind.RParen:
-                            self.advance()  # consume )
-                            return Ok(CmmStmt.DialogBlock(items, span(start_tok.line, start_tok.column)))
-                        case CmmTokenKind.Newline:
-                            self.advance()
-                        case CmmTokenKind.Comment(c):
-                            self.advance()
-                        case CmmTokenKind.Eof:
-                            return Err(self.make_error("Unterminated DIALOG block"))
-                        case _:
-                            # Try to parse a dialog item
-                            match self.parse_dialog_item():
-                                case Ok(item):
-                                    items.push(item)
-                                case Err(e):
-                                    # Error recovery: skip to next line within dialog
-                                    self.skip_to_next_line()
+        self.advance()  # consume (
+        var items: [CmmDialogItem] = []
+        self.skip_newlines()
 
-                Err(self.make_error("Unterminated DIALOG block"))
-            case _:
-                # DIALOG without block — treat as generic command
-                self.parse_generic_command()
+        while not self.is_at_end():
+            if self.check_kind("RParen"):
+                self.advance()  # consume )
+                return Ok(CmmStmt.DialogBlock(items, span(start_tok.line, start_tok.column)))
+            if self.check_kind("Newline"):
+                self.advance()
+            else if self.check_kind("Comment"):
+                self.advance()
+            else if self.check_kind("Eof"):
+                return Err(self.make_error("Unterminated DIALOG block"))
+            else:
+                # Try to parse a dialog item
+                match self.parse_dialog_item():
+                    case Ok(item):
+                        items.push(item)
+                    case Err(e):
+                        # Error recovery: skip to next line within dialog
+                        self.skip_to_next_line()
+
+        Err(self.make_error("Unterminated DIALOG block"))
 
     # Parse a single dialog item line.
     # Recognizes HEADER, POS, TEXT, DEFBUTTON, BUTTON, EDIT, CHECKBOX,
     # CHOOSEBOX, PULLDOWN, LINE, CLOSE, and NAME: prefixed items.
+    # Flattened to avoid nested match with return/mutation.
     me parse_dialog_item() -> Result<CmmDialogItem, CmmParseError>:
         val tok = self.peek()
 
         # Check for label-prefixed items (NAME: EDIT/BUTTON/etc.)
-        match tok.kind:
-            case CmmTokenKind.Label(name):
-                self.advance()  # consume label
-                # Now parse the dialog widget keyword
-                match self.peek().kind:
-                    case CmmTokenKind.Identifier(widget_name):
-                        val widget_upper = to_upper_cmm(widget_name)
-                        self.advance()  # consume widget keyword
-
-                        if widget_upper == "EDIT":
-                            val default_val = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgEdit(name, default_val, callback))
-
-                        if widget_upper == "BUTTON":
-                            val btn_text = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgButton(name, btn_text, callback))
-
-                        if widget_upper == "DEFBUTTON":
-                            val btn_text = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgDefButton(name, btn_text, callback))
-
-                        if widget_upper == "CHECKBOX":
-                            val cb_text = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgCheckbox(name, cb_text, callback))
-
-                        if widget_upper == "CHOOSEBOX":
-                            val cb_text = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgChoosebox(cb_text, callback))
-
-                        if widget_upper == "PULLDOWN":
-                            val options = self.consume_string_or_empty()
-                            val callback = self.consume_string_or_empty()
-                            self.skip_to_next_line()
-                            return Ok(CmmDialogItem.DlgPulldown(options, callback))
-
-                        # Unknown widget after label — skip line
-                        self.skip_to_next_line()
-                        return Err(self.make_error("Unknown dialog widget: {widget_name}"))
-                    case _:
-                        self.skip_to_next_line()
-                        return Err(self.make_error("Expected dialog widget after label"))
-            case _: ()
+        # Flattened: detect Label, then check Identifier, all at top level.
+        val label_name = self.extract_label_name()
+        if label_name != "":
+            self.advance()  # consume label
+            # Check for widget keyword after label
+            val widget_name = self.extract_identifier_name()
+            if widget_name == "":
+                self.skip_to_next_line()
+                return Err(self.make_error("Expected dialog widget after label"))
+            val widget_upper = to_upper_cmm(widget_name)
+            self.advance()  # consume widget keyword
+            return self.parse_labeled_dialog_widget(label_name, widget_upper, widget_name)
 
         # Non-label dialog items: HEADER, POS, TEXT, DEFBUTTON, BUTTON, LINE, CLOSE
         match tok.kind:
@@ -705,6 +665,8 @@ impl CmmParser:
     # =========================================================================
 
     # Parse a parenthesized block: ( stmt1  stmt2  ... )
+    # Flattened: main loop uses if/else instead of nested match to avoid
+    # mutation inside nested match arms.
     me parse_block() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume (
         var stmts: [CmmStmt] = []
@@ -712,34 +674,18 @@ impl CmmParser:
         self.skip_newlines()
 
         while not self.is_at_end():
-            match self.peek().kind:
-                case CmmTokenKind.RParen:
-                    self.advance()  # consume )
-                    return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
-                case CmmTokenKind.Newline:
-                    val nl_tok = self.advance()
-                    stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
-                case CmmTokenKind.Comment(c):
-                    val c_tok = self.advance()
-                    stmts.push(CmmStmt.CommentLine(c, span(c_tok.line, c_tok.column)))
-                case CmmTokenKind.Eof:
-                    return Err(self.make_error("Unterminated block — expected )"))
-                case _:
-                    match self.parse_statement():
-                        case Ok(stmt):
-                            stmts.push(stmt)
-                        case Err(e):
-                            self.errors.push("Line {e.line}: {e.message}")
-                            stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
-                            self.skip_to_next_line()
-                    # Consume trailing newline
-                    if not self.is_at_end():
-                        match self.peek().kind:
-                            case CmmTokenKind.Newline: self.advance()
-                            case CmmTokenKind.Comment(c):
-                                val cc = self.advance()
-                                stmts.push(CmmStmt.CommentLine(c, span(cc.line, cc.column)))
-                            case _: ()
+            if self.check_kind("RParen"):
+                self.advance()  # consume )
+                return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
+            if self.check_kind("Eof"):
+                return Err(self.make_error("Unterminated block — expected )"))
+            if self.check_kind("Newline"):
+                val nl_tok = self.advance()
+                stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
+            else if self.check_kind("Comment"):
+                self.push_comment_stmt(stmts)
+            else:
+                self.parse_block_statement_into(stmts)
 
         Err(self.make_error("Unterminated block — expected )"))
 
@@ -827,6 +773,140 @@ impl CmmParser:
     # Helper methods
     # =========================================================================
 
+    # Extract the label name from the current token, or "" if not a Label token.
+    fn extract_label_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Label(name): name
+            case _: ""
+
+    # Extract the identifier name from the current token, or "" if not an Identifier.
+    fn extract_identifier_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name): name
+            case _: ""
+
+    # Parse a labeled dialog widget item (called after label and widget keyword consumed).
+    # widget_upper is the uppercased widget keyword, widget_name is the original.
+    me parse_labeled_dialog_widget(label_name: text, widget_upper: text, widget_name: text) -> Result<CmmDialogItem, CmmParseError>:
+        if widget_upper == "EDIT":
+            val default_val = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgEdit(label_name, default_val, callback))
+
+        if widget_upper == "BUTTON":
+            val btn_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgButton(label_name, btn_text, callback))
+
+        if widget_upper == "DEFBUTTON":
+            val btn_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgDefButton(label_name, btn_text, callback))
+
+        if widget_upper == "CHECKBOX":
+            val cb_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgCheckbox(label_name, cb_text, callback))
+
+        if widget_upper == "CHOOSEBOX":
+            val cb_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgChoosebox(cb_text, callback))
+
+        if widget_upper == "PULLDOWN":
+            val options = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgPulldown(options, callback))
+
+        # Unknown widget after label — skip line
+        self.skip_to_next_line()
+        Err(self.make_error("Unknown dialog widget: {widget_name}"))
+
+    # Unwrap an Ok(text) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_text(result: Result<text, CmmParseError>) -> text:
+        match result:
+            case Ok(v): v
+            case _: ""
+
+    # Unwrap an Ok(CmmExpr) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_expr(result: Result<CmmExpr, CmmParseError>) -> CmmExpr:
+        match result:
+            case Ok(v): v
+            case _: CmmExpr.ExprEmpty
+
+    # Unwrap an Ok(CmmStmt) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_stmt(result: Result<CmmStmt, CmmParseError>) -> CmmStmt:
+        match result:
+            case Ok(v): v
+            case _: CmmStmt.ErrorNode("unreachable unwrap_stmt", span(0, 0))
+
+    # Check if the current token is a % (for format specifiers like %ERROR, %WARNING).
+    fn check_percent_format() -> bool:
+        match self.peek().kind:
+            case CmmTokenKind.Percent: true
+            case _: false
+
+    # Check if the current token looks like a repeat count (number or macro).
+    # Used by parse_repeat to avoid nested match with return/mutation.
+    fn check_repeat_count_start() -> bool:
+        match self.peek().kind:
+            case CmmTokenKind.IntNumber(n): true
+            case CmmTokenKind.DecNumber(n): true
+            case CmmTokenKind.HexNumber(n): true
+            case CmmTokenKind.MacroRef(n): true
+            case _: false
+
+    # Check if the current token + next form a macro assignment pattern.
+    # Returns a MacroAssignInfo with is_assign=true if &name= or &&name= is found.
+    fn check_macro_assign() -> MacroAssignInfo:
+        var name = ""
+        var is_recursive = false
+        var is_macro = false
+        match self.peek().kind:
+            case CmmTokenKind.MacroRef(n):
+                name = n
+                is_macro = true
+            case CmmTokenKind.MacroRecRef(n):
+                name = n
+                is_macro = true
+                is_recursive = true
+            case _: ()
+        if not is_macro:
+            return MacroAssignInfo(is_assign: false, name: "", is_recursive: false)
+        var has_assign = false
+        match self.peek_ahead(1).kind:
+            case CmmTokenKind.Assign:
+                has_assign = true
+            case _: ()
+        MacroAssignInfo(is_assign: has_assign, name: name, is_recursive: is_recursive)
+
+    # Check if the current token is % followed by LINE identifier.
+    # Returns a PercentLineInfo indicating whether the pattern was found.
+    fn check_percent_line() -> PercentLineInfo:
+        var is_percent = false
+        match self.peek().kind:
+            case CmmTokenKind.Percent:
+                is_percent = true
+            case _: ()
+        if not is_percent:
+            return PercentLineInfo(found: false, tokens_to_skip: 0)
+        var is_line = false
+        match self.peek_ahead(1).kind:
+            case CmmTokenKind.Identifier(name):
+                if to_upper_cmm(name) == "LINE":
+                    is_line = true
+            case _: ()
+        PercentLineInfo(found: is_line, tokens_to_skip: 2)
+
     # Consume and return a command name (Identifier or DotCommand text).
     # Returns empty string if current token is not a command name.
     me consume_command_name() -> text:
@@ -881,6 +961,15 @@ impl CmmParser:
                     # Stop collecting on error
                     break
         exprs
+
+    # Consume an option token (/mode) and return its text, or return "" if not an option.
+    me consume_option_or_empty() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Option(opt):
+                self.advance()
+                return opt
+            case _:
+                return ""
 
     # Consume a string literal token and return its value, or return "".
     me consume_string_or_empty() -> text:

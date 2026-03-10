@@ -1,5 +1,59 @@
 extern fn rt_get_args() -> [text]
 extern fn rt_native_build(args: [text]) -> i64
+use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.driver.driver_types.{CompileResult, CompileResult__get_errors}
+
+fn run_native_build_bootstrap(args: [text]) -> i64:
+    var backend = ""
+    var backend_explicit = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        i = i + 1
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
+        var entry_point = ""
+        var output = "a.out"
+        var j = 0
+        while j < args.len():
+            val a = args[j]
+            if a == "native-build":
+                pass
+            elif a.starts_with("--entry="):
+                entry_point = a.substring(8)
+            elif a == "--entry" and j + 1 < args.len():
+                j = j + 1
+                entry_point = args[j]
+            elif a == "-o" and j + 1 < args.len():
+                j = j + 1
+                output = args[j]
+            elif a.starts_with("-o"):
+                output = a.substring(2)
+            j = j + 1
+
+        if entry_point == "":
+            print "error: missing --entry for llvm-lib native-build"
+            return 1
+
+        print "[bootstrap_main] pure-simple llvm-lib path"
+        val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
+        match result:
+            case CompileResult.Success(_):
+                return 0
+            case _:
+                val errors = CompileResult__get_errors(result)
+                for err in errors:
+                    print "error: {err}"
+                return 1
+
+    rt_native_build(args)
 
 fn main() -> i64:
     val all_args = rt_get_args()
@@ -23,7 +77,7 @@ fn main() -> i64:
         print "Built from Simple source via Rust seed compiler"
         return 0
     if first == "native-build":
-        return rt_native_build(all_args.slice(1, all_args.len()))
+        return run_native_build_bootstrap(all_args.slice(1, all_args.len()))
     if first == "compile":
         if argc < 3:
             print "error: missing source file"

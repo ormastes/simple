@@ -359,6 +359,8 @@ pub enum TokenKind {
     Tilde,       // ~
     ShiftLeft,   // <<
     ShiftRight,  // >>
+    TripleLt,    // <<<  (CUDA kernel launch open)
+    TripleGt,    // >>>  (CUDA kernel launch close)
 
     Arrow,        // ->
     FatArrow,     // =>

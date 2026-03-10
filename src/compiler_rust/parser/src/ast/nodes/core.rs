@@ -486,6 +486,14 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Argument>,
     },
+    /// CUDA kernel launch: kernel<<<grid: (gx,gy,gz), block: (bx,by,bz)>>>(args)
+    /// Desugars to a regular Call in interpreter mode.
+    KernelLaunch {
+        kernel: Box<Expr>,
+        grid: Box<Expr>,
+        block: Box<Expr>,
+        args: Vec<Argument>,
+    },
     MethodCall {
         receiver: Box<Expr>,
         method: String,

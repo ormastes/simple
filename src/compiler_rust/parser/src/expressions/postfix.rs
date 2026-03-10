@@ -59,6 +59,10 @@ impl<'a> Parser<'a> {
                 TokenKind::LParen => {
                     expr = self.parse_call(expr)?;
                 }
+                TokenKind::TripleLt => {
+                    // CUDA kernel launch: kernel<<<grid: expr, block: expr>>>(args)
+                    expr = self.parse_kernel_launch(expr)?;
+                }
                 TokenKind::Bang => {
                     // Macro invocation: name!(args)
                     if let Expr::Identifier(name) = expr {
@@ -575,6 +579,47 @@ impl<'a> Parser<'a> {
         // This avoids conflicts with for/while/if statements that use colon after expressions.
         Ok(Expr::Call {
             callee: Box::new(callee),
+            args,
+        })
+    }
+
+    /// Parse CUDA kernel launch: kernel<<<grid: expr, block: expr>>>(args)
+    /// The `<<<` token has already been seen as the current token.
+    fn parse_kernel_launch(&mut self, kernel: Expr) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::TripleLt)?; // consume <<<
+
+        // Parse grid expression: "grid:" expr
+        // Accept both named (grid: expr) and positional (expr, expr) forms
+        // Note: "grid" is a keyword (TokenKind::Grid), not an identifier
+        let grid = if self.check(&TokenKind::Grid) {
+            self.advance(); // consume "grid"
+            self.expect(&TokenKind::Colon)?;
+            self.parse_expression()?
+        } else {
+            self.parse_expression()?
+        };
+
+        self.expect(&TokenKind::Comma)?;
+
+        // Parse block expression: "block:" expr
+        // "block" is a regular identifier (not a keyword)
+        let block = if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "block") {
+            self.advance(); // consume "block"
+            self.expect(&TokenKind::Colon)?;
+            self.parse_expression()?
+        } else {
+            self.parse_expression()?
+        };
+
+        self.expect(&TokenKind::TripleGt)?; // consume >>>
+
+        // Parse the call arguments: (args)
+        let args = self.parse_arguments()?;
+
+        Ok(Expr::KernelLaunch {
+            kernel: Box::new(kernel),
+            grid: Box::new(grid),
+            block: Box::new(block),
             args,
         })
     }

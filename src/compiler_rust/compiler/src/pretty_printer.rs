@@ -135,8 +135,206 @@ impl PrettyPrinter {
             }
             Node::UseStmt(u) => self.print_use(u),
             Node::ModDecl(m) => self.print_mod_decl(m),
+            Node::Static(s) => {
+                self.write_indent();
+                self.write("static ");
+                self.write(&s.name);
+                if let Some(ref ty) = s.ty {
+                    self.write(": ");
+                    self.print_type(ty);
+                }
+                self.write(" = ");
+                self.print_expr(&s.value);
+                self.output.push('\n');
+            }
+            Node::Defer(d) => {
+                self.write_indent();
+                self.write("defer ");
+                match &d.body {
+                    DeferBody::Expr(expr) => {
+                        self.print_expr(expr);
+                        self.output.push('\n');
+                    }
+                    DeferBody::Block(block) => {
+                        self.output.push_str(":\n");
+                        self.indent_inc();
+                        for stmt in &block.statements {
+                            self.print_node(stmt);
+                        }
+                        self.indent_dec();
+                    }
+                }
+            }
+            Node::Assert(a) => {
+                self.write_indent();
+                self.write("assert ");
+                self.print_expr(&a.condition);
+                if let Some(ref msg) = a.message {
+                    self.write(&format!(", \"{}\"", msg));
+                }
+                self.output.push('\n');
+            }
+            Node::Guard(g) => {
+                self.write_indent();
+                self.write("? ");
+                if let Some(ref cond) = g.condition {
+                    self.print_expr(cond);
+                } else {
+                    self.write("else");
+                }
+                self.write(" -> ");
+                self.print_expr(&g.result);
+                self.output.push('\n');
+            }
+            Node::TypeAlias(ta) => {
+                self.write_indent();
+                self.write("type ");
+                self.write(&ta.name);
+                self.write(" = ");
+                self.print_type(&ta.ty);
+                self.output.push('\n');
+            }
+            Node::ClassAlias(ca) => {
+                self.write_indent();
+                self.write("alias ");
+                self.write(&ca.name);
+                self.write(" = ");
+                self.write(&ca.target);
+                self.output.push('\n');
+            }
+            Node::FunctionAlias(fa) => {
+                self.write_indent();
+                self.write("fn ");
+                self.write(&fa.name);
+                self.write(" = ");
+                self.write(&fa.target);
+                self.output.push('\n');
+            }
+            Node::Newtype(nt) => {
+                self.write_indent();
+                self.write("newtype ");
+                self.write(&nt.name);
+                self.write(" = ");
+                self.print_type(&nt.inner_type);
+                self.output.push('\n');
+            }
+            Node::Extern(ext) => {
+                self.write_indent();
+                self.write("extern fn ");
+                self.write(&ext.name);
+                self.write("(");
+                for (i, param) in ext.params.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.print_param(param);
+                }
+                self.write(")");
+                if let Some(ref ret_type) = ext.return_type {
+                    self.write(" -> ");
+                    self.print_type(ret_type);
+                }
+                self.output.push('\n');
+            }
+            Node::ExternClass(ec) => {
+                self.write_indent();
+                self.write("extern class ");
+                self.write(&ec.name);
+                self.write(":");
+                self.output.push('\n');
+                self.indent_inc();
+                for method in &ec.methods {
+                    self.write_indent();
+                    match method.kind {
+                        ExternMethodKind::Static => self.write("static fn "),
+                        ExternMethodKind::Mutable => self.write("me "),
+                        ExternMethodKind::Immutable => self.write("fn "),
+                    }
+                    self.write(&method.name);
+                    self.write("(");
+                    for (i, param) in method.params.iter().enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.print_param(param);
+                    }
+                    self.write(")");
+                    if let Some(ref ret_type) = method.return_type {
+                        self.write(" -> ");
+                        self.print_type(ret_type);
+                    }
+                    self.output.push('\n');
+                }
+                self.indent_dec();
+            }
+            Node::Extend(ext) => {
+                self.write_indent();
+                self.write("extend ");
+                self.write(&ext.target_type);
+                self.write(":");
+                self.output.push('\n');
+                self.indent_inc();
+                for method in &ext.methods {
+                    self.print_function(method);
+                    self.output.push('\n');
+                }
+                self.indent_dec();
+            }
+            Node::Mixin(m) => {
+                self.write_indent();
+                self.write("mixin ");
+                self.write(&m.name);
+                self.write(":");
+                self.output.push('\n');
+                self.indent_inc();
+                for field in &m.fields {
+                    self.print_field(field);
+                }
+                for method in &m.methods {
+                    self.print_function(method);
+                    self.output.push('\n');
+                }
+                self.indent_dec();
+            }
+            Node::Actor(a) => {
+                self.write_indent();
+                self.write("actor ");
+                self.write(&a.name);
+                self.write(":");
+                self.output.push('\n');
+                self.indent_inc();
+                for field in &a.fields {
+                    self.print_field(field);
+                }
+                for method in &a.methods {
+                    self.print_function(method);
+                    self.output.push('\n');
+                }
+                self.indent_dec();
+            }
+            Node::With(w) => {
+                self.write_indent();
+                self.write("with ");
+                self.print_expr(&w.resource);
+                if let Some(ref name) = w.name {
+                    self.write(" as ");
+                    self.write(name);
+                }
+                self.write(":");
+                self.output.push('\n');
+                self.indent_inc();
+                for stmt in &w.body.statements {
+                    self.print_node(stmt);
+                }
+                self.indent_dec();
+            }
             _ => {
-                // TODO: Implement other node types
+                // Remaining node types: Bitfield, InterfaceBinding, Macro, Unit,
+                // UnitFamily, CompoundUnit, HandlePool, LiteralFunction, MultiUse,
+                // CommonUseStmt, ExportUseStmt, StructuredExportStmt, AutoImportStmt,
+                // RequiresCapabilities, AopAdvice, DiBinding, ArchitectureRule,
+                // MockDecl, Assume, Admit, ProofHint, Calc, Context, LeanBlock,
+                // InlineAsm
                 self.write_line(&format!("# TODO: Pretty print {:?}", node));
             }
         }

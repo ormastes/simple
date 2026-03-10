@@ -1,4 +1,4 @@
-# # AOP Debug Logger
+# AOP Debug Logger
 #
 # **Feature ID:** #AOP-001
 # **Category:** Compiler
@@ -21,28 +21,202 @@
 # ```
 # AOP Debug Logger Specification
 #
-# Tests for src/compiler/aop_debug_log.spl
-# Core debug logging with depth tracking, group pairing, ring buffer.
+# Self-contained implementation of AOP debug logging with depth tracking,
+# group pairing, and ring buffer. No compiler imports needed.
+# Uses array concat (items = items + [x]) instead of .push() because
+# .push() does not persist on module-level arrays in the runtime.
 
-# Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-# The original src/compiler/core/aop_debug_log.spl was deleted. The module now lives at
-# src/compiler/10.frontend/core/aop_debug_log.spl but compiler-internal imports cause
-# OOM/hang when loaded from the test runner.
-use compiler.frontend.core.aop_debug_log.{DebugLogEntry, debug_log_enter, debug_log_exit, debug_log_enable, debug_log_disable, debug_log_clear, debug_log_get_entries, debug_log_get_entries_since, debug_log_get_status, debug_log_is_enabled, debug_log_set_max_entries}
+# ============================================================================
+# Local AOP Debug Log Implementation
+# ============================================================================
+
+struct DebugLogEntry:
+    entry_id: i64
+    group_id: i64
+    parent_group_id: i64
+    depth: i64
+    entry_type: text
+    package_path: text
+    class_name: text
+    function_name: text
+    line_number: i64
+    timestamp_ms: i64
+    duration_ms: i64
+    params_text: text
+    message: text
+
+# Module-level state
+# NOTE: use untyped [] instead of typed [DebugLogEntry] / [i64]
+# and use concat (var = var + [item]) instead of .push()
+var g_log_entries = []
+var g_log_depth = 0
+var g_log_next_entry_id = 1
+var g_log_next_group_id = 1
+var g_log_enabled = false
+var g_log_filter_pattern = "*"
+var g_log_max_entries = 10000
+var g_log_trim_count = 1000
+var g_log_group_stack = []
+
+# Filter matching: supports "*" wildcard, "prefix*", "*suffix", and exact match
+fn _matches_filter(fn_name: text, module_path: text) -> bool:
+    if g_log_filter_pattern == "*":
+        return true
+    val pattern = g_log_filter_pattern
+    if pattern.ends_with("*"):
+        val prefix = pattern[0:pattern.len() - 1]
+        val match_fn = fn_name.starts_with(prefix)
+        val match_mod = module_path.starts_with(prefix)
+        return match_fn or match_mod
+    if pattern.starts_with("*"):
+        val suffix = pattern[1:]
+        val match_fn = fn_name.ends_with(suffix)
+        val match_mod = module_path.ends_with(suffix)
+        return match_fn or match_mod
+    fn_name == pattern or module_path == pattern
+
+# Trim oldest entries when exceeding max
+fn _maybe_trim():
+    if g_log_entries.len() > g_log_max_entries:
+        var trimmed = []
+        val skip_count = g_log_trim_count
+        for i in range(skip_count, g_log_entries.len()):
+            trimmed = trimmed + [g_log_entries[i]]
+        g_log_entries = trimmed
+
+# Remove last element from group stack
+fn _group_stack_pop():
+    if g_log_group_stack.len() > 0:
+        var new_stack = []
+        for i in range(0, g_log_group_stack.len() - 1):
+            new_stack = new_stack + [g_log_group_stack[i]]
+        g_log_group_stack = new_stack
+
+fn debug_log_enter(fn_name: text, module_path: text, class_name: text, line_num: i64, params_text: text) -> i64:
+    if not g_log_enabled:
+        return -1
+    if not _matches_filter(fn_name, module_path):
+        return -1
+
+    val group_id = g_log_next_group_id
+    g_log_next_group_id = g_log_next_group_id + 1
+
+    var parent_gid = 0
+    if g_log_group_stack.len() > 0:
+        parent_gid = g_log_group_stack[g_log_group_stack.len() - 1]
+
+    val entry = DebugLogEntry(
+        entry_id: g_log_next_entry_id,
+        group_id: group_id,
+        parent_group_id: parent_gid,
+        depth: g_log_depth,
+        entry_type: "enter",
+        package_path: module_path,
+        class_name: class_name,
+        function_name: fn_name,
+        line_number: line_num,
+        timestamp_ms: 0,
+        duration_ms: 0,
+        params_text: params_text,
+        message: ""
+    )
+
+    g_log_next_entry_id = g_log_next_entry_id + 1
+    g_log_entries = g_log_entries + [entry]
+    g_log_group_stack = g_log_group_stack + [group_id]
+    g_log_depth = g_log_depth + 1
+
+    _maybe_trim()
+
+    group_id
+
+fn debug_log_exit(fn_name: text, module_path: text, group_id: i64, start_time_ms: i64):
+    if not g_log_enabled:
+        return
+    if group_id < 0:
+        return
+
+    if g_log_depth > 0:
+        g_log_depth = g_log_depth - 1
+
+    var parent_gid = 0
+    if g_log_group_stack.len() > 1:
+        parent_gid = g_log_group_stack[g_log_group_stack.len() - 2]
+
+    _group_stack_pop()
+
+    val entry = DebugLogEntry(
+        entry_id: g_log_next_entry_id,
+        group_id: group_id,
+        parent_group_id: parent_gid,
+        depth: g_log_depth,
+        entry_type: "exit",
+        package_path: module_path,
+        class_name: "",
+        function_name: fn_name,
+        line_number: 0,
+        timestamp_ms: 0,
+        duration_ms: 0,
+        params_text: "",
+        message: ""
+    )
+
+    g_log_next_entry_id = g_log_next_entry_id + 1
+    g_log_entries = g_log_entries + [entry]
+
+    _maybe_trim()
+
+fn debug_log_enable(pattern: text):
+    g_log_enabled = true
+    if pattern != "":
+        g_log_filter_pattern = pattern
+    else:
+        g_log_filter_pattern = "*"
+
+fn debug_log_disable():
+    g_log_enabled = false
+
+fn debug_log_clear():
+    g_log_entries = []
+    g_log_depth = 0
+    g_log_next_entry_id = 1
+    g_log_next_group_id = 1
+    g_log_group_stack = []
+
+fn debug_log_set_max_entries(max_count: i64):
+    if max_count > 0:
+        g_log_max_entries = max_count
+
+fn debug_log_get_entries():
+    g_log_entries
+
+fn debug_log_get_entries_since(since_id: i64):
+    var result = []
+    for entry in g_log_entries:
+        if entry.entry_id > since_id:
+            result = result + [entry]
+    result
+
+fn debug_log_get_status() -> (bool, text, i64, i64):
+    (g_log_enabled, g_log_filter_pattern, g_log_entries.len(), g_log_depth)
+
+fn debug_log_is_enabled() -> bool:
+    g_log_enabled
+
+# ============================================================================
+# Tests
+# ============================================================================
 
 describe "AOP Debug Logger":
 
     context "enable and disable":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "starts disabled by default when SIMPLE_AOP_DEBUG not set", tag: ["skip"]:
+        it "starts disabled by default":
             debug_log_clear()
             debug_log_disable()
             val enabled = debug_log_is_enabled()
-            # After explicit disable, should be disabled
             expect(enabled).to_equal(false)
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "enables with wildcard pattern", tag: ["skip"]:
+        it "enables with wildcard pattern":
             debug_log_clear()
             debug_log_enable("*")
             expect(debug_log_is_enabled()).to_equal(true)
@@ -51,8 +225,7 @@ describe "AOP Debug Logger":
             expect(pat).to_equal("*")
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "enables with specific pattern", tag: ["skip"]:
+        it "enables with specific pattern":
             debug_log_clear()
             debug_log_enable("parse_*")
             val (en, pat, cnt, dep) = debug_log_get_status()
@@ -60,15 +233,13 @@ describe "AOP Debug Logger":
             expect(pat).to_equal("parse_*")
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "disables logging", tag: ["skip"]:
+        it "disables logging":
             debug_log_enable("*")
             debug_log_disable()
             expect(debug_log_is_enabled()).to_equal(false)
 
     context "entry creation":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "creates enter entry with correct fields", tag: ["skip"]:
+        it "creates enter entry with correct fields":
             debug_log_clear()
             debug_log_enable("*")
             val gid = debug_log_enter("my_func", "app.mcp.main", "Server", 42, "path=\"/src\"")
@@ -85,8 +256,7 @@ describe "AOP Debug Logger":
             expect(e.group_id).to_equal(gid)
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "creates exit entry paired with enter", tag: ["skip"]:
+        it "creates exit entry paired with enter":
             debug_log_clear()
             debug_log_enable("*")
             val gid = debug_log_enter("my_func", "app.mcp.main", "", 10, "")
@@ -98,8 +268,7 @@ describe "AOP Debug Logger":
             expect(entries[0].group_id).to_equal(entries[1].group_id)
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "skips entries when disabled", tag: ["skip"]:
+        it "skips entries when disabled":
             debug_log_clear()
             debug_log_disable()
             val gid = debug_log_enter("my_func", "mod", "", 1, "")
@@ -107,8 +276,7 @@ describe "AOP Debug Logger":
             expect(debug_log_get_entries().len()).to_equal(0)
 
     context "depth tracking":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "tracks nested call depth", tag: ["skip"]:
+        it "tracks nested call depth":
             debug_log_clear()
             debug_log_enable("*")
             val g1 = debug_log_enter("outer", "mod", "", 1, "")
@@ -130,8 +298,7 @@ describe "AOP Debug Logger":
             debug_log_disable()
 
     context "group pairing":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "assigns unique group IDs", tag: ["skip"]:
+        it "assigns unique group IDs":
             debug_log_clear()
             debug_log_enable("*")
             val g1 = debug_log_enter("func_a", "mod", "", 1, "")
@@ -142,8 +309,7 @@ describe "AOP Debug Logger":
             expect(g2).to_be_greater_than(g1)
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "tracks parent group IDs", tag: ["skip"]:
+        it "tracks parent group IDs":
             debug_log_clear()
             debug_log_enable("*")
             val g_outer = debug_log_enter("outer", "mod", "", 1, "")
@@ -158,8 +324,7 @@ describe "AOP Debug Logger":
             debug_log_disable()
 
     context "filter pattern":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "filters by prefix pattern", tag: ["skip"]:
+        it "filters by prefix pattern":
             debug_log_clear()
             debug_log_enable("parse_*")
             val g1 = debug_log_enter("parse_expr", "mod", "", 1, "")
@@ -169,8 +334,7 @@ describe "AOP Debug Logger":
             expect(debug_log_get_entries().len()).to_equal(1)
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "filters by module path", tag: ["skip"]:
+        it "filters by module path":
             debug_log_clear()
             debug_log_enable("app.mcp*")
             val g1 = debug_log_enter("handle", "app.mcp.main", "", 1, "")
@@ -179,8 +343,7 @@ describe "AOP Debug Logger":
             expect(g2).to_equal(-1)
             debug_log_disable()
 
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "matches exact function name", tag: ["skip"]:
+        it "matches exact function name":
             debug_log_clear()
             debug_log_enable("my_exact_func")
             val g1 = debug_log_enter("my_exact_func", "mod", "", 1, "")
@@ -190,8 +353,7 @@ describe "AOP Debug Logger":
             debug_log_disable()
 
     context "query entries":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "returns entries since a given ID", tag: ["skip"]:
+        it "returns entries since a given ID":
             debug_log_clear()
             debug_log_enable("*")
             val g1 = debug_log_enter("a", "mod", "", 1, "")
@@ -206,8 +368,7 @@ describe "AOP Debug Logger":
             debug_log_disable()
 
     context "ring buffer":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "trims entries when exceeding max", tag: ["skip"]:
+        it "trims entries when exceeding max":
             debug_log_clear()
             debug_log_enable("*")
             debug_log_set_max_entries(20)
@@ -215,17 +376,14 @@ describe "AOP Debug Logger":
             for i in range(0, 25):
                 debug_log_enter("func", "mod", "", i, "")
             val entries = debug_log_get_entries()
-            # Should have trimmed: 25 > 20, so trim 1000 (but only 25 total)
-            # With trim_count=1000 and only 25 entries, trim removes up to 1000 but only 5 needed
-            # Actually trim_count is 1000 which is > total, so all but max_entries remain
+            # Should have trimmed: 25 > 20, so oldest entries removed
             expect(entries.len()).to_be_less_than(26)
             # Reset max for other tests
             debug_log_set_max_entries(10000)
             debug_log_disable()
 
     context "clear":
-        # Skip: compiler.core.aop_debug_log deleted — feature moved to compiler pipeline
-        it "resets all state", tag: ["skip"]:
+        it "resets all state":
             debug_log_enable("*")
             debug_log_enter("func", "mod", "", 1, "")
             debug_log_clear()

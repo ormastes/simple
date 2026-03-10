@@ -20,6 +20,8 @@ type Enums = HashMap<String, simple_parser::ast::EnumDef>;
 type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
 
 use crate::interpreter::evaluate_expr;
+use crate::interpreter::MODULE_GLOBALS;
+use crate::interpreter::core_types::get_pattern_name;
 
 /// Add builtin types to the module environment
 pub(super) fn add_builtin_types(env: &mut Env) {
@@ -301,11 +303,17 @@ pub(super) fn process_imports_and_assignments(
                     if let Ok(value) =
                         evaluate_expr(init, env, local_functions, local_classes, local_enums, impl_methods)
                     {
-                        // Only handle simple identifier patterns for now
-                        if let Pattern::Identifier(name) = &stmt.pattern {
+                        // Handle all pattern types (Identifier, MutIdentifier, Typed)
+                        if let Some(name) = get_pattern_name(&stmt.pattern) {
                             env.insert(name.clone(), value.clone());
                             // Export constants so they're visible after import
-                            exports.insert(name.clone(), value);
+                            exports.insert(name.clone(), value.clone());
+                            // Sync module-level vars to MODULE_GLOBALS so that functions
+                            // within this module can read/write them even when called from
+                            // other modules (where the function's captured_env may not be used).
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut().insert(name.clone(), value);
+                            });
                         }
                     }
                 }
@@ -323,7 +331,11 @@ pub(super) fn process_imports_and_assignments(
                     ) {
                         env.insert(name.clone(), value.clone());
                         // Export vars so they're visible after import
-                        exports.insert(name.clone(), value);
+                        exports.insert(name.clone(), value.clone());
+                        // Sync to MODULE_GLOBALS for the same reason as Node::Let above
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.clone(), value);
+                        });
                     }
                 }
             }

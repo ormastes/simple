@@ -388,7 +388,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn check_identifier(&self, name: &str) -> bool {
+    pub(crate) fn check_identifier(&self, name: &str) -> bool {
         matches!(&self.current.kind, TokenKind::Identifier { name: n, .. } if n == name)
     }
 

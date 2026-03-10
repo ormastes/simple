@@ -400,6 +400,82 @@ pub(crate) fn call_method_on_value(
         _ => {}
     }
 
+    // Trait impl dispatch fallback for built-in types in chained calls.
+    // Check TRAIT_IMPLS for user-defined trait implementations on built-in types.
+    {
+        let type_names: &[&str] = match &recv_val {
+            Value::Str(_) => &["text", "str", "String"],
+            Value::Int(_) => &["i64", "i32", "int"],
+            Value::Float(_) => &["f64", "f32", "float"],
+            Value::Bool(_) => &["bool"],
+            Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
+            Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
+            Value::Tuple(_) => &["tuple", "Tuple"],
+            _ => &[],
+        };
+
+        if !type_names.is_empty() {
+            let trait_method: Option<simple_parser::ast::FunctionDef> = TRAIT_IMPLS.with(|cell| {
+                let trait_impls = cell.borrow();
+                for type_alias in type_names {
+                    for ((_trait_name, impl_type), methods) in trait_impls.iter() {
+                        if impl_type == type_alias {
+                            if let Some(func) = methods.iter().find(|m| m.name == method) {
+                                return Some(func.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            });
+
+            if let Some(func) = trait_method {
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                let type_name = type_names[0];
+                return exec_function_with_values_and_self(
+                    &func,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                    Some((type_name, &self_fields)),
+                );
+            }
+
+            // Also check blanket impls
+            let blanket_method: Option<simple_parser::ast::FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+                let blanket_impls = cell.borrow();
+                for (_trait_name, methods) in blanket_impls.iter() {
+                    if let Some(func) = methods.iter().find(|m| m.name == method) {
+                        return Some(func.clone());
+                    }
+                }
+                None
+            });
+
+            if let Some(func) = blanket_method {
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                let type_name = type_names[0];
+                return exec_function_with_values_and_self(
+                    &func,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                    Some((type_name, &self_fields)),
+                );
+            }
+        }
+    }
+
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work in chained calls
     if let Some(func) = _functions.get(method).cloned() {

@@ -82,6 +82,7 @@ pub mod error_ffi;
 pub mod span_ffi;
 pub mod rc;
 pub mod wffi;
+pub mod dynamic_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -1215,6 +1216,14 @@ pub(crate) fn call_extern_function(
         "spl_str_ptr" => wffi::spl_str_ptr(&evaluated),
         "rt_cstring_to_text" => wffi::rt_cstring_to_text(&evaluated),
 
-        _ => Err(common::unknown_function(name)),
+        _ => {
+            // Try dynamic FFI dispatch via the runtime shared library.
+            // This handles extern fn declarations that aren't in the built-in table
+            // by loading libsimple_runtime.so/.dylib/.dll and calling via dlsym.
+            if let Some(result) = dynamic_ffi::try_call_dynamic(name, &evaluated) {
+                return result;
+            }
+            Err(common::unknown_function(name))
+        }
     }
 }

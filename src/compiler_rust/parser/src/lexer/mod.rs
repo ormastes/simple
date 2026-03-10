@@ -411,7 +411,12 @@ impl<'a> Lexer<'a> {
                     TokenKind::LtEq
                 } else if self.check('<') {
                     self.advance();
-                    TokenKind::ShiftLeft
+                    if self.check('<') {
+                        self.advance();
+                        TokenKind::TripleLt
+                    } else {
+                        TokenKind::ShiftLeft
+                    }
                 } else {
                     TokenKind::Lt
                 }
@@ -422,7 +427,12 @@ impl<'a> Lexer<'a> {
                     TokenKind::GtEq
                 } else if self.check('>') {
                     self.advance();
-                    TokenKind::ShiftRight
+                    if self.check('>') {
+                        self.advance();
+                        TokenKind::TripleGt
+                    } else {
+                        TokenKind::ShiftRight
+                    }
                 } else {
                     TokenKind::Gt
                 }
