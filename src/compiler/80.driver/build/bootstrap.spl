@@ -3,9 +3,9 @@
 # 3-stage self-compilation verification for the Simple compiler.
 # Ensures the compiler can compile itself consistently.
 #
-# Stage 1: Pre-built bootstrap binary → simple_new1 (copy)
-# Stage 2: simple_new1 compiles src/app/cli/main.spl → simple_new2.smf
-# Stage 3: simple_new2.smf compiles src/app/cli/main.spl → simple_new3.smf
+# Stage 1: Rust seed builds the full CLI
+# Stage 2: Stage 1 native-builds the full CLI with llvm-lib
+# Stage 3: Stage 2 native-builds the full CLI with llvm-lib
 # Verify: Stage2 == Stage3 (binary reproducibility)
 
 use app.build.types (BuildProfile)
@@ -13,9 +13,9 @@ use std.log.{error}
 
 # Bootstrap stage
 enum BootstrapStage:
-    Stage1    # Pre-built binary → simple_new1
-    Stage2    # simple_new1 → simple_new2
-    Stage3    # simple_new2 → simple_new3
+    Stage1
+    Stage2
+    Stage3
 
 # Bootstrap configuration
 struct BootstrapConfig:
@@ -24,6 +24,8 @@ struct BootstrapConfig:
     keep_artifacts: bool       # Keep intermediate binaries
     workspace_root: text       # Workspace root directory
     output_dir: text           # Where to place stage outputs
+    backend: text              # Backend for stage2/stage3
+    rust_seed_binary: text     # Rust seed binary for stage1
 
 # Bootstrap result for a single stage
 struct StageResult:
@@ -75,8 +77,8 @@ class Bootstrap:
         # Create output directory
         dir_create(config.output_dir, false)
 
-        # Stage 1: Pre-built binary → simple_new1
-        print "Stage 1: Using pre-built bootstrap binary..."
+        # Stage 1: Rust seed → simple_new1
+        print "Stage 1: Building from Rust seed..."
         val stage1_result = run_stage1(config)
         print stage1_result.summary()
 
@@ -90,7 +92,7 @@ class Bootstrap:
             )
 
         # Stage 2: simple_new1 → simple_new2
-        print "\nStage 2: Compiling with simple_new1..."
+        print "\nStage 2: Building pure-Simple compiler with {config.backend}..."
         val stage2_result = run_stage2(config, stage1_result)
         print stage2_result.summary()
 
@@ -104,7 +106,7 @@ class Bootstrap:
             )
 
         # Stage 3: simple_new2 → simple_new3
-        print "\nStage 3: Compiling with simple_new2..."
+        print "\nStage 3: Rebuilding pure-Simple compiler with {config.backend}..."
         val stage3_result = run_stage3(config, stage2_result)
         print stage3_result.summary()
 
@@ -153,18 +155,14 @@ class Bootstrap:
     static fn quick() -> BootstrapResult:
         Bootstrap.run(default_bootstrap_config())
 
-# Stage 1: Use pre-built bootstrap binary
+# Stage 1: Use Rust seed binary to build the full CLI
 fn run_stage1(config: BootstrapConfig) -> StageResult:
     val start_time = current_time_ms()
 
-    # Find the pre-built bootstrap binary
-    var bootstrap_path = "bin/release/simple"
-    if not file_exists(bootstrap_path):
-        bootstrap_path = "./bin/release/simple"
-
-    if not file_exists(bootstrap_path):
-        error("build", "Pre-built bootstrap binary not found")
-        print "  Expected: bin/release/simple"
+    val rust_seed = config.rust_seed_binary
+    if not file_exists(rust_seed):
+        error("build", "Rust seed binary not found")
+        print "  Expected: {rust_seed}"
         return StageResult(
             stage: BootstrapStage.Stage1,
             success: false,
@@ -174,10 +172,13 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
             hash: ""
         )
 
-    # Copy to stage1 output
     val stage1_path = "{config.output_dir}/simple_new1"
-    if not file_copy(bootstrap_path, stage1_path):
-        error("build", "Failed to copy bootstrap binary to {stage1_path}")
+    val compile_cmd = "{rust_seed} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl -o {stage1_path} --clean"
+    val compile_result = shell(compile_cmd)
+    if compile_result.exit_code != 0:
+        error("build", "Stage 1 compilation failed")
+        if compile_result.stderr != "":
+            print "  {compile_result.stderr}"
         return StageResult(
             stage: BootstrapStage.Stage1,
             success: false,
@@ -187,13 +188,12 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
             hash: ""
         )
 
-    # Make executable
     shell("chmod +x {stage1_path}")
 
     val binary_size = file_size_raw(stage1_path)
     val hash = file_hash_sha256(stage1_path)
 
-    print "  Copied pre-built binary ({binary_size} bytes)"
+    print "  Built stage1 binary ({binary_size} bytes)"
 
     StageResult(
         stage: BootstrapStage.Stage1,
@@ -208,14 +208,10 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
 fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Stage 2: Use stage1 binary to compile the compiler to a native executable.
-    # SIMPLE_COMPILE_RUST=1 tells the binary to use its native Cranelift backend.
-    # Building as native executable (not SMF) so it includes the full compiler.
     val stage2_path = "{config.output_dir}/simple_new2"
     val stage1_binary = stage1.binary_path
 
-    # Use stage1 binary to compile the compiler to native executable
-    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage1_binary} compile src/app/cli/main.spl --format=native -o {stage2_path}"
+    val compile_cmd = "{stage1_binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend {config.backend} -o {stage2_path} --clean"
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -247,16 +243,12 @@ fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
 fn run_stage3(config: BootstrapConfig, stage2: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Stage 3: Use stage2 binary to compile again.
-    # If stage2 == stage3 (hash match), the compiler is reproducible.
     val stage3_path = "{config.output_dir}/simple_new3"
     val stage2_binary = stage2.binary_path
 
-    # Make stage2 binary executable
     shell("chmod +x {stage2_binary}")
 
-    # Use stage2 binary directly to compile the compiler
-    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage2_binary} compile src/app/cli/main.spl --format=native -o {stage3_path}"
+    val compile_cmd = "{stage2_binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend {config.backend} -o {stage3_path} --clean"
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -363,5 +355,7 @@ fn default_bootstrap_config() -> BootstrapConfig:
         verify: true,
         keep_artifacts: true,
         workspace_root: ".",
-        output_dir: "build/bootstrap"
+        output_dir: "build/bootstrap",
+        backend: "llvm-lib",
+        rust_seed_binary: "src/compiler_rust/target/bootstrap/simple"
     )

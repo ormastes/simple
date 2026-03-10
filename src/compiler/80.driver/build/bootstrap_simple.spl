@@ -1,9 +1,9 @@
 # Bootstrap Pipeline
 #
 # 3-stage self-compilation verification for the Simple compiler.
-# Stage 1: Compile compiler with current binary
-# Stage 2: Compile compiler with Stage 1 output
-# Stage 3: Compile compiler with Stage 2 output, verify Stage 2 == Stage 3
+# Stage 1: Rust seed builds the full CLI
+# Stage 2: Stage 1 native-builds the full CLI with llvm-lib
+# Stage 3: Stage 2 native-builds the full CLI with llvm-lib, verify Stage 2 == Stage 3
 
 use app.build.types (BuildProfile)
 use app.build.cargo (Cargo, BuildConfig)
@@ -22,6 +22,7 @@ struct BootstrapConfig:
     workspace_root: text
     output_dir: text
     backend: text
+    rust_seed_binary: text
 
 # Stage result
 struct StageResult:
@@ -50,21 +51,14 @@ class Bootstrap:
         # Ensure output directory exists
         val mkdir_result = process_run("mkdir", ["-p", config.output_dir])
 
-        # Determine the compiler to use for Stage 1.
-        # NOTE: Bootstrap uses subprocess calls intentionally — each stage runs
-        # the previous stage's binary to verify the compiled compiler works correctly.
-        # This cannot be replaced with in-process calls because Stages 2 and 3
-        # must execute different binaries (the outputs of previous stages).
-        var compiler = "bin/release/simple"
+        val compiler = config.rust_seed_binary
         if not file_exists(compiler):
-            compiler = "bin/simple"
-        if not file_exists(compiler):
-            print "Error: No compiler binary found at bin/release/simple or bin/simple"
-            return early_failure("No compiler binary found")
+            print "Error: Rust seed binary not found at {compiler}"
+            return early_failure("Rust seed binary not found")
 
         # Stage 1: Compile compiler with current binary
         print ""
-        print "=== Stage 1: Compile with current binary ==="
+        print "=== Stage 1: Build with Rust seed ==="
         val stage1 = compile_stage(BootstrapStage.Stage1, compiler, config)
         if not stage1.success:
             print "Stage 1 FAILED"
@@ -79,7 +73,7 @@ class Bootstrap:
 
         # Stage 2: Compile compiler with Stage 1 output
         print ""
-        print "=== Stage 2: Compile with Stage 1 binary ==="
+        print "=== Stage 2: Build with Stage 1 binary ({config.backend}) ==="
         val stage2 = compile_stage(BootstrapStage.Stage2, stage1.binary_path, config)
         if not stage2.success:
             print "Stage 2 FAILED"
@@ -94,7 +88,7 @@ class Bootstrap:
 
         # Stage 3: Compile compiler with Stage 2 output, verify match
         print ""
-        print "=== Stage 3: Compile with Stage 2 binary ==="
+        print "=== Stage 3: Build with Stage 2 binary ({config.backend}) ==="
         val stage3 = compile_stage(BootstrapStage.Stage3, stage2.binary_path, config)
         if not stage3.success:
             print "Stage 3 FAILED"
@@ -132,13 +126,17 @@ fn compile_stage(stage: BootstrapStage, compiler: text, config: BootstrapConfig)
     val sname = stage_name(stage)
     val output = "{config.output_dir}/simple_{sname}"
 
-    # Compile: run the compiler to build the main CLI entry point.
-    # MUST use subprocess here: bootstrap self-compilation requires running the output
-    # binary of previous stages (Stage 2 uses Stage 1's binary, Stage 3 uses Stage 2's).
-    # Each stage must run as a separate process to verify the compiled binary works.
-    var args = ["src/app/compile/native.spl", "src/app/cli/main.spl", output]
-    if config.backend != "auto":
-        args = ["src/app/compile/native.spl", "src/app/cli/main.spl", output, "--backend={config.backend}"]
+    var args = [
+        "native-build",
+        "--source", "src/compiler",
+        "--source", "src/lib",
+        "--source", "src/app",
+        "--entry", "src/app/cli/main.spl",
+        "-o", output,
+        "--clean"
+    ]
+    if stage != BootstrapStage.Stage1:
+        args = args.merge(["--backend", config.backend])
     val result = process_run(compiler, args)
     val stdout = result.0
     val stderr = result.1
@@ -201,7 +199,8 @@ fn default_simple_bootstrap_config() -> BootstrapConfig:
         verify: true,
         workspace_root: ".",
         output_dir: "bootstrap",
-        backend: "auto"
+        backend: "llvm-lib",
+        rust_seed_binary: "src/compiler_rust/target/bootstrap/simple"
     )
 
 # Alias for default config
