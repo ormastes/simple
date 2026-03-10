@@ -1,152 +1,276 @@
-# Codex Bootstrap Status (2026-03-01)
+# Codex Bootstrap Plan
 
-## Replan Update (2026-03-08, macOS arm64)
+Updated: 2026-03-10
 
-## Execution Update (2026-03-08, Stage 3 full + default llvm-lib)
+## Goal
 
-### Code changes applied
-- Updated compile defaults to prefer pure Simple LLVM lib backend:
-  - `src/app/io/cli_compile.spl`
-    - `backend` default changed from `auto` -> `llvm-lib`
-    - help text updated to show default `llvm-lib`
-    - native bridge changed from `--backend llvm` -> `--backend llvm-lib`
-    - added support for `--backend <value>` form in `cli_native_build`
-    - `cli_native_build` now uses pure llvm-lib path only when backend is explicitly set to llvm-lib
-      (default native-build path stays on `rt_native_build` for stability)
+Make bootstrap work in three explicit levels across the target host matrix:
 
-### Stage builds executed
-1. Canonical bootstrap script:
-   - `scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --skip-rust-build --keep-artifacts --jobs=7`
-   - Result:
-     - `build/bootstrap/stage1/simple`
-     - `build/bootstrap/stage2/simple`
-     - Stage1/Stage2 reproducible hash:
-       - `ade36639f7821f75507bfc7198500fc34bbd7f31f9582beeba7eacb851578bfa`
+1. Rust-base Simple
+2. Pure Simple with LLVM backend via `llvm-lib`
+3. Full pure Simple self-host
 
-2. Stage3 full attempt (requested full entry + llvm-lib):
-   - `build/bootstrap/stage2/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend llvm-lib -o build/bootstrap/stage3_full/simple --strip`
-   - Result: binary builds and links, but runtime identity is still bootstrap CLI:
-     - `build/bootstrap/stage3_full/simple --version` -> `simple-bootstrap 0.8.0`
-     - `build/bootstrap/stage3_full/simple --help` -> `Simple Bootstrap Compiler v0.8.0`
+Execution priority:
 
-3. Stage4 rebuild from Stage3 (stable path):
-   - `build/bootstrap/stage3_full/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --clean -o build/bootstrap/stage4_full/simple --strip`
-   - Hashes now match:
-     - Stage3: `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`
-     - Stage4: `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`
+1. Linux native
+2. FreeBSD in QEMU from Linux host
+3. macOS prepared
+4. Windows prepared for both MinGW and MSVC
 
-### Smoke results (interpreter / loader / native)
-- Stage3 full candidate (`build/bootstrap/stage3_full/simple`) behavior:
-  - `--help` / `--version`: full CLI works (`Simple Language v0.8.0`, full command list).
-  - Interpreter path: `simple /tmp/stage3_hello.spl` exits 139 with runtime missing symbols:
-    `Logger.trace`, `parse_outline`, `with_file`, `with_module`, `resolve`, `parse`.
-  - Native path (default backend): `simple compile /tmp/stage3_hello.spl -o /tmp/h.native` succeeds (exit 0),
-    but running `/tmp/h.native` exits 3 with no output.
-  - Loader path: `simple compile /tmp/stage3_hello.spl --format=smf -o /tmp/h.smf` exits 139
-    with the same missing symbols; `/tmp/h.smf` run fails.
+This document is now the root execution plan. Historical notes remain in `doc/build/` and platform-specific docs.
 
-### Current blocker for Stage 3 full
-- Stage3 full binary is now full CLI and Stage3/Stage4 are reproducible.
-- Remaining blocker is runtime completeness in pure-Simple interpreter/SMF compile paths
-  (missing symbols at runtime in Stage3 binary).
+## Required Outcome Matrix
 
-### TODO status (compact checklist)
-- [x] Default backend switched to `llvm-lib` in full compile path code.
-- [x] `--backend` override preserved.
-- [x] Stage3 binary built from Stage2 with requested entry/backend flags.
-- [x] Stage4 binary rebuilt from Stage3 and hashes compared.
-- [x] Stage3 full binary verified as full CLI (`simple --help` full command set).
-- [ ] Interpreter smoke on Stage3 full binary (currently fails with missing symbols).
-- [ ] Loader smoke on Stage3 full binary (currently fails with missing symbols).
-- [ ] Native smoke on Stage3 full binary with default backend (compile works; produced binary exits 3).
-- [x] Focused CLI checks run and logged on Stage3 full binary.
+| Platform | Stage 1 Rust-base Simple | Stage 2 Pure Simple `llvm-lib` | Stage 3 Full pure Simple | Mode |
+|----------|--------------------------|--------------------------------|--------------------------|------|
+| Linux x86_64 | Do now | Do now | Do now | Native host |
+| FreeBSD x86_64 | Do now | Do now | Do now | QEMU guest from Linux |
+| macOS arm64/x86_64 | Prepare now | Prepare now | Prepare now | Native CI/host later |
+| Windows x86_64 MinGW | Prepare now | Prepare now | Prepare now | Native or cross later |
+| Windows x86_64 MSVC | Prepare now | Prepare now | Prepare now | Native CI/host later |
 
-## Mac Progress Notes (2026-03-08)
-- Stage1/Stage2 bootstrap via `scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --skip-rust-build --keep-artifacts --jobs=7` completed with reproducible hash `ade36639f7821f75507bfc7198500fc34bbd7f31f9582beeba7eacb851578bfa`.
-- Stage3 full CLI (`build/bootstrap/stage3_full/simple`) is now built from Stage2 with `native-build --entry src/app/cli/main.spl --backend llvm-lib` and reports the same CLI help/version text as the release compiler.
-- Stage4 (rebuild from Stage3 with `native-build --clean`) matches Stage3 hash `823bda61c7f08146b78523b9a9c387cff6741283321845d526ac054ec5693698`.
-- Interpreter/loader paths crash with `Runtime error: Function 'Logger.trace' not found` etc., blocking pure-Simple execution tests.
-- `simple compile /tmp/stage3_hello.spl -o /tmp/h.native` succeeds but the produced binary exits with code 3; SMF compilation fails for the same missing-symbol reason.
-- Next focus: restore the missing runtime symbols for `Logger.trace`, parser helpers, and module resolution so interpreter/loader invocations complete.
+Definition of done per stage:
 
-### Requested constraint
-- Stage 1 can use Rust backend.
-- Pure Simple stages must use `llvm-lib` backend.
+- Stage 1: Rust seed produces a working Simple CLI binary from `src/app/cli/main.spl`.
+- Stage 2: Stage 1 binary can compile with `--backend llvm-lib` and produce a working Simple binary.
+- Stage 3: Stage 2 binary rebuilds the full CLI again with matching behavior and reproducible hash policy.
 
-### Executed on macOS
-1. Verified Rust seed works on macOS:
-   - `src/compiler_rust/target/bootstrap/simple --version` -> `Simple Language v0.8.1`
-2. Built Stage 1 (Rust seed -> Simple binary, full CLI entry):
-   - `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl -o build/bootstrap/stage1_full/simple --strip`
-   - Result: success (`build/bootstrap/stage1_full/simple`, Mach-O arm64).
-3. Tried Stage 2 with pure Simple `llvm-lib` from Stage 1:
-   - `build/bootstrap/stage1_full/simple compile examples/01_getting_started/hello_native.spl --format=native --backend=llvm-lib -o /tmp/hello_stage2_from_stage1`
-   - Result: fails at runtime:
-     - `Runtime error: Function 'CompilerDriver.compile' not found`
-     - `Runtime error: Function 'get_errors' not found`
+## Canonical Commands
 
-### Root blocker
-- Stage 1 produced by Rust `native-build` links with large unresolved-symbol auto-stubs.
-- The resulting binary starts and handles basic CLI, but does not contain required runtime symbols for pure-Simple `llvm-lib` compilation path.
-- Therefore Stage 2/Stage 3 cannot currently be completed under the required "pure Simple + llvm-lib" constraint.
+### Stage 1: Rust-base Simple
 
-### Current status
-- `bin/simple` wrapper is unusable on this macOS workspace because it points to Linux ELF (`bin/release/simple`).
-- Rust seed is healthy.
-- Pure-Simple `llvm-lib` bootstrap chain is blocked by missing symbols in Rust-seeded Stage 1 artifact.
+```bash
+cargo build --profile bootstrap -p simple-driver
 
-### Next fix targets
-1. Build a non-stubbed Stage 1 full CLI binary from Rust seed (must include `CompilerDriver.compile` and related driver API symbols).
-2. Re-run Stage 2/3 with:
-   - `stage1_full/simple compile src/app/cli/main.spl --format=native --backend=llvm-lib -o build/bootstrap/stage2_llvm`
-   - `build/bootstrap/stage2_llvm compile src/app/cli/main.spl --format=native --backend=llvm-lib -o build/bootstrap/stage3_llvm`
-3. Validate:
-   - `--version`, `--help`
-   - compile/run smoke sample
-   - bootstrap hash comparison (stage2 vs stage3)
-4. Then run bootstrap test scripts/specs.
-
-## Summary
-- Stage1 compiler still builds clean.
-- Stage2/Stage3 bootstrap **now link successfully**; native binary is at `./tmp/simple_stage3_native` (links against `libsimple_runtime.so`).
-- Auto‑stub allow-list was widened: all `rt_*` symbols plus a handful of non‑rt helpers (`acquire`, `empty`, `defaults`, `mem_* leak tracker`, etc.) are preserved; everything else still auto‑stubbed.
-- Added real shims earlier (process spawn/wait/kill, file delete/size, time nanos/micros, SHA256) and kept them.
-- Runtime execution of the stage3 binary currently exits with code 1 for `--version/--help` and simple compile runs; likely needs proper env/assets (e.g., `SIMPLE_LIB`, `SIMPLE_HOME`, `LD_LIBRARY_PATH`).
-
-## Latest status (2026-03-01)
-- Link succeeds; no remaining undefined symbols during bootstrap link.
-- Stage3 binary present: `./tmp/simple_stage3_native` (PIE, dynamically linked; depends on `libsimple_runtime.so`).
-- Binary currently not responding to `--version/--help`; needs runtime env investigation.
-
-## Work Done (this session)
-- Allowed all `rt_*` symbols in bootstrap auto-stubs to avoid piecemeal misses; added explicit keepers for `acquire`, `empty`, `defaults`, `mem_enable`, `mem_snapshot`, `mem_dump_leaks`, `mem_live_*`, `mem_reset`.
-- Added keepers for full file I/O, TCP/UDP I/O, epoll/socket nonblocking, stdin/out/err, leak tracker, and other runtime helpers.
-- Kept earlier real C shims (process, time, file size/delete, SHA256) and removed extra runtime archive to avoid duplicate symbols.
-
-## Current Blocking Issue
-- Stage3 binary runs but exits with code 1 for basic CLI invocations; likely missing env/assets. Need to determine required runtime environment (e.g., `SIMPLE_HOME`, `SIMPLE_LIB`, `LD_LIBRARY_PATH`) or adjust CLI dispatch.
-
-## Next Steps (proposed)
-1) Figure out runtime env needed for `./tmp/simple_stage3_native` (try `SIMPLE_HOME=$(pwd)`, `SIMPLE_LIB=src`, `LD_LIBRARY_PATH=src/compiler_rust/target/release`, and ensure assets exist).
-2) Run smoke tests once env sorted: `--version`, `--help`, `compile examples/hello.spl -o /tmp/hello_stage3`.
-3) Optionally tighten allow-list later (replace blanket `rt_*` keep with precise set) once stable.
-4) Clean temp artifacts (`tmp/`) after confirming runtime behavior.
-
-## How to Verify (once link succeeds)
-```
-SIMPLE_HOME=$(pwd) SIMPLE_LIB=src LD_LIBRARY_PATH=src/compiler_rust/target/release ./tmp/simple_stage3_native --version
-SIMPLE_HOME=$(pwd) SIMPLE_LIB=src LD_LIBRARY_PATH=src/compiler_rust/target/release ./tmp/simple_stage3_native compile examples/hello.spl -o /tmp/hello_stage3
+src/compiler_rust/target/bootstrap/simple \
+  native-build \
+  --source src/compiler \
+  --source src/lib \
+  --source src/app \
+  --entry src/app/cli/main.spl \
+  -o build/bootstrap/stage1/simple \
+  --strip
 ```
 
-## Useful Paths
-- Stage1 compiler: `src/compiler_rust/target/release/simple`
-- Stage3 binary: `./tmp/simple_stage3_native`
-- Entry source: `src/app/cli/main.spl`
-- C stub fix: `src/compiler_rust/compiler/src/pipeline/native_project.rs:501-516`
-- Runtime args: `src/compiler_rust/runtime/src/value/args.rs`
+### Stage 2: Pure Simple via `llvm-lib`
 
-## Owner Notes
-- Segfault fixed; Stage2 runs CLI commands successfully.
-- `native-build` exits with code 8 on all native binaries — this is the next blocker for Stage3.
-- Parser improvements: 163 remaining parse failures (down from 284).
-- Keep using clang (not gcc_s) per instructions.
+```bash
+build/bootstrap/stage1/simple \
+  native-build \
+  --source src/compiler \
+  --source src/lib \
+  --source src/app \
+  --entry src/app/cli/main.spl \
+  --backend llvm-lib \
+  -o build/bootstrap/stage2/simple \
+  --strip
+```
+
+### Stage 3: Full pure Simple self-host
+
+```bash
+build/bootstrap/stage2/simple \
+  native-build \
+  --source src/compiler \
+  --source src/lib \
+  --source src/app \
+  --entry src/app/cli/main.spl \
+  --backend llvm-lib \
+  --clean \
+  -o build/bootstrap/stage3/simple \
+  --strip
+```
+
+### Minimum smoke suite after each successful stage
+
+```bash
+<binary> --version
+<binary> --help
+<binary> compile examples/01_getting_started/hello_native.spl -o /tmp/simple_hello
+/tmp/simple_hello
+```
+
+Additional Stage 2/3 checks:
+
+```bash
+<binary> compile examples/01_getting_started/hello_native.spl --format=smf -o /tmp/simple_hello.smf
+<binary> /tmp/simple_hello.smf
+sha256sum build/bootstrap/stage2/simple build/bootstrap/stage3/simple
+```
+
+## Current Reality
+
+### Known good base
+
+- Linux bootstrap scripts exist:
+  - `scripts/bootstrap/bootstrap-from-scratch.sh`
+- FreeBSD QEMU wrapper exists:
+  - `scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh`
+- Windows bootstrap entry exists:
+  - `scripts/bootstrap/bootstrap-from-scratch.bat`
+- `llvm-lib` backend exists in-tree:
+  - `src/compiler/70.backend/backend/llvm_lib_backend.spl`
+- Windows linker support exists in-tree for both MinGW-style and MSVC-style flows:
+  - `src/compiler/80.driver/build/cross_compile.spl`
+  - `src/compiler/70.backend/linker/msvc.spl`
+
+### Current blockers already observed
+
+- Rust-seeded binaries can reach full CLI startup but still miss runtime symbols in pure-Simple compile/interpreter paths.
+- `llvm-lib` is the required backend for pure-Simple stages, but runtime completeness is not yet proven for Stage 2.
+- Existing `bin/simple` and `bin/release/simple` behavior is not a reliable cross-platform proof point because artifacts may be host-specific.
+
+## Execution Plan
+
+## Phase A: Linux first
+
+Objective: make the entire 1 -> 2 -> 3 chain work on Linux before expanding.
+
+Tasks:
+
+1. Re-run Stage 1 from Rust seed using the explicit full CLI entry.
+2. Verify Stage 1 contains the driver/runtime symbols needed by:
+   - `compile`
+   - interpreter execution
+   - SMF loading
+3. Fix missing symbol/runtime registration problems until Stage 2 succeeds with `--backend llvm-lib`.
+4. Use Stage 2 to rebuild Stage 3 with the same backend and compare hashes.
+5. Promote the verified Linux artifact into the canonical release/bootstrap path.
+
+Linux success criteria:
+
+- `build/bootstrap/stage1/simple` works.
+- `build/bootstrap/stage2/simple` builds from Stage 1 with `llvm-lib`.
+- `build/bootstrap/stage3/simple` builds from Stage 2 with `llvm-lib`.
+- Stage 2 and Stage 3 pass `--help`, `--version`, native compile/run, and SMF compile/run.
+- Stage 2 and Stage 3 hashes are identical or any mismatch is explained and documented with a reproducibility bug.
+
+## Phase B: FreeBSD via QEMU from Linux host
+
+Objective: prove the same chain on FreeBSD without requiring a physical FreeBSD machine.
+
+Execution path:
+
+```bash
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --deploy
+```
+
+Tasks:
+
+1. Standardize the FreeBSD guest image and SSH assumptions used by the wrapper.
+2. Make the wrapper run the same staged commands as Linux, but inside the guest.
+3. Copy out stage artifacts and logs to the host workspace after each major step.
+4. Run the same smoke suite in the FreeBSD guest.
+5. Record the FreeBSD artifact naming and deployment path.
+
+FreeBSD success criteria:
+
+- Stage 1 Rust-base Simple works in guest.
+- Stage 2 `llvm-lib` build works in guest.
+- Stage 3 full pure-Simple rebuild works in guest.
+- Guest-produced binary passes smoke checks on FreeBSD.
+- Host retrieves final artifact and logs cleanly.
+
+Notes:
+
+- FreeBSD is an execution target, not just a cross-link target.
+- QEMU wrapper is the canonical path for now; no separate manual VM recipe should be treated as primary.
+
+## Phase C: Prepare macOS
+
+Objective: remove ambiguity so a macOS host or CI runner can execute the same three-stage chain when scheduled.
+
+Preparation tasks:
+
+1. Define artifact paths for:
+   - `macos-arm64`
+   - `macos-x86_64`
+2. Confirm Stage 1 invocation is identical apart from host toolchain assumptions.
+3. Confirm `llvm-lib` link path expectations on macOS:
+   - clang/LLVM presence
+   - ld64/lld usage
+   - dynamic library search rules
+4. Document required environment variables for runtime execution.
+5. Add explicit smoke commands and expected output contract.
+
+Prepared means:
+
+- Commands are documented and consistent.
+- Required host tools are listed.
+- Known blockers are reduced to code/runtime issues, not process ambiguity.
+
+## Phase D: Prepare Windows MinGW and MSVC
+
+Objective: define two supported Windows bootstrap lanes without mixing their linker/runtime assumptions.
+
+### Windows MinGW lane
+
+Tasks:
+
+1. Keep bootstrap entry at `scripts/bootstrap/bootstrap-from-scratch.bat`.
+2. Treat MinGW as the GNU/PE path for early Windows bring-up.
+3. Align Stage 2/3 `llvm-lib` expectations with MinGW import libraries and executable naming.
+4. Document required tools:
+   - MSYS2/MinGW-w64
+   - LLVM/LLD if used by `llvm-lib`
+5. Define smoke commands for `simple.exe`.
+
+### Windows MSVC lane
+
+Tasks:
+
+1. Use existing linker support in `src/compiler/70.backend/linker/msvc.spl`.
+2. Document environment discovery assumptions:
+   - `link.exe`
+   - `lld-link.exe`
+   - Visual Studio toolchain paths
+3. Keep MSVC separate from MinGW in both docs and artifact naming.
+4. Define the same Stage 1/2/3 commands, with Windows path and linker expectations clarified.
+
+Prepared means:
+
+- MinGW and MSVC are described as separate targets.
+- Toolchain detection/linker policy is explicit.
+- The repo has a single Windows bootstrap plan instead of mixed notes.
+
+## Deliverables
+
+### Immediate deliverable
+
+- This root plan becomes the canonical bootstrap tracker.
+
+### Next implementation deliverables
+
+1. Linux stage logs and verified artifact paths.
+2. FreeBSD QEMU stage logs and verified artifact paths.
+3. macOS preparation doc updates in `doc/build/`.
+4. Windows preparation doc updates for MinGW and MSVC in `doc/build/`.
+
+## Concrete work order
+
+1. Stabilize Linux Stage 1 runtime completeness.
+2. Get Linux Stage 2 `llvm-lib` working.
+3. Get Linux Stage 3 reproducible.
+4. Port the same exact staged flow into FreeBSD QEMU wrapper execution.
+5. Once Linux and FreeBSD are green, update `doc/build/bootstrap_multi_platform.md`.
+6. Then split Windows documentation into explicit MinGW and MSVC lanes.
+7. Then add macOS host execution notes.
+
+## Non-goals for this pass
+
+- No claim yet that macOS or Windows are working end-to-end.
+- No release packaging changes until Linux and FreeBSD Stage 3 are proven.
+- No new bootstrap variant beyond the three required levels.
+
+## Progress tracker
+
+| Item | Status |
+|------|--------|
+| Root plan rewritten around 3-stage matrix | Done |
+| Linux Stage 1 runtime completeness | Pending |
+| Linux Stage 2 `llvm-lib` | Pending |
+| Linux Stage 3 reproducibility | Pending |
+| FreeBSD QEMU Stage 1-3 | Pending |
+| macOS preparation | Pending |
+| Windows MinGW preparation | Pending |
+| Windows MSVC preparation | Pending |

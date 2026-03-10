@@ -225,7 +225,12 @@ impl NativeProjectBuilder {
                 // Always recompile the entry file (its main→spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
                 if !is_entry {
-                    let hash = content_hash(source);
+                    let hash = object_cache_key(
+                        source,
+                        is_entry,
+                        &self.config.backend,
+                        self.config.no_mangle,
+                    );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
                         // Cache hit: copy to temp dir
@@ -357,8 +362,14 @@ impl NativeProjectBuilder {
         // 6. Cache freshly compiled objects
         if use_incremental {
             for (idx, obj_path) in &freshly_compiled {
-                if let Some((_, source)) = file_sources.get(*idx) {
-                    let hash = content_hash(source);
+                if let Some((path, source)) = file_sources.get(*idx) {
+                    let is_entry = is_entry_file(path, &canonical_entry);
+                    let hash = object_cache_key(
+                        source,
+                        is_entry,
+                        &self.config.backend,
+                        self.config.no_mangle,
+                    );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _ = std::fs::copy(obj_path, cached_o);
                 }
@@ -1640,6 +1651,23 @@ fn content_hash(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Compute the object cache key for a module.
+///
+/// The generated object is not determined by source text alone: entry modules
+/// rename `main` to `spl_main`, backend choice changes codegen, and
+/// no-mangle mode changes symbol emission. All of that must be part of the
+/// cache key or an object from a previous build can be linked under the wrong
+/// role.
+fn object_cache_key(content: &str, is_entry: bool, backend: &str, no_mangle: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    is_entry.hash(&mut hasher);
+    backend.hash(&mut hasher);
+    no_mangle.hash(&mut hasher);
     hasher.finish()
 }
 
