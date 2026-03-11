@@ -102,10 +102,7 @@ pytorch_fn!(rt_torch_rnn_new, (input_size: i64, hidden_size: i64), {
 });
 
 pytorch_fn!(rt_torch_rnn_forward, (layer: RuntimeValue, input: RuntimeValue, hidden: RuntimeValue), {
-    let layer_handle = match layer.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let layer_handle = layer.as_int();
 
     let rnn_layer = match get_rnn_layer(layer_handle) {
         Some(l) => l,

@@ -27,7 +27,7 @@ use crate::value::torch::{rt_torch_free, rt_torch_grad, rt_torch_zero_grad};
 
 #[cfg(feature = "pytorch")]
 #[derive(Debug)]
-struct OptimizerState {
+pub(crate) struct OptimizerState {
     params: Vec<u64>, // Parameter tensor handles
     lr: f64,
     optimizer_type: OptimizerType,

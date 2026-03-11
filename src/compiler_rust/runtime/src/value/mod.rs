@@ -648,6 +648,8 @@ pub use torch::{
     rt_torch_sub_scalar,
     rt_torch_sum,
     rt_torch_tanh,
+    rt_torch_tensor,
+    rt_torch_tensor_from_data,
     // Data Loading - Dataset
     rt_torch_tensor_dataset_new,
     rt_torch_to_cpu,

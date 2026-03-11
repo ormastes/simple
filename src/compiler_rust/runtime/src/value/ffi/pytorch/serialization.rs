@@ -99,10 +99,7 @@ pytorch_fn!(rt_torch_jit_save, (module: RuntimeValue, path_ptr: *const u8, path_
         return;
     }
 
-    let module_handle = match module.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let module_handle = module.as_int();
 
     let path_slice = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
     let path_str = match std::str::from_utf8(path_slice) {
@@ -116,15 +113,9 @@ pytorch_fn!(rt_torch_jit_save, (module: RuntimeValue, path_ptr: *const u8, path_
 });
 
 pytorch_fn!(rt_torch_jit_forward, (module: RuntimeValue, inputs: RuntimeValue), {
-    let module_handle = match module.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let module_handle = module.as_int();
 
-    let inputs_handle = match inputs.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let inputs_handle = inputs.as_int();
 
     // inputs should be a tensor list
     let input_handles = match get_tensor_list(inputs_handle) {
@@ -147,7 +138,7 @@ pytorch_fn!(rt_torch_jit_forward, (module: RuntimeValue, inputs: RuntimeValue), 
     if let Some(m) = JIT_MODULE_MAP.lock().unwrap().get(&module_handle) {
         match m.forward_is(&input_tensors) {
             Ok(output) => {
-                if let Some(tensor) = output.into_tensor().ok() {
+                if let tch::IValue::Tensor(tensor) = output {
                     let handle = store_tensor(tensor);
                     return RuntimeValue::from_int(handle);
                 }
@@ -160,10 +151,7 @@ pytorch_fn!(rt_torch_jit_forward, (module: RuntimeValue, inputs: RuntimeValue), 
 });
 
 pytorch_fn!(rt_torch_jit_eval, (module: RuntimeValue), (), {
-    let module_handle = match module.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let module_handle = module.as_int();
 
     if let Some(m) = JIT_MODULE_MAP.lock().unwrap().get_mut(&module_handle) {
         m.set_eval();
@@ -171,10 +159,7 @@ pytorch_fn!(rt_torch_jit_eval, (module: RuntimeValue), (), {
 });
 
 pytorch_fn!(rt_torch_jit_train, (module: RuntimeValue), (), {
-    let module_handle = match module.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let module_handle = module.as_int();
 
     if let Some(m) = JIT_MODULE_MAP.lock().unwrap().get_mut(&module_handle) {
         m.set_train();
@@ -182,10 +167,7 @@ pytorch_fn!(rt_torch_jit_train, (module: RuntimeValue), (), {
 });
 
 pytorch_fn!(rt_torch_jit_free, (module: RuntimeValue), (), {
-    let module_handle = match module.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let module_handle = module.as_int();
 
     JIT_MODULE_MAP.lock().unwrap().remove(&module_handle);
 });

@@ -86,7 +86,7 @@ pub extern "C" fn rt_torch_linalg_solve(a_handle: u64, b_handle: u64) -> u64 {
         };
         drop(registry);
 
-        let result = Tensor::linalg_solve(&a.0, &b.0);
+        let result = Tensor::linalg_solve(&a.0, &b.0, true);
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_linalg_solve: A={} b={} -> x={}", a_handle, b_handle, handle);

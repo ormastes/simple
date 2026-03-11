@@ -26,7 +26,7 @@ use crate::value::Value;
 pub fn is_available() -> bool {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_available() != 0;
+        return simple_runtime::value::rt_torch_available() != 0;
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -44,7 +44,7 @@ pub fn rt_torch_available() -> bool {
 pub fn is_cuda_available() -> bool {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_cuda_available() != 0;
+        return simple_runtime::value::rt_torch_cuda_available() != 0;
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -62,7 +62,7 @@ pub fn rt_torch_cuda_available() -> bool {
 pub fn cuda_device_count() -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_cuda_device_count();
+        return simple_runtime::value::rt_torch_cuda_device_count();
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -73,6 +73,33 @@ pub fn cuda_device_count() -> i32 {
 /// Alias: matches `rt_torch_cuda_device_count()` naming.
 pub fn rt_torch_cuda_device_count() -> i32 {
     cuda_device_count()
+}
+
+/// Create a tensor from raw f64 data.
+pub fn rt_torch_tensor(
+    data_ptr: *const f64,
+    data_len: i64,
+    shape_ptr: *const i64,
+    shape_len: i32,
+    dtype_code: i32,
+    device_code: i32,
+) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        return simple_runtime::value::rt_torch_tensor(
+            data_ptr,
+            data_len,
+            shape_ptr,
+            shape_len,
+            dtype_code,
+            device_code,
+        );
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code);
+        0
+    }
 }
 
 // ============================================================================
@@ -87,7 +114,7 @@ pub fn rt_torch_cuda_device_count() -> i32 {
 pub fn cuda_memory_allocated(device: i32) -> i64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_cuda_memory_allocated(device);
+        return simple_runtime::value::rt_torch_cuda_memory_allocated(device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -106,7 +133,7 @@ pub fn rt_torch_cuda_memory_allocated(device: i32) -> i64 {
 pub fn cuda_synchronize(device: i32) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_cuda_synchronize(device);
+        return simple_runtime::value::rt_torch_cuda_synchronize(device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -125,7 +152,7 @@ pub fn rt_torch_cuda_synchronize(device: i32) -> i32 {
 pub fn cuda_reset_peak_memory_stats(device: i32) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_cuda_reset_peak_memory_stats(device);
+        return simple_runtime::value::rt_torch_cuda_reset_peak_memory_stats(device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -151,7 +178,7 @@ pub fn rt_torch_cuda_reset_peak_memory_stats(device: i32) -> i32 {
 pub fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_zeros(shape_ptr, ndim, dtype, device);
+        return simple_runtime::value::rt_torch_zeros(shape_ptr, ndim, dtype, device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -165,7 +192,7 @@ pub fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32)
 pub fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_ones(shape_ptr, ndim, dtype, device);
+        return simple_runtime::value::rt_torch_ones(shape_ptr, ndim, dtype, device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -179,7 +206,7 @@ pub fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) 
 pub fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_randn(shape_ptr, ndim, dtype, device);
+        return simple_runtime::value::rt_torch_randn(shape_ptr, ndim, dtype, device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -193,7 +220,7 @@ pub fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32)
 pub fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_arange(start, end, step, dtype, device);
+        return simple_runtime::value::rt_torch_arange(start, end, step, dtype, device);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -207,7 +234,7 @@ pub fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, device: i32)
 pub fn rt_torch_free(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_free(tensor_handle);
+        return simple_runtime::value::rt_torch_free(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -221,7 +248,7 @@ pub fn rt_torch_free(tensor_handle: u64) -> i32 {
 pub fn rt_torch_clone(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_clone(tensor_handle);
+        return simple_runtime::value::rt_torch_clone(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -239,7 +266,7 @@ pub fn rt_torch_clone(tensor_handle: u64) -> u64 {
 pub fn rt_torch_add(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_add(a_handle, b_handle);
+        return simple_runtime::value::rt_torch_add(a_handle, b_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -252,7 +279,7 @@ pub fn rt_torch_add(a_handle: u64, b_handle: u64) -> u64 {
 pub fn rt_torch_sub(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_sub(a_handle, b_handle);
+        return simple_runtime::value::rt_torch_sub(a_handle, b_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -265,7 +292,7 @@ pub fn rt_torch_sub(a_handle: u64, b_handle: u64) -> u64 {
 pub fn rt_torch_mul(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_mul(a_handle, b_handle);
+        return simple_runtime::value::rt_torch_mul(a_handle, b_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -278,7 +305,7 @@ pub fn rt_torch_mul(a_handle: u64, b_handle: u64) -> u64 {
 pub fn rt_torch_div(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_div(a_handle, b_handle);
+        return simple_runtime::value::rt_torch_div(a_handle, b_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -291,7 +318,7 @@ pub fn rt_torch_div(a_handle: u64, b_handle: u64) -> u64 {
 pub fn rt_torch_pow(tensor_handle: u64, exp: f64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_pow(tensor_handle, exp);
+        return simple_runtime::value::rt_torch_pow(tensor_handle, exp);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -304,7 +331,7 @@ pub fn rt_torch_pow(tensor_handle: u64, exp: f64) -> u64 {
 pub fn rt_torch_sqrt(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_sqrt(tensor_handle);
+        return simple_runtime::value::rt_torch_sqrt(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -317,7 +344,7 @@ pub fn rt_torch_sqrt(tensor_handle: u64) -> u64 {
 pub fn rt_torch_exp(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_exp(tensor_handle);
+        return simple_runtime::value::rt_torch_exp(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -330,7 +357,7 @@ pub fn rt_torch_exp(tensor_handle: u64) -> u64 {
 pub fn rt_torch_log(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_log(tensor_handle);
+        return simple_runtime::value::rt_torch_log(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -348,7 +375,7 @@ pub fn rt_torch_log(tensor_handle: u64) -> u64 {
 pub fn rt_torch_matmul(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_matmul(a_handle, b_handle);
+        return simple_runtime::value::rt_torch_matmul(a_handle, b_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -361,7 +388,7 @@ pub fn rt_torch_matmul(a_handle: u64, b_handle: u64) -> u64 {
 pub fn rt_torch_transpose(tensor_handle: u64, dim0: i64, dim1: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_transpose(tensor_handle, dim0, dim1);
+        return simple_runtime::value::rt_torch_transpose(tensor_handle, dim0, dim1);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -379,7 +406,7 @@ pub fn rt_torch_transpose(tensor_handle: u64, dim0: i64, dim1: i64) -> u64 {
 pub fn rt_torch_relu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_relu(tensor_handle);
+        return simple_runtime::value::rt_torch_relu(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -392,7 +419,7 @@ pub fn rt_torch_relu(tensor_handle: u64) -> u64 {
 pub fn rt_torch_sigmoid(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_sigmoid(tensor_handle);
+        return simple_runtime::value::rt_torch_sigmoid(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -405,7 +432,7 @@ pub fn rt_torch_sigmoid(tensor_handle: u64) -> u64 {
 pub fn rt_torch_tanh(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_tanh(tensor_handle);
+        return simple_runtime::value::rt_torch_tanh(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -418,7 +445,7 @@ pub fn rt_torch_tanh(tensor_handle: u64) -> u64 {
 pub fn rt_torch_softmax(tensor_handle: u64, dim: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_softmax(tensor_handle, dim);
+        return simple_runtime::value::rt_torch_softmax(tensor_handle, dim);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -431,7 +458,7 @@ pub fn rt_torch_softmax(tensor_handle: u64, dim: i64) -> u64 {
 pub fn rt_torch_gelu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_gelu(tensor_handle);
+        return simple_runtime::value::rt_torch_gelu(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -444,7 +471,7 @@ pub fn rt_torch_gelu(tensor_handle: u64) -> u64 {
 pub fn rt_torch_silu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_silu(tensor_handle);
+        return simple_runtime::value::rt_torch_silu(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -462,7 +489,7 @@ pub fn rt_torch_silu(tensor_handle: u64) -> u64 {
 pub fn rt_torch_sum(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_sum(tensor_handle);
+        return simple_runtime::value::rt_torch_sum(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -475,7 +502,7 @@ pub fn rt_torch_sum(tensor_handle: u64) -> u64 {
 pub fn rt_torch_mean(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_mean(tensor_handle);
+        return simple_runtime::value::rt_torch_mean(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -488,7 +515,7 @@ pub fn rt_torch_mean(tensor_handle: u64) -> u64 {
 pub fn rt_torch_item(tensor_handle: u64) -> f64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_item(tensor_handle);
+        return simple_runtime::value::rt_torch_item(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -506,7 +533,7 @@ pub fn rt_torch_item(tensor_handle: u64) -> f64 {
 pub fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_reshape(tensor_handle, new_shape_ptr, ndim);
+        return simple_runtime::value::rt_torch_reshape(tensor_handle, new_shape_ptr, ndim);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -524,7 +551,7 @@ pub fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32
 pub fn rt_torch_dtype(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_dtype(tensor_handle);
+        return simple_runtime::value::rt_torch_dtype(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -537,7 +564,7 @@ pub fn rt_torch_dtype(tensor_handle: u64) -> i32 {
 pub fn rt_torch_numel(tensor_handle: u64) -> i64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_numel(tensor_handle);
+        return simple_runtime::value::rt_torch_numel(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -550,7 +577,7 @@ pub fn rt_torch_numel(tensor_handle: u64) -> i64 {
 pub fn rt_torch_device(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_device(tensor_handle);
+        return simple_runtime::value::rt_torch_device(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -568,7 +595,7 @@ pub fn rt_torch_device(tensor_handle: u64) -> i32 {
 pub fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_to_device(tensor_handle, device_code);
+        return simple_runtime::value::rt_torch_to_device(tensor_handle, device_code);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -581,7 +608,7 @@ pub fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u64 {
 pub fn rt_torch_to_cpu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_to_cpu(tensor_handle);
+        return simple_runtime::value::rt_torch_to_cpu(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -594,7 +621,7 @@ pub fn rt_torch_to_cpu(tensor_handle: u64) -> u64 {
 pub fn rt_torch_to_cuda(tensor_handle: u64, device_id: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_to_cuda(tensor_handle, device_id);
+        return simple_runtime::value::rt_torch_to_cuda(tensor_handle, device_id);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -612,7 +639,7 @@ pub fn rt_torch_to_cuda(tensor_handle: u64, device_id: i32) -> u64 {
 pub fn rt_torch_backward(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_backward(tensor_handle);
+        return simple_runtime::value::rt_torch_backward(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -625,7 +652,7 @@ pub fn rt_torch_backward(tensor_handle: u64) -> i32 {
 pub fn rt_torch_grad(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_grad(tensor_handle);
+        return simple_runtime::value::rt_torch_grad(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -638,7 +665,7 @@ pub fn rt_torch_grad(tensor_handle: u64) -> u64 {
 pub fn rt_torch_set_requires_grad(tensor_handle: u64, requires_grad: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_set_requires_grad(tensor_handle, requires_grad);
+        return simple_runtime::value::rt_torch_set_requires_grad(tensor_handle, requires_grad);
     }
     #[cfg(not(feature = "pytorch"))]
     {
@@ -651,7 +678,7 @@ pub fn rt_torch_set_requires_grad(tensor_handle: u64, requires_grad: i32) -> u64
 pub fn rt_torch_detach(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        return simple_runtime::value::torch::creation::rt_torch_detach(tensor_handle);
+        return simple_runtime::value::rt_torch_detach(tensor_handle);
     }
     #[cfg(not(feature = "pytorch"))]
     {

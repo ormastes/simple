@@ -121,10 +121,7 @@ pytorch_fn!(rt_torch_onnx_check, (path_ptr: *const u8, path_len: u64), i64, {
 });
 
 pytorch_fn!(rt_torch_onnx_free, (session: RuntimeValue), (), {
-    let session_handle = match session.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let session_handle = session.as_int();
 
     ONNX_SESSION_MAP.lock().unwrap().remove(&session_handle);
 });

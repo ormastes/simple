@@ -121,10 +121,7 @@ pytorch_fn!(rt_torch_multihead_attention_new, (embed_dim: i64, num_heads: i64), 
 
 pytorch_fn!(rt_torch_multihead_attention_forward,
     (layer: RuntimeValue, query: RuntimeValue, key: RuntimeValue, value: RuntimeValue), {
-    let layer_handle = match layer.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let layer_handle = layer.as_int();
 
     let mha_layer = match get_multihead_attention_layer(layer_handle) {
         Some(l) => l,

@@ -120,6 +120,16 @@ pub fn parse_memory_size(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Convert raw IEEE-754 bits to f32.
+pub fn f32_from_bits(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("f32_from_bits requires 1 argument (bits)"));
+    }
+
+    let bits = args[0].as_int()? as u32;
+    Ok(Value::Float(f32::from_bits(bits) as f64))
+}
+
 // Internal helper functions
 
 fn get_current_memory_usage() -> usize {

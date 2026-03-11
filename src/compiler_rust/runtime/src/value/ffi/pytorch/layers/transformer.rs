@@ -127,10 +127,7 @@ pytorch_fn!(rt_torch_transformer_encoder_layer_new, (d_model: i64, nhead: i64), 
     let dim_feedforward = 4 * d_model; // Standard transformer uses 4x
 
     // Create self-attention
-    let self_attn_handle = match rt_torch_multihead_attention_new(d_model, nhead).as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let self_attn_handle = rt_torch_multihead_attention_new(d_model, nhead).as_int();
 
     // Feedforward layers
     let linear1_weight = Tensor::randn(&[dim_feedforward, d_model], (Kind::Float, Device::Cpu));
@@ -182,10 +179,7 @@ pytorch_fn!(rt_torch_transformer_encoder_layer_new, (d_model: i64, nhead: i64), 
 pytorch_fn!(rt_torch_transformer_encoder_layer_forward, (layer: RuntimeValue, src: RuntimeValue), {
     use super::attention::rt_torch_multihead_attention_forward;
 
-    let layer_handle = match layer.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let layer_handle = layer.as_int();
 
     let enc_layer = match get_transformer_encoder_layer(layer_handle) {
         Some(l) => l,
@@ -205,7 +199,7 @@ pytorch_fn!(rt_torch_transformer_encoder_layer_forward, (layer: RuntimeValue, sr
         RuntimeValue::from_int(store_tensor(src_tensor.shallow_clone())),
     );
 
-    let attn_output = match attn_output.as_int().ok().and_then(get_tensor) {
+    let attn_output = match get_tensor(attn_output.as_int()) {
         Some(t) => t,
         None => return RuntimeValue::NIL,
     };
@@ -270,16 +264,10 @@ pytorch_fn!(rt_torch_transformer_decoder_layer_new, (d_model: i64, nhead: i64), 
     let dim_feedforward = 4 * d_model;
 
     // Self-attention
-    let self_attn_handle = match rt_torch_multihead_attention_new(d_model, nhead).as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let self_attn_handle = rt_torch_multihead_attention_new(d_model, nhead).as_int();
 
     // Cross-attention
-    let cross_attn_handle = match rt_torch_multihead_attention_new(d_model, nhead).as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let cross_attn_handle = rt_torch_multihead_attention_new(d_model, nhead).as_int();
 
     // Feedforward layers
     let linear1_weight = Tensor::randn(&[dim_feedforward, d_model], (Kind::Float, Device::Cpu));
@@ -340,10 +328,7 @@ pytorch_fn!(rt_torch_transformer_decoder_layer_forward,
     (layer: RuntimeValue, tgt: RuntimeValue, memory: RuntimeValue), {
     use super::attention::rt_torch_multihead_attention_forward;
 
-    let layer_handle = match layer.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let layer_handle = layer.as_int();
 
     let dec_layer = match get_transformer_decoder_layer(layer_handle) {
         Some(l) => l,
@@ -368,7 +353,7 @@ pytorch_fn!(rt_torch_transformer_decoder_layer_forward,
         RuntimeValue::from_int(store_tensor(tgt_tensor.shallow_clone())),
     );
 
-    let self_attn_output = match self_attn_output.as_int().ok().and_then(get_tensor) {
+    let self_attn_output = match get_tensor(self_attn_output.as_int()) {
         Some(t) => t,
         None => return RuntimeValue::NIL,
     };
@@ -394,7 +379,7 @@ pytorch_fn!(rt_torch_transformer_decoder_layer_forward,
         RuntimeValue::from_int(store_tensor(memory_tensor.shallow_clone())),
     );
 
-    let cross_attn_output = match cross_attn_output.as_int().ok().and_then(get_tensor) {
+    let cross_attn_output = match get_tensor(cross_attn_output.as_int()) {
         Some(t) => t,
         None => return RuntimeValue::NIL,
     };

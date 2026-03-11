@@ -16,6 +16,15 @@ use std::sync::Arc;
 #[cfg(feature = "pytorch")]
 use tch::Tensor;
 
+#[cfg(feature = "pytorch")]
+fn fft_norm_str(norm: i32) -> &'static str {
+    match norm {
+        1 => "forward",
+        3 => "ortho",
+        _ => "backward",
+    }
+}
+
 // ============================================================================
 // Simple Math: FFT Operations (#1950-#1959)
 // ============================================================================
@@ -34,15 +43,8 @@ pub extern "C" fn rt_torch_fft(tensor_handle: u64, n: i64, dim: i64, norm: i32) 
         drop(registry);
 
         // norm: 0 = None, 1 = "forward", 2 = "backward", 3 = "ortho"
-        let norm_str = match norm {
-            1 => Some("forward"),
-            2 => Some("backward"),
-            3 => Some("ortho"),
-            _ => None,
-        };
-
         let n_opt = if n > 0 { Some(n) } else { None };
-        let result = tensor.0.fft_fft(n_opt, dim, norm_str);
+        let result = tensor.0.fft_fft(n_opt, dim, fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
@@ -75,15 +77,8 @@ pub extern "C" fn rt_torch_ifft(tensor_handle: u64, n: i64, dim: i64, norm: i32)
         };
         drop(registry);
 
-        let norm_str = match norm {
-            1 => Some("forward"),
-            2 => Some("backward"),
-            3 => Some("ortho"),
-            _ => None,
-        };
-
         let n_opt = if n > 0 { Some(n) } else { None };
-        let result = tensor.0.fft_ifft(n_opt, dim, norm_str);
+        let result = tensor.0.fft_ifft(n_opt, dim, fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
@@ -116,15 +111,8 @@ pub extern "C" fn rt_torch_rfft(tensor_handle: u64, n: i64, dim: i64, norm: i32)
         };
         drop(registry);
 
-        let norm_str = match norm {
-            1 => Some("forward"),
-            2 => Some("backward"),
-            3 => Some("ortho"),
-            _ => None,
-        };
-
         let n_opt = if n > 0 { Some(n) } else { None };
-        let result = tensor.0.fft_rfft(n_opt, dim, norm_str);
+        let result = tensor.0.fft_rfft(n_opt, dim, fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
@@ -157,15 +145,8 @@ pub extern "C" fn rt_torch_irfft(tensor_handle: u64, n: i64, dim: i64, norm: i32
         };
         drop(registry);
 
-        let norm_str = match norm {
-            1 => Some("forward"),
-            2 => Some("backward"),
-            3 => Some("ortho"),
-            _ => None,
-        };
-
         let n_opt = if n > 0 { Some(n) } else { None };
-        let result = tensor.0.fft_irfft(n_opt, dim, norm_str);
+        let result = tensor.0.fft_irfft(n_opt, dim, fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
@@ -205,15 +186,8 @@ pub extern "C" fn rt_torch_fftn(tensor_handle: u64, dims_ptr: *const i64, ndim: 
             &[]
         };
 
-        let norm_str = match norm {
-            1 => Some("forward"),
-            2 => Some("backward"),
-            3 => Some("ortho"),
-            _ => None,
-        };
-
         let dims_vec: Vec<i64> = dims.to_vec();
-        let result = tensor.0.fft_fftn(Some(&dims_vec), None, norm_str);
+        let result = tensor.0.fft_fftn(Option::<&[i64]>::None, Some(dims_vec.as_slice()), fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(

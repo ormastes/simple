@@ -66,10 +66,7 @@ fn store_rmsprop_optimizer(optimizer: RmsPropOptimizer) -> i64 {
 
 pytorch_fn!(rt_torch_rmsprop_new, (params: RuntimeValue, lr: f64), {
     // params is a tensor list handle
-    let params_handle = match params.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let params_handle = params.as_int();
 
     let param_handles = match get_tensor_list(params_handle) {
         Some(h) => h,

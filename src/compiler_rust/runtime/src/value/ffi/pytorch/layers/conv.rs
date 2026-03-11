@@ -97,10 +97,7 @@ pytorch_fn!(rt_torch_conv3d_new, (in_channels: i64, out_channels: i64, kernel_si
 });
 
 pytorch_fn!(rt_torch_conv3d_forward, (layer: RuntimeValue, input: RuntimeValue), {
-    let layer_handle = match layer.as_int() {
-        Ok(h) => h,
-        Err(_) => return RuntimeValue::NIL,
-    };
+    let layer_handle = layer.as_int();
 
     let conv_layer = match get_conv3d_layer(layer_handle) {
         Some(l) => l,

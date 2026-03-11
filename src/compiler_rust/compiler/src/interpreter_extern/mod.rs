@@ -51,6 +51,7 @@ pub mod network;
 pub mod filesystem;
 pub mod file_io;
 pub mod terminal;
+pub mod torch;
 pub mod atomic;
 pub mod concurrency;
 #[cfg(feature = "tui")]
@@ -528,6 +529,12 @@ pub(crate) fn call_extern_function(
         "rt_ptr_write_u8" => memory::rt_ptr_write_u8(&evaluated),
         "rt_memset" => memory::rt_memset(&evaluated),
         "rt_memcpy" => memory::rt_memcpy(&evaluated),
+        "rt_torch_tensor" => torch::rt_torch_tensor(&evaluated),
+        "rt_torch_to_cuda" => torch::rt_torch_to_cuda(&evaluated),
+        "rt_torch_to_cpu" => torch::rt_torch_to_cpu(&evaluated),
+        "rt_torch_free" => torch::rt_torch_free(&evaluated),
+        "rt_torch_copy_data_to_cpu" => torch::rt_torch_copy_data_to_cpu(&evaluated),
+        "f32_from_bits" => memory::f32_from_bits(&evaluated),
 
         // ====================================================================
         // RC/ARC Operations (20 functions: Rc + Arc reference counting)

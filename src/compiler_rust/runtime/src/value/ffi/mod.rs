@@ -92,7 +92,10 @@ pub mod sync;
 pub mod utils;
 
 // Phase 10B: PyTorch/ML integration
-pub mod pytorch;
+//
+// The legacy RuntimeValue-based PyTorch FFI exports overlapping `rt_torch_*`
+// symbols with the canonical handle-based runtime in `value::torch`. Keep it
+// out of the default runtime build until the ABI overlap is resolved.
 
 // Phase 11: Runtime configuration
 pub mod config;
@@ -150,8 +153,6 @@ pub use sync::*;
 // Phase 10A
 pub use utils::*;
 
-// Phase 10B
-pub use pytorch::*;
 
 // Phase 11
 pub use config::*;

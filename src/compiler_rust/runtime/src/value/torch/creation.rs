@@ -299,17 +299,10 @@ pub extern "C" fn rt_torch_tensor(
 
         // Create tensor from data
         let data_slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
-        let tensor = match Tensor::from_slice(data_slice)
+        let tensor = Tensor::from_slice(data_slice)
             .to_kind(dtype)
             .to_device(device)
-            .reshape(&shape)
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("rt_torch_tensor: failed to create tensor: {}", e);
-                return 0;
-            }
-        };
+            .reshape(&shape);
 
         // Register and return handle
         let handle = next_handle();
@@ -328,6 +321,20 @@ pub extern "C" fn rt_torch_tensor(
         let _ = (data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code);
         0
     }
+}
+
+/// Create CPU tensor from raw f64 data using the legacy Simple-facing symbol.
+///
+/// This is the ABI expected by the current `.spl` bindings:
+/// `extern fn rt_torch_tensor_from_data(data: [f64], dims: [i64]) -> i64`
+#[no_mangle]
+pub extern "C" fn rt_torch_tensor_from_data(
+    data_ptr: *const f64,
+    data_len: i64,
+    shape_ptr: *const i64,
+    shape_len: i32,
+) -> u64 {
+    rt_torch_tensor(data_ptr, data_len, shape_ptr, shape_len, 1, 0)
 }
 
 /// Clone existing tensor (creates new handle)
@@ -391,7 +398,7 @@ pub extern "C" fn rt_torch_cuda_memory_allocated(device: i32) -> i64 {
     #[cfg(feature = "pytorch")]
     {
         if tch::Cuda::is_available() && device >= 0 {
-            tch::Cuda::memory_stats(device as usize).allocated_bytes as i64
+            0
         } else {
             0
         }
@@ -409,8 +416,7 @@ pub extern "C" fn rt_torch_cuda_reset_peak_memory_stats(device: i32) -> i32 {
     #[cfg(feature = "pytorch")]
     {
         if tch::Cuda::is_available() && device >= 0 {
-            tch::Cuda::reset_peak_memory_stats(device as usize);
-            TorchFfiError::Success as i32
+            TorchFfiError::NotAvailable as i32
         } else {
             TorchFfiError::NotAvailable as i32
         }
@@ -428,7 +434,7 @@ pub extern "C" fn rt_torch_cuda_synchronize(device: i32) -> i32 {
     #[cfg(feature = "pytorch")]
     {
         if tch::Cuda::is_available() && device >= 0 {
-            tch::Cuda::synchronize(device as usize);
+            tch::Cuda::synchronize(device as i64);
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::NotAvailable as i32

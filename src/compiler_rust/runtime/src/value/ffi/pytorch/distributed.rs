@@ -109,10 +109,7 @@ pytorch_fn!(rt_torch_dist_all_gather, (tensor_list: RuntimeValue, tensor: Runtim
         return;
     }
 
-    let list_handle = match tensor_list.as_int() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let list_handle = tensor_list.as_int();
 
     let tensor_handle = match value_to_tensor_handle(tensor) {
         Some(h) => h,
