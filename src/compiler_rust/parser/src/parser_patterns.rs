@@ -103,7 +103,8 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '('
             let mut patterns = Vec::new();
             while !self.check(&TokenKind::RParen) {
-                patterns.push(self.parse_pattern()?);
+                // Use parse_single_pattern to avoid comma being consumed as or-pattern
+                patterns.push(self.parse_single_pattern()?);
                 if !self.check(&TokenKind::RParen) {
                     self.expect(&TokenKind::Comma)?;
                 }
@@ -129,7 +130,8 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let mut patterns = Vec::new();
                 while !self.check(&TokenKind::RParen) {
-                    patterns.push(self.parse_pattern()?);
+                    // Use parse_single_pattern to avoid comma being consumed as or-pattern
+                    patterns.push(self.parse_single_pattern()?);
                     if !self.check(&TokenKind::RParen) {
                         self.expect(&TokenKind::Comma)?;
                     }
@@ -186,7 +188,8 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let mut patterns = Vec::new();
                     while !self.check(&TokenKind::RParen) {
-                        patterns.push(self.parse_pattern()?);
+                        // Use parse_single_pattern to avoid comma being consumed as or-pattern
+                        patterns.push(self.parse_single_pattern()?);
                         if !self.check(&TokenKind::RParen) {
                             self.expect(&TokenKind::Comma)?;
                         }
@@ -294,7 +297,8 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let mut patterns = Vec::new();
                         while !self.check(&TokenKind::RParen) {
-                            patterns.push(self.parse_pattern()?);
+                            // Use parse_single_pattern to avoid comma being consumed as or-pattern
+                            patterns.push(self.parse_single_pattern()?);
                             if !self.check(&TokenKind::RParen) {
                                 self.expect(&TokenKind::Comma)?;
                             }
@@ -336,7 +340,8 @@ impl<'a> Parser<'a> {
                     self.advance(); // consume LParen
                     let mut patterns = Vec::new();
                     while !self.check(&TokenKind::RParen) {
-                        patterns.push(self.parse_pattern()?);
+                        // Use parse_single_pattern to avoid comma being consumed as or-pattern
+                        patterns.push(self.parse_single_pattern()?);
                         if !self.check(&TokenKind::RParen) {
                             self.expect(&TokenKind::Comma)?;
                         }

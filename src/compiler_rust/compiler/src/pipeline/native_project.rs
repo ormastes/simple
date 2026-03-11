@@ -1765,6 +1765,22 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                                 .push(mangled);
                         }
                     }
+                    // Module-level variables (val/const/static) need to be in the
+                    // import map so cross-module references resolve correctly.
+                    simple_parser::ast::Node::Let(l) => {
+                        if let Some(name) = extract_let_name(&l.pattern) {
+                            let mangled = format!("{}__{}", prefix, name);
+                            raw_to_mangled.entry(name).or_default().push(mangled);
+                        }
+                    }
+                    simple_parser::ast::Node::Const(c) => {
+                        let mangled = format!("{}__{}", prefix, c.name);
+                        raw_to_mangled.entry(c.name.clone()).or_default().push(mangled);
+                    }
+                    simple_parser::ast::Node::Static(s) => {
+                        let mangled = format!("{}__{}", prefix, s.name);
+                        raw_to_mangled.entry(s.name.clone()).or_default().push(mangled);
+                    }
                     _ => {}
                 }
             }
@@ -2033,6 +2049,17 @@ fn mangled_matches_use_path(mangled: &str, use_segments: &[&str]) -> bool {
         }
     }
     seg_idx == use_segments.len()
+}
+
+/// Extract variable name from a Let statement's pattern.
+/// Handles simple identifiers and Pattern::Typed wrappers.
+fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
+    match pattern {
+        simple_parser::Pattern::Identifier(n) => Some(n.clone()),
+        simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
+        simple_parser::Pattern::Typed { pattern: inner, .. } => extract_let_name(inner),
+        _ => None,
+    }
 }
 
 /// Recursively collect .spl files from a directory.

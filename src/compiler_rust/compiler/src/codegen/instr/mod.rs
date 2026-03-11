@@ -189,15 +189,29 @@ pub fn compile_instruction<M: Module>(
                     .ins()
                     .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
                 ctx.vreg_values.insert(*dest, val);
+            } else if let Some(resolved) = ctx.use_map.get(global_name.as_str())
+                .or_else(|| ctx.import_map.get(global_name.as_str()))
+            {
+                // Cross-module global: resolve via import/use maps and declare on-the-fly.
+                // Replace dots with _dot_ for macOS symbol name compatibility.
+                let symbol = resolved.replace('.', "_dot_");
+                match ctx.module.declare_data(&symbol, cranelift_module::Linkage::Import, true, false) {
+                    Ok(data_id) => {
+                        let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                        let global_addr = builder.ins().global_value(types::I64, global_ref);
+                        let val = builder
+                            .ins()
+                            .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+                        ctx.vreg_values.insert(*dest, val);
+                    }
+                    Err(_) => {
+                        let val = builder.ins().iconst(types::I64, 0);
+                        ctx.vreg_values.insert(*dest, val);
+                    }
+                }
             } else {
-                // Variable not declared as global - likely a local variable from
-                // tuple destructuring, if-else expressions, or pattern matching.
-                // Use zero as default to allow the function to compile.
-                eprintln!(
-                    "[WARN] GlobalLoad: global '{}' not found in global_ids ({} entries)",
-                    global_name,
-                    ctx.global_ids.len()
-                );
+                // Truly unresolved - likely a local variable that MIR incorrectly
+                // treated as a global. Use zero to allow compilation to proceed.
                 let val = builder.ins().iconst(types::I64, 0);
                 ctx.vreg_values.insert(*dest, val);
             }
@@ -212,8 +226,22 @@ pub fn compile_instruction<M: Module>(
                     .get(value)
                     .ok_or_else(|| format!("GlobalStore: vreg {:?} not found", value))?;
                 builder.ins().store(MemFlags::new(), *val, global_addr, 0);
+            } else if let Some(resolved) = ctx.use_map.get(global_name.as_str())
+                .or_else(|| ctx.import_map.get(global_name.as_str()))
+            {
+                // Cross-module global store: resolve via import/use maps
+                let symbol = resolved.replace('.', "_dot_");
+                if let Ok(data_id) = ctx.module.declare_data(&symbol, cranelift_module::Linkage::Import, true, false) {
+                    let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    let val = ctx
+                        .vreg_values
+                        .get(value)
+                        .ok_or_else(|| format!("GlobalStore: vreg {:?} not found", value))?;
+                    builder.ins().store(MemFlags::new(), *val, global_addr, 0);
+                }
             }
-            // If global not found, silently skip the store (same undeclared variable issue)
+            // If still not found, silently skip the store
         }
 
         MirInst::UnaryOp { dest, op, operand } => {

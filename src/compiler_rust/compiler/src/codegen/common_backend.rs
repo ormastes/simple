@@ -506,31 +506,33 @@ impl<M: Module> CodegenBackend<M> {
                 continue;
             }
 
-            let symbol_name = self.mangle_name(name);
             let is_local = local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:
-            // - Local globals with init values: Preemptible + initialized data
-            //   (Preemptible allows merging; initialized data provides the value)
-            // - Local globals without init values: Preemptible + zeroinit
-            // - Imported globals (not local): Import (reference only, no data def)
+            // - Local globals: Preemptible + initialized data (if available)
+            // - Imported globals: Import linkage, resolve symbol via use_map/import_map
             if !is_local {
-                // Imported global: declare as Import (no data definition).
-                // The linker resolves this to the definition in the defining module.
+                // Imported global: resolve the correct mangled name from the defining module
+                // via use_map (per-module imports) or import_map (global unique names).
+                let resolved_name = self.use_map.get(name.as_str())
+                    .or_else(|| self.import_map.get(name.as_str()))
+                    .map(|s| self.sanitize_symbol(s))
+                    .unwrap_or_else(|| self.mangle_name(name));
                 let data_id = self
                     .module
-                    .declare_data(&symbol_name, cranelift_module::Linkage::Import, *is_mutable, false)
+                    .declare_data(&resolved_name, cranelift_module::Linkage::Import, *is_mutable, false)
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 self.global_ids.insert(name.clone(), data_id);
-                if symbol_name != *name {
-                    self.global_ids.insert(symbol_name, data_id);
+                if resolved_name != *name {
+                    self.global_ids.insert(resolved_name, data_id);
                 }
             } else {
                 // Local global: define with Preemptible linkage.
+                let local_symbol = self.mangle_name(name);
                 let data_id = self
                     .module
-                    .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
+                    .declare_data(&local_symbol, cranelift_module::Linkage::Preemptible, *is_mutable, false)
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
@@ -551,8 +553,8 @@ impl<M: Module> CodegenBackend<M> {
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 self.global_ids.insert(name.clone(), data_id);
-                if symbol_name != *name {
-                    self.global_ids.insert(symbol_name, data_id);
+                if local_symbol != *name {
+                    self.global_ids.insert(local_symbol, data_id);
                 }
             }
         }
