@@ -71,13 +71,68 @@ impl LlvmBackend {
             }
         };
 
-        // Get or declare the called function
-        let called_func = module.get_function(func_name).unwrap_or_else(|| {
-            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                args.iter().map(|_| i64_type.into()).collect();
-            let fn_type = i64_type.fn_type(&param_types, false);
-            module.add_function(func_name, fn_type, None)
-        });
+        // Resolve through use_map/import_map before declaring (matches Cranelift behavior)
+        let resolved_name = self.use_map.get(func_name)
+            .or_else(|| self.import_map.get(func_name))
+            .map(|s| s.as_str())
+            .unwrap_or(func_name);
+
+        // Get or declare the called function (with suffix matching safety net)
+        let called_func = module.get_function(resolved_name)
+            .or_else(|| module.get_function(func_name))
+            .or_else(|| {
+                // Suffix matching: scan module for functions ending with ".{func_name}"
+                let suffix = format!(".{}", func_name);
+                let mut func_opt = module.get_first_function();
+                let mut best: Option<inkwell::values::FunctionValue> = None;
+                while let Some(f) = func_opt {
+                    let name = f.get_name().to_string_lossy();
+                    if name.ends_with(&suffix) {
+                        if best.as_ref().map_or(true, |b| {
+                            name.len() < b.get_name().to_bytes().len()
+                        }) {
+                            best = Some(f);
+                        }
+                    }
+                    func_opt = f.get_next_function();
+                }
+                best
+            })
+            .or_else(|| {
+                // Split at underscores right-to-left: "tokens_push" → try ".push"
+                for (i, _) in func_name.match_indices('_').rev() {
+                    let method = &func_name[i + 1..];
+                    if method.is_empty() { continue; }
+                    let suffix = format!(".{}", method);
+                    let prefix_part = func_name[..i].to_lowercase();
+                    let mut func_opt = module.get_first_function();
+                    let mut best: Option<inkwell::values::FunctionValue> = None;
+                    while let Some(f) = func_opt {
+                        let name = f.get_name().to_string_lossy();
+                        if name.ends_with(&suffix) {
+                            let dominated = best.as_ref().map_or(true, |b| {
+                                let bname = b.get_name().to_string_lossy();
+                                let has_prefix = name.to_lowercase().contains(&prefix_part);
+                                let best_has = bname.to_lowercase().contains(&prefix_part);
+                                (has_prefix && !best_has)
+                                    || (has_prefix == best_has && name.len() < bname.len())
+                            });
+                            if dominated {
+                                best = Some(f);
+                            }
+                        }
+                        func_opt = f.get_next_function();
+                    }
+                    if best.is_some() { return best; }
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    args.iter().map(|_| i64_type.into()).collect();
+                let fn_type = i64_type.fn_type(&param_types, false);
+                module.add_function(resolved_name, fn_type, None)
+            });
 
         // Collect argument values as i64
         let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();

@@ -309,6 +309,9 @@ impl Lowerer {
             "gpu_global_id_x" => (GpuIntrinsicKind::GlobalId, 0u8),
             "gpu_global_id_y" => (GpuIntrinsicKind::GlobalId, 1),
             "gpu_global_id_z" => (GpuIntrinsicKind::GlobalId, 2),
+            "gpu_thread_id_x" => (GpuIntrinsicKind::LocalId, 0),
+            "gpu_thread_id_y" => (GpuIntrinsicKind::LocalId, 1),
+            "gpu_thread_id_z" => (GpuIntrinsicKind::LocalId, 2),
             "gpu_local_id_x" => (GpuIntrinsicKind::LocalId, 0),
             "gpu_local_id_y" => (GpuIntrinsicKind::LocalId, 1),
             "gpu_local_id_z" => (GpuIntrinsicKind::LocalId, 2),
@@ -317,8 +320,10 @@ impl Lowerer {
             "gpu_block_id_z" => (GpuIntrinsicKind::GroupId, 2),
             "gpu_block_dim_x" => (GpuIntrinsicKind::LocalSize, 0),
             "gpu_block_dim_y" => (GpuIntrinsicKind::LocalSize, 1),
+            "gpu_block_dim_z" => (GpuIntrinsicKind::LocalSize, 2),
             "gpu_grid_dim_x" => (GpuIntrinsicKind::NumGroups, 0),
             "gpu_grid_dim_y" => (GpuIntrinsicKind::NumGroups, 1),
+            "gpu_grid_dim_z" => (GpuIntrinsicKind::NumGroups, 2),
             "gpu_syncthreads" => {
                 return Ok(Some(HirExpr {
                     kind: HirExprKind::GpuIntrinsic {

@@ -135,17 +135,38 @@ class GpuArray<T>:
     fn copy_to(other: GpuArray<T>) -> bool:
         """Copy device to device.
 
-        LIMITATION: object arguments are still passed in a way that prevents
-        the caller from observing mutation of `other` reliably in the
-        interpreter-backed pure-Simple CUDA path. Use copy() instead.
-
         Args:
             other: Destination array
 
         Returns:
-            false until by-reference object mutation is available here
+            true on success
         """
-        false
+        match self.backend:
+            case GpuBackend.Cuda:
+                if other.backend != GpuBackend.Cuda:
+                    return false
+
+                if self.torch_handle == 0:
+                    return false
+
+                val cloned = rt_torch_clone(self.torch_handle)
+                if cloned == 0:
+                    return false
+
+                var copied_handle = cloned
+                if self.device_id != other.device_id:
+                    copied_handle = rt_torch_to_cuda(cloned, other.device_id)
+                    rt_torch_free(cloned)
+                    if copied_handle == 0:
+                        return false
+
+                if other.torch_handle != 0:
+                    rt_torch_free(other.torch_handle)
+                other.torch_handle = copied_handle
+                other.count = self.count
+                true
+            case _:
+                false
 
     fn copy() -> GpuArray<T>:
         """Create a deep copy of this GPU array."""

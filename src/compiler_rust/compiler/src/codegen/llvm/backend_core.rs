@@ -36,6 +36,10 @@ pub struct LlvmBackend {
     /// Counter for coverage basic blocks
     #[cfg(feature = "llvm")]
     pub(super) coverage_counter: RefCell<u32>,
+    /// Import map: raw function name → mangled name for cross-module resolution
+    pub(super) import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Per-module use map from `use` statements
+    pub(super) use_map: std::collections::HashMap<String, String>,
 }
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
@@ -68,8 +72,20 @@ impl LlvmBackend {
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
+                import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+                use_map: std::collections::HashMap::new(),
             })
         }
+    }
+
+    /// Set the import map for cross-module function resolution
+    pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
+        self.import_map = map;
+    }
+
+    /// Set the per-module use map from `use` statements
+    pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
+        self.use_map = map;
     }
 
     /// Enable coverage instrumentation

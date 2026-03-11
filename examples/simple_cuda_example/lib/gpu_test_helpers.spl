@@ -4,8 +4,7 @@
 # Provides GPU availability checks, convenience alloc/download wrappers,
 # and floating-point comparison.
 
-use std.nogc_sync_mut.gpu.memory.{GpuArray}
-use std.nogc_sync_mut.gpu.device.{GpuBackend, detect_backends}
+use std.nogc_sync_mut.gpu.{GpuArray, GpuBackend, detect_backends}
 
 extern fn rt_torch_tensor(data: [f64], dims: [i64], dtype_code: i32, device_code: i32) -> i64
 extern fn rt_torch_to_cuda(handle: i64, device_id: i32) -> i64
@@ -144,6 +143,39 @@ fn copy_roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
 
     Ok(true)
 
+fn copy_to_roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    val uploaded = alloc_and_upload(data)
+    val source = match uploaded:
+        case Ok(arr):
+            arr
+        case Err(msg):
+            return Err(msg)
+
+    val dest = GpuArray(
+        backend: GpuBackend.Cuda,
+        device_id: 0,
+        count: data.len(),
+        torch_handle: 0
+    )
+
+    if not source.copy_to(dest):
+        return Err("GpuArray.copy_to failed")
+
+    val host_data = dest.download()
+    if host_data.len() != data.len():
+        return Err("Copy-to round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
+
+    var i = 0
+    while i < data.len():
+        if not close_enough(host_data[i], data[i], epsilon):
+            return Err("Copy-to round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
+        i = i + 1
+
+    Ok(true)
+
 # ============================================================================
 # Floating-Point Comparison
 # ============================================================================
@@ -163,5 +195,5 @@ fn close_enough(a: f32, b: f32, epsilon: f32) -> bool:
 
 export assert_gpu_available
 export alloc_and_upload, download_and_free
-export roundtrip_f32, copy_roundtrip_f32
+export roundtrip_f32, copy_roundtrip_f32, copy_to_roundtrip_f32
 export close_enough

@@ -48,6 +48,16 @@ macro_rules! simd_binary_op {
 }
 
 impl<'a> MirLowerer<'a> {
+    fn emit_nil_vreg_in_current_block(&mut self) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            // Nil is tagged value 3 in the runtime.
+            block.instructions.push(MirInst::ConstInt { dest, value: 3 });
+            dest
+        })
+    }
+
     pub(super) fn lower_gpu_intrinsic(
         &mut self,
         intrinsic: GpuIntrinsicKind,
@@ -61,22 +71,19 @@ impl<'a> MirLowerer<'a> {
             GpuIntrinsicKind::LocalSize => gpu_dim_op!(self, args, GpuLocalSize),
             GpuIntrinsicKind::NumGroups => gpu_dim_op!(self, args, GpuNumGroups),
             GpuIntrinsicKind::Barrier => {
-                // Barrier doesn't return a meaningful value, use dummy vreg
                 self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuBarrier);
-                    dest
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::MemFence => {
                 let scope = self.get_gpu_scope_arg(args)?;
                 self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuMemFence { scope });
-                    dest
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::SimdIndex => {
                 // SIMD linear global index - use GlobalId with dim 0
@@ -206,9 +213,8 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::VecStore { source, array, offset });
-                    // VecStore has no return value, return a dummy vreg
-                    func.new_vreg()
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::SimdGather => {
                 // vec.gather(array, indices) - gather from array at indices
@@ -229,9 +235,8 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::VecScatter { source, array, indices });
-                    // VecScatter has no return value, return a dummy vreg
-                    func.new_vreg()
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::SimdFma => {
                 // v.fma(b, c) - fused multiply-add: v * b + c
@@ -296,9 +301,8 @@ impl<'a> MirLowerer<'a> {
                         offset,
                         mask,
                     });
-                    // Return dummy vreg since store has no result
-                    func.new_vreg()
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::SimdMinVec => simd_binary_op!(self, args, VecMinVec),
             GpuIntrinsicKind::SimdMaxVec => simd_binary_op!(self, args, VecMaxVec),
@@ -377,11 +381,10 @@ impl<'a> MirLowerer<'a> {
                 let index = self.lower_expr(&args[1])?;
                 let value = self.lower_expr(&args[2])?;
                 self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuStoreF64 { ptr, index, value });
-                    dest
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
             GpuIntrinsicKind::GpuLoadI64 => {
                 // gpu.load_i64(ptr, index) -> i64
@@ -400,11 +403,10 @@ impl<'a> MirLowerer<'a> {
                 let index = self.lower_expr(&args[1])?;
                 let value = self.lower_expr(&args[2])?;
                 self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuStoreI64 { ptr, index, value });
-                    dest
-                })
+                })?;
+                self.emit_nil_vreg_in_current_block()
             }
         }
     }

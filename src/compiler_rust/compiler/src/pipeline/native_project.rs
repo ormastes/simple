@@ -832,7 +832,12 @@ int main(int argc, char** argv) {
             cmd.arg("-Wl,--allow-multiple-definition");
         }
         #[cfg(target_os = "linux")]
-        cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+        {
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            cmd.arg(&stubs_o);
+            // Keep --unresolved-symbols=ignore-all for system symbols not in our stubs
+            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+        }
         #[cfg(target_os = "windows")]
         if is_clang_cl {
             cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
@@ -877,7 +882,7 @@ int main(int argc, char** argv) {
 /// Scans the given object files / archive for undefined symbols that have no definition,
 /// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], main_o: &std::path::Path) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
@@ -1004,6 +1009,33 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let system_libs = [
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/lib/x86_64-linux-gnu/libpthread.so.0",
+            "/lib/x86_64-linux-gnu/libdl.so.2",
+        ];
+        for lib_path in &system_libs {
+            if std::path::Path::new(lib_path).exists() {
+                if let Ok(output) = std::process::Command::new("nm")
+                    .arg("-D").arg("-g").arg("-p").arg(lib_path)
+                    .output()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let [_addr, sym_type, name] = parts.as_slice() {
+                            if *sym_type != "U" {
+                                defined.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Symbols that are undefined and not defined anywhere → need stubs
     let needs_stub: Vec<String> = undefined
@@ -1050,10 +1082,10 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
     for sym in &needs_stub {
         // Skip symbols with characters not valid in assembly labels.
         // macOS: alphanumerics, _, $ (Mach-O)
-        // FreeBSD/ELF: also allows dots (Simple uses dots in symbol names like Arch.from_u8)
-        #[cfg(not(target_os = "freebsd"))]
+        // Linux/FreeBSD/ELF: also allows dots (Simple uses dots in symbol names like Arch.from_u8)
+        #[cfg(target_os = "macos")]
         let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-        #[cfg(target_os = "freebsd")]
+        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
         let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$');
         if !valid {
             continue;
@@ -1082,6 +1114,12 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
             ".globl {0}\n{0}:\n  {1}\n\n",
             sym, ret_nil
         ));
+        // Linux ELF: weak stubs (real definitions take precedence at link time)
+        #[cfg(target_os = "linux")]
+        asm_code.push_str(&format!(
+            ".weak {0}\n{0}:\n  {1}\n\n",
+            sym, ret_nil
+        ));
     }
 
     let stub_s = temp_dir.join("_stubs.s");
@@ -1105,7 +1143,7 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn is_system_symbol(sym: &str) -> bool {
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
@@ -1180,6 +1218,164 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
     None
 }
 
+/// Try alternate name forms to resolve a call target through use_map/import_map.
+/// MIR generates `Type__method` but import_map uses `Type.method` (and vice versa).
+fn resolve_name_variants(
+    name: &str,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    // Try Type__method → Type.method
+    if let Some(pos) = name.find("__") {
+        let dotted = format!("{}.{}", &name[..pos], &name[pos + 2..]);
+        if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
+            return Some(resolved.clone());
+        }
+    }
+    // Try Type.method → Type__method
+    if let Some(pos) = name.find('.') {
+        let underscored = format!("{}__{}", &name[..pos], &name[pos + 1..]);
+        if let Some(resolved) = use_map.get(&underscored).or_else(|| import_map.get(&underscored)) {
+            return Some(resolved.clone());
+        }
+        // Also try replacing ALL dots with `__` for module-qualified names
+        // e.g., "types.locale_en_us" → "types__locale_en_us"
+        let all_under = name.replace('.', "__");
+        if all_under != underscored {
+            if let Some(resolved) = use_map.get(&all_under).or_else(|| import_map.get(&all_under)) {
+                return Some(resolved.clone());
+            }
+        }
+        // Try the part after the last dot as a raw function name in import_map
+        // e.g., "types.locale_en_us" → look up "locale_en_us"
+        let func_part = &name[pos + 1..];
+        if !func_part.is_empty() {
+            if let Some(resolved) = use_map.get(func_part).or_else(|| import_map.get(func_part)) {
+                return Some(resolved.clone());
+            }
+        }
+    }
+    // Try enum variant constructor pattern: `typename_Variant` → `TypeName.Variant`
+    // Heuristic: split at last `_` before an uppercase letter.
+    // E.g., `castnumericresult_Int` → try `CastNumericResult.Int` in import_map
+    for (i, _) in name.match_indices('_').rev() {
+        let variant = &name[i + 1..];
+        if variant.is_empty() { continue; }
+        // Variant part must start with uppercase (enum variant convention)
+        if !variant.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let prefix_raw = &name[..i];
+        if prefix_raw.is_empty() { continue; }
+        // Try to find import_map keys matching `*.{variant}` where the key prefix
+        // matches the raw prefix case-insensitively
+        for (key, resolved) in import_map.iter().chain(use_map.iter()) {
+            if let Some(dot_pos) = key.rfind('.') {
+                let key_variant = &key[dot_pos + 1..];
+                let key_type = &key[..dot_pos];
+                if key_variant == variant
+                    && key_type.to_lowercase().replace("_", "") == prefix_raw.to_lowercase().replace("_", "")
+                {
+                    return Some(resolved.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn suffix_of(name: &str) -> Option<&str> {
+    if let Some((_, suffix)) = name.rsplit_once("__") {
+        Some(suffix)
+    } else if let Some((_, suffix)) = name.rsplit_once('.') {
+        Some(suffix)
+    } else {
+        None
+    }
+}
+
+/// Build a suffix index from all mangled names for fuzzy method resolution.
+///
+/// Maps method suffix (e.g., "push") → list of fully-qualified mangled names.
+/// Also indexes sub-suffixes: for "Type.method" suffixes, indexes "method" separately.
+fn build_suffix_index(
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for mangled_list in all_mangled.values() {
+        for mangled in mangled_list {
+            if let Some(suffix) = suffix_of(mangled) {
+                index
+                    .entry(suffix.to_string())
+                    .or_default()
+                    .push(mangled.clone());
+                // Also index the sub-suffix after '.' within the suffix,
+                // but ONLY when the sub-suffix starts with uppercase (enum variant convention).
+                // E.g., "CastNumericResult.Int" → also index "Int" → mangled.
+                // Skip lowercase sub-suffixes like "new", "get" which are too ambiguous.
+                if let Some(dot_pos) = suffix.rfind('.') {
+                    let sub_suffix = &suffix[dot_pos + 1..];
+                    if !sub_suffix.is_empty() && sub_suffix.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        index
+                            .entry(sub_suffix.to_string())
+                            .or_default()
+                            .push(mangled.clone());
+                    }
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Resolve an unresolved call name by suffix matching against the suffix index.
+///
+/// Splits `name` at underscores from right to left, trying each suffix
+/// (e.g., "tokens_push" → try "push"). Returns the best matching fully-qualified name.
+/// Only resolves when there is a single candidate or a confident prefix-based match.
+fn resolve_by_suffix(
+    name: &str,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    // First: try the whole name as a suffix (e.g., "push" directly)
+    if let Some(candidates) = suffix_index.get(name) {
+        if candidates.len() == 1 {
+            return Some(candidates[0].clone());
+        }
+    }
+    // Then: split at underscores right-to-left
+    // "tokens_push" → try "push", "engine_unify" → try "unify"
+    for (i, _) in name.match_indices('_').rev() {
+        let prefix = &name[..i];
+        let method = &name[i + 1..];
+        if method.is_empty() || prefix.is_empty() {
+            continue;
+        }
+
+        if let Some(candidates) = suffix_index.get(method) {
+            if candidates.len() == 1 {
+                return Some(candidates[0].clone());
+            }
+            // Disambiguate: only resolve when prefix matches exactly one candidate
+            let prefix_lower = prefix.to_lowercase();
+            let matching: Vec<_> = candidates
+                .iter()
+                .filter(|c| c.to_lowercase().contains(&prefix_lower))
+                .collect();
+            if matching.len() == 1 {
+                return Some(matching[0].clone());
+            }
+            // If multiple match prefix, pick shortest as tiebreaker
+            if !matching.is_empty() {
+                if let Some(best) = matching.iter().min_by_key(|c| c.len()) {
+                    return Some((*best).clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 ///
 /// The Cranelift backend does this at codegen time via `module_prefix`, `import_map`, etc.
@@ -1191,6 +1387,7 @@ fn mangle_mir(
     import_map: &std::collections::HashMap<String, String>,
     ambiguous_names: &std::collections::HashSet<String>,
     use_map: &std::collections::HashMap<String, String>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> usize {
     use crate::mir::MirInst;
 
@@ -1205,6 +1402,14 @@ fn mangle_mir(
             || name.starts_with("__set_global_")
             || name.starts_with("bit_")
             || name.starts_with("bitwise_")
+            || name.starts_with("ffi_")
+            || name.starts_with("rc_box_")
+            || name.starts_with("arc_box_")
+            // UPPER_CASE.method calls are global variable method calls — pass through unmangled
+            || (name.contains('.') && {
+                let prefix = name.split('.').next().unwrap_or("");
+                !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            })
             || matches!(
                 name,
                 "print" | "println" | "eprint" | "eprintln"
@@ -1219,6 +1424,20 @@ fn mangle_mir(
                     | "keys" | "values" | "filter" | "sort" | "reverse"
                     | "first" | "last" | "find" | "any" | "all"
                     | "map" | "each" | "reduce" | "fold"
+                    | "asm" | "unsafe" | "assert" | "Dict"
+                    | "traverse" | "func" | "line_trim"
+                    | "malloc" | "free" | "calloc" | "realloc"
+                    | "memset" | "memcpy" | "memmove" | "madvise"
+                    | "mmap" | "mmap_file" | "munmap"
+                    | "readln" | "input" | "input_line" | "input_chars"
+                    | "env_var" | "env_args" | "temp_dir"
+                    | "file_mtime" | "file_size_for_mmap"
+                    | "fs_read_text" | "fs_write_text" | "fs_has_file" | "fs_has_file_or_dir"
+                    | "dir_list_recursive"
+                    | "__traits" | "Error" | "VReg" | "Generic"
+                    | "trim_end" | "string_from_byte"
+                    | "i64_max" | "text_index_of"
+                    | "current_rss_kb_main"
             )
     };
 
@@ -1251,6 +1470,34 @@ fn mangle_mir(
             format!("{}__{}", prefix, func.name)
         };
         local_mangled.insert(func.name.clone(), mangled);
+    }
+
+    // Build local suffix index from this module's known names (low ambiguity).
+    // The global suffix_index from all_mangled is used as a fallback for names
+    // not found in the local index.
+    let mut local_suffix_index: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for resolved in local_mangled
+        .values()
+        .chain(use_map.values())
+        .chain(import_map.values())
+    {
+        if let Some(suffix) = suffix_of(resolved) {
+            local_suffix_index
+                .entry(suffix.to_string())
+                .or_default()
+                .push(resolved.clone());
+            // Also index sub-suffix after '.'
+            if let Some(dot_pos) = suffix.rfind('.') {
+                let sub_suffix = &suffix[dot_pos + 1..];
+                if !sub_suffix.is_empty() {
+                    local_suffix_index
+                        .entry(sub_suffix.to_string())
+                        .or_default()
+                        .push(resolved.clone());
+                }
+            }
+        }
     }
 
     // Build a mapping from raw name → mangled name for local globals.
@@ -1317,6 +1564,52 @@ fn mangle_mir(
                             *target = target.with_name(resolved.clone());
                         } else if let Some(resolved) = resolve_name_variants(&name, use_map, import_map) {
                             *target = target.with_name(resolved);
+                        } else if name.contains('.') {
+                            // Dotted call: "Type.method" or "module.function"
+                            let method = name.rsplit('.').next().unwrap_or(&name);
+                            let type_part = name.split('.').next().unwrap_or("");
+                            // First try looking up the full dotted name as a suffix key
+                            // (handles "Type.method" keys in the suffix index)
+                            let candidates = local_suffix_index.get(&name)
+                                .or_else(|| suffix_index.get(&name))
+                                .or_else(|| local_suffix_index.get(method))
+                                .or_else(|| suffix_index.get(method));
+                            if let Some(candidates) = candidates {
+                                let best = candidates
+                                    .iter()
+                                    .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
+                                    .or_else(|| {
+                                        if candidates.len() == 1 { candidates.first() } else { None }
+                                    });
+                                if let Some(b) = best {
+                                    *target = target.with_name(b.clone());
+                                } else {
+                                    // Try resolve_by_suffix as last resort for dotted names
+                                    if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
+                                        .or_else(|| resolve_by_suffix(&name, suffix_index))
+                                    {
+                                        *target = target.with_name(resolved);
+                                    } else {
+                                        unresolved_count += 1;
+                                        eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
+                                                  name, func.name, prefix);
+                                    }
+                                }
+                            } else {
+                                if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
+                                    .or_else(|| resolve_by_suffix(&name, suffix_index))
+                                {
+                                    *target = target.with_name(resolved);
+                                } else {
+                                    unresolved_count += 1;
+                                    eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
+                                              name, func.name, prefix);
+                                }
+                            }
+                        } else if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
+                            .or_else(|| resolve_by_suffix(&name, suffix_index))
+                        {
+                            *target = target.with_name(resolved);
                         } else {
                             unresolved_count += 1;
                             eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
@@ -1335,6 +1628,10 @@ fn mangle_mir(
                             *func_name = resolved.clone();
                         } else if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
                             *func_name = resolved;
+                        } else if let Some(resolved) = resolve_by_suffix(func_name, &local_suffix_index)
+                            .or_else(|| resolve_by_suffix(func_name, suffix_index))
+                        {
+                            *func_name = resolved;
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
@@ -1349,6 +1646,46 @@ fn mangle_mir(
                             *global_name = resolved.clone();
                         } else if let Some(resolved) = resolve_name_variants(global_name, use_map, import_map) {
                             *global_name = resolved;
+                        } else if let Some(resolved) = resolve_by_suffix(global_name, &local_suffix_index)
+                            .or_else(|| resolve_by_suffix(global_name, suffix_index))
+                        {
+                            *global_name = resolved;
+                        }
+                    }
+                    MirInst::MethodCallStatic { func_name, .. } => {
+                        if is_runtime_or_builtin(func_name) {
+                            continue;
+                        }
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                        } else if let Some(resolved) = use_map.get(func_name.as_str())
+                            .or_else(|| import_map.get(func_name.as_str()))
+                        {
+                            *func_name = resolved.clone();
+                        } else if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
+                            *func_name = resolved;
+                        } else {
+                            // Extract method part: "Type.method" → try "method" in suffix indexes
+                            let method = func_name.rsplit('.').next().unwrap_or(func_name);
+                            let type_part = func_name.split('.').next().unwrap_or("");
+                            let type_part_lower = type_part.to_lowercase();
+                            let candidates = local_suffix_index.get(method)
+                                .or_else(|| suffix_index.get(method));
+                            if let Some(candidates) = candidates {
+                                let best = candidates
+                                    .iter()
+                                    .find(|c| c.to_lowercase().contains(&type_part_lower))
+                                    .or_else(|| {
+                                        if candidates.len() == 1 { candidates.first() } else { None }
+                                    });
+                                if let Some(b) = best {
+                                    *func_name = b.clone();
+                                }
+                            } else if let Some(resolved) = resolve_by_suffix(func_name, &local_suffix_index)
+                                .or_else(|| resolve_by_suffix(func_name, suffix_index))
+                            {
+                                *func_name = resolved;
+                            }
                         }
                     }
                     _ => {}
@@ -1356,6 +1693,8 @@ fn mangle_mir(
             }
         }
     }
+
+    unresolved_count
 }
 
 fn compile_file_to_object(
@@ -1676,7 +2015,14 @@ fn compile_file_to_object(
             // Without this, same-named functions from different modules collide.
             if !no_mangle {
                 let prefix = module_prefix_from_path(file_path, source_root);
-                mangle_mir(&mut mir, &prefix, is_entry, import_map.as_ref(), ambiguous_names.as_ref(), &use_map);
+                let global_suffix_index = build_suffix_index(all_mangled.as_ref());
+                let unresolved = mangle_mir(&mut mir, &prefix, is_entry, import_map.as_ref(), ambiguous_names.as_ref(), &use_map, &global_suffix_index);
+                if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
+                    return Err(format!(
+                        "{}: {} unresolved call(s) in module `{}` — fix imports or add to runtime",
+                        file_path.display(), unresolved, module_prefix_from_path(file_path, source_root)
+                    ));
+                }
             } else {
                 // Even with no_mangle, entry module main → spl_main
                 if is_entry {
@@ -1690,6 +2036,8 @@ fn compile_file_to_object(
 
             let mut llvm = LlvmBackend::new(simple_common::target::Target::host())
                 .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
+            llvm.set_import_map(import_map.clone());
+            llvm.set_use_map(use_map.clone());
             let obj = llvm
                 .compile(&mir)
                 .map_err(|e| format!("{}: llvm codegen: {e}", file_path.display()))?;

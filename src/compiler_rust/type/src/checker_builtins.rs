@@ -162,6 +162,91 @@ impl TypeChecker {
         self.env.insert("next".to_string(), generic_fn.clone());
         self.env.insert("collect".to_string(), generic_fn.clone());
 
+        let gpu_i64_fn = |name: &str, env: &mut HashMap<String, Type>| {
+            env.insert(
+                name.to_string(),
+                Type::Function {
+                    params: vec![],
+                    ret: Box::new(Type::Int),
+                },
+            );
+        };
+        for name in [
+            "gpu_thread_id_x",
+            "gpu_thread_id_y",
+            "gpu_thread_id_z",
+            "gpu_local_id_x",
+            "gpu_local_id_y",
+            "gpu_local_id_z",
+            "gpu_global_id_x",
+            "gpu_global_id_y",
+            "gpu_global_id_z",
+            "gpu_block_id_x",
+            "gpu_block_id_y",
+            "gpu_block_id_z",
+            "gpu_block_dim_x",
+            "gpu_block_dim_y",
+            "gpu_block_dim_z",
+            "gpu_grid_dim_x",
+            "gpu_grid_dim_y",
+            "gpu_grid_dim_z",
+        ] {
+            gpu_i64_fn(name, &mut self.env);
+        }
+        self.env.insert(
+            "gpu_syncthreads".to_string(),
+            Type::Function {
+                params: vec![],
+                ret: Box::new(Type::Nil),
+            },
+        );
+        self.env.insert(
+            "gpu_load_f64".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int],
+                ret: Box::new(Type::Float),
+            },
+        );
+        self.env.insert(
+            "gpu_store_f64".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int, Type::Float],
+                ret: Box::new(Type::Nil),
+            },
+        );
+        for name in ["gpu_load_i64", "gpu_load_i32"] {
+            self.env.insert(
+                name.to_string(),
+                Type::Function {
+                    params: vec![Type::Int, Type::Int],
+                    ret: Box::new(Type::Int),
+                },
+            );
+        }
+        self.env.insert(
+            "gpu_load_f32".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int],
+                ret: Box::new(Type::Float),
+            },
+        );
+        for name in ["gpu_store_i64", "gpu_store_i32"] {
+            self.env.insert(
+                name.to_string(),
+                Type::Function {
+                    params: vec![Type::Int, Type::Int, Type::Int],
+                    ret: Box::new(Type::Nil),
+                },
+            );
+        }
+        self.env.insert(
+            "gpu_store_f32".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int, Type::Float],
+                ret: Box::new(Type::Nil),
+            },
+        );
+
         // Use remaining vars for reserved names
         let _ = (var12, var13);
 

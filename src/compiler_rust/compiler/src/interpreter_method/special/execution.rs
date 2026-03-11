@@ -139,6 +139,19 @@ pub fn exec_function_with_self_return(
         Err(e) => return Err(e),
     };
 
+    // Write back mutated object arguments passed by identifier.
+    // This lets methods like `source.copy_to(dest)` persist changes to `dest`.
+    let non_self_params: Vec<_> = func.params.iter().filter(|p| p.name != "self").collect();
+    for (param, arg) in non_self_params.into_iter().zip(args.iter()) {
+        if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
+            if let Some(updated_arg) = local_env.get(&param.name).cloned() {
+                if matches!(updated_arg, Value::Object { .. }) {
+                    outer_env.insert(var_name.clone(), updated_arg);
+                }
+            }
+        }
+    }
+
     // Get the potentially modified self
     let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {
         class: class_name.to_string(),

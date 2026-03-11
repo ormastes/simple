@@ -1380,6 +1380,12 @@ fn gpu_lowerer_setup() -> MirLowerer<'static> {
     lowerer
 }
 
+fn gpu_result_is_materialized_nil(func: &crate::mir::function::MirFunction, result: crate::mir::instructions::VReg) -> bool {
+    func.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
+        matches!(i, MirInst::ConstInt { dest, value } if *dest == result && *value == 3)
+    })
+}
+
 #[test]
 fn gpu_global_id_default_dim() {
     let mut lowerer = gpu_lowerer_setup();
@@ -1509,12 +1515,14 @@ fn gpu_barrier() {
     let mut lowerer = gpu_lowerer_setup();
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::Barrier, &[]);
     assert!(result.is_ok());
+    let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
     assert!(func
         .blocks
         .iter()
         .flat_map(|b| &b.instructions)
         .any(|i| matches!(i, MirInst::GpuBarrier)));
+    assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
 #[test]
@@ -1522,6 +1530,7 @@ fn gpu_mem_fence_default() {
     let mut lowerer = gpu_lowerer_setup();
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::MemFence, &[]);
     assert!(result.is_ok());
+    let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
         i,
@@ -1529,6 +1538,7 @@ fn gpu_mem_fence_default() {
             scope: crate::mir::instructions::GpuMemoryScope::All
         }
     )));
+    assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
 #[test]
@@ -1854,12 +1864,14 @@ fn gpu_simd_store() {
         &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
     );
     assert!(result.is_ok());
+    let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
     assert!(func
         .blocks
         .iter()
         .flat_map(|b| &b.instructions)
         .any(|i| matches!(i, MirInst::VecStore { .. })));
+    assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
 #[test]
@@ -1883,12 +1895,54 @@ fn gpu_simd_scatter() {
         &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
     );
     assert!(result.is_ok());
+    let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
     assert!(func
         .blocks
         .iter()
         .flat_map(|b| &b.instructions)
         .any(|i| matches!(i, MirInst::VecScatter { .. })));
+    assert!(gpu_result_is_materialized_nil(&func, result));
+}
+
+#[test]
+fn gpu_store_f64_materializes_nil_result() {
+    let mut lowerer = gpu_lowerer_setup();
+    let float_expr = HirExpr {
+        kind: HirExprKind::Float(1.5),
+        ty: hir::TypeId::F64,
+    };
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuStoreF64,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), float_expr],
+    );
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    let func = lowerer.end_function().unwrap();
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuStoreF64 { .. })));
+    assert!(gpu_result_is_materialized_nil(&func, result));
+}
+
+#[test]
+fn gpu_store_i64_materializes_nil_result() {
+    let mut lowerer = gpu_lowerer_setup();
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuStoreI64,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    let func = lowerer.end_function().unwrap();
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuStoreI64 { .. })));
+    assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
 #[test]
