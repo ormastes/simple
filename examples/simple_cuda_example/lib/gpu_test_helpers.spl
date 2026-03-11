@@ -6,15 +6,9 @@
 
 use std.nogc_sync_mut.gpu.memory.{GpuArray}
 use std.nogc_sync_mut.gpu.device.{GpuBackend, detect_backends}
-use std.nogc_sync_mut.torch.ffi.{rt_torch_copy_data_to_cpu}
 
-extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64)
-extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
-extern fn f32_from_bits(bits: u32) -> f32
 extern fn rt_torch_tensor(data: [f64], dims: [i64], dtype_code: i32, device_code: i32) -> i64
 extern fn rt_torch_to_cuda(handle: i64, device_id: i32) -> i64
-extern fn rt_torch_to_cpu(handle: i64) -> i64
 extern fn rt_torch_free(handle: i64)
 
 fn has_cuda_gpu() -> bool:
@@ -92,29 +86,9 @@ fn download_and_free(arr: GpuArray<f32>, size: i64) -> Result<[f32], text>:
     if arr.torch_handle == 0:
         return Err("GpuArray has no backing tensor")
 
-    val cpu_handle = rt_torch_to_cpu(arr.torch_handle)
-    if cpu_handle == 0:
-        return Err("rt_torch_to_cpu failed")
-
-    val raw_ptr = rt_alloc(size * 4)
-    if raw_ptr == 0:
-        rt_torch_free(cpu_handle)
-        return Err("Failed to allocate host buffer")
-
-    val copied = rt_torch_copy_data_to_cpu(cpu_handle, raw_ptr, size)
-    rt_torch_free(cpu_handle)
-    if copied != size:
-        rt_free(raw_ptr)
-        return Err("Download length mismatch: expected {size}, got {copied}")
-
-    var host_data: [f32] = []
-    var i = 0
-    while i < copied:
-        val bits = rt_ptr_read_i32(raw_ptr, i * 4)
-        host_data.push(f32_from_bits(bits as u32))
-        i = i + 1
-
-    rt_free(raw_ptr)
+    val host_data = arr.download()
+    if host_data.len() != size:
+        return Err("Download length mismatch: expected {size}, got {host_data.len()}")
     Ok(host_data)
 
 # Upload and immediately download data to validate host/device round-tripping.
@@ -123,53 +97,15 @@ fn roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
     if not has_cuda_gpu():
         return Err("GPU context not available")
 
-    var host_f64: [f64] = []
-    var convert_i = 0
-    while convert_i < data.len():
-        host_f64.push(data[convert_i] as f64)
-        convert_i = convert_i + 1
+    val uploaded = alloc_and_upload(data)
+    val arr = match uploaded:
+        case Ok(gpu_arr):
+            gpu_arr
+        case Err(msg):
+            return Err(msg)
 
-    val cpu_handle = rt_torch_tensor(host_f64, [data.len()], 1, 0)
-    if cpu_handle == 0:
-        return Err("rt_torch_tensor failed")
-
-    val gpu_handle = rt_torch_to_cuda(cpu_handle, 0)
-    if gpu_handle == 0:
-        rt_torch_free(cpu_handle)
-        return Err("rt_torch_to_cuda failed")
-
-    val roundtrip_cpu = rt_torch_to_cpu(gpu_handle)
-    if roundtrip_cpu == 0:
-        rt_torch_free(cpu_handle)
-        rt_torch_free(gpu_handle)
-        return Err("rt_torch_to_cpu failed")
-
-    val raw_ptr = rt_alloc(data.len() * 4)
-    if raw_ptr == 0:
-        rt_torch_free(cpu_handle)
-        rt_torch_free(gpu_handle)
-        rt_torch_free(roundtrip_cpu)
-        return Err("Failed to allocate host buffer")
-
-    val copied = rt_torch_copy_data_to_cpu(roundtrip_cpu, raw_ptr, data.len())
-    if copied != data.len():
-        rt_free(raw_ptr)
-        rt_torch_free(cpu_handle)
-        rt_torch_free(gpu_handle)
-        rt_torch_free(roundtrip_cpu)
-        return Err("Round-trip length mismatch: expected {data.len()}, got {copied}")
-
-    var host_data: [f32] = []
-    var read_i = 0
-    while read_i < copied:
-        val bits = rt_ptr_read_i32(raw_ptr, read_i * 4)
-        host_data.push(f32_from_bits(bits as u32))
-        read_i = read_i + 1
-
-    rt_free(raw_ptr)
-    rt_torch_free(cpu_handle)
-    rt_torch_free(gpu_handle)
-    rt_torch_free(roundtrip_cpu)
+    val downloaded = arr.download()
+    val host_data = downloaded
     if host_data.len() != data.len():
         return Err("Round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
 
@@ -177,6 +113,33 @@ fn roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
     while i < data.len():
         if not close_enough(host_data[i], data[i], epsilon):
             return Err("Round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
+        i = i + 1
+
+    Ok(true)
+
+fn copy_roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
+    if not has_cuda_gpu():
+        return Err("GPU context not available")
+
+    val uploaded = alloc_and_upload(data)
+    val source = match uploaded:
+        case Ok(arr):
+            arr
+        case Err(msg):
+            return Err(msg)
+
+    val cloned = source.copy()
+    if cloned.torch_handle == 0:
+        return Err("GpuArray.copy failed")
+
+    val host_data = cloned.download()
+    if host_data.len() != data.len():
+        return Err("Copy round-trip length mismatch: expected {data.len()}, got {host_data.len()}")
+
+    var i = 0
+    while i < data.len():
+        if not close_enough(host_data[i], data[i], epsilon):
+            return Err("Copy round-trip mismatch at index {i}: expected {data[i]}, got {host_data[i]}")
         i = i + 1
 
     Ok(true)
@@ -200,5 +163,5 @@ fn close_enough(a: f32, b: f32, epsilon: f32) -> bool:
 
 export assert_gpu_available
 export alloc_and_upload, download_and_free
-export roundtrip_f32
+export roundtrip_f32, copy_roundtrip_f32
 export close_enough

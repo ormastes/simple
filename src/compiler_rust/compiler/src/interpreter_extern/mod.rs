@@ -533,6 +533,7 @@ pub(crate) fn call_extern_function(
         "rt_torch_to_cuda" => torch::rt_torch_to_cuda(&evaluated),
         "rt_torch_to_cpu" => torch::rt_torch_to_cpu(&evaluated),
         "rt_torch_free" => torch::rt_torch_free(&evaluated),
+        "rt_torch_clone" => torch::rt_torch_clone(&evaluated),
         "rt_torch_copy_data_to_cpu" => torch::rt_torch_copy_data_to_cpu(&evaluated),
         "f32_from_bits" => memory::f32_from_bits(&evaluated),
 

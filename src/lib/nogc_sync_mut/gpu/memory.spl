@@ -3,18 +3,22 @@
 # Provides typed GPU arrays with unique ownership (no owns_handle)
 
 use std.nogc_sync_mut.gpu.device.{Gpu, GpuBackend}
-use std.nogc_sync_mut.torch.ffi.{rt_torch_tensor_from_data, rt_torch_torchtensor_clone, rt_torch_torchtensor_cuda, rt_torch_torchtensor_cpu, rt_torch_torchtensor_free, rt_torch_copy_data_to_cpu}
+use std.nogc_sync_mut.torch.ffi.{rt_torch_tensor_from_data, rt_torch_tensor_zeros, rt_torch_copy_data_to_cpu}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn f32_from_bits(bits: u32) -> f32
+extern fn rt_torch_to_cuda(handle: i64, device_id: i32) -> i64
+extern fn rt_torch_to_cpu(handle: i64) -> i64
+extern fn rt_torch_free(handle: i64)
+extern fn rt_torch_clone(handle: i64) -> i64
 
 # ============================================================================
 # GPU Array Type
 # ============================================================================
 
-class GpuArray[T]:
+class GpuArray<T>:
     """Typed GPU array with unique ownership (NoGC).
 
     Wraps backend-specific memory (PyTorch tensors) and provides
@@ -38,7 +42,7 @@ class GpuArray[T]:
         # Current pure-Simple CUDA path is implemented for f32 payloads.
         self.count * 4
 
-    me upload(data: [T]) -> bool:
+    me upload(data: [f32]) -> bool:
         """Upload data from host to device.
 
         Creates a tensor from host data and moves it to the CUDA device.
@@ -65,19 +69,19 @@ class GpuArray[T]:
                 if handle == 0:
                     return false
 
-                val gpu_handle = rt_torch_torchtensor_cuda(handle, self.device_id)
-                rt_torch_torchtensor_free(handle)
+                val gpu_handle = rt_torch_to_cuda(handle, self.device_id)
+                rt_torch_free(handle)
                 if gpu_handle == 0:
                     return false
 
                 if self.torch_handle != 0:
-                    rt_torch_torchtensor_free(self.torch_handle)
+                    rt_torch_free(self.torch_handle)
                 self.torch_handle = gpu_handle
                 true
             case _:
                 false
 
-    fn download() -> [T]:
+    fn download() -> [f32]:
         """Download data from device to host (blocking).
 
         Returns:
@@ -86,35 +90,35 @@ class GpuArray[T]:
         match self.backend:
             case GpuBackend.Cuda:
                 if self.torch_handle == 0:
-                    var empty: [T] = []
+                    var empty: [f32] = []
                     return empty
 
-                val cpu_handle = rt_torch_torchtensor_cpu(self.torch_handle)
+                val cpu_handle = rt_torch_to_cpu(self.torch_handle)
                 if cpu_handle == 0:
-                    var empty: [T] = []
+                    var empty: [f32] = []
                     return empty
 
                 val buffer_size = self.count
                 if buffer_size <= 0:
-                    rt_torch_torchtensor_free(cpu_handle)
-                    var empty: [T] = []
+                    rt_torch_free(cpu_handle)
+                    var empty: [f32] = []
                     return empty
 
                 val bytes = buffer_size * 4
                 val raw_ptr = rt_alloc(bytes)
                 if raw_ptr == 0:
-                    rt_torch_torchtensor_free(cpu_handle)
-                    var empty: [T] = []
+                    rt_torch_free(cpu_handle)
+                    var empty: [f32] = []
                     return empty
 
                 val copied = rt_torch_copy_data_to_cpu(cpu_handle, raw_ptr, buffer_size)
-                rt_torch_torchtensor_free(cpu_handle)
+                rt_torch_free(cpu_handle)
                 if copied <= 0:
                     rt_free(raw_ptr)
-                    var empty: [T] = []
+                    var empty: [f32] = []
                     return empty
 
-                var result: [T] = []
+                var result: [f32] = []
                 var i = 0
                 while i < copied:
                     val bits = rt_ptr_read_i32(raw_ptr, i * 4)
@@ -125,39 +129,52 @@ class GpuArray[T]:
                 rt_free(raw_ptr)
                 result
             case _:
-                var result: [T] = []
+                var result: [f32] = []
                 result
 
-    fn copy_to(other: GpuArray[T]) -> bool:
+    fn copy_to(other: GpuArray<T>) -> bool:
         """Copy device to device.
 
-        Clones the source tensor and returns success status.
-        LIMITATION: Cannot mutate `other` from an immutable method.
-        The cloned tensor is created but not stored in `other`.
-        Use gpu_copy() free function instead for a full copy.
+        LIMITATION: object arguments are still passed in a way that prevents
+        the caller from observing mutation of `other` reliably in the
+        interpreter-backed pure-Simple CUDA path. Use copy() instead.
 
         Args:
-            other: Destination array (not modified - see LIMITATION)
+            other: Destination array
 
         Returns:
-            true if source tensor exists and clone succeeded
+            false until by-reference object mutation is available here
         """
-        match self.backend:
-            case GpuBackend.Cuda:
-                self.torch_handle != 0
-            case _:
-                false
+        false
+
+    fn copy() -> GpuArray<T>:
+        """Create a deep copy of this GPU array."""
+        if self.torch_handle == 0:
+            return GpuArray(
+                backend: self.backend,
+                device_id: self.device_id,
+                count: self.count,
+                torch_handle: 0
+            )
+
+        val cloned = rt_torch_clone(self.torch_handle)
+        GpuArray(
+            backend: self.backend,
+            device_id: self.device_id,
+            count: self.count,
+            torch_handle: cloned
+        )
 
     fn drop():
         """Automatically free memory when object goes out of scope."""
         if self.torch_handle != 0:
-            rt_torch_torchtensor_free(self.torch_handle)
+            rt_torch_free(self.torch_handle)
 
 # ============================================================================
 # Memory Allocation Functions
 # ============================================================================
 
-fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
+fn gpu_alloc<T>(gpu: Gpu, count: i64) -> GpuArray<T>:
     """Allocate GPU array (zero-initialized on device).
 
     Creates a zeros tensor and moves it to the GPU device.
@@ -172,21 +189,32 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
     """
     match gpu.backend:
         case GpuBackend.Cuda:
-            GpuArray[T](
+            val cpu_handle = rt_torch_tensor_zeros([count])
+            if cpu_handle == 0:
+                return GpuArray(
+                    backend: GpuBackend.Cuda,
+                    device_id: gpu.device_id,
+                    count: count,
+                    torch_handle: 0
+                )
+
+            val gpu_handle = rt_torch_to_cuda(cpu_handle, gpu.device_id)
+            rt_torch_free(cpu_handle)
+            GpuArray(
                 backend: GpuBackend.Cuda,
                 device_id: gpu.device_id,
                 count: count,
-                torch_handle: 0
+                torch_handle: gpu_handle
             )
         case _:
-            GpuArray[T](
+            GpuArray(
                 backend: GpuBackend.None_,
                 device_id: -1,
                 count: count,
                 torch_handle: 0
             )
 
-fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
+fn gpu_alloc_upload<T>(gpu: Gpu, data: [T]) -> GpuArray<T>:
     """Allocate and upload data to GPU in one call.
 
     Args:
@@ -196,11 +224,11 @@ fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
     Returns:
         GPU array with uploaded data
     """
-    var arr = gpu_alloc[T](gpu, data.len())
+    var arr = gpu_alloc(gpu, data.len())
     arr.upload(data)
     arr
 
-fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
+fn gpu_alloc_zeros<T>(gpu: Gpu, count: i64) -> GpuArray<T>:
     """Allocate zero-initialized GPU array.
 
     Args:
@@ -210,24 +238,9 @@ fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
     Returns:
         GPU array filled with zeros
     """
-    match gpu.backend:
-        case GpuBackend.Cuda:
-            # Use PyTorch zeros tensor (NoGC: Tensor always owns, no owns_handle)
-            GpuArray[T](
-                backend: GpuBackend.Cuda,
-                device_id: gpu.device_id,
-                count: count,
-                torch_handle: 0
-            )
-        case _:
-            GpuArray[T](
-                backend: GpuBackend.None_,
-                device_id: -1,
-                count: count,
-                torch_handle: 0
-            )
+    gpu_alloc(gpu, count)
 
-fn gpu_copy[T](source: GpuArray[T]) -> GpuArray[T]:
+fn gpu_copy<T>(source: GpuArray<T>) -> GpuArray<T>:
     """Create a deep copy of a GPU array.
 
     Clones the underlying tensor and wraps it in a new GpuArray.
@@ -239,21 +252,7 @@ fn gpu_copy[T](source: GpuArray[T]) -> GpuArray[T]:
     Returns:
         New GPU array with cloned tensor data
     """
-    if source.torch_handle != 0:
-        val cloned = rt_torch_torchtensor_clone(source.torch_handle)
-        GpuArray[T](
-            backend: source.backend,
-            device_id: source.device_id,
-            count: source.count,
-            torch_handle: cloned
-        )
-    else:
-        GpuArray[T](
-            backend: source.backend,
-            device_id: source.device_id,
-            count: source.count,
-            torch_handle: 0
-        )
+    source.copy()
 
 # ============================================================================
 # Exports

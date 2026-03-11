@@ -75,6 +75,16 @@ fn torch_free_impl(_handle: u64) -> i32 {
 }
 
 #[cfg(feature = "pytorch")]
+fn torch_clone_impl(handle: u64) -> u64 {
+    simple_runtime::value::rt_torch_clone(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_clone_impl(_handle: u64) -> u64 {
+    0
+}
+
+#[cfg(feature = "pytorch")]
 fn torch_copy_data_to_cpu_impl(handle: u64, buffer_ptr: i64, buffer_size: i64) -> i64 {
     simple_runtime::value::rt_torch_copy_data_to_cpu(handle, buffer_ptr as *mut f32, buffer_size)
 }
@@ -130,6 +140,17 @@ pub fn rt_torch_free(args: &[Value]) -> Result<Value, CompileError> {
 
     let handle = args[0].as_int()? as u64;
     Ok(Value::Int(torch_free_impl(handle) as i64))
+}
+
+pub fn rt_torch_clone(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_torch_clone requires 1 argument (handle)",
+        ));
+    }
+
+    let handle = args[0].as_int()? as u64;
+    Ok(Value::Int(torch_clone_impl(handle) as i64))
 }
 
 pub fn rt_torch_copy_data_to_cpu(args: &[Value]) -> Result<Value, CompileError> {
