@@ -56,6 +56,8 @@ pub struct Lowerer {
     pub(super) lenient_types: bool,
     /// Names of extern function declarations for codegen
     pub(super) extern_fn_names: HashSet<String>,
+    /// Function names imported via `use` statements (should not become globals in MIR)
+    pub(super) imported_function_names: HashSet<String>,
 }
 
 impl Lowerer {
@@ -86,6 +88,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             lenient_types: false,
             extern_fn_names: HashSet::new(),
+            imported_function_names: HashSet::new(),
         }
     }
 
@@ -115,6 +118,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             lenient_types: false,
             extern_fn_names: HashSet::new(),
+            imported_function_names: HashSet::new(),
         }
     }
 
@@ -167,6 +171,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             lenient_types: false,
             extern_fn_names: HashSet::new(),
+            imported_function_names: HashSet::new(),
         }
     }
 

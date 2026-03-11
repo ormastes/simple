@@ -23,7 +23,7 @@
 
 use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmExpr, CmmBinOp, CmmUnaryOp, CmmLiteral, CmmSpan, span}
-use cmm_parser.{CmmParser, CmmParseError}
+use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
 
 # ---------------------------------------------------------------------------
 # Access class detection helper
@@ -57,7 +57,10 @@ fn is_access_class(name: text) -> bool:
     name == "SPR" or name == "spr" or
     name == "DAP" or name == "dap" or
     name == "EAXI" or name == "eaxi" or
-    name == "AXI" or name == "axi")
+    name == "AXI" or name == "axi" or
+    name == "EDBG" or name == "edbg" or
+    name == "APB" or name == "apb" or
+    name == "C15" or name == "c15")
 
 # ---------------------------------------------------------------------------
 # Expression parsing methods — added to CmmParser via impl block
@@ -350,6 +353,13 @@ impl CmmParser:
         match token.kind:
             case CmmTokenKind.HexNumber(v):
                 self.advance()
+                # Handle 0x&MACRO pattern: bare "0x" prefix followed by macro ref
+                if v == "0x" or v == "0X":
+                    match self.peek().kind:
+                        case CmmTokenKind.MacroRef(mname):
+                            self.advance()
+                            return Ok(CmmExpr.Ident("0x&" + mname))
+                        case _: ()
                 return Ok(CmmExpr.Lit(CmmLiteral.HexInt(v)))
             case _:
                 pass_dn
@@ -433,6 +443,10 @@ impl CmmParser:
                             full = full + "." + seg
                         else:
                             full = full + "."
+                    # Check for function call: &obj.method(args)
+                    if self.check_kind("LParen"):
+                        self.advance()
+                        return self.finish_call_expr(full)
                     return Ok(CmmExpr.Ident(full))
                 # Check for backslash path: &configdir\file
                 if self.check_kind("Backslash"):
@@ -458,6 +472,10 @@ impl CmmParser:
                             else:
                                 full = full + "."
                     return Ok(CmmExpr.Ident(full))
+                # Check for function call on macro: &name(args)
+                if self.check_kind("LParen"):
+                    self.advance()
+                    return self.finish_call_expr("&" + name)
                 return Ok(CmmExpr.MacroRef(name))
             case _:
                 pass_dn
@@ -465,6 +483,10 @@ impl CmmParser:
         match token.kind:
             case CmmTokenKind.MacroRecRef(name):
                 self.advance()
+                # Check for function call on recursive macro: &&name(args)
+                if self.check_kind("LParen"):
+                    self.advance()
+                    return self.finish_call_expr("&&" + name)
                 return Ok(CmmExpr.MacroRecRef(name))
             case _:
                 pass_dn
@@ -482,8 +504,24 @@ impl CmmParser:
             if self.check_kind("RParen"):
                 self.advance()
                 return Ok(CmmExpr.Parenthesized(inner))
-            else:
-                return Err(CmmParseError(message: "Expected ')' after expression", line: self.peek().line, column: self.peek().column))
+            # C-style cast/complex expressions: skip tokens until matching ) or EOL.
+            # Handles patterns like ((struct module*)&magic)->init where
+            # the parenthesized content is a C type cast not parseable as expressions.
+            var paren_depth = 1
+            while not self.is_at_end() and not self.at_stmt_end() and paren_depth > 0:
+                match self.peek().kind:
+                    case CmmTokenKind.LParen: paren_depth = paren_depth + 1
+                    case CmmTokenKind.RParen: paren_depth = paren_depth - 1
+                    case _: ()
+                if paren_depth > 0:
+                    self.advance()
+            if self.check_kind("RParen"):
+                self.advance()
+                return Ok(CmmExpr.Parenthesized(inner))
+            # PRACTICE is lenient: allow unclosed grouping parens at end of line
+            if self.at_stmt_end():
+                return Ok(CmmExpr.Parenthesized(inner))
+            return Err(CmmParseError(message: "Expected ')' after expression", line: self.peek().line, column: self.peek().column))
 
         # --- Braced expression: {expr} (constant conversion) ---
         # Flattened to avoid nested match with return/mutation.
@@ -521,6 +559,7 @@ impl CmmParser:
 
         # --- Dot-prefixed name: .text, .data, .bss, .dynamic (ELF section names) ---
         # In CMM, y.secaddress(.dynamic) passes a dot-prefixed section name.
+        # Also handles ./ relative paths (DO ./script.cmm) and bare . as path component.
         if self.check_kind("Dot"):
             val dot_tok = self.peek()
             val next_ident = self.peek_ahead(1)
@@ -533,6 +572,17 @@ impl CmmParser:
                 self.advance()  # consume .
                 self.advance()  # consume identifier
                 return Ok(CmmExpr.DotPath("." + dot_name_found))
+            # Handle ./ relative path prefix (DO ./script.cmm)
+            # Note: /word is lexed as Option("word") by the CMM lexer
+            var next_is_path = false
+            match next_ident.kind:
+                case CmmTokenKind.Slash: next_is_path = true
+                case CmmTokenKind.Backslash: next_is_path = true
+                case CmmTokenKind.Option(o): next_is_path = true
+                case _: ()
+            if next_is_path:
+                self.advance()  # consume .
+                return Ok(CmmExpr.Ident("."))
 
         # --- DotCommand: could be function call or dot path ---
         #     Data.dump  → DotPath
@@ -556,6 +606,14 @@ impl CmmParser:
         val ident_name = self.extract_ident_name()
         if ident_name != "":
             self.advance()
+
+            # C type keywords in v.value() expressions: struct X, union X, enum X
+            val ident_upper = to_upper_cmm(ident_name)
+            if ident_upper == "STRUCT" or ident_upper == "UNION" or ident_upper == "ENUM":
+                val type_name = self.extract_ident_name()
+                if type_name != "":
+                    self.advance()
+                    return Ok(CmmExpr.Ident(ident_name + " " + type_name))
 
             # Check for function call: Identifier(
             if self.check_kind("LParen"):
@@ -800,22 +858,38 @@ impl CmmParser:
     # Parse function call arguments and closing paren after LParen has been consumed.
     # Returns the full FunctionCall expression or an error.
     me finish_call_expr(fn_name: text) -> Result<CmmExpr, CmmParseError>:
+        var args: [CmmExpr] = []
         val args_result = self.parse_call_args()
         match args_result:
-            case Err(e): return Err(e)
-            case _: ()
-        val args = self.unwrap_args_result(args_result)
+            case Err(e):
+                # Recover from C-style expressions (type casts, -> operator, etc.)
+                # by skipping to the matching close paren
+                args = []
+            case Ok(parsed_args):
+                args = parsed_args
         # Skip trailing * wildcard before ) (e.g. CPUIS(ADUCM33*))
         if self.check_op("*") and self.is_trailing_star():
             self.advance()
         # Skip other unexpected tokens before ) for error recovery
-        while not self.is_at_end() and not self.check_kind("RParen") and not self.at_stmt_end():
-            self.advance()
+        # Track paren depth to find the matching close paren
+        var depth = 1
+        while not self.is_at_end() and not self.at_stmt_end() and depth > 0:
+            if self.check_kind("RParen"):
+                depth = depth - 1
+                if depth == 0:
+                    break
+                self.advance()
+            else:
+                if self.check_kind("LParen"):
+                    depth = depth + 1
+                self.advance()
         if self.check_kind("RParen"):
             self.advance()
             Ok(CmmExpr.FunctionCall(fn_name, args))
         else:
-            Err(CmmParseError(message: "Expected ')' after function arguments", line: self.peek().line, column: self.peek().column))
+            # PRACTICE is lenient: accept unclosed function calls at end of line.
+            # e.g. CPUIS("MSP430AFE22*" followed by block ( on next line.
+            Ok(CmmExpr.FunctionCall(fn_name, args))
 
     # Unwrap an Ok([CmmExpr]) from a Result that is known to be Ok.
     fn unwrap_args_result(result: Result<[CmmExpr], CmmParseError>) -> [CmmExpr]:

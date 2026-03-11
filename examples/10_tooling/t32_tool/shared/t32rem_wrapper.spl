@@ -1,0 +1,45 @@
+# T32 Tool — Shared t32rem wrapper
+# Extracted from mcp_t32/session_tools.spl for reuse.
+
+export t32_find_t32rem, t32_run_remote
+
+use shared.session_types.{McpT32Session}
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Find t32rem binary. Checks T32REM env, common paths, then PATH.
+fn t32_find_t32rem() -> text:
+    val env_path = rt_env_get("T32REM") ?? ""
+    if env_path != "":
+        return env_path
+    if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
+        return "/opt/t32/bin/pc_linux64/t32rem"
+    if rt_file_exists("/opt/t32/bin/t32rem"):
+        return "/opt/t32/bin/t32rem"
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
+    if rc == 0 and stdout.trim() != "":
+        return stdout.trim()
+    ""
+
+# Run a remote command on a TRACE32 session via t32rem.
+fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    val t32rem = t32_find_t32rem()
+    if t32rem == "":
+        return ("T4070: t32rem not found.\n  Set the T32REM environment variable to the path of t32rem,\n  or install TRACE32 to /opt/t32/.", -1)
+    val intercom = session.intercom_name
+    var full_cmd = t32rem + " " + session.host + " port=" + str(session.port)
+    if intercom != "":
+        full_cmd = full_cmd + " INTERCOM=" + intercom
+    full_cmd = full_cmd + " " + cmd
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    if rc != 0 and stderr != "":
+        return ("t32rem error (exit " + str(rc) + "): " + stderr.trim(), rc)
+    (stdout, rc)

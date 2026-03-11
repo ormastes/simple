@@ -30,7 +30,7 @@ use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
 use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION, TOK_DOT_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
 use compiler.core.tokens.{TOK_DOTDOT_EQ, TOK_DOUBLE_STAR, TOK_UNDERSCORE}
-use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_SEMICOLON}
+use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_SEMICOLON, TOK_SHR}
 use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
 use compiler.core.tokens.{TOK_KW_DO, TOK_KW_CE}
 use compiler.core.tokens.{TOK_BACKTICK_IDENT}
@@ -71,7 +71,56 @@ use compiler.frontend.core.parser_primary.{parse_primary_expr}
 # ===== Expression Parsing =====
 
 fn parse_expr() -> i64:
-    parse_assignment()
+    parse_pipe()
+
+fn parse_pipe() -> i64:
+    var left = parse_compose()
+    for i in 0..1000:
+        if par_kind_get() != TOK_PIPE_FORWARD:
+            break
+        parser_advance()
+        # Parse RHS: could be `f` or `f(a, b)` — use parse_postfix to get calls
+        val right = parse_postfix()
+        if expr_get_tag(right) == EXPR_CALL:
+            # x |> f(a) → f(x, a) — prepend left as first arg
+            val old_args = expr_args[right]
+            var new_args: [i64] = [left]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                j = j + 1
+            expr_args[right] = new_args
+            left = right
+        elif expr_get_tag(right) == EXPR_METHOD_CALL:
+            # x |> obj.method(a) → obj.method(x, a) — prepend
+            val old_args = expr_args[right]
+            var new_args: [i64] = [left]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                j = j + 1
+            expr_args[right] = new_args
+            left = right
+        else:
+            # x |> f → f(x)
+            left = expr_call(right, [left], 0)
+    left
+
+fn parse_compose() -> i64:
+    var left = parse_assignment()
+    for i in 0..1000:
+        if par_kind_get() != TOK_SHR:
+            break
+        parser_advance()
+        val right = parse_assignment()
+        # f >> g → \__c0: g(f(__c0))
+        val param = expr_ident("__c0", 0)
+        val inner_call = expr_call(left, [param], 0)
+        val outer_call = expr_call(right, [inner_call], 0)
+        var param_names: [i64] = [expr_ident("__c0", 0)]
+        var body_stmts: [i64] = [outer_call]
+        left = expr_lambda(param_names, body_stmts, 0)
+    left
 
 fn parse_assignment() -> i64:
     val left = parse_or()
@@ -371,6 +420,32 @@ fn parse_binary_from(base: i64) -> i64:
         parser_advance()
         val right = parse_and()
         left = expr_binary(TOK_OR, left, right, 0)
+    # Pipe forward (lowest precedence in binary context)
+    for i in 0..1000:
+        if par_kind_get() != TOK_PIPE_FORWARD:
+            break
+        parser_advance()
+        val pipe_right = parse_postfix()
+        if expr_get_tag(pipe_right) == EXPR_CALL:
+            val old_args = expr_args[pipe_right]
+            var new_args: [i64] = [left]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                j = j + 1
+            expr_args[pipe_right] = new_args
+            left = pipe_right
+        elif expr_get_tag(pipe_right) == EXPR_METHOD_CALL:
+            val old_args = expr_args[pipe_right]
+            var new_args: [i64] = [left]
+            var j = 0
+            while j < old_args.len():
+                new_args.push(old_args[j])
+                j = j + 1
+            expr_args[pipe_right] = new_args
+            left = pipe_right
+        else:
+            left = expr_call(pipe_right, [left], 0)
     left
 
 fn parse_call_arg() -> i64:
@@ -663,7 +738,7 @@ use compiler.core.parser_primary.*
 
 # ===== Exports =====
 
-export parse_expr, parse_assignment, parse_or, parse_and, parse_not
+export parse_expr, parse_pipe, parse_compose, parse_assignment, parse_or, parse_and, parse_not
 export parse_comparison, parse_null_coalesce, parse_range
 export parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary
 export parse_call_arg, parse_postfix_on, parse_binary_from

@@ -1180,6 +1180,174 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
     None
 }
 
+/// Apply name mangling to a MIR module for the LLVM backend.
+///
+/// The Cranelift backend does this at codegen time via `module_prefix`, `import_map`, etc.
+/// The LLVM backend operates on MIR names directly, so we mangle MIR before passing it.
+fn mangle_mir(
+    mir: &mut crate::mir::MirModule,
+    prefix: &str,
+    is_entry: bool,
+    import_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    use_map: &std::collections::HashMap<String, String>,
+) {
+    use crate::mir::MirInst;
+
+    // Names that should never be mangled (runtime functions, builtins).
+    let is_runtime_or_builtin = |name: &str| -> bool {
+        name.starts_with("rt_")
+            || name.starts_with("__simple_")
+            || name.starts_with("spl_")
+            || matches!(
+                name,
+                "print" | "println" | "eprint" | "eprintln"
+                    | "print_raw" | "eprint_raw" | "dprint"
+                    | "Ok" | "Err" | "Some" | "None"
+                    | "len" | "push" | "pop" | "get" | "clear"
+                    | "contains" | "starts_with" | "ends_with"
+                    | "concat" | "char_at" | "at" | "join" | "trim"
+                    | "split" | "replace" | "to_upper" | "upper"
+                    | "to_lower" | "lower" | "to_int" | "to_i64" | "parse_int"
+                    | "to_string" | "str" | "slice" | "substring"
+                    | "keys" | "values" | "filter" | "sort" | "reverse"
+                    | "first" | "last" | "find" | "any" | "all"
+                    | "map" | "each" | "reduce" | "fold"
+            )
+    };
+
+    // Build set of locally-defined function names (functions with bodies in this module).
+    let local_fn_names: std::collections::HashSet<String> = mir
+        .functions
+        .iter()
+        .filter(|f| !f.blocks.is_empty())
+        .map(|f| f.name.clone())
+        .collect();
+
+    // Build a mapping from raw name → mangled name for local functions.
+    let mut local_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for func in &mir.functions {
+        let has_body = !func.blocks.is_empty();
+        if !has_body {
+            // Extern declarations: never mangle
+            continue;
+        }
+        if is_runtime_or_builtin(&func.name) {
+            continue;
+        }
+        let mangled = if func.name == "main" {
+            if is_entry {
+                "spl_main".to_string()
+            } else {
+                format!("{}__{}", prefix, func.name)
+            }
+        } else {
+            format!("{}__{}", prefix, func.name)
+        };
+        local_mangled.insert(func.name.clone(), mangled);
+    }
+
+    // Build a mapping from raw name → mangled name for local globals.
+    let mut local_global_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (name, _ty, _is_mut) in &mir.globals {
+        if mir.local_globals.contains(name) && !is_runtime_or_builtin(name) {
+            local_global_mangled.insert(name.clone(), format!("{}__{}", prefix, name));
+        }
+    }
+
+    // Phase 1: Rename function definitions
+    for func in &mut mir.functions {
+        if let Some(mangled) = local_mangled.get(&func.name) {
+            func.name = mangled.clone();
+        }
+    }
+
+    // Phase 2: Rename globals in mir.globals, global_init_values, local_globals
+    let mut new_globals = Vec::new();
+    for (name, ty, is_mut) in &mir.globals {
+        if let Some(mangled) = local_global_mangled.get(name) {
+            new_globals.push((mangled.clone(), *ty, *is_mut));
+        } else {
+            new_globals.push((name.clone(), *ty, *is_mut));
+        }
+    }
+    mir.globals = new_globals;
+
+    let old_init = std::mem::take(&mut mir.global_init_values);
+    for (name, val) in old_init {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_values.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_values.insert(name, val);
+        }
+    }
+
+    let old_local = std::mem::take(&mut mir.local_globals);
+    for name in old_local {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.local_globals.insert(mangled.clone());
+        } else {
+            mir.local_globals.insert(name);
+        }
+    }
+
+    // Phase 3: Rename call targets and global references in instructions.
+    // Resolution order: local definition first (prevents imported name shadowing
+    // a module's own function), then use_map, then import_map, then raw fallback.
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        let name = target.name().to_string();
+                        if is_runtime_or_builtin(&name) {
+                            continue;
+                        }
+                        if let Some(mangled) = local_mangled.get(&name) {
+                            *target = target.with_name(mangled.clone());
+                        } else if let Some(resolved) = use_map.get(&name) {
+                            *target = target.with_name(resolved.clone());
+                        } else if let Some(resolved) = import_map.get(&name) {
+                            *target = target.with_name(resolved.clone());
+                        }
+                        else if std::env::var("SIMPLE_DEBUG_MANGLE").is_ok() {
+                            let in_import = import_map.contains_key(&name);
+                            let in_use = use_map.contains_key(&name);
+                            let in_local = local_fn_names.contains(&name);
+                            eprintln!("[mangle] UNRESOLVED call: {} (import={}, use={}, local={})", name, in_import, in_use, in_local);
+                        }
+                    }
+                    MirInst::InterpCall { func_name, .. } => {
+                        if is_runtime_or_builtin(func_name) {
+                            continue;
+                        }
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                        } else if let Some(resolved) = use_map.get(func_name.as_str()) {
+                            *func_name = resolved.clone();
+                        } else if let Some(resolved) = import_map.get(func_name.as_str()) {
+                            *func_name = resolved.clone();
+                        }
+                    }
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        if is_runtime_or_builtin(global_name) {
+                            continue;
+                        }
+                        if let Some(mangled) = local_global_mangled.get(global_name.as_str()) {
+                            *global_name = mangled.clone();
+                        } else if let Some(resolved) = use_map.get(global_name.as_str()) {
+                            *global_name = resolved.clone();
+                        } else if let Some(resolved) = import_map.get(global_name.as_str()) {
+                            *global_name = resolved.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn compile_file_to_object(
     source: &str,
     file_path: &Path,
@@ -1492,12 +1660,20 @@ fn compile_file_to_object(
             use crate::codegen::backend_trait::NativeBackend;
             use crate::codegen::llvm::LlvmBackend;
 
-            // Rename main → spl_main for entry module
             let mut mir = mir;
-            if is_entry {
-                for func in &mut mir.functions {
-                    if func.name == "main" {
-                        func.name = "spl_main".to_string();
+
+            // Apply name mangling to MIR (matching Cranelift backend behavior).
+            // Without this, same-named functions from different modules collide.
+            if !no_mangle {
+                let prefix = module_prefix_from_path(file_path, source_root);
+                mangle_mir(&mut mir, &prefix, is_entry, import_map.as_ref(), ambiguous_names.as_ref(), &use_map);
+            } else {
+                // Even with no_mangle, entry module main → spl_main
+                if is_entry {
+                    for func in &mut mir.functions {
+                        if func.name == "main" {
+                            func.name = "spl_main".to_string();
+                        }
                     }
                 }
             }

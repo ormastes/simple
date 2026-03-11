@@ -1,0 +1,136 @@
+# T32 Tool — MCP CMM CLI Server
+# MCP server for CMM conversion, validation, and headless execution.
+# Tools: cmm_convert_file, cmm_convert_dir, cmm_preview,
+#         cmm_bulk_validate, cmm_check_gui, cmm_report,
+#         cmm_run_converted, cmm_diff_original
+
+use shared.mcp_json_base.{t32_Q, t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_jo1, t32_jo2, t32_jo3, t32_escape_json, t32_extract_field, t32_extract_field_raw, t32_extract_id, t32_extract_nested, t32_make_json_result, t32_make_error, t32_make_tool_result, t32_make_tool_error}
+use shared.mcp_protocol_base.{mcp_read_stdin_message, mcp_write_stdout_message}
+use mcp_cmm_cli.converter_tools.{handle_cmm_convert_file, handle_cmm_convert_dir, handle_cmm_preview}
+use mcp_cmm_cli.validator_tools.{handle_cmm_bulk_validate, handle_cmm_check_gui, handle_cmm_report}
+use mcp_cmm_cli.runner_tools.{handle_cmm_run_converted, handle_cmm_diff_original}
+
+extern fn sys_get_args() -> [text]
+
+val CMM_CLI_SERVER_NAME = "simple-mcp-cmm-cli"
+val CMM_CLI_SERVER_VERSION = "1.0.0"
+
+var CMM_CLI_INIT_CACHE = ""
+var CMM_CLI_TOOLS_CACHE = ""
+
+# --- Initialize response ---
+
+fn cmm_cli_make_init_response(id: text) -> text:
+    if CMM_CLI_INIT_CACHE != "":
+        return t32_make_json_result(id, CMM_CLI_INIT_CACHE)
+    var tools_cap = t32_jo1(t32_jp("listChanged", "true"))
+    val server_info = t32_jo3(
+        t32_jp("name", t32_js(CMM_CLI_SERVER_NAME)),
+        t32_jp("version", t32_js(CMM_CLI_SERVER_VERSION)),
+        t32_jp("instructions", t32_js("CMM script converter and validator. 8 tools for GUI-to-CLI conversion, bulk validation, and headless execution."))
+    )
+    val result = t32_jo3(
+        t32_jp("protocolVersion", t32_js("2025-06-18")),
+        t32_jp("capabilities", t32_jo1(t32_jp("tools", tools_cap))),
+        t32_jp("serverInfo", server_info)
+    )
+    CMM_CLI_INIT_CACHE = result
+    t32_make_json_result(id, result)
+
+# --- Tools list ---
+
+fn cmm_cli_make_tools_list(id: text) -> text:
+    if CMM_CLI_TOOLS_CACHE != "":
+        return t32_make_json_result(id, CMM_CLI_TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+
+    # Converter tools (3)
+    tool_parts.push(cmm_cli_tool_schema("cmm_convert_file", "Convert a single CMM file from GUI to CLI mode", "path"))
+    tool_parts.push(cmm_cli_tool_schema("cmm_convert_dir", "Convert all CMM files in a directory", "input_dir"))
+    tool_parts.push(cmm_cli_tool_schema("cmm_preview", "Preview GUI-to-CLI conversion without writing files", "path"))
+
+    # Validator tools (3)
+    tool_parts.push(cmm_cli_tool_schema("cmm_bulk_validate", "Validate all CMM files in a directory", "dir"))
+    tool_parts.push(cmm_cli_tool_schema("cmm_check_gui", "Check a CMM file for GUI-only commands", "path"))
+    tool_parts.push(cmm_cli_tool_schema("cmm_report", "Generate GUI command usage report for a directory", "dir"))
+
+    # Runner tools (2)
+    tool_parts.push(cmm_cli_tool_schema("cmm_run_converted", "Convert and run a CMM file in headless mode", "path"))
+    tool_parts.push(cmm_cli_tool_schema("cmm_diff_original", "Show diff between original and converted CMM", "path"))
+
+    val tools = t32_SB_L() + tool_parts.join(",") + t32_SB_R()
+    val result = t32_jo1(t32_jp("tools", tools))
+    CMM_CLI_TOOLS_CACHE = result
+    t32_make_json_result(id, result)
+
+fn cmm_cli_tool_schema(name: text, description: text, required_param: text) -> text:
+    var props = t32_LB()
+    props = props + t32_jp(required_param, t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Required: " + required_param))))
+    props = props + t32_RB()
+    var req = t32_SB_L() + t32_js(required_param) + t32_SB_R()
+    var schema = t32_jo3(t32_jp("type", t32_js("object")), t32_jp("properties", props), t32_jp("required", req))
+    t32_jo3(t32_jp("name", t32_js(name)), t32_jp("description", t32_js(description)), t32_jp("inputSchema", schema))
+
+# --- Dispatcher ---
+
+fn cmm_cli_dispatch_tool(id: text, body: text) -> text:
+    val tool_name = t32_extract_nested(body, "name")
+    val args_raw = t32_extract_field_raw(body, "arguments")
+    if tool_name == "":
+        return t32_make_error(id, -32602, "Missing tool name")
+
+    if tool_name == "cmm_convert_file":
+        return handle_cmm_convert_file(id, args_raw)
+    elif tool_name == "cmm_convert_dir":
+        return handle_cmm_convert_dir(id, args_raw)
+    elif tool_name == "cmm_preview":
+        return handle_cmm_preview(id, args_raw)
+    elif tool_name == "cmm_bulk_validate":
+        return handle_cmm_bulk_validate(id, args_raw)
+    elif tool_name == "cmm_check_gui":
+        return handle_cmm_check_gui(id, args_raw)
+    elif tool_name == "cmm_report":
+        return handle_cmm_report(id, args_raw)
+    elif tool_name == "cmm_run_converted":
+        return handle_cmm_run_converted(id, args_raw)
+    elif tool_name == "cmm_diff_original":
+        return handle_cmm_diff_original(id, args_raw)
+
+    t32_make_error(id, -32602, "Unknown tool: " + tool_name)
+
+# --- Server loop ---
+
+fn cmm_cli_start_server():
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        var msg = mcp_read_stdin_message()
+        if msg == "":
+            running = false
+        else:
+            var method = t32_extract_field(msg, "method")
+            var id = t32_extract_id(msg)
+            var response = ""
+            if method == "initialize":
+                response = cmm_cli_make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "shutdown":
+                response = t32_make_json_result(id, "null")
+            elif method == "tools/list":
+                response = cmm_cli_make_tools_list(id)
+            elif method == "tools/call":
+                response = cmm_cli_dispatch_tool(id, msg)
+            elif method == "ping":
+                response = t32_make_json_result(id, t32_LB() + t32_RB())
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = t32_make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                mcp_write_stdout_message(response)
+
+cmm_cli_start_server()

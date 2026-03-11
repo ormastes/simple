@@ -201,8 +201,11 @@ pub(crate) fn call_extern_function(
         }
         "input" => io::input::input(&evaluated),
         "stdin_read_char" => io::input::stdin_read_char(&evaluated),
+        "rt_stdin_read_line" => io::input::input(&[]),
         "stdout_write" => io::stdout_write(&evaluated),
         "stdout_flush" => io::stdout_flush(&evaluated),
+        "rt_stdout_write_text" => io::stdout_write(&evaluated),
+        "rt_stdout_flush" => io::stdout_flush(&[]),
         "stderr_write" => io::stderr_write(&evaluated),
         "stderr_flush" => io::stderr_flush(&evaluated),
 
@@ -520,6 +523,7 @@ pub(crate) fn call_extern_function(
         "rt_free" => memory::rt_free(&evaluated),
         "rt_ptr_write_i64" => memory::rt_ptr_write_i64(&evaluated),
         "rt_ptr_read_i64" => memory::rt_ptr_read_i64(&evaluated),
+        "rt_ptr_read_i32" => memory::rt_ptr_read_i32(&evaluated),
         "rt_ptr_write_i32" => memory::rt_ptr_write_i32(&evaluated),
         "rt_ptr_write_u8" => memory::rt_ptr_write_u8(&evaluated),
         "rt_memset" => memory::rt_memset(&evaluated),

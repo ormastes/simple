@@ -46,6 +46,27 @@ char* rt_readline(void) {
     return spl_str_new("");
 }
 
+char* rt_stdin_read_line(void) {
+    char buf[4096];
+    if (fgets(buf, sizeof(buf), stdin)) {
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+        return spl_str_new(buf);
+    }
+    return NULL; /* EOF */
+}
+
+int64_t rt_stdout_write_text(const char* s) {
+    if (!s) return 0;
+    int64_t len = (int64_t)strlen(s);
+    fputs(s, stdout);
+    return len;
+}
+
+void rt_stdout_flush(void) {
+    fflush(stdout);
+}
+
 /* ================================================================
  * Memory Operations
  * ================================================================ */

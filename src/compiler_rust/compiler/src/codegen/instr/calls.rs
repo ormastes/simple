@@ -116,7 +116,7 @@ fn untag_runtime_value_to_int(
 /// For example, `rt_process_run(cmd, args)` has text at index 0: the `cmd`
 /// RuntimeValue string must be expanded to `(cmd_ptr, cmd_len)` before calling
 /// the Rust FFI function `rt_process_run(cmd_ptr, cmd_len, args)`.
-fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
+pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
@@ -571,8 +571,10 @@ pub fn compile_call<M: Module>(
                     }
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 // Declaration conflict (e.g., incompatible signature already declared).
+                eprintln!("[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): {}",
+                    func_name, resolved_name, e);
                 // Fall back to returning tagged nil for the dest.
                 if let Some(d) = dest {
                     let nil = builder.ins().iconst(types::I64, 3);

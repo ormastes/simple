@@ -90,6 +90,13 @@ impl CmmParser:
                 self.advance()
             return Ok(CmmStmt.Command("[]", [], span(bracket_tok.line, bracket_tok.column)))
 
+        # --- Bare colon: used as section separator / no-op in PRACTICE ---
+        if self.check_kind("Colon"):
+            val colon_tok = self.advance()
+            # Skip rest of line (`: CPU setup` style section headers)
+            self.skip_to_next_line()
+            return Ok(CmmStmt.EmptyLine(span(colon_tok.line, colon_tok.column)))
+
         # --- Keyword dispatch (case-insensitive on Identifier tokens) ---
         match tok.kind:
             case CmmTokenKind.Identifier(name):
@@ -129,13 +136,20 @@ impl CmmParser:
                 if upper == "PRINT": return self.parse_print()
                 if upper == "WAIT": return self.parse_wait()
                 if upper == "DIALOG": return self.parse_dialog()
+                if upper == "PARAMETERS": return self.parse_entry()
+                if upper == "RETURNVALUES": return self.parse_return()
+                if upper == "PRINTF" or upper == "ECHO": return self.parse_print()
                 # Fall through to generic command
                 return self.parse_generic_command()
             case _: ()
 
         # --- DotCommand (e.g. Data.dump, SYStem.CPU) ---
+        # Handle ON.ERROR, ON.STOP as event handlers (dot-separated variant)
         match tok.kind:
             case CmmTokenKind.DotCommand(cmd):
+                val cmd_upper = to_upper_cmm(cmd)
+                if cmd_upper == "ON.ERROR" or cmd_upper == "ON.STOP" or cmd_upper == "ON.ALWAYS":
+                    return self.parse_on_dot_event(cmd_upper)
                 return self.parse_generic_command()
             case _: ()
 
@@ -146,6 +160,15 @@ impl CmmParser:
             case CmmTokenKind.Ampersand:
                 self.advance()
                 return Ok(CmmStmt.Command("&", [], span(tok.line, tok.column)))
+            case _: ()
+
+        # --- Question marks at statement start: ??? masks or placeholder text ---
+        # CMM uses ??? for "don't care" data masks. Also appears as placeholder text in dead code.
+        match tok.kind:
+            case CmmTokenKind.Question:
+                self.advance()
+                self.skip_to_next_line()
+                return Ok(CmmStmt.Command("?", [], span(tok.line, tok.column)))
             case _: ()
 
         # --- Fallback ---
@@ -423,6 +446,26 @@ impl CmmParser:
         val action_stmt = self.unwrap_stmt(action_result)
         Ok(CmmStmt.OnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
 
+    # ON.ERROR / ON.STOP / ON.ALWAYS — dot-separated variant of ON event
+    # Handles ON.ERROR GOTO label, ON.ERROR GOSUB handler, ON.ERROR continue, etc.
+    me parse_on_dot_event(cmd_upper: text) -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume ON.ERROR / ON.STOP / ON.ALWAYS
+
+        # Extract event name from the dot-command: ON.ERROR -> ERROR, ON.STOP -> STOP
+        var event_name = "ERROR"
+        if cmd_upper == "ON.STOP":
+            event_name = "STOP"
+        if cmd_upper == "ON.ALWAYS":
+            event_name = "ALWAYS"
+
+        # Parse action
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.OnEvent(event_name, action_stmt, span(start_tok.line, start_tok.column)))
+
     # GLOBALON ERROR DO handler.cmm / GLOBALON TIME 1.s DO periodic.cmm
     # Flattened to avoid nested match with return (3 levels deep).
     me parse_globalon() -> Result<CmmStmt, CmmParseError>:
@@ -461,7 +504,9 @@ impl CmmParser:
         match self.peek().kind:
             case CmmTokenKind.Identifier(name):
                 val upper = to_upper_cmm(name)
-                (upper == "GOTO" or upper == "GOSUB" or upper == "CONTINUE" or upper == "DO" or upper == "NOTHING")
+                (upper == "GOTO" or upper == "GOSUB" or upper == "CONTINUE" or
+                 upper == "DO" or upper == "NOTHING" or upper == "JUMPTO" or
+                 upper == "INHERIT" or upper == "DEFAULT")
             case _: false
 
     # Parse event action: GOTO label, GOSUB label, CONTinue, DO file, NOTHING
@@ -484,6 +529,11 @@ impl CmmParser:
                 if upper == "NOTHING":
                     val tok = self.advance()
                     return Ok(CmmStmt.ContinueCmd(span(tok.line, tok.column)))
+                if upper == "JUMPTO":
+                    return self.parse_jumpto()
+                if upper == "INHERIT" or upper == "DEFAULT":
+                    val tok = self.advance()
+                    return Ok(CmmStmt.Command(upper, [], span(tok.line, tok.column)))
                 # Unknown action — treat as generic command
                 return self.parse_generic_command()
             case _:
@@ -598,19 +648,21 @@ impl CmmParser:
             case Err(e): Err(e)
 
     # PRINT expr1 expr2 ...
-    # Also handles PRINT %ERROR "msg", PRINT %WARNING "msg"
+    # Also handles PRINT %ERROR "msg", PRINT %WARNING "msg",
+    # PRINT %COLOR.NAVY "msg", PRINT %COLOR.RED "msg"
     me parse_print() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume PRINT
 
-        # Check for % format specifier (e.g. %ERROR, %WARNING)
-        # Flattened: detect %+Identifier first, then consume outside the match.
+        # Check for % format specifier (e.g. %ERROR, %WARNING, %COLOR.NAVY)
+        # Flattened: detect %+Identifier or %+DotCommand first, then consume.
         val has_pct_fmt = self.check_percent_format()
         if has_pct_fmt:
             self.advance()  # consume %
-            # Check if next is identifier keyword (ERROR, WARNING, etc.)
+            # Check if next is identifier or dot-command (COLOR.NAVY, etc.)
             val has_fmt_kw = self.check_kind("Identifier")
-            if has_fmt_kw:
-                self.advance()  # consume format keyword
+            val has_fmt_dot = self.check_kind("DotCommand")
+            if has_fmt_kw or has_fmt_dot:
+                self.advance()  # consume format keyword or dot-command
 
         var exprs = self.collect_remaining_exprs()
         Ok(CmmStmt.PrintStmt(exprs, span(start_tok.line, start_tok.column)))
@@ -1115,6 +1167,7 @@ impl CmmParser:
                 Err(self.make_error("Expected {context}"))
 
     # Collect macro names (&name tokens) until end of statement.
+    # Also accepts %name (format-typed variables like %srcpath, %line).
     # Returns list of macro names (without the & prefix).
     me collect_macro_names() -> [text]:
         var names: [text] = []
@@ -1127,8 +1180,21 @@ impl CmmParser:
                     self.advance()
                     names.push(name)
                 case _:
-                    # Stop collecting if we hit a non-macro token
-                    break
+                    # Check for %name pattern (format-typed local variable)
+                    if self.check_op("%"):
+                        val pct_tok = self.advance()
+                        val maybe_name = self.peek_identifier()
+                        if maybe_name.?:
+                            val n = maybe_name ?? ""
+                            self.advance()
+                            names.push("%" + n)
+                        else:
+                            # Not %name, put back
+                            self.current = self.current - 1
+                            break
+                    else:
+                        # Stop collecting if we hit a non-macro token
+                        break
         names
 
     # Collect remaining expressions on the current line as a list.

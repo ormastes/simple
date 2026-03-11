@@ -526,6 +526,7 @@ impl Lowerer {
 
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();
+        self.module.imported_function_names = self.imported_function_names.clone();
 
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
@@ -717,6 +718,7 @@ impl Lowerer {
 
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();
+        self.module.imported_function_names = self.imported_function_names.clone();
 
         // Take warnings before consuming self
         let warnings = std::mem::take(&mut self.memory_warnings);

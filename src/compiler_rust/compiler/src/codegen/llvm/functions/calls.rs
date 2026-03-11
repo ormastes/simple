@@ -58,6 +58,19 @@ impl LlvmBackend {
             return Ok(());
         }
 
+        // Map Simple builtin names to runtime FFI names (same as Cranelift backend)
+        let ffi_name: &str = match func_name {
+            "sys_get_args" => "rt_get_args",
+            "sys_exit" => "rt_exit",
+            "rt_file_read_text" => "rt_file_read_text_rv",
+            "rt_println" => "rt_println_value",
+            "rt_print" => "rt_print_value",
+            _ => {
+                // Strip module prefix for FFI matching
+                func_name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(func_name)
+            }
+        };
+
         // Get or declare the called function
         let called_func = module.get_function(func_name).unwrap_or_else(|| {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -66,20 +79,56 @@ impl LlvmBackend {
             module.add_function(func_name, fn_type, None)
         });
 
-        // Collect argument values
-        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        // Collect argument values as i64
+        let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
         for arg in args.iter() {
             let val = self.get_vreg(arg, vreg_map)?;
             let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-            arg_vals.push(casted.into());
+            raw_arg_vals.push(casted.into_int_value());
         }
 
-        // Check if declared param count matches call arg count
+        // Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
+        // This handles the ABI mismatch between Simple (text = RuntimeValue i64)
+        // and Rust FFI (text = *const u8 + u64 len).
+        let arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
+            if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(ffi_name) {
+                let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_string_data", fn_type, None)
+                });
+                let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_string_len", fn_type, None)
+                });
+                let mut expanded = Vec::with_capacity(raw_arg_vals.len() + text_indices.len());
+                for (i, val) in raw_arg_vals.iter().enumerate() {
+                    if text_indices.contains(&i) {
+                        // Expand text RuntimeValue to (ptr, len)
+                        let ptr_call = builder.build_call(rt_string_data, &[(*val).into()], "str_ptr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
+                        let ptr_val = ptr_call.try_as_basic_value().left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        let len_call = builder.build_call(rt_string_len, &[(*val).into()], "str_len")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
+                        let len_val = len_call.try_as_basic_value().left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        expanded.push(ptr_val.into());
+                        expanded.push(len_val.into());
+                    } else {
+                        expanded.push((*val).into());
+                    }
+                }
+                expanded
+            } else {
+                raw_arg_vals.iter().map(|v| (*v).into()).collect()
+            };
+
+        // Check if declared param count matches expanded arg count
         let declared_params = called_func.get_type().get_param_types().len();
-        let call_site = if declared_params != args.len() {
-            // Arity mismatch: use indirect call with correct function type
+        let call_site = if declared_params != arg_vals.len() {
+            // Arity mismatch: use indirect call with matching function type
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                args.iter().map(|_| i64_type.into()).collect();
+                arg_vals.iter().map(|_| i64_type.into()).collect();
             let fn_type = i64_type.fn_type(&param_types, false);
             let fn_ptr = called_func.as_global_value().as_pointer_value();
             builder
@@ -162,36 +211,24 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
 
             if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
+                let i64_type = self.context.i64_type();
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                 for arg in args {
                     let val = self.get_vreg(arg, vreg_map)?;
-                    arg_vals.push(val.into());
+                    let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                    arg_vals.push(casted.into());
                 }
 
-                let llvm_param_types: Result<Vec<inkwell::types::BasicMetadataTypeEnum>, CompileError> = param_types
-                    .iter()
-                    .map(|ty| self.llvm_type(ty).map(|t| t.into()))
-                    .collect();
-                let llvm_param_types = llvm_param_types?;
+                // Use actual arg count for function type (param_types from HIR may differ).
+                // All args are coerced to i64 matching the tagged-value ABI.
+                let llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    args.iter().map(|_| i64_type.into()).collect();
 
+                // Default to i64 return (tagged value) — void is rare for indirect calls
                 let fn_type = if *return_type == TypeId::VOID {
                     self.context.void_type().fn_type(&llvm_param_types, false)
                 } else {
-                    let ret_llvm = self.llvm_type(return_type)?;
-                    match ret_llvm {
-                        BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
-                        BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
-                        BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help("this return type is not yet supported in indirect calls");
-                            return Err(CompileError::semantic_with_context(
-                                "Unsupported return type".to_string(),
-                                ctx,
-                            ));
-                        }
-                    }
+                    i64_type.fn_type(&llvm_param_types, false)
                 };
 
                 let call_site = builder

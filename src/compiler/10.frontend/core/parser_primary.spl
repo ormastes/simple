@@ -27,6 +27,7 @@ use compiler.core.tokens.{TOK_KW_DO, TOK_KW_CE}
 use compiler.core.tokens.{TOK_BACKTICK_IDENT}
 use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN, TOK_STAR}
 use compiler.core.tokens.{TOK_AMP_COLON}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_method_call, expr_lambda}
@@ -35,6 +36,7 @@ use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo,
 use compiler.core.ast.{expr_dict_lit}
 use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
+use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
@@ -350,18 +352,51 @@ fn parse_primary_expr() -> i64:
         return inner
 
     if par_kind_get() == TOK_LBRACKET:
-        # Array literal: [1, 2, 3]
+        # Array literal or list comprehension
         parser_advance()
-        var elements: [i64] = []
-        if par_kind_get() != TOK_RBRACKET:
-            elements.push(parse_expr())
-            for i in 0..10000:
-                if par_kind_get() != TOK_COMMA:
-                    break
+        # Empty array
+        if par_kind_get() == TOK_RBRACKET:
+            parser_advance()
+            return expr_array_lit([], 0)
+        # For-first comprehension: [for x in items if cond: expr]
+        if par_kind_get() == TOK_KW_FOR:
+            parser_advance()
+            val comp_iter_var = par_text_get()
+            parser_expect(TOK_IDENT)
+            parser_expect(TOK_KW_IN)
+            val comp_iterable = parse_expr()
+            var comp_cond = -1
+            if par_kind_get() == TOK_KW_IF:
                 parser_advance()
-                if par_kind_get() == TOK_RBRACKET:
-                    break
-                elements.push(parse_expr())
+                comp_cond = parse_expr()
+            parser_expect(TOK_COLON)
+            val comp_body = parse_expr()
+            parser_expect(TOK_RBRACKET)
+            return expr_list_comp(comp_iter_var, comp_iterable, comp_body, comp_cond, 0)
+        # Parse first element
+        val first_elem = parse_expr()
+        # For-last comprehension: [expr for x in items if cond]
+        if par_kind_get() == TOK_KW_FOR:
+            parser_advance()
+            val comp_iter_var = par_text_get()
+            parser_expect(TOK_IDENT)
+            parser_expect(TOK_KW_IN)
+            val comp_iterable = parse_expr()
+            var comp_cond = -1
+            if par_kind_get() == TOK_KW_IF:
+                parser_advance()
+                comp_cond = parse_expr()
+            parser_expect(TOK_RBRACKET)
+            return expr_list_comp(comp_iter_var, comp_iterable, first_elem, comp_cond, 0)
+        # Regular array literal: [first, second, ...]
+        var elements: [i64] = [first_elem]
+        for i in 0..10000:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+            if par_kind_get() == TOK_RBRACKET:
+                break
+            elements.push(parse_expr())
         parser_expect(TOK_RBRACKET)
         return expr_array_lit(elements, 0)
 
@@ -462,7 +497,7 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         return expr_ident("_", 0)
 
-    # Dict literal: {key: value, ...} or empty {}
+    # Dict literal, dict comprehension, or empty {}
     if par_kind_get() == TOK_LBRACE:
         parser_advance()
         var key_exprs: [i64] = []
@@ -473,19 +508,52 @@ fn parse_primary_expr() -> i64:
             parser_advance()
             return expr_dict_lit(key_exprs, value_exprs, 0)
 
-        # Parse key-value pairs
-        for i in 0..10000:
-            # Parse key
-            val key = parse_expr()
-            key_exprs.push(key)
-
-            # Expect colon
+        # Dict comprehension for-first: {for x in items if cond: (key, val)}
+        if par_kind_get() == TOK_KW_FOR:
+            parser_advance()
+            val dc_iter_var = par_text_get()
+            parser_expect(TOK_IDENT)
+            parser_expect(TOK_KW_IN)
+            val dc_iterable = parse_expr()
+            var dc_cond = -1
+            if par_kind_get() == TOK_KW_IF:
+                parser_advance()
+                dc_cond = parse_expr()
             parser_expect(TOK_COLON)
+            # Parse (key, value) tuple
+            parser_expect(TOK_LPAREN)
+            val dc_key = parse_expr()
+            parser_expect(TOK_COMMA)
+            val dc_val = parse_expr()
+            parser_expect(TOK_RPAREN)
+            parser_expect(TOK_RBRACE)
+            return expr_dict_comp(dc_iter_var, dc_iterable, dc_key, dc_val, dc_cond, 0)
 
-            # Parse value
-            val value = parse_expr()
-            value_exprs.push(value)
+        # Parse first key
+        val key = parse_expr()
+        parser_expect(TOK_COLON)
+        val value = parse_expr()
 
+        # Dict comprehension for-last: {k: v for x in items if cond}
+        if par_kind_get() == TOK_KW_FOR:
+            parser_advance()
+            val dc_iter_var = par_text_get()
+            parser_expect(TOK_IDENT)
+            parser_expect(TOK_KW_IN)
+            val dc_iterable = parse_expr()
+            var dc_cond = -1
+            if par_kind_get() == TOK_KW_IF:
+                parser_advance()
+                dc_cond = parse_expr()
+            parser_expect(TOK_RBRACE)
+            return expr_dict_comp(dc_iter_var, dc_iterable, key, value, dc_cond, 0)
+
+        # Regular dict literal continues
+        key_exprs.push(key)
+        value_exprs.push(value)
+
+        # Parse remaining key-value pairs
+        for i in 0..10000:
             # Check for comma or closing brace
             if par_kind_get() == TOK_COMMA:
                 parser_advance()
@@ -499,6 +567,13 @@ fn parse_primary_expr() -> i64:
             else:
                 parser_error("expected , or } in dict literal")
                 break
+
+            # Parse next key-value pair
+            val next_key = parse_expr()
+            key_exprs.push(next_key)
+            parser_expect(TOK_COLON)
+            val next_value = parse_expr()
+            value_exprs.push(next_value)
 
         return expr_dict_lit(key_exprs, value_exprs, 0)
 

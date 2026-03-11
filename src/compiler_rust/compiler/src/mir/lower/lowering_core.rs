@@ -571,8 +571,14 @@ impl<'a> MirLowerer<'a> {
         let function_names: std::collections::HashSet<&str> = hir.functions.iter().map(|f| f.name.as_str()).collect();
 
         for (name, ty) in &hir.globals {
-            // Skip if this name is a function
+            // Skip if this name is a function defined in this module
             if function_names.contains(name.as_str()) {
+                continue;
+            }
+            // Skip function names imported via `use` statements — these are only
+            // used for type resolution and should not become data globals (which
+            // would conflict with function import declarations in codegen).
+            if hir.imported_function_names.contains(name) {
                 continue;
             }
 

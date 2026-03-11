@@ -35,6 +35,8 @@ User-facing guides for the Simple programming language. For specifications see `
 
 | Guide | Description |
 |-------|-------------|
+| [tooling/repl.md](tooling/repl.md) | Interactive REPL — commands, multi-line, state |
+| [tooling/jupyter.md](tooling/jupyter.md) | Jupyter kernel — notebooks, installation, testing |
 | [tooling/lsp_dap.md](tooling/lsp_dap.md) | LSP + DAP setup (VSCode, Neovim) |
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |

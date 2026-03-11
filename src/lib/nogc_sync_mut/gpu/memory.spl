@@ -4,7 +4,12 @@
 
 use std.nogc_sync_mut.gpu.device.{Gpu, GpuBackend}
 use std.nogc_sync_mut.torch.{Tensor}
-use std.nogc_sync_mut.torch.ffi.{rt_torch_tensor_from_data, rt_torch_torchtensor_clone, rt_torch_torchtensor_cpu}
+use std.nogc_sync_mut.torch.ffi.{rt_torch_tensor_from_data, rt_torch_torchtensor_clone, rt_torch_torchtensor_cpu, rt_torch_copy_data_to_cpu}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn f32_from_bits(bits: u32) -> f32
 
 # ============================================================================
 # GPU Array Type
@@ -61,18 +66,39 @@ class GpuArray[T]:
         """Download data from device to host (blocking).
 
         Returns:
-            Host array with device data (empty until rt_torch_tensor_to_data FFI is added)
+            Host array with device data.
         """
         match self.backend:
             case GpuBackend.Cuda:
-                # Move tensor to CPU if present (prepares for data extraction)
-                # LIMITATION: Requires rt_torch_tensor_to_data FFI (not yet in runtime)
-                # Once available, call it on the CPU tensor handle to get [f64] back
                 match self.torch_tensor:
                     case Some(tensor):
                         val cpu_tensor = tensor.cpu()
-                        # cpu_tensor is ready but we cannot extract data without FFI
+                        val buffer_size = self.count
+                        if buffer_size <= 0:
+                            var empty: [T] = []
+                            return empty
+
+                        val bytes = buffer_size * 4
+                        val raw_ptr = rt_alloc(bytes)
+                        if raw_ptr == 0:
+                            var empty: [T] = []
+                            return empty
+
+                        val copied = rt_torch_copy_data_to_cpu(cpu_tensor.handle, raw_ptr, buffer_size)
+                        if copied <= 0:
+                            rt_free(raw_ptr)
+                            var empty: [T] = []
+                            return empty
+
                         var result: [T] = []
+                        var i = 0
+                        while i < copied:
+                            val bits = rt_ptr_read_i32(raw_ptr, i * 4)
+                            val value = f32_from_bits(bits as u32)
+                            result.push(value)
+                            i = i + 1
+
+                        rt_free(raw_ptr)
                         result
                     case nil:
                         var result: [T] = []
@@ -144,7 +170,7 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
             )
         case _:
             GpuArray[T](
-                backend: GpuBackend.None,
+                backend: GpuBackend.None_,
                 device_id: -1,
                 count: count,
                 torch_tensor: nil
@@ -188,7 +214,7 @@ fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
             )
         case _:
             GpuArray[T](
-                backend: GpuBackend.None,
+                backend: GpuBackend.None_,
                 device_id: -1,
                 count: count,
                 torch_tensor: nil

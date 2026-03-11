@@ -344,6 +344,54 @@ impl NativeBackend for LlvmBackend {
         let module_name = module.name.as_deref().unwrap_or("module");
         self.create_module(module_name)?;
 
+        // Pre-declare runtime functions with correct signatures.
+        // This prevents compile_call from creating wrong declarations when
+        // MIR calls a runtime function with a different number of arguments
+        // (e.g., rt_array_new called with 0 args in MIR vs 1 arg actual).
+        //
+        // Skip functions that the LLVM backend declares manually with ptr types
+        // (Cranelift uses i64 for everything, but LLVM distinguishes ptr from i64).
+        #[cfg(feature = "llvm")]
+        {
+            let m = self.module.borrow();
+            if let Some(m) = m.as_ref() {
+                let i64_type = self.context.i64_type();
+
+                for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
+                    // Skip if already declared
+                    if m.get_function(spec.name).is_some() {
+                        continue;
+                    }
+
+                    // Only pre-declare functions with ALL i64 params and i64 return.
+                    // MIR always uses i64 for all values (tagged-value ABI).
+                    // Functions with i8/i32/f64 params would cause type mismatches
+                    // when compile_call passes i64 args. Those functions will be
+                    // declared on-demand by compile_call with matching arg types,
+                    // and the indirect call path handles arity mismatches.
+                    let all_i64_params = spec.params.iter().all(|ty| *ty == cranelift_codegen::ir::types::I64);
+                    let i64_return = spec.returns.len() == 1 && spec.returns[0] == cranelift_codegen::ir::types::I64;
+                    let void_return = spec.returns.is_empty();
+
+                    // Only pre-declare functions with ALL i64 params and i64 return.
+                    // Skip void-return functions — they may clash with user-defined
+                    // functions that return values (e.g. debug_stubs.spl redefines
+                    // rt_fault_* to return bool). The arity-mismatch path in
+                    // compile_call handles void functions fine.
+                    if !all_i64_params || !i64_return {
+                        continue;
+                    }
+
+                    let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                        spec.params.iter().map(|_| i64_type.into()).collect();
+
+                    let fn_type = i64_type.fn_type(&params, false);
+                    let f = m.add_function(spec.name, fn_type, None);
+                    f.set_linkage(inkwell::module::Linkage::External);
+                }
+            }
+        }
+
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
         for func in &module.functions {
@@ -356,8 +404,9 @@ impl NativeBackend for LlvmBackend {
             self.compile_function(func)?;
         }
 
-        // Fix linkage: declarations (no body) must have External linkage, not WeakAny.
-        // This can happen when auto-renamed functions get WeakAny from forward-declaration.
+        // Fix linkage after compilation:
+        // 1. Declarations (no body) must have External linkage, not WeakAny.
+        // 2. spl_main (entry point) must have Global linkage to beat the weak stub.
         #[cfg(feature = "llvm")]
         {
             let m = self.module.borrow();
@@ -366,6 +415,10 @@ impl NativeBackend for LlvmBackend {
                 while let Some(f) = func_opt {
                     if f.count_basic_blocks() == 0 {
                         // No body — must be External
+                        f.set_linkage(inkwell::module::Linkage::External);
+                    } else if f.get_name().to_str() == Ok("spl_main") {
+                        // Entry point must be a strong (Global) symbol so the linker
+                        // prefers it over the weak spl_main in the C main stub.
                         f.set_linkage(inkwell::module::Linkage::External);
                     }
                     func_opt = f.get_next_function();

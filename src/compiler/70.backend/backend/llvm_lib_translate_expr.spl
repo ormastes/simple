@@ -232,17 +232,30 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
         case Shr: llvm_build_ashr(builder, lhs, rhs, "shr")
 
         case Eq:
-            val cmp = if left_is_float:
-                llvm_build_fcmp(builder, LLVM_REAL_OEQ, lhs, rhs, "eq")
+            if left_is_float:
+                val cmp = llvm_build_fcmp(builder, LLVM_REAL_OEQ, lhs, rhs, "eq")
+                maybe_zext(builder, ctx, cmp, dest_ty)
             else:
-                llvm_build_icmp(builder, LLVM_INT_EQ, lhs, rhs, "eq")
-            maybe_zext(builder, ctx, cmp, dest_ty)
+                # Use rt_native_eq for proper equality of all types (int + string).
+                # Native icmp only compares raw i64 values; tagged string pointers
+                # with the same content but different allocations would compare as not-equal.
+                val eq_fn = llvm_get_named_function(mod_, "rt_native_eq")
+                if eq_fn != 0:
+                    llvm_build_call2(builder, llvm_global_get_value_type(eq_fn), eq_fn, [lhs, rhs], "eq")
+                else:
+                    val cmp = llvm_build_icmp(builder, LLVM_INT_EQ, lhs, rhs, "eq")
+                    maybe_zext(builder, ctx, cmp, dest_ty)
         case Ne:
-            val cmp = if left_is_float:
-                llvm_build_fcmp(builder, LLVM_REAL_ONE, lhs, rhs, "ne")
+            if left_is_float:
+                val cmp = llvm_build_fcmp(builder, LLVM_REAL_ONE, lhs, rhs, "ne")
+                maybe_zext(builder, ctx, cmp, dest_ty)
             else:
-                llvm_build_icmp(builder, LLVM_INT_NE, lhs, rhs, "ne")
-            maybe_zext(builder, ctx, cmp, dest_ty)
+                val neq_fn = llvm_get_named_function(mod_, "rt_native_neq")
+                if neq_fn != 0:
+                    llvm_build_call2(builder, llvm_global_get_value_type(neq_fn), neq_fn, [lhs, rhs], "ne")
+                else:
+                    val cmp = llvm_build_icmp(builder, LLVM_INT_NE, lhs, rhs, "ne")
+                    maybe_zext(builder, ctx, cmp, dest_ty)
         case Lt:
             val cmp = if left_is_float:
                 llvm_build_fcmp(builder, LLVM_REAL_OLT, lhs, rhs, "lt")

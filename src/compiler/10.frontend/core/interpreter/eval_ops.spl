@@ -850,3 +850,97 @@ fn eval_lambda(eid: i64) -> i64:
 
     # Return function value
     val_make_function(fn_name, decl_id)
+
+# ===== List Comprehension =====
+# EXPR_LIST_COMP: s_val=iter_var, left=iterable, right=body, extra=cond (-1 if none)
+
+fn eval_list_comp(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val iter_name = e_node.s_val
+    val iterable_eid = e_node.left
+    val body_eid = e_node.right
+    val cond_eid = e_node.extra
+
+    # Evaluate iterable
+    val iterable_val = eval_expr(iterable_eid)
+    if eval_had_error: return -1
+
+    var result_elements: [i64] = []
+    val kind = val_get_kind(iterable_val)
+
+    if kind == VAL_ARRAY:
+        val elements = val_get_array(iterable_val)
+        for elem_vid in elements:
+            if eval_had_error: break
+            env_push_scope()
+            env_define(iter_name, elem_vid)
+            # Check condition if present
+            var include = true
+            if cond_eid >= 0:
+                val cond_result = eval_expr(cond_eid)
+                if eval_had_error:
+                    env_pop_scope()
+                    return -1
+                include = val_is_truthy(cond_result)
+            if include:
+                val body_val = eval_expr(body_eid)
+                if eval_had_error:
+                    env_pop_scope()
+                    return -1
+                result_elements.push(body_val)
+            env_pop_scope()
+        return val_make_array(result_elements)
+
+    # Range support: check if iterable_eid is a RANGE expression
+    if kind == VAL_INT:
+        val iterable_tag = expr_get(iterable_eid).tag
+        if iterable_tag == EXPR_RANGE:
+            val range_node = expr_get(iterable_eid)
+            val start_val = eval_expr(range_node.left)
+            if eval_had_error: return -1
+            val end_val = eval_expr(range_node.right)
+            if eval_had_error: return -1
+            val inclusive = range_node.i_val
+            val start_n = val_get_int(start_val)
+            val end_n = val_get_int(end_val)
+            var current = start_n
+            var _iter: i64 = 0
+            while _iter < 1000001:
+                val should_stop = current > end_n
+                val at_limit = current == end_n
+                if inclusive != 0:
+                    if should_stop: break
+                else:
+                    if at_limit: break
+                    if should_stop: break
+                env_push_scope()
+                env_define(iter_name, val_make_int(current))
+                var include = true
+                if cond_eid >= 0:
+                    val cond_result = eval_expr(cond_eid)
+                    if eval_had_error:
+                        env_pop_scope()
+                        return -1
+                    include = val_is_truthy(cond_result)
+                if include:
+                    val body_val = eval_expr(body_eid)
+                    if eval_had_error:
+                        env_pop_scope()
+                        return -1
+                    result_elements.push(body_val)
+                env_pop_scope()
+                current = current + 1
+                _iter = _iter + 1
+            return val_make_array(result_elements)
+
+    eval_set_error("comprehension: cannot iterate over " + val_kind_name(kind))
+    -1
+
+# ===== Dict Comprehension =====
+# EXPR_DICT_COMP: s_val=iter_var, left=iterable, args=[key_body, val_body], extra=cond
+
+fn eval_dict_comp(eid: i64) -> i64:
+    # Dict comprehension not supported in tree-walking interpreter (no dict value type)
+    # Works via compiled path (HIR/MIR)
+    eval_set_error("dict comprehension not supported in interpreter mode")
+    -1

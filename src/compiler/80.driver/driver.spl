@@ -157,18 +157,13 @@ class CompilerDriver:
 
     me compile() -> CompileResult:
         val log = self.ctx.logger
-        print "[DRIVER] compile() start"
 
         # Phase 1: Load source files
-        print "[DRIVER] phase 1: loading sources..."
-        print "[DRIVER] input_files={self.ctx.options.input_files}"
         if not self.load_sources_impl():
             log_error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
-        print "[DRIVER] phase 1 done, {self.ctx.sources.len()} sources loaded"
 
         # Phase 2: Parse all sources
-        print "[DRIVER] phase 2: parsing..."
         log_debug("phase 2: parsing...")
         if not self.parse_all_impl():
             log_error("phase 2 FAILED")
@@ -181,8 +176,6 @@ class CompilerDriver:
             self.ctx.evict_sources()
 
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
-        print "[DRIVER] phase 2 done, modules={self.ctx.modules.keys().len()}"
-        print "[DRIVER] phase 3: lowering..."
         log_trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
         val analyze_ok = self.lower_and_check_impl()
         log_trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
@@ -210,8 +203,6 @@ class CompilerDriver:
         log_debug("phase 4 done")
 
         # Phase 5: Mode-specific processing
-        print "[DRIVER] phase 3 done, hir_modules={self.ctx.hir_modules.keys().len()}"
-        print "[DRIVER] phase 5: mode dispatch..."
         log_debug("phase 5: mode-specific processing...")
         match self.ctx.options.mode:
             case CompileMode.Check:
@@ -258,9 +249,7 @@ class CompilerDriver:
         var has_project_source = false
         while i < self.ctx.options.input_files.len():
             val input_path = self.ctx.options.input_files[i]
-            print "[DRIVER] loading: {input_path}"
             val loaded = _driver_collect_sources(input_path)
-            print "[DRIVER] collected {loaded.len()} sources from {input_path}"
             for s in loaded:
                 all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
@@ -280,10 +269,8 @@ class CompilerDriver:
                     for s in loaded:
                         all_sources = all_sources.push(s)
 
-        print "[DRIVER] total sources collected: {all_sources.len()}"
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources
-        print "[DRIVER] after assign: {self.ctx.sources.len()}"
 
         self.ctx.errors.len() == 0
 
@@ -292,23 +279,26 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me parse_all_impl() -> bool:
-        val log = self.ctx.logger
         val sources = self.ctx.sources
-        log_debug("parsing {sources.len()} sources")
+        print "[PARSE] sources count = {sources.len()}"
+        # Debug: directly access sources[1] first (skip sources[0])
+        if sources.len() > 1:
+            val s1 = sources[1]
+            print "[PARSE] s1 obtained (skipped s0)"
+            val s1p = s1.path
+            print "[PARSE] s1 path = {s1p}"
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
-            log_trace("parsing: {source.path} (module={source.module_name}, len={source.content.len()})")
+            print "[PARSE] idx={src_idx} path={source.path}"
             val module = self.parse_source(source)
             self.ctx.modules[source.module_name] = module
-            log_trace("stored module, total={self.ctx.modules.keys().len()}")
             src_idx = src_idx + 1
 
-        log_debug("parsing done, modules={self.ctx.modules.keys().len()}")
+        print "[PARSE] done"
         self.ctx.errors.len() == 0
 
     fn parse_source(source: SourceFile) -> Module:
-        print "[DRIVER] parse_source path={source.path} len={source.content.len()}"
         parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
 
     # --------------------------------------------------------------------------
@@ -577,17 +567,14 @@ class CompilerDriver:
 
     me aot_compile() -> CompileResult:
         val log = self.ctx.logger
-        print "[DRIVER] aot_compile() start"
 
         # Lower to MIR
-        print "[DRIVER] AOT: lowering to MIR"
         if not self.lower_to_mir():
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
             val first_err = self.ctx.errors.first()
             val msg = if first_err != nil: first_err else: "MIR lowering failed"
             return CompileResult.CodegenError(msg)
-        print "[DRIVER] MIR done"
 
         # Evict HIR modules (no longer needed after MIR lowering)
         if self.ctx.options.low_memory:
@@ -595,33 +582,23 @@ class CompilerDriver:
             self.ctx.evict_hir()
 
         # Borrow checking
-        print "[DRIVER] AOT: running borrow check..."
         if not self.borrow_check():
             for err in self.ctx.errors:
                 log_error("Borrow error: {err}")
             return CompileResult.BorrowError(self.ctx.errors)
-        print "[DRIVER] borrow check done"
 
         # Process async functions (generate state machines for await/yield)
-        print "[DRIVER] AOT: processing async functions"
         val async_state_machines = self.process_async()
-        print "[DRIVER] async processing done"
 
         # Optimize MIR (use optimization level from options)
-        print "[DRIVER] AOT: getting opt config"
         val opt_config = self.get_optimization_config()
-        print "[DRIVER] AOT: optimizing MIR"
         self.optimize_mir(opt_config)
-        print "[DRIVER] MIR optimization done"
 
-        print "[DRIVER] aot_compile() about to dispatch output format"
         # Determine output file
         val output = self.ctx.options.output_file ?? "a.out"
-        print "[DRIVER] output file = {output}"
 
         # If backend is C, write C++ source instead of compiling to native
         val backend_name = self.ctx.options.backend
-        print "[DRIVER] backend_name = {backend_name}"
         if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
             return self.compile_to_c(output)
 
@@ -630,9 +607,7 @@ class CompilerDriver:
             return self.compile_to_cuda(output)
 
         # Dispatch based on output format
-        print "[DRIVER] dispatching output format..."
         val format = self.ctx.options.output_format
-        print "[DRIVER] format retrieved, matching..."
         match format:
             case OutputFormat.Smf:
                 return self.compile_to_smf(output)
@@ -649,7 +624,6 @@ class CompilerDriver:
                 return CompileResult.Success(output)
             case _:
                 # Native (default)
-                print "[DRIVER] calling compile_to_native({output})"
                 return CompilerDriver_dot_compile_to_native(self, output)
 
     # --------------------------------------------------------------------------
@@ -657,7 +631,6 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        print "[DRIVER] lower_to_mir: create lowering"
         var lowering = MirLowering(
             builder: MirBuilder(
                 module: MirModule(
@@ -685,9 +658,7 @@ class CompilerDriver:
         val hir_keys = self.ctx.hir_modules.keys()
         for name in hir_keys:
             val hir_module = self.ctx.hir_modules[name]
-            print "[DRIVER] lower_to_mir: lowering {name}"
             var mir_module = call_mir_lower_module(lowering, hir_module)
-            print "[DRIVER] lower_to_mir: lowered {name}"
             # Ensure module name is set
             mir_module.name = name
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)

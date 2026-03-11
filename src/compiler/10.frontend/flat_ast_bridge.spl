@@ -10,6 +10,7 @@ use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind}
 use compiler.frontend.lexer_types.Span
 
 fn make_span() -> Span:
@@ -174,8 +175,42 @@ fn convert_flat_expr(idx: i64) -> Expr:
     elif tag == EXPR_EXISTS_CHECK:
         val inner = convert_flat_expr(expr_left[idx])
         Expr(kind: ExprKind.ExistsCheck(inner), span: span)
+    elif tag == EXPR_LIST_COMP:
+        val comp_body = convert_flat_expr(expr_right[idx])
+        val comp_iterable = convert_flat_expr(expr_left[idx])
+        val comp_iter_name = expr_s_val[idx]
+        var comp_clauses: [ComprehensionClause] = []
+        comp_clauses = comp_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(comp_iter_name, comp_iterable),
+            span: span
+        ))
+        val comp_cond_idx = expr_extra[idx]
+        if comp_cond_idx >= 0:
+            val comp_cond_expr = convert_flat_expr(comp_cond_idx)
+            comp_clauses = comp_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(comp_cond_expr),
+                span: span
+            ))
+        Expr(kind: ExprKind.ListComprehension(comp_body, comp_clauses), span: span)
+    elif tag == EXPR_DICT_COMP:
+        val dc_key = convert_flat_expr(expr_args[idx][0])
+        val dc_val = convert_flat_expr(expr_args[idx][1])
+        val dc_iterable = convert_flat_expr(expr_left[idx])
+        val dc_iter_name = expr_s_val[idx]
+        var dc_clauses: [ComprehensionClause] = []
+        dc_clauses = dc_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(dc_iter_name, dc_iterable),
+            span: span
+        ))
+        val dc_cond_idx = expr_extra[idx]
+        if dc_cond_idx >= 0:
+            val dc_cond_expr = convert_flat_expr(dc_cond_idx)
+            dc_clauses = dc_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(dc_cond_expr),
+                span: span
+            ))
+        Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
     else:
-        print "[bridge] WARNING: unhandled expr tag {tag}"
         Expr(kind: ExprKind.NilLit, span: span)
 
 fn convert_flat_stmt(idx: i64) -> Stmt:
@@ -257,7 +292,6 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             bi = bi + 1
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
     else:
-        print "[bridge] WARNING: unhandled stmt tag {tag}"
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
 fn convert_decl_fn(idx: i64) -> Function:
@@ -474,12 +508,10 @@ fn flat_ast_to_module(path: text) -> Module:
     )
 
 fn parse_and_build_module(source: text, path: text) -> Module:
-    print "[bridge] parse_and_build source_len={source.len()} path={path}"
     parser_init_with_path(source, path)
     parse_module_body()
     if parser_has_errors():
         val errors = parser_get_errors()
-        print "[bridge] Parse errors ({errors.len()}):"
         var ei = 0
         while ei < errors.len():
             print "  {errors[ei]}"

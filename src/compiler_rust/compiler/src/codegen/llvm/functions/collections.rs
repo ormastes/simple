@@ -5,8 +5,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use inkwell::builder::Builder;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
-#[cfg(feature = "llvm")]
-use inkwell::types::BasicTypeEnum;
+
 
 impl LlvmBackend {
     // ============================================================================
@@ -20,35 +19,43 @@ impl LlvmBackend {
         elements: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        // Create array on stack and initialize elements
         let i64_type = self.context.i64_type();
-        let array_type = i64_type.array_type(elements.len() as u32);
-        let alloc = builder
-            .build_alloca(array_type, "array")
-            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
 
-        // Store each element
-        for (i, elem) in elements.iter().enumerate() {
+        // Use minimum capacity of 16 for empty arrays to allow push operations
+        let capacity = if elements.is_empty() { 16 } else { elements.len() };
+
+        // Call rt_array_new(capacity) to create a proper heap-allocated RuntimeValue array.
+        // Runtime functions are pre-declared with correct signatures in compile(),
+        // so get_function will find the correct (1-param) declaration.
+        let array_new = module.get_function("rt_array_new").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_array_new", fn_type, None)
+        });
+        let cap_val = i64_type.const_int(capacity as u64, false);
+        let call_site = builder
+            .build_call(array_new, &[cap_val.into()], "array_new")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_new", &e))?;
+        let collection = call_site
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+
+        // Push each element via rt_array_push(array, element)
+        let array_push = module.get_function("rt_array_push").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+            module.add_function("rt_array_push", fn_type, None)
+        });
+        for elem in elements.iter() {
             let elem_val = self.get_vreg(elem, vreg_map)?;
-
-            let indices = [
-                self.context.i32_type().const_int(0, false),
-                self.context.i32_type().const_int(i as u64, false),
-            ];
-            let gep = unsafe { builder.build_gep(array_type, alloc, &indices, "elem_ptr") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-
+            let elem_i64 = self.coerce_value_to_type(elem_val, Some(i64_type.into()), builder)?;
             builder
-                .build_store(gep, elem_val)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+                .build_call(array_push, &[collection.into(), elem_i64.into()], "")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_push", &e))?;
         }
 
-        // Convert array pointer to i64 (tagged-value ABI)
-        let arr_i64 = builder
-            .build_ptr_to_int(alloc, i64_type, "arr_i64")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-        vreg_map.insert(dest, arr_i64.into());
+        vreg_map.insert(dest, collection);
         Ok(())
     }
 
@@ -59,33 +66,39 @@ impl LlvmBackend {
         elements: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        // Tuples are similar to arrays - create struct on stack
         let i64_type = self.context.i64_type();
-        let field_types: Vec<BasicTypeEnum> = elements.iter().map(|_| i64_type.into()).collect();
-        let struct_type = self.context.struct_type(&field_types, false);
-        let alloc = builder
-            .build_alloca(struct_type, "tuple")
-            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
 
-        // Store each element
+        // Call rt_tuple_new(size) to create a proper heap-allocated RuntimeValue tuple
+        let tuple_new = module.get_function("rt_tuple_new").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_tuple_new", fn_type, None)
+        });
+        let size_val = i64_type.const_int(elements.len() as u64, false);
+        let call_site = builder
+            .build_call(tuple_new, &[size_val.into()], "tuple_new")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_tuple_new", &e))?;
+        let collection = call_site
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+
+        // Set each element via rt_tuple_set(tuple, index, value)
+        let tuple_set = module.get_function("rt_tuple_set").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+            module.add_function("rt_tuple_set", fn_type, None)
+        });
         for (i, elem) in elements.iter().enumerate() {
             let elem_val = self.get_vreg(elem, vreg_map)?;
-
-            let gep = builder
-                .build_struct_gep(struct_type, alloc, i as u32, "tuple_elem")
-                .map_err(|e| crate::error::factory::llvm_build_failed("struct gep", &e))?;
-
+            let elem_i64 = self.coerce_value_to_type(elem_val, Some(i64_type.into()), builder)?;
+            let idx_val = i64_type.const_int(i as u64, false);
             builder
-                .build_store(gep, elem_val)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+                .build_call(tuple_set, &[collection.into(), idx_val.into(), elem_i64.into()], "")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt_tuple_set", &e))?;
         }
 
-        // Convert tuple pointer to i64 (tagged-value ABI)
-        let tuple_i64 = builder
-            .build_ptr_to_int(alloc, i64_type, "tuple_i64")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-        vreg_map.insert(dest, tuple_i64.into());
+        vreg_map.insert(dest, collection);
         Ok(())
     }
 
@@ -99,28 +112,26 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        // Dictionaries are represented as a struct with keys array and values array
         let i64_type = self.context.i64_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
-        // Declare rt_dict_new if not exists
+        // Declare rt_dict_new if not exists — all i64 to match tagged-value ABI
         let dict_new = module.get_function("rt_dict_new").unwrap_or_else(|| {
-            let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
             module.add_function("rt_dict_new", fn_type, None)
         });
 
-        // Declare rt_dict_insert if not exists
-        let dict_insert = module.get_function("rt_dict_insert").unwrap_or_else(|| {
+        // Declare rt_dict_set if not exists (rt_dict_insert is not in the runtime spec)
+        let dict_set = module.get_function("rt_dict_set").unwrap_or_else(|| {
             let fn_type = self
                 .context
-                .void_type()
-                .fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
-            module.add_function("rt_dict_insert", fn_type, None)
+                .i8_type()
+                .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+            module.add_function("rt_dict_set", fn_type, None)
         });
 
         // Create new dict with initial capacity
         let capacity = i64_type.const_int(keys.len() as u64, false);
-        let dict_ptr = builder
+        let dict_val = builder
             .build_call(dict_new, &[capacity.into()], "dict")
             .map_err(|e| crate::error::factory::llvm_build_failed("dict_new call", &e))?
             .try_as_basic_value()
@@ -128,21 +139,24 @@ impl LlvmBackend {
             .ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_OPERATION)
-                    .with_help("dict_new should return a pointer value, not void");
-                CompileError::semantic_with_context("dict_new returned void instead of pointer".to_string(), ctx)
+                    .with_help("dict_new should return a value, not void");
+                CompileError::semantic_with_context("dict_new returned void".to_string(), ctx)
             })?;
+        let dict_i64 = self.coerce_value_to_type(dict_val, Some(i64_type.into()), builder)?;
 
         // Insert each key-value pair
         for (key, value) in keys.iter().zip(values.iter()) {
             let key_val = self.get_vreg(key, vreg_map)?;
             let value_val = self.get_vreg(value, vreg_map)?;
+            let key_i64 = self.coerce_value_to_type(key_val, Some(i64_type.into()), builder)?;
+            let val_i64 = self.coerce_value_to_type(value_val, Some(i64_type.into()), builder)?;
 
             builder
-                .build_call(dict_insert, &[dict_ptr.into(), key_val.into(), value_val.into()], "")
-                .map_err(|e| crate::error::factory::llvm_build_failed("dict_insert call", &e))?;
+                .build_call(dict_set, &[dict_i64.into(), key_i64.into(), val_i64.into()], "")
+                .map_err(|e| crate::error::factory::llvm_build_failed("dict_set call", &e))?;
         }
 
-        vreg_map.insert(dest, dict_ptr);
+        vreg_map.insert(dest, dict_i64.into());
         Ok(())
     }
 
@@ -226,44 +240,47 @@ impl LlvmBackend {
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
         let i64_type = self.context.i64_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
-        // Declare rt_slice if not exists
+        // Declare rt_slice if not exists — all i64 to match tagged-value ABI
         let slice_fn = module.get_function("rt_slice").unwrap_or_else(|| {
-            let fn_type = i8_ptr_type.fn_type(
-                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+            let fn_type = i64_type.fn_type(
+                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
                 false,
             );
             module.add_function("rt_slice", fn_type, None)
         });
 
         let coll_val = self.get_vreg(&collection, vreg_map)?;
+        let coll_i64 = self.coerce_value_to_type(coll_val, Some(i64_type.into()), builder)?;
 
         // Get start index (default to 0 if None)
-        let start_val = if let Some(s) = start {
-            self.get_vreg(&s, vreg_map)?
+        let start_i64 = if let Some(s) = start {
+            let v = self.get_vreg(&s, vreg_map)?;
+            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
         } else {
-            inkwell::values::BasicValueEnum::IntValue(i64_type.const_int(0, false))
+            i64_type.const_int(0, false).into()
         };
 
         // Get end index (default to -1 meaning end of collection)
-        let end_val = if let Some(e) = end {
-            self.get_vreg(&e, vreg_map)?
+        let end_i64 = if let Some(e) = end {
+            let v = self.get_vreg(&e, vreg_map)?;
+            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
         } else {
-            inkwell::values::BasicValueEnum::IntValue(i64_type.const_int(i64::MAX as u64, false))
+            i64_type.const_int(i64::MAX as u64, false).into()
         };
 
         // Get step (default to 1)
-        let step_val = if let Some(s) = step {
-            self.get_vreg(&s, vreg_map)?
+        let step_i64 = if let Some(s) = step {
+            let v = self.get_vreg(&s, vreg_map)?;
+            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
         } else {
-            inkwell::values::BasicValueEnum::IntValue(i64_type.const_int(1, false))
+            i64_type.const_int(1, false).into()
         };
 
         let call_site = builder
             .build_call(
                 slice_fn,
-                &[coll_val.into(), start_val.into(), end_val.into(), step_val.into()],
+                &[coll_i64.into(), start_i64.into(), end_i64.into(), step_i64.into()],
                 "slice",
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("slice call", &e))?;

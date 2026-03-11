@@ -141,6 +141,10 @@ pub struct HirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: HashSet<String>,
+    /// Function names imported via `use` statements.
+    /// These should NOT become global variables in MIR — they are only used
+    /// for type resolution during HIR lowering.
+    pub imported_function_names: HashSet<String>,
 }
 
 impl HirModule {
@@ -163,6 +167,7 @@ impl HirModule {
             lean_blocks: Vec::new(),
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
+            imported_function_names: HashSet::new(),
         }
     }
 

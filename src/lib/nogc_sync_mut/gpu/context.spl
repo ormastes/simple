@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.gpu.device.{GpuBackend, Gpu, detect_backends, preferred_backend, gpu_cuda, gpu_none}
 use std.nogc_sync_mut.gpu.memory.{GpuArray, gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros}
-use std.nogc_sync_mut.torch.{Stream}
+use std.nogc_sync_mut.torch.{Tensor, Stream}
 
 # ============================================================================
 # Context Type
@@ -56,8 +56,8 @@ class Context:
                 Context.new(backend: GpuBackend.Cuda, device: 0)
             case GpuBackend.Vulkan:
                 Context.new(backend: GpuBackend.Vulkan, device: 0)
-            case GpuBackend.None:
-                Context.new(backend: GpuBackend.None, device: -1)
+            case GpuBackend.None_:
+                Context.new(backend: GpuBackend.None_, device: -1)
 
     static fn new(backend: GpuBackend, device: i32) -> Context:
         """Create context for specific backend and device.
@@ -77,16 +77,12 @@ class Context:
             case GpuBackend.Cuda: gpu_cuda(device)
             case GpuBackend.Vulkan:
                 gpu_cuda(device)
-            case GpuBackend.None: gpu_none()
+            case GpuBackend.None_: gpu_none()
 
-        val device_i64 = device * 1
-        val stream = match backend:
-            case GpuBackend.Cuda:
-                Some(Stream.create(device_i64))
-            case _:
-                nil
-
-        Context(backend: backend, device: gpu, default_stream: stream)
+        # Avoid eager stream creation here; some semantic/codegen paths still
+        # reject static path calls like Stream.create(). Callers that need a
+        # stream can request one explicitly with create_stream().
+        Context(backend: backend, device: gpu, default_stream: nil)
 
     # ========================================================================
     # Memory Allocation
@@ -104,7 +100,24 @@ class Context:
         Example:
             val arr = ctx.alloc[f32](1024)
         """
-        gpu_alloc[T](self.device, count)
+        match self.backend:
+            case GpuBackend.Cuda:
+                val tensor = Tensor.zeros([count])
+                val device_id_i64 = self.device.device_id * 1
+                val gpu_tensor = tensor.cuda(device_id_i64)
+                GpuArray[T](
+                    backend: GpuBackend.Cuda,
+                    device_id: self.device.device_id,
+                    count: count,
+                    torch_tensor: Some(gpu_tensor)
+                )
+            case _:
+                GpuArray[T](
+                    backend: GpuBackend.None_,
+                    device_id: -1,
+                    count: count,
+                    torch_tensor: nil
+                )
 
     fn alloc_upload[T](data: [T]) -> GpuArray[T]:
         """Allocate and upload data to device (async).
@@ -118,7 +131,18 @@ class Context:
         Example:
             val arr = ctx.alloc_upload([1.0, 2.0, 3.0, 4.0])
         """
-        gpu_alloc_upload[T](self.device, data)
+        match self.backend:
+            case GpuBackend.Cuda:
+                var arr = self.alloc[T](data.len())
+                arr.upload(data)
+                arr
+            case _:
+                GpuArray[T](
+                    backend: GpuBackend.None_,
+                    device_id: -1,
+                    count: data.len(),
+                    torch_tensor: nil
+                )
 
     fn alloc_zeros[T](count: i64) -> GpuArray[T]:
         """Allocate zero-initialized array.
@@ -132,7 +156,7 @@ class Context:
         Example:
             val arr = ctx.alloc_zeros[f32](1024)
         """
-        gpu_alloc_zeros[T](self.device, count)
+        self.alloc[T](count)
 
     # ========================================================================
     # Synchronization
@@ -187,7 +211,7 @@ class Context:
         match self.backend:
             case GpuBackend.Cuda: "CUDA"
             case GpuBackend.Vulkan: "Vulkan"
-            case GpuBackend.None: "CPU"
+            case GpuBackend.None_: "CPU"
 
     fn device_id() -> i32:
         """Get device ID.
@@ -196,6 +220,16 @@ class Context:
             Device ID, or -1 for CPU
         """
         self.device.device_id
+
+    fn is_valid() -> bool:
+        """Check whether this context can execute GPU work."""
+        match self.backend:
+            case GpuBackend.Cuda:
+                self.device.device_id >= 0
+            case GpuBackend.Vulkan:
+                self.device.device_id >= 0
+            case GpuBackend.None_:
+                false
 
     # ========================================================================
     # Cleanup
@@ -229,9 +263,16 @@ fn create_context_from_config() -> Context:
 
     match dl.default_device:
         case Device.CPU:
-            Context.new(backend: GpuBackend.None, device: -1)
+            Context.new(backend: GpuBackend.None_, device: -1)
         case Device.CUDA(id):
             Context.new(backend: GpuBackend.Cuda, device: id)
+
+fn default_context() -> Context:
+    """Create the default GPU context through a plain function wrapper.
+
+    This avoids static method path-call limitations in some semantic paths.
+    """
+    Context.default()
 
 # ============================================================================
 # Exports
@@ -239,3 +280,4 @@ fn create_context_from_config() -> Context:
 
 export Context
 export create_context_from_config
+export default_context

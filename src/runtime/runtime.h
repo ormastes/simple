@@ -220,6 +220,12 @@ int64_t  rt_page_size(void);
 int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
 int64_t  rt_time_now_micros(void);  /* Microsecond precision monotonic time */
 
+/* ===== Stdin/Stdout I/O ===== */
+
+char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
+int64_t  rt_stdout_write_text(const char* s); /* writes text without newline, returns len */
+void     rt_stdout_flush(void);            /* flushes stdout */
+
 /* ===== Output ===== */
 
 void     spl_print(const char* s);

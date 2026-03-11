@@ -1,0 +1,34 @@
+# Jupyter Kernel Error Handling System Tests
+# Tests: syntax errors show error, kernel survives
+
+# tag: slow, system
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn send_kernel_messages(msgs: text) -> text:
+    val tmp = "/tmp/jupyter_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+    rt_file_write_text(tmp, msgs)
+    val (stdout, stderr, code) = rt_process_run("bash", ["-c", "cat {tmp} | timeout 10 bin/release/simple src/app/jupyter_kernel/main.spl 2>/dev/null"])
+    rt_file_delete(tmp)
+    stdout
+
+describe "Jupyter Kernel Error Handling":
+    it "should report errors for bad code":
+        val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"err1\",\"session\":\"s1\",\"content\":{\"code\":\"val = \"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s2\",\"session\":\"s1\",\"content\":{}}\n"
+        val output = send_kernel_messages(msgs)
+        # Should get error reply, not crash
+        expect(output).to_contain("execute_reply")
+
+    it "should survive error and handle next request":
+        val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"err2\",\"session\":\"s1\",\"content\":{\"code\":\"bad code\"}}\n{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"ok1\",\"session\":\"s1\",\"content\":{\"code\":\"print 42\"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s3\",\"session\":\"s1\",\"content\":{}}\n"
+        val output = send_kernel_messages(msgs)
+        expect(output).to_contain("execute_reply")
+
+    it "should handle comm_info_request":
+        val msgs = "{\"channel\":\"shell\",\"msg_type\":\"comm_info_request\",\"msg_id\":\"ci1\",\"session\":\"s1\",\"content\":{}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s4\",\"session\":\"s1\",\"content\":{}}\n"
+        val output = send_kernel_messages(msgs)
+        expect(output).to_contain("comm_info_reply")

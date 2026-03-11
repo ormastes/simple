@@ -34,11 +34,13 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
 
     // For heap objects, compare by content
     // Guard: raw untagged integers can have TAG_HEAP bits (0b001), producing
-    // invalid low addresses. Real heap pointers are always above 0x1000.
+    // invalid low addresses. Real heap pointers are always above MIN_HEAP_ADDR.
+    // On x86-64 Linux, brk heap starts >= 0x600000 even without ASLR.
+    const MIN_HEAP_ADDR: usize = 0x100000; // 1MB — safe for all 64-bit systems
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
-        if ptr_a.is_null() || ptr_b.is_null() || (ptr_a as usize) < 0x1000 || (ptr_b as usize) < 0x1000 {
+        if ptr_a.is_null() || ptr_b.is_null() || (ptr_a as usize) < MIN_HEAP_ADDR || (ptr_b as usize) < MIN_HEAP_ADDR {
             return 0;
         }
         unsafe {
@@ -129,12 +131,13 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     // String/char comparison (lexicographic)
     // Guard: raw untagged integers can have TAG_HEAP bits (0b001), producing
     // very low invalid addresses when as_heap_ptr strips the tag. Real heap
-    // pointers are always above the first page (typically > 0x1000).
+    // pointers are always above MIN_HEAP_ADDR.
+    const MIN_HEAP_ADDR: usize = 0x100000; // 1MB — safe for all 64-bit systems
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
-        let a_valid = !ptr_a.is_null() && (ptr_a as usize) >= 0x1000;
-        let b_valid = !ptr_b.is_null() && (ptr_b as usize) >= 0x1000;
+        let a_valid = !ptr_a.is_null() && (ptr_a as usize) >= MIN_HEAP_ADDR;
+        let b_valid = !ptr_b.is_null() && (ptr_b as usize) >= MIN_HEAP_ADDR;
         if a_valid && b_valid {
             unsafe {
                 if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
@@ -210,6 +213,50 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     } else {
         0
     }
+}
+
+// ============================================================================
+// Native codegen comparison (safe for raw untagged integers + tagged strings)
+// ============================================================================
+
+/// Equality comparison safe for native codegen values.
+///
+/// Native codegen stores integers as raw i64 (untagged) and strings as
+/// tagged RuntimeValues (TAG_HEAP = 0b001 from rt_string_new). This function
+/// handles both representations correctly:
+///
+/// - Same raw bits → equal (handles integers and same-pointer strings)
+/// - Both TAG_HEAP with valid pointers → content comparison (handles strings)
+/// - Otherwise → not equal (different integers or mixed types)
+#[no_mangle]
+pub extern "C" fn rt_native_eq(a: i64, b: i64) -> i64 {
+    // Fast path: identical raw bits → always equal
+    if a == b {
+        return 1;
+    }
+
+    // Check if both values have TAG_HEAP bits (potential string pointers)
+    let au = a as u64;
+    let bu = b as u64;
+    if (au & 7) == super::super::tags::TAG_HEAP && (bu & 7) == super::super::tags::TAG_HEAP {
+        // Both tagged as heap. Validate pointers before dereferencing.
+        let ptr_a = (au & !7) as usize;
+        let ptr_b = (bu & !7) as usize;
+        // Real heap pointers are above 1MB on any modern 64-bit system
+        const MIN_HEAP_ADDR: usize = 0x100000;
+        if ptr_a >= MIN_HEAP_ADDR && ptr_b >= MIN_HEAP_ADDR {
+            return rt_value_eq(RuntimeValue(au), RuntimeValue(bu)) as i64;
+        }
+    }
+
+    // Different raw values, not both valid heap pointers → not equal
+    0
+}
+
+/// Inequality comparison safe for native codegen values.
+#[no_mangle]
+pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
+    if rt_native_eq(a, b) == 1 { 0 } else { 1 }
 }
 
 #[cfg(test)]

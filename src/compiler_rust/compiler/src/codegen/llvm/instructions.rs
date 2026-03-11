@@ -50,36 +50,30 @@ impl LlvmBackend {
                         .build_int_signed_div(l, r, "div")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_signed_div", &e))?,
                     BinOp::Eq => {
-                        // Use rt_value_eq for deep equality (handles strings, etc.)
-                        let rt_func = module.get_function("rt_value_eq").unwrap_or_else(|| {
+                        // Use rt_native_eq for safe equality (handles mixed raw int / tagged string)
+                        let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                            module.add_function("rt_value_eq", fn_type, None)
+                            module.add_function("rt_native_eq", fn_type, None)
                         });
                         let call_site = builder
                             .build_call(rt_func, &[l.into(), r.into()], "eq")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_eq", &e))?;
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                         call_site.try_as_basic_value().left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value()
                     }
                     BinOp::NotEq => {
-                        // Use rt_value_eq then negate
-                        let rt_func = module.get_function("rt_value_eq").unwrap_or_else(|| {
+                        // Use rt_native_neq for safe inequality
+                        let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                            module.add_function("rt_value_eq", fn_type, None)
+                            module.add_function("rt_native_neq", fn_type, None)
                         });
                         let call_site = builder
-                            .build_call(rt_func, &[l.into(), r.into()], "eq_tmp")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_eq", &e))?;
-                        let eq_val = call_site.try_as_basic_value().left()
+                            .build_call(rt_func, &[l.into(), r.into()], "neq")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
+                        call_site.try_as_basic_value().left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
-                            .into_int_value();
-                        // Negate: ne = (eq == 0) ? 1 : 0
-                        let zero = i64_type.const_int(0, false);
-                        let cmp = builder.build_int_compare(IntPredicate::EQ, eq_val, zero, "ne")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("icmp", &e))?;
-                        builder.build_int_z_extend(cmp, i64_type, "ne_i64")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                            .into_int_value()
                     }
                     BinOp::Lt => {
                         let cmp = builder
@@ -197,31 +191,26 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e))?;
                 let result = match op {
                     BinOp::Eq => {
-                        let rt_func = module.get_function("rt_value_eq").unwrap_or_else(|| {
+                        let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                             let fn_type = self.context.i64_type().fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
-                            module.add_function("rt_value_eq", fn_type, None)
+                            module.add_function("rt_native_eq", fn_type, None)
                         });
                         let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_eq", &e))?;
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                         call_site.try_as_basic_value().left()
                             .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
                             .into_int_value()
                     }
                     BinOp::NotEq => {
-                        let rt_func = module.get_function("rt_value_eq").unwrap_or_else(|| {
+                        let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
                             let fn_type = self.context.i64_type().fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
-                            module.add_function("rt_value_eq", fn_type, None)
+                            module.add_function("rt_native_neq", fn_type, None)
                         });
-                        let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "eq_tmp")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_eq", &e))?;
-                        let eq_val = call_site.try_as_basic_value().left()
+                        let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
+                        call_site.try_as_basic_value().left()
                             .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
-                            .into_int_value();
-                        let zero = self.context.i64_type().const_int(0, false);
-                        let cmp = builder.build_int_compare(IntPredicate::EQ, eq_val, zero, "ne")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("icmp", &e))?;
-                        builder.build_int_z_extend(cmp, self.context.i64_type(), "ne_i64")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                            .into_int_value()
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         // Arithmetic on pointers (runtime representation): operate on integer form
@@ -251,26 +240,30 @@ impl LlvmBackend {
                 let l_int = self.coerce_to_int(left, i64_type, builder, "coerce_l")?;
                 let r_int = self.coerce_to_int(right, i64_type, builder, "coerce_r")?;
 
-                // Eq/NotEq use runtime for deep equality
-                if matches!(op, BinOp::Eq | BinOp::NotEq) {
-                    let rt_func = module.get_function("rt_value_eq").unwrap_or_else(|| {
+                // Eq/NotEq use rt_native_eq/neq for safe mixed-representation equality
+                if matches!(op, BinOp::Eq) {
+                    let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                         let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                        module.add_function("rt_value_eq", fn_type, None)
+                        module.add_function("rt_native_eq", fn_type, None)
                     });
                     let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_eq", &e))?;
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                     let eq_val = call_site.try_as_basic_value().left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         .into_int_value();
-                    if matches!(op, BinOp::NotEq) {
-                        let zero = i64_type.const_int(0, false);
-                        let cmp = builder.build_int_compare(IntPredicate::EQ, eq_val, zero, "ne")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("icmp", &e))?;
-                        let result = builder.build_int_z_extend(cmp, i64_type, "ne_i64")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?;
-                        return Ok(result.into());
-                    }
                     return Ok(eq_val.into());
+                }
+                if matches!(op, BinOp::NotEq) {
+                    let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
+                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        module.add_function("rt_native_neq", fn_type, None)
+                    });
+                    let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
+                    let neq_val = call_site.try_as_basic_value().left()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                        .into_int_value();
+                    return Ok(neq_val.into());
                 }
 
                 let result = match op {
@@ -598,14 +591,32 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("trunc", &e))?;
                 Ok(cast.into())
             }
-            // float → int
+            // float → int (bitcast to preserve tagged-value ABI bit patterns)
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it))
+                if it.get_bit_width() == 64 =>
+            {
+                let cast = builder
+                    .build_bit_cast(fv, it, "f2i")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_f2i", &e))?;
+                Ok(cast.into())
+            }
+            // float → int (different widths, fall back to fptosi)
             (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it)) => {
                 let cast = builder
                     .build_float_to_signed_int(fv, it, "fptosi")
                     .map_err(|e| crate::error::factory::llvm_build_failed("float_to_int", &e))?;
                 Ok(cast.into())
             }
-            // int → float
+            // int → float (bitcast to preserve tagged-value ABI bit patterns)
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft))
+                if iv.get_type().get_bit_width() == 64 =>
+            {
+                let cast = builder
+                    .build_bit_cast(iv, ft, "i2f")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_i2f", &e))?;
+                Ok(cast.into())
+            }
+            // int → float (different widths, fall back to sitofp)
             (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft)) => {
                 let cast = builder
                     .build_signed_int_to_float(iv, ft, "sitofp")

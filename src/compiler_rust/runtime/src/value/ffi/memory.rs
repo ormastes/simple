@@ -66,6 +66,15 @@ pub extern "C" fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64 {
     }
 }
 
+/// Read i32 value from addr+offset
+#[no_mangle]
+pub extern "C" fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32 {
+    unsafe {
+        let ptr = (addr as *const u8).offset(offset as isize) as *const i32;
+        ptr.read()
+    }
+}
+
 /// Write u8 value at addr+offset
 #[no_mangle]
 pub extern "C" fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) {

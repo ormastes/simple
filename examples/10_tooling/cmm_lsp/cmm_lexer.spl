@@ -257,18 +257,32 @@ fn lex_macro_ref(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
         is_recursive = true
         i = i + 1
 
-    # When &&name immediately follows an expression-ending char (ident, digit, ), "),
-    # split into & (AND operator) + &name (macro ref).
-    # Recursive macro &&name only makes sense when preceded by whitespace/operator.
-    # Only split when an identifier follows (so &&( stays as logical AND + paren).
-    # Covers: &var&&var2, func()&&macro, "str"&&var
+    # When &&name immediately follows a non-hex-number token, split into & (AND) + &name.
+    # Requires identifier to follow (so &&( stays as LogicalAnd).
     if is_recursive and pos > 0 and i < length and is_ident_char(line[i:i + 1]):
         val prev_ch = line[pos - 1:pos]
-        if is_ident_char(prev_ch) or prev_ch == ")" or prev_ch == "\"" or is_digit(prev_ch):
+        var split_here = false
+        # Split after non-hex identifier chars (g-z, G-Z, _)
+        if is_ident_char(prev_ch) and not is_hex_digit(prev_ch) and not is_digit(prev_ch):
+            split_here = true
+        # Split after closing quote, closing paren, or trailing dot
+        if prev_ch == "\"" or prev_ch == ")" or prev_ch == ".":
+            split_here = true
+        # Split after digits/hex that are part of a macro name (&name ending in digit)
+        # Scan backwards: if we find & before ident chars, it's &macro&&name, so split.
+        if not split_here and (is_digit(prev_ch) or is_hex_digit(prev_ch)):
+            var back = pos - 1
+            while back > 0 and is_ident_char(line[back - 1:back]):
+                back = back - 1
+            # If the character before the identifier is &, this is &macro_name&&
+            if back > 0 and line[back - 1:back] == "&":
+                split_here = true
+        if split_here:
             return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
 
-    # Special case: && as logical AND operator (no identifier follows)
-    if is_recursive and (i >= length or not is_ident_char(line[i:i + 1])):
+    # Special case: && as logical AND operator (no identifier follows, or digit follows)
+    # Macro names start with letter or _, NOT with digit. &&0xFF = LogicalAnd + hex.
+    if is_recursive and (i >= length or not is_ident_char(line[i:i + 1]) or is_digit(line[i:i + 1])):
         return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalAnd, line: line_num, column: col, text: "&&"), new_pos: i)
 
     # Special case: & as binary AND operator (no identifier follows, or digit follows)
@@ -317,9 +331,9 @@ fn lex_string_literal(line: text, pos: i64, line_num: i64, col: i64) -> LexResul
             content = content + ch
             i = i + 1
 
-    # Unterminated string
+    # Unterminated string — PRACTICE extends to EOL, treat as valid string
     val full_text = line[pos:i]
-    LexResult(token: CmmToken(kind: CmmTokenKind.Error("Unterminated string"), line: line_num, column: col, text: full_text), new_pos: i)
+    LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: i)
 
 # --- Char literal lexing ---
 
@@ -354,6 +368,14 @@ fn lex_number(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
     # Consume digit sequence
     while i < length and is_digit(line[i:i + 1]):
         i = i + 1
+
+    # Check for bare hex: digits followed by hex letters (a-f/A-F) without 0x prefix.
+    # CMM allows bare hex like 9ff, 0ffff8000, etc.
+    if i < length and is_hex_digit(line[i:i + 1]) and not is_digit(line[i:i + 1]):
+        while i < length and is_hex_digit(line[i:i + 1]):
+            i = i + 1
+        val hex_text = line[pos:i]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.HexNumber(hex_text), line: line_num, column: col, text: hex_text), new_pos: i)
 
     # Check for dot
     if i < length and line[i:i + 1] == ".":
@@ -670,6 +692,17 @@ fn lex_operator_or_delimiter(line: text, pos: i64, line_num: i64, col: i64) -> L
     if ch == ":":
         return LexResult(token: CmmToken(kind: CmmTokenKind.Colon, line: line_num, column: col, text: ch), new_pos: pos + 1)
     if ch == ".":
+        # Fractional number: .digits (e.g. .1s, .5ms, .001)
+        if pos + 1 < length and is_digit(line[pos + 1:pos + 2]):
+            var i = pos + 1
+            while i < length and is_digit(line[i:i + 1]):
+                i = i + 1
+            # Check for time suffix
+            val time_result = try_lex_time_suffix(line, i, pos, line_num, col)
+            if time_result.?:
+                return time_result ?? LexResult(token: CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: ""), new_pos: 0)
+            val float_text = line[pos:i]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.FloatNumber(float_text), line: line_num, column: col, text: float_text), new_pos: i)
         return LexResult(token: CmmToken(kind: CmmTokenKind.Dot, line: line_num, column: col, text: ch), new_pos: pos + 1)
 
     if ch == "\\":

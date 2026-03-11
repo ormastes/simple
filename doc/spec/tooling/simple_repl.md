@@ -2,52 +2,37 @@
 
 ## Overview
 
-Interactive Read-Eval-Print-Loop for exploring Simple language.
+Interactive Read-Eval-Print-Loop for exploring Simple language. Implemented in pure Simple using temp-file accumulation and subprocess execution.
 
 ## Usage
 
 ```bash
-simple_repl                        # Start REPL
-simple_repl --load file.spl        # Load file before starting
-simple_repl --no-prelude           # Don't load prelude
+# Start the REPL
+bin/release/simple src/app/repl/main.spl
+
+# Via CLI dispatch
+bin/simple repl
 ```
-
-## Options
-
-| Flag | Description |
-|------|-------------|
-| `--load <file>` | Load file before starting |
-| `--no-prelude` | Don't auto-import prelude |
-| `--no-colors` | Disable syntax highlighting |
-| `--history <file>` | History file location |
 
 ## REPL Session
 
 ```
-Simple REPL v0.1.0
-Type :help for commands, :quit to exit
+Simple Language REPL v0.2.0
+Type ':help' for commands, ':quit' to exit
 
->>> let x = 42
+>>> val x = 42
+>>> print x
 42
 
->>> x * 2
-84
+>>> 2 + 3
+5
 
->>> fn double(n: Int) -> Int:
-...     return n * 2
+>>> fn double(n: i64) -> i64:
+...     n * 2
 ...
-<function double>
 
->>> double(21)
+>>> print double(21)
 42
-
->>> import core.json
-
->>> json.parse('{"name": "test"}')
-Ok({"name": "test"})
-
->>> :type x
-Int
 
 >>> :quit
 Goodbye!
@@ -57,121 +42,95 @@ Goodbye!
 
 | Command | Description |
 |---------|-------------|
-| `:help` | Show help |
-| `:quit` / `:q` | Exit REPL |
-| `:clear` | Clear screen |
-| `:reset` | Reset environment |
-| `:load <file>` | Load and execute file |
-| `:type <expr>` | Show type of expression |
-| `:doc <name>` | Show documentation |
+| `:help`, `:h` | Show help |
+| `:quit`, `:q`, `:exit` | Exit REPL |
+| `:clear` | Clear accumulated state |
 | `:history` | Show command history |
-| `:save <file>` | Save session to file |
+| `:show` | Show accumulated definitions |
+| `:load <file>` | Load and execute file |
+| `exit`, `quit`, `exit()`, `quit()` | Exit (without colon prefix) |
 
 ## Features
 
 ### Multi-line Input
 
+Lines ending with `:` enter continuation mode. Empty line submits block:
+
 ```
->>> fn factorial(n: Int) -> Int:
+>>> fn factorial(n: i64) -> i64:
 ...     if n <= 1:
 ...         return 1
-...     return n * factorial(n - 1)
+...     n * factorial(n - 1)
 ...
-<function factorial>
 
->>> factorial(5)
+>>> print factorial(5)
 120
 ```
 
-### Tab Completion
+### State Persistence
+
+Declarations persist across evaluations:
 
 ```
->>> json.<TAB>
-json.parse    json.stringify    json.Value
-
->>> let s = "hello"
->>> s.<TAB>
-s.len    s.trim    s.split    s.replace    s.upper    s.lower
-```
-
-### History Navigation
-
-- Up/Down arrows: Navigate history
-- Ctrl+R: Reverse search
-- History persists across sessions
-
-### Syntax Highlighting
-
-- Keywords in blue
-- Strings in green
-- Numbers in cyan
-- Comments in gray
-- Errors in red
-
-## Implementation Notes
-
-1. Line editing: Use readline-like library or custom
-2. Multi-line detection: Track open brackets, colons
-3. Evaluation: Use interpreter with persistent environment
-4. Completion: Parse current scope for available names
-5. History: Save to `~/.simple_history`
-
-## Environment
-
-Variables and functions defined in REPL persist:
-
-```
->>> let config = {"debug": true}
->>> fn is_debug() -> Bool:
-...     return config["debug"]
+>>> val config = "debug"
+>>> fn is_debug() -> bool:
+...     config == "debug"
 ...
->>> is_debug()
+
+>>> print is_debug()
 true
 ```
 
-## Error Handling
+### Expression Auto-print
+
+Bare expressions are automatically wrapped and printed:
 
 ```
->>> 1 / 0
-Error: Division by zero
-
->>> undefined_var
-Error: Undefined variable 'undefined_var'
-
->>> fn bad():
-...     return
-...
-Error: Missing return value
+>>> 2 + 3
+5
+>>> "hello".len()
+5
 ```
+
+### Error Recovery
+
+Invalid input shows an error but doesn't crash:
+
+```
+>>> this is not valid
+Error: ...
+
+>>> print "still alive"
+still alive
+```
+
+## Evaluation Strategy
+
+1. **Declarations** (`val`, `var`, `fn`, `class`, etc.): Appended to accumulated state, re-run via subprocess
+2. **Statements** (`if`, `while`, `for`, `print`, assignments): Appended to accumulated state
+3. **Expressions** (anything else): Wrapped in `fn __repl_expr_N()` helper, not persisted
+4. **Failures**: Rolled back to previous accumulated state
+
+## Implementation Notes
+
+- **Source:** `src/app/repl/main.spl` (249 lines)
+- **No compiler imports:** Uses `bin/release/simple` subprocess for fast startup
+- **Module-level state:** `var` declarations at module level (avoids closure mutation bug)
+- **Text accumulation:** Uses `text` concatenation (avoids `.len()`/`.push()` array path call bug)
+- **Temp file:** `/tmp/simple_repl_{pid}.spl`
+- **Subprocess:** `rt_process_run("bash", ["-c", "bin/release/simple path </dev/null 2>&1"])`
 
 ## Dependencies
 
-- Interpreter integration
-- Line editing (readline-like)
-- Terminal handling (colors, cursor)
-- `sys_get_args` - Command-line arguments
+- `bin/release/simple` binary
+- Runtime extern functions: `input()`, `stdout_write()`, `stdout_flush()`, `rt_file_write_text()`, `rt_file_delete()`, `rt_file_exists()`, `rt_getpid()`, `rt_process_run()`, `rt_file_read_text()`
 
-## Example Session
+## Test Files
 
-```
-$ simple_repl --load mylib.spl
-
-Simple REPL v0.1.0
-Loaded: mylib.spl (3 functions, 1 class)
-Type :help for commands, :quit to exit
-
->>> MyClass.new("test")
-MyClass { name: "test" }
-
->>> :type MyClass
-class MyClass
-
->>> :doc MyClass.new
-Creates a new MyClass instance.
-
-@param name: The name for this instance
-@returns: A new MyClass
-
->>> :quit
-Goodbye!
-```
+| File | Tests |
+|------|-------|
+| `test/system/repl/repl_basic_eval_system_spec.spl` | 5 |
+| `test/system/repl/repl_state_persistence_system_spec.spl` | 3 |
+| `test/system/repl/repl_multiline_system_spec.spl` | 2 |
+| `test/system/repl/repl_error_recovery_system_spec.spl` | 2 |
+| `test/system/repl/repl_commands_system_spec.spl` | 7 |

@@ -1,0 +1,150 @@
+# T32 Tool — MCP CMM CLI: Validator tool handlers
+# Tools: cmm_bulk_validate, cmm_check_gui, cmm_report
+
+export handle_cmm_bulk_validate, handle_cmm_check_gui, handle_cmm_report
+
+use shared.mcp_json_base.{t32_js, t32_jp, t32_jo1, t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
+use cmm.cmm_parser.{parse_cmm_file, parse_cmm_source}
+use cmm.cmm_analyzer.{analyze_program}
+use cmm.cmm_diagnostics.{format_diagnostic}
+use cmm.cmm_ast.{CmmStmt}
+use converter.gui_commands.{is_gui_only, is_gui_transform}
+use converter.converter_report.{generate_report}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+fn handle_cmm_bulk_validate(id: text, body: text) -> text:
+    val dir = t32_extract_field(body, "dir")
+    if dir == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: dir")
+
+    val files = collect_cmm(dir)
+    var total = 0
+    var ok_count = 0
+    var error_count = 0
+    var errors: [text] = []
+
+    var i = 0
+    while i < files.len():
+        val content = rt_file_read_text(files[i]) ?? ""
+        if content.starts_with("trace32 encrypted cmm file"):
+            i = i + 1
+            continue
+        total = total + 1
+        val program = parse_cmm_source(content)
+        if program.errors.len() > 0:
+            error_count = error_count + 1
+            if errors.len() < 10:
+                errors.push(files[i] + ": " + program.errors[0])
+        else:
+            ok_count = ok_count + 1
+        i = i + 1
+
+    var r = t32_LB()
+    r = r + t32_jp("dir", t32_js(dir))
+    r = r + "," + t32_jp("total", str(total))
+    r = r + "," + t32_jp("ok", str(ok_count))
+    r = r + "," + t32_jp("errors", str(error_count))
+    if errors.len() > 0:
+        var err_arr = t32_SB_L()
+        var first = true
+        for e in errors:
+            if not first:
+                err_arr = err_arr + ","
+            first = false
+            err_arr = err_arr + t32_js(e)
+        err_arr = err_arr + t32_SB_R()
+        r = r + "," + t32_jp("top_errors", err_arr)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+fn handle_cmm_check_gui(id: text, body: text) -> text:
+    val path = t32_extract_field(body, "path")
+    if path == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: path")
+    if not rt_file_exists(path):
+        return t32_make_tool_error(id, -32602, "File not found: " + path)
+
+    val program = parse_cmm_file(path)
+    var gui_only_cmds: [text] = []
+    var transform_cmds: [text] = []
+
+    var i = 0
+    while i < program.statements.len():
+        val cmd_name = get_cmd_name(program.statements[i])
+        if cmd_name != "":
+            if is_gui_only(cmd_name):
+                gui_only_cmds.push(cmd_name)
+            elif is_gui_transform(cmd_name):
+                transform_cmds.push(cmd_name)
+        i = i + 1
+
+    var cli_ready = "true"
+    if gui_only_cmds.len() > 0 or transform_cmds.len() > 0:
+        cli_ready = "false"
+
+    var r = t32_LB()
+    r = r + t32_jp("path", t32_js(path))
+    r = r + "," + t32_jp("gui_only_count", str(gui_only_cmds.len()))
+    r = r + "," + t32_jp("transform_count", str(transform_cmds.len()))
+    r = r + "," + t32_jp("total_stmts", str(program.statements.len()))
+    r = r + "," + t32_jp("cli_ready", cli_ready)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+fn handle_cmm_report(id: text, body: text) -> text:
+    val dir = t32_extract_field(body, "dir")
+    if dir == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: dir")
+
+    val report = generate_report(dir)
+
+    var r = t32_LB()
+    r = r + t32_jp("dir", t32_js(dir))
+    r = r + "," + t32_jp("total_files", str(report.total_files))
+    r = r + "," + t32_jp("total_gui_commands", str(report.total_gui_commands))
+    if report.command_stats.len() > 0:
+        var stats_arr = t32_SB_L()
+        var first = true
+        var si = 0
+        while si < report.command_stats.len():
+            if not first:
+                stats_arr = stats_arr + ","
+            first = false
+            stats_arr = stats_arr + t32_LB() + t32_jp("command", t32_js(report.command_stats[si].command)) + "," + t32_jp("count", str(report.command_stats[si].count)) + t32_RB()
+            si = si + 1
+        stats_arr = stats_arr + t32_SB_R()
+        r = r + "," + t32_jp("command_stats", stats_arr)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+# --- Helpers ---
+
+fn get_cmd_name(stmt: CmmStmt) -> text:
+    match stmt:
+        case CmmStmt.Command(cmd, params, s): return cmd
+        case CmmStmt.DeviceCommand(dev, cmd, params, s): return cmd
+        case _: return ""
+
+fn collect_cmm(dir: text) -> [text]:
+    var results: [text] = []
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry == "." or entry == "..":
+            i = i + 1
+            continue
+        val full_path = dir + "/" + entry
+        if entry.len() >= 5 and entry[entry.len() - 4:entry.len()].to_lower() == ".cmm":
+            results.push(full_path)
+        elif not entry.contains("."):
+            val sub = collect_cmm(full_path)
+            var si = 0
+            while si < sub.len():
+                results.push(sub[si])
+                si = si + 1
+        i = i + 1
+    results

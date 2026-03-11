@@ -569,6 +569,19 @@ impl CallTarget {
         }
     }
 
+    /// Return a new CallTarget with the same effect variant but a different name.
+    pub fn with_name(&self, new_name: String) -> Self {
+        match self {
+            CallTarget::Pure(_) => CallTarget::Pure(new_name),
+            CallTarget::Io(_) => CallTarget::Io(new_name),
+            CallTarget::Blocking(_) => CallTarget::Blocking(new_name),
+            CallTarget::GcAllocating(_) => CallTarget::GcAllocating(new_name),
+            CallTarget::Net(_) => CallTarget::Net(new_name),
+            CallTarget::Fs(_) => CallTarget::Fs(new_name),
+            CallTarget::Unsafe(_) => CallTarget::Unsafe(new_name),
+        }
+    }
+
     /// Get the effect of this call.
     pub fn effect(&self) -> Effect {
         match self {

@@ -164,18 +164,17 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(cc, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
-                // Use rt_value_compare for proper comparison of all types (int, float, string/char).
-                let cmp_id = ctx.runtime_funcs["rt_value_compare"];
-                let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
-                let call = adapted_call(builder, cmp_ref, &[lhs, rhs]);
-                let cmp_result = builder.inst_results(call)[0];
-                let cmp_i8 = match op {
-                    BinOp::Lt => builder.ins().icmp_imm(IntCC::SignedLessThan, cmp_result, 0),
-                    BinOp::Gt => builder.ins().icmp_imm(IntCC::SignedGreaterThan, cmp_result, 0),
-                    BinOp::LtEq => builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, cmp_result, 0),
-                    BinOp::GtEq => builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                // Native integer comparison. Works correctly for raw untagged
+                // integers (which is what native codegen uses). String ordering
+                // via < > operators is handled by explicit runtime calls in source.
+                let cc = match op {
+                    BinOp::Lt => IntCC::SignedLessThan,
+                    BinOp::Gt => IntCC::SignedGreaterThan,
+                    BinOp::LtEq => IntCC::SignedLessThanOrEqual,
+                    BinOp::GtEq => IntCC::SignedGreaterThanOrEqual,
                     _ => unreachable!(),
                 };
+                let cmp_i8 = builder.ins().icmp(cc, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             }
         }
@@ -185,11 +184,13 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
-                // Use native icmp for i64 operands — avoids rt_value_eq I8 return
-                // type issue where upper 56 bits of RAX are garbage, causing
-                // ensure_i64 sign-extension to corrupt the result (SIGSEGV).
-                let cmp = builder.ins().icmp(IntCC::Equal, lhs, rhs);
-                ensure_i64(builder, cmp)
+                // Use rt_native_eq for safe equality of native codegen values.
+                // Handles both raw untagged integers (icmp fast path) and
+                // tagged heap strings (content comparison via rt_value_eq).
+                let eq_id = ctx.runtime_funcs["rt_native_eq"];
+                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
+                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
+                builder.inst_results(call)[0]
             }
         }
         BinOp::NotEq => {
@@ -198,11 +199,11 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
-                // Use native icmp for i64 operands — avoids rt_value_eq I8 return
-                // type issue where upper 56 bits of RAX are garbage, causing
-                // ensure_i64 sign-extension to corrupt the result (SIGSEGV).
-                let cmp = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
-                ensure_i64(builder, cmp)
+                // Use rt_native_neq for safe inequality of native codegen values.
+                let neq_id = ctx.runtime_funcs["rt_native_neq"];
+                let neq_ref = ctx.module.declare_func_in_func(neq_id, builder.func);
+                let call = adapted_call(builder, neq_ref, &[lhs, rhs]);
+                builder.inst_results(call)[0]
             }
         }
         BinOp::Is => {

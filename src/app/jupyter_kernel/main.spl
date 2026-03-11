@@ -1,0 +1,287 @@
+# Jupyter Kernel for Simple Language
+# JSON-lines protocol over stdin/stdout — all-in-one (no cross-module imports)
+#
+# Protocol: Python wrapper sends JSON-lines on stdin, kernel replies on stdout
+# Message format: {"channel":"shell","msg_type":"...","msg_id":"...","session":"...","content":{...}}
+
+extern fn input() -> text
+extern fn stdout_write(s: text)
+extern fn stdout_flush()
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# JSON Helpers (inlined to avoid cross-module issues)
+# ============================================================================
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(Q(), r"\" + Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
+
+fn js(s: text) -> text:
+    Q() + escape_json(s) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+
+fn jo5(p1: text, p2: text, p3: text, p4: text, p5: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + "," + p5 + RB()
+
+fn extract_field(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(Q()):
+        # Parse JSON string value, handling escape sequences
+        var result_parts: [text] = []
+        var pos = 1
+        var escaped = false
+        while pos < trimmed.len():
+            val ch = trimmed.char_at(pos)
+            if escaped:
+                if ch == Q():
+                    result_parts.push(Q())
+                elif ch == "n":
+                    result_parts.push("\n")
+                elif ch == "r":
+                    result_parts.push("\r")
+                elif ch == "t":
+                    result_parts.push("\t")
+                elif ch == r"\":
+                    result_parts.push(r"\")
+                else:
+                    result_parts.push(ch)
+                escaped = false
+            elif ch == r"\":
+                escaped = true
+            elif ch == Q():
+                break
+            else:
+                result_parts.push(ch)
+            pos = pos + 1
+        return result_parts.join("")
+    else:
+        var parts: [text] = []
+        for ch in trimmed:
+            if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+                break
+            parts.push(ch)
+        return parts.join("")
+
+# ============================================================================
+# Session state (module-level, all in this file)
+# Uses text accumulation instead of arrays to avoid .len()/.push() path issues
+# ============================================================================
+
+var SESSION_CODE_ALL: text = ""
+var SESSION_CODE_PREV: text = ""
+var SESSION_TEMP_PATH: text = ""
+var SESSION_PREV_OUTPUT_LEN: i64 = 0
+
+fn session_init():
+    val pid = rt_getpid()
+    SESSION_TEMP_PATH = "/tmp/simple_jupyter_{pid}.spl"
+
+fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
+    # Save previous state for rollback on error
+    SESSION_CODE_PREV = SESSION_CODE_ALL
+    SESSION_CODE_ALL = SESSION_CODE_ALL + code + "\n"
+
+    rt_file_write_text(SESSION_TEMP_PATH, SESSION_CODE_ALL)
+
+    # Use bash to redirect stdin from /dev/null — prevents subprocess
+    # from inheriting the kernel's stdin (which has JSON-lines data)
+    val (out, err, exit_code) = rt_process_run("bash", ["-c", "bin/release/simple " + SESSION_TEMP_PATH + " </dev/null 2>&1"])
+
+    if exit_code != 0:
+        # Rollback failed cell
+        SESSION_CODE_ALL = SESSION_CODE_PREV
+        return (out, err, false)
+
+    # Only return NEW output (delta from previous execution)
+    var new_output = out
+    if SESSION_PREV_OUTPUT_LEN > 0 and out.len() > SESSION_PREV_OUTPUT_LEN:
+        new_output = out.substring(SESSION_PREV_OUTPUT_LEN)
+    elif SESSION_PREV_OUTPUT_LEN > 0 and out.len() <= SESSION_PREV_OUTPUT_LEN:
+        new_output = ""
+    SESSION_PREV_OUTPUT_LEN = out.len()
+
+    return (new_output, "", true)
+
+fn session_is_complete(code: text) -> text:
+    val trimmed = code.trim()
+    if trimmed == "":
+        return "complete"
+    if trimmed.ends_with(":"):
+        return "incomplete"
+    "complete"
+
+# ============================================================================
+# Kernel state
+# ============================================================================
+
+var KERNEL_RUNNING: bool = true
+var EXECUTION_COUNT: i64 = 0
+
+fn send_message(channel: text, msg_type: text, parent_msg_id: text, content: text):
+    val msg = jo4(
+        jp("channel", js(channel)),
+        jp("msg_type", js(msg_type)),
+        jp("parent_msg_id", js(parent_msg_id)),
+        jp("content", content)
+    )
+    stdout_write(msg + "\n")
+    stdout_flush()
+
+fn send_status(parent_msg_id: text, state: text):
+    val content = jo1(jp("execution_state", js(state)))
+    send_message("iopub", "status", parent_msg_id, content)
+
+fn handle_kernel_info(msg_id: text):
+    send_status(msg_id, "busy")
+    val lang_info = jo5(
+        jp("name", js("simple")),
+        jp("version", js("0.2.0")),
+        jp("mimetype", js("text/x-simple")),
+        jp("file_extension", js(".spl")),
+        jp("pygments_lexer", js("text"))
+    )
+    val content = jo5(
+        jp("status", js("ok")),
+        jp("protocol_version", js("5.4")),
+        jp("implementation", js("simple-kernel")),
+        jp("implementation_version", js("0.1.0")),
+        jp("language_info", lang_info)
+    )
+    send_message("shell", "kernel_info_reply", msg_id, content)
+    send_status(msg_id, "idle")
+
+fn handle_execute(msg_id: text, raw_msg: text):
+    send_status(msg_id, "busy")
+    EXECUTION_COUNT = EXECUTION_COUNT + 1
+    val code = extract_field(raw_msg, "code")
+
+    val input_content = jo2(
+        jp("code", js(code)),
+        jp("execution_count", str(EXECUTION_COUNT))
+    )
+    send_message("iopub", "execute_input", msg_id, input_content)
+
+    val (output, error, success) = session_execute(code, EXECUTION_COUNT)
+
+    if success:
+        if output.trim() != "":
+            val stream_content = jo2(
+                jp("name", js("stdout")),
+                jp("text", js(output))
+            )
+            send_message("iopub", "stream", msg_id, stream_content)
+        val reply_content = jo2(
+            jp("status", js("ok")),
+            jp("execution_count", str(EXECUTION_COUNT))
+        )
+        send_message("shell", "execute_reply", msg_id, reply_content)
+    else:
+        val err_content = jo3(
+            jp("ename", js("ExecutionError")),
+            jp("evalue", js(error)),
+            jp("traceback", SB_L() + js(error) + SB_R())
+        )
+        send_message("iopub", "error", msg_id, err_content)
+        val reply_content = jo3(
+            jp("status", js("error")),
+            jp("execution_count", str(EXECUTION_COUNT)),
+            jp("ename", js("ExecutionError"))
+        )
+        send_message("shell", "execute_reply", msg_id, reply_content)
+
+    send_status(msg_id, "idle")
+
+fn handle_is_complete(msg_id: text, raw_msg: text):
+    val code = extract_field(raw_msg, "code")
+    val status = session_is_complete(code)
+    val content = jo1(jp("status", js(status)))
+    send_message("shell", "is_complete_reply", msg_id, content)
+
+fn handle_shutdown(msg_id: text):
+    val content = jo2(
+        jp("status", js("ok")),
+        jp("restart", "false")
+    )
+    send_message("shell", "shutdown_reply", msg_id, content)
+    KERNEL_RUNNING = false
+
+fn handle_comm_info(msg_id: text):
+    val content = jo2(
+        jp("status", js("ok")),
+        jp("comms", LB() + RB())
+    )
+    send_message("shell", "comm_info_reply", msg_id, content)
+
+fn kernel_main():
+    session_init()
+    while KERNEL_RUNNING:
+        val line = input() ?? ""
+        if line == "":
+            KERNEL_RUNNING = false
+            continue
+
+        val msg_type = extract_field(line, "msg_type")
+        val msg_id = extract_field(line, "msg_id")
+
+        if msg_type == "kernel_info_request":
+            handle_kernel_info(msg_id)
+        elif msg_type == "execute_request":
+            handle_execute(msg_id, line)
+        elif msg_type == "is_complete_request":
+            handle_is_complete(msg_id, line)
+        elif msg_type == "shutdown_request":
+            handle_shutdown(msg_id)
+        elif msg_type == "comm_info_request":
+            handle_comm_info(msg_id)
+
+fn main():
+    kernel_main()

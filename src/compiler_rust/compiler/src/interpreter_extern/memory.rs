@@ -302,6 +302,21 @@ pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Read i32 value from addr+offset.
+///
+/// Callable from Simple as: `rt_ptr_read_i32(addr: i64, offset: i64) -> i32`
+pub fn rt_ptr_read_i32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_ptr_read_i32 requires 2 arguments (addr, offset)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    unsafe {
+        let ptr = (addr as *const u8).offset(offset as isize) as *const i32;
+        Ok(Value::Int(ptr.read() as i64))
+    }
+}
+
 /// Write i32 value at addr+offset.
 ///
 /// Callable from Simple as: `rt_ptr_write_i32(addr: i64, offset: i64, value: i64)`

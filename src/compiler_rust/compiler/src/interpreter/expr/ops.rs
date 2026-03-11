@@ -159,6 +159,120 @@ pub(super) fn eval_op_expr(
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::Bool(right_val.truthy())));
                 }
+                BinOp::ShiftRight => {
+                    // Compose operator: f >> g → \__c0: g(f(__c0))
+                    // Creates a lambda that chains the two functions
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let is_func = |v: &Value| matches!(v, Value::Function { .. } | Value::Lambda { .. } | Value::NativeFunction(_));
+                    if is_func(&left_val) && is_func(&right_val) {
+                        // Build AST body: __compose_g(__compose_f(__c0))
+                        let param_ident = Expr::Identifier("__c0".to_string());
+                        let inner_call = Expr::Call {
+                            callee: Box::new(Expr::Identifier("__compose_f".to_string())),
+                            args: vec![simple_parser::ast::Argument::new(None, param_ident)],
+                        };
+                        let outer_call = Expr::Call {
+                            callee: Box::new(Expr::Identifier("__compose_g".to_string())),
+                            args: vec![simple_parser::ast::Argument::new(None, inner_call)],
+                        };
+                        let mut captured_env: Env = HashMap::new();
+                        captured_env.insert("__compose_f".to_string(), left_val);
+                        captured_env.insert("__compose_g".to_string(), right_val);
+                        return Ok(Some(Value::Lambda {
+                            params: vec!["__c0".to_string()],
+                            body: Box::new(outer_call),
+                            env: captured_env,
+                        }));
+                    }
+                    // Fall through to integer shift-right for non-function operands
+                }
+                BinOp::PipeForward => {
+                    // Pipe forward: x |> f → f(x), x |> f(a) → f(x, a)
+                    // Must intercept BEFORE evaluating right side to prepend left as first arg
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    match right.as_ref() {
+                        Expr::Call { callee, args } => {
+                            // x |> f(a, b) → f(x, a, b) — prepend left as first arg
+                            let callee_val = evaluate_expr(callee, env, functions, classes, enums, impl_methods)?;
+                            let mut all_args = vec![left_val];
+                            for arg in args {
+                                let arg_val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                                all_args.push(arg_val);
+                            }
+                            match callee_val {
+                                Value::Function { def, captured_env, .. } => {
+                                    let mut env_clone = captured_env.clone();
+                                    return Ok(Some(super::super::exec_function_with_values(
+                                        &def, &all_args, &mut env_clone, functions, classes, enums, impl_methods,
+                                    )?));
+                                }
+                                Value::Lambda { params, body, env: lambda_env } => {
+                                    let mut local_env = lambda_env.clone();
+                                    for (i, param_name) in params.iter().enumerate() {
+                                        if let Some(arg) = all_args.get(i) {
+                                            local_env.insert(param_name.clone(), arg.clone());
+                                        }
+                                    }
+                                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+                                    return Ok(Some(result));
+                                }
+                                _ => {
+                                    // Try looking up function by name
+                                    if let Expr::Identifier(name) = callee.as_ref() {
+                                        if let Some(func_def) = functions.get(name).cloned() {
+                                            let mut env_clone = env.clone();
+                                            return Ok(Some(super::super::exec_function_with_values(
+                                                &func_def, &all_args, &mut env_clone, functions, classes, enums, impl_methods,
+                                            )?));
+                                        }
+                                    }
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::TYPE_MISMATCH)
+                                        .with_help("pipe forward |> requires a callable on the right side");
+                                    return Err(CompileError::semantic_with_context("pipe forward: callee is not a function", ctx));
+                                }
+                            }
+                        }
+                        _ => {
+                            // x |> f → f(x) — simple case
+                            let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                            match right_val {
+                                Value::Function { def, captured_env, .. } => {
+                                    let mut env_clone = captured_env.clone();
+                                    return Ok(Some(super::super::exec_function_with_values(
+                                        &def, &[left_val], &mut env_clone, functions, classes, enums, impl_methods,
+                                    )?));
+                                }
+                                Value::Lambda { params, body, env: lambda_env } => {
+                                    let mut local_env = lambda_env.clone();
+                                    if let Some(param_name) = params.first() {
+                                        local_env.insert(param_name.clone(), left_val);
+                                    }
+                                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+                                    return Ok(Some(result));
+                                }
+                                _ => {
+                                    // Try looking up function by name from the right expression
+                                    if let Expr::Identifier(name) = right.as_ref() {
+                                        if let Some(func_def) = functions.get(name).cloned() {
+                                            let mut env_clone = env.clone();
+                                            return Ok(Some(super::super::exec_function_with_values(
+                                                &func_def, &[left_val], &mut env_clone, functions, classes, enums, impl_methods,
+                                            )?));
+                                        }
+                                    }
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::TYPE_MISMATCH)
+                                        .with_help("pipe forward operator |> requires a function on the right side");
+                                    return Err(CompileError::semantic_with_context(
+                                        format!("cannot pipe to non-function: {}", right_val.type_name()), ctx,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {} // Fall through to normal handling
             }
 
@@ -575,33 +689,8 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::PipeForward => {
-                    // Pipe forward: left |> right means right(left)
-                    // right should be a function, left is the argument
-                    match right_val {
-                        Value::Function { def, captured_env, .. } => {
-                            // Call the function with left_val as argument
-                            let mut captured_env_clone = captured_env.clone();
-                            let args = [left_val];
-                            super::super::exec_function_with_values(
-                                &def,
-                                &args,
-                                &mut captured_env_clone,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )
-                        }
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::TYPE_MISMATCH)
-                                .with_help("pipe forward operator |> requires a function on the right side");
-                            Err(CompileError::semantic_with_context(
-                                format!("cannot pipe to non-function: {}", right_val.type_name()),
-                                ctx,
-                            ))
-                        }
-                    }
+                    // Handled in early-return block above (before evaluating both sides)
+                    unreachable!("PipeForward should be handled before evaluating both sides")
                 }
                 BinOp::Parallel => {
                     // Parallel execution: f // g

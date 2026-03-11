@@ -113,6 +113,10 @@ impl Lowerer {
                     if self.should_import_symbol(&func_def.name, target) {
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
+                        // Track that this is an imported function name, not a real global variable.
+                        // This prevents it from being declared as a DATA symbol in codegen,
+                        // which would conflict with the FUNCTION import declaration.
+                        self.imported_function_names.insert(func_def.name.clone());
                         if func_def.is_pure() {
                             self.pure_functions.insert(func_def.name.clone());
                         }
