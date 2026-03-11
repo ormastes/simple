@@ -1191,14 +1191,20 @@ fn mangle_mir(
     import_map: &std::collections::HashMap<String, String>,
     ambiguous_names: &std::collections::HashSet<String>,
     use_map: &std::collections::HashMap<String, String>,
-) {
+) -> usize {
     use crate::mir::MirInst;
+
+    let mut unresolved_count: usize = 0;
 
     // Names that should never be mangled (runtime functions, builtins).
     let is_runtime_or_builtin = |name: &str| -> bool {
         name.starts_with("rt_")
             || name.starts_with("__simple_")
             || name.starts_with("spl_")
+            || name.starts_with("__get_global_")
+            || name.starts_with("__set_global_")
+            || name.starts_with("bit_")
+            || name.starts_with("bitwise_")
             || matches!(
                 name,
                 "print" | "println" | "eprint" | "eprintln"
@@ -1309,12 +1315,12 @@ fn mangle_mir(
                             *target = target.with_name(resolved.clone());
                         } else if let Some(resolved) = import_map.get(&name) {
                             *target = target.with_name(resolved.clone());
-                        }
-                        else if std::env::var("SIMPLE_DEBUG_MANGLE").is_ok() {
-                            let in_import = import_map.contains_key(&name);
-                            let in_use = use_map.contains_key(&name);
-                            let in_local = local_fn_names.contains(&name);
-                            eprintln!("[mangle] UNRESOLVED call: {} (import={}, use={}, local={})", name, in_import, in_use, in_local);
+                        } else if let Some(resolved) = resolve_name_variants(&name, use_map, import_map) {
+                            *target = target.with_name(resolved);
+                        } else {
+                            unresolved_count += 1;
+                            eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
+                                      name, func.name, prefix);
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
@@ -1327,6 +1333,8 @@ fn mangle_mir(
                             *func_name = resolved.clone();
                         } else if let Some(resolved) = import_map.get(func_name.as_str()) {
                             *func_name = resolved.clone();
+                        } else if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
+                            *func_name = resolved;
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
@@ -1339,6 +1347,8 @@ fn mangle_mir(
                             *global_name = resolved.clone();
                         } else if let Some(resolved) = import_map.get(global_name.as_str()) {
                             *global_name = resolved.clone();
+                        } else if let Some(resolved) = resolve_name_variants(global_name, use_map, import_map) {
+                            *global_name = resolved;
                         }
                     }
                     _ => {}
@@ -1956,6 +1966,89 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                     simple_parser::ast::Node::Static(s) => {
                         let mangled = format!("{}__{}", prefix, s.name);
                         raw_to_mangled.entry(s.name.clone()).or_default().push(mangled);
+                    }
+                    // Struct methods (needed for cross-module calls like Span.empty)
+                    simple_parser::ast::Node::Struct(s) => {
+                        for m in &s.methods {
+                            if !m.body.statements.is_empty() {
+                                let raw = format!("{}.{}", s.name, m.name);
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
+                                raw_to_mangled
+                                    .entry(m.name.clone())
+                                    .or_default()
+                                    .push(mangled.clone());
+                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                            }
+                        }
+                    }
+                    // Enum methods and variant constructors
+                    simple_parser::ast::Node::Enum(e) => {
+                        for m in &e.methods {
+                            if !m.body.statements.is_empty() {
+                                let raw = format!("{}.{}", e.name, m.name);
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name));
+                                raw_to_mangled
+                                    .entry(m.name.clone())
+                                    .or_default()
+                                    .push(mangled.clone());
+                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                            }
+                        }
+                        // Enum variant constructors (e.g., Option.Some, Result.Ok)
+                        for v in &e.variants {
+                            let raw = format!("{}.{}", e.name, v.name);
+                            let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, v.name));
+                            raw_to_mangled.entry(raw).or_default().push(mangled);
+                        }
+                    }
+                    // Trait default methods
+                    simple_parser::ast::Node::Trait(t) => {
+                        for m in &t.methods {
+                            if !m.body.statements.is_empty() {
+                                let raw = format!("{}.{}", t.name, m.name);
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
+                                raw_to_mangled
+                                    .entry(m.name.clone())
+                                    .or_default()
+                                    .push(mangled.clone());
+                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                            }
+                        }
+                    }
+                    // Impl block methods (impl Type: or impl Trait for Type:)
+                    simple_parser::ast::Node::Impl(imp) => {
+                        let type_name = match &imp.target_type {
+                            simple_parser::ast::Type::Simple(n) => Some(n.as_str()),
+                            simple_parser::ast::Type::Generic { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        if let Some(type_name) = type_name {
+                            for m in &imp.methods {
+                                if !m.body.statements.is_empty() {
+                                    let raw = format!("{}.{}", type_name, m.name);
+                                    let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
+                                    raw_to_mangled
+                                        .entry(m.name.clone())
+                                        .or_default()
+                                        .push(mangled.clone());
+                                    raw_to_mangled.entry(raw).or_default().push(mangled);
+                                }
+                            }
+                        }
+                    }
+                    // Extend block methods (extend Type:)
+                    simple_parser::ast::Node::Extend(ext) => {
+                        for m in &ext.methods {
+                            if !m.body.statements.is_empty() {
+                                let raw = format!("{}.{}", ext.target_type, m.name);
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
+                                raw_to_mangled
+                                    .entry(m.name.clone())
+                                    .or_default()
+                                    .push(mangled.clone());
+                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                            }
+                        }
                     }
                     _ => {}
                 }
