@@ -4,7 +4,7 @@
 # Provides GPU availability checks, convenience alloc/download wrappers,
 # and floating-point comparison.
 
-use std.nogc_sync_mut.gpu.memory.{GpuArray, gpu_alloc}
+use std.nogc_sync_mut.gpu.memory.{GpuArray}
 use std.nogc_sync_mut.gpu.device.{GpuBackend, detect_backends}
 use std.nogc_sync_mut.torch.ffi.{rt_torch_copy_data_to_cpu}
 
@@ -60,7 +60,27 @@ fn alloc_and_upload(data: [f32]) -> Result<GpuArray<f32>, text>:
     if not has_cuda_gpu():
         return Err("GPU context not available")
 
-    Err("alloc_and_upload() still depends on the unstable GpuArray wrapper")
+    var host_f64: [f64] = []
+    var i = 0
+    while i < data.len():
+        host_f64.push(data[i] as f64)
+        i = i + 1
+
+    val cpu_handle = rt_torch_tensor(host_f64, [data.len()], 1, 0)
+    if cpu_handle == 0:
+        return Err("rt_torch_tensor failed")
+
+    val gpu_handle = rt_torch_to_cuda(cpu_handle, 0)
+    rt_torch_free(cpu_handle)
+    if gpu_handle == 0:
+        return Err("rt_torch_to_cuda failed")
+
+    Ok(GpuArray(
+        backend: GpuBackend.Cuda,
+        device_id: 0,
+        count: data.len(),
+        torch_handle: gpu_handle
+    ))
 
 # Download data from a GpuArray and free the device memory.
 # `size` is the expected number of f32 elements.
@@ -69,8 +89,32 @@ fn download_and_free(arr: GpuArray<f32>, size: i64) -> Result<[f32], text>:
     if arr.count != size:
         return Err("Size mismatch: expected {size}, got {arr.count}")
 
-    val host_data = arr.download()
-    # GpuArray.drop() is called automatically when arr goes out of scope (RAII)
+    if arr.torch_handle == 0:
+        return Err("GpuArray has no backing tensor")
+
+    val cpu_handle = rt_torch_to_cpu(arr.torch_handle)
+    if cpu_handle == 0:
+        return Err("rt_torch_to_cpu failed")
+
+    val raw_ptr = rt_alloc(size * 4)
+    if raw_ptr == 0:
+        rt_torch_free(cpu_handle)
+        return Err("Failed to allocate host buffer")
+
+    val copied = rt_torch_copy_data_to_cpu(cpu_handle, raw_ptr, size)
+    rt_torch_free(cpu_handle)
+    if copied != size:
+        rt_free(raw_ptr)
+        return Err("Download length mismatch: expected {size}, got {copied}")
+
+    var host_data: [f32] = []
+    var i = 0
+    while i < copied:
+        val bits = rt_ptr_read_i32(raw_ptr, i * 4)
+        host_data.push(f32_from_bits(bits as u32))
+        i = i + 1
+
+    rt_free(raw_ptr)
     Ok(host_data)
 
 # Upload and immediately download data to validate host/device round-tripping.
@@ -109,6 +153,7 @@ fn roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
 
     val copied = rt_torch_copy_data_to_cpu(roundtrip_cpu, raw_ptr, data.len())
     if copied != data.len():
+        rt_free(raw_ptr)
         rt_torch_free(cpu_handle)
         rt_torch_free(gpu_handle)
         rt_torch_free(roundtrip_cpu)
@@ -121,6 +166,7 @@ fn roundtrip_f32(data: [f32], epsilon: f32) -> Result<bool, text>:
         host_data.push(f32_from_bits(bits as u32))
         read_i = read_i + 1
 
+    rt_free(raw_ptr)
     rt_torch_free(cpu_handle)
     rt_torch_free(gpu_handle)
     rt_torch_free(roundtrip_cpu)
