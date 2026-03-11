@@ -5,8 +5,8 @@ use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT,
-    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS,
-    TRAITS, USER_MACROS,
+    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
+    TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -214,11 +214,14 @@ pub(super) fn exec_block_closure(
                 if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
                     // Check if this is a module-level global variable
                     let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
-                    if is_global && !local_env.contains_key(name) {
-                        // Update module-level global
+                    if is_global {
+                        // Always update MODULE_GLOBALS for global vars
                         MODULE_GLOBALS.with(|cell| {
                             cell.borrow_mut().insert(name.clone(), val);
                         });
+                        // Remove from local env so reads always go through MODULE_GLOBALS
+                        // This ensures mutations by called functions are visible
+                        local_env.remove(name);
                     } else {
                         // Update or create local variable
                         local_env.insert(name.clone(), val);
@@ -466,6 +469,47 @@ pub(super) fn exec_block_closure(
                     )?;
                 }
             }
+            Node::Match(match_stmt) => {
+                let subject = evaluate_expr(
+                    &match_stmt.subject,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                let mut matched = false;
+                for arm in &match_stmt.arms {
+                    let mut bindings = std::collections::HashMap::new();
+                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
+                        if let Some(guard) = &arm.guard {
+                            let mut guard_env = local_env.clone();
+                            for (name, value) in &bindings {
+                                guard_env.insert(name.clone(), value.clone());
+                            }
+                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                                continue;
+                            }
+                        }
+                        for (name, value) in bindings {
+                            local_env.insert(name, value);
+                        }
+                        last_value = exec_block_closure_mut(
+                            &arm.body.statements,
+                            &mut local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    last_value = Value::Nil;
+                }
+            }
             Node::Function(f) => {
                 // Handle function definitions inside block closures (like in `it` blocks)
                 // Register in both local_env and functions map for recursive calls to work
@@ -552,6 +596,8 @@ pub(super) fn exec_block_closure(
                 );
                 // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
                 BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                // Also register in GLOBAL_ENUMS for cross-function enum visibility
+                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
                 last_value = Value::Nil;
             }
             Node::Struct(s) => {
@@ -958,6 +1004,40 @@ fn exec_block_closure_mut(
                     )?;
                 }
             }
+            Node::Match(match_stmt) => {
+                let subject = evaluate_expr(&match_stmt.subject, local_env, functions, classes, enums, impl_methods)?;
+                let mut matched = false;
+                for arm in &match_stmt.arms {
+                    let mut bindings = std::collections::HashMap::new();
+                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
+                        if let Some(guard) = &arm.guard {
+                            let mut guard_env = local_env.clone();
+                            for (name, value) in &bindings {
+                                guard_env.insert(name.clone(), value.clone());
+                            }
+                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                                continue;
+                            }
+                        }
+                        for (name, value) in bindings {
+                            local_env.insert(name, value);
+                        }
+                        last_value = exec_block_closure_mut(
+                            &arm.body.statements,
+                            local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    last_value = Value::Nil;
+                }
+            }
             Node::With(with_stmt) => {
                 // Handle context manager (with statement) inside block closures
                 // Delegates to the main interpreter's exec_with function
@@ -986,6 +1066,8 @@ fn exec_block_closure_mut(
                 );
                 // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
                 BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                // Also register in GLOBAL_ENUMS for cross-function enum visibility
+                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
                 last_value = Value::Nil;
             }
             Node::Struct(s) => {

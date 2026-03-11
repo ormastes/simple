@@ -15,6 +15,7 @@ use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
 use cmm_ast.{span, span_range, merge_spans}
 use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_expr.{is_access_class}
 
 # Helper struct for flattened macro assignment detection.
 # Avoids nested match with return in parse_statement.
@@ -51,6 +52,13 @@ impl CmmParser:
                 return self.parse_device_command(dev)
             case _: ()
 
+        # --- Comment (;... or //...) ---
+        match tok.kind:
+            case CmmTokenKind.Comment(c):
+                self.advance()
+                return Ok(CmmStmt.CommentLine(c, span(tok.line, tok.column)))
+            case _: ()
+
         # --- Macro assignment: &name=expr or &&name=expr ---
         # Flattened to avoid nested match with return (return inside nested match
         # does not propagate to the outer function in Simple's runtime).
@@ -58,15 +66,39 @@ impl CmmParser:
         if macro_info.is_assign:
             return self.parse_macro_assign(macro_info.name, macro_info.is_recursive)
 
+        # --- Standalone macro execution: &cmd (execute macro value as command) ---
+        # Flattened to avoid nested return inside match/case/if
+        if not macro_info.is_assign:
+            val macro_cmd_name = self.extract_macro_cmd_name()
+            if macro_cmd_name != "":
+                self.advance()
+                var params = self.collect_remaining_exprs()
+                return Ok(CmmStmt.Command(macro_cmd_name, params, span(tok.line, tok.column)))
+
         # --- Block: ( stmt1  stmt2  ... ) ---
         match tok.kind:
             case CmmTokenKind.LParen:
                 return self.parse_block()
             case _: ()
 
+        # --- Bracket block: [ bitmap data ] (TOOLITEM bitmaps, skip content) ---
+        if self.check_kind("LBracket"):
+            val bracket_tok = self.advance()
+            while not self.is_at_end() and not self.check_kind("RBracket"):
+                self.advance()
+            if self.check_kind("RBracket"):
+                self.advance()
+            return Ok(CmmStmt.Command("[]", [], span(bracket_tok.line, bracket_tok.column)))
+
         # --- Keyword dispatch (case-insensitive on Identifier tokens) ---
         match tok.kind:
             case CmmTokenKind.Identifier(name):
+                # Check for indented label: name: (identifier followed by colon)
+                val maybe_label = self.check_indented_label()
+                if maybe_label != "":
+                    self.advance()  # consume identifier
+                    self.advance()  # consume colon
+                    return Ok(CmmStmt.LabelDef(maybe_label, span(tok.line, tok.column)))
                 val upper = to_upper_cmm(name)
                 if upper == "IF": return self.parse_if()
                 if upper == "ELSE": return self.parse_else_error()
@@ -105,6 +137,15 @@ impl CmmParser:
         match tok.kind:
             case CmmTokenKind.DotCommand(cmd):
                 return self.parse_generic_command()
+            case _: ()
+
+        # --- Bare operator tokens that can appear as statement starts ---
+        # DIALOG blocks: (& ... ) — bare & used as block modifier
+        # Lone operator tokens: skip them silently
+        match tok.kind:
+            case CmmTokenKind.Ampersand:
+                self.advance()
+                return Ok(CmmStmt.Command("&", [], span(tok.line, tok.column)))
             case _: ()
 
         # --- Fallback ---
@@ -205,11 +246,13 @@ impl CmmParser:
                 Ok(CmmStmt.RepeatLoop(count, body, span(start_tok.line, start_tok.column)))
             case Err(e): Err(e)
 
-    # GOTO label
+    # GOTO label [IF condition] — optional conditional suffix
     me parse_goto() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume GOTO
         # GOTO can have: label, macro ref, or empty (for ON ERROR GOTO to clear handler)
         val label = self.consume_label_or_macro()
+        # Consume optional IF condition suffix (GOTO label IF condition)
+        var params = self.collect_remaining_exprs()
         Ok(CmmStmt.Goto(label, span(start_tok.line, start_tok.column)))
 
     # GOSUB label [args...] — target can be identifier, dot-command, or macro ref
@@ -219,7 +262,7 @@ impl CmmParser:
         var args = self.collect_remaining_exprs()
         Ok(CmmStmt.Gosub(label, args, span(start_tok.line, start_tok.column)))
 
-    # RETURN [values...]
+    # RETURN [values...] or RETurn (abbreviated)
     me parse_return() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume RETURN
         var values = self.collect_remaining_exprs()
@@ -265,14 +308,18 @@ impl CmmParser:
                 Ok(CmmStmt.RunCall(file_expr, args, span(start_tok.line, start_tok.column)))
             case Err(e): Err(e)
 
-    # END — terminate script
+    # END — terminate script (may have trailing tokens to skip)
     me parse_end() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume END
+        # Consume any trailing expressions on this line
+        var params = self.collect_remaining_exprs()
         Ok(CmmStmt.EndStmt(span(start_tok.line, start_tok.column)))
 
-    # STOP — halt execution
+    # STOP [message] — halt execution with optional error message
     me parse_stop() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume STOP
+        # Consume optional message arguments
+        var params = self.collect_remaining_exprs()
         Ok(CmmStmt.StopStmt(span(start_tok.line, start_tok.column)))
 
     # CONTinue — resume target
@@ -313,23 +360,30 @@ impl CmmParser:
     me parse_entry() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume ENTRY
 
-        # Check for %LINE option (flattened — no nested match mutation)
-        val pct_line = self.check_percent_line()
-        var has_line = pct_line.found
-        if has_line:
-            self.advance()  # consume %
-            self.advance()  # consume LINE
-
-        var names = self.collect_macro_names()
-
-        # When %LINE is used, prepend "%LINE" marker to the names list
-        if has_line:
-            var all_names: [text] = ["%LINE"]
-            var ni = 0
-            while ni < names.len():
-                all_names.push(names[ni])
-                ni = ni + 1
-            names = all_names
+        # Collect macro names and %LINE markers until end of statement
+        var names: [text] = []
+        while not self.at_stmt_end():
+            # Check for %LINE option anywhere in the list
+            val pct_line = self.check_percent_line()
+            if pct_line.found:
+                self.advance()  # consume %
+                self.advance()  # consume LINE
+                names.push("%LINE")
+            if not pct_line.found:
+                # Try to consume a macro name
+                var got_macro = false
+                match self.peek().kind:
+                    case CmmTokenKind.MacroRef(name):
+                        self.advance()
+                        names.push(name)
+                        got_macro = true
+                    case CmmTokenKind.MacroRecRef(name):
+                        self.advance()
+                        names.push("&" + name)
+                        got_macro = true
+                    case _: ()
+                if not got_macro:
+                    break
 
         if names.len() == 0:
             return Err(self.make_error("Expected macro name(s) after ENTRY"))
@@ -344,12 +398,22 @@ impl CmmParser:
     me parse_on_event() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume ON
 
-        # Parse event type: ERROR, STOP, ALWAYS, etc.
+        # Parse event type: ERROR, STOP, ALWAYS, TIME, PBREAKAT, KEY, CMD, etc.
         val ev_result = self.expect_identifier("event type after ON")
         match ev_result:
             case Err(e): return Err(e)
             case _: ()
         val event_upper = to_upper_cmm(self.unwrap_text(ev_result))
+
+        # Some events have arguments before the action keyword:
+        #   ON TIME 100.ms GOTO handler
+        #   ON PBREAKAT &addr GOTO label
+        #   ON KEY 0x4008 GOSUB handler
+        # Consume event arguments until we hit an action keyword or end of stmt
+        while not self.at_stmt_end() and not self.is_event_action_keyword():
+            match self.parse_expression():
+                case Ok(arg): ()
+                case Err(e): break
 
         # Parse action: GOTO, GOSUB, CONTinue, DO, NOTHING, etc.
         val action_result = self.parse_event_action()
@@ -390,10 +454,21 @@ impl CmmParser:
         val action_stmt = self.unwrap_stmt(action_result)
         Ok(CmmStmt.GlobalOnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
 
+    # Check if the current token is an event action keyword (GOTO, GOSUB, etc.)
+    fn is_event_action_keyword() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                val upper = to_upper_cmm(name)
+                (upper == "GOTO" or upper == "GOSUB" or upper == "CONTINUE" or upper == "DO" or upper == "NOTHING")
+            case _: false
+
     # Parse event action: GOTO label, GOSUB label, CONTinue, DO file, NOTHING
     me parse_event_action() -> Result<CmmStmt, CmmParseError>:
+        # ON ERROR (without action) clears the handler
         if self.at_stmt_end():
-            return Err(self.make_error("Expected event action (GOTO/GOSUB/CONTinue/DO)"))
+            return Ok(CmmStmt.Command("NOTHING", [], span(0, 0)))
 
         match self.peek().kind:
             case CmmTokenKind.Identifier(name):
@@ -412,6 +487,9 @@ impl CmmParser:
                 # Unknown action — treat as generic command
                 return self.parse_generic_command()
             case _:
+                # Try generic command for non-Identifier actions (DotCommand, etc.)
+                if not self.at_stmt_end():
+                    return self.parse_generic_command()
                 Err(self.make_error("Expected event action keyword"))
 
     # =========================================================================
@@ -444,30 +522,43 @@ impl CmmParser:
         var mode = self.consume_option_or_empty()
         Ok(CmmStmt.OpenFile(channel_expr, file_expr, mode, span(start_tok.line, start_tok.column)))
 
-    # CLOSE #n
+    # CLOSE #n or CLOSE "callback" (in dialog context)
     me parse_close() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume CLOSE
 
+        # CLOSE without arguments
+        if self.at_stmt_end():
+            return Ok(CmmStmt.CloseFile(CmmExpr.ExprEmpty, span(start_tok.line, start_tok.column)))
+
         match self.parse_expression():
             case Ok(channel_expr):
+                # Consume remaining args (in case of CLOSE #1 /mode etc.)
+                var params = self.collect_remaining_exprs()
                 Ok(CmmStmt.CloseFile(channel_expr, span(start_tok.line, start_tok.column)))
             case Err(e): Err(e)
 
-    # READ #n [%LINE] &var1 &var2
+    # READ #n [%LINE] &var1 &var2 ...
     me parse_read() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume READ
 
         # Parse file channel
         match self.parse_expression():
             case Ok(channel_expr):
-                # Check for %LINE option (flattened — no nested match mutation)
-                val read_pct = self.check_percent_line()
-                if read_pct.found:
-                    self.advance()  # consume %
-                    self.advance()  # consume LINE
-
-                # Collect macro names to read into
-                var names = self.collect_macro_names()
+                # Collect all remaining tokens: macro names, format specifiers, expressions
+                var names: [text] = []
+                while not self.at_stmt_end():
+                    match self.peek().kind:
+                        case CmmTokenKind.MacroRef(name):
+                            self.advance()
+                            names.push(name)
+                        case CmmTokenKind.MacroRecRef(name):
+                            self.advance()
+                            names.push(name)
+                        case _:
+                            # Consume any remaining expressions (format specifiers, etc.)
+                            match self.parse_expression():
+                                case Ok(e): ()
+                                case Err(e): break
                 Ok(CmmStmt.ReadFile(channel_expr, names, span(start_tok.line, start_tok.column)))
             case Err(e): Err(e)
 
@@ -528,7 +619,7 @@ impl CmmParser:
     # Wait statement
     # =========================================================================
 
-    # WAIT expr — wait for time or condition
+    # WAIT expr [timeout] — wait for time or condition with optional timeout
     me parse_wait() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume WAIT
 
@@ -537,6 +628,8 @@ impl CmmParser:
 
         match self.parse_expression():
             case Ok(expr):
+                # Consume optional remaining expressions (timeout, etc.)
+                var params = self.collect_remaining_exprs()
                 Ok(CmmStmt.WaitStmt(expr, span(start_tok.line, start_tok.column)))
             case Err(e): Err(e)
 
@@ -670,6 +763,18 @@ impl CmmParser:
 
         self.skip_newlines()
 
+        # Skip DIALOG block modifiers: (&, (&+, (&-, etc.
+        # These appear right after ( and before the block content.
+        if self.check_op("&"):
+            self.advance()
+            # Consume optional +/-/= modifiers
+            if self.check_op("+"):
+                self.advance()
+            if self.check_op("-"):
+                self.advance()
+
+        self.skip_newlines()
+
         while not self.is_at_end():
             if self.check_kind("RParen"):
                 self.advance()  # consume )
@@ -742,7 +847,8 @@ impl CmmParser:
         # Parse the command name (Identifier or DotCommand)
         val cmd_name = self.consume_command_name()
         if cmd_name == "":
-            return Err(self.make_error("Expected command after device selector {device}::"))
+            # Standalone device selector (e.g. B:: on its own line) — no command follows
+            return Ok(CmmStmt.Command(device + "::", [], span(start_tok.line, start_tok.column)))
 
         # Collect remaining expressions as parameters
         var params = self.collect_remaining_exprs()
@@ -784,6 +890,8 @@ impl CmmParser:
         match self.parse_statement():
             case Ok(stmt):
                 stmts.push(stmt)
+                # Skip remaining tokens on this line, but stop at ) which closes the block
+                self.skip_to_next_line_or_rparen()
             case Err(e):
                 self.errors.push("Line {e.line}: {e.message}")
                 stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
@@ -799,6 +907,14 @@ impl CmmParser:
     fn extract_comment_text() -> text:
         match self.peek().kind:
             case CmmTokenKind.Comment(c): c
+            case _: ""
+
+    # Extract macro name as command name (&name → "&name", &&name → "&&name").
+    # Returns "" if current token is not a macro reference.
+    fn extract_macro_cmd_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.MacroRef(name): "&" + name
+            case CmmTokenKind.MacroRecRef(name): "&&" + name
             case _: ""
 
     # Extract the label name from the current token, or "" if not a Label token.
@@ -892,6 +1008,23 @@ impl CmmParser:
             case CmmTokenKind.HexNumber(n): true
             case CmmTokenKind.MacroRef(n): true
             case _: false
+
+    # Check if the current token is an identifier followed by a colon (indented label).
+    # Returns the label name, or "" if not a label pattern.
+    # Must distinguish from access class patterns (D:, P:, etc.) — those are handled elsewhere.
+    fn check_indented_label() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                if is_access_class(name):
+                    return ""
+                match self.peek_ahead(1).kind:
+                    case CmmTokenKind.Colon:
+                        # Check it's not :: (device selector)
+                        match self.peek_ahead(2).kind:
+                            case CmmTokenKind.Colon: ""
+                            case _: name
+                    case _: ""
+            case _: ""
 
     # Check if the current token + next form a macro assignment pattern.
     # Returns a MacroAssignInfo with is_assign=true if &name= or &&name= is found.
@@ -1003,12 +1136,27 @@ impl CmmParser:
     me collect_remaining_exprs() -> [CmmExpr]:
         var exprs: [CmmExpr] = []
         while not self.at_stmt_end():
-            match self.parse_expression():
-                case Ok(expr):
-                    exprs.push(expr)
-                case Err(e):
-                    # Stop collecting on error
-                    break
+            # Skip separators: commas, backslashes, dots (as path/address separators)
+            var skipped = true
+            while skipped:
+                skipped = false
+                if not self.at_stmt_end() and self.check_kind("Comma"):
+                    self.advance()
+                    skipped = true
+                if not self.at_stmt_end() and self.check_kind("Backslash"):
+                    self.advance()
+                    skipped = true
+            if not self.at_stmt_end():
+                val saved_pos = self.current
+                match self.parse_expression():
+                    case Ok(expr):
+                        exprs.push(expr)
+                    case Err(e):
+                        # Restore position and stop — don't consume tokens
+                        # that might belong to the next statement
+                        self.current = saved_pos
+                        self.skip_to_next_line()
+                        break
         exprs
 
     # Consume an option token (/mode) and return its text, or return "" if not an option.

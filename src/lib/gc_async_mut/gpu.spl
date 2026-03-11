@@ -339,9 +339,7 @@ fn gpu_upload_f32(gpu_ptr: GpuPtr, data: [f32]) -> Result<(), GpuError>:
 
 fn gpu_download_f32(gpu_ptr: GpuPtr, count: i64) -> Result<[f32], GpuError>:
     """Download f32 array from device to host."""
-    var result: [f32] = []
-    for i in 0..count:
-        result = result + [0.0]
+    var result = [for i in 0..count: 0.0]
     val byte_size = count * 4
     val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
     match dl_result:
@@ -526,9 +524,7 @@ fn gpu_upload_f64(gpu_ptr: GpuPtr, data: [f64]) -> Result<(), GpuError>:
 
 fn gpu_download_i32(gpu_ptr: GpuPtr, count: i64) -> Result<[i32], GpuError>:
     """Download i32 array from device to host."""
-    var result: [i32] = []
-    for i in 0..count:
-        result = result + [0]
+    var result = [for i in 0..count: 0]
     val byte_size = count * 4
     val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
     match dl_result:
@@ -539,9 +535,7 @@ fn gpu_download_i32(gpu_ptr: GpuPtr, count: i64) -> Result<[i32], GpuError>:
 
 fn gpu_download_i64(gpu_ptr: GpuPtr, count: i64) -> Result<[i64], GpuError>:
     """Download i64 array from device to host."""
-    var result: [i64] = []
-    for i in 0..count:
-        result = result + [0]
+    var result = [for i in 0..count: 0]
     val byte_size = count * 8
     val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
     match dl_result:
@@ -552,9 +546,7 @@ fn gpu_download_i64(gpu_ptr: GpuPtr, count: i64) -> Result<[i64], GpuError>:
 
 fn gpu_download_f64(gpu_ptr: GpuPtr, count: i64) -> Result<[f64], GpuError>:
     """Download f64 array from device to host."""
-    var result: [f64] = []
-    for i in 0..count:
-        result = result + [0.0]
+    var result = [for i in 0..count: 0.0]
     val byte_size = count * 8
     val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
     match dl_result:
@@ -639,6 +631,106 @@ fn gpu_copy(dst: GpuPtr, src: GpuPtr, bytes: i64) -> Result<(), GpuError>:
 type GpuBuffer = GpuPtr
 
 # ============================================================================
+# BLAS CPU-fallback Stubs
+# ============================================================================
+
+fn gpu_gemm(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    # Matrix multiply C[i,j] = sum(A[i,p] * B[p,j]) for p in 0..k. CPU fallback.
+    var result = [for idx in 0..(m * n): 0.0]
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = 0.0
+            var p = 0
+            while p < k:
+                sum = sum + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            result[i * n + j] = sum
+            j = j + 1
+        i = i + 1
+    Ok(result)
+
+fn gpu_dot(x: [f32], y: [f32]) -> Result<f32, GpuError>:
+    # Dot product of two vectors. CPU fallback.
+    var sum = 0.0
+    var i = 0
+    while i < x.len():
+        sum = sum + x[i] * y[i]
+        i = i + 1
+    Ok(sum)
+
+fn gpu_axpy(alpha: f32, x: [f32], y: [f32]) -> Result<[f32], GpuError>:
+    # AXPY: result[i] = alpha * x[i] + y[i]. CPU fallback.
+    var result = [for idx in 0..x.len(): 0.0]
+    var i = 0
+    while i < x.len():
+        result[i] = alpha * x[i] + y[i]
+        i = i + 1
+    Ok(result)
+
+# ============================================================================
+# Thrust CPU-fallback Stubs
+# ============================================================================
+
+fn gpu_map(data: [f32], op: fn(f32) -> f32) -> Result<[f32], GpuError>:
+    # Apply op to each element. CPU fallback.
+    var result = [for idx in 0..data.len(): 0.0]
+    var i = 0
+    while i < data.len():
+        result[i] = op(data[i])
+        i = i + 1
+    Ok(result)
+
+fn gpu_reduce(data: [f32], init: f32, op: fn(f32, f32) -> f32) -> Result<f32, GpuError>:
+    # Reduce array with binary op. CPU fallback.
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = op(acc, data[i])
+        i = i + 1
+    Ok(acc)
+
+fn gpu_scan(data: [f32], init: f32, op: fn(f32, f32) -> f32) -> Result<[f32], GpuError>:
+    # Inclusive prefix scan. CPU fallback.
+    var result = [for idx in 0..data.len(): 0.0]
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = op(acc, data[i])
+        result[i] = acc
+        i = i + 1
+    Ok(result)
+
+fn gpu_filter(data: [f32], pred: fn(f32) -> bool) -> Result<[f32], GpuError>:
+    # Filter elements matching predicate. CPU fallback.
+    var result: [f32] = []
+    var i = 0
+    while i < data.len():
+        if pred(data[i]):
+            result = result + [data[i]]
+        i = i + 1
+    Ok(result)
+
+fn gpu_sort(data: [f32]) -> Result<[f32], GpuError>:
+    # Sort array (insertion sort). CPU fallback.
+    var result = [for idx in 0..data.len(): data[idx]]
+    var i = 1
+    while i < result.len():
+        val key = result[i]
+        var j = i - 1
+        var done = false
+        while j >= 0 and not done:
+            if result[j] > key:
+                result[j + 1] = result[j]
+                j = j - 1
+            else:
+                done = true
+        result[j + 1] = key
+        i = i + 1
+    Ok(result)
+
+# ============================================================================
 # Export
 # ============================================================================
 
@@ -665,3 +757,6 @@ export gpu_load_f64, gpu_store_f64, gpu_load_i64, gpu_store_i64
 export gpu_shared_array_f32, gpu_shared_store_f32, gpu_shared_load_f32
 export gpu_shared_array_i32, gpu_shared_store_i32, gpu_shared_load_i32
 export gpu_barrier, gpu_copy
+export GpuBuffer
+export gpu_gemm, gpu_dot, gpu_axpy
+export gpu_map, gpu_reduce, gpu_scan, gpu_filter, gpu_sort

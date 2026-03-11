@@ -31,16 +31,9 @@ pub(super) fn eval_call_expr(
             impl_methods,
         )?)),
         // CUDA kernel launch: kernel<<<grid, block>>>(args)
-        // Desugar to regular function call in interpreter mode (grid/block ignored)
-        Expr::KernelLaunch { kernel, args, .. } => Ok(Some(evaluate_call(
-            kernel,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
+        // In interpreter mode, kernel launches are no-ops since GPU code
+        // (GpuBuffer indexing, thread intrinsics) can't run on the CPU.
+        Expr::KernelLaunch { .. } => Ok(Some(Value::Nil)),
         Expr::MethodCall { receiver, method, args } => {
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method

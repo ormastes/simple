@@ -269,10 +269,17 @@ pub enum GenericParam {
     /// Type parameter: T, U, etc.
     /// Can optionally have trait bounds: T: Display, I: Iterator
     /// Can optionally have default type: Rhs = Self
+    /// Can optionally have type candidates/limits: T: [f32, i32]
     Type {
         name: String,
         bounds: Vec<String>,
         default: Option<Type>,
+        /// Type limit/candidate list: [f32, i32, f64, i64]
+        /// When non-empty, restricts T to these concrete types
+        type_candidates: Vec<String>,
+        /// true if candidate mode (lazy instantiation for unlisted types),
+        /// false if limit mode (error for unlisted types)
+        is_candidate_mode: bool,
     },
     /// Const parameter: const N: usize
     Const { name: String, ty: Type },

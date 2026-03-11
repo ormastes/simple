@@ -775,6 +775,24 @@ pub(crate) fn evaluate_method_call(
                 bail_unknown_method!(method, "ThreadPool", available);
             }
         }
+        Value::Generator(gen) => {
+            match method {
+                "next" => {
+                    return Ok(gen.next().unwrap_or(Value::Nil));
+                }
+                "is_done" => {
+                    return Ok(Value::Bool(gen.is_done()));
+                }
+                "collect" => {
+                    return Ok(Value::Array(Arc::new(gen.collect_remaining())));
+                }
+                _ => {
+                    return Err(CompileError::semantic(format!(
+                        "method '{}' not found on generator", method
+                    )));
+                }
+            }
+        }
         Value::Constructor { class_name } => {
             if let Some(result) = special::handle_constructor_methods(
                 class_name,

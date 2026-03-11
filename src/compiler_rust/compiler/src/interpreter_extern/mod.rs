@@ -247,6 +247,32 @@ pub(crate) fn call_extern_function(
         "rt_math_is_finite" => math::rt_math_is_finite_fn(&evaluated),
 
         // ====================================================================
+        // Type Introspection (2 functions)
+        // ====================================================================
+        "sizeof" | "size_of" => {
+            // Non-generic call: sizeof("f32") or sizeof(value)
+            if let Some(val) = evaluated.first() {
+                let size: i64 = match val {
+                    Value::Str(s) => match s.as_str() {
+                        "f32" | "i32" | "u32" => 4,
+                        "f64" | "i64" | "u64" => 8,
+                        "i16" | "u16" => 2,
+                        "i8" | "u8" | "bool" => 1,
+                        "i128" | "u128" => 16,
+                        _ => 8,
+                    },
+                    Value::Int(_) => 8,
+                    Value::Float(_) => 8,
+                    Value::Bool(_) => 1,
+                    _ => 8,
+                };
+                Ok(Value::Int(size))
+            } else {
+                Ok(Value::Int(8)) // default
+            }
+        }
+
+        // ====================================================================
         // Time Operations (3 functions)
         // ====================================================================
         "rt_time_now_seconds" => time::rt_time_now_seconds(&evaluated),

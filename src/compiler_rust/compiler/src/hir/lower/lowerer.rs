@@ -14,6 +14,10 @@ use crate::type_inference_config::TypeInferenceConfig;
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
+    /// Compile-time constant initial values for module-level `val` declarations.
+    pub(super) global_init_values: HashMap<String, i64>,
+    /// Set of globals that are defined locally in this module (not imported).
+    pub(super) local_globals: HashSet<String>,
     /// Set of function names that are marked with #[pure] (CTR-031)
     /// These functions can be called from contract expressions
     pub(super) pure_functions: HashSet<String>,
@@ -62,6 +66,8 @@ impl Lowerer {
         Self {
             module: HirModule::new(),
             globals: HashMap::new(),
+            global_init_values: HashMap::new(),
+            local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: None,
@@ -89,6 +95,8 @@ impl Lowerer {
         Self {
             module: HirModule::new(),
             globals: HashMap::new(),
+            global_init_values: HashMap::new(),
+            local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: Some(module_resolver),
@@ -139,6 +147,8 @@ impl Lowerer {
         Self {
             module: HirModule::new(),
             globals: HashMap::new(),
+            global_init_values: HashMap::new(),
+            local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: None,

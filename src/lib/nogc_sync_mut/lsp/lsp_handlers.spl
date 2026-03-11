@@ -1,0 +1,466 @@
+# LSP Server - Request handlers
+# Uses lightweight lsp_query.spl for fast code analysis (no full compiler load).
+# Only falls back to full query.spl for heavy operations (check/diagnostics).
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    "bin/simple"
+
+fn _fast_query_cmd(subcmd: text) -> text:
+    # Lightweight query — only imports query_engine (no compiler). Fast startup.
+    val bin = _find_simple_binary()
+    "timeout 30 " + bin + " src/app/lsp/lsp_query.spl " + subcmd
+
+fn _heavy_query_cmd(subcmd: text) -> text:
+    # Full query — imports compiler for check/diagnostics. Slow startup.
+    val bin = _find_simple_binary()
+    "timeout 60 " + bin + " src/app/cli/query.spl " + subcmd
+
+fn _shell_cmd(command: text) -> (text, i64):
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+    (stdout, code)
+
+fn _extract_uri(body: text) -> text:
+    val td_search = Q() + "textDocument" + Q() + ":"
+    val td_idx_result = body.index_of(td_search)
+    var td_idx = -1
+    match td_idx_result:
+        Some(i): td_idx = i
+        nil: return ""
+    if td_idx < 0:
+        return ""
+    val td_start = td_idx + td_search.len()
+    val td_rest = body.substring(td_start)
+    extract_field(td_rest, "uri")
+
+fn _uri_to_path(uri: text) -> text:
+    if uri.starts_with("file://"):
+        return uri.substring(7)
+    uri
+
+fn _extract_line(body: text) -> text:
+    val pos_search = Q() + "position" + Q() + ":"
+    val pos_idx_result = body.index_of(pos_search)
+    var pos_idx = -1
+    match pos_idx_result:
+        Some(i): pos_idx = i
+        nil: return "0"
+    if pos_idx < 0:
+        return "0"
+    val pos_start = pos_idx + pos_search.len()
+    val pos_rest = body.substring(pos_start)
+    val line_str = extract_field(pos_rest, "line")
+    if line_str == "":
+        return "0"
+    line_str
+
+fn _extract_character(body: text) -> text:
+    val pos_search = Q() + "position" + Q() + ":"
+    val pos_idx_result = body.index_of(pos_search)
+    var pos_idx = -1
+    match pos_idx_result:
+        Some(i): pos_idx = i
+        nil: return "0"
+    if pos_idx < 0:
+        return "0"
+    val pos_start = pos_idx + pos_search.len()
+    val pos_rest = body.substring(pos_start)
+    val char_str = extract_field(pos_rest, "character")
+    if char_str == "":
+        return "0"
+    char_str
+
+# --- Initialize ---
+
+fn lsp_handle_initialize(id: text) -> text:
+    val completion_provider = jo1(jp("triggerCharacters", SB_L() + js(".") + "," + js(":") + "," + js("&") + SB_R()))
+    var caps: [text] = []
+    val sync_opts = jo3(jp("openClose", "true"), jp("change", "1"), jp("save", jo1(jp("includeText", "false"))))
+    caps.push(jp("textDocumentSync", sync_opts))
+    caps.push(jp("completionProvider", completion_provider))
+    caps.push(jp("hoverProvider", "true"))
+    caps.push(jp("definitionProvider", "true"))
+    caps.push(jp("referencesProvider", "true"))
+    caps.push(jp("documentSymbolProvider", "true"))
+    caps.push(jp("implementationProvider", "true"))
+    caps.push(jp("workspaceSymbolProvider", "true"))
+    caps.push(jp("callHierarchyProvider", "true"))
+    val capabilities_obj = LB() + caps.join(",") + RB()
+    val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
+    val result = jo2(jp("capabilities", capabilities_obj), jp("serverInfo", server_info))
+    make_json_result(id, result)
+
+# --- Document sync ---
+
+fn lsp_handle_did_open(body: text):
+    # Diagnostics require full compiler (slow) — run async in background
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if uri != "" and file_path != "":
+        _publish_diagnostics(uri, file_path)
+
+fn lsp_handle_did_change(body: text):
+    val _x = 0
+
+fn lsp_handle_did_close(body: text):
+    val uri = _extract_uri(body)
+    if uri != "":
+        val params = jo2(jp("uri", js(uri)), jp("diagnostics", SB_L() + SB_R()))
+        lsp_write_notification("textDocument/publishDiagnostics", params)
+
+fn lsp_handle_did_save(body: text):
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if uri != "" and file_path != "":
+        _publish_diagnostics(uri, file_path)
+
+# --- Diagnostics (heavy — uses full query.spl with compiler) ---
+
+fn _publish_diagnostics(uri: text, file_path: text):
+    var cmd = _heavy_query_cmd("check " + file_path)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    var diags: [text] = []
+    if exit_code != 0 and out != "":
+        val lines = out.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val diag = _parse_diagnostic_line(trimmed, file_path)
+            if diag != "":
+                diags.push(diag)
+    val diags_str = SB_L() + diags.join(",") + SB_R()
+    val params = jo2(jp("uri", js(uri)), jp("diagnostics", diags_str))
+    lsp_write_notification("textDocument/publishDiagnostics", params)
+
+fn _parse_diagnostic_line(line: text, file_path: text) -> text:
+    var diag_line = 0
+    var diag_col = 0
+    var diag_msg = line
+    var severity = 1
+    val colon_idx = line.index_of(":")
+    match colon_idx:
+        Some(ci):
+            val after = line.substring(ci + 1)
+            val second_colon = after.index_of(":")
+            match second_colon:
+                Some(ci2):
+                    val line_str = after.substring(0, ci2).trim()
+                    val line_num = int(line_str)
+                    if line_num > 0:
+                        diag_line = line_num - 1
+                        val after2 = after.substring(ci2 + 1)
+                        val third_colon = after2.index_of(":")
+                        match third_colon:
+                            Some(ci3):
+                                val col_str = after2.substring(0, ci3).trim()
+                                val col_num = int(col_str)
+                                if col_num > 0:
+                                    diag_col = col_num - 1
+                                diag_msg = after2.substring(ci3 + 1).trim()
+                            nil:
+                                diag_msg = after2.trim()
+                nil:
+                    val _x = 0
+        nil:
+            val _x = 0
+    if diag_msg.starts_with("warning"):
+        severity = 2
+        diag_msg = diag_msg.replace("warning:", "").trim()
+    elif diag_msg.starts_with("error"):
+        severity = 1
+        diag_msg = diag_msg.replace("error:", "").trim()
+    val range = jo2(
+        jp("start", jo2(jp("line", str(diag_line)), jp("character", str(diag_col)))),
+        jp("end", jo2(jp("line", str(diag_line)), jp("character", str(diag_col + 1))))
+    )
+    jo3(jp("range", range), jp("severity", str(severity)), jp("message", js(diag_msg)))
+
+# --- Definition (fast path) ---
+
+fn lsp_handle_definition(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("definition " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, "null")
+    val result = _parse_location(out.trim())
+    make_json_result(id, result)
+
+fn _parse_location(output: text) -> text:
+    val lines = output.split("\n")
+    if lines.len() == 0:
+        return "null"
+    val first = lines[0].trim()
+    if first == "" or first == "null" or first.starts_with("No ") or first.starts_with("Error"):
+        return "null"
+    var parts = first.split(":")
+    if parts.len() >= 3:
+        val file = parts[0]
+        val line_num = int(parts[1]) - 1
+        var col_num = 0
+        if parts.len() >= 3:
+            col_num = int(parts[2])
+        if line_num < 0:
+            line_num = 0
+        val loc_uri = "file://" + file
+        val range = jo2(
+            jp("start", jo2(jp("line", str(line_num)), jp("character", str(col_num)))),
+            jp("end", jo2(jp("line", str(line_num)), jp("character", str(col_num))))
+        )
+        return jo2(jp("uri", js(loc_uri)), jp("range", range))
+    "null"
+
+# --- References (fast path) ---
+
+fn lsp_handle_references(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("references " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var locs: [text] = []
+    for loc_line in lines:
+        val trimmed = loc_line.trim()
+        if trimmed == "" or trimmed.starts_with("No ") or trimmed.starts_with("Error"):
+            continue
+        val loc = _parse_location(trimmed)
+        if loc != "null":
+            locs.push(loc)
+    make_json_result(id, SB_L() + locs.join(",") + SB_R())
+
+# --- Hover (fast path) ---
+
+fn lsp_handle_hover(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, "null")
+    val content = jo2(jp("kind", js("markdown")), jp("value", js(out.trim())))
+    val result = jo1(jp("contents", content))
+    make_json_result(id, result)
+
+# --- Completion (fast path) ---
+
+fn lsp_handle_completion(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("completions " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var items: [text] = []
+    for comp_line in lines:
+        val trimmed = comp_line.trim()
+        if trimmed == "":
+            continue
+        val tab_idx = trimmed.index_of("\t")
+        var label = trimmed
+        var detail = ""
+        match tab_idx:
+            Some(ti):
+                label = trimmed.substring(0, ti)
+                detail = trimmed.substring(ti + 1)
+            nil:
+                val _x = 0
+        var item = jo2(jp("label", js(label)), jp("kind", "6"))
+        if detail != "":
+            item = jo3(jp("label", js(label)), jp("kind", "6"), jp("detail", js(detail)))
+        items.push(item)
+    make_json_result(id, SB_L() + items.join(",") + SB_R())
+
+# --- Document Symbol (fast path) ---
+
+fn lsp_handle_document_symbol(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_json_result(id, SB_L() + SB_R())
+    var cmd = _fast_query_cmd("symbols " + file_path)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    # Parse symbols output (one per line: name:kind:line or name:kind:line (in parent))
+    val lines = out.split("\n")
+    var symbols: [text] = []
+    for sym_line in lines:
+        val trimmed = sym_line.trim()
+        if trimmed == "":
+            continue
+        # Strip "(in parent)" suffix if present
+        var sym_text = trimmed
+        val paren_idx = sym_text.index_of(" (in ")
+        match paren_idx:
+            Some(pi): sym_text = sym_text.substring(0, pi)
+            nil: val _x = 0
+        val parts = sym_text.split(":")
+        if parts.len() < 3:
+            continue
+        val name = parts[0]
+        val kind_str = parts[1]
+        val line_num = int(parts[2]) - 1
+        if line_num < 0:
+            continue
+        var kind = _symbol_kind_number(kind_str)
+        val range = jo2(
+            jp("start", jo2(jp("line", str(line_num)), jp("character", "0"))),
+            jp("end", jo2(jp("line", str(line_num)), jp("character", "0")))
+        )
+        val sym = jo4(jp("name", js(name)), jp("kind", str(kind)), jp("range", range), jp("selectionRange", range))
+        symbols.push(sym)
+    make_json_result(id, SB_L() + symbols.join(",") + SB_R())
+
+fn _symbol_kind_number(kind_str: text) -> i64:
+    if kind_str == "fn" or kind_str == "function" or kind_str == "extern_fn":
+        return 12
+    elif kind_str == "method" or kind_str == "static_method":
+        return 6
+    elif kind_str == "class":
+        return 5
+    elif kind_str == "struct":
+        return 23
+    elif kind_str == "enum":
+        return 10
+    elif kind_str == "trait" or kind_str == "impl":
+        return 11
+    elif kind_str == "var" or kind_str == "val":
+        return 13
+    12
+
+# --- Implementation (fast path) ---
+
+fn lsp_handle_implementation(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("implementation " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var locs: [text] = []
+    for loc_line in lines:
+        val trimmed = loc_line.trim()
+        if trimmed == "":
+            continue
+        val loc = _parse_location(trimmed)
+        if loc != "null":
+            locs.push(loc)
+    make_json_result(id, SB_L() + locs.join(",") + SB_R())
+
+# --- Workspace Symbol (fast path) ---
+
+fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
+    val query = extract_nested(body, "query")
+    var cmd = _fast_query_cmd("symbols src/")
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var symbols: [text] = []
+    for sym_line in lines:
+        val trimmed = sym_line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() < 3:
+            continue
+        val name = parts[0]
+        val kind_str = parts[1]
+        # Filter by query if provided
+        if query != "" and not name.starts_with(query):
+            continue
+        var kind = _symbol_kind_number(kind_str)
+        val loc = jo2(jp("uri", js("file://unknown")), jp("range", jo2(
+            jp("start", jo2(jp("line", "0"), jp("character", "0"))),
+            jp("end", jo2(jp("line", "0"), jp("character", "0")))
+        )))
+        val sym = jo3(jp("name", js(name)), jp("kind", str(kind)), jp("location", loc))
+        symbols.push(sym)
+    make_json_result(id, SB_L() + symbols.join(",") + SB_R())
+
+# --- Call Hierarchy (fast path) ---
+
+fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val line = _extract_line(body)
+    val col = _extract_character(body)
+    val file_path = _uri_to_path(uri)
+    val query_line = str(int(line) + 1)
+    val query_col = str(int(col) + 1)
+    var cmd = _fast_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val first_line = out.split("\n")[0].trim()
+    if first_line == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lsp_line = str(int(line))
+    val range = jo2(
+        jp("start", jo2(jp("line", lsp_line), jp("character", col))),
+        jp("end", jo2(jp("line", lsp_line), jp("character", col)))
+    )
+    val item = jo4(jp("name", js(first_line)), jp("kind", "12"), jp("uri", js(uri)), jp("range", range)) + "," + jp("selectionRange", range)
+    val item_obj = LB() + item + RB()
+    make_json_result(id, SB_L() + item_obj + SB_R())
+
+fn lsp_handle_incoming_calls(id: text, body: text) -> text:
+    make_json_result(id, SB_L() + SB_R())
+
+fn lsp_handle_outgoing_calls(id: text, body: text) -> text:
+    make_json_result(id, SB_L() + SB_R())

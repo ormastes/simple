@@ -50,12 +50,14 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
     val cc = find_c_compiler()
     if cc == "":
         return Err("No C compiler found")
-    val entry_c = "/tmp/simple_entry.c"
-    val entry_o = "/tmp/simple_entry.o"
-    val c_source = "extern void __simple_runtime_init(void);\n" +
+    val entry_c = "/tmp/simple_entry_{pid}.c"
+    val entry_o = "/tmp/simple_entry_{pid}.o"
+    val c_source = "extern void spl_init_args(int argc, char** argv);\n" +
+        "extern void __simple_runtime_init(void);\n" +
         "extern long long __simple_main(void);\n" +
         "extern void __simple_runtime_shutdown(void);\n" +
         "int main(int argc, char** argv) {\n" +
+        "    spl_init_args(argc, argv);\n" +
         "    __simple_runtime_init();\n" +
         "    long long result = __simple_main();\n" +
         "    __simple_runtime_shutdown();\n" +
@@ -108,15 +110,14 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     # Step 2: Generate and compile entry point
     print "[LLVM-LINK] step 2: compile entry point..."
-    val entry_obj_path = "/tmp/simple_entry_{pid}.o"
     val c_result = compile_entry_point_c(pid, verbose)
     print "[LLVM-LINK] entry point compiled"
-    match c_result:
+    val entry_obj_path = match c_result:
+        case Ok(path):
+            path
         case Err(err):
             cleanup_runtime_objects(runtime_objects)
             return Err("Entry point compilation failed: {err}")
-        case _:
-            pass
 
     # Step 3: Combine all objects and link
     print "[LLVM-LINK] step 3: combining objects..."

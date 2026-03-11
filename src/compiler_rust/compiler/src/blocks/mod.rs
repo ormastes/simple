@@ -44,7 +44,7 @@ pub use shell::ShellBlock;
 pub use sql::SqlBlock;
 
 use crate::error::CompileError;
-use crate::value::Value;
+use crate::value::{Env, Value};
 
 /// Result of evaluating a custom block
 pub type BlockResult = Result<Value, CompileError>;
@@ -101,6 +101,22 @@ pub fn evaluate_block(kind: &str, payload: &str) -> BlockResult {
         "sql" => SqlBlock.evaluate(payload),
         "re" => RegexBlock.evaluate(payload),
         // md, html, graph, img are not yet implemented
+        _ => Err(crate::error::factory::unknown_block_type(kind)),
+    }
+}
+
+/// Evaluate a custom block with access to the interpreter environment.
+///
+/// Math blocks (`m{}`) need the interpreter's variable environment so that
+/// variables defined in Simple code (e.g., `val x = 5; m{ 2x }`) are
+/// visible inside the math evaluator. Other block types ignore the env.
+pub fn evaluate_block_with_env(kind: &str, payload: &str, env: &Env) -> BlockResult {
+    match kind {
+        "m" => MathBlock.evaluate_with_env(payload, env),
+        // Other blocks don't need env access
+        "sh" => ShellBlock.evaluate(payload),
+        "sql" => SqlBlock.evaluate(payload),
+        "re" => RegexBlock.evaluate(payload),
         _ => Err(crate::error::factory::unknown_block_type(kind)),
     }
 }

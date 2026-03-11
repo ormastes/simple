@@ -29,9 +29,9 @@ use super::{
     validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MIXINS,
-    TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
-    USER_MACROS,
+    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, GLOBAL_ENUMS,
+    MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -146,6 +146,9 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rc_box_dec_strong",
     "rc_box_inc_weak",
     "rc_box_dec_weak",
+    // Type introspection
+    "sizeof",
+    "size_of",
     // Arc box operations (atomic)
     "arc_box_size",
     "arc_box_init",
@@ -198,11 +201,66 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     let mut trait_impls: TraitImpls = HashMap::new();
     let mut trait_impl_registry: HashMap<String, TraitImplRegistry> = HashMap::new();
 
-    // First pass: register all functions (needed for decorator lookup)
+    // First pass: register all functions, structs, enums, and classes
+    // (needed for forward references — structs defined after describe blocks)
     for item in items {
         match item {
             Node::Function(f) => {
                 functions.insert(f.name.clone(), f.clone());
+            }
+            Node::Struct(s) => {
+                // Pre-register struct constructor and class definition
+                env.insert(
+                    s.name.clone(),
+                    Value::Constructor {
+                        class_name: s.name.clone(),
+                    },
+                );
+                classes.insert(
+                    s.name.clone(),
+                    ClassDef {
+                        span: s.span,
+                        name: s.name.clone(),
+                        generic_params: Vec::new(),
+                        where_clause: vec![],
+                        fields: s.fields.clone(),
+                        methods: s.methods.clone(),
+                        parent: None,
+                        visibility: s.visibility,
+                        effects: Vec::new(),
+                        attributes: Vec::new(),
+                        doc_comment: None,
+                        invariant: None,
+                        macro_invocations: Vec::new(),
+                        mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
+                    },
+                );
+            }
+            Node::Enum(e) => {
+                // Pre-register enum
+                enums.insert(e.name.clone(), e.clone());
+                GLOBAL_ENUMS.with(|cell| {
+                    cell.borrow_mut().insert(e.name.clone(), e.clone());
+                });
+                env.insert(
+                    e.name.clone(),
+                    Value::EnumType {
+                        enum_name: e.name.clone(),
+                    },
+                );
+            }
+            Node::Class(c) => {
+                // Pre-register class name AND full ClassDef (needed for default field values)
+                env.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
+                classes.insert(c.name.clone(), c.clone());
             }
             _ => {}
         }

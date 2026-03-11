@@ -419,6 +419,8 @@ impl<M: Module> CodegenBackend<M> {
         &mut self,
         globals: &[(String, TypeId, bool)],
         extern_fn_names: &std::collections::HashSet<String>,
+        global_init_values: &std::collections::HashMap<String, i64>,
+        local_globals: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
 
@@ -505,27 +507,53 @@ impl<M: Module> CodegenBackend<M> {
             }
 
             let symbol_name = self.mangle_name(name);
+            let is_local = local_globals.contains(name);
 
-            // Use Preemptible linkage so that when multiple .o files define the same
-            // global (from shared imports), the linker merges them instead of erroring.
-            let data_id = self
-                .module
-                .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
-                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+            // Linkage strategy for globals in per-module compilation:
+            // - Local globals with init values: Preemptible + initialized data
+            //   (Preemptible allows merging; initialized data provides the value)
+            // - Local globals without init values: Preemptible + zeroinit
+            // - Imported globals (not local): Import (reference only, no data def)
+            if !is_local {
+                // Imported global: declare as Import (no data definition).
+                // The linker resolves this to the definition in the defining module.
+                let data_id = self
+                    .module
+                    .declare_data(&symbol_name, cranelift_module::Linkage::Import, *is_mutable, false)
+                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
-            // Initialize with zero (will be set by runtime initialization)
-            let mut data_desc = cranelift_module::DataDescription::new();
-            let size = super::types_util::type_id_size(*ty) as usize;
-            data_desc.define_zeroinit(size);
+                self.global_ids.insert(name.clone(), data_id);
+                if symbol_name != *name {
+                    self.global_ids.insert(symbol_name, data_id);
+                }
+            } else {
+                // Local global: define with Preemptible linkage.
+                let data_id = self
+                    .module
+                    .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
+                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
-            self.module
-                .define_data(data_id, &data_desc)
-                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+                let mut data_desc = cranelift_module::DataDescription::new();
+                let size = super::types_util::type_id_size(*ty) as usize;
+                if let Some(&init_val) = global_init_values.get(name) {
+                    // Initialize with compile-time constant value
+                    let bytes = init_val.to_le_bytes();
+                    let mut buf = vec![0u8; size];
+                    let copy_len = std::cmp::min(bytes.len(), size);
+                    buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                    data_desc.define(buf.into_boxed_slice());
+                } else {
+                    data_desc.define_zeroinit(size);
+                }
 
-            // Register under raw name for local lookups
-            self.global_ids.insert(name.clone(), data_id);
-            if symbol_name != *name {
-                self.global_ids.insert(symbol_name, data_id);
+                self.module
+                    .define_data(data_id, &data_desc)
+                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+                self.global_ids.insert(name.clone(), data_id);
+                if symbol_name != *name {
+                    self.global_ids.insert(symbol_name, data_id);
+                }
             }
         }
         Ok(())
@@ -602,7 +630,7 @@ impl<M: Module> CodegenBackend<M> {
         // globals that correspond to function references and initialize their
         // BSS slots with the function address (instead of zero).
         self.declare_functions(&functions)?;
-        self.declare_globals(&mir.globals, &mir.extern_fn_names)?;
+        self.declare_globals(&mir.globals, &mir.extern_fn_names, &mir.global_init_values, &mir.local_globals)?;
 
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs

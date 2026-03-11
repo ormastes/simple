@@ -104,6 +104,10 @@ class CmmParser:
             case CmmTokenKind.Comma: kind_name == "Comma"
             case CmmTokenKind.Colon: kind_name == "Colon"
             case CmmTokenKind.Dot: kind_name == "Dot"
+            case CmmTokenKind.Backslash: kind_name == "Backslash"
+            case CmmTokenKind.LBracket: kind_name == "LBracket"
+            case CmmTokenKind.RBracket: kind_name == "RBracket"
+            case CmmTokenKind.Question: kind_name == "Question"
             case _: false
 
     # Check if current token is a specific operator by its text representation.
@@ -221,6 +225,16 @@ class CmmParser:
                 case CmmTokenKind.Eof: return
                 case _: self.advance()
 
+    # Skip tokens until newline or closing paren (for block-level trailing token cleanup).
+    # Stops at ) so it doesn't consume the block-closing delimiter.
+    me skip_to_next_line_or_rparen():
+        while not self.is_at_end():
+            match self.peek().kind:
+                case CmmTokenKind.Newline: return
+                case CmmTokenKind.Eof: return
+                case CmmTokenKind.RParen: return
+                case _: self.advance()
+
     # Create a parse error at the current token position.
     fn make_error(message: text) -> CmmParseError:
         val tok = self.peek()
@@ -241,10 +255,15 @@ class CmmParser:
                     stmts.push(CmmStmt.CommentLine(c, span(tok.line, tok.column)))
                 case CmmTokenKind.Eof:
                     break
+                case CmmTokenKind.RParen:
+                    # Stray closing paren at top level — skip silently
+                    self.advance()
                 case _:
                     match self.parse_statement():
                         case Ok(stmt):
                             stmts.push(stmt)
+                            # Skip any remaining tokens on this line (trailing comments, annotations)
+                            self.skip_to_next_line()
                         case Err(e):
                             self.errors.push("Line {e.line}: {e.message}")
                             # Error recovery: emit an ErrorNode and skip to next line

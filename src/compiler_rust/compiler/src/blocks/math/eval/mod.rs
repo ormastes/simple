@@ -108,6 +108,76 @@ pub fn eval_with_backend(expr: &MathExpr, preferred: super::backend::MathBackend
     evaluate_with_backend(expr, preferred)
 }
 
+/// Evaluate with interpreter environment bridged to math environment.
+///
+/// Converts interpreter `Value`s (Int, Float, Bool, Array) into `MathValue`s
+/// and passes them to the math evaluator, so that variables defined in Simple
+/// code are visible inside `m{}` blocks.
+pub fn evaluate_with_env_bridge(expr: &MathExpr, interpreter_env: &crate::value::Env) -> Result<Value, CompileError> {
+    let mut math_env = HashMap::new();
+
+    // Convert interpreter values to math values
+    for (name, value) in interpreter_env {
+        if let Some(math_val) = value_to_math_value(value) {
+            math_env.insert(name.clone(), math_val);
+        }
+    }
+
+    let result = eval_with_env(expr, &mut math_env)?;
+    Ok(result.to_value())
+}
+
+/// Convert an interpreter Value to a MathValue (if numeric/bool/array).
+fn value_to_math_value(value: &Value) -> Option<MathValue> {
+    match value {
+        Value::Int(n) => Some(MathValue::Int(*n)),
+        Value::Float(f) => Some(MathValue::Float(*f)),
+        Value::Bool(b) => Some(MathValue::Bool(*b)),
+        Value::Array(arr) => {
+            // Check if all elements are numeric (1D tensor)
+            let all_numeric = arr.iter().all(|v| matches!(v, Value::Int(_) | Value::Float(_)));
+            if all_numeric && !arr.is_empty() {
+                let floats: Vec<f64> = arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => *n as f64,
+                        Value::Float(f) => *f,
+                        _ => 0.0,
+                    })
+                    .collect();
+                return Some(MathValue::Tensor(Tensor::new(floats, vec![arr.len()]).ok()?));
+            }
+            // Check if all elements are arrays (2D tensor — nested array)
+            let all_arrays = arr.iter().all(|v| matches!(v, Value::Array(_)));
+            if all_arrays && !arr.is_empty() {
+                let mut data = Vec::new();
+                let mut inner_len = 0;
+                for (i, v) in arr.iter().enumerate() {
+                    if let Value::Array(inner) = v {
+                        if i == 0 {
+                            inner_len = inner.len();
+                        } else if inner.len() != inner_len {
+                            return None; // Ragged array
+                        }
+                        for elem in inner.iter() {
+                            match elem {
+                                Value::Int(n) => data.push(*n as f64),
+                                Value::Float(f) => data.push(*f),
+                                _ => return None,
+                            }
+                        }
+                    }
+                }
+                return Some(MathValue::Tensor(
+                    Tensor::new(data, vec![arr.len(), inner_len]).ok()?,
+                ));
+            }
+            None
+        }
+        _ => None, // Objects, strings, etc. can't be used in math
+    }
+}
+
 /// Evaluate with variable environment
 fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Result<MathValue, CompileError> {
     match expr {

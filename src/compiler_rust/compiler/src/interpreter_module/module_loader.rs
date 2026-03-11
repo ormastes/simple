@@ -113,11 +113,13 @@ pub fn load_and_merge_module(
     }
 
     // Build module path from segments (path only, not the import target)
+    // Filter out "crate" and "self" prefixes — both refer to the current module's directory.
+    // "self" in `use self.main.{...}` means "sibling module in same directory".
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
         .iter()
-        .filter(|s| s.as_str() != "crate")
+        .filter(|s| s.as_str() != "crate" && s.as_str() != "self")
         .cloned()
         .collect();
 

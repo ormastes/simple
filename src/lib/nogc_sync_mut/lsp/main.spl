@@ -1,43 +1,113 @@
-# Simple Language Server
-# LSP server for Simple language (self-hosted implementation)
-# Usage: simple lsp (communicates via stdin/stdout)
+# Simple Language Server (LSP)
+#
+# Zero-stdlib LSP server for Simple language.
+# Bridges `simple query` CLI to LSP protocol over stdin/stdout.
+# Architecture mirrors MCP server (src/app/mcp/) for consistency.
+#
+# Usage: simple lsp (started by Claude Code LSP plugin or editor)
+#
+# Handles:
+#   initialize, initialized, shutdown, exit
+#   textDocument/didOpen, didChange, didClose
+#   textDocument/definition, references, hover, completion
+#   textDocument/documentSymbol, implementation
+#   textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, outgoingCalls
+#   workspace/symbol
 
-fn main() -> i64:
-    extern fn rt_cli_get_args() -> [text]
-    extern fn rt_env_get(name: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+
+use app.lsp.lsp_json
+use app.lsp.lsp_protocol
+use app.lsp.lsp_handlers
+
+# Server state
+var LSP_INITIALIZED = false
+var LSP_SHUTDOWN = false
+
+fn lsp_main():
     val args = rt_cli_get_args()
 
-    # Check for help flag
-    var show_help = false
-    var show_version = false
+    # Check for help/version flags
     for arg in args:
         if arg == "--help" or arg == "-h":
-            show_help = true
+            print_usage()
+            return
         if arg == "--version" or arg == "-v":
-            show_version = true
+            print "simple-lsp 0.1.0"
+            return
 
-    if show_help:
-        print_usage()
-        return 0
+    # Start LSP server loop
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        var line = lsp_read_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_field(line, "method")
+            val id = extract_id(line)
+            if method == "initialize":
+                val response = lsp_handle_initialize(id)
+                lsp_write_message(response)
+            elif method == "initialized":
+                LSP_INITIALIZED = true
+            elif method == "shutdown":
+                LSP_SHUTDOWN = true
+                val response = make_json_result(id, "null")
+                lsp_write_message(response)
+            elif method == "exit":
+                running = false
+            elif method == "textDocument/didOpen":
+                lsp_handle_did_open(line)
+            elif method == "textDocument/didChange":
+                lsp_handle_did_change(line)
+            elif method == "textDocument/didClose":
+                lsp_handle_did_close(line)
+            elif method == "textDocument/didSave":
+                lsp_handle_did_save(line)
+            elif method == "textDocument/definition":
+                val response = lsp_handle_definition(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/references":
+                val response = lsp_handle_references(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/hover":
+                val response = lsp_handle_hover(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/completion":
+                val response = lsp_handle_completion(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/documentSymbol":
+                val response = lsp_handle_document_symbol(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/implementation":
+                val response = lsp_handle_implementation(id, line)
+                lsp_write_message(response)
+            elif method == "callHierarchy/incomingCalls":
+                val response = lsp_handle_incoming_calls(id, line)
+                lsp_write_message(response)
+            elif method == "callHierarchy/outgoingCalls":
+                val response = lsp_handle_outgoing_calls(id, line)
+                lsp_write_message(response)
+            elif method == "textDocument/prepareCallHierarchy":
+                val response = lsp_handle_prepare_call_hierarchy(id, line)
+                lsp_write_message(response)
+            elif method == "workspace/symbol":
+                val response = lsp_handle_workspace_symbol(id, line)
+                lsp_write_message(response)
+            else:
+                # Unknown method — respond with method not found for requests (has id)
+                if id != "null" and id != "":
+                    val response = make_error(id, -32601, "Method not found: " + method)
+                    lsp_write_message(response)
 
-    if show_version:
-        print "simple-lsp 0.1.0"
-        print "Simple Language Server (LSP)"
-        return 0
-
-    # Log startup (only if debug enabled)
-    val debug_mode = rt_env_get("SIMPLE_LSP_DEBUG")
-    if debug_mode != "":
-        print "Starting Simple LSP server (stdio mode)"
-
-    # The full LSP server requires compiled mode (tree-sitter, JSON-RPC transport)
-    # In interpreter mode, print guidance
-    print "Simple Language Server"
-    print "The LSP server requires compiled mode for full operation."
-    print "Run: simple build && ./build/simple lsp"
-    print ""
-    print "For development, use: simple lsp --help"
-    return 1
+# Entry point
+lsp_main()
 
 fn print_usage():
     print "Simple Language Server (LSP)"
@@ -54,12 +124,10 @@ fn print_usage():
     print "Environment Variables:"
     print "  SIMPLE_LSP_DEBUG  Enable debug logging to stderr"
     print ""
+    print "Claude Code Integration:"
+    print "  claude plugin install --dir tools/claude-plugin/simple-lsp"
+    print "  Set ENABLE_LSP_TOOL=1 in ~/.claude/settings.json"
+    print ""
     print "Editor Integration:"
     print "  VS Code: Install the Simple Language extension"
-    print "    Settings: \"simple.lsp.serverPath\": \"simple\""
-    print ""
-    print "  Neovim: Use simple.nvim plugin"
-    print "    require('simple').setup()"
-    print ""
-    print "Documentation:"
-    print "  https://github.com/simple-lang/simple/doc/status/lsp_implementation.md"
+    print "  Neovim:  require('simple').setup()"

@@ -6,14 +6,7 @@
 # - gpu_atomic_cas for compare-and-swap
 # - gpu_syncthreads for block synchronization
 
-use std.gpu.{
-    gpu_alloc, gpu_upload, gpu_download, gpu_free, gpu_memset,
-    gpu_shared_mem, gpu_syncthreads,
-    gpu_atomic_add, gpu_atomic_min, gpu_atomic_max, gpu_atomic_cas,
-    gpu_block_id_x, gpu_block_dim_x, gpu_local_id_x,
-    gpu_grid_dim_x,
-    gpu_launch, GpuBuffer, GpuError
-}
+use std.gpu.*
 
 # --------------------------------------------------------------------------
 # Pattern 1: Atomic counter
@@ -23,20 +16,20 @@ use std.gpu.{
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn atomic_count_kernel(counter: GpuBuffer<i32>, n: i32):
+fn atomic_count_kernel(counter: GpuBuffer<i64>, n: i64):
     val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         gpu_atomic_add(counter, 0, 1)
 
-fn run_atomic_count(n: i32) -> Result<i32, GpuError>:
-    val counter_dev = gpu_alloc<i32>(1)?
+fn run_atomic_count(n: i64) -> Result<i64, GpuError>:
+    val counter_dev = gpu_alloc_i64(1)?
     gpu_memset(counter_dev, 0, 1)?
 
     val block_size = 256
     val grid_size = (n + block_size - 1) / block_size
     atomic_count_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(counter_dev, n)
 
-    val result = gpu_download<i32>(counter_dev, 1)?
+    val result = gpu_download_i64(counter_dev, 1)?
     gpu_free(counter_dev)?
     Ok(result[0])
 
@@ -49,29 +42,29 @@ fn run_atomic_count(n: i32) -> Result<i32, GpuError>:
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn atomic_minmax_kernel(data: GpuBuffer<i32>, result_min: GpuBuffer<i32>,
-                        result_max: GpuBuffer<i32>, n: i32):
+fn atomic_minmax_kernel(data: GpuBuffer<i64>, result_min: GpuBuffer<i64>,
+                        result_max: GpuBuffer<i64>, n: i64):
     val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         val val_at = data[idx]
         gpu_atomic_min(result_min, 0, val_at)
         gpu_atomic_max(result_max, 0, val_at)
 
-fn run_atomic_minmax(data_host: List<i32>) -> Result<List<i32>, GpuError>:
+fn run_atomic_minmax(data_host: List<i64>) -> Result<List<i64>, GpuError>:
     val n = data_host.len()
-    val data_dev = gpu_alloc<i32>(n)?
-    val min_dev = gpu_alloc<i32>(1)?
-    val max_dev = gpu_alloc<i32>(1)?
+    val data_dev = gpu_alloc_i64(n)?
+    val min_dev = gpu_alloc_i64(1)?
+    val max_dev = gpu_alloc_i64(1)?
 
-    gpu_upload(data_dev, data_host)?
+    gpu_upload_i64(data_dev, data_host)?
 
     # Initialize min to large value, max to small value
-    var init_min = List<i32>()
+    var init_min = List(_items: [])
     init_min.push(2147483647)
-    var init_max = List<i32>()
+    var init_max = List(_items: [])
     init_max.push(-2147483648)
-    gpu_upload(min_dev, init_min)?
-    gpu_upload(max_dev, init_max)?
+    gpu_upload_i64(min_dev, init_min)?
+    gpu_upload_i64(max_dev, init_max)?
 
     val block_size = 256
     val grid_size = (n + block_size - 1) / block_size
@@ -79,14 +72,14 @@ fn run_atomic_minmax(data_host: List<i32>) -> Result<List<i32>, GpuError>:
         data_dev, min_dev, max_dev, n
     )
 
-    val min_result = gpu_download<i32>(min_dev, 1)?
-    val max_result = gpu_download<i32>(max_dev, 1)?
+    val min_result = gpu_download_i64(min_dev, 1)?
+    val max_result = gpu_download_i64(max_dev, 1)?
 
     gpu_free(data_dev)?
     gpu_free(min_dev)?
     gpu_free(max_dev)?
 
-    var out = List<i32>()
+    var out = List(_items: [])
     out.push(min_result[0])
     out.push(max_result[0])
     Ok(out)
@@ -99,8 +92,8 @@ fn run_atomic_minmax(data_host: List<i32>) -> Result<List<i32>, GpuError>:
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn histogram_kernel(data: GpuBuffer<i32>, histogram: GpuBuffer<i32>,
-                    n: i32, num_bins: i32):
+fn histogram_kernel(data: GpuBuffer<i64>, histogram: GpuBuffer<i64>,
+                    n: i64, num_bins: i64):
     val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         val bin = data[idx] % num_bins
@@ -110,12 +103,12 @@ fn histogram_kernel(data: GpuBuffer<i32>, histogram: GpuBuffer<i32>,
             safe_bin = safe_bin + num_bins
         gpu_atomic_add(histogram, safe_bin, 1)
 
-fn run_histogram(data_host: List<i32>, num_bins: i32) -> Result<List<i32>, GpuError>:
+fn run_histogram(data_host: List<i64>, num_bins: i64) -> Result<List<i64>, GpuError>:
     val n = data_host.len()
-    val data_dev = gpu_alloc<i32>(n)?
-    val hist_dev = gpu_alloc<i32>(num_bins)?
+    val data_dev = gpu_alloc_i64(n)?
+    val hist_dev = gpu_alloc_i64(num_bins)?
 
-    gpu_upload(data_dev, data_host)?
+    gpu_upload_i64(data_dev, data_host)?
     gpu_memset(hist_dev, 0, num_bins)?
 
     val block_size = 256
@@ -124,7 +117,7 @@ fn run_histogram(data_host: List<i32>, num_bins: i32) -> Result<List<i32>, GpuEr
         data_dev, hist_dev, n, num_bins
     )
 
-    val result = gpu_download<i32>(hist_dev, num_bins)?
+    val result = gpu_download_i64(hist_dev, num_bins)?
 
     gpu_free(data_dev)?
     gpu_free(hist_dev)?
@@ -139,7 +132,7 @@ fn run_histogram(data_host: List<i32>, num_bins: i32) -> Result<List<i32>, GpuEr
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn cas_set_if_greater_kernel(target: GpuBuffer<i32>, data: GpuBuffer<i32>, n: i32):
+fn cas_set_if_greater_kernel(target: GpuBuffer<i64>, data: GpuBuffer<i64>, n: i64):
     val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         val new_val = data[idx]
@@ -155,17 +148,17 @@ fn cas_set_if_greater_kernel(target: GpuBuffer<i32>, data: GpuBuffer<i32>, n: i3
                     done = true
                 # else: another thread changed target, retry
 
-fn run_cas_max(data_host: List<i32>) -> Result<i32, GpuError>:
+fn run_cas_max(data_host: List<i64>) -> Result<i64, GpuError>:
     val n = data_host.len()
-    val data_dev = gpu_alloc<i32>(n)?
-    val target_dev = gpu_alloc<i32>(1)?
+    val data_dev = gpu_alloc_i64(n)?
+    val target_dev = gpu_alloc_i64(1)?
 
-    gpu_upload(data_dev, data_host)?
+    gpu_upload_i64(data_dev, data_host)?
 
     # Initialize target to minimum possible value
-    var init = List<i32>()
+    var init = List(_items: [])
     init.push(-2147483648)
-    gpu_upload(target_dev, init)?
+    gpu_upload_i64(target_dev, init)?
 
     val block_size = 256
     val grid_size = (n + block_size - 1) / block_size
@@ -173,7 +166,7 @@ fn run_cas_max(data_host: List<i32>) -> Result<i32, GpuError>:
         target_dev, data_dev, n
     )
 
-    val result = gpu_download<i32>(target_dev, 1)?
+    val result = gpu_download_i64(target_dev, 1)?
     gpu_free(data_dev)?
     gpu_free(target_dev)?
     Ok(result[0])
@@ -187,17 +180,17 @@ fn run_cas_max(data_host: List<i32>) -> Result<i32, GpuError>:
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn block_reduce_sum_kernel(data: GpuBuffer<f32>, result: GpuBuffer<f32>, n: i32):
-    val shared = gpu_shared_mem<f32>(256)
+fn block_reduce_sum_kernel(data: GpuBuffer<f32>, result: GpuBuffer<f32>, n: i64):
+    val sdata = gpu_shared_mem_f32(256)
 
     val tid = gpu_local_id_x()
     val global_idx = gpu_block_id_x() * gpu_block_dim_x() + tid
 
     # Load from global to shared (or 0 if out of bounds)
     if global_idx < n:
-        shared[tid] = data[global_idx]
+        sdata[tid] = data[global_idx]
     else:
-        shared[tid] = 0.0f32
+        sdata[tid] = 0.0
 
     gpu_syncthreads()
 
@@ -205,24 +198,24 @@ fn block_reduce_sum_kernel(data: GpuBuffer<f32>, result: GpuBuffer<f32>, n: i32)
     var stride = gpu_block_dim_x() / 2
     while stride > 0:
         if tid < stride:
-            shared[tid] = shared[tid] + shared[tid + stride]
+            sdata[tid] = sdata[tid] + shared[tid + stride]
         gpu_syncthreads()
         stride = stride / 2
 
     # Thread 0 of each block atomically adds the block sum
     if tid == 0:
-        gpu_atomic_add(result, 0, shared[0])
+        gpu_atomic_add(result, 0, sdata[0])
 
 fn run_block_reduce_sum(data_host: List<f32>) -> Result<f32, GpuError>:
     val n = data_host.len()
-    val data_dev = gpu_alloc<f32>(n)?
-    val result_dev = gpu_alloc<f32>(1)?
+    val data_dev = gpu_alloc_f32(n)?
+    val result_dev = gpu_alloc_f32(1)?
 
-    gpu_upload(data_dev, data_host)?
+    gpu_upload_f32(data_dev, data_host)?
 
-    var zero = List<f32>()
-    zero.push(0.0f32)
-    gpu_upload(result_dev, zero)?
+    var zero = List(_items: [])
+    zero.push(0.0)
+    gpu_upload_f32(result_dev, zero)?
 
     val block_size = 256
     val grid_size = (n + block_size - 1) / block_size
@@ -230,7 +223,7 @@ fn run_block_reduce_sum(data_host: List<f32>) -> Result<f32, GpuError>:
         data_dev, result_dev, n
     )
 
-    val result = gpu_download<f32>(result_dev, 1)?
+    val result = gpu_download_f32(result_dev, 1)?
     gpu_free(data_dev)?
     gpu_free(result_dev)?
     Ok(result[0])
@@ -239,7 +232,7 @@ fn run_block_reduce_sum(data_host: List<f32>) -> Result<f32, GpuError>:
 # Main
 # --------------------------------------------------------------------------
 
-fn main() -> Result<i32, GpuError>:
+fn main() -> Result<i64, GpuError>:
     # Pattern 1: Atomic counter
     print "=== Atomic Counter ==="
     val count = run_atomic_count(10000)?
@@ -247,7 +240,7 @@ fn main() -> Result<i32, GpuError>:
 
     # Pattern 2: Atomic min/max
     print "=== Atomic Min/Max ==="
-    var data = List<i32>()
+    var data = List(_items: [])
     var i = 0
     while i < 1000:
         data.push(i * 7 - 500)
@@ -257,7 +250,7 @@ fn main() -> Result<i32, GpuError>:
 
     # Pattern 3: Histogram
     print "=== Histogram ==="
-    var hist_data = List<i32>()
+    var hist_data = List(_items: [])
     i = 0
     while i < 1000:
         hist_data.push(i % 10)
@@ -276,10 +269,10 @@ fn main() -> Result<i32, GpuError>:
 
     # Pattern 5: Block reduce sum
     print "=== Block Reduce Sum ==="
-    var float_data = List<f32>()
+    var float_data = List(_items: [])
     i = 0
     while i < 1024:
-        float_data.push(1.0f32)
+        float_data.push(1.0)
         i = i + 1
     val total = run_block_reduce_sum(float_data)?
     print "  Sum: {total} (expected 1024.0)"

@@ -3,14 +3,7 @@
 # Demonstrates GPU thread organization with multiple kernel variants
 # showing different grid/block configurations for matrix operations.
 
-use std.gpu.{
-    gpu_alloc, gpu_upload, gpu_download, gpu_free,
-    gpu_block_id_x, gpu_block_id_y,
-    gpu_block_dim_x, gpu_block_dim_y,
-    gpu_local_id_x, gpu_local_id_y,
-    gpu_grid_dim_x, gpu_grid_dim_y,
-    gpu_launch, GpuBuffer, GpuError
-}
+use std.gpu.*
 
 # --------------------------------------------------------------------------
 # Variant 1: 1D grid, 1D blocks -- vector addition
@@ -20,7 +13,7 @@ use std.gpu.{
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn vec_add_1d(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
+fn vec_add_1d(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i64):
     val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         c[idx] = a[idx] + b[idx]
@@ -35,7 +28,7 @@ fn vec_add_1d(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
 
 @gpu_kernel
 fn mat_add_2d(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>,
-              rows: i32, cols: i32):
+              rows: i64, cols: i64):
     val col = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     val row = gpu_block_id_y() * gpu_block_dim_y() + gpu_local_id_y()
 
@@ -52,13 +45,13 @@ fn mat_add_2d(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>,
 
 @gpu_kernel
 fn matmul_row_per_thread(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
-                         c: GpuBuffer<f32>, n: i32):
+                         c: GpuBuffer<f32>, n: i64):
     val row = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
 
     if row < n:
         var col = 0
         while col < n:
-            var sum = 0.0f32
+            var sum = 0.0
             var k = 0
             while k < n:
                 sum = sum + a[row * n + k] * b[k * n + col]
@@ -75,12 +68,12 @@ fn matmul_row_per_thread(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
 
 @gpu_kernel
 fn matmul_2d(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
-             c: GpuBuffer<f32>, n: i32):
+             c: GpuBuffer<f32>, n: i64):
     val col = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     val row = gpu_block_id_y() * gpu_block_dim_y() + gpu_local_id_y()
 
     if row < n and col < n:
-        var sum = 0.0f32
+        var sum = 0.0
         var k = 0
         while k < n:
             sum = sum + a[row * n + k] * b[k * n + col]
@@ -97,7 +90,7 @@ fn matmul_2d(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
 
 @gpu_kernel
 fn vec_add_grid_stride(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
-                       c: GpuBuffer<f32>, n: i32):
+                       c: GpuBuffer<f32>, n: i64):
     val stride = gpu_grid_dim_x() * gpu_block_dim_x()
     var idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
 
@@ -109,21 +102,16 @@ fn vec_add_grid_stride(a: GpuBuffer<f32>, b: GpuBuffer<f32>,
 # Host-side runners
 # --------------------------------------------------------------------------
 
-fn create_vec(n: i32, fill: f32) -> List<f32>:
-    var data = List<f32>()
-    var i = 0
-    while i < n:
-        data.push(fill)
-        i = i + 1
-    data
+fn create_vec(n: i64, fill: f32) -> List<f32>:
+    List(_items: [for i in 0..n: fill])
 
-fn run_vec_add_1d(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
-    val a_dev = gpu_alloc<f32>(n)?
-    val b_dev = gpu_alloc<f32>(n)?
-    val c_dev = gpu_alloc<f32>(n)?
+fn run_vec_add_1d(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
+    val a_dev = gpu_alloc_f32(n)?
+    val b_dev = gpu_alloc_f32(n)?
+    val c_dev = gpu_alloc_f32(n)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     # 1D launch: 256 threads per block
     val block_size = 256
@@ -132,21 +120,21 @@ fn run_vec_add_1d(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f
 
     vec_add_1d<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, n)?
+    val result = gpu_download_f32(c_dev, n)?
     gpu_free(a_dev)?
     gpu_free(b_dev)?
     gpu_free(c_dev)?
     Ok(result)
 
 fn run_mat_add_2d(a_host: List<f32>, b_host: List<f32>,
-                  rows: i32, cols: i32) -> Result<List<f32>, GpuError>:
+                  rows: i64, cols: i64) -> Result<List<f32>, GpuError>:
     val total = rows * cols
-    val a_dev = gpu_alloc<f32>(total)?
-    val b_dev = gpu_alloc<f32>(total)?
-    val c_dev = gpu_alloc<f32>(total)?
+    val a_dev = gpu_alloc_f32(total)?
+    val b_dev = gpu_alloc_f32(total)?
+    val c_dev = gpu_alloc_f32(total)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     # 2D launch: 16x16 threads per block
     val block_dim = (16, 16, 1)
@@ -154,20 +142,20 @@ fn run_mat_add_2d(a_host: List<f32>, b_host: List<f32>,
 
     mat_add_2d<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, rows, cols)
 
-    val result = gpu_download<f32>(c_dev, total)?
+    val result = gpu_download_f32(c_dev, total)?
     gpu_free(a_dev)?
     gpu_free(b_dev)?
     gpu_free(c_dev)?
     Ok(result)
 
-fn run_matmul_row(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
+fn run_matmul_row(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
     val total = n * n
-    val a_dev = gpu_alloc<f32>(total)?
-    val b_dev = gpu_alloc<f32>(total)?
-    val c_dev = gpu_alloc<f32>(total)?
+    val a_dev = gpu_alloc_f32(total)?
+    val b_dev = gpu_alloc_f32(total)?
+    val c_dev = gpu_alloc_f32(total)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     # 1D launch: one thread per row
     val block_size = 128
@@ -176,20 +164,20 @@ fn run_matmul_row(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f
 
     matmul_row_per_thread<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, total)?
+    val result = gpu_download_f32(c_dev, total)?
     gpu_free(a_dev)?
     gpu_free(b_dev)?
     gpu_free(c_dev)?
     Ok(result)
 
-fn run_matmul_2d(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
+fn run_matmul_2d(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
     val total = n * n
-    val a_dev = gpu_alloc<f32>(total)?
-    val b_dev = gpu_alloc<f32>(total)?
-    val c_dev = gpu_alloc<f32>(total)?
+    val a_dev = gpu_alloc_f32(total)?
+    val b_dev = gpu_alloc_f32(total)?
+    val c_dev = gpu_alloc_f32(total)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     # 2D launch: 16x16 block for matrix
     val block_dim = (16, 16, 1)
@@ -197,19 +185,19 @@ fn run_matmul_2d(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f3
 
     matmul_2d<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, total)?
+    val result = gpu_download_f32(c_dev, total)?
     gpu_free(a_dev)?
     gpu_free(b_dev)?
     gpu_free(c_dev)?
     Ok(result)
 
-fn run_vec_add_grid_stride(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
-    val a_dev = gpu_alloc<f32>(n)?
-    val b_dev = gpu_alloc<f32>(n)?
-    val c_dev = gpu_alloc<f32>(n)?
+fn run_vec_add_grid_stride(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
+    val a_dev = gpu_alloc_f32(n)?
+    val b_dev = gpu_alloc_f32(n)?
+    val c_dev = gpu_alloc_f32(n)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     # Launch fewer threads than data -- grid-stride loop handles the rest
     val block_size = 256
@@ -219,7 +207,7 @@ fn run_vec_add_grid_stride(a_host: List<f32>, b_host: List<f32>, n: i32) -> Resu
 
     vec_add_grid_stride<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, n)?
+    val result = gpu_download_f32(c_dev, n)?
     gpu_free(a_dev)?
     gpu_free(b_dev)?
     gpu_free(c_dev)?
@@ -229,12 +217,12 @@ fn run_vec_add_grid_stride(a_host: List<f32>, b_host: List<f32>, n: i32) -> Resu
 # Main
 # --------------------------------------------------------------------------
 
-fn main() -> Result<i32, GpuError>:
+fn main() -> Result<i64, GpuError>:
     val n = 64
 
     # --- 1D vector addition ---
-    val va = create_vec(n * n, 1.0f32)
-    val vb = create_vec(n * n, 2.0f32)
+    val va = create_vec(n * n, 1.0)
+    val vb = create_vec(n * n, 2.0)
 
     print "1D vec_add: {n * n} elements, 256 threads/block..."
     val r1 = run_vec_add_1d(va, vb, n * n)?
@@ -246,7 +234,7 @@ fn main() -> Result<i32, GpuError>:
     print "  result[0] = {r2[0]} (expected 3.0)"
 
     # --- Row-per-thread matmul ---
-    val ones = create_vec(n * n, 1.0f32)
+    val ones = create_vec(n * n, 1.0)
     print "Row-per-thread matmul: {n}x{n}..."
     val r3 = run_matmul_row(ones, ones, n)?
     print "  result[0] = {r3[0]} (expected {n}.0)"

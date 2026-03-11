@@ -185,12 +185,11 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
-                // Use rt_value_eq for deep equality comparison (handles strings, etc.)
-                let eq_id = ctx.runtime_funcs["rt_value_eq"];
-                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
-                let result = builder.inst_results(call)[0];
-                ensure_i64(builder, result)
+                // Use native icmp for i64 operands — avoids rt_value_eq I8 return
+                // type issue where upper 56 bits of RAX are garbage, causing
+                // ensure_i64 sign-extension to corrupt the result (SIGSEGV).
+                let cmp = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                ensure_i64(builder, cmp)
             }
         }
         BinOp::NotEq => {
@@ -199,13 +198,11 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
-                // Use rt_value_eq and negate the result
-                let eq_id = ctx.runtime_funcs["rt_value_eq"];
-                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
-                let eq_result = ensure_i64(builder, builder.inst_results(call)[0]);
-                let negated = builder.ins().icmp_imm(IntCC::Equal, eq_result, 0);
-                ensure_i64(builder, negated)
+                // Use native icmp for i64 operands — avoids rt_value_eq I8 return
+                // type issue where upper 56 bits of RAX are garbage, causing
+                // ensure_i64 sign-extension to corrupt the result (SIGSEGV).
+                let cmp = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
+                ensure_i64(builder, cmp)
             }
         }
         BinOp::Is => {

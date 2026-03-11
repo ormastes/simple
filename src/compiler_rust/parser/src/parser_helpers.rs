@@ -1257,57 +1257,49 @@ impl<'a> Parser<'a> {
             } else {
                 let name = self.expect_identifier()?;
 
-                // Check for trait bounds: T: Display or I: Iterator<Item=T>
+                // Check for trait bounds, type limits, or type candidates
+                // T: Display, T: [f32, i32], T limits [f32, i32]
                 let mut bounds = Vec::new();
-                if self.check(&TokenKind::Colon) {
-                    self.advance(); // consume ':'
+                let mut type_candidates = Vec::new();
+                let mut is_candidate_mode = false;
 
-                    // Parse first bound as identifier (with optional generic args)
-                    let bound_name = self.expect_identifier()?;
+                // Check for 'limits' keyword (alternative to colon for type limits)
+                let has_limits_keyword = self.check_identifier("limits");
+                if has_limits_keyword {
+                    self.advance(); // consume 'limits'
+                }
 
-                    // Check for generic arguments in bound: Iterator<Item=T>
-                    // Note: For now, we skip parsing the full generic args to avoid complexity
-                    // and just store the trait name. Full support for associated type constraints
-                    // like Item=T would require more AST changes.
-                    if self.check(&TokenKind::Lt) {
-                        // Skip generic arguments for now
-                        let mut depth = 1;
-                        self.advance(); // consume '<'
-                        while depth > 0 && !self.is_at_end() {
-                            if self.check(&TokenKind::Lt) {
-                                depth += 1;
+                if has_limits_keyword || self.check(&TokenKind::Colon) {
+                    if !has_limits_keyword {
+                        self.advance(); // consume ':'
+                    }
+
+                    // Check if followed by '[' — type candidate/limit list
+                    if self.check(&TokenKind::LBracket) {
+                        self.advance(); // consume '['
+
+                        // Parse type names: [f32, i32, f64, *]
+                        while !self.check(&TokenKind::RBracket) && !self.is_at_end() {
+                            if self.check(&TokenKind::Star) {
+                                is_candidate_mode = true;
                                 self.advance();
-                            } else if self.check(&TokenKind::Gt) {
-                                depth -= 1;
-                                self.advance();
-                            } else if self.check(&TokenKind::ShiftRight) {
-                                // >> is two > tokens
-                                if depth == 1 {
-                                    // Special case: depth is 1, so first > closes inner generics
-                                    // Second > belongs to outer context (function generic params)
-                                    // Don't consume the >> token - just exit the loop
-                                    break;
-                                } else {
-                                    depth -= 2;
-                                    self.advance();
-                                }
                             } else {
+                                let type_name = self.expect_identifier()?;
+                                type_candidates.push(type_name);
+                            }
+                            if self.check(&TokenKind::Comma) {
                                 self.advance();
                             }
                         }
-                    }
-
-                    bounds.push(bound_name);
-
-                    // Parse additional bounds with + separator: T: Display + Debug
-                    while self.check(&TokenKind::Plus) {
-                        self.advance(); // consume '+'
+                        self.expect(&TokenKind::RBracket)?;
+                    } else {
+                        // Regular trait bounds: T: Display or I: Iterator<Item=T>
                         let bound_name = self.expect_identifier()?;
 
-                        // Skip generic args for additional bounds too
+                        // Check for generic arguments in bound: Iterator<Item=T>
                         if self.check(&TokenKind::Lt) {
                             let mut depth = 1;
-                            self.advance();
+                            self.advance(); // consume '<'
                             while depth > 0 && !self.is_at_end() {
                                 if self.check(&TokenKind::Lt) {
                                     depth += 1;
@@ -1317,7 +1309,6 @@ impl<'a> Parser<'a> {
                                     self.advance();
                                 } else if self.check(&TokenKind::ShiftRight) {
                                     if depth == 1 {
-                                        // First > closes inner generics, second > belongs to outer context
                                         break;
                                     } else {
                                         depth -= 2;
@@ -1330,6 +1321,37 @@ impl<'a> Parser<'a> {
                         }
 
                         bounds.push(bound_name);
+
+                        // Parse additional bounds with + separator: T: Display + Debug
+                        while self.check(&TokenKind::Plus) {
+                            self.advance(); // consume '+'
+                            let bound_name = self.expect_identifier()?;
+
+                            if self.check(&TokenKind::Lt) {
+                                let mut depth = 1;
+                                self.advance();
+                                while depth > 0 && !self.is_at_end() {
+                                    if self.check(&TokenKind::Lt) {
+                                        depth += 1;
+                                        self.advance();
+                                    } else if self.check(&TokenKind::Gt) {
+                                        depth -= 1;
+                                        self.advance();
+                                    } else if self.check(&TokenKind::ShiftRight) {
+                                        if depth == 1 {
+                                            break;
+                                        } else {
+                                            depth -= 2;
+                                            self.advance();
+                                        }
+                                    } else {
+                                        self.advance();
+                                    }
+                                }
+                            }
+
+                            bounds.push(bound_name);
+                        }
                     }
                 }
 
@@ -1341,7 +1363,7 @@ impl<'a> Parser<'a> {
                     None
                 };
 
-                params.push(GenericParam::Type { name, bounds, default });
+                params.push(GenericParam::Type { name, bounds, default, type_candidates, is_candidate_mode });
             }
 
             // Check for end of generic parameters or comma before next parameter

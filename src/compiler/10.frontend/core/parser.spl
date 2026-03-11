@@ -24,9 +24,12 @@ use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
 use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
-use compiler.frontend.core.lexer.{lex_init, lex_next, lex_cur_text_get, lex_cur_line_get, lex_cur_col_get}
+use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next}
+use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.core.ast.{module_set_path}
 use compiler.core.ast.{ast_reset}
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
@@ -56,76 +59,103 @@ use compiler.core.parser_decls.{parse_module_body}
 
 # ===== Parser State =====
 
-var par_kind_slot: [i64] = [0]
-var par_text_slot: [text] = [""]
-var par_line_slot: [i64] = [0]
-var par_col_slot: [i64] = [0]
 var par_errors: [text] = []
-var par_had_error_slot: [bool] = [false]
 var par_struct_names: [text] = []
+
+fn par_kind_set(value: i64):
+    # Bootstrap path reads current token directly from lexer state.
+    nil
+
+fn par_kind_get() -> i64:
+    lex_token_kind()
+
+fn par_text_set(value: text):
+    nil
+
+fn par_text_get() -> text:
+    lex_token_text()
+
+fn par_line_set(value: i64):
+    nil
+
+fn par_line_get() -> i64:
+    lex_token_line()
+
+fn par_col_set(value: i64):
+    nil
+
+fn par_col_get() -> i64:
+    lex_token_col()
+
+fn par_had_error_set(value: bool):
+    if value:
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR", "1")
+    else:
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR", "0")
+
+fn par_had_error_get() -> bool:
+    (rt_env_get("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR") ?? "0") == "1"
 
 # ===== Parser Init =====
 
 fn parser_init(source: text):
+    parser_init_with_path(source, "")
+
+fn parser_init_with_path(source: text, path: text):
     print "[parser_init] 1"
     print "[parser_init] source_len_pre_reset={source.len()}"
     ast_reset()
     print "[parser_init] 2"
+    if path != "":
+        module_set_path(path)
     print "[parser_init] source_len_pre_lex={source.len()}"
-    lex_init(source)
+    lex_init_with_path(source, path)
     print "[parser_init] 3"
     print "[parser_init] 4"
-    par_had_error_slot[0] = false
+    par_had_error_set(false)
     print "[parser_init] 5"
     parser_advance()
 
 fn parser_advance():
     print "[parser_advance] 1"
-    par_kind_slot[0] = lex_next()
+    lex_next()
+    par_kind_set(lex_token_kind())
     print "[parser_advance] 2"
-    par_text_slot[0] = lex_cur_text_get()
+    print "[parser_advance] kind={par_kind_get()}"
+    par_text_set(lex_token_text())
     print "[parser_advance] 3"
-    par_line_slot[0] = lex_cur_line_get()
+    print "[parser_advance] text={par_text_get()}"
+    par_line_set(lex_token_line())
     print "[parser_advance] 4"
-    par_col_slot[0] = lex_cur_col_get()
+    print "[parser_advance] line={par_line_get()}"
+    par_col_set(lex_token_col())
     print "[parser_advance] 5"
-
-fn par_kind_get() -> i64:
-    par_kind_slot[0]
-
-fn par_text_get() -> text:
-    par_text_slot[0]
-
-fn par_line_get() -> i64:
-    par_line_slot[0]
-
-fn par_col_get() -> i64:
-    par_col_slot[0]
+    print "[parser_advance] col={par_col_get()}"
 
 # ===== Token Checking =====
 
 fn parser_check(expected: i64) -> bool:
-    par_kind_slot[0] == expected
+    par_kind_get() == expected
 
 fn parser_match_tok(expected: i64) -> bool:
-    if par_kind_slot[0] != expected:
+    if par_kind_get() != expected:
         return false
     parser_advance()
     true
 
 fn parser_expect(expected: i64) -> bool:
-    if par_kind_slot[0] == expected:
+    if par_kind_get() == expected:
         parser_advance()
         return true
-    val msg = "line " + int_to_str(par_line_slot[0]) + ":" + int_to_str(par_col_slot[0]) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_slot[0]) + " '" + par_text_slot[0] + "'"
+    val msg = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'"
     print "[parser_error] {msg}"
-    par_had_error_slot[0] = true
+    par_had_error_set(true)
     false
 
 fn parser_error(msg: text):
-    val full = "line " + int_to_str(par_line_slot[0]) + ":" + int_to_str(par_col_slot[0]) + ": " + msg
+    val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
     print "[parser_error] {full}"
-    par_had_error_slot[0] = true
+    par_had_error_set(true)
 
 # ===== Skip Newlines =====
 
@@ -340,8 +370,7 @@ fn parse_module(source: text, path: text):
     print "[parse_module] source_len={source.len()} path={path}"
     val preprocessed = _pp_preprocess_conditionals(source)
     print "[parse_module] preprocessed_len={preprocessed.len()} path={path}"
-    parser_init(preprocessed)
-    module_set_path(path)
+    parser_init_with_path(preprocessed, path)
     parse_module_body()
 
 fn parse_module_file(source: text, path: text):
@@ -349,17 +378,17 @@ fn parse_module_file(source: text, path: text):
     print "[parse_module_file] source_len={source.len()} path={path}"
     val preprocessed = _pp_preprocess_conditionals(source)
     print "[parse_module_file] preprocessed_len={preprocessed.len()} path={path}"
-    lex_init(preprocessed)
-    par_had_error_slot[0] = false
-    parser_advance()
     module_set_path(path)
+    lex_init_with_path(preprocessed, path)
+    par_had_error_set(false)
+    parser_advance()
     parse_module_body()
 
 fn parser_has_errors() -> bool:
-    par_had_error_slot[0]
+    par_had_error_get()
 
 fn parser_set_had_error(value: bool):
-    par_had_error_slot[0] = value
+    par_had_error_set(value)
 
 fn parser_get_errors() -> [text]:
     []

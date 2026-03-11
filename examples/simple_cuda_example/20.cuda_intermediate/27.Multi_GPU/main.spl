@@ -1,80 +1,115 @@
-use std.gpu.{GpuDevice, GpuBuffer, gpu_device_count, gpu_copy_peer, gpu_kernel_launch}
-use std.io.{print}
-
 # Multi-GPU vector addition
 # Splits work across two GPUs, each processing half the data
 
+use std.gpu.*
+
 @gpu_kernel
-fn vector_add_kernel(a: &[f32], b: &[f32], c: &mut [f32], n: i64):
-    val idx = thread_idx_x() + block_idx_x() * block_dim_x()
+fn vector_add_kernel(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i64):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
     if idx < n:
         c[idx] = a[idx] + b[idx]
 
-fn split_work_across_gpus(a: [f32], b: [f32]) -> Result<[f32], GpuError>:
-    val device_count = gpu_device_count()?
+fn split_work_across_gpus(a: List<f32>, b: List<f32>) -> Result<List<f32>, GpuError>:
+    val device_count = gpu_device_count()
     if device_count < 2:
         return Err(GpuError(message: "Need at least 2 GPUs"))
 
     val n = a.len()
     val half = n / 2
 
-    # Get device handles
-    val dev0 = GpuDevice.get(0)?
-    val dev1 = GpuDevice.get(1)?
+    # --- Device 0: first half ---
+    gpu_set_device(0)?
 
-    # Split input data
-    val a_first = a[0..half]
-    val a_second = a[half..n]
-    val b_first = b[0..half]
-    val b_second = b[half..n]
+    val buf_a0 = gpu_alloc_f32(half)?
+    val buf_b0 = gpu_alloc_f32(half)?
+    val buf_c0 = gpu_alloc_f32(half)?
 
-    # Allocate on device 0
-    var buf_a0 = dev0.alloc_copy(a_first)?
-    var buf_b0 = dev0.alloc_copy(b_first)?
-    var buf_c0 = dev0.alloc_f32(half)?
+    # Copy first half of input to device 0
+    var a_first = List(_items: [])
+    var i = 0
+    while i < half:
+        a_first.push(a[i])
+        i = i + 1
+    var b_first = List(_items: [])
+    i = 0
+    while i < half:
+        b_first.push(b[i])
+        i = i + 1
 
-    # Allocate on device 1
-    var buf_a1 = dev1.alloc_copy(a_second)?
-    var buf_b1 = dev1.alloc_copy(b_second)?
-    var buf_c1 = dev1.alloc_f32(n - half)?
+    gpu_upload_f32(buf_a0, a_first)?
+    gpu_upload_f32(buf_b0, b_first)?
 
-    # Launch kernels on each device
     val block_size = 256
     val grid0 = (half + block_size - 1) / block_size
-    val grid1 = ((n - half) + block_size - 1) / block_size
+    vector_add_kernel<<<grid: (grid0, 1, 1), block: (block_size, 1, 1)>>>(buf_a0, buf_b0, buf_c0, half)
+    gpu_sync()?
 
-    dev0.launch(vector_add_kernel, grid: grid0, block: block_size,
-        args: (buf_a0, buf_b0, buf_c0, half))
-    dev1.launch(vector_add_kernel, grid: grid1, block: block_size,
-        args: (buf_a1, buf_b1, buf_c1, n - half))
+    val result_first = gpu_download_f32(buf_c0, half)?
 
-    # Synchronize both devices
-    dev0.sync()?
-    dev1.sync()?
+    gpu_free(buf_a0)?
+    gpu_free(buf_b0)?
+    gpu_free(buf_c0)?
 
-    # Collect results
-    val result_first = buf_c0.to_host()?
-    val result_second = buf_c1.to_host()?
+    # --- Device 1: second half ---
+    val second_half = n - half
+    gpu_set_device(1)?
 
-    Ok(result_first + result_second)
+    val buf_a1 = gpu_alloc_f32(second_half)?
+    val buf_b1 = gpu_alloc_f32(second_half)?
+    val buf_c1 = gpu_alloc_f32(second_half)?
+
+    # Copy second half of input to device 1
+    var a_second = List(_items: [])
+    i = half
+    while i < n:
+        a_second.push(a[i])
+        i = i + 1
+    var b_second = List(_items: [])
+    i = half
+    while i < n:
+        b_second.push(b[i])
+        i = i + 1
+
+    gpu_upload_f32(buf_a1, a_second)?
+    gpu_upload_f32(buf_b1, b_second)?
+
+    val grid1 = (second_half + block_size - 1) / block_size
+    vector_add_kernel<<<grid: (grid1, 1, 1), block: (block_size, 1, 1)>>>(buf_a1, buf_b1, buf_c1, second_half)
+    gpu_sync()?
+
+    val result_second = gpu_download_f32(buf_c1, second_half)?
+
+    gpu_free(buf_a1)?
+    gpu_free(buf_b1)?
+    gpu_free(buf_c1)?
+
+    # Combine results
+    var result = List(_items: [])
+    i = 0
+    while i < result_first.len():
+        result.push(result_first[i])
+        i = i + 1
+    i = 0
+    while i < result_second.len():
+        result.push(result_second[i])
+        i = i + 1
+    Ok(result)
 
 fn device_info():
-    val count = gpu_device_count() ?? 0
+    val count = gpu_device_count()
     print "Available GPU devices: {count}"
-
-    var i = 0
-    while i < count:
-        val dev = GpuDevice.get(i)
-        if val d = dev:
-            print "  Device {i}: {d.name()}, memory: {d.total_memory() / 1048576} MB"
-        i = i + 1
 
 fn main():
     device_info()
 
-    val n = 1_000_000
-    var a = [f32].fill(n, 1.0)
-    var b = [f32].fill(n, 2.0)
+    val n = 1024
+    var a = List(_items: [])
+    var b = List(_items: [])
+    var i = 0
+    while i < n:
+        a.push(1.0)
+        b.push(2.0)
+        i = i + 1
 
     val result = split_work_across_gpus(a, b)
     match result:

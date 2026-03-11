@@ -208,8 +208,8 @@ pub(super) fn eval_literal_expr(
 
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
         Expr::BlockExpr { kind, payload } => {
-            // Evaluate the block using the appropriate handler
-            match blocks::evaluate_block(kind, payload) {
+            // Evaluate the block using the appropriate handler, passing env for variable access
+            match blocks::evaluate_block_with_env(kind, payload, env) {
                 Ok(value) => Ok(Some(value)),
                 Err(e) => Err(e),
             }

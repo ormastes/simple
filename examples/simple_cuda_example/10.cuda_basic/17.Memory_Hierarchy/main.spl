@@ -4,14 +4,7 @@
 # 1. Naive (global memory only)
 # 2. Shared memory tiled (with gpu_shared_mem and gpu_syncthreads)
 
-use std.gpu.{
-    gpu_alloc, gpu_upload, gpu_download, gpu_free,
-    gpu_shared_mem, gpu_syncthreads,
-    gpu_block_id_x, gpu_block_id_y,
-    gpu_block_dim_x, gpu_block_dim_y,
-    gpu_local_id_x, gpu_local_id_y,
-    gpu_launch, GpuBuffer, GpuError
-}
+use std.gpu.*
 
 # Tile size for shared memory tiling
 val TILE_SIZE = 16
@@ -25,12 +18,12 @@ val TILE_SIZE = 16
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn matmul_naive(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
+fn matmul_naive(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i64):
     val row = gpu_block_id_y() * gpu_block_dim_y() + gpu_local_id_y()
     val col = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
 
     if row < n and col < n:
-        var sum = 0.0f32
+        var sum = 0.0
         var k = 0
         while k < n:
             # Every thread reads from global memory -- slow!
@@ -49,17 +42,17 @@ fn matmul_naive(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32)
 # --------------------------------------------------------------------------
 
 @gpu_kernel
-fn matmul_tiled(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
+fn matmul_tiled(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i64):
     # Allocate shared memory for one tile of A and one tile of B
-    val tile_a = gpu_shared_mem<f32>(TILE_SIZE * TILE_SIZE)
-    val tile_b = gpu_shared_mem<f32>(TILE_SIZE * TILE_SIZE)
+    val tile_a = gpu_shared_mem_f32(TILE_SIZE * TILE_SIZE)
+    val tile_b = gpu_shared_mem_f32(TILE_SIZE * TILE_SIZE)
 
     val row = gpu_block_id_y() * TILE_SIZE + gpu_local_id_y()
     val col = gpu_block_id_x() * TILE_SIZE + gpu_local_id_x()
     val tx = gpu_local_id_x()
     val ty = gpu_local_id_y()
 
-    var sum = 0.0f32
+    var sum = 0.0
 
     # Number of tiles needed to cover the shared dimension
     val num_tiles = (n + TILE_SIZE - 1) / TILE_SIZE
@@ -75,12 +68,12 @@ fn matmul_tiled(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32)
         if row < n and a_col < n:
             tile_a[ty * TILE_SIZE + tx] = a[row * n + a_col]
         else:
-            tile_a[ty * TILE_SIZE + tx] = 0.0f32
+            tile_a[ty * TILE_SIZE + tx] = 0.0
 
         if b_row < n and col < n:
             tile_b[ty * TILE_SIZE + tx] = b[b_row * n + col]
         else:
-            tile_b[ty * TILE_SIZE + tx] = 0.0f32
+            tile_b[ty * TILE_SIZE + tx] = 0.0
 
         # --- Barrier: all threads must finish loading before computing ---
         gpu_syncthreads()
@@ -105,33 +98,33 @@ fn matmul_tiled(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32)
 # Host-side helper: create matrix, run kernel, retrieve result
 # --------------------------------------------------------------------------
 
-fn create_matrix(rows: i32, cols: i32, fill_value: f32) -> List<f32>:
-    var data = List<f32>()
+fn create_matrix(rows: i64, cols: i64, fill_value: f32) -> List<f32>:
+    var data = List(_items: [])
     var i = 0
     while i < rows * cols:
         data.push(fill_value)
         i = i + 1
     data
 
-fn create_identity(n: i32) -> List<f32>:
-    var data = List<f32>()
+fn create_identity(n: i64) -> List<f32>:
+    var data = List(_items: [])
     var i = 0
     while i < n * n:
-        data.push(0.0f32)
+        data.push(0.0)
         i = i + 1
     var row = 0
     while row < n:
-        data[row * n + row] = 1.0f32
+        data[row * n + row] = 1.0
         row = row + 1
     data
 
-fn run_naive(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
-    val a_dev = gpu_alloc<f32>(n * n)?
-    val b_dev = gpu_alloc<f32>(n * n)?
-    val c_dev = gpu_alloc<f32>(n * n)?
+fn run_naive(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
+    val a_dev = gpu_alloc_f32(n * n)?
+    val b_dev = gpu_alloc_f32(n * n)?
+    val c_dev = gpu_alloc_f32(n * n)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     val block_dim = (TILE_SIZE, TILE_SIZE, 1)
     val grid_dim = ((n + TILE_SIZE - 1) / TILE_SIZE,
@@ -139,7 +132,7 @@ fn run_naive(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, 
 
     matmul_naive<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, n * n)?
+    val result = gpu_download_f32(c_dev, n * n)?
 
     gpu_free(a_dev)?
     gpu_free(b_dev)?
@@ -147,13 +140,13 @@ fn run_naive(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, 
 
     Ok(result)
 
-fn run_tiled(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, GpuError>:
-    val a_dev = gpu_alloc<f32>(n * n)?
-    val b_dev = gpu_alloc<f32>(n * n)?
-    val c_dev = gpu_alloc<f32>(n * n)?
+fn run_tiled(a_host: List<f32>, b_host: List<f32>, n: i64) -> Result<List<f32>, GpuError>:
+    val a_dev = gpu_alloc_f32(n * n)?
+    val b_dev = gpu_alloc_f32(n * n)?
+    val c_dev = gpu_alloc_f32(n * n)?
 
-    gpu_upload(a_dev, a_host)?
-    gpu_upload(b_dev, b_host)?
+    gpu_upload_f32(a_dev, a_host)?
+    gpu_upload_f32(b_dev, b_host)?
 
     val block_dim = (TILE_SIZE, TILE_SIZE, 1)
     val grid_dim = ((n + TILE_SIZE - 1) / TILE_SIZE,
@@ -161,7 +154,7 @@ fn run_tiled(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, 
 
     matmul_tiled<<<grid: grid_dim, block: block_dim>>>(a_dev, b_dev, c_dev, n)
 
-    val result = gpu_download<f32>(c_dev, n * n)?
+    val result = gpu_download_f32(c_dev, n * n)?
 
     gpu_free(a_dev)?
     gpu_free(b_dev)?
@@ -173,13 +166,13 @@ fn run_tiled(a_host: List<f32>, b_host: List<f32>, n: i32) -> Result<List<f32>, 
 # CPU reference for verification
 # --------------------------------------------------------------------------
 
-fn matmul_cpu(a: List<f32>, b: List<f32>, n: i32) -> List<f32>:
-    var c = create_matrix(n, n, 0.0f32)
+fn matmul_cpu(a: List<f32>, b: List<f32>, n: i64) -> List<f32>:
+    var c = create_matrix(n, n, 0.0)
     var i = 0
     while i < n:
         var j = 0
         while j < n:
-            var sum = 0.0f32
+            var sum = 0.0
             var k = 0
             while k < n:
                 sum = sum + a[i * n + k] * b[k * n + j]
@@ -193,11 +186,11 @@ fn matmul_cpu(a: List<f32>, b: List<f32>, n: i32) -> List<f32>:
 # Main: run both variants and compare
 # --------------------------------------------------------------------------
 
-fn main() -> Result<i32, GpuError>:
+fn main() -> Result<i64, GpuError>:
     val n = 64
 
     # Create test matrices: A * I = A
-    val a_host = create_matrix(n, n, 2.0f32)
+    val a_host = create_matrix(n, n, 2.0)
     val identity = create_identity(n)
 
     val expected = matmul_cpu(a_host, identity, n)
@@ -217,9 +210,9 @@ fn main() -> Result<i32, GpuError>:
     while i < n * n:
         val diff_naive = result_naive[i] - expected[i]
         val diff_tiled = result_tiled[i] - expected[i]
-        if diff_naive > 0.001f32 or diff_naive < -0.001f32:
+        if diff_naive > 0.001 or diff_naive < -0.001:
             errors_naive = errors_naive + 1
-        if diff_tiled > 0.001f32 or diff_tiled < -0.001f32:
+        if diff_tiled > 0.001 or diff_tiled < -0.001:
             errors_tiled = errors_tiled + 1
         i = i + 1
 

@@ -181,6 +181,11 @@ thread_local! {
     /// Key is mixin name, value is the mixin definition.
     /// Mixins are stateful traits (traits with fields) that can be composed into classes.
     pub(crate) static MIXINS: RefCell<HashMap<String, simple_parser::ast::MixinDef>> = RefCell::new(HashMap::new());
+
+    /// Global enum definitions registry (mirrors MODULE_GLOBALS but for enums).
+    /// Populated during module evaluation first pass; provides fallback enum lookups
+    /// for imported enums that are not in the local `enums` parameter.
+    pub(crate) static GLOBAL_ENUMS: RefCell<HashMap<String, simple_parser::ast::EnumDef>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -547,6 +552,9 @@ pub fn clear_interpreter_state() {
 
     // Clear block-scoped enums
     BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear global enum definitions
+    GLOBAL_ENUMS.with(|cell| cell.borrow_mut().clear());
 
     // Clear unit system registries
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());

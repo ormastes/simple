@@ -396,21 +396,45 @@ pub(super) fn eval_op_expr(
                 BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
                 BinOp::Lt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
+                    (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
+                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                    }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
                 },
                 BinOp::Gt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
+                    (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
+                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                    }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
                 },
                 BinOp::LtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
+                    (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
+                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                    }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
                 },
                 BinOp::GtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
+                    (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
+                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                    }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
                 },

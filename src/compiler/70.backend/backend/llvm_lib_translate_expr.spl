@@ -108,9 +108,23 @@ fn translate_instruction(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMappe
         case DebugValue(_, _): ()
         case Nop: ()
 
-        # Stubs for GPU/VHDL/SIMD/Pipeline/Async — produce zero value
+        # Pipeline operators — partially supported (PipeForward handled above)
+        case Compose(dest, _, _):
+            print "[llvm-lib] warning: Compose (>>) not yet supported, producing zero"
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
+        case Parallel(dest, _, _):
+            print "[llvm-lib] warning: Parallel (//) not yet supported, producing zero"
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
+        case LayerConnect(dest, _, _):
+            print "[llvm-lib] warning: LayerConnect (~>) not yet supported, producing zero"
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
+
+        case InlineAsm(_, _, _, _, _):
+            print "[llvm-lib] error: inline assembly not supported by llvm-lib backend"
+
+        # Remaining: SIMD, GPU, VHDL, Async — warn instead of silent
         case _:
-            ()
+            print "[llvm-lib] warning: unhandled MIR instruction kind (skipped)"
 
 # ============================================================================
 # Constant Translation
@@ -201,12 +215,14 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                     if rt_pow != 0:
                         llvm_build_call2(builder, llvm_global_get_value_type(rt_pow), rt_pow, [lhs, rhs], "pow")
                     else:
+                        print "[llvm-lib] warning: float pow (**) function not found, producing zero"
                         llvm_const_null(dest_ty)
             else:
                 val pow_fn = llvm_get_named_function(mod_, "__simple_pow")
                 if pow_fn != 0:
                     llvm_build_call2(builder, llvm_global_get_value_type(pow_fn), pow_fn, [lhs, rhs], "pow")
                 else:
+                    print "[llvm-lib] warning: integer pow (**) function not found, producing zero"
                     llvm_const_null(dest_ty)
 
         case BitAnd: llvm_build_and(builder, lhs, rhs, "and")
@@ -257,7 +273,8 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
             llvm_build_gep2(builder, i8_ty, lhs, [rhs], "offset")
 
         case _:
-            # MatMul, BroadcastOps — stub to zero
+            # MatMul, BroadcastOps — warn instead of silent zero
+            print "[llvm-lib] warning: unhandled binary op (MatMul/Broadcast), producing zero"
             llvm_const_null(dest_ty)
 
     value_map[dest.id] = result
@@ -290,6 +307,7 @@ fn translate_unaryop(ctx: i64, builder: i64, tm: LlvmLibTypeMapper,
         case BitNot:
             llvm_build_not(builder, op_val, "bitnot")
         case _:
+            print "[llvm-lib] warning: unhandled unary op (Transpose), producing zero"
             llvm_const_null(dest_ty)
 
     value_map[dest.id] = result

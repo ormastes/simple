@@ -1,58 +1,66 @@
-use std.gpu.{GpuDevice, TensorFragment, tensor_load, tensor_store, tensor_mma}
+# 38. Tensor Cores - Tests
+#
+# SSpec tests for tensor core GEMM operations.
+# Uses CPU reference implementation for tensor core API.
+# Tile size is 4x4 for interpreter performance.
+
+use std.gpu.*
+use self.main.{TensorFragment, create_fragment, tensor_load, tensor_store, tensor_mma, tensor_gemm, ml_matmul, WMMA_M, WMMA_N, WMMA_K}
+
+# Helper: build 4x4 identity matrix (while loops must be outside it blocks)
+fn make_identity_4() -> [f64]:
+    var data = [for i in 0..16: 0.0]
+    var i = 0
+    while i < 4:
+        data[i * 4 + i] = 1.0
+        i = i + 1
+    data
+
+# Helper: build sequential 4x4 matrix [1.0, 2.0, ..., 16.0]
+fn make_sequential_4() -> [f64]:
+    var data = [for i in 0..16: 0.0]
+    var i = 0
+    while i < 16:
+        data[i] = (i + 1) * 1.0
+        i = i + 1
+    data
 
 describe "Tensor core operations":
     it "should multiply identity by matrix":
-        val m = 16
-        val n = 16
-        val k = 16
-        # Identity matrix A
-        var a_f32 = [f32].fill(m * k, 0.0)
-        var i = 0
-        while i < m:
-            a_f32[i * k + i] = 1.0
-            i = i + 1
-        # Sequential matrix B
-        var b_f32 = [f32].fill(k * n, 0.0)
-        i = 0
-        while i < k * n:
-            b_f32[i] = (i + 1).to_f32()
-            i = i + 1
-        val a = to_f16(a_f32)
-        val b = to_f16(b_f32)
-        val c = tensor_gemm(a, b, m, n, k)?
+        val a_data = make_identity_4()
+        val b_data = make_sequential_4()
+        val c = tensor_gemm(a_data, b_data, 4, 4, 4)
+        val result = c.unwrap()
         # I * B = B, so first element should be 1.0
-        expect(c[0]).to_equal(1.0)
-        expect(c[1]).to_equal(2.0)
+        expect(result[0]).to_equal(1.0)
+        expect(result[1]).to_equal(2.0)
 
-    it "should accumulate with f32 precision":
-        # Even though inputs are f16, accumulator is f32
-        val m = 16
-        val n = 16
-        val k = 16
-        val a = [f16].fill(m * k, 1.0.to_f16())
-        val b = [f16].fill(k * n, 1.0.to_f16())
-        val c = tensor_gemm(a, b, m, n, k)?
-        # Each element = sum of k ones = 16.0
-        expect(c[0]).to_equal(16.0)
+    it "should accumulate with f64 precision":
+        val a = [for i in 0..16: 1.0]
+        val b = [for i in 0..16: 1.0]
+        val c = tensor_gemm(a, b, 4, 4, 4)
+        val result = c.unwrap()
+        # Each element = sum of 4 ones = 4.0
+        expect(result[0]).to_equal(4.0)
 
     it "should handle zero matrices":
-        val m = 16
-        val n = 16
-        val k = 16
-        val a = [f16].fill(m * k, 0.0.to_f16())
-        val b = [f16].fill(k * n, 1.0.to_f16())
-        val c = tensor_gemm(a, b, m, n, k)?
-        expect(c[0]).to_equal(0.0)
+        val a = [for i in 0..16: 0.0]
+        val b = [for i in 0..16: 1.0]
+        val c = tensor_gemm(a, b, 4, 4, 4)
+        val result = c.unwrap()
+        expect(result[0]).to_equal(0.0)
 
     it "should perform ML matmul":
-        val weights = [f16].fill(4 * 8, 0.5.to_f16())
-        val acts = [f16].fill(2 * 8, 1.0.to_f16())
-        val result = ml_matmul(weights, acts, 2, 8, 4)?
-        # Each output = sum of 8 * (0.5 * 1.0) = 4.0
-        expect(result[0]).to_equal(4.0)
-        expect(result.len()).to_equal(8)
+        val weights = [for i in 0..16: 0.5]
+        val acts = [for i in 0..8: 1.0]
+        val result = ml_matmul(weights, acts, 2, 4, 4)
+        val data = result.unwrap()
+        # Each output = sum of 4 * (0.5 * 1.0) = 2.0
+        expect(data[0]).to_equal(2.0)
+        expect(data.len()).to_equal(8)
 
     it "should create zero fragment":
-        val frag = TensorFragment<16, 16, f32>.zero()
-        expect(frag.rows()).to_equal(16)
-        expect(frag.cols()).to_equal(16)
+        val frag = create_fragment(4, 4)
+        expect(frag.num_rows()).to_equal(4)
+        expect(frag.num_cols()).to_equal(4)
+        expect(frag.get(0, 0)).to_equal(0.0)

@@ -290,6 +290,9 @@ impl<'a> MirLowerer<'a> {
                     }
                 }
 
+                // Emit deferred blocks in LIFO order before returning
+                self.emit_deferred_blocks(contract)?;
+
                 // Emit drop instructions for all locals before returning
                 // This ensures proper cleanup in LIFO order (Rust-level memory safety)
                 self.emit_function_drops()?;
@@ -528,6 +531,9 @@ impl<'a> MirLowerer<'a> {
                     .ok_or(super::lowering_core::MirLowerError::BreakOutsideLoop)?
                     .clone();
 
+                // Emit deferred blocks before breaking out of loop
+                self.emit_deferred_blocks(contract)?;
+
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(loop_ctx.break_target);
@@ -541,6 +547,9 @@ impl<'a> MirLowerer<'a> {
                     .current_loop()
                     .ok_or(super::lowering_core::MirLowerError::ContinueOutsideLoop)?
                     .clone();
+
+                // Emit deferred blocks before continuing loop
+                self.emit_deferred_blocks(contract)?;
 
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
@@ -932,13 +941,9 @@ impl<'a> MirLowerer<'a> {
 
             HirStmt::Defer { body } => {
                 // Defer statement for RAII/cleanup patterns
-                // Full implementation requires scope tracking and injecting defer bodies at all exit points
-                // For MVP: lower the body statements immediately (simplified semantics)
-                // TODO(defer): Track defer blocks and inject at scope exit points (return, break, end-of-block)
-                // TODO(defer): Implement LIFO ordering when multiple defers exist
-                for stmt in body {
-                    self.lower_stmt(stmt, contract)?;
-                }
+                // Push the body onto the defer stack; it will be emitted in LIFO order
+                // at scope exit points (return, break, continue, end of function)
+                self.push_defer(body.clone())?;
                 Ok(())
             }
         }

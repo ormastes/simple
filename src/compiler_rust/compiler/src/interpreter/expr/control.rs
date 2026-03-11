@@ -182,6 +182,12 @@ pub(super) fn eval_control_expr(
                             }
                         }
                     }
+                    // Write back pre-existing variables from arm_env to env
+                    for (key, value) in &arm_env {
+                        if env.contains_key(key) {
+                            env.insert(key.clone(), value.clone());
+                        }
+                    }
                     return Ok(Some(result));
                 }
             }

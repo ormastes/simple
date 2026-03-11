@@ -21,7 +21,9 @@ pub(crate) use core::{
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
+    GLOBAL_ENUMS,
 };
+use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
@@ -278,8 +280,11 @@ pub(crate) fn evaluate_call(
             // Check for enum variant constructor: EnumName.Variant(args)
             // This handles calls like Result.Ok(42), Option.Some(x), etc.
 
-            // Try global enums first
-            if let Some(enum_def) = enums.get(module_name) {
+            // Try local enums first, then GLOBAL_ENUMS fallback
+            let enum_def_opt = enums.get(module_name).cloned().or_else(|| {
+                GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned())
+            });
+            if let Some(enum_def) = enum_def_opt {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
                     let payload = if args.is_empty() {
                         None
@@ -358,6 +363,33 @@ pub(crate) fn evaluate_call(
                     );
                 }
             }
+
+            // Cross-module fallback for FieldAccess: search MODULE_CLASSES_CACHE
+            // for the class definition when it's not in the local classes map.
+            let cached_fa_class: Option<ClassDef> = MODULE_CLASSES_CACHE.with(|cache| {
+                let cache = cache.borrow();
+                for (_path, module_classes) in cache.iter() {
+                    if let Some(class_def) = module_classes.get(module_name.as_str()) {
+                        return Some(class_def.clone());
+                    }
+                }
+                None
+            });
+            if let Some(class_def) = cached_fa_class {
+                classes.insert(module_name.clone(), class_def.clone());
+                if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
+                    let is_new_method = field == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
+                    }
+                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
+                    }
+                    return result;
+                }
+            }
+
             let ctx = ErrorContext::new()
                 .with_code(codes::UNDEFINED_VARIABLE)
                 .with_help("check that the symbol exists in the module");
@@ -374,8 +406,11 @@ pub(crate) fn evaluate_call(
             let type_name = &segments[0];
             let method_name = &segments[1];
 
-            // Check if it's an enum variant constructor
-            if let Some(enum_def) = enums.get(type_name) {
+            // Check if it's an enum variant constructor (local enums + GLOBAL_ENUMS fallback)
+            let path_enum_def = enums.get(type_name).cloned().or_else(|| {
+                GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name).cloned())
+            });
+            if let Some(enum_def) = path_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| &v.name == method_name) {
                     let payload = if args.is_empty() {
                         None
@@ -581,8 +616,11 @@ pub(crate) fn evaluate_call(
                 }
             }
 
-            // Try as enum variant constructor (for user-defined enums)
-            if let Some(enum_def) = enums.get(type_name.as_str()) {
+            // Try as enum variant constructor (for user-defined enums + GLOBAL_ENUMS fallback)
+            let tail_enum_def = enums.get(type_name.as_str()).cloned().or_else(|| {
+                GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned())
+            });
+            if let Some(enum_def) = tail_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| v.name == *method_name) {
                     let payload = if args.is_empty() {
                         None
@@ -609,6 +647,37 @@ pub(crate) fn evaluate_call(
                     });
                 }
             }
+
+            // Cross-module fallback: search MODULE_CLASSES_CACHE for the class definition.
+            // When a class is imported from another module, its ClassDef may not be in the
+            // local `classes` map if the import path didn't fully merge definitions.
+            // Search all cached module definitions for the class and dispatch the method.
+            let cached_class_def: Option<ClassDef> = MODULE_CLASSES_CACHE.with(|cache| {
+                let cache = cache.borrow();
+                for (_path, module_classes) in cache.iter() {
+                    if let Some(class_def) = module_classes.get(type_name.as_str()) {
+                        return Some(class_def.clone());
+                    }
+                }
+                None
+            });
+            if let Some(class_def) = cached_class_def {
+                // Also insert into local classes map so subsequent lookups are fast
+                classes.insert(type_name.clone(), class_def.clone());
+
+                // Try any method (static or instance-as-static)
+                if let Some(method) = class_def.methods.iter().find(|m| m.name == *method_name) {
+                    let is_new_method = method_name == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                    }
+                    let result = core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                    }
+                    return result;
+                }
+            }
         }
 
         let ctx = ErrorContext::new()
@@ -620,9 +689,27 @@ pub(crate) fn evaluate_call(
         ));
     }
 
-    // Handle generic type constructors like Channel[int]()
-    if let Expr::Index { receiver, .. } = callee.as_ref() {
+    // Handle generic type constructors like Channel[int]() and sizeof<T>()
+    if let Expr::Index { receiver, index } = callee.as_ref() {
         if let Expr::Identifier(name) = receiver.as_ref() {
+            // sizeof<T>() / size_of<T>() — returns byte size of type T
+            if name == "sizeof" || name == "size_of" {
+                let type_name = match index.as_ref() {
+                    Expr::Identifier(t) => t.as_str(),
+                    _ => "unknown",
+                };
+                let size: i64 = match type_name {
+                    "f32" => 4,
+                    "i32" | "u32" => 4,
+                    "f64" => 8,
+                    "i64" | "u64" => 8,
+                    "i16" | "u16" => 2,
+                    "i8" | "u8" | "bool" => 1,
+                    "i128" | "u128" => 16,
+                    _ => 8, // default pointer/word size
+                };
+                return Ok(Value::Int(size));
+            }
             if name == BUILTIN_CHANNEL {
                 let buffer_size = args.iter().find_map(|arg| {
                     if arg.name.as_deref() == Some("buffer") {

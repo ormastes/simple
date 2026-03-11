@@ -68,6 +68,21 @@ impl MathBlock {
 
         eval::evaluate_with_backend(&expr, preferred)
     }
+
+    /// Evaluate with access to the interpreter's variable environment.
+    ///
+    /// This bridges interpreter variables (e.g., `val x = 5`) into the math
+    /// evaluator so that `m{ 2x }` can resolve `x` from the surrounding scope.
+    pub fn evaluate_with_env(&self, payload: &str, interpreter_env: &crate::value::Env) -> BlockResult {
+        let (payload_expr, _preferred) = parse_backend_directive(payload);
+        let (expr, warnings) = parser::parse_math(payload_expr)?;
+
+        for warning in &warnings {
+            eprintln!("warning: {}", warning);
+        }
+
+        eval::evaluate_with_env_bridge(&expr, interpreter_env)
+    }
 }
 
 impl BlockHandler for MathBlock {

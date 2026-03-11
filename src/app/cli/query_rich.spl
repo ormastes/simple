@@ -7,6 +7,7 @@
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process}
 use app.cli.query_engine.{engine_signature_help}
@@ -14,6 +15,10 @@ use app.cli.query_ast_query.{engine_ast_query}
 use app.cli.query_sem_query.{engine_sem_query}
 use app.cli.query_schema.{engine_query_schema}
 use app.cli.query_helpers.{_has_flag, _replace_word, _collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _count_indent, _extract_flag, _extract_call_name}
+use compiler.driver.driver.{check_file}
+use compiler.driver.driver_types.{CompileResult}
+use compiler.tools.fix.main.{collect_fixes_from_source}
+use compiler.tools.formatter.main.{make_formatter}
 
 fn query_file_read_rich(path: text) -> text:
     rt_file_read_text(path) ?? ""
@@ -99,36 +104,32 @@ fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i6
     0
 
 fn query_code_actions(file: text, line_num: i64) -> i64:
-    # TODO: check/fix commands are stubs (cli_check, cli_run_fix return "not implemented").
-    # When they are implemented, call them in-process instead of via subprocess.
-    val check_out = ""
-    val fix_out = ""
-
     val line_str = "{line_num}"
 
+    # Run type-check pass to collect diagnostics
     var has_diagnostics = false
-    if check_out.trim() != "":
-        val check_lines = check_out.split("\n")
-        print "--- Diagnostics ---"
-        for cline in check_lines:
-            val ct = cline.trim()
-            if (ct != "" and ct.contains(":" + line_str + ":")):
-                print ct
-                has_diagnostics = true
-            elif (ct != "" and ct.contains(":" + line_str + " ")):
-                print ct
-                has_diagnostics = true
+    val check_result = check_file(file)
+    match check_result:
+        case CompileResult.Success(_):
+            val _ = 0
+        case _:
+            print "--- Diagnostics ---"
+            print "{file}:{line_str}: type check reported issues"
+            has_diagnostics = true
 
+    # Run fix tool to collect suggested fixes
     var has_fixes = false
-    if fix_out.trim() != "":
-        val fix_lines = fix_out.split("\n")
-        print ""
-        print "--- Suggested Fixes ---"
-        for fline in fix_lines:
-            val ft = fline.trim()
-            if ft != "" and ft.contains(":" + line_str):
-                print ft
-                has_fixes = true
+    if rt_file_exists(file):
+        val source = rt_file_read_text(file) ?? ""
+        if source != "":
+            val fixes = collect_fixes_from_source(file, source)
+            if fixes.len() > 0:
+                print ""
+                print "--- Suggested Fixes ---"
+                for fix in fixes:
+                    val fix_desc = "[{fix.id}] {fix.description}"
+                    print fix_desc
+                    has_fixes = true
 
     if not has_diagnostics and not has_fixes:
         print "No code actions available at {file}:{line_num}"
@@ -626,18 +627,18 @@ fn query_document_formatting(file: text) -> i64:
     if clean_file == "":
         print "Error: invalid file path"
         return 1
-    # TODO: fmt command is a stub (cli_run_fmt returns "not implemented").
-    # When it is implemented, call it in-process instead of via subprocess.
-    val out = ""
-    val code = 0
-    if out.trim() != "":
-        print out
-    else:
-        if code == 0:
-            print "File is already formatted: {clean_file}"
-        else:
+
+    # Format file in-process using the Formatter
+    val fmt = make_formatter()
+    val result = fmt.format_file(clean_file)
+    match result:
+        case Ok(formatted):
+            print formatted
+            return 0
+        case Err(e):
             print "Formatting failed for: {clean_file}"
-    code
+            print "Error: {e}"
+            return 1
 
 fn query_ast_query(cmd_args: [text]) -> i64:
     if cmd_args.len() < 2:
@@ -666,3 +667,16 @@ fn query_query_schema(cmd_args: [text]) -> i64:
     if cmd_args.len() >= 2:
         kind = cmd_args[1]
     engine_query_schema(kind)
+
+fn query_check(file: text) -> i64:
+    val result = check_file(file)
+    match result:
+        case CompileResult.Success(_):
+            return 0
+        case CompileResult.Error(errors):
+            for err in errors:
+                print "{file}:{err}"
+            return 1
+        case _:
+            print "{file}:1:1: error: check failed"
+            return 1

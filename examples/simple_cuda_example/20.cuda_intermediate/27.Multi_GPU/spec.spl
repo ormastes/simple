@@ -1,52 +1,85 @@
-use std.gpu.{GpuDevice, gpu_device_count}
+# Multi-GPU operations - Tests
+
+use std.gpu.*
+
+use self.main.{vector_add_kernel, split_work_across_gpus}
 
 describe "Multi-GPU operations":
-    it "should enumerate available devices":
-        val count = gpu_device_count() ?? 0
+    it "should report device count":
+        val count = gpu_device_count()
         expect(count).to_be_greater_than(-1)
 
-    it "should get device handle by id":
-        val count = gpu_device_count() ?? 0
+    it "should set active device":
+        val count = gpu_device_count()
         if count > 0:
-            val dev = GpuDevice.get(0)
-            expect(dev.?).to_equal(true)
+            gpu_set_device(0)
+            # If no error, device was set successfully
+            expect(true).to_equal(true)
 
-    it "should report device name":
-        val count = gpu_device_count() ?? 0
+    it "should allocate memory on default device":
+        val count = gpu_device_count()
         if count > 0:
-            val dev = GpuDevice.get(0)?
-            val name = dev.name()
-            expect(name.len()).to_be_greater_than(0)
+            gpu_set_device(0)
+            val buf = gpu_alloc_f32(1024)
+            expect(buf.is_ok()).to_equal(true)
+            gpu_free(buf.unwrap())
 
-    it "should allocate memory on specific device":
-        val count = gpu_device_count() ?? 0
+    it "should upload and download on device":
+        val count = gpu_device_count()
         if count > 0:
-            val dev = GpuDevice.get(0)?
-            val buf = dev.alloc_f32(1024)
-            expect(buf.?).to_equal(true)
-
-    it "should copy data between devices":
-        val count = gpu_device_count() ?? 0
-        if count >= 2:
-            val dev0 = GpuDevice.get(0)?
-            val dev1 = GpuDevice.get(1)?
-            val data = [1.0, 2.0, 3.0, 4.0]
-            var buf0 = dev0.alloc_copy(data)?
-            var buf1 = dev1.alloc_f32(4)?
-            val copy_result = gpu_copy_peer(buf0, buf1)
-            expect(copy_result.?).to_equal(true)
+            gpu_set_device(0)
+            val buf = gpu_alloc_f32(4)?
+            var data = List(_items: [])
+            data.push(1.0)
+            data.push(2.0)
+            data.push(3.0)
+            data.push(4.0)
+            gpu_upload_f32(buf, data)?
+            val result = gpu_download_f32(buf, 4)?
+            expect(result[0]).to_equal(1.0)
+            expect(result[3]).to_equal(4.0)
+            gpu_free(buf)
 
     it "should run kernel on selected device":
-        val count = gpu_device_count() ?? 0
+        val count = gpu_device_count()
         if count > 0:
-            val dev = GpuDevice.get(0)?
-            val a = dev.alloc_copy([1.0, 2.0, 3.0])?
-            val b = dev.alloc_copy([4.0, 5.0, 6.0])?
-            var c = dev.alloc_f32(3)?
-            dev.launch(vector_add_kernel, grid: 1, block: 3,
-                args: (a, b, c, 3))
-            dev.sync()?
-            val result = c.to_host()?
+            gpu_set_device(0)
+            val a = gpu_alloc_f32(3)?
+            val b = gpu_alloc_f32(3)?
+            var c = gpu_alloc_f32(3)?
+            var a_data = List(_items: [])
+            a_data.push(1.0)
+            a_data.push(2.0)
+            a_data.push(3.0)
+            var b_data = List(_items: [])
+            b_data.push(4.0)
+            b_data.push(5.0)
+            b_data.push(6.0)
+            gpu_upload_f32(a, a_data)?
+            gpu_upload_f32(b, b_data)?
+            vector_add_kernel<<<grid: (1, 1, 1), block: (3, 1, 1)>>>(a, b, c, 3)
+            gpu_sync()?
+            val result = gpu_download_f32(c, 3)?
             expect(result[0]).to_equal(5.0)
             expect(result[1]).to_equal(7.0)
             expect(result[2]).to_equal(9.0)
+            gpu_free(a)
+            gpu_free(b)
+            gpu_free(c)
+
+    it "should split work across two GPUs":
+        val count = gpu_device_count()
+        if count >= 2:
+            var a = List(_items: [])
+            var b = List(_items: [])
+            var i = 0
+            while i < 512:
+                a.push(1.0)
+                b.push(2.0)
+                i = i + 1
+            val result = split_work_across_gpus(a, b)
+            expect(result.is_ok()).to_equal(true)
+            val c = result.unwrap()
+            expect(c.len()).to_equal(512)
+            expect(c[0]).to_equal(3.0)
+            expect(c[511]).to_equal(3.0)

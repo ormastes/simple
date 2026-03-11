@@ -159,10 +159,9 @@ fn main() -> i64:
     42
 );
 
-// FIXME: SIGSEGV crash in JIT compiler when handling == comparison
 backend_test!(
     jit_comparison_eq,
-    interp,
+    interp_jit,
     r#"
 fn main() -> i64:
     if 42 == 42:
@@ -452,10 +451,9 @@ fn main() -> i64:
     42
 );
 
-// FIXME: SIGSEGV crash in JIT compiler when handling != comparison
 backend_test!(
     jit_comparison_not_equal,
-    interp,
+    interp_jit,
     r#"
 fn main() -> i64:
     if 41 != 42:
@@ -580,10 +578,9 @@ fn main() -> i64:
 // Feature #5: Control Flow (if/elif/else)
 // =============================================================================
 
-// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
 backend_test!(
     jit_if_elif_else_first,
-    interp,
+    interp_jit,
     r#"
 fn main() -> i64:
     let x: i64 = 1
@@ -597,10 +594,9 @@ fn main() -> i64:
     42
 );
 
-// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
 backend_test!(
     jit_if_elif_else_second,
-    interp,
+    interp_jit,
     r#"
 fn main() -> i64:
     let x: i64 = 2
@@ -614,10 +610,9 @@ fn main() -> i64:
     42
 );
 
-// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
 backend_test!(
     jit_if_elif_else_third,
-    interp,
+    interp_jit,
     r#"
 fn main() -> i64:
     let x: i64 = 3
@@ -653,10 +648,9 @@ fn main() -> i64:
 // Integration Tests: Complex Programs
 // =============================================================================
 
-// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
 backend_test!(
     jit_gcd,
-    interp,
+    interp_jit,
     r#"
 fn gcd(a: i64, b: i64) -> i64:
     if b == 0:
@@ -707,10 +701,9 @@ fn main() -> i64:
     42
 );
 
-// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
 backend_test!(
     jit_is_even_odd,
-    interp,
+    interp_jit,
     r#"
 fn is_even(n: i64) -> i64:
     if n % 2 == 0:

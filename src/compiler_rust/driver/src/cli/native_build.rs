@@ -16,6 +16,7 @@
 //!   --clean             Force clean rebuild (delete cache)
 //!   --cache-dir <dir>   Cache directory for incremental builds
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
+//!   --backend <name>    Compilation backend (cranelift, llvm)
 //!   --help              Show help
 
 use std::path::PathBuf;
@@ -34,6 +35,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
+    let mut backend = String::new();
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -130,8 +132,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 i += 1;
             }
             "--backend" => {
-                // Accept and ignore --backend (Rust seed always uses Cranelift)
                 if i + 1 < args.len() {
+                    backend = args[i + 1].clone();
                     i += 2;
                 } else {
                     eprintln!("error: --backend requires a value (cranelift or llvm)");
@@ -139,7 +141,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 }
             }
             other if other.starts_with("--backend=") => {
-                // Accept and ignore --backend=value (Rust seed always uses Cranelift)
+                backend = other.strip_prefix("--backend=").unwrap_or("").to_string();
                 i += 1;
             }
             other => {
@@ -193,6 +195,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         eprintln!("  Timeout: {}s", timeout);
         eprintln!("  Incremental: {}", incremental);
         eprintln!("  Mangle: {}", !no_mangle);
+        if !backend.is_empty() {
+            eprintln!("  Backend: {}", backend);
+        }
     }
 
     let mut config = NativeBuildConfig::default();
@@ -204,6 +209,18 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     config.clean = clean;
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
+    if !backend.is_empty() {
+        // Normalize backend aliases
+        let normalized = match backend.as_str() {
+            "llvm-lib" | "llvmlib" => "llvm".to_string(),
+            other => other.to_string(),
+        };
+        config.backend = normalized.clone();
+        // Set env var so compile_file_to_object can select backend
+        if normalized != "cranelift" {
+            std::env::set_var("SIMPLE_BACKEND", &normalized);
+        }
+    }
 
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
@@ -269,6 +286,7 @@ fn print_help() {
     println!("  --clean             Force clean rebuild (delete cache)");
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
+    println!("  --backend <name>    Compilation backend (cranelift, llvm)");
     println!("  --help, -h          Show this help");
     println!();
     println!("Examples:");

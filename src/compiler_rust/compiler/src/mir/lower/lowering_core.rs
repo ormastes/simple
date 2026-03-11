@@ -10,7 +10,7 @@ use super::super::{
     instructions::BlockId,
 };
 use crate::di::DiConfig;
-use crate::hir::{HirExpr, HirFunction, HirModule, TypeId};
+use crate::hir::{HirContract, HirExpr, HirFunction, HirModule, HirStmt, TypeId};
 use crate::mir::instructions::VReg;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -115,6 +115,8 @@ pub enum LowererState {
         loop_stack: Vec<LoopContext>,
         /// Contract context for Design by Contract support
         contract_ctx: ContractContext,
+        /// Stack of deferred statement blocks (executed in LIFO order at scope exit)
+        defer_stack: Vec<Vec<HirStmt>>,
     },
 }
 
@@ -190,6 +192,22 @@ impl LowererState {
         match self {
             LowererState::Lowering { loop_stack, .. } => loop_stack.len(),
             LowererState::Idle => 0,
+        }
+    }
+
+    /// Get mutable defer stack (returns error if idle)
+    pub fn try_defer_stack_mut(&mut self) -> MirLowerResult<&mut Vec<Vec<HirStmt>>> {
+        match self {
+            LowererState::Lowering { defer_stack, .. } => Ok(defer_stack),
+            LowererState::Idle => Err(Self::idle_state_error()),
+        }
+    }
+
+    /// Get defer stack (returns error if idle)
+    pub fn try_defer_stack(&self) -> MirLowerResult<&Vec<Vec<HirStmt>>> {
+        match self {
+            LowererState::Lowering { defer_stack, .. } => Ok(defer_stack),
+            LowererState::Idle => Err(Self::idle_state_error()),
         }
     }
 }
@@ -391,6 +409,7 @@ impl<'a> MirLowerer<'a> {
                         func_name: func_name.to_string(),
                         is_public,
                     },
+                    defer_stack: Vec::new(),
                 };
                 Ok(())
             }
@@ -473,6 +492,27 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Push a defer body onto the defer stack
+    pub(super) fn push_defer(&mut self, body: Vec<HirStmt>) -> MirLowerResult<()> {
+        self.state.try_defer_stack_mut().map(|stack| stack.push(body))
+    }
+
+    /// Emit all deferred blocks in LIFO order (reverse of defer registration order).
+    /// This should be called at scope exit points: return, break, continue, end of function.
+    pub(super) fn emit_deferred_blocks(&mut self, contract: Option<&HirContract>) -> MirLowerResult<()> {
+        // Clone the defer stack so we can iterate without borrowing self
+        let deferred: Vec<Vec<HirStmt>> = self.state.try_defer_stack()?.clone();
+
+        // Iterate in reverse (LIFO) order
+        for body in deferred.iter().rev() {
+            for stmt in body {
+                self.lower_stmt(stmt, contract)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Helper to set jump target if block terminator is still Unreachable
     pub(super) fn finalize_block_jump(&mut self, target: BlockId) -> MirLowerResult<()> {
         self.with_func(|func, current_block| {
@@ -511,6 +551,12 @@ impl<'a> MirLowerer<'a> {
 
         // Copy extern function names from HIR to MIR
         module.extern_fn_names = hir.extern_fn_names.clone();
+
+        // Copy compile-time constant init values from HIR to MIR
+        module.global_init_values = hir.global_init_values.clone();
+
+        // Copy local globals set from HIR to MIR for codegen linkage decisions
+        module.local_globals = hir.local_globals.clone();
 
         // Copy global variables from HIR to MIR
         // IMPORTANT: HIR globals HashMap is used for name resolution and contains:
@@ -683,6 +729,9 @@ impl<'a> MirLowerer<'a> {
         for stmt in &func.body {
             self.lower_stmt(stmt, func.contract.as_ref())?;
         }
+
+        // Emit deferred blocks at end of function body (implicit return path)
+        self.emit_deferred_blocks(func.contract.as_ref())?;
 
         // Handle implicit returns and void function terminators
         let is_void = func.return_type == TypeId::VOID;

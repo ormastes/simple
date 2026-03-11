@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self, Enums, ImplMethods,
-    CONST_NAMES,
+    CONST_NAMES, MODULE_GLOBALS,
 };
 
 use super::collections::bind_sequence_pattern;
@@ -262,6 +262,27 @@ pub(crate) fn handle_method_call_with_self_update(
                     return Ok((result, Some((obj_name.clone(), new_self))));
                 }
                 return Ok((result, None));
+            }
+            // Handle Object mutations for MODULE_GLOBALS variables (not in local env)
+            let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
+            if let Some(Value::Object { class, fields }) = global_obj {
+                if let Some((result, updated_self)) = find_and_exec_method_with_self(
+                    method,
+                    args,
+                    &class,
+                    &fields,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    // Write back to MODULE_GLOBALS directly
+                    MODULE_GLOBALS.with(|cell| {
+                        cell.borrow_mut().insert(obj_name.clone(), updated_self.clone());
+                    });
+                    return Ok((result, Some((obj_name.clone(), updated_self))));
+                }
             }
             // Handle Array mutations for mutating methods
             if let Some(Value::Array(_)) = env.get(obj_name) {

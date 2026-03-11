@@ -392,7 +392,8 @@ impl<'a> Parser<'a> {
         let is_gen_or_kernel_decl = matches!(&self.current.kind, TokenKind::Gen | TokenKind::Kernel)
             && !self.peek_is(&TokenKind::Dot)
             && !self.peek_is(&TokenKind::Assign)
-            && !self.peek_is(&TokenKind::LParen);
+            && !self.peek_is(&TokenKind::LParen)
+            && !self.peek_is(&TokenKind::TripleLt);
         // `match` is usually a statement keyword, but can be used as a variable name:
         //   for match in matches: results.push(match.0)
         // If followed by `.` or `=`, treat as an expression/identifier.

@@ -14,7 +14,9 @@ use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
-use compiler.core.parser_decls.{parse_type_params}
+use compiler.core.parser_decls.{parse_type_params, parse_type_param_constraint_list}
+use compiler.core.parser_decls.{file_generic_constraints, file_generic_constraint_modes}
+use compiler.core.tokens.{TOK_KW_GENERIC, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
 
 # ===== Use/Export Declarations =====
 
@@ -146,6 +148,31 @@ fn parse_export_decl() -> i64:
 
 fn parse_val_decl() -> i64:
     parser_advance()
+
+    # Check for `val generic T limits [f32, i32]` — module-level generic constraint
+    val is_generic_kw: bool = par_kind_get() == TOK_KW_GENERIC
+    val is_generic_ident: bool = par_kind_get() == TOK_IDENT and par_text_get() == "generic"
+    if is_generic_kw or is_generic_ident:
+        parser_advance()
+        val param_name = par_text_get()
+        parser_expect(TOK_IDENT)
+
+        # Optional constraint: limits [...] or candidates [...]
+        val is_limits: bool = par_kind_get() == TOK_KW_LIMITS
+        val is_limits_ident: bool = par_kind_get() == TOK_IDENT and par_text_get() == "limits"
+        val is_candidates: bool = par_kind_get() == TOK_KW_CANDIDATES
+        val is_cand_ident: bool = par_kind_get() == TOK_IDENT and par_text_get() == "candidates"
+        if is_limits or is_limits_ident or is_candidates or is_cand_ident:
+            parser_advance()
+            val constraint_types = parse_type_param_constraint_list()
+            val mode = if is_candidates or is_cand_ident: "candidate" else: "limit"
+            file_generic_constraints[param_name] = constraint_types
+            file_generic_constraint_modes[param_name] = mode
+        # No-op declaration: just registers the constraint for later use
+        # Create a placeholder DECL_VAL with no init expression
+        val placeholder_expr = expr_int(0, 0)
+        return decl_val_binding("__generic_" + param_name, 0, placeholder_expr, 0)
+
     val name = par_text_get()
     parser_expect(TOK_IDENT)
 

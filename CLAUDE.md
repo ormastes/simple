@@ -16,6 +16,7 @@ Impl in simple unless it has big performance differences.
 | **Codegen tool** | `build/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
 
 - **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple`. Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
+- **NEVER copy the Rust bootstrap binary to `bin/release/simple`** — `bin/release/simple` is the **self-hosted** binary compiled by Simple itself. The Rust bootstrap is only a seed for bootstrapping; it goes to `src/compiler_rust/target/bootstrap/simple`, not to `bin/release/`.
 
 - **`bin/release/simple` is fully self-sufficient** — all compilation, interpretation, file execution, and test running happens **in-process** via direct function calls (`aot_c_file()`, `compile_native()`, `interpret_file()`, `aot_vhdl_file()`). No subprocess calls to `bin/simple` or `bin/release/simple`.
 - The only external tool calls are system tools: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`, `uname`, `which`

@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, Module, Node};
+use simple_parser::{self as ast, Expr, Module, Node};
 
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
@@ -12,10 +12,12 @@ impl Lowerer {
                 let struct_type_id = self.register_struct(s)?;
                 // Register struct constructor in globals so it can be used as a value
                 self.globals.insert(s.name.clone(), struct_type_id);
+                self.local_globals.insert(s.name.clone());
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
                 self.globals.insert(f.name.clone(), ret_ty);
+                self.local_globals.insert(f.name.clone());
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
                     self.pure_functions.insert(f.name.clone());
@@ -25,6 +27,7 @@ impl Lowerer {
                 let class_type_id = self.register_class(c)?;
                 // Register class constructor in globals so it can be used as a value
                 self.globals.insert(c.name.clone(), class_type_id);
+                self.local_globals.insert(c.name.clone());
             }
             Node::Enum(e) => {
                 let variants: Vec<_> = e
@@ -62,6 +65,7 @@ impl Lowerer {
                 // Register enum name in globals so that Backend.Native can be resolved
                 // The enum name acts as a namespace for variant constructors
                 self.globals.insert(e.name.clone(), enum_type_id);
+                self.local_globals.insert(e.name.clone());
             }
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
@@ -123,6 +127,7 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());
             }
@@ -145,6 +150,11 @@ impl Lowerer {
                     TypeId::ANY
                 };
                 self.globals.insert(s.name.clone(), ty);
+                self.local_globals.insert(s.name.clone());
+                // Extract compile-time constant value from initializer
+                if let Expr::Integer(val) = &s.value {
+                    self.global_init_values.insert(s.name.clone(), *val);
+                }
             }
             Node::Const(c) => {
                 // Register constant
@@ -154,6 +164,11 @@ impl Lowerer {
                     TypeId::ANY
                 };
                 self.globals.insert(c.name.clone(), ty);
+                self.local_globals.insert(c.name.clone());
+                // Extract compile-time constant value from initializer
+                if let Expr::Integer(val) = &c.value {
+                    self.global_init_values.insert(c.name.clone(), *val);
+                }
             }
             Node::Let(l) => {
                 // Register module-level variable (var at module scope = global)
@@ -165,7 +180,12 @@ impl Lowerer {
                     } else {
                         TypeId::ANY
                     };
-                    self.globals.insert(n, ty);
+                    self.globals.insert(n.clone(), ty);
+                    self.local_globals.insert(n.clone());
+                    // Extract compile-time constant value from initializer
+                    if let Some(Expr::Integer(val)) = &l.value {
+                        self.global_init_values.insert(n, *val);
+                    }
                 }
             }
             _ => {}
@@ -498,6 +518,12 @@ impl Lowerer {
             self.module.globals.push((name.clone(), *ty));
         }
 
+        // Copy compile-time constant init values to HirModule for codegen
+        self.module.global_init_values = self.global_init_values.clone();
+
+        // Copy local globals set to HirModule for codegen linkage decisions
+        self.module.local_globals = self.local_globals.clone();
+
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();
 
@@ -677,6 +703,17 @@ impl Lowerer {
                 return Err(LowerError::LifetimeViolations(lifetime_violations));
             }
         }
+
+        // Copy globals and init values to HirModule
+        let mut sorted_globals: Vec<_> = self.globals.iter().collect();
+        sorted_globals.sort_by_key(|(name, _)| name.clone());
+        for (name, ty) in sorted_globals {
+            self.module.globals.push((name.clone(), *ty));
+        }
+        self.module.global_init_values = self.global_init_values.clone();
+
+        // Copy local globals set to HirModule for codegen linkage decisions
+        self.module.local_globals = self.local_globals.clone();
 
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();

@@ -296,7 +296,28 @@ impl<'a> Parser<'a> {
 
     // Simple Math: Matrix multiplication @ operator (#1930-#1939)
     // Precedence: between shift and term (same level as factor: *, /, %, //)
-    parse_binary_single!(parse_matmul, parse_term, At, BinOp::MatMul);
+    // NOTE: Hand-written instead of parse_binary_single! because @ must NOT
+    // peek through newlines — `val x = 16\n@gpu_kernel fn...` would otherwise
+    // be parsed as `x = 16 @ gpu_kernel` (matmul) instead of a decorator.
+    pub(crate) fn parse_matmul(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_term()?;
+        loop {
+            if self.check(&TokenKind::At) {
+                // Only trailing @: `a @ b` on same line
+                self.advance();
+                self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                let right = self.parse_term()?;
+                left = Expr::Binary {
+                    op: BinOp::MatMul,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
 
     parse_binary_multi!(parse_term, parse_factor,
         Plus => BinOp::Add,

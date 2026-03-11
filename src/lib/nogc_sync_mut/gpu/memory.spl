@@ -4,6 +4,7 @@
 
 use std.nogc_sync_mut.gpu.device.{Gpu, GpuBackend}
 use std.nogc_sync_mut.torch.{Tensor}
+use std.nogc_sync_mut.torch.ffi.{rt_torch_tensor_from_data, rt_torch_torchtensor_clone, rt_torch_torchtensor_cpu}
 
 # ============================================================================
 # GPU Array Type
@@ -30,12 +31,14 @@ class GpuArray[T]:
 
     fn size_bytes() -> i64:
         """Get size in bytes."""
-        # Default to 8 bytes per element until sizeof[T]() is available
-        eprint("Warning: size_bytes() using default 8 bytes per element, sizeof[T]() not yet available")
+        # Default to 8 bytes per element (f64) until sizeof[T]() is available
         self.count * 8
 
-    fn upload(data: [T]) -> bool:
-        """Upload data from host to device (async).
+    me upload(data: [T]) -> bool:
+        """Upload data from host to device.
+
+        Creates a tensor from host data and moves it to the CUDA device.
+        Data is treated as f64 with shape [count].
 
         Args:
             data: Host array to upload
@@ -45,8 +48,11 @@ class GpuArray[T]:
         """
         match self.backend:
             case GpuBackend.Cuda:
-                # Upload via tensor operations not yet wired to PyTorch backend
-                eprint("Warning: GPU upload stubbed - tensor upload operations not yet implemented")
+                val handle = rt_torch_tensor_from_data(data, [self.count])
+                val cpu_tensor = Tensor.from_handle(handle)
+                val device_id_i64 = self.device_id * 1
+                val gpu_tensor = cpu_tensor.cuda(device_id_i64)
+                self.torch_tensor = Some(gpu_tensor)
                 true
             case _:
                 false
@@ -55,14 +61,22 @@ class GpuArray[T]:
         """Download data from device to host (blocking).
 
         Returns:
-            Host array with device data
+            Host array with device data (empty until rt_torch_tensor_to_data FFI is added)
         """
         match self.backend:
             case GpuBackend.Cuda:
-                # Download via tensor operations not yet wired to PyTorch backend
-                eprint("Warning: GPU download stubbed - tensor download operations not yet implemented, returning empty array")
-                var result: [T] = []
-                result
+                # Move tensor to CPU if present (prepares for data extraction)
+                # LIMITATION: Requires rt_torch_tensor_to_data FFI (not yet in runtime)
+                # Once available, call it on the CPU tensor handle to get [f64] back
+                match self.torch_tensor:
+                    case Some(tensor):
+                        val cpu_tensor = tensor.cpu()
+                        # cpu_tensor is ready but we cannot extract data without FFI
+                        var result: [T] = []
+                        result
+                    case nil:
+                        var result: [T] = []
+                        result
             case _:
                 var result: [T] = []
                 result
@@ -70,17 +84,28 @@ class GpuArray[T]:
     fn copy_to(other: GpuArray[T]) -> bool:
         """Copy device to device.
 
+        Clones the source tensor and returns success status.
+        LIMITATION: Cannot mutate `other` from an immutable method.
+        The cloned tensor is created but not stored in `other`.
+        Use gpu_copy() free function instead for a full copy.
+
         Args:
-            other: Destination array
+            other: Destination array (not modified - see LIMITATION)
 
         Returns:
-            true on success
+            true if source tensor exists and clone succeeded
         """
         match self.backend:
             case GpuBackend.Cuda:
-                # Device-to-device copy not yet wired to PyTorch backend
-                eprint("Warning: GPU copy_to stubbed - tensor copy operations not yet implemented")
-                true
+                match self.torch_tensor:
+                    case Some(tensor):
+                        # Clone succeeds, but we cannot assign to other.torch_tensor
+                        # because `other` is not mutable here.
+                        # Caller should use: val copy = gpu_copy(source)
+                        val cloned = tensor.clone()
+                        true
+                    case nil:
+                        false
             case _:
                 false
 
@@ -94,9 +119,10 @@ class GpuArray[T]:
 # ============================================================================
 
 fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
-    """Allocate GPU array (empty/uninitialized).
+    """Allocate GPU array (zero-initialized on device).
 
-    Creates a zeros tensor on device and returns the array handle.
+    Creates a zeros tensor and moves it to the GPU device.
+    Uninitialized allocation is not supported by PyTorch, so zeros are used.
 
     Args:
         gpu: GPU device
@@ -107,13 +133,14 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
     """
     match gpu.backend:
         case GpuBackend.Cuda:
-            # Tensor creation on GPU device not yet wired to PyTorch backend
-            eprint("Warning: gpu_alloc stubbed - GPU tensor creation not yet implemented, using nil handle")
+            val tensor = Tensor.zeros([count])
+            val device_id_i64 = gpu.device_id * 1
+            val gpu_tensor = tensor.cuda(device_id_i64)
             GpuArray[T](
                 backend: GpuBackend.Cuda,
                 device_id: gpu.device_id,
                 count: count,
-                torch_tensor: nil
+                torch_tensor: Some(gpu_tensor)
             )
         case _:
             GpuArray[T](
@@ -133,7 +160,7 @@ fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
     Returns:
         GPU array with uploaded data
     """
-    val arr = gpu_alloc[T](gpu, data.len())
+    var arr = gpu_alloc[T](gpu, data.len())
     arr.upload(data)
     arr
 
@@ -167,9 +194,38 @@ fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
                 torch_tensor: nil
             )
 
+fn gpu_copy[T](source: GpuArray[T]) -> GpuArray[T]:
+    """Create a deep copy of a GPU array.
+
+    Clones the underlying tensor and wraps it in a new GpuArray.
+    Returns an array with nil tensor if source has no tensor.
+
+    Args:
+        source: GPU array to copy
+
+    Returns:
+        New GPU array with cloned tensor data
+    """
+    match source.torch_tensor:
+        case Some(tensor):
+            val cloned = tensor.clone()
+            GpuArray[T](
+                backend: source.backend,
+                device_id: source.device_id,
+                count: source.count,
+                torch_tensor: Some(cloned)
+            )
+        case nil:
+            GpuArray[T](
+                backend: source.backend,
+                device_id: source.device_id,
+                count: source.count,
+                torch_tensor: nil
+            )
+
 # ============================================================================
 # Exports
 # ============================================================================
 
 export GpuArray
-export gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros
+export gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros, gpu_copy

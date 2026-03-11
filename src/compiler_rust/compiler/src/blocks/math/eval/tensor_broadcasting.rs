@@ -139,16 +139,20 @@ pub fn broadcast_index(flat_idx: usize, result_shape: &[usize], source_shape: &[
 
     let result_strides: Vec<usize> = {
         let mut s = vec![1; result_shape.len()];
-        for i in (0..result_shape.len() - 1).rev() {
-            s[i] = s[i + 1] * result_shape[i + 1];
+        if result_shape.len() > 1 {
+            for i in (0..result_shape.len() - 1).rev() {
+                s[i] = s[i + 1] * result_shape[i + 1];
+            }
         }
         s
     };
 
     let source_strides: Vec<usize> = {
         let mut s = vec![1; source_shape.len()];
-        for i in (0..source_shape.len() - 1).rev() {
-            s[i] = s[i + 1] * source_shape[i + 1];
+        if source_shape.len() > 1 {
+            for i in (0..source_shape.len() - 1).rev() {
+                s[i] = s[i + 1] * source_shape[i + 1];
+            }
         }
         s
     };

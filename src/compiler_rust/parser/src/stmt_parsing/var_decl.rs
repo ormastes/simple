@@ -29,10 +29,63 @@ impl Parser<'_> {
     }
 
     /// Parse val: `val name = value` (immutable variable, Scala-style)
+    /// Also handles: `val generic T limits [f32, i32]` (type constraint declaration)
     pub(crate) fn parse_val(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Val)?;
+
+        // Check for `val generic T ...` — type constraint declaration
+        if self.check_identifier("generic") {
+            return self.parse_val_generic(start_span);
+        }
+
         self.parse_let_impl(start_span, Mutability::Immutable, StorageClass::Auto, false)
+    }
+
+    /// Parse `val generic T`, `val generic T limits [f32, i32]`, `val generic T candidates [...]`
+    /// Emits a no-op constant declaration (type constraints are metadata only).
+    fn parse_val_generic(&mut self, start_span: Span) -> Result<Node, ParseError> {
+        self.advance(); // consume 'generic'
+        let param_name = self.expect_identifier()?;
+
+        // Optional: `limits [...]` or `candidates [...]`
+        let mut _type_candidates: Vec<String> = Vec::new();
+        let mut _is_candidate_mode = false;
+
+        if self.check_identifier("limits") || self.check_identifier("candidates") {
+            _is_candidate_mode = self.check_identifier("candidates");
+            self.advance(); // consume 'limits' or 'candidates'
+
+            if self.check(&TokenKind::LBracket) {
+                self.advance(); // consume '['
+                while !self.check(&TokenKind::RBracket) && !self.is_at_end() {
+                    if self.check(&TokenKind::Star) {
+                        _is_candidate_mode = true;
+                        self.advance();
+                    } else {
+                        let type_name = self.expect_identifier()?;
+                        _type_candidates.push(type_name);
+                    }
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::RBracket)?;
+            }
+        }
+
+        // Emit as a no-op constant: val __generic_T = nil
+        // The constraint info is consumed by the parser but not enforced at this stage
+        Ok(Node::Let(LetStmt {
+            span: start_span,
+            pattern: Pattern::Identifier(format!("__generic_{}", param_name)),
+            ty: None,
+            value: Some(Expr::Nil),
+            mutability: Mutability::Immutable,
+            storage_class: StorageClass::Auto,
+            is_ghost: false,
+            is_suspend: false,
+        }))
     }
 
     /// Parse var: `var name = value` (mutable variable, Scala-style)

@@ -80,9 +80,38 @@ fn parser_expect_param_name():
 
 # ===== Generic Type Parameter Parsing =====
 
+# Module-level generic constraint declarations (populated by `val generic T limits [...]`)
+var file_generic_constraints: {text: [text]} = {}
+var file_generic_constraint_modes: {text: text} = {}
+
+fn parse_type_param_constraint_list() -> [text]:
+    # Parses [f32, i32, f64, i64] or [f32, i32, *] constraint list
+    var types: [text] = []
+    if par_kind_get() != TOK_LBRACKET:
+        return types
+    parser_advance()
+    for ci in 0..100:
+        if par_kind_get() == TOK_RBRACKET:
+            break
+        if ci > 0:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+        if par_kind_get() == TOK_IDENT:
+            types.push(par_text_get())
+            parser_advance()
+        elif par_kind_get() == TOK_STAR:
+            types.push("*")
+            parser_advance()
+        else:
+            break
+    parser_expect(TOK_RBRACKET)
+    types
+
 fn parse_type_params() -> [text]:
-    # Parses <T>, <T, U>, etc. after function/class/struct name
+    # Parses <T>, <T, U>, <T limits [f32, i32]>, <T: [f32, i32]>, etc.
     # Returns list of type parameter names (e.g., ["T", "U"])
+    # Side effect: populates last_type_param_constraints and last_type_param_modes
     var type_params: [text] = []
 
     # Check for < token (either TOK_LT or TOK_LT_GENERIC)
@@ -94,24 +123,41 @@ fn parse_type_params() -> [text]:
 
     parser_advance()
 
-    # Parse first type parameter
-    if par_kind_get() != TOK_IDENT:
-        parser_error("expected type parameter name")
-        return type_params
+    # Parse type parameters with optional inline constraints
+    for pi in 0..100:
+        if pi > 0:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
 
-    type_params.push(par_text_get())
-    parser_advance()
-
-    # Parse additional type parameters
-    for i in 0..100:
-        if par_kind_get() != TOK_COMMA:
-            break
-        parser_advance()
         if par_kind_get() != TOK_IDENT:
-            parser_error("expected type parameter name")
+            if pi == 0:
+                parser_error("expected type parameter name")
             break
-        type_params.push(par_text_get())
+
+        val param_name = par_text_get()
+        type_params.push(param_name)
         parser_advance()
+
+        # Check for inline constraint: `T limits [...]` or `T: [...]`
+        val is_limits: bool = par_kind_get() == TOK_KW_LIMITS
+        val is_candidates: bool = par_kind_get() == TOK_KW_CANDIDATES
+        val is_colon_constraint: bool = par_kind_get() == TOK_COLON
+        if is_limits or is_candidates or is_colon_constraint:
+            parser_advance()
+            val constraint_types = parse_type_param_constraint_list()
+            if constraint_types.len() > 0:
+                # Check for * (candidate mode marker)
+                var has_star = false
+                var filtered: [text] = []
+                for ct in constraint_types:
+                    if ct == "*":
+                        has_star = true
+                    else:
+                        filtered.push(ct)
+                val mode_str = if is_candidates or has_star: "candidate" else: "limit"
+                file_generic_constraints[param_name] = filtered
+                file_generic_constraint_modes[param_name] = mode_str
 
     # Expect closing >
     parser_expect(TOK_GT)

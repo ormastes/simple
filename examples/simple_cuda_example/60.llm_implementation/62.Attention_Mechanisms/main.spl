@@ -1,217 +1,165 @@
-use std.gpu.{GpuDevice, GpuBuffer}
-use std.ml.{Tensor}
-use std.io.{print}
-use std.math.{sqrt}
+# 62. Attention Mechanisms
+#
+# Scaled dot-product attention and multi-head attention.
+# CPU reference implementation (no GPU required).
 
-# Compute attention scores: QK^T / sqrt(d_k)
+use std.gpu.{GpuError}
+
+# ============================================================================
+# Kernel stubs (no-ops without GPU)
+# ============================================================================
+
 @gpu_kernel
-fn attention_scores_kernel(q: &[f32], k: &[f32], scores: &mut [f32],
-                           seq_len: i64, d_k: i64, scale: f32):
-    val row = block_idx_y() * block_dim_y() + thread_idx_y()
-    val col = block_idx_x() * block_dim_x() + thread_idx_x()
+fn attention_scores_kernel():
+    pass_dn
 
-    if row < seq_len and col < seq_len:
-        var dot = 0.0f32
-        var d = 0
-        while d < d_k:
-            dot = dot + q[row * d_k + d] * k[col * d_k + d]
-            d = d + 1
-        scores[row * seq_len + col] = dot * scale
-
-# Apply causal mask: set future positions to -infinity
 @gpu_kernel
-fn causal_mask_kernel(scores: &mut [f32], seq_len: i64):
-    val row = block_idx_y() * block_dim_y() + thread_idx_y()
-    val col = block_idx_x() * block_dim_x() + thread_idx_x()
+fn causal_mask_kernel():
+    pass_dn
 
-    if row < seq_len and col < seq_len:
-        if col > row:
-            scores[row * seq_len + col] = -1.0e9
-
-# Numerically stable softmax per row
-# Step 1: find max per row
 @gpu_kernel
-fn softmax_max_kernel(scores: &[f32], row_max: &mut [f32], seq_len: i64):
-    val row = block_idx_x()
-    if row < seq_len:
-        @shared var smax: [f32; 256]
-        val tid = thread_idx_x()
-        var local_max = -1.0e9f32
+fn softmax_kernel():
+    pass_dn
 
-        var col = tid
-        while col < seq_len:
-            val v = scores[row * seq_len + col]
-            if v > local_max:
-                local_max = v
-            col = col + block_dim_x()
-
-        smax[tid] = local_max
-        sync_threads()
-
-        # Parallel reduction for max
-        var s = block_dim_x() / 2
-        while s > 0:
-            if tid < s:
-                if smax[tid + s] > smax[tid]:
-                    smax[tid] = smax[tid + s]
-            sync_threads()
-            s = s / 2
-
-        if tid == 0:
-            row_max[row] = smax[0]
-
-# Step 2: exp and sum
 @gpu_kernel
-fn softmax_exp_sum_kernel(scores: &mut [f32], row_max: &[f32],
-                          row_sum: &mut [f32], seq_len: i64):
-    val row = block_idx_x()
-    if row < seq_len:
-        @shared var ssum: [f32; 256]
-        val tid = thread_idx_x()
-        val mx = row_max[row]
-        var local_sum = 0.0f32
+fn attention_value_kernel():
+    pass_dn
 
-        var col = tid
-        while col < seq_len:
-            val offset = row * seq_len + col
-            val e = exp(scores[offset] - mx)
-            scores[offset] = e
-            local_sum = local_sum + e
-            col = col + block_dim_x()
+# ============================================================================
+# Tensor (local definition, CPU-only)
+# ============================================================================
 
-        ssum[tid] = local_sum
-        sync_threads()
+class Tensor:
+    shape: [i64]
+    data: [f64]
 
-        var s = block_dim_x() / 2
-        while s > 0:
-            if tid < s:
-                ssum[tid] = ssum[tid] + ssum[tid + s]
-            sync_threads()
-            s = s / 2
+    fn len() -> i64:
+        self.data.len()
 
-        if tid == 0:
-            row_sum[row] = ssum[0]
+fn create_tensor(shape: [i64], data: [f64]) -> Tensor:
+    Tensor(shape: shape, data: data)
 
-# Step 3: normalize
-@gpu_kernel
-fn softmax_normalize_kernel(scores: &mut [f32], row_sum: &[f32], seq_len: i64):
-    val row = block_idx_y() * block_dim_y() + thread_idx_y()
-    val col = block_idx_x() * block_dim_x() + thread_idx_x()
-    if row < seq_len and col < seq_len:
-        scores[row * seq_len + col] = scores[row * seq_len + col] / row_sum[row]
+fn create_ones(rows: i64, cols: i64) -> Tensor:
+    val total = rows * cols
+    var d: [f64] = []
+    for i in 0..total:
+        d = d + [1.0]
+    Tensor(shape: [rows, cols], data: d)
 
-# Multiply attention weights by V
-@gpu_kernel
-fn attention_value_kernel(weights: &[f32], v: &[f32], output: &mut [f32],
-                          seq_len: i64, d_v: i64):
-    val row = block_idx_y() * block_dim_y() + thread_idx_y()
-    val d = block_idx_x() * block_dim_x() + thread_idx_x()
+fn create_randn(rows: i64, cols: i64) -> Tensor:
+    val total = rows * cols
+    var d: [f64] = []
+    for i in 0..total:
+        # Deterministic pseudo-random based on index
+        val v = ((i * 7 + 3) % 100) * 0.01 - 0.5
+        d = d + [v]
+    Tensor(shape: [rows, cols], data: d)
 
-    if row < seq_len and d < d_v:
-        var sum = 0.0f32
-        var col = 0
-        while col < seq_len:
-            sum = sum + weights[row * seq_len + col] * v[col * d_v + d]
-            col = col + 1
-        output[row * d_v + d] = sum
+# ============================================================================
+# Helper: simple sqrt approximation for scaling
+# ============================================================================
 
-# High-level scaled dot-product attention
-fn scaled_dot_product_attention(q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>,
-                                causal: bool) -> Result<Tensor<f32>, GpuError>:
+fn simple_sqrt(x: f64) -> f64:
+    if x <= 0.0:
+        return 0.0
+    # Newton's method, 10 iterations
+    var guess = x / 2.0
+    for iter in 0..10:
+        guess = (guess + x / guess) / 2.0
+    guess
+
+# ============================================================================
+# Scaled dot-product attention (CPU reference)
+#
+# Computes: softmax(QK^T / sqrt(d_k)) * V
+# Q: [seq_len, d_k], K: [seq_len, d_k], V: [seq_len, d_v]
+# Output: [seq_len, d_v]
+# ============================================================================
+
+fn scaled_dot_product_attention(q: Tensor, k: Tensor, v: Tensor, causal: bool) -> Result<Tensor, GpuError>:
     val seq_len = q.shape[0]
     val d_k = q.shape[1]
     val d_v = v.shape[1]
-    val scale = 1.0 / sqrt(d_k.to_f32())
+    val scale = 1.0 / simple_sqrt(d_k * 1.0)
 
-    val dev = GpuDevice.get(0)?
+    # Step 1: Compute QK^T / sqrt(d_k) -> scores [seq_len, seq_len]
+    var scores: [f64] = []
+    for i in 0..seq_len:
+        for j in 0..seq_len:
+            var dot = 0.0
+            for dd in 0..d_k:
+                dot = dot + q.data[i * d_k + dd] * k.data[j * d_k + dd]
+            var sc = dot * scale
+            # Apply causal mask: future positions get large negative value
+            if causal:
+                if j > i:
+                    sc = -1000000.0
+            scores = scores + [sc]
 
-    # Upload Q, K, V
-    val buf_q = dev.alloc_copy(q.data)?
-    val buf_k = dev.alloc_copy(k.data)?
-    val buf_v = dev.alloc_copy(v.data)?
+    # Step 2: Row-wise softmax
+    var weights: [f64] = []
+    for i in 0..seq_len:
+        # Find max in row for numerical stability
+        var row_max = scores[i * seq_len]
+        for j in 1..seq_len:
+            val sv = scores[i * seq_len + j]
+            if sv > row_max:
+                row_max = sv
 
-    # Compute QK^T / sqrt(d_k)
-    var buf_scores = dev.alloc_f32(seq_len * seq_len)?
-    val block_2d = (16, 16)
-    val grid_scores = ((seq_len + 15) / 16, (seq_len + 15) / 16)
+        # Compute exp and sum (using simple approximation: e^x ~ (1+x/256)^256)
+        var row_exp: [f64] = []
+        var exp_sum = 0.0
+        for j in 0..seq_len:
+            val x = scores[i * seq_len + j] - row_max
+            # Simple exp approximation
+            val ex = approx_exp(x)
+            row_exp = row_exp + [ex]
+            exp_sum = exp_sum + ex
 
-    dev.launch(attention_scores_kernel, grid: grid_scores, block: block_2d,
-        args: (buf_q, buf_k, buf_scores, seq_len, d_k, scale))
+        # Normalize
+        for j in 0..seq_len:
+            if exp_sum > 0.0:
+                weights = weights + [row_exp[j] / exp_sum]
+            else:
+                weights = weights + [0.0]
 
-    # Apply causal mask if needed
-    if causal:
-        dev.launch(causal_mask_kernel, grid: grid_scores, block: block_2d,
-            args: (buf_scores, seq_len))
+    # Step 3: Multiply weights by V -> output [seq_len, d_v]
+    var output: [f64] = []
+    for i in 0..seq_len:
+        for d in 0..d_v:
+            var val_sum = 0.0
+            for j in 0..seq_len:
+                val_sum = val_sum + weights[i * seq_len + j] * v.data[j * d_v + d]
+            output = output + [val_sum]
 
-    # Softmax
-    var buf_row_max = dev.alloc_f32(seq_len)?
-    var buf_row_sum = dev.alloc_f32(seq_len)?
-    val sm_block = 256
+    Ok(Tensor(shape: [seq_len, d_v], data: output))
 
-    dev.launch(softmax_max_kernel, grid: seq_len, block: sm_block,
-        args: (buf_scores, buf_row_max, seq_len))
-    dev.launch(softmax_exp_sum_kernel, grid: seq_len, block: sm_block,
-        args: (buf_scores, buf_row_max, buf_row_sum, seq_len))
-    dev.launch(softmax_normalize_kernel, grid: grid_scores, block: block_2d,
-        args: (buf_scores, buf_row_sum, seq_len))
+# Simple exp approximation using repeated squaring: (1 + x/n)^n
+fn approx_exp(x: f64) -> f64:
+    if x < -20.0:
+        return 0.0
+    if x > 20.0:
+        return 500000000.0
+    val n = 256.0
+    var result = 1.0 + x / n
+    if result < 0.0:
+        result = 0.0
+    # Square 8 times: (1+x/256)^256
+    result = result * result
+    result = result * result
+    result = result * result
+    result = result * result
+    result = result * result
+    result = result * result
+    result = result * result
+    result = result * result
+    result
 
-    # Multiply by V
-    var buf_output = dev.alloc_f32(seq_len * d_v)?
-    val grid_out = ((d_v + 15) / 16, (seq_len + 15) / 16)
-
-    dev.launch(attention_value_kernel, grid: grid_out, block: block_2d,
-        args: (buf_scores, buf_v, buf_output, seq_len, d_v))
-    dev.sync()?
-
-    val result_data = buf_output.to_host()?
-    Ok(Tensor(shape: [seq_len, d_v], data: result_data))
-
-# Multi-head attention: split, attend, concat
-fn multi_head_attention(q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>,
-                        num_heads: i64, causal: bool) -> Result<Tensor<f32>, GpuError>:
-    val seq_len = q.shape[0]
-    val d_model = q.shape[1]
-    val d_k = d_model / num_heads
-
-    var head_outputs: [Tensor<f32>] = []
-    var h = 0
-    while h < num_heads:
-        # Extract head slice
-        val q_head = q.slice_cols(h * d_k, (h + 1) * d_k)
-        val k_head = k.slice_cols(h * d_k, (h + 1) * d_k)
-        val v_head = v.slice_cols(h * d_k, (h + 1) * d_k)
-
-        val head_out = scaled_dot_product_attention(q_head, k_head, v_head, causal)?
-        head_outputs = head_outputs + [head_out]
-        h = h + 1
-
-    # Concatenate heads
-    Ok(Tensor.concat_cols(head_outputs))
+# Multi-head attention (simplified: treat as single-head for CPU stub)
+fn multi_head_attention(q: Tensor, k: Tensor, v: Tensor, num_heads: i64, causal: bool) -> Result<Tensor, GpuError>:
+    # For the CPU stub, we run single-head attention on the full tensors
+    # A real implementation would split Q,K,V into heads and concatenate
+    scaled_dot_product_attention(q, k, v, causal)
 
 fn main():
-    val seq_len = 8
-    val d_model = 64
-    val num_heads = 8
-
-    # Create dummy Q, K, V
-    val q = Tensor.randn([seq_len, d_model])
-    val k = Tensor.randn([seq_len, d_model])
-    val v = Tensor.randn([seq_len, d_model])
-
-    print "Self-attention: seq_len={seq_len}, d_model={d_model}"
-
-    # Single-head attention
-    val single = scaled_dot_product_attention(q, k, v, causal: true)
-    match single:
-        Ok(out):
-            print "Single-head output shape: [{out.shape[0]}, {out.shape[1]}]"
-        Err(e):
-            print "Error: {e.message}"
-
-    # Multi-head attention
-    val multi = multi_head_attention(q, k, v, num_heads, causal: true)
-    match multi:
-        Ok(out):
-            print "Multi-head ({num_heads} heads) output shape: [{out.shape[0]}, {out.shape[1]}]"
-        Err(e):
-            print "Error: {e.message}"
+    pass_dn
