@@ -240,11 +240,10 @@ impl LlvmBackend {
         has_body: bool,
     ) -> Result<(), CompileError> {
         let func = self.create_function_signature(name, param_types, return_type)?;
-        if has_body {
-            func.set_linkage(inkwell::module::Linkage::WeakAny);
-        } else {
-            func.set_linkage(inkwell::module::Linkage::External);
-        }
+        // All functions get External linkage — strong symbols beat weak stubs.
+        // WeakAny was wrong here: it made compiled functions lose to weak stubs
+        // generated for unresolved symbols, breaking cross-module linking.
+        func.set_linkage(inkwell::module::Linkage::External);
         Ok(())
     }
 
@@ -420,27 +419,8 @@ impl NativeBackend for LlvmBackend {
             self.compile_function(func)?;
         }
 
-        // Fix linkage after compilation:
-        // 1. Declarations (no body) must have External linkage, not WeakAny.
-        // 2. spl_main (entry point) must have Global linkage to beat the weak stub.
-        #[cfg(feature = "llvm")]
-        {
-            let m = self.module.borrow();
-            if let Some(m) = m.as_ref() {
-                let mut func_opt = m.get_first_function();
-                while let Some(f) = func_opt {
-                    if f.count_basic_blocks() == 0 {
-                        // No body — must be External
-                        f.set_linkage(inkwell::module::Linkage::External);
-                    } else if f.get_name().to_str() == Ok("spl_main") {
-                        // Entry point must be a strong (Global) symbol so the linker
-                        // prefers it over the weak spl_main in the C main stub.
-                        f.set_linkage(inkwell::module::Linkage::External);
-                    }
-                    func_opt = f.get_next_function();
-                }
-            }
-        }
+        // All functions already have External linkage from declare_function_with_linkage.
+        // No post-compilation fixup needed.
 
         self.verify()?;
         self.emit_object(module)

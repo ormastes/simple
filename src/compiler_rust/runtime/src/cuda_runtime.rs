@@ -977,6 +977,7 @@ pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
 
     #[test]
     fn test_cuda_error_display() {
@@ -988,5 +989,42 @@ mod tests {
     fn test_device_count() {
         // This should not panic even without CUDA
         let _ = get_device_count();
+    }
+
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn test_cuda_ffi_stubs_report_not_initialized() {
+        let ptx = CString::new(".version 7.0\n.target sm_50\n.address_size 64\n").unwrap();
+        assert_eq!(rt_cuda_module_load_data(ptx.as_ptr()), -3);
+        assert_eq!(
+            rt_cuda_launch_kernel(0, ptx.as_ptr(), 1, 1, 1, 1, 1, 1, 0),
+            -3
+        );
+        assert_eq!(rt_cuda_sync(), -3);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_invalid_ptx_is_rejected_when_cuda_is_available() {
+        if get_device_count() <= 0 {
+            return;
+        }
+
+        let runtime = match CudaRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let device = match runtime.get_device(0) {
+            Ok(device) => device,
+            Err(_) => return,
+        };
+
+        let err = device
+            .load_ptx("this is not valid PTX")
+            .expect_err("invalid PTX should not load successfully");
+        assert!(matches!(
+            err,
+            CudaError::InvalidPtx | CudaError::InvalidImage | CudaError::InvalidSource
+        ));
     }
 }

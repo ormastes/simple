@@ -1,6 +1,8 @@
 //! Data copying and item extraction operations
 
 use super::registry::TENSOR_REGISTRY;
+#[cfg(not(feature = "pytorch"))]
+use super::dynamic_runtime;
 
 #[cfg(feature = "pytorch")]
 use tch::Tensor;
@@ -55,8 +57,7 @@ pub extern "C" fn rt_torch_copy_data_to_cpu(tensor_handle: u64, buffer_ptr: *mut
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (tensor_handle, buffer_ptr, buffer_size);
-        0
+        dynamic_runtime::call_copy_data_to_cpu(tensor_handle, buffer_ptr, buffer_size).unwrap_or(0)
     }
 }
 

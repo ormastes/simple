@@ -339,6 +339,14 @@ if let Value::Str(ref s) = recv_val {
                 None => return Ok(Value::Int(0)),
             }
         }
+        "char_code_at" => {
+            // Return the Unicode code point of the character at the given index
+            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            match s.chars().nth(idx) {
+                Some(c) => return Ok(Value::Int(c as i64)),
+                None => return Ok(Value::Int(0)),
+            }
+        }
         "pad_left" | "pad_start" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let pad_char = eval_arg(args, 1, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?

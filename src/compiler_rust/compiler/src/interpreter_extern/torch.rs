@@ -108,6 +108,10 @@ pub fn rt_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(torch_tensor_impl(&data, &dims, dtype_code, device_code) as i64))
 }
 
+pub fn rt_ps_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
+    rt_torch_tensor(args)
+}
+
 pub fn rt_torch_to_cuda(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
@@ -166,4 +170,28 @@ pub fn rt_torch_copy_data_to_cpu(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Int(
         torch_copy_data_to_cpu_impl(handle, buffer_ptr, buffer_size),
     ))
+}
+
+pub fn rt_ps_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_ps_torch_tensor_from_data requires 2 arguments (data, dims)",
+        ));
+    }
+
+    let data = extract_f64_array(&args[0], "rt_ps_torch_tensor_from_data")?;
+    let dims = extract_i64_array(&args[1], "rt_ps_torch_tensor_from_data")?;
+    Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
+}
+
+pub fn rt_ps_torch_tensor_zeros(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_ps_torch_tensor_zeros requires 1 argument (dims)",
+        ));
+    }
+
+    let dims = extract_i64_array(&args[0], "rt_ps_torch_tensor_zeros")?;
+    let zeros = vec![0.0; dims.iter().product::<i64>().max(0) as usize];
+    Ok(Value::Int(torch_tensor_impl(&zeros, &dims, 1, 0) as i64))
 }

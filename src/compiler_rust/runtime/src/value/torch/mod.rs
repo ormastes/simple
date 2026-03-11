@@ -41,6 +41,7 @@ mod creation;
 pub mod data;
 mod data_access;
 mod device;
+mod dynamic_runtime;
 pub mod error;
 mod fft;
 mod linalg;

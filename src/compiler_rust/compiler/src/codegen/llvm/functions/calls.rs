@@ -58,6 +58,66 @@ impl LlvmBackend {
             return Ok(());
         }
 
+        // Redirect bare builtin method names to runtime functions.
+        // When MIR emits Call { target: "starts_with" } instead of BuiltinMethod,
+        // we must map these to rt_* functions. The first arg is the receiver.
+        let bare_rt_redirect: Option<&str> = match func_name {
+            // String methods (all verified as T symbols in runtime)
+            "starts_with" => Some("rt_string_starts_with"),
+            "ends_with" => Some("rt_string_ends_with"),
+            "contains" => Some("rt_contains"),
+            "split" => Some("rt_string_split"),
+            "trim" => Some("rt_string_trim"),
+            "replace" => Some("rt_string_replace"),
+            "to_upper" | "upper" => Some("rt_string_to_upper"),
+            "to_lower" | "lower" => Some("rt_string_to_lower"),
+            "char_at" => Some("rt_string_char_at"),
+            "to_text" | "to_string" => Some("rt_to_string"),
+            "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+            "concat" => Some("rt_string_concat"),
+            // Array methods (verified as T symbols)
+            "push" => Some("rt_array_push"),
+            "pop" => Some("rt_array_pop"),
+            "sort" => Some("rt_array_sort"),
+            "reverse" => Some("rt_array_reverse"),
+            "join" => Some("rt_array_join"),
+            "clear" => Some("rt_array_clear"),
+            "slice" => Some("rt_slice"),
+            // Collection methods (verified as T symbols)
+            "len" => Some("rt_len"),
+            "get" => Some("rt_index_get"),
+            "set" => Some("rt_index_set"),
+            "keys" => Some("rt_dict_keys"),
+            "values" => Some("rt_dict_values"),
+            _ => None,
+        };
+
+        if let Some(rt_fn_name) = bare_rt_redirect {
+            let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+            for arg in args.iter() {
+                let val = self.get_vreg(arg, vreg_map)?;
+                let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                arg_vals.push(casted.into());
+            }
+            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                arg_vals.iter().map(|_| i64_type.into()).collect();
+            let fn_type = i64_type.fn_type(&param_types, false);
+            let rt_func = module.get_function(rt_fn_name).unwrap_or_else(|| {
+                module.add_function(rt_fn_name, fn_type, None)
+            });
+            let call_site = builder
+                .build_call(rt_func, &arg_vals, "rt_redirect")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt redirect call", &e))?;
+            if let Some(d) = dest {
+                if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    vreg_map.insert(d, ret_val);
+                } else {
+                    vreg_map.insert(d, i64_type.const_int(0, false).into());
+                }
+            }
+            return Ok(());
+        }
+
         // Map Simple builtin names to runtime FFI names (same as Cranelift backend)
         let ffi_name: &str = match func_name {
             "sys_get_args" => "rt_get_args",

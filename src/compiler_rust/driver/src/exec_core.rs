@@ -359,13 +359,15 @@ impl ExecCore {
 
     /// Load an SMF module from file
     pub fn load_module(&self, path: &Path) -> Result<LoadedModule, String> {
-        self.loader.load(path).map_err(|e| format!("load failed: {e}"))
+        self.loader
+            .load_with_resolver(path, |name| self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize))
+            .map_err(|e| format!("load failed: {e}"))
     }
 
     /// Load an SMF module from memory buffer
     pub fn load_module_from_memory(&self, bytes: &[u8]) -> Result<LoadedModule, String> {
         self.loader
-            .load_from_memory(bytes)
+            .load_from_memory_with_resolver(bytes, |name| self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize))
             .map_err(|e| format!("load failed: {e}"))
     }
 

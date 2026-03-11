@@ -16,6 +16,9 @@ use std::sync::Arc;
 
 use super::error::TorchFfiError;
 use super::registry::*;
+#[cfg(not(feature = "pytorch"))]
+use super::dynamic_runtime;
+use crate::value::{rt_array_get, rt_array_len, RuntimeValue};
 
 // ============================================================================
 // FFI Helper Functions
@@ -54,7 +57,7 @@ pub extern "C" fn rt_torch_available() -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        dynamic_runtime::call0_i32(b"rt_torch_available").unwrap_or(0)
     }
 }
 
@@ -67,7 +70,7 @@ pub extern "C" fn rt_torch_cuda_available() -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        dynamic_runtime::call0_i32(b"rt_torch_cuda_available").unwrap_or(0)
     }
 }
 
@@ -80,7 +83,7 @@ pub extern "C" fn rt_torch_cuda_device_count() -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        dynamic_runtime::call0_i32(b"rt_torch_cuda_device_count").unwrap_or(0)
     }
 }
 
@@ -139,8 +142,7 @@ pub extern "C" fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, d
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (shape_ptr, ndim, dtype, device);
-        0
+        dynamic_runtime::call_zeros(shape_ptr, ndim, dtype, device).unwrap_or(0)
     }
 }
 
@@ -318,9 +320,69 @@ pub extern "C" fn rt_torch_tensor(
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code);
-        0
+        dynamic_runtime::call_tensor(data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code).unwrap_or(0)
     }
+}
+
+fn runtime_array_to_f64_vec(array: RuntimeValue) -> Option<Vec<f64>> {
+    let len = rt_array_len(array);
+    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
+        eprintln!("torch_creation f64 array raw=0x{:016x} len={}", array.to_raw(), len);
+    }
+    if len < 0 {
+        return None;
+    }
+
+    let mut values = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = rt_array_get(array, i);
+        if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
+            eprintln!(
+                "torch_creation f64[{}] raw=0x{:016x} int={} float={}",
+                i,
+                value.to_raw(),
+                value.is_int(),
+                value.is_float()
+            );
+        }
+        if value.is_float() {
+            values.push(value.as_float());
+        } else if value.is_int() {
+            values.push(value.as_int() as f64);
+        } else {
+            return None;
+        }
+    }
+    Some(values)
+}
+
+fn runtime_array_to_i64_vec(array: RuntimeValue) -> Option<Vec<i64>> {
+    let len = rt_array_len(array);
+    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
+        eprintln!("torch_creation i64 array raw=0x{:016x} len={}", array.to_raw(), len);
+    }
+    if len < 0 {
+        return None;
+    }
+
+    let mut values = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = rt_array_get(array, i);
+        if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
+            eprintln!(
+                "torch_creation i64[{}] raw=0x{:016x} int={} float={}",
+                i,
+                value.to_raw(),
+                value.is_int(),
+                value.is_float()
+            );
+        }
+        if !value.is_int() {
+            return None;
+        }
+        values.push(value.as_int());
+    }
+    Some(values)
 }
 
 /// Create CPU tensor from raw f64 data using the legacy Simple-facing symbol.
@@ -335,6 +397,71 @@ pub extern "C" fn rt_torch_tensor_from_data(
     shape_len: i32,
 ) -> u64 {
     rt_torch_tensor(data_ptr, data_len, shape_ptr, shape_len, 1, 0)
+}
+
+/// Pure-Simple ABI wrapper for tensor creation from RuntimeValue arrays.
+///
+/// This is the stable bootstrap boundary for compiled `.smf` code, which
+/// passes `[f64]` and `[i64]` as RuntimeValue array handles rather than raw
+/// pointer/length pairs.
+#[no_mangle]
+pub extern "C" fn rt_ps_torch_tensor(
+    data: RuntimeValue,
+    dims: RuntimeValue,
+    dtype_code: i32,
+    device_code: i32,
+) -> u64 {
+    if std::env::var_os("SIMPLE_TORCH_BRIDGE_PANIC").is_some() {
+        panic!("rt_ps_torch_tensor reached local bootstrap wrapper");
+    }
+    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
+        eprintln!(
+            "torch_creation tensor data=0x{:016x} dims=0x{:016x} dtype={} device={}",
+            data.to_raw(),
+            dims.to_raw(),
+            dtype_code,
+            device_code
+        );
+    }
+    let Some(data_vec) = runtime_array_to_f64_vec(data) else {
+        tracing::error!("rt_ps_torch_tensor: expected [f64] data array");
+        return 0;
+    };
+    let Some(shape_vec) = runtime_array_to_i64_vec(dims) else {
+        tracing::error!("rt_ps_torch_tensor: expected [i64] dims array");
+        return 0;
+    };
+
+    rt_torch_tensor(
+        data_vec.as_ptr(),
+        data_vec.len() as i64,
+        shape_vec.as_ptr(),
+        shape_vec.len() as i32,
+        dtype_code,
+        device_code,
+    )
+}
+
+/// Pure-Simple ABI wrapper for CPU f64 tensor creation.
+#[no_mangle]
+pub extern "C" fn rt_ps_torch_tensor_from_data(data: RuntimeValue, dims: RuntimeValue) -> u64 {
+    rt_ps_torch_tensor(data, dims, 1, 0)
+}
+
+/// Pure-Simple ABI wrapper for zeros tensor creation.
+#[no_mangle]
+pub extern "C" fn rt_ps_torch_tensor_zeros(dims: RuntimeValue) -> u64 {
+    let Some(shape_vec) = runtime_array_to_i64_vec(dims) else {
+        tracing::error!("rt_ps_torch_tensor_zeros: expected [i64] dims array");
+        return 0;
+    };
+
+    if shape_vec.is_empty() {
+        tracing::error!("rt_ps_torch_tensor_zeros: dims must not be empty");
+        return 0;
+    }
+
+    rt_torch_zeros(shape_vec.as_ptr(), shape_vec.len() as i32, 1, 0)
 }
 
 /// Clone existing tensor (creates new handle)
@@ -359,8 +486,7 @@ pub extern "C" fn rt_torch_clone(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = tensor_handle;
-        0
+        dynamic_runtime::call1_u64(b"rt_torch_clone", tensor_handle).unwrap_or(0)
     }
 }
 
@@ -383,8 +509,7 @@ pub extern "C" fn rt_torch_free(tensor_handle: u64) -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = tensor_handle;
-        TorchFfiError::NotAvailable as i32
+        dynamic_runtime::call1_i32(b"rt_torch_free", tensor_handle).unwrap_or(TorchFfiError::NotAvailable as i32)
     }
 }
 

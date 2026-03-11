@@ -789,6 +789,7 @@ fn select_backend(target: &Target) -> Result<BackendKind, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_parser::Parser;
 
     #[test]
     fn backend_env_defaults_to_target_selection() {
@@ -825,5 +826,29 @@ mod tests {
         let result = select_backend(&target);
         assert!(result.is_err());
         env::remove_var("SIMPLE_BACKEND");
+    }
+
+    #[test]
+    fn ptx_emits_documented_gpu_aliases_without_undefined_store_regs() {
+        let source = r#"
+@gpu_kernel
+fn vector_add(a: i64, b: i64, out: i64, n: i64):
+    val idx = gpu_thread_id_x() + gpu_block_id_x() * gpu_block_dim_x()
+    if idx < n:
+        val av = gpu_load_f64(a, idx)
+        val bv = gpu_load_f64(b, idx)
+        gpu_store_f64(out, idx, av + bv)
+"#;
+
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let ptx = generate_ptx(&mir_module);
+
+        assert!(ptx.contains("mov.u32 %r510, %tid.x;"), "expected gpu_thread_id_x alias to lower to %tid.x:\n{ptx}");
+        assert!(ptx.contains("mov.s64 %rd32, 3;"), "expected void gpu_store_f64 to materialize nil:\n{ptx}");
+        assert!(!ptx.contains("%rd28;"), "unexpected undefined-register artifact remains in PTX:\n{ptx}");
+        assert!(!ptx.contains("call.uni (%rd0), gpu_thread_id_x;"), "gpu_thread_id_x should not remain as a call target:\n{ptx}");
     }
 }

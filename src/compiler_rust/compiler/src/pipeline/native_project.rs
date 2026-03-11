@@ -1227,8 +1227,21 @@ fn resolve_name_variants(
 ) -> Option<String> {
     // Try Type__method → Type.method
     if let Some(pos) = name.find("__") {
-        let dotted = format!("{}.{}", &name[..pos], &name[pos + 2..]);
+        let type_part = &name[..pos];
+        let method_part = &name[pos + 2..];
+        let dotted = format!("{}.{}", type_part, method_part);
         if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
+            return Some(resolved.clone());
+        }
+        // Also try all-lowercase joined: "OptimizationConfig__speed" → "optimizationconfig_speed"
+        // (desugar creates Type__method but actual fn may be typename_method in lowercase)
+        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+            return Some(resolved.clone());
+        }
+        // Try lowercase no-separator: "OptimizationConfig__speed" → "optimizationconfigspeed"
+        let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
+        if let Some(resolved) = import_map.get(&lower_no_sep) {
             return Some(resolved.clone());
         }
     }
@@ -1410,6 +1423,12 @@ fn mangle_mir(
                 let prefix = name.split('.').next().unwrap_or("");
                 !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
             })
+            // Variable method call pattern: xxx_builtin_method where the suffix is a known
+            // collection method. These are calls like `varname.contains(x)` lowered as
+            // `varname_contains(varname, x)` in MIR.
+            // Variable method call patterns: only exclude SPECIFIC known non-function patterns
+            // Avoid broad suffixes like _get/_map that might match real functions
+            || name.ends_with("_contains_key")
             || matches!(
                 name,
                 "print" | "println" | "eprint" | "eprintln"
@@ -1430,14 +1449,45 @@ fn mangle_mir(
                     | "memset" | "memcpy" | "memmove" | "madvise"
                     | "mmap" | "mmap_file" | "munmap"
                     | "readln" | "input" | "input_line" | "input_chars"
-                    | "env_var" | "env_args" | "temp_dir"
+                    | "env_var" | "env_args" | "env_clone" | "temp_dir"
                     | "file_mtime" | "file_size_for_mmap"
                     | "fs_read_text" | "fs_write_text" | "fs_has_file" | "fs_has_file_or_dir"
                     | "dir_list_recursive"
                     | "__traits" | "Error" | "VReg" | "Generic"
-                    | "trim_end" | "string_from_byte"
+                    | "trim_end" | "trim_start" | "string_from_byte" | "string_from_char_code"
+                    | "from_char_code"
                     | "i64_max" | "text_index_of"
                     | "current_rss_kb_main"
+                    | "array_length" | "array_new"
+                    | "mmap_read_string" | "mmap_read_bytes"
+                    | "interpret_ast" | "execute_compiled"
+                    | "handler" | "highlighter" | "completer" | "validator"
+                    | "AtomicI64" | "CircuitBreakerConfig" | "RateLimitConfig"
+                    | "ResourceLimits" | "TimeoutConfig"
+                    | "run_benchmarks" | "run_arch_check"
+                    | "validate_databases" | "test_user_service"
+                    | "register_builtin_blocks"
+                    | "sql_keywords"
+                    | "path_pop"
+                    | "new_text_lines" | "old_text_lines"
+                    | "new_to_clone" | "parent_clone" | "cycle_path_clone"
+                    | "upx_ensure_available" | "upx_get_path"
+                    | "self_extract_create" | "self_extract_is_compressed"
+                    | "JsonBlockDef" | "MathBlockDef" | "ShellBlockDef" | "SqlBlockDef"
+                    | "RegexBlockDef" | "MarkdownBlockDef" | "NogradBlockDef" | "LossBlockDef"
+                    | "make_cuda_port" | "make_vulkan_port"
+                    | "lexer_create_internal"
+                    | "mlr_lower_module" | "hir_expr_type" | "hir_pool_get"
+                    | "json_to_const"
+                    | "linkercompilationcontext_from_objects"
+                    | "search_recursive" | "find_decreases" | "find_scope_ancestor"
+                    | "calls_itself" | "hover_fn"
+                    | "daemon_send_request" | "parse_shell_commands"
+                    | "count_leading_chars" | "count_trailing_chars"
+                    | "line_trim_start" | "trimmed_is_empty" | "transcriber_is_empty"
+                    | "trait__is_none" | "type__size_bytes"
+                    | "next_lexeme_value_chars"
+                    | "matching_sort_by" | "mp_segments"
             )
     };
 

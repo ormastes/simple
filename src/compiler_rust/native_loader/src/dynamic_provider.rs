@@ -140,10 +140,15 @@ impl RuntimeSymbolProvider for DynamicSymbolProvider {
             return Some(ptr);
         }
 
-        // Load symbol from library
+        // Load symbol from library.
+        //
+        // Runtime symbols are exported C functions. Requesting them as `*const u8`
+        // from libloading is incorrect because that interprets the symbol as a data
+        // symbol and dereferences the bytes at the function entry address. Resolve
+        // them as function pointers first, then cast the function address.
         let ptr = unsafe {
-            let sym: Symbol<*const u8> = self.library.get(name.as_bytes()).ok()?;
-            *sym
+            let sym: Symbol<unsafe extern "C" fn()> = self.library.get(name.as_bytes()).ok()?;
+            (*sym) as *const () as *const u8
         };
 
         // Cache for future lookups

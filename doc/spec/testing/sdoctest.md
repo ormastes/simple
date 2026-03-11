@@ -88,7 +88,7 @@ Doctest examples within `"""` blocks are wrapped with Markdown code fences to cl
 Computes factorial of n
 
 Examples:
-```sdoctest
+```text
 >>> factorial 5
 120
 >>> factorial 0
@@ -107,7 +107,7 @@ fn factorial(n: Int) -> Int:
 Computes factorial of n
 
 Examples:
-```sdoctest
+```text
 >>> factorial 5
 120
 >>> factorial 0
@@ -154,7 +154,7 @@ fn process_nums():
 Divide two numbers
 
 Examples:
-```sdoctest
+```text
 >>> divide 10, 0
 Error: DivisionByZero
 >>> parse_int "not a number"
@@ -174,7 +174,7 @@ fn divide(a, b):
 Generate a unique identifier
 
 Examples:
-```sdoctest
+```text
 >>> generate_uuid()
 "........-....-....-....-............"
 >>> get_timestamp()
@@ -197,13 +197,13 @@ fn generate_uuid():
 Database operations with cleanup
 
 Setup:
-```sdoctest
+```text
 >>> db = Database.connect("test.db")
 >>> db.clear()
 ```
 
 Examples:
-```sdoctest
+```text
 >>> user = User.new(name: "Alice")
 >>> db.save(user)
 >>> db.find_by_name("Alice").name
@@ -211,7 +211,7 @@ Examples:
 ```
 
 Teardown:
-```sdoctest
+```text
 >>> db.close()
 ```
 """
@@ -509,7 +509,7 @@ skip_tags = ["slow", "manual"]
 """
 Creates a new stack with initial capacity
 
-```sdoctest
+```text
 >>> s = Stack.new(capacity: 10)
 >>> s.capacity
 10
@@ -531,7 +531,7 @@ struct Stack:
 
 Simple provides a `Stack` data structure:
 
-```simple-doctest
+```text
 >>> stack = Stack.new
 >>> stack.push(1)
 >>> stack.push(2)
@@ -548,7 +548,7 @@ Simple provides a `Stack` data structure:
 """
 Parses integer from string
 
-```sdoctest
+```text
 >>> parse_int "123"
 123
 >>> parse_int "12.3"
@@ -568,12 +568,12 @@ fn parse_int(s: String) -> Int:
 Database connection
 
 Setup:
-```sdoctest
+```text
 >>> db = Database.connect(":memory:")
 ```
 
 Examples:
-```sdoctest
+```text
 >>> db.execute("CREATE TABLE users (id INT, name TEXT)")
 >>> db.execute("INSERT INTO users VALUES (1, 'Alice')")
 >>> db.query("SELECT name FROM users").first
@@ -581,7 +581,7 @@ Examples:
 ```
 
 Teardown:
-```sdoctest
+```text
 >>> db.close()
 ```
 """

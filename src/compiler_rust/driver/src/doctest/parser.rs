@@ -94,11 +94,16 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
         let line = raw_line.trim_end();
 
         if let Some(rest) = line.strip_prefix(">>>") {
+            let command = rest.trim_start();
+            if matches!(command, "exit" | "quit") {
+                finish_example(&mut examples, &mut commands, &mut expected, &mut start_line);
+                continue;
+            }
             if !commands.is_empty() {
                 finish_example(&mut examples, &mut commands, &mut expected, &mut start_line);
             }
             start_line = line_num;
-            commands.push(rest.trim_start().to_string());
+            commands.push(command.to_string());
             continue;
         }
 
@@ -113,6 +118,9 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
         }
 
         if !commands.is_empty() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
             expected.push(line.to_string());
         }
     }

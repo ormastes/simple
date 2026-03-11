@@ -108,16 +108,20 @@ Window definitions, actions, and fields loaded from `config/t32/catalogs/`:
 
 ## Source Locations
 
-| Component | Path |
-|-----------|------|
-| T32 CLI | `src/app/t32_cli/` (9 files) |
-| MCP T32 server | `src/app/mcp_t32/` (6 files) |
-| CMM LSP/parser | `examples/10_tooling/cmm_lsp/` (40+ files) |
-| DAP adapters | `src/lib/nogc_sync_mut/dap/adapter/` |
-| RCL protocol | `src/lib/nogc_sync_mut/debug/remote/protocol/trace32.spl` |
-| GDB bridge | `src/lib/nogc_sync_mut/debug/remote/protocol/t32_gdb_bridge.spl` |
-| Config files | `config/t32/` (.t32, .cmm, catalogs/) |
-| Shell helpers | `scripts/t32_*.shs` |
+All T32 tools live in the [`trace32_tools`](https://github.com/ormastes/trace32_tools) submodule at `examples/10_tooling/trace32_tools/`. Symlinks at the original paths preserve import compatibility.
+
+| Component | Submodule Path | Symlink |
+|-----------|---------------|---------|
+| T32 CLI | `trace32_tools/t32_cli/` (9 files) | `src/app/t32_cli/` |
+| MCP T32 server | `trace32_tools/t32_mcp/` (6 files) | `src/app/mcp_t32/` |
+| T32 LSP MCP server | `trace32_tools/t32_lsp_mcp/` (4 files) | — |
+| CMM LSP/parser | `trace32_tools/cmm_lsp/` (43 files) | `examples/10_tooling/cmm_lsp/` |
+| Config/catalogs | `trace32_tools/config/` (5 files) | — |
+| Test fixtures | `trace32_tools/test_fixtures/` (47 CMM scripts) | — |
+| DAP adapters | `src/lib/nogc_sync_mut/dap/adapter/` | — |
+| RCL protocol | `src/lib/nogc_sync_mut/debug/remote/protocol/trace32.spl` | — |
+| GDB bridge | `src/lib/nogc_sync_mut/debug/remote/protocol/t32_gdb_bridge.spl` | — |
+| Shell helpers | `scripts/t32_*.shs` | — |
 
 ---
 

@@ -1,6 +1,8 @@
 //! Device movement and placement operations
 
 use super::registry::{next_handle, TensorWrapper, TENSOR_REGISTRY};
+#[cfg(not(feature = "pytorch"))]
+use super::dynamic_runtime;
 use std::sync::Arc;
 
 #[cfg(feature = "pytorch")]
@@ -46,8 +48,7 @@ pub extern "C" fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u6
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (tensor_handle, device_code);
-        0
+        dynamic_runtime::call2_u64_i32(b"rt_torch_to_device", tensor_handle, device_code).unwrap_or(0)
     }
 }
 

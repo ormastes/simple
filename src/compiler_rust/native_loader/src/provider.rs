@@ -58,8 +58,23 @@ impl RuntimeLoadMode {
     /// Previously, debug builds tried dynamic loading first, but this
     /// caused output capture to fail in JIT-compiled code.
     pub fn default_for_profile() -> Self {
-        // Always use static linking to ensure TLS consistency
-        // between capture functions and print functions
+        if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return Self::DynamicPath(trimmed.to_string());
+            }
+        }
+
+        if let Ok(mode) = std::env::var("SIMPLE_RUNTIME_LOAD") {
+            match mode.trim().to_ascii_lowercase().as_str() {
+                "dynamic" => return Self::Dynamic,
+                "static" => return Self::Static,
+                _ => {}
+            }
+        }
+
+        // Default to static linking to ensure TLS consistency
+        // between capture functions and print functions.
         Self::Static
     }
 
@@ -117,8 +132,14 @@ pub fn create_runtime_provider(mode: RuntimeLoadMode) -> Result<Arc<dyn RuntimeS
 /// If dynamic loading fails in debug builds, it silently falls back to
 /// static linking without errors.
 pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
-    create_runtime_provider(RuntimeLoadMode::default_for_profile())
-        .unwrap_or_else(|_| Arc::new(StaticSymbolProvider::default()))
+    let mode = RuntimeLoadMode::default_for_profile();
+    create_runtime_provider(mode.clone()).unwrap_or_else(|err| {
+        eprintln!(
+            "warning: failed to initialize runtime provider {:?}: {}; falling back to static",
+            mode, err
+        );
+        Arc::new(StaticSymbolProvider::default())
+    })
 }
 
 /// Create a static-only provider.
@@ -131,6 +152,9 @@ pub fn static_provider() -> Arc<dyn RuntimeSymbolProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_static_mode() {
@@ -171,5 +195,29 @@ mod tests {
             RuntimeLoadMode::Static => (),
             _ => panic!("Default should be Static"),
         }
+    }
+
+    #[test]
+    fn test_default_for_profile_honors_runtime_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("SIMPLE_RUNTIME_PATH", "/tmp/libsimple_runtime.so");
+        std::env::remove_var("SIMPLE_RUNTIME_LOAD");
+        match RuntimeLoadMode::default_for_profile() {
+            RuntimeLoadMode::DynamicPath(path) => assert_eq!(path, "/tmp/libsimple_runtime.so"),
+            other => panic!("expected DynamicPath, got {:?}", other),
+        }
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+    }
+
+    #[test]
+    fn test_default_for_profile_honors_runtime_load_mode() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+        std::env::set_var("SIMPLE_RUNTIME_LOAD", "dynamic");
+        match RuntimeLoadMode::default_for_profile() {
+            RuntimeLoadMode::Dynamic => (),
+            other => panic!("expected Dynamic, got {:?}", other),
+        }
+        std::env::remove_var("SIMPLE_RUNTIME_LOAD");
     }
 }

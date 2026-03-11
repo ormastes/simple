@@ -227,8 +227,10 @@ Communication with TRACE32 uses `t32rem` (Remote API CLI). The MCP servers manag
 - **Catalogs:** `config/t32/catalogs/` (windows, actions, fields in SDN)
 - **Tests:** `test/unit/app/mcp_t32/` (dispatch + JSON specs)
 
-### Legacy locations (originals preserved)
+### Canonical locations (submodule)
 
-- `src/app/mcp_t32/` — original monolithic MCP server
-- `src/app/t32_cli/` — original CLI tool
-- `examples/10_tooling/cmm_lsp/` — original CMM LSP
+All T32 tools now live in the [`trace32_tools`](https://github.com/ormastes/trace32_tools) submodule at `examples/10_tooling/trace32_tools/`. Symlinks at the original paths preserve import compatibility:
+
+- `src/app/mcp_t32/` → `trace32_tools/t32_mcp/`
+- `src/app/t32_cli/` → `trace32_tools/t32_cli/`
+- `examples/10_tooling/cmm_lsp/` → `trace32_tools/cmm_lsp/`

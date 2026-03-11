@@ -1134,31 +1134,74 @@ impl LlvmBackend {
                     }
                 }
             }
-            MirInst::BuiltinMethod { dest, receiver, method, args, .. } => {
-                // Compile as a regular function call with the method name
+            MirInst::BuiltinMethod { dest, receiver, receiver_type, method, args, .. } => {
+                // Map builtin method calls to runtime functions (matching Cranelift backend)
                 let i64_type = self.context.i64_type();
-                let mut all_args = vec![*receiver];
-                all_args.extend_from_slice(args);
-                let func = module.get_function(method);
-                if let Some(func) = func {
-                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in &all_args {
+                let receiver_val = self.get_vreg(receiver, vreg_map)?;
+                let receiver_i64 = self.coerce_value_to_type(receiver_val, Some(i64_type.into()), builder)?;
+
+                // Determine runtime function name based on receiver type and method
+                let rt_name: Option<&str> = match (receiver_type.as_str(), method.as_str()) {
+                    ("Array" | "array", "push") => Some("rt_array_push"),
+                    ("Array" | "array", "len") => Some("rt_array_len"),
+                    ("Array" | "array", "get") => Some("rt_index_get"),
+                    ("Array" | "array", "set") => Some("rt_index_set"),
+                    ("Array" | "array", "pop") => Some("rt_array_pop"),
+                    ("Array" | "array", "clear") => Some("rt_array_clear"),
+                    ("String" | "string", "len") => Some("rt_string_len"),
+                    ("String" | "string", "concat") => Some("rt_string_concat"),
+                    ("String" | "string", "starts_with") => Some("rt_string_starts_with"),
+                    ("String" | "string", "ends_with") => Some("rt_string_ends_with"),
+                    ("String" | "string", "contains") | ("Array" | "array", "contains") | ("Dict" | "dict", "contains") => Some("rt_contains"),
+                    ("String" | "string", "substring") => Some("rt_string_substring"),
+                    ("String" | "string", "split") => Some("rt_string_split"),
+                    ("String" | "string", "trim") => Some("rt_string_trim"),
+                    ("String" | "string", "replace") => Some("rt_string_replace"),
+                    ("String" | "string", "index_of") => Some("rt_string_index_of"),
+                    ("String" | "string", "to_upper") | ("String" | "string", "upper") => Some("rt_string_to_upper"),
+                    ("String" | "string", "to_lower") | ("String" | "string", "lower") => Some("rt_string_to_lower"),
+                    ("String" | "string", "char_at") => Some("rt_string_char_at"),
+                    ("Dict" | "dict", "get") => Some("rt_index_get"),
+                    ("Dict" | "dict", "set") => Some("rt_dict_set"),
+                    ("Dict" | "dict", "len") => Some("rt_dict_len"),
+                    ("Dict" | "dict", "clear") => Some("rt_dict_clear"),
+                    ("Dict" | "dict", "keys") => Some("rt_dict_keys"),
+                    ("Dict" | "dict", "values") => Some("rt_dict_values"),
+                    ("Dict" | "dict", "contains_key") => Some("rt_dict_contains_key"),
+                    ("Tuple" | "tuple", "get") => Some("rt_tuple_get"),
+                    ("Tuple" | "tuple", "len") => Some("rt_tuple_len"),
+                    ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
+                    ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
+                    ("Array" | "array", "join") => Some("rt_array_join"),
+                    ("Array" | "array", "sort") => Some("rt_array_sort"),
+                    ("Array" | "array", "reverse") => Some("rt_array_reverse"),
+                    ("Array" | "array", "filter") => Some("rt_array_filter"),
+                    ("Array" | "array", "map") => Some("rt_array_map"),
+                    ("Array" | "array", "each") | ("Array" | "array", "for_each") => Some("rt_array_each"),
+                    ("Array" | "array", "find") => Some("rt_array_find"),
+                    ("Array" | "array", "any") => Some("rt_array_any"),
+                    ("Array" | "array", "all") => Some("rt_array_all"),
+                    ("Array" | "array", "reduce") | ("Array" | "array", "fold") => Some("rt_array_reduce"),
+                    _ => None,
+                };
+
+                if let Some(rt_fn_name) = rt_name {
+                    // Build arg list: receiver + method args
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![receiver_i64.into()];
+                    for arg in args.iter() {
                         let val = self.get_vreg(arg, vreg_map)?;
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                         arg_vals.push(casted.into());
                     }
-                    let declared_params = func.get_type().get_param_types().len();
-                    let call_site = if declared_params != all_args.len() {
-                        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            all_args.iter().map(|_| i64_type.into()).collect();
-                        let fn_type = i64_type.fn_type(&param_types, false);
-                        let fn_ptr = func.as_global_value().as_pointer_value();
-                        builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "bcall")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?
-                    } else {
-                        builder.build_call(func, &arg_vals, "bcall")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?
-                    };
+                    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                        arg_vals.iter().map(|_| i64_type.into()).collect();
+                    let fn_type = i64_type.fn_type(&param_types, false);
+                    let rt_func = module.get_function(rt_fn_name).unwrap_or_else(|| {
+                        module.add_function(rt_fn_name, fn_type, None)
+                    });
+                    let call_site = builder
+                        .build_call(rt_func, &arg_vals, "bcall")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().left() {
                             vreg_map.insert(*d, ret_val);
@@ -1167,32 +1210,30 @@ impl LlvmBackend {
                         }
                     }
                 } else {
-                    // Call rt_function_not_found for a useful runtime error
-                    let name_bytes = method.as_bytes();
-                    let name_const = self.context.const_string(name_bytes, false);
-                    let name_global = module.add_global(
-                        name_const.get_type(), None,
-                        &format!("notfound_builtin_{}", method.replace('.', "_")),
-                    );
-                    name_global.set_initializer(&name_const);
-                    name_global.set_constant(true);
-                    name_global.set_linkage(inkwell::module::Linkage::Private);
-                    let name_ptr = builder
-                        .build_ptr_to_int(name_global.as_pointer_value(), i64_type, "nf_ptr")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-                    let name_len = i64_type.const_int(name_bytes.len() as u64, false);
-                    let not_found_func = module.get_function("rt_function_not_found").unwrap_or_else(|| {
-                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                        module.add_function("rt_function_not_found", fn_type, None)
-                    });
-                    let call_site = builder
-                        .build_call(not_found_func, &[name_ptr.into(), name_len.into()], "nf_call")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_function_not_found", &e))?;
-                    if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                            vreg_map.insert(*d, ret_val);
-                        } else {
-                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
+                    // Fallback: try calling the method by name (may be user-defined)
+                    let mut all_args = vec![*receiver];
+                    all_args.extend_from_slice(args);
+                    let func = module.get_function(method);
+                    if let Some(func) = func {
+                        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                        for arg in &all_args {
+                            let val = self.get_vreg(arg, vreg_map)?;
+                            let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                            arg_vals.push(casted.into());
+                        }
+                        let call_site = builder.build_call(func, &arg_vals, "bcall")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            } else {
+                                vreg_map.insert(*d, i64_type.const_int(0, false).into());
+                            }
+                        }
+                    } else {
+                        // Method not found — return nil
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, i64_type.const_int(3, false).into()); // tagged nil
                         }
                     }
                 }
