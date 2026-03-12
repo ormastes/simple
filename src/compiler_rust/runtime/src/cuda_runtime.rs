@@ -40,7 +40,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 /// CUDA error codes (subset)
 #[repr(C)]
@@ -115,6 +115,8 @@ type CUstream = *mut c_void;
 
 // CUDA Driver API function signatures
 #[cfg(feature = "cuda")]
+#[cfg_attr(target_os = "linux", link(name = "cuda"))]
+#[cfg_attr(target_os = "macos", link(name = "cuda"))]
 extern "C" {
     fn cuInit(flags: c_uint) -> c_int;
     fn cuDeviceGetCount(count: *mut c_int) -> c_int;
@@ -175,6 +177,8 @@ use cuda_stubs::*;
 /// CUDA runtime initialization
 static CUDA_INIT: Once = Once::new();
 static mut CUDA_INITIALIZED: bool = false;
+#[cfg(feature = "cuda")]
+static DEFAULT_CONTEXT: OnceLock<Result<usize, CudaError>> = OnceLock::new();
 
 /// Initialize CUDA driver
 fn init_cuda() -> CudaResult<()> {
@@ -202,6 +206,48 @@ fn init_cuda() -> CudaResult<()> {
     } else {
         Err(result)
     }
+}
+
+#[cfg(feature = "cuda")]
+fn get_or_create_default_context() -> CudaResult<CUcontext> {
+    let stored = DEFAULT_CONTEXT.get_or_init(|| {
+        if let Err(err) = init_cuda() {
+            return Err(err);
+        }
+
+        unsafe {
+            let mut handle: CUdevice = 0;
+            let err = cuDeviceGet(&mut handle, 0);
+            if err != 0 {
+                return Err(std::mem::transmute(err));
+            }
+
+            let mut context: CUcontext = ptr::null_mut();
+            let err = cuCtxCreate_v2(&mut context, 0, handle);
+            if err != 0 {
+                return Err(std::mem::transmute(err));
+            }
+
+            Ok(context as usize)
+        }
+    });
+
+    match stored {
+        Ok(ctx) => Ok(*ctx as CUcontext),
+        Err(err) => Err(*err),
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn ensure_default_context_current() -> CudaResult<()> {
+    let context = get_or_create_default_context()?;
+    unsafe {
+        let err = cuCtxSetCurrent(context);
+        if err != 0 {
+            return Err(std::mem::transmute(err));
+        }
+    }
+    Ok(())
 }
 
 /// CUDA device wrapper
@@ -727,6 +773,9 @@ pub extern "C" fn rt_cuda_ctx_destroy(_ctx: i64) -> i64 { -3 }
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_ctx_synchronize() -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuCtxSynchronize();
         if err != 0 { return -(err as i64); }
@@ -742,6 +791,9 @@ pub extern "C" fn rt_cuda_ctx_synchronize() -> i64 { -3 }
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_mem_alloc(size: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let mut dptr: CUdeviceptr = 0;
         let err = cuMemAlloc_v2(&mut dptr, size as usize);
@@ -758,6 +810,9 @@ pub extern "C" fn rt_cuda_mem_alloc(_size: i64) -> i64 { -3 }
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_mem_free(ptr: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuMemFree_v2(ptr as CUdeviceptr);
         if err != 0 { return -(err as i64); }
@@ -773,6 +828,9 @@ pub extern "C" fn rt_cuda_mem_free(_ptr: i64) -> i64 { -3 }
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_memcpy_htod(dst: i64, src: i64, size: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuMemcpyHtoD_v2(dst as CUdeviceptr, src as *const c_void, size as usize);
         if err != 0 { return -(err as i64); }
@@ -788,6 +846,9 @@ pub extern "C" fn rt_cuda_memcpy_htod(_dst: i64, _src: i64, _size: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuMemcpyDtoH_v2(dst as *mut c_void, src as CUdeviceptr, size as usize);
         if err != 0 { return -(err as i64); }
@@ -803,6 +864,9 @@ pub extern "C" fn rt_cuda_memcpy_dtoh(_dst: i64, _src: i64, _size: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_memcpy_dtod(dst: i64, src: i64, size: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuMemcpyDtoD_v2(dst as CUdeviceptr, src as CUdeviceptr, size as usize);
         if err != 0 { return -(err as i64); }
@@ -818,6 +882,9 @@ pub extern "C" fn rt_cuda_memcpy_dtod(_dst: i64, _src: i64, _size: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuMemsetD8_v2(ptr as CUdeviceptr, value as u8, size as usize);
         if err != 0 { return -(err as i64); }
@@ -834,6 +901,9 @@ pub extern "C" fn rt_cuda_memset(_ptr: i64, _value: i64, _size: i64) -> i64 { -3
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_load(path: *const c_char) -> i64 {
     if path.is_null() { return -1; }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let mut module: CUmodule = ptr::null_mut();
         let err = cuModuleLoad(&mut module, path);
@@ -851,6 +921,9 @@ pub extern "C" fn rt_cuda_module_load(_path: *const c_char) -> i64 { -3 }
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_load_data(ptx: *const c_char) -> i64 {
     if ptx.is_null() { return -1; }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let mut module: CUmodule = ptr::null_mut();
         let err = cuModuleLoadData(&mut module, ptx as *const c_void);
@@ -867,6 +940,9 @@ pub extern "C" fn rt_cuda_module_load_data(_ptx: *const c_char) -> i64 { -3 }
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_unload(module: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuModuleUnload(module as CUmodule);
         if err != 0 { return -(err as i64); }
@@ -906,6 +982,9 @@ pub extern "C" fn rt_cuda_launch_kernel(
     args_ptr: i64,
 ) -> i64 {
     if func_name.is_null() { return -1; }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         // Get function from module
         let mut func: CUfunction = ptr::null_mut();
@@ -940,6 +1019,9 @@ pub extern "C" fn rt_cuda_launch_kernel(
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_sync() -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
     unsafe {
         let err = cuCtxSynchronize();
         if err != 0 { return -(err as i64); }
@@ -1006,25 +1088,79 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_invalid_ptx_is_rejected_when_cuda_is_available() {
-        if get_device_count() <= 0 {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
             return;
         }
 
-        let runtime = match CudaRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
-        let device = match runtime.get_device(0) {
+        let device = match CudaDevice::new(0) {
             Ok(device) => device,
             Err(_) => return,
         };
 
-        let err = device
-            .load_ptx("this is not valid PTX")
-            .expect_err("invalid PTX should not load successfully");
+        let err = match device.load_ptx("this is not valid PTX") {
+            Ok(_) => panic!("invalid PTX should not load successfully"),
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             CudaError::InvalidPtx | CudaError::InvalidImage | CudaError::InvalidSource
         ));
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_invalid_ptx_is_rejected_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let ptx = CString::new("this is not valid PTX").unwrap();
+        let result = rt_cuda_module_load_data(ptx.as_ptr());
+        assert!(
+            matches!(result, -218 | -200 | -300),
+            "expected invalid PTX/image/source error, got {result}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_can_load_and_launch_noop_kernel_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let ptx = CString::new(
+            ".version 7.0\n\
+             .target sm_50\n\
+             .address_size 64\n\
+             \n\
+             .visible .entry noop()\n\
+             {\n\
+                 ret;\n\
+             }\n",
+        )
+        .unwrap();
+        let kernel_name = CString::new("noop").unwrap();
+
+        let module = rt_cuda_module_load_data(ptx.as_ptr());
+        assert!(module > 0, "expected PTX module to load, got {module}");
+
+        let launch = rt_cuda_launch_kernel(module, kernel_name.as_ptr(), 1, 1, 1, 1, 1, 1, 0);
+        assert_eq!(launch, 0, "expected noop kernel launch to succeed, got {launch}");
+
+        let sync = rt_cuda_sync();
+        assert_eq!(sync, 0, "expected sync after noop kernel to succeed, got {sync}");
+
+        let unload = rt_cuda_module_unload(module);
+        assert_eq!(unload, 0, "expected module unload to succeed, got {unload}");
     }
 }

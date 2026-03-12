@@ -58,7 +58,7 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        // Special case: substring(text, start) → rt_slice(text, start, rt_len(text))
+        // Special case: substring(text, start) → rt_slice(text, start, rt_len(text), 1)
         // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
         if func_name == "substring" && args.len() == 2 {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
@@ -75,14 +75,15 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
             let end_val = len_call.try_as_basic_value().left()
                 .unwrap_or_else(|| i64_type.const_int(0, false).into());
-            // Call rt_slice(text, start, end)
-            let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+            let step_val = i64_type.const_int(1, false);
+            // Call rt_slice(text, start, end, step) — 4 args
+            let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()], false);
             let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
                 module.add_function("rt_slice", slice_fn_type, None)
             });
-            let slice_args = &[text_casted.into(), start_casted.into(), end_val.into()];
+            let slice_args = &[text_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
             let declared_params = slice_func.get_type().get_param_types().len();
-            let slice_call = if declared_params != 3 {
+            let slice_call = if declared_params != 4 {
                 let fn_ptr = slice_func.as_global_value().as_pointer_value();
                 builder.build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?

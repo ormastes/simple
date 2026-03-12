@@ -994,7 +994,7 @@ impl LlvmBackend {
                 // Extract plain method name from qualified name (e.g., "text.len" -> "len")
                 let method = func_name.rsplit('.').next().unwrap_or(func_name);
 
-                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver))
+                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
@@ -1009,14 +1009,15 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
                     let end_val = len_call.try_as_basic_value().left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
-                    let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                    let step_val = i64_type.const_int(1, false);
+                    // rt_slice(collection, start, end, step) takes 4 args
+                    let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()], false);
                     let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
                         module.add_function("rt_slice", slice_fn_type, None)
                     });
-                    // Use indirect call if existing declaration has mismatched arity
-                    let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into()];
+                    let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
                     let declared_params = slice_func.get_type().get_param_types().len();
-                    let slice_call = if declared_params != 3 {
+                    let slice_call = if declared_params != 4 {
                         let fn_ptr = slice_func.as_global_value().as_pointer_value();
                         builder.build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
