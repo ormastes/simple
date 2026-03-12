@@ -39,6 +39,11 @@ fn schema_simple_check() -> text:
     val props = jo1(jp("path", path_prop))
     make_tool_schema_multi("simple_check", "Type-check a Simple source file and return structured diagnostics with line numbers and easyfix hints", props, "[" + js("path") + "]", true, false, true)
 
+fn schema_simple_diagnostics() -> text:
+    val path_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file or directory to check")))
+    val props = jo1(jp("path", path_prop))
+    make_tool_schema_multi("simple_diagnostics", "Run diagnostics on a file or directory, returning MCP-formatted structured content with diagnostics array, count, and isError fields", props, "[" + js("path") + "]", true, false, true)
+
 fn schema_simple_symbols() -> text:
     val path_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file")))
     val props = jo1(jp("path", path_prop))
@@ -152,6 +157,36 @@ fn handle_simple_check(id: text, body: text) -> text:
     val diag = run_diagnostics(path)
     val json = diag_result_to_json(diag)
     make_tool_result(id, json)
+
+fn handle_simple_diagnostics(id: text, body: text) -> text:
+    val path = extract_arg(body, "path")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+
+    val diag = run_diagnostics(path)
+    val diag_json = diag_entries_to_json(diag.entries)
+
+    # Build MCP-style response with content array and structuredContent
+    var content_text = ""
+    if diag.error_count == 0 and diag.warning_count == 0:
+        content_text = "OK: no diagnostics for " + path
+    else:
+        content_text = diag_result_to_json(diag)
+
+    val escaped_content = escape_json(content_text)
+    var content_arr = "[" + LB() + jp("type", js("text")) + "," + jp("text", js(escaped_content)) + RB() + "]"
+
+    val total_count = diag.error_count + diag.warning_count
+    val is_error = if diag.error_count > 0 then "true" else "false"
+
+    var structured = LB()
+    structured = structured + jp("diagnostics", diag_json)
+    structured = structured + "," + jp("count", total_count.to_string())
+    structured = structured + "," + jp("isError", is_error)
+    structured = structured + RB()
+
+    val result = LB() + jp("content", content_arr) + "," + jp("structuredContent", structured) + RB()
+    make_tool_result(id, result)
 
 fn handle_simple_symbols(id: text, body: text) -> text:
     val path = extract_arg(body, "path")

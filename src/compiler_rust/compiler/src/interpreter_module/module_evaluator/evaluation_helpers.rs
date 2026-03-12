@@ -21,6 +21,8 @@ type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
 
 use crate::interpreter::evaluate_expr;
 use crate::interpreter::MODULE_GLOBALS;
+use crate::interpreter::GLOBAL_IMPL_METHODS;
+use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::interpreter::core_types::get_pattern_name;
 
 /// Add builtin types to the module environment
@@ -185,6 +187,26 @@ pub(super) fn register_definitions(
                                 },
                             );
                         }
+                    }
+                    // Populate GLOBAL_IMPL_METHODS for cross-module fallback
+                    // (mirrors GLOBAL_ENUMS pattern for enum definitions)
+                    GLOBAL_IMPL_METHODS.with(|cell| {
+                        let mut global_impls = cell.borrow_mut();
+                        let methods = global_impls.entry(type_name.clone()).or_default();
+                        methods.extend(impl_block.methods.clone());
+                    });
+                    // Update MODULE_CLASSES_CACHE with the enriched class definition
+                    // so cross-module fallback lookups find impl-added methods
+                    if let Some(enriched_class) = global_classes.get(&type_name) {
+                        let enriched_clone = enriched_class.clone();
+                        MODULE_CLASSES_CACHE.with(|cache| {
+                            let mut cache = cache.borrow_mut();
+                            for (_path, module_classes) in cache.iter_mut() {
+                                if module_classes.contains_key(&type_name) {
+                                    module_classes.insert(type_name.clone(), enriched_clone.clone());
+                                }
+                            }
+                        });
                     }
                 }
             }

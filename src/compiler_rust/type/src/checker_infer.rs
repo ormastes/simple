@@ -291,9 +291,12 @@ impl TypeChecker {
 
                 Ok(self.fresh_var())
             }
-            Expr::StructInit { fields, .. } => {
+            Expr::StructInit { fields, spread, .. } => {
                 for (_, expr) in fields {
                     let _ = self.infer_expr(expr)?;
+                }
+                if let Some(spread_expr) = spread {
+                    let _ = self.infer_expr(spread_expr)?;
                 }
                 Ok(self.fresh_var())
             }

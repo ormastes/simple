@@ -65,7 +65,7 @@ impl Lowerer {
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
             Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall { receiver, method, args } => self.lower_method_call(receiver, method, args, ctx),
-            Expr::StructInit { name, fields } => self.lower_struct_init(name, fields, ctx),
+            Expr::StructInit { name, fields, .. } => self.lower_struct_init(name, fields, ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
             Expr::TensorLiteral {

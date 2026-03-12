@@ -1,0 +1,71 @@
+# Closure Capture Lint Specification
+#
+# Tests for CLOS001 detection of closures that modify outer variables.
+# Closures can READ outer vars but CANNOT MODIFY them (nested closure limitation).
+# Module-level var mutation is fine and should not be flagged.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_for_warnings(name: text, code: text) -> text:
+    """Write code to a temp file and run query check with JSON format."""
+    val path = "/tmp/simple_lint_closure_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
+    stdout ?? ""
+
+fn output_has_code(output: text, code: text) -> bool:
+    """Check if output contains a specific diagnostic code."""
+    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
+
+fn output_mentions(output: text, name: text) -> bool:
+    """Check if output mentions a specific name."""
+    output.contains(name)
+
+# ============================================================================
+# CLOS001: Closure modifying outer variable
+# ============================================================================
+
+describe "Closure Capture Lint":
+    context "closure modifying outer variable":
+        it "flags closure that modifies an outer var (CLOS001)":
+            val code = "fn compute():\n    var counter = 0\n    val inc = \\(): counter = counter + 1\n    inc()\n"
+            val output = check_file_for_warnings("modify_outer", code)
+            val has_clos001 = output_has_code(output, "CLOS001")
+            expect(has_clos001).to_equal(true)
+
+        it "flags closure that reassigns outer var":
+            val code = "fn test():\n    var x = 10\n    val update = \\(): x = 42\n    update()\n"
+            val output = check_file_for_warnings("reassign_outer", code)
+            val mentions_capture = output_mentions(output, "CLOS001") or output_mentions(output, "closure") or output_mentions(output, "capture")
+            expect(mentions_capture).to_equal(true)
+
+    context "closure reading outer variable":
+        it "does not flag closure that only reads outer var":
+            val code = "fn compute() -> i64:\n    val x = 10\n    val double = \\(): x * 2\n    double()\n"
+            val output = check_file_for_warnings("read_outer", code)
+            val has_clos001 = output_has_code(output, "CLOS001")
+            expect(has_clos001).to_equal(false)
+
+        it "does not flag closure reading outer val":
+            val code = "fn greet():\n    val name = \"Alice\"\n    val say = \\(): print \"Hello, {name}\"\n    say()\n"
+            val output = check_file_for_warnings("read_val", code)
+            val has_clos001 = output_has_code(output, "CLOS001")
+            expect(has_clos001).to_equal(false)
+
+    context "module-level var mutation":
+        it "does not flag module-level var mutation":
+            val code = "var global_count = 0\n\nfn increment():\n    global_count = global_count + 1\n"
+            val output = check_file_for_warnings("module_var", code)
+            val has_clos001 = output_has_code(output, "CLOS001")
+            expect(has_clos001).to_equal(false)
+
+        it "does not flag module-level var push":
+            val code = "var items: [text] = []\n\nfn add_item(item: text):\n    items.push(item)\n"
+            val output = check_file_for_warnings("module_push", code)
+            val has_clos001 = output_has_code(output, "CLOS001")
+            expect(has_clos001).to_equal(false)

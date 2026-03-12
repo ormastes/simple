@@ -307,9 +307,12 @@ fn collect_references_in_expr(expr: &Expr, name: &str, uri: &str, references: &m
         Expr::Await(future) => {
             collect_references_in_expr(future, name, uri, references);
         }
-        Expr::StructInit { fields, .. } => {
+        Expr::StructInit { fields, spread, .. } => {
             for (_, value) in fields {
                 collect_references_in_expr(value, name, uri, references);
+            }
+            if let Some(spread_expr) = spread {
+                collect_references_in_expr(spread_expr, name, uri, references);
             }
         }
         _ => {}

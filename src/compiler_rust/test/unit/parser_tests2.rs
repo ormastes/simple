@@ -582,7 +582,7 @@ fn test_parse_path() {
 #[test]
 fn test_parse_struct_init() {
     let module = parse("Point { x: 1, y: 2 }").unwrap();
-    if let Node::Expression(Expr::StructInit { name, fields }) = &module.items[0] {
+    if let Node::Expression(Expr::StructInit { name, fields, .. }) = &module.items[0] {
         assert_eq!(name, "Point");
         assert_eq!(fields.len(), 2);
     } else {

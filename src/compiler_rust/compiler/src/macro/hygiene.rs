@@ -445,12 +445,13 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
-        Expr::StructInit { name, fields } => Expr::StructInit {
+        Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields
                 .iter()
                 .map(|(field, expr)| (field.clone(), apply_macro_hygiene_expr(expr, ctx)))
                 .collect(),
+            spread: spread.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Await(expr) => Expr::Await(Box::new(apply_macro_hygiene_expr(expr, ctx))),

@@ -505,25 +505,19 @@ pub(super) fn exec_block_closure(
                 }
             }
             Node::Function(f) => {
-                // Handle function definitions inside block closures (like in `it` blocks).
-                // Only store in local_env with captured scope — NOT in the global `functions`
-                // map. This ensures the function uses its captured_env (which includes outer
-                // scope variables like loop variables) instead of being called as a bare
-                // FunctionDef without closure context.
-                let mut captured = local_env.clone();
-                // Pre-insert the function into its own captured_env for recursion support
-                let func_val = Value::Function {
-                    name: f.name.clone(),
-                    def: Box::new(f.clone()),
-                    captured_env: HashMap::new(), // placeholder
-                };
-                captured.insert(f.name.clone(), func_val);
+                // Handle function definitions inside block closures (like in `it` blocks)
+                // Register in both local_env and functions map for recursive calls to work
+
+                // Add to functions map so recursive calls can find it
+                functions.insert(f.name.clone(), f.clone());
+
+                // Also add to local_env as a Function value with captured environment
                 local_env.insert(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
                         def: Box::new(f.clone()),
-                        captured_env: captured,
+                        captured_env: local_env.clone(), // Capture current scope
                     },
                 );
                 last_value = Value::Nil;
@@ -1246,22 +1240,19 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::Function(f) => {
-                // Handle function definitions inside mutable block closures.
-                // Only store in local_env with captured scope — NOT in the global `functions`
-                // map (see exec_block_closure for rationale).
-                let mut captured = local_env.clone();
-                let func_val = Value::Function {
-                    name: f.name.clone(),
-                    def: Box::new(f.clone()),
-                    captured_env: HashMap::new(),
-                };
-                captured.insert(f.name.clone(), func_val);
+                // Handle function definitions inside mutable block closures
+                // Register in both local_env and functions map for recursive calls to work
+
+                // Add to functions map so recursive calls can find it
+                functions.insert(f.name.clone(), f.clone());
+
+                // Also add to local_env as a Function value with captured environment
                 local_env.insert(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
                         def: Box::new(f.clone()),
-                        captured_env: captured,
+                        captured_env: local_env.clone(), // Capture current scope
                     },
                 );
                 last_value = Value::Nil;

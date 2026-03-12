@@ -186,6 +186,13 @@ thread_local! {
     /// Populated during module evaluation first pass; provides fallback enum lookups
     /// for imported enums that are not in the local `enums` parameter.
     pub(crate) static GLOBAL_ENUMS: RefCell<HashMap<String, simple_parser::ast::EnumDef>> = RefCell::new(HashMap::new());
+
+    /// Global impl methods registry (mirrors GLOBAL_ENUMS but for impl block methods).
+    /// Populated during module evaluation first pass and top-level impl block processing;
+    /// provides fallback impl method lookups for imported types whose impl methods
+    /// are not in the local `impl_methods` parameter.
+    /// Key is type name, value is list of methods from impl blocks for that type.
+    pub(crate) static GLOBAL_IMPL_METHODS: RefCell<HashMap<String, Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -555,6 +562,9 @@ pub fn clear_interpreter_state() {
 
     // Clear global enum definitions
     GLOBAL_ENUMS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear global impl methods
+    GLOBAL_IMPL_METHODS.with(|cell| cell.borrow_mut().clear());
 
     // Clear unit system registries
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());

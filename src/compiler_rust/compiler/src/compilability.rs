@@ -393,9 +393,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         }
 
         // Struct initialization needs runtime
-        Expr::StructInit { fields, .. } => {
+        Expr::StructInit { fields, spread, .. } => {
             for (_, value) in fields {
                 analyze_expr(value, reasons);
+            }
+            if let Some(spread_expr) = spread {
+                analyze_expr(spread_expr, reasons);
             }
             add_reason(reasons, FallbackReason::ObjectConstruction);
         }

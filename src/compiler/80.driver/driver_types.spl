@@ -6,15 +6,11 @@
 # - CompileOptions: Compilation configuration
 # - CompileResult: Compilation result types
 # - SourceFile: Source file representation
-# - Helper factory functions
 #
 # The compiler driver implementation is in driver.spl
 
 use compiler.hir.hir.*
-use compiler.hir.hir.{HirLowering_dot_lower_module}
-use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir.*
-use compiler.mir.mir.{MirLowering_dot_lower_module}
 use compiler.frontend.core.lexer.*
 use compiler.core.parser.*
 use compiler.frontend.treesitter.*
@@ -61,50 +57,10 @@ class BootLogger:
     fn error(message: text): ()
     fn trace(message: text): ()
 
-fn create_config() -> Config:
-    Config(values: {})
-
-# Helper function to create a BlockResolver (avoids static method calls)
-fn create_block_resolver() -> BlockResolver:
-    BlockResolver(
-        registry: block_registry(),
-        diagnostics: [],
-        file_path: nil,
-        module_name: nil
-    )
-
-# Helper function to create a SymbolTable (avoids static method calls)
-fn create_symbol_table() -> SymbolTable:
-    var table = SymbolTable(
-        symbols: {},
-        scopes: {},
-        current_scope: ScopeId(id: 0),
-        next_symbol_id: 0,
-        next_scope_id: 1
-    )
-    # Create root scope (direct mutation avoids copy-modify-reassign bug)
-    table.scopes[0] = Scope(
-        id: ScopeId(id: 0),
-        parent: nil,
-        kind: ScopeKind.Module,
-        symbols: {}
-    )
-    table
-
-# Helper function to create HirLowering (avoids static method calls)
-fn create_hir_lowering() -> HirLowering:
-    HirLowering(
-        symbols: create_symbol_table(),
-        errors: [],
-        current_function: nil,
-        loop_depth: 0
-    )
-
-fn call_hir_lower_module(lowering: HirLowering, module: Module) -> HirModule:
-    HirLowering_dot_lower_module(lowering, module)
-
-fn call_mir_lower_module(lowering: MirLowering, module: HirModule) -> MirModule:
-    MirLowering_dot_lower_module(lowering, module)
+# Factory functions removed — cross-module Type.method() now works via
+# GLOBAL_IMPL_METHODS in the Rust bootstrap.  Callers use the real static
+# methods directly: HirLowering.new(), SymbolTable.new(), Config.default(),
+# lowering.lower_module(module).
 
 # ------------------------------------------------------------------------------
 # Compilation Mode
@@ -412,30 +368,6 @@ class CompileContext:
     # After codegen writes .o for a module, its MIR can be released.
     me evict_mir_module(name: text):
         self.mir_modules.remove(name)
-
-# ------------------------------------------------------------------------------
-# Check Backend (Type Check Only)
-# ------------------------------------------------------------------------------
-
-# ------------------------------------------------------------------------------
-# Factory: create_compile_context
-#
-# Creates a CompileContext wired through CompilerServices.
-#
-# Calls create_default_services() to obtain a typed CompilerServices container,
-# then replaces the noop backend with the real mode-specific backend determined
-# from options.mode. All other service ports come from the services container
-# and can be replaced incrementally as the MDSoC migration progresses.
-#
-# This makes the dependency wiring visible: open CompilerServices to see every
-# service the compiler pipeline needs, each with a typed port contract.
-# ------------------------------------------------------------------------------
-
-fn create_compile_context(options: CompileOptions) -> CompileContext:
-    # Bootstrap path: reuse the original constructor that wires the backend directly.
-    # The generic services container uses helper functions that aren't mapped in
-    # the bootstrap import table, so calling it triggers a null function pointer.
-    CompileContext.create(options)
 
 # ============================================================================
 # Compile Options Hash Helper

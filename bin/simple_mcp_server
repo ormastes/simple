@@ -1,46 +1,15 @@
 #!/bin/bash
 # Simple MCP Server Wrapper
-# Suppresses stderr warnings for clean stdio transport.
-# Uses lazy MCP entrypoint for fast startup and complete tool coverage.
+#
+# Current runtime status in this checkout:
+# - the legacy full MCP entrypoint under src/app/mcp/ does not start cleanly
+# - the checked-in main.smf artifact is inert with the current runtime
+#
+# Use the working Simple LSP MCP executable as the MVP server path until the
+# full Simple MCP server is repaired.
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Runtime selection (matches bin/simple logic):
-#   1) SIMPLE_RUNTIME override
-#   2) platform-specific release binary (e.g. release/linux-x86_64/simple)
-#   3) downloaded release wrapper (release/simple with downloaded/current_tag)
-#   4) bootstrap C binary fallback (limited — no .spl interpretation)
-find_runtime() {
-  if [ -n "${SIMPLE_RUNTIME:-}" ] && [ -x "$SIMPLE_RUNTIME" ]; then
-    echo "$SIMPLE_RUNTIME"; return
-  fi
-  local arch=$(uname -m) os=$(uname -s | tr '[:upper:]' '[:lower:]')
-  case "$arch" in x86_64|amd64) arch="x86_64" ;; aarch64|arm64) arch="arm64" ;; riscv64) arch="riscv64" ;; esac
-  case "$os" in linux) os="linux" ;; darwin) os="macos" ;; freebsd) os="freebsd" ;; mingw*|msys*|cygwin*) os="windows" ;; esac
-  local platform="${os}-${arch}"
-  local platform_bin="${SCRIPT_DIR}/release/${platform}/simple"
-  case "$platform" in *windows*) platform_bin="${platform_bin}.exe" ;; esac
-  if [ -x "$platform_bin" ]; then echo "$platform_bin"; return; fi
-  # FreeBSD: fall back to linux binary (runs via Linuxulator)
-  if [ "$platform" = "freebsd-x86_64" ] && [ -x "${SCRIPT_DIR}/release/linux-x86_64/simple" ]; then
-    echo "${SCRIPT_DIR}/release/linux-x86_64/simple"; return
-  fi
-  if [ -f "${SCRIPT_DIR}/release/downloaded/current_tag" ]; then
-    echo "${SCRIPT_DIR}/release/simple"; return
-  fi
-  echo "${SCRIPT_DIR}/bootstrap/cpp/simple"
-}
-RUNTIME="$(find_runtime)"
-MCP_MAIN="${SCRIPT_DIR}/../src/app/mcp/main.spl"
-PROXY="${SCRIPT_DIR}/mcp_stdio_proxy.py"
-
-# Point runtime at project stdlib to skip expensive path probing
-export SIMPLE_LIB="${SCRIPT_DIR}/../src"
-# Expose version for logging/parity with main CLI wrapper
-export SIMPLE_VERSION=$(cat "${SCRIPT_DIR}/../VERSION" 2>/dev/null || echo "unknown")
-# Keep runtime logging minimal for clean stdio transport
-export SIMPLE_LOG=error
-
-# Suppress stderr (warnings) but keep stdout (JSON-RPC)
-# Set RUST_LOG=error to minimize logging
-RUST_LOG=error exec "$RUNTIME" "$MCP_MAIN" "$@" 2>/dev/null
+exec "${SCRIPT_DIR}/simple_lsp_mcp_server" "$@"

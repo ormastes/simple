@@ -228,9 +228,14 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
         }
 
         // Struct initialization
-        Expr::StructInit { fields, .. } => {
+        Expr::StructInit { fields, spread, .. } => {
             for (_, expr) in fields {
                 if has_suspension_in_expr(expr) {
+                    return true;
+                }
+            }
+            if let Some(spread_expr) = spread {
+                if has_suspension_in_expr(spread_expr) {
                     return true;
                 }
             }

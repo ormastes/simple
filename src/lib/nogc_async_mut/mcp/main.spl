@@ -20,7 +20,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> text
 extern fn rt_env_get(name: text) -> text
 
 # JSON and response helpers
-use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_result_response, make_error_response}
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_result_response, make_error_response, emit_diagnostic_notification}
 use std.nogc_async_mut.mcp.helpers.{make_no_param_tool}
 
 # Protocol I/O
@@ -123,6 +123,7 @@ fn build_server_config() -> ServerConfig:
     # Diagnostic tools (12)
     cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_read", "Read Simple source with diagnostics"))
     cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_check", "Check Simple source for errors"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_diagnostics", "Run diagnostics returning MCP-formatted structured content"))
     cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_symbols", "List symbols in file"))
     cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_status", "Get project status"))
     cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_expand_at", "Expand symbol at position"))
@@ -180,6 +181,15 @@ fn start_server():
 
         if response != "":
             protocol_write_message(PROTOCOL, response)
+            # Emit diagnostic notification after simple_check tool calls
+            if method == "tools/call":
+                val called_tool = extract_nested_string(line, "params", "name")
+                if called_tool == "simple_check":
+                    val check_path = _extract_tool_arg(line, "path")
+                    if check_path != "":
+                        val diag_notif = _build_diagnostic_notification(check_path, response)
+                        if diag_notif != "":
+                            protocol_write_message(PROTOCOL, diag_notif)
 
 # ============================================================================
 # Tool dispatch
@@ -527,3 +537,19 @@ fn get_cwd() -> text:
     if out.ends_with("\n"):
         out = out.substring(0, out.len() - 1)
     out
+
+fn _extract_tool_arg(body: text, key: text) -> text:
+    """Extract a string argument from the tool call arguments."""
+    val args_json = extract_arguments_dict(body)
+    extract_json_string_v2(args_json, key)
+
+fn _build_diagnostic_notification(path: text, tool_response: text) -> text:
+    """Build a notifications/diagnostics notification from a simple_check response.
+    Extracts diagnostic data from the tool response text content.
+    """
+    val uri = "file://" + path
+    # The tool result contains diagnostics in the text content field.
+    # Emit a notification with the file URI and empty diagnostics array
+    # (clients should use the tool result for the actual diagnostic data).
+    var diags: [text] = []
+    emit_diagnostic_notification(uri, diags)

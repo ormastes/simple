@@ -211,10 +211,13 @@ impl SymbolUsageAnalyzer {
             }
 
             // Type construction
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit { name, fields, spread } => {
                 usage.used_types.insert(name.clone());
                 for (_, value) in fields {
                     self.collect_usage_from_expr(value, usage);
+                }
+                if let Some(spread_expr) = spread {
+                    self.collect_usage_from_expr(spread_expr, usage);
                 }
             }
 

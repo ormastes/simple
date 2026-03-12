@@ -1,0 +1,71 @@
+# Multiline Boolean Lint Specification
+#
+# Tests for BOOL001 detection of multiline boolean expressions without
+# parentheses. Multiline `if` with trailing `and`/`or` should be wrapped
+# in parentheses to avoid ambiguity.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_for_warnings(name: text, code: text) -> text:
+    """Write code to a temp file and run query check with JSON format."""
+    val path = "/tmp/simple_lint_bool_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
+    stdout ?? ""
+
+fn output_has_code(output: text, code: text) -> bool:
+    """Check if output contains a specific diagnostic code."""
+    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
+
+fn output_mentions(output: text, name: text) -> bool:
+    """Check if output mentions a specific name."""
+    output.contains(name)
+
+# ============================================================================
+# BOOL001: Multiline boolean without parentheses
+# ============================================================================
+
+describe "Multiline Boolean Lint":
+    context "multiline if with trailing boolean operator":
+        it "flags multiline if with trailing and (BOOL001)":
+            val code = "fn test(a: bool, b: bool):\n    if a and\n       b:\n        print \"both true\"\n"
+            val output = check_file_for_warnings("trailing_and", code)
+            val has_bool001 = output_has_code(output, "BOOL001")
+            expect(has_bool001).to_equal(true)
+
+        it "flags multiline if with trailing or":
+            val code = "fn test(x: bool, y: bool):\n    if x or\n       y:\n        print \"either true\"\n"
+            val output = check_file_for_warnings("trailing_or", code)
+            val mentions_bool = output_mentions(output, "BOOL001") or output_mentions(output, "multiline") or output_mentions(output, "parenthes")
+            expect(mentions_bool).to_equal(true)
+
+    context "single-line boolean":
+        it "does not flag single-line if with and":
+            val code = "fn test(a: bool, b: bool):\n    if a and b:\n        print \"both true\"\n"
+            val output = check_file_for_warnings("single_line_and", code)
+            val has_bool001 = output_has_code(output, "BOOL001")
+            expect(has_bool001).to_equal(false)
+
+        it "does not flag single-line if with or":
+            val code = "fn test(x: bool, y: bool):\n    if x or y:\n        print \"either true\"\n"
+            val output = check_file_for_warnings("single_line_or", code)
+            val has_bool001 = output_has_code(output, "BOOL001")
+            expect(has_bool001).to_equal(false)
+
+    context "parenthesized multiline boolean":
+        it "does not flag parenthesized multiline boolean":
+            val code = "fn test(a: bool, b: bool):\n    if (a and\n        b):\n        print \"both true\"\n"
+            val output = check_file_for_warnings("parens_multiline", code)
+            val has_bool001 = output_has_code(output, "BOOL001")
+            expect(has_bool001).to_equal(false)
+
+        it "does not flag parenthesized multiline or":
+            val code = "fn test(x: bool, y: bool):\n    if (x or\n        y):\n        print \"either true\"\n"
+            val output = check_file_for_warnings("parens_or", code)
+            val has_bool001 = output_has_code(output, "BOOL001")
+            expect(has_bool001).to_equal(false)

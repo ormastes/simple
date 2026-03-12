@@ -576,6 +576,8 @@ pub enum Expr {
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
+        /// Struct spread/update: `..base_expr` fills remaining fields from base
+        spread: Option<Box<Expr>>,
     },
     Spawn(Box<Expr>),
     /// Go-style thread spawn:

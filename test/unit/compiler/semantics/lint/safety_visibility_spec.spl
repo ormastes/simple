@@ -1,0 +1,87 @@
+# Safety and Visibility Lint Specification
+#
+# Tests for visibility warnings (W0401) and safety checks (SAFE001, SAFE003).
+# - W0401: Importing private symbols (prefixed with _) from another module
+# - SAFE001: Using asm outside unsafe block
+# - SAFE003: Raw pointer operations outside unsafe block
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_for_warnings(name: text, code: text) -> text:
+    """Write code to a temp file and run query check with JSON format."""
+    val path = "/tmp/simple_lint_safety_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
+    stdout ?? ""
+
+fn output_has_code(output: text, code: text) -> bool:
+    """Check if output contains a specific diagnostic code."""
+    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
+
+fn output_mentions(output: text, name: text) -> bool:
+    """Check if output mentions a specific name."""
+    output.contains(name)
+
+# ============================================================================
+# W0401: Private symbol import
+# ============================================================================
+
+describe "Safety and Visibility Lint":
+    context "private symbol imports":
+        it "flags importing _private_fn from another module (W0401)":
+            val code = "use std.nogc_sync_mut.fs.{_private_helper}\n\nfn test():\n    print \"test\"\n"
+            val output = check_file_for_warnings("private_import", code)
+            val has_w0401 = output_has_code(output, "W0401")
+            expect(has_w0401).to_equal(true)
+
+        it "flags importing _internal symbol":
+            val code = "use std.common.text.{_internal_parse}\n\nfn test():\n    print \"test\"\n"
+            val output = check_file_for_warnings("internal_import", code)
+            val mentions_private = output_mentions(output, "W0401") or output_mentions(output, "private") or output_mentions(output, "visibility")
+            expect(mentions_private).to_equal(true)
+
+    context "public symbol imports":
+        it "does not flag importing public symbols":
+            val code = "use std.spec\n\nfn test():\n    print \"test\"\n"
+            val output = check_file_for_warnings("public_import", code)
+            val has_w0401 = output_has_code(output, "W0401")
+            expect(has_w0401).to_equal(false)
+
+    # ============================================================================
+    # SAFE001: asm outside unsafe
+    # ============================================================================
+
+    context "asm outside unsafe":
+        it "flags asm usage outside unsafe block (SAFE001)":
+            val code = "fn test():\n    asm \"nop\"\n"
+            val output = check_file_for_warnings("asm_no_unsafe", code)
+            val has_safe001 = output_has_code(output, "SAFE001")
+            expect(has_safe001).to_equal(true)
+
+        it "flags inline assembly without unsafe context":
+            val code = "fn compute():\n    val result = asm \"mov eax, 42\"\n    print \"done\"\n"
+            val output = check_file_for_warnings("asm_inline", code)
+            val mentions_unsafe = output_mentions(output, "SAFE001") or output_mentions(output, "unsafe") or output_mentions(output, "asm")
+            expect(mentions_unsafe).to_equal(true)
+
+    # ============================================================================
+    # SAFE003: Raw pointer outside unsafe
+    # ============================================================================
+
+    context "raw pointer operations outside unsafe":
+        it "flags raw pointer deref outside unsafe (SAFE003)":
+            val code = "fn test():\n    val ptr = raw_ptr(42)\n    val value = ptr.deref()\n"
+            val output = check_file_for_warnings("raw_ptr_no_unsafe", code)
+            val has_safe003 = output_has_code(output, "SAFE003")
+            expect(has_safe003).to_equal(true)
+
+        it "flags raw pointer arithmetic outside unsafe":
+            val code = "fn test():\n    val ptr = raw_ptr(0)\n    val next = ptr.offset(8)\n"
+            val output = check_file_for_warnings("ptr_arith", code)
+            val mentions_safe = output_mentions(output, "SAFE003") or output_mentions(output, "unsafe") or output_mentions(output, "raw")
+            expect(mentions_safe).to_equal(true)

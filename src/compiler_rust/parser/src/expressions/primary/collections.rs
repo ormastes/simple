@@ -89,6 +89,7 @@ impl<'a> Parser<'a> {
                 return Ok(Expr::StructInit {
                     name: "".to_string(),
                     fields,
+                    spread: None,
                 });
             }
         }

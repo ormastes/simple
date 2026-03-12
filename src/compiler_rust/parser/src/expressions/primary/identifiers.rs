@@ -241,7 +241,26 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
             let mut fields = Vec::new();
+            let mut spread = None;
             while !self.check(&TokenKind::RBrace) {
+                // Check for spread: ..base_expr
+                if self.check(&TokenKind::DoubleDot) {
+                    self.advance(); // consume '..'
+                    let spread_expr = self.parse_expression()?;
+                    spread = Some(Box::new(spread_expr));
+                    // Skip newlines after spread
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                    // Allow trailing comma after spread
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
+                    break; // spread must be last
+                }
                 let field_name = self.expect_identifier()?;
                 // Skip newlines before colon or comma
                 while self.check(&TokenKind::Newline) {
@@ -276,7 +295,7 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(&TokenKind::RBrace)?;
-            Ok(Expr::StructInit { name, fields })
+            Ok(Expr::StructInit { name, fields, spread })
         } else {
             Ok(Expr::Identifier(name))
         }

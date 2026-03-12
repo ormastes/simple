@@ -1,7 +1,230 @@
 #!/bin/bash
-# Codex-only MCP alias for LSP-oriented Simple tools.
-# This currently delegates to the main MCP server wrapper.
+# Minimal MCP wrapper for Simple LSP-style code intelligence tools.
+# Uses commands that work in the current checkout instead of the broken main MCP server.
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SIMPLE_BIN="${SCRIPT_DIR}/release/simple"
+if [ ! -x "$SIMPLE_BIN" ]; then
+  SIMPLE_BIN="${SCRIPT_DIR}/release/linux-x86_64/simple"
+fi
+LSP_QUERY="${SCRIPT_DIR}/../src/app/lsp/lsp_query.spl"
 
-exec "${SCRIPT_DIR}/simple_mcp_server" "$@"
+TOOLS_JSON='[
+  {
+    "name": "lsp_definition",
+    "description": "Find where a symbol is defined in a Simple source file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "description": "Path to the source file"},
+        "line": {"type": "integer", "description": "0-indexed line number"},
+        "character": {"type": "integer", "description": "0-indexed character offset"}
+      },
+      "required": ["file", "line", "character"]
+    }
+  },
+  {
+    "name": "lsp_references",
+    "description": "Find symbol references in Simple source.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "description": "Path to the source file"},
+        "line": {"type": "integer", "description": "0-indexed line number"},
+        "character": {"type": "integer", "description": "0-indexed character offset"}
+      },
+      "required": ["file", "line", "character"]
+    }
+  },
+  {
+    "name": "lsp_hover",
+    "description": "Get hover information for a symbol in Simple source.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "description": "Path to the source file"},
+        "line": {"type": "integer", "description": "0-indexed line number"},
+        "character": {"type": "integer", "description": "0-indexed character offset"}
+      },
+      "required": ["file", "line", "character"]
+    }
+  },
+  {
+    "name": "lsp_symbols",
+    "description": "List symbols in a Simple source file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "description": "Path to the source file"}
+      },
+      "required": ["file"]
+    }
+  },
+  {
+    "name": "lsp_diagnostics",
+    "description": "Run lightweight diagnostics via simple lint.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "description": "Path to the source file"}
+      },
+      "required": ["file"]
+    }
+  }
+]'
+
+write_message() {
+  local body="$1"
+  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+}
+
+read_message() {
+  local first line len body
+  IFS= read -r first || return 1
+  first="${first%$'\r'}"
+  if [[ "$first" == \{* ]]; then
+    printf '%s' "$first"
+    return 0
+  fi
+  len=""
+  line="$first"
+  while :; do
+    line="${line%$'\r'}"
+    if [[ -z "$line" ]]; then
+      break
+    fi
+    if [[ "$line" == Content-Length:* ]]; then
+      len="${line#Content-Length: }"
+      len="${len//[[:space:]]/}"
+    fi
+    IFS= read -r line || break
+  done
+  [ -n "$len" ] || return 1
+  IFS= read -r -N "$len" body || true
+  printf '%s' "$body"
+}
+
+json_result() {
+  local id_json="$1"
+  local result_json="$2"
+  jq -cn --argjson id "$id_json" --argjson result "$result_json" \
+    '{"jsonrpc":"2.0","id":$id,"result":$result}'
+}
+
+json_error() {
+  local id_json="$1"
+  local code="$2"
+  local msg="$3"
+  jq -cn --argjson id "$id_json" --argjson code "$code" --arg msg "$msg" \
+    '{"jsonrpc":"2.0","id":$id,"error":{"code":$code,"message":$msg}}'
+}
+
+tool_text_result() {
+  local id_json="$1"
+  local text="$2"
+  local body
+  body="$(jq -cn --arg text "$text" '{"content":[{"type":"text","text":$text}]}' )"
+  json_result "$id_json" "$body"
+}
+
+run_lsp_query() {
+  local subcmd="$1"
+  local file="$2"
+  local line0="${3:-0}"
+  local char0="${4:-0}"
+  local line1=$((line0 + 1))
+  local char1=$((char0 + 1))
+  "$SIMPLE_BIN" "$LSP_QUERY" "$subcmd" "$file" "$line1" "$char1" 2>/dev/null || true
+}
+
+run_lsp_symbols() {
+  local file="$1"
+  "$SIMPLE_BIN" "$LSP_QUERY" symbols "$file" 2>/dev/null || true
+}
+
+run_lsp_diagnostics() {
+  local file="$1"
+  "$SIMPLE_BIN" lint "$file" 2>/dev/null || true
+}
+
+handle_tool_call() {
+  local id_json="$1"
+  local req="$2"
+  local name file line char out
+  name="$(printf '%s' "$req" | jq -r '.params.name // .name // empty')"
+  case "$name" in
+    lsp_definition)
+      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
+      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
+      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
+      out="$(run_lsp_query definition "$file" "$line" "$char")"
+      tool_text_result "$id_json" "$out"
+      ;;
+    lsp_references)
+      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
+      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
+      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
+      out="$(run_lsp_query references "$file" "$line" "$char")"
+      tool_text_result "$id_json" "$out"
+      ;;
+    lsp_hover)
+      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
+      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
+      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
+      out="$(run_lsp_query hover "$file" "$line" "$char")"
+      tool_text_result "$id_json" "$out"
+      ;;
+    lsp_symbols)
+      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
+      out="$(run_lsp_symbols "$file")"
+      tool_text_result "$id_json" "$out"
+      ;;
+    lsp_diagnostics)
+      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
+      out="$(run_lsp_diagnostics "$file")"
+      tool_text_result "$id_json" "$out"
+      ;;
+    *)
+      json_error "$id_json" -32602 "Unknown tool: $name"
+      ;;
+  esac
+}
+
+while req="$(read_message)"; do
+  [ -n "$req" ] || exit 0
+  method="$(printf '%s' "$req" | jq -r '.method // empty')"
+  id_json="$(printf '%s' "$req" | jq -c '.id')"
+  response=""
+  case "$method" in
+    initialize)
+      response="$(json_result "$id_json" '{
+        "protocolVersion":"2025-06-18",
+        "capabilities":{"tools":{"listChanged":false}},
+        "serverInfo":{"name":"simple-lsp-mcp","version":"0.1.0-mvp","instructions":"Minimal Simple LSP MCP shim backed by lsp_query.spl and simple lint."}
+      }')"
+      ;;
+    initialized|notifications/initialized|notifications/cancelled|notifications/roots/list_changed)
+      response=""
+      ;;
+    shutdown)
+      response="$(json_result "$id_json" 'null')"
+      ;;
+    ping)
+      response="$(json_result "$id_json" '{}')"
+      ;;
+    tools/list)
+      response="$(json_result "$id_json" "{\"tools\":$TOOLS_JSON}")"
+      ;;
+    tools/call)
+      response="$(handle_tool_call "$id_json" "$req")"
+      ;;
+    *)
+      response="$(json_error "$id_json" -32601 "Method not found: $method")"
+      ;;
+  esac
+  if [ -n "$response" ]; then
+    write_message "$response"
+  fi
+done

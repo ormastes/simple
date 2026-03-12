@@ -21,7 +21,7 @@ pub(crate) use core::{
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
-    GLOBAL_ENUMS,
+    GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -244,7 +244,12 @@ pub(crate) fn evaluate_call(
             }
             // Check for static method call on a type: Type.method()
             // This handles calls like Set.new() or Set.from_array()
-            if let Some(methods) = impl_methods.get(module_name) {
+            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
+            let impl_methods_for_type = impl_methods
+                .get(module_name)
+                .cloned()
+                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
+            if let Some(methods) = impl_methods_for_type {
                 if let Some(func) = methods.iter().find(|m| &m.name == field) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
@@ -388,6 +393,33 @@ pub(crate) fn evaluate_call(
                 }
             }
 
+            // Last resort: try GLOBAL_IMPL_METHODS for impl methods that weren't
+            // merged into the class definition (e.g., cross-module impl blocks,
+            // or impl methods added after the class was cached)
+            let global_impl_method: Option<FunctionDef> = GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(module_name)
+                    .and_then(|methods| methods.iter().find(|m| &m.name == field).cloned())
+            });
+            if let Some(func) = global_impl_method {
+                let is_new_method = field == "new";
+                if is_new_method {
+                    core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
+                }
+                let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                if is_new_method {
+                    core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
+                }
+                return result;
+            }
+
+            // Try the mangled free function name as a final fallback
+            // (ClassName__method is registered when impl blocks are processed)
+            let mangled_name = format!("{}__{}", module_name, field);
+            if let Some(func) = functions.get(&mangled_name).cloned() {
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+            }
+
             let ctx = ErrorContext::new()
                 .with_code(codes::UNDEFINED_VARIABLE)
                 .with_help("check that the symbol exists in the module");
@@ -438,7 +470,12 @@ pub(crate) fn evaluate_call(
             }
 
             // Check for associated function call
-            if let Some(methods) = impl_methods.get(type_name) {
+            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
+            let path_impl_methods = impl_methods
+                .get(type_name)
+                .cloned()
+                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name).cloned()));
+            if let Some(methods) = path_impl_methods {
                 if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = method_name == "new";
@@ -593,8 +630,12 @@ pub(crate) fn evaluate_call(
                 }
             }
 
-            // Check impl_methods for static methods
-            if let Some(methods) = impl_methods.get(type_name.as_str()) {
+            // Check impl_methods for static methods (local first, then GLOBAL_IMPL_METHODS fallback)
+            let path_static_impl_methods = impl_methods
+                .get(type_name.as_str())
+                .cloned()
+                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
+            if let Some(methods) = path_static_impl_methods {
                 if let Some(method) = methods.iter().find(|m| m.name == *method_name && m.is_static) {
                     let mut local_env = env.clone();
                     let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
@@ -677,6 +718,31 @@ pub(crate) fn evaluate_call(
                     }
                     return result;
                 }
+            }
+
+            // Last resort: try GLOBAL_IMPL_METHODS for impl methods that weren't
+            // merged into the class definition
+            let global_path_impl_method: Option<FunctionDef> = GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(type_name.as_str())
+                    .and_then(|methods| methods.iter().find(|m| m.name == *method_name).cloned())
+            });
+            if let Some(func) = global_path_impl_method {
+                let is_new_method = method_name == "new";
+                if is_new_method {
+                    core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                }
+                let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                if is_new_method {
+                    core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                }
+                return result;
+            }
+
+            // Try the mangled free function name as a final fallback
+            let mangled_path_name = format!("{}__{}", type_name, method_name);
+            if let Some(func) = functions.get(&mangled_path_name).cloned() {
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
         }
 

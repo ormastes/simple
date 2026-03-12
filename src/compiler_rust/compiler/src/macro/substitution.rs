@@ -404,12 +404,13 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
-        Expr::StructInit { name, fields } => Expr::StructInit {
+        Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields
                 .iter()
                 .map(|(field, expr)| (field.clone(), substitute_expr_templates(expr, const_bindings)))
                 .collect(),
+            spread: spread.as_ref().map(|expr| Box::new(substitute_expr_templates(expr, const_bindings))),
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::Await(expr) => Expr::Await(Box::new(substitute_expr_templates(expr, const_bindings))),

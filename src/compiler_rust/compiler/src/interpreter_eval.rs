@@ -30,8 +30,8 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, GLOBAL_ENUMS,
-    MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS,
+    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -540,6 +540,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     for method in &impl_block.methods {
                         methods.push(method.clone());
                     }
+
+                    // Populate GLOBAL_IMPL_METHODS for cross-module fallback
+                    GLOBAL_IMPL_METHODS.with(|cell| {
+                        let mut global_impls = cell.borrow_mut();
+                        let global_methods = global_impls.entry(type_name.clone()).or_default();
+                        global_methods.extend(impl_block.methods.clone());
+                    });
 
                     // Also add impl methods to class/struct definition for Constructor method dispatch
                     if let Some(class_def) = classes.get_mut(&type_name) {

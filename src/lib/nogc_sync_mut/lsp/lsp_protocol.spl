@@ -1,8 +1,13 @@
 #![allow(unnamed_duplicate_typed_args)]
 # LSP Server - Protocol I/O
-# Content-Length framed JSON-RPC over stdin/stdout
+# Supports both Content-Length (standard LSP) and JSON Lines framing.
+# Auto-detects mode based on first message, matching MCP transport behavior.
 
 val NL = "\n"
+
+# Module state for framing mode (mirrors MCP transport)
+var LSP_USE_JSON_LINES = false
+var LSP_FRAMING_DETECTED = false
 
 fn lsp_read_message() -> text:
     var line = input()
@@ -10,8 +15,18 @@ fn lsp_read_message() -> text:
         return ""
     if line.ends_with("\r"):
         line = line.substring(0, line.len() - 1)
-    # LSP always uses Content-Length framing
+
+    # JSON Lines mode: line starts with {
+    if line.starts_with("{"):
+        if not LSP_FRAMING_DETECTED:
+            LSP_USE_JSON_LINES = true
+            LSP_FRAMING_DETECTED = true
+        return line
+
+    # Content-Length mode (standard LSP framing)
     if line.starts_with("Content-Length:"):
+        if not LSP_FRAMING_DETECTED:
+            LSP_FRAMING_DETECTED = true
         var len_str = line.replace("Content-Length:", "")
         len_str = len_str.trim()
         val content_length = int(len_str)
@@ -28,18 +43,27 @@ fn lsp_read_message() -> text:
         # Read body
         var body = input()
         return body
-    # Fallback: if it starts with { treat as raw JSON
-    if line.starts_with("{"):
-        return line
     ""
 
 fn lsp_write_message(body: text):
     if body == "":
         return
-    val byte_count = text_byte_len(body)
-    var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
-    print_raw(header)
-    print_raw(body)
+    if LSP_USE_JSON_LINES:
+        # JSON Lines: one message per line
+        print_raw(body + NL)
+    else:
+        # Content-Length: standard LSP framing
+        val byte_count = text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
+        print_raw(header)
+        print_raw(body)
+
+fn lsp_is_json_lines_mode() -> bool:
+    LSP_USE_JSON_LINES
+
+fn lsp_set_json_lines_mode(use_json_lines: bool):
+    LSP_USE_JSON_LINES = use_json_lines
+    LSP_FRAMING_DETECTED = true
 
 fn lsp_write_notification(method: text, params: text):
     val msg = jo3(jp("jsonrpc", js("2.0")), jp("method", js(method)), jp("params", params))

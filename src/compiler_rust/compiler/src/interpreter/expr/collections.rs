@@ -43,8 +43,41 @@ pub(super) fn eval_collection_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::StructInit { name, fields } => {
+        Expr::StructInit { name, fields, spread } => {
             let mut map = HashMap::new();
+
+            // If there's a spread expression, evaluate it first to get the base struct
+            if let Some(spread_expr) = spread {
+                let base_val = evaluate_expr(spread_expr, env, functions, classes, enums, impl_methods)?;
+                match &base_val {
+                    Value::Object { fields: base_fields, .. } => {
+                        // Copy all fields from the base struct
+                        for (k, v) in base_fields.as_ref() {
+                            map.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Value::Dict(base_map) => {
+                        // Also support dicts as spread base
+                        for (k, v) in base_map {
+                            map.insert(k.clone(), v.clone());
+                        }
+                    }
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("struct spread (..) requires an object or dict value as base");
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "type mismatch: struct spread requires object or dict, got {}",
+                                base_val.type_name()
+                            ),
+                            ctx,
+                        ));
+                    }
+                }
+            }
+
+            // Explicit fields override spread fields
             for (fname, fexpr) in fields {
                 let v = evaluate_expr(fexpr, env, functions, classes, enums, impl_methods)?;
                 map.insert(fname.clone(), v);
