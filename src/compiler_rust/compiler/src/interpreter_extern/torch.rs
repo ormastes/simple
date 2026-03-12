@@ -2,6 +2,72 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+#[cfg(not(feature = "pytorch"))]
+use std::ffi::CString;
+#[cfg(not(feature = "pytorch"))]
+use std::sync::OnceLock;
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_runtime_name() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "libsimple_runtime.so"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libsimple_runtime.dylib"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "simple_runtime.dll"
+    }
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_runtime_path() -> String {
+    std::env::var("SIMPLE_RUNTIME_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| torch_runtime_name().to_string())
+}
+
+#[cfg(all(not(feature = "pytorch"), unix))]
+fn torch_runtime_handle() -> Option<usize> {
+    static HANDLE: OnceLock<Option<usize>> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            let path = CString::new(torch_runtime_path()).ok()?;
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+            if handle.is_null() {
+                None
+            } else {
+                Some(handle as usize)
+            }
+        })
+        .to_owned()
+}
+
+#[cfg(any(feature = "pytorch", not(unix)))]
+fn torch_runtime_handle() -> Option<usize> {
+    None
+}
+
+#[cfg(all(not(feature = "pytorch"), unix))]
+unsafe fn lookup_torch_symbol(name: &str) -> Option<usize> {
+    let handle = torch_runtime_handle()?;
+    let c_name = CString::new(name).ok()?;
+    let sym = libc::dlsym(handle as *mut libc::c_void, c_name.as_ptr());
+    if sym.is_null() {
+        None
+    } else {
+        Some(sym as usize)
+    }
+}
+
+#[cfg(any(feature = "pytorch", not(unix)))]
+unsafe fn lookup_torch_symbol(_name: &str) -> Option<usize> {
+    None
+}
 
 fn extract_f64_array(arg: &Value, func_name: &str) -> Result<Vec<f64>, CompileError> {
     match arg {
@@ -36,12 +102,27 @@ fn torch_tensor_impl(
 
 #[cfg(not(feature = "pytorch"))]
 fn torch_tensor_impl(
-    _data: &[f64],
-    _dims: &[i64],
-    _dtype_code: i32,
-    _device_code: i32,
+    data: &[f64],
+    dims: &[i64],
+    dtype_code: i32,
+    device_code: i32,
 ) -> u64 {
-    0
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_tensor") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(*const f64, i64, *const i64, i32, i32, i32) -> u64 =
+            std::mem::transmute(fptr);
+        func(
+            data.as_ptr(),
+            data.len() as i64,
+            dims.as_ptr(),
+            dims.len() as i32,
+            dtype_code,
+            device_code,
+        )
+    }
 }
 
 #[cfg(feature = "pytorch")]
@@ -50,8 +131,15 @@ fn torch_to_cuda_impl(handle: u64, device_id: i32) -> u64 {
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_to_cuda_impl(_handle: u64, _device_id: i32) -> u64 {
-    0
+fn torch_to_cuda_impl(handle: u64, device_id: i32) -> u64 {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_to_cuda") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(u64, i32) -> u64 = std::mem::transmute(fptr);
+        func(handle, device_id)
+    }
 }
 
 #[cfg(feature = "pytorch")]
@@ -60,8 +148,15 @@ fn torch_to_cpu_impl(handle: u64) -> u64 {
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_to_cpu_impl(_handle: u64) -> u64 {
-    0
+fn torch_to_cpu_impl(handle: u64) -> u64 {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_to_cpu") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(u64) -> u64 = std::mem::transmute(fptr);
+        func(handle)
+    }
 }
 
 #[cfg(feature = "pytorch")]
@@ -70,8 +165,15 @@ fn torch_free_impl(handle: u64) -> i32 {
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_free_impl(_handle: u64) -> i32 {
-    0
+fn torch_free_impl(handle: u64) -> i32 {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_free") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(u64) -> i32 = std::mem::transmute(fptr);
+        func(handle)
+    }
 }
 
 #[cfg(feature = "pytorch")]
@@ -80,8 +182,15 @@ fn torch_clone_impl(handle: u64) -> u64 {
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_clone_impl(_handle: u64) -> u64 {
-    0
+fn torch_clone_impl(handle: u64) -> u64 {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_clone") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(u64) -> u64 = std::mem::transmute(fptr);
+        func(handle)
+    }
 }
 
 #[cfg(feature = "pytorch")]
@@ -90,8 +199,15 @@ fn torch_copy_data_to_cpu_impl(handle: u64, buffer_ptr: i64, buffer_size: i64) -
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_copy_data_to_cpu_impl(_handle: u64, _buffer_ptr: i64, _buffer_size: i64) -> i64 {
-    0
+fn torch_copy_data_to_cpu_impl(handle: u64, buffer_ptr: i64, buffer_size: i64) -> i64 {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_copy_data_to_cpu") {
+            Some(fptr) => fptr,
+            None => return 0,
+        };
+        let func: extern "C" fn(u64, *mut f32, i64) -> i64 = std::mem::transmute(fptr);
+        func(handle, buffer_ptr as *mut f32, buffer_size)
+    }
 }
 
 pub fn rt_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
@@ -208,7 +324,32 @@ pub fn rt_ps_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, CompileE
 }
 
 pub fn rt_dyn_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, CompileError> {
-    rt_ps_torch_tensor_from_bits_1d(args)
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_dyn_torch_tensor_from_bits_1d requires 2 arguments (data_bits_ptr, data_len)",
+        ));
+    }
+
+    let ptr = args[0].as_int()?;
+    let len = args[1].as_int()?;
+    if ptr == 0 || len <= 0 {
+        return Ok(Value::Int(0));
+    }
+
+    #[cfg(feature = "pytorch")]
+    {
+        return rt_ps_torch_tensor_from_bits_1d(args);
+    }
+
+    #[cfg(not(feature = "pytorch"))]
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_dyn_torch_tensor_from_bits_1d") {
+            Some(fptr) => fptr,
+            None => return Ok(Value::Int(0)),
+        };
+        let func: extern "C" fn(*const i64, i64) -> u64 = std::mem::transmute(fptr);
+        return Ok(Value::Int(func(ptr as *const i64, len) as i64));
+    }
 }
 
 pub fn rt_ps_torch_tensor_zeros(args: &[Value]) -> Result<Value, CompileError> {

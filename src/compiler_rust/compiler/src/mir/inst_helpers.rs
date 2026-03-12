@@ -113,7 +113,11 @@ impl MirInst {
             | MirInst::ParFilter { dest, .. }
             | MirInst::UnitWiden { dest, .. }
             | MirInst::UnitNarrow { dest, .. }
-            | MirInst::UnitSaturate { dest, .. } => Some(*dest),
+            | MirInst::UnitSaturate { dest, .. }
+            | MirInst::BoxInt { dest, .. }
+            | MirInst::BoxFloat { dest, .. }
+            | MirInst::UnboxInt { dest, .. }
+            | MirInst::UnboxFloat { dest, .. } => Some(*dest),
             MirInst::ParForEach { .. } => None,
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
