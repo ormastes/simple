@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -eu
+
+RUNTIME="${T32_CONTAINER_RUNTIME:-docker}"
+COMPOSE_FILE="config/t32/trace32_x11_container.compose.yml"
+T32REM="/opt/t32/bin/pc_linux64/t32rem"
+IMAGE_NAME="${T32_CONTAINER_IMAGE:-simple-trace32-x11:latest}"
+CONTAINER_NAME="${T32_CONTAINER_NAME:-simple-trace32-x11}"
+REPO_ROOT="$(pwd)"
+
+if ! command -v "$RUNTIME" >/dev/null 2>&1; then
+    echo "missing container runtime: $RUNTIME" >&2
+    exit 1
+fi
+
+if [ ! -f "$COMPOSE_FILE" ]; then
+    echo "missing compose file: $COMPOSE_FILE" >&2
+    exit 1
+fi
+
+if [ ! -x "$T32REM" ]; then
+    echo "missing host TRACE32 install: $T32REM" >&2
+    exit 1
+fi
+
+cmd="${1:-up}"
+shift || true
+
+case "$cmd" in
+    build)
+        "$RUNTIME" build -f config/t32/trace32_x11_container.Dockerfile -t "$IMAGE_NAME" "$REPO_ROOT" "$@"
+        ;;
+    up)
+        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        "$RUNTIME" run --rm --name "$CONTAINER_NAME" \
+            --privileged \
+            -p 20000:20000 \
+            -v "$REPO_ROOT:/workspace" \
+            -v /opt/t32:/opt/t32:ro \
+            -v /dev/lauterbach:/dev/lauterbach \
+            -v /dev/bus/usb:/dev/bus/usb \
+            -w /workspace \
+            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
+            "$IMAGE_NAME" \
+            sh -lc 'xvfb-run -a /opt/t32/bin/pc_linux64/t32marm -c "$T32_CONFIG"' "$@"
+        ;;
+    up-d)
+        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        "$RUNTIME" run -d --name "$CONTAINER_NAME" \
+            --privileged \
+            -p 20000:20000 \
+            -v "$REPO_ROOT:/workspace" \
+            -v /opt/t32:/opt/t32:ro \
+            -v /dev/lauterbach:/dev/lauterbach \
+            -v /dev/bus/usb:/dev/bus/usb \
+            -w /workspace \
+            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
+            "$IMAGE_NAME" \
+            sh -lc 'xvfb-run -a /opt/t32/bin/pc_linux64/t32marm -c "$T32_CONFIG"' "$@"
+        ;;
+    down)
+        "$RUNTIME" rm -f "$CONTAINER_NAME" "$@" >/dev/null 2>&1 || true
+        ;;
+    logs)
+        "$RUNTIME" logs "$CONTAINER_NAME" "$@"
+        ;;
+    ping)
+        "$T32REM" localhost port=20000 PING "$@"
+        ;;
+    *)
+        echo "usage: $0 {build|up|up-d|down|logs|ping}" >&2
+        exit 1
+        ;;
+esac

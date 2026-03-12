@@ -1502,6 +1502,25 @@ fn mangle_mir(
         .map(|f| f.name.clone())
         .collect();
 
+    // Build a set of all known fully-qualified imported names (values from import_map/use_map)
+    // including both `.` and `_dot_` forms, so we can recognize function definitions that
+    // are already cross-module qualified and skip re-mangling them.
+    let imported_qualified: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        for v in import_map.values().chain(use_map.values()) {
+            set.insert(v.clone());
+            // Also add _dot_ form if it contains '.'
+            if v.contains('.') {
+                set.insert(v.replace('.', "_dot_"));
+            }
+            // Also add '.' form if it contains '_dot_'
+            if v.contains("_dot_") {
+                set.insert(v.replace("_dot_", "."));
+            }
+        }
+        set
+    };
+
     // Build a mapping from raw name → mangled name for local functions.
     let mut local_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for func in &mir.functions {
@@ -1511,6 +1530,11 @@ fn mangle_mir(
             continue;
         }
         if is_runtime_or_builtin(&func.name) {
+            continue;
+        }
+        // Skip if the function name is already a fully-qualified imported name
+        // (e.g., "mod__Type.method" or "mod__Type_dot_method" from cross-module references)
+        if imported_qualified.contains(&func.name) {
             continue;
         }
         let mangled = if func.name == "main" {
@@ -1599,12 +1623,26 @@ fn mangle_mir(
 
     // Build a set of all known mangled names (values from import_map/use_map + local_mangled)
     // so we can recognize already-qualified call targets and skip re-mangling them.
-    let known_mangled: std::collections::HashSet<&str> = import_map
-        .values()
-        .chain(use_map.values())
-        .chain(local_mangled.values())
-        .map(|s| s.as_str())
-        .collect();
+    // Include both `.` and `_dot_` forms for cross-module method calls.
+    let known_mangled: std::collections::HashSet<String> = {
+        let mut set: std::collections::HashSet<String> = import_map
+            .values()
+            .chain(use_map.values())
+            .chain(local_mangled.values())
+            .cloned()
+            .collect();
+        let extras: Vec<String> = set.iter().filter_map(|v| {
+            if v.contains('.') {
+                Some(v.replace('.', "_dot_"))
+            } else if v.contains("_dot_") {
+                Some(v.replace("_dot_", "."))
+            } else {
+                None
+            }
+        }).collect();
+        set.extend(extras);
+        set
+    };
 
     // Phase 3: Rename call targets and global references in instructions.
     // Resolution order: local definition first (prevents imported name shadowing
@@ -1731,6 +1769,14 @@ fn mangle_mir(
                     MirInst::MethodCallStatic { func_name, .. } => {
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
+                        }
+                        // Try _dot_ → . conversion for cross-module method calls
+                        if func_name.contains("_dot_") {
+                            let converted = func_name.replace("_dot_", ".");
+                            if known_mangled.contains(converted.as_str()) {
+                                *func_name = converted;
+                                continue;
+                            }
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {
                             *func_name = mangled.clone();

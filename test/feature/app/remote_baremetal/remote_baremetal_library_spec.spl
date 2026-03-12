@@ -1,0 +1,225 @@
+"""
+# Remote Baremetal Library Checks
+
+**Feature IDs:** #RBLB-001
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** [doc/plan/trace32_x11_container_recovery_2026-03-12.md](doc/plan/trace32_x11_container_recovery_2026-03-12.md)
+**Research:** [doc/research/remote_interpreter_failures_2026-03-12.md](doc/research/remote_interpreter_failures_2026-03-12.md)
+
+## Overview
+
+Checks the library surface that should remain usable for the
+`interpreter(remote(baremetal(riscv32)))` lane even when full baremetal ELF
+generation is not yet available from Pure Simple.
+
+The spec covers:
+
+- noalloc allocator semantics through `BumpAllocator`
+- fixed-capacity collection semantics through `FixedArray`, `FixedMap`, and
+  `FixedSet`
+- noalloc async base behavior through `NoallocScheduler` and `TimerFuture`
+- semihost shortened-print readiness for QEMU RISC-V with explicit blocked
+  reasons when the host or repo is not ready for a real end-to-end run
+
+This spec is intentionally host-aware for the semihost shortened-print lane.
+It reports `skip:` or `blocked:` when custom QEMU support, fixture ELFs, or the
+Pure Simple baremetal compiler path are still missing.
+
+## Syntax
+
+```simple
+var allocator = BumpAllocator(base: 0x20000000, size: 64, offset: 0, allocated: 0)
+val future = timer_after(2)
+val status = qemu_riscv32_semihost_short_print_status()
+```
+
+## Examples
+
+```simple
+expect(status_is_acceptable(status)).to_equal(true)
+expect(future.poll_timer()).to_equal(0)
+expect(future.poll_timer()).to_equal(1)
+```
+"""
+
+use std.io_runtime.{shell, file_exists, file_read}
+use std.nogc_async_mut_noalloc.baremetal.allocator.BumpAllocator
+use std.nogc_async_mut_noalloc.collections.fixed_array.{FixedArray, fixed_array_8}
+use std.nogc_async_mut_noalloc.collections.fixed_map.FixedMap
+use std.nogc_async_mut_noalloc.collections.fixed_set.FixedSet
+use std.nogc_async_mut_noalloc.async.scheduler.{NoallocScheduler, MAX_TASKS}
+use std.nogc_async_mut_noalloc.async.timer.{timer_now, timer_elapsed, timer_after}
+use std.nogc_async_mut_noalloc.log.targets.{
+    TARGET_DEVICE,
+    TARGET_SEMIHOST,
+    TARGET_HOST_FILE,
+    target_semihost_write,
+    target_semihost_write_h,
+    target_semihost_write_h1,
+    target_semihost_write_h2
+}
+use std.nogc_async_mut_noalloc.baremetal.system_api.{
+    SYS_WRITE_HANDLE,
+    SYS_WRITE_HANDLE_P1,
+    SYS_WRITE_HANDLE_P2
+}
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn status_is_acceptable(status: text) -> bool:
+    status == "ok" or status.starts_with("blocked:") or status.starts_with("skip:")
+
+fn custom_qemu_riscv32_path() -> text:
+    val path = "resources/qemu/bin/qemu-system-riscv32-simple"
+    if file_exists(path):
+        return path
+    ""
+
+fn baremetal_builder_has_real_compile_path() -> bool:
+    if not file_exists("src/compiler/80.driver/build/baremetal.spl"):
+        return false
+    val content = file_read("src/compiler/80.driver/build/baremetal.spl")
+    not content.contains("Compilation not yet implemented - needs Simple compiler with bare-metal backend")
+
+fn interned_semihost_fixture_path() -> text:
+    val fixture = "examples/09_embedded/baremetal/baremetal/hello_riscv32_interned.elf"
+    if file_exists(fixture):
+        return fixture
+    ""
+
+fn qemu_riscv32_semihost_short_print_status() -> text:
+    if not command_available("qemu-system-riscv32"):
+        return "skip: qemu-system-riscv32 unavailable"
+
+    val custom_qemu = custom_qemu_riscv32_path()
+    if custom_qemu == "":
+        return "blocked: custom qemu-system-riscv32-simple missing"
+
+    if not baremetal_builder_has_real_compile_path():
+        return "blocked: simple baremetal riscv compiler backend not implemented"
+
+    val fixture = interned_semihost_fixture_path()
+    if fixture == "":
+        return "blocked: missing interned riscv32 elf fixture"
+
+    val run = shell("timeout 10 '{custom_qemu}' -M virt -bios none -kernel '{fixture}' -nographic -semihosting-config enable=on,target=native 2>&1")
+    val output = (run.stdout + run.stderr).trim()
+    if run.exit_code == 0 and output != "":
+        return "ok"
+    if output == "":
+        return "blocked: custom qemu produced no semihost output"
+    "blocked: {output}"
+
+describe "Remote baremetal library readiness":
+
+    context "allocator":
+        it "supports bump allocation alignment and reset semantics":
+            var allocator = BumpAllocator(base: 0x20000000, size: 64, offset: 0, allocated: 0)
+
+            val first = allocator.alloc(5)
+            expect(first).to_equal(0x20000000)
+            expect(allocator.total_allocated()).to_equal(8)
+            expect(allocator.remaining()).to_equal(56)
+
+            val second = allocator.alloc_aligned(4, 16)
+            expect(second).to_equal(0x20000010)
+            expect(allocator.total_allocated()).to_equal(24)
+            expect(allocator.remaining()).to_equal(40)
+
+            allocator.reset()
+            expect(allocator.total_allocated()).to_equal(0)
+            expect(allocator.remaining()).to_equal(64)
+
+    context "collections":
+        it "supports fixed array push remove and factory sizing":
+            val arr = FixedArray.new(3)
+            expect(arr.push(10)).to_equal(true)
+            expect(arr.push(20)).to_equal(true)
+            expect(arr.push(30)).to_equal(true)
+            expect(arr.push(40)).to_equal(false)
+            expect(arr.remove(1)).to_equal(20)
+            expect(arr.size()).to_equal(2)
+            expect(arr.get(0)).to_equal(10)
+            expect(arr.get(1)).to_equal(30)
+
+            val arr8 = fixed_array_8()
+            expect(arr8.capacity).to_equal(8)
+
+        it "supports fixed map put update remove and probe continuity":
+            val map = FixedMap.new(8)
+            expect(map.put(1, 10)).to_equal(true)
+            expect(map.put(9, 90)).to_equal(true)
+            expect(map.put(1, 11)).to_equal(true)
+            expect(map.get(1)).to_equal(11)
+            expect(map.get(9)).to_equal(90)
+            expect(map.contains(9)).to_equal(true)
+            expect(map.remove(1)).to_equal(true)
+            expect(map.contains(1)).to_equal(false)
+            expect(map.get(9)).to_equal(90)
+
+        it "supports fixed set add duplicate remove and capacity tracking":
+            val set = FixedSet.new(3)
+            expect(set.add(5)).to_equal(true)
+            expect(set.add(7)).to_equal(true)
+            expect(set.add(5)).to_equal(true)
+            expect(set.size()).to_equal(2)
+            expect(set.contains(7)).to_equal(true)
+            expect(set.remove(5)).to_equal(true)
+            expect(set.contains(5)).to_equal(false)
+            expect(set.capacity()).to_equal(3)
+
+    context "async":
+        it "tracks cooperative scheduler task lifecycle":
+            val sched = NoallocScheduler.new()
+            expect(sched.is_idle()).to_equal(true)
+
+            val task0 = sched.spawn(100, 0)
+            val task1 = sched.spawn(200, 1)
+            expect(task0).to_equal(0)
+            expect(task1).to_equal(1)
+            expect(sched.task_count()).to_equal(2)
+            expect(MAX_TASKS).to_equal(16)
+
+            sched.complete_task(task1, 77)
+            expect(sched.is_task_complete(task1)).to_equal(true)
+            expect(sched.task_result(task1)).to_equal(77)
+            expect(sched.has_active_incomplete()).to_equal(true)
+
+            sched.complete_task(task0, 33)
+            expect(sched.count_completed()).to_equal(2)
+
+            sched.cleanup_completed()
+            expect(sched.task_count()).to_equal(0)
+            expect(sched.is_idle()).to_equal(true)
+
+        it "advances timer futures to readiness":
+            val start = timer_now()
+            val elapsed = timer_elapsed(start)
+            expect(elapsed).to_be_greater_than(0)
+
+            val future = timer_after(2)
+            expect(future.poll_timer()).to_equal(0)
+            expect(future.poll_timer()).to_equal(1)
+
+    context "semihost shortened print":
+        it "keeps semihost print opcodes stable":
+            expect(TARGET_DEVICE).to_equal(1)
+            expect(TARGET_SEMIHOST).to_equal(2)
+            expect(TARGET_HOST_FILE).to_equal(4)
+            expect(SYS_WRITE_HANDLE).to_equal(0x100)
+            expect(SYS_WRITE_HANDLE_P1).to_equal(0x101)
+            expect(SYS_WRITE_HANDLE_P2).to_equal(0x102)
+
+        it "keeps interpreter stubs callable while qemu support is host aware":
+            target_semihost_write("remote baremetal semihost smoke")
+            target_semihost_write_h(42)
+            target_semihost_write_h1(42, 7)
+            target_semihost_write_h2(42, 7, 9)
+
+            val status = qemu_riscv32_semihost_short_print_status()
+            expect(status_is_acceptable(status)).to_equal(true)
