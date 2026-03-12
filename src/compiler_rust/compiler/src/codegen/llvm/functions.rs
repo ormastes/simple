@@ -988,9 +988,17 @@ impl LlvmBackend {
                     let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
                         module.add_function("rt_slice", slice_fn_type, None)
                     });
-                    let slice_call = builder
-                        .build_call(slice_func, &[recv_casted.into(), start_casted.into(), end_val.into()], "substr")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?;
+                    // Use indirect call if existing declaration has mismatched arity
+                    let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into()];
+                    let declared_params = slice_func.get_type().get_param_types().len();
+                    let slice_call = if declared_params != 3 {
+                        let fn_ptr = slice_func.as_global_value().as_pointer_value();
+                        builder.build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
+                    } else {
+                        builder.build_call(slice_func, slice_args, "substr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
+                    };
                     if let Some(d) = dest {
                         if let Some(ret_val) = slice_call.try_as_basic_value().left() {
                             vreg_map.insert(*d, ret_val);

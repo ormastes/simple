@@ -53,6 +53,27 @@ Key observations:
 A modern TRACE32 install (2020+) would likely resolve all of these issues, but
 upgrading requires a Lauterbach maintenance agreement.
 
+### Container Validation Result (2026-03-12)
+
+With the container fixes applied (XtErrorDB symlink, libXp.so.6, libjpeg.so.62,
+bitmap font unblocking, manual Xvfb), the Xt initialization crash is **resolved**.
+`t32marm` starts, connects to Xvfb, and enters its X event loop successfully.
+
+However, the **RCL/NETASSIST port (20000) is never bound**. Strace confirms:
+
+- The binary creates only two `AF_UNIX` sockets (X11 connections)
+- **No UDP socket is ever created** — the NETASSIST listener is never activated
+- The binary enters a polling loop on the X11 socket and runs indefinitely
+
+This means the 2013-era binary's NETASSIST support is non-functional. The
+`RCL=NETASSIST` config section is parsed but has no effect. The Remote API
+capability was either not implemented or requires a probe connection to activate
+in this vintage build.
+
+**Conclusion:** The container infrastructure is complete and working. The
+blocking issue is the binary version — a TRACE32 update is required for
+Remote API functionality.
+
 ## Added Repo Artifacts
 
 - `config/t32/trace32_x11_container.Dockerfile`
