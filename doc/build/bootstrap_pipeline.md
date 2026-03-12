@@ -843,6 +843,98 @@ Blocked by P1. Once full1 produces a working compiler, it must compile itself re
 ### P3: Native release binaries
 Replace Linux ELF placeholders in `bin/release/` with actual native binaries for each platform.
 
+---
+
+## LLVM Backend Bootstrap (Rust Seed) — 2026-03-12
+
+### Overview
+
+Alternative bootstrap path using the Rust seed compiler with LLVM backend instead of Cranelift. Goal: produce a self-hosting binary compiled entirely through the LLVM pipeline.
+
+### Pipeline
+
+```
+Rust seed (cargo, --features llvm)
+  → Stage 1 (LLVM native-build, 3859 files → ~206MB ELF)
+  → Stage 2 (Stage 1 self-compiles → Stage 2)   ← BLOCKED
+  → Stage 3 (fixed point check)
+```
+
+### Build Commands
+
+```bash
+# 1. Build Rust seed with LLVM feature
+cd src/compiler_rust
+cargo build --profile bootstrap -p simple-driver --features llvm
+
+# 2. Build Stage 1 (Rust seed → LLVM)
+SIMPLE_BACKEND=llvm SIMPLE_BOOTSTRAP=1 \
+  target/bootstrap/simple native-build \
+    --backend llvm \
+    --source src/compiler --source src/lib --source src/app \
+    --entry src/app/cli/main.spl \
+    -o build/bootstrap/stage1/simple --clean
+
+# 3. Build Stage 2 (Stage 1 self-compiles) — BLOCKED
+SIMPLE_BACKEND_OVERRIDE=llvm-lib \
+SIMPLE_ENTRY_OVERRIDE=src/app/cli/main.spl \
+SIMPLE_OUTPUT_OVERRIDE=build/bootstrap/stage2/simple \
+  build/bootstrap/stage1/simple native-build
+```
+
+### Status (2026-03-12)
+
+| Stage | Status | Details |
+|-------|--------|---------|
+| Rust seed build | **PASS** | `cargo build --profile bootstrap --features llvm` |
+| Stage 1 compile | **PASS** | 3859 compiled, 3 failed, ~2101 stubs, 206MB binary |
+| Stage 1 runs | **PASS** | `--version`, basic CLI work correctly |
+| Stage 2 compile | **BLOCKED** | `aot_native_file_with_backend()` returns failure, 0 errors |
+
+### Files Failed (3, consistent across builds)
+
+1. `src/lib/common/pure/autograd_advanced.spl` — `rt_string_split` arg count mismatch
+2. `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost.spl` — parse error (`time` keyword)
+3. `src/lib/nogc_sync_mut/net/http.spl` — `rt_index_get` arg count mismatch
+
+### Fixes Implemented
+
+| Fix | File | Description |
+|-----|------|-------------|
+| Enum instructions | `codegen/llvm/functions.rs` | EnumUnit/EnumWith/EnumDiscriminant/EnumPayload now call `rt_enum_new`/`rt_enum_discriminant`/`rt_enum_payload` instead of returning const(0) |
+| Union instructions | `codegen/llvm/functions.rs` | UnionDiscriminant/UnionPayload/UnionWrap use same enum runtime functions |
+| Option/Result | `codegen/llvm/functions.rs` | OptionSome/OptionNone/ResultOk/ResultErr create proper enum values via `rt_enum_new` |
+| TryUnwrap | `codegen/llvm/functions.rs` | Extracts payload via `rt_enum_payload` instead of returning const(0) |
+| BoxInt/UnboxInt dest | `mir/inst_helpers.rs` | BoxInt/BoxFloat/UnboxInt/UnboxFloat added to `dest()` match for cross-block alloca storage |
+| rt_slice 4-arg | `codegen/llvm/functions.rs`, `calls.rs` | substring expansion passes step=1 as 4th arg to `rt_slice` (was missing, caused NIL return) |
+| Env var overrides | `src/app/cli/main.spl` | SIMPLE_BACKEND_OVERRIDE, SIMPLE_ENTRY_OVERRIDE, SIMPLE_OUTPUT_OVERRIDE bypass broken arg parsing in LLVM-compiled binaries |
+
+### Remaining Blockers
+
+1. **~2101 stub functions** — Weak symbols returning 0 for unresolved calls. Major categories:
+   - **~228 snake_method** stubs — monomorphized/desugared functions not found
+   - **~82 module_qualified** — namespace-qualified calls (e.g., `types.locale_en_us`)
+   - **~40 dotted_static** — static methods/constructors (e.g., `HirModule.from_class`)
+   - **~34 ffi_runtime** — memory/refcounting primitives (`arc_box_*`, `rc_box_*`)
+   - **~31 enum_variant** — desugared enum constructors (`concretetype_Named`)
+   - **~12 block_defs** — block definition types (`JsonBlockDef`, `MathBlockDef`)
+2. **String operations broken** in LLVM-compiled binaries — `starts_with`, `substring` arg parsing fails (workaround: env var overrides)
+3. **Self-hosted compiler pipeline fails** — Stage 1/2 can run basic operations but `aot_native_file_with_backend()` fails silently (returns non-Success CompileResult with 0 error messages)
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/compiler_rust/compiler/src/codegen/llvm/functions.rs` | Main LLVM instruction compilation (enum, option, result, patterns) |
+| `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs` | Call instruction compilation (method calls, substring) |
+| `src/compiler_rust/compiler/src/codegen/llvm/functions/memory.rs` | Load/Store compilation |
+| `src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs` | LLVM backend core (module setup, stub generation) |
+| `src/compiler_rust/compiler/src/pipeline/native_project.rs` | Native build orchestration (file discovery, parallel compile, link) |
+| `src/compiler_rust/compiler/src/mir/inst_helpers.rs` | MIR instruction dest/uses helpers |
+| `src/app/cli/main.spl` | CLI entry point (env var overrides for LLVM bootstrap) |
+
+---
+
 ## Related Files
 
 | File | Purpose |

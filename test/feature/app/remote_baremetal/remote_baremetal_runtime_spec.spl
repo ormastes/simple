@@ -52,8 +52,6 @@ use app.test_runner_new.test_executor_composite.{
     find_baremetal_elf
 }
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
-use std.nogc_sync_mut.debug.remote.protocol.openocd.OpenocdClient
-use std.nogc_sync_mut.debug.remote.protocol.stlink_tools.StLinkToolsClient
 use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
 use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
@@ -147,6 +145,22 @@ fn parse_stlink_hex_dump(raw: text) -> [i32]:
             continue
         result.push(parse_hex_byte_pair(trimmed) as i32)
     result
+
+fn extract_probe_block(raw: text, serial: text) -> text:
+    val blocks = raw.split("\n\n")
+    for block in blocks:
+        val trimmed = block.trim()
+        if trimmed.contains("serial:     {serial}"):
+            return trimmed
+    ""
+
+fn extract_hex_field(raw: text, prefix: text) -> i64:
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return parse_leading_hex_address(trimmed)
+    -1
 
 fn qemu_riscv32_remote_memory_status() -> text:
     if not command_available("clang"):
@@ -303,21 +317,11 @@ fn trace32_remote_status() -> text:
 fn openocd_live_cpuid_status(cfg_path: text, serial: text, gdb_port: i32, expected_cpuid: i64) -> text:
     if not command_available("openocd"):
         return "skip: openocd unavailable"
-    if not command_available("gdb"):
-        return "skip: gdb unavailable"
-
-    val client_result = OpenocdClient.connect(cfg_path, gdb_port, gdb_port + 1000, "", serial)
-    if client_result.is_err():
-        return "blocked: {client_result.err().unwrap()}"
-
-    var client = client_result.ok.unwrap()
-    val cpuid_bytes = client.read_memory(ARM_CPUID_ADDR, 4)
-    client.disconnect()
-
-    if cpuid_bytes.is_err():
-        return "error: openocd read_memory failed: {cpuid_bytes.err().unwrap()}"
-
-    val cpuid = bytes_to_u32_le(cpuid_bytes.ok.unwrap())
+    val run = shell("timeout 15 openocd -f '{cfg_path}' -c 'adapter serial {serial}' -c 'gdb_port {gdb_port}' -c 'telnet_port {gdb_port + 1000}' -c 'init' -c 'reset halt' -c 'mdw 0xE000ED00 1' -c shutdown 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if run.exit_code != 0:
+        return "blocked: {combined}"
+    val cpuid = extract_hex_field(combined, "0xe000ed00:")
     if cpuid == expected_cpuid:
         return "ok"
     "error: unexpected cpuid 0x{cpuid}"
@@ -328,33 +332,24 @@ fn stlink_live_cpuid_status(serial: text, expected_chip_id: i64, expected_flash:
     if not command_available("st-flash"):
         return "skip: st-flash unavailable"
 
-    val client_result = StLinkToolsClient.connect(serial)
-    if client_result.is_err():
-        return "blocked: {client_result.err().unwrap()}"
+    val probe_output = shell("st-info --probe 2>&1")
+    if probe_output.exit_code != 0:
+        return "blocked: {(probe_output.stdout + probe_output.stderr).trim()}"
+    val block = extract_probe_block(probe_output.stdout + probe_output.stderr, serial)
+    if block == "":
+        return "blocked: probe {serial} not present"
+    val chip_id = extract_hex_field(block, "chipid:")
+    if chip_id != expected_chip_id:
+        return "error: unexpected st-link chip id 0x{chip_id}"
+    if not block.contains("flash:      {expected_flash}"):
+        return "error: unexpected st-link flash size block"
+    if not block.contains("sram:       {expected_sram}"):
+        return "error: unexpected st-link sram size block"
 
-    val client = client_result.ok.unwrap()
-    val chip_id = client.chip_id()
-    if chip_id.is_err():
-        return "error: st-link chip id read failed: {chip_id.err().unwrap()}"
-    if chip_id.ok.unwrap() != expected_chip_id:
-        return "error: unexpected st-link chip id 0x{chip_id.ok.unwrap()}"
-
-    val flash_size = client.flash_size()
-    if flash_size.is_err():
-        return "error: st-link flash size read failed: {flash_size.err().unwrap()}"
-    if flash_size.ok.unwrap() != expected_flash:
-        return "error: unexpected st-link flash size {flash_size.ok.unwrap()}"
-
-    val sram_size = client.sram_size()
-    if sram_size.is_err():
-        return "error: st-link sram size read failed: {sram_size.err().unwrap()}"
-    if sram_size.ok.unwrap() != expected_sram:
-        return "error: unexpected st-link sram size {sram_size.ok.unwrap()}"
-
-    val cpuid_dump = client.read_memory(ARM_CPUID_ADDR, 4)
-    if cpuid_dump.is_err():
-        return "error: st-link memory read failed: {cpuid_dump.err().unwrap()}"
-    val cpuid = bytes_to_u32_le(parse_stlink_hex_dump(cpuid_dump.ok.unwrap()))
+    val cpuid_dump = shell("sh -c 'tmp=$(mktemp) && st-flash --serial={serial} read \"$tmp\" 0xE000ED00 4 >/dev/null 2>&1 && od -An -t x1 \"$tmp\" && rm -f \"$tmp\"' 2>&1")
+    if cpuid_dump.exit_code != 0:
+        return "blocked: {(cpuid_dump.stdout + cpuid_dump.stderr).trim()}"
+    val cpuid = bytes_to_u32_le(parse_stlink_hex_dump(cpuid_dump.stdout + cpuid_dump.stderr))
     if cpuid == expected_cpuid:
         return "ok"
     "error: unexpected st-link cpuid 0x{cpuid}"
