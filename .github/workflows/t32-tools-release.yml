@@ -249,22 +249,48 @@ jobs:
       - name: Run smoke tests
         run: |
           chmod +x bin/*
-          echo "=== T32 Tools Smoke Test ==="
-          for binary in bin/*; do
-            name=$(basename "$binary")
-            echo -n "$name: "
-            if file "$binary" | grep -q "ELF"; then
-              echo -n "ELF OK "
-              if "$binary" --help > /dev/null 2>&1; then
-                echo "✓ --help OK"
-              else
-                echo "✓ runs"
-              fi
-            else
-              echo "✗ NOT ELF"
+
+          assert_framed_jsonrpc() {
+            local binary="$1"
+            local body="$2"
+            local expect="$3"
+            local tmp
+            tmp="$(mktemp)"
+            printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body" \
+              | timeout 5s "$binary" > "$tmp"
+            if ! grep -q "$expect" "$tmp"; then
+              echo "::error::Protocol smoke test failed for $binary"
+              echo "Expected pattern: $expect"
+              echo "Response:"
+              cat "$tmp"
+              rm -f "$tmp"
               exit 1
             fi
+            rm -f "$tmp"
+          }
+
+          echo "=== T32 Tools Smoke Test ==="
+          for binary in bin/*; do
+            file "$binary" | grep -q "ELF"
           done
+
+          assert_framed_jsonrpc \
+            "bin/t32-mcp-server" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
+
+          assert_framed_jsonrpc \
+            "bin/t32-lsp-mcp-server" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
+
+          assert_framed_jsonrpc \
+            "bin/cmm-lsp" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"capabilities"'
+
+          timeout 5s bin/t32-cli --help > /tmp/t32-cli-help.txt
+          grep -q "Usage" /tmp/t32-cli-help.txt
 
       - name: Validate CMM LSP plugin bundle
         run: |
@@ -356,7 +382,12 @@ jobs:
             ### Claude Code Plugin
 
             - **Plugin bundle**: `cmm-lsp-claude-plugin-${{ needs.version.outputs.version }}.tar.gz`
-            - Install from repo: `claude plugin install --dir examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp`
+            - **Marketplace install**:
+
+            ```bash
+            claude plugin marketplace add tools/claude-plugin/marketplace
+            claude plugin install cmm-lsp@simple-local
+            ```
 
             ### Quick Install (Linux)
 
@@ -393,7 +424,8 @@ jobs:
             ### Verification
 
             ```bash
-            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' | ./t32-mcp-server
+            msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
+            printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | ./t32-mcp-server
             ```
 
             See [SHA256SUMS.txt](SHA256SUMS.txt) for binary checksums.

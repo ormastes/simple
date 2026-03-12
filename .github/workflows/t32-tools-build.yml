@@ -264,50 +264,56 @@ jobs:
       - name: Run smoke tests
         run: |
           chmod +x bin/t32/*
-          PASS=0
-          FAIL=0
+
+          assert_framed_jsonrpc() {
+            local binary="$1"
+            local body="$2"
+            local expect="$3"
+            local tmp
+            tmp="$(mktemp)"
+            printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body" \
+              | timeout 5s "$binary" > "$tmp"
+            if ! grep -q "$expect" "$tmp"; then
+              echo "::error::Protocol smoke test failed for $binary"
+              echo "Expected pattern: $expect"
+              echo "Response:"
+              cat "$tmp"
+              rm -f "$tmp"
+              exit 1
+            fi
+            rm -f "$tmp"
+          }
 
           echo "=== T32 Tools Smoke Test Suite ==="
-          echo ""
 
           for tool in cmm_lsp t32_mcp t32_lsp_mcp t32_cli; do
-            BINARY="bin/t32/$tool"
-            echo -n "$tool: "
-
-            if [ ! -f "$BINARY" ]; then
-              echo "MISSING"
-              FAIL=$((FAIL + 1))
-              continue
-            fi
-
-            # Check binary is executable ELF
-            if file "$BINARY" | grep -q "ELF"; then
-              echo -n "ELF OK, "
-            else
-              echo "NOT ELF"
-              FAIL=$((FAIL + 1))
-              continue
-            fi
-
-            # Try --version or --help (tools may not support these)
-            if "$BINARY" --help > /dev/null 2>&1; then
-              echo "--help OK"
-              PASS=$((PASS + 1))
-            elif "$BINARY" --version > /dev/null 2>&1; then
-              echo "--version OK"
-              PASS=$((PASS + 1))
-            else
-              echo "runs (no --help/--version)"
-              PASS=$((PASS + 1))
-            fi
+            test -f "bin/t32/$tool"
+            file "bin/t32/$tool" | grep -q "ELF"
           done
 
-          echo ""
-          echo "=== Results: $PASS passed, $FAIL failed ==="
+          echo "t32_mcp: MCP initialize"
+          assert_framed_jsonrpc \
+            "bin/t32/t32_mcp" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
 
-          if [ "$FAIL" -gt 0 ]; then
-            echo "::warning::$FAIL tool(s) had issues"
-          fi
+          echo "t32_lsp_mcp: MCP initialize"
+          assert_framed_jsonrpc \
+            "bin/t32/t32_lsp_mcp" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"protocolVersion":"2025-06-18"'
+
+          echo "cmm_lsp: LSP initialize"
+          assert_framed_jsonrpc \
+            "bin/t32/cmm_lsp" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
+            '"capabilities"'
+
+          echo "t32_cli: help"
+          timeout 5s bin/t32/t32_cli --help > /tmp/t32-cli-help.txt
+          grep -q "Usage" /tmp/t32-cli-help.txt
+
+          echo "=== Results: protocol smoke tests passed ==="
 
       - name: Validate CMM LSP plugin bundle
         run: |

@@ -128,6 +128,10 @@ fi
 echo ""
 echo "Setup for Claude Code"
 echo "---------------------"
+echo "Current recommendation:"
+echo "  Prefer the repo-backed Simple entrypoints for Claude/Codex MCP until"
+echo "  a release has been verified with framed MCP handshake tests."
+echo ""
 echo "Add to your project's .mcp.json:"
 echo ""
 echo '{'
@@ -141,8 +145,13 @@ echo '    }'
 echo '  }'
 echo '}'
 echo ""
+echo "If you have a Simple repo checkout available, this is the more reliable form:"
+echo "  claude mcp add t32-mcp -- /path/to/simple/bin/release/simple /path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+echo "  claude mcp add t32-lsp-mcp -- /path/to/simple/bin/release/simple /path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
+echo ""
 echo "Verify:"
-echo "  t32-mcp-server --help"
-echo "  t32-lsp-mcp-server --help"
+echo "  msg='{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}'"
+echo "  printf 'Content-Length: %s\\r\\n\\r\\n%s' \"\${#msg}\" \"\$msg\" | t32-mcp-server"
+echo "  printf 'Content-Length: %s\\r\\n\\r\\n%s' \"\${#msg}\" \"\$msg\" | t32-lsp-mcp-server"
 echo ""
 echo "Documentation: https://github.com/${REPO}/tree/main/examples/10_tooling/trace32_tools"

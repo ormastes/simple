@@ -20,7 +20,7 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 | `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
 | `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
 | `cmm-lsp` | Linux, Windows | CMM Language Server executable (LSP over stdio) |
-| `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data, pending marketplace-based install support in repo docs |
+| `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data for marketplace-based installs from a repo checkout |
 | `t32-cli` | Linux, Windows | Interactive TRACE32 CLI shell |
 
 As of March 12, 2026:
@@ -96,6 +96,13 @@ For the CMM LSP Claude plugin itself, use the checked-in marketplace:
 ```bash
 claude plugin marketplace add tools/claude-plugin/marketplace
 claude plugin install cmm-lsp@simple-local
+```
+
+For the Simple language plugin:
+
+```bash
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install simple-lsp@simple-local
 ```
 
 Project `.mcp.json` is also valid:
@@ -203,9 +210,9 @@ Full LSP implementation for `.cmm` files, for IDE integration:
 - **Document symbols** — Labels and macros as outline
 - **Diagnostics** — Parse errors, undefined labels, unreachable code, unused macros
 
-The release currently contains two different CMM LSP assets:
+The release path currently has two different CMM LSP assets:
 - `cmm-lsp` — the standalone executable
-- `cmm-lsp-claude-plugin-${VERSION}.tar.gz` — the Claude Code plugin bundle (`.claude-plugin/` + `.lsp.json`) for repo-checkout installs
+- `cmm-lsp-claude-plugin-${VERSION}.tar.gz` — the Claude Code plugin bundle (`.claude-plugin/` + `.lsp.json`) for repo-checkout marketplace installs
 
 See [`cmm_lsp/README.md`](cmm_lsp/README.md) for IDE-specific setup.
 
