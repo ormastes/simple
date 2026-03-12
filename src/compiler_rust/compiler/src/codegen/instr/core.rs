@@ -378,15 +378,88 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
     _dest: &Option<VReg>,
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     match func_name {
-        "print" | "println" | "eprint" | "eprintln" | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" => {
+        "input" | "spl_input" => {
+            // Read a line from stdin
+            let read_fn = "rt_read_stdin_line";
+            if let Some(&func_id) = ctx.runtime_funcs.get(read_fn) {
+                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                let call = adapted_call(builder, func_ref, &[]);
+                let result = builder.inst_results(call)[0];
+                return Ok(Some(result));
+            }
+            let nil = builder.ins().iconst(types::I64, 0);
+            Ok(Some(nil))
+        }
+        "int" | "i64" => {
+            // Convert string to integer: calls rt_string_to_int (returns raw i64),
+            // then re-box as RuntimeValue via rt_value_int
+            if args.is_empty() {
+                let zero = builder.ins().iconst(types::I64, 0);
+                return Ok(Some(zero));
+            }
+            let arg_val = match ctx.vreg_values.get(&args[0]) {
+                Some(&v) => v,
+                None => builder.ins().iconst(types::I64, 0),
+            };
+            // Call rt_string_to_int to get raw i64
+            if let Some(&to_int_id) = ctx.runtime_funcs.get("rt_string_to_int") {
+                let to_int_ref = ctx.module.declare_func_in_func(to_int_id, builder.func);
+                let call = adapted_call(builder, to_int_ref, &[arg_val]);
+                let raw_int = builder.inst_results(call)[0];
+                // Re-box as RuntimeValue via rt_value_int
+                if let Some(&value_int_id) = ctx.runtime_funcs.get("rt_value_int") {
+                    let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
+                    let call2 = adapted_call(builder, value_int_ref, &[raw_int]);
+                    let result = builder.inst_results(call2)[0];
+                    return Ok(Some(result));
+                }
+                return Ok(Some(raw_int));
+            }
+            let zero = builder.ins().iconst(types::I64, 0);
+            Ok(Some(zero))
+        }
+        "str" | "to_string" => {
+            // Convert value to string: box int if needed, then call rt_to_string
+            if args.is_empty() {
+                let nil = builder.ins().iconst(types::I64, 0);
+                return Ok(Some(nil));
+            }
+            let arg_val = match ctx.vreg_values.get(&args[0]) {
+                Some(&v) => v,
+                None => builder.ins().iconst(types::I64, 0),
+            };
+            // Box the argument as RuntimeValue int if it might be a raw integer.
+            // We use rt_value_int to ensure proper tagging.
+            // If the value is already a RuntimeValue (heap string, tagged int, etc.),
+            // rt_to_string handles all types, but raw untagged ints need boxing first.
+            let boxed_arg = if let Some(&value_int_id) = ctx.runtime_funcs.get("rt_value_int") {
+                let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
+                let call = adapted_call(builder, value_int_ref, &[arg_val]);
+                builder.inst_results(call)[0]
+            } else {
+                arg_val
+            };
+            if let Some(&to_str_id) = ctx.runtime_funcs.get("rt_to_string") {
+                let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
+                let call = adapted_call(builder, to_str_ref, &[boxed_arg]);
+                let result = builder.inst_results(call)[0];
+                return Ok(Some(result));
+            }
+            let nil = builder.ins().iconst(types::I64, 0);
+            Ok(Some(nil))
+        }
+        "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" | "spl_print_raw" | "spl_eprint_raw" => {
             // Determine which runtime function to use
             // Note: In Simple, 'print' adds a newline (Python 3 convention)
+            // print_raw prints without newline
             // Accepts both bare names and spl_ prefixed names (safe symbol exports).
             let (print_value_fn, print_str_fn) = match func_name {
                 "print" | "spl_print" => ("rt_println_value", "rt_println_str"),
                 "println" | "spl_println" => ("rt_println_value", "rt_println_str"),
+                "print_raw" | "spl_print_raw" => ("rt_print_value", "rt_print_str"),
                 "eprint" | "spl_eprint" => ("rt_eprint_value", "rt_eprint_str"),
                 "eprintln" | "spl_eprintln" => ("rt_eprintln_value", "rt_eprintln_str"),
+                "eprint_raw" | "spl_eprint_raw" => ("rt_eprint_value", "rt_eprint_str"),
                 _ => unreachable!(),
             };
 

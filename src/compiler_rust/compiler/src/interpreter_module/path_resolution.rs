@@ -183,14 +183,18 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
     // Only attempt numbered dir resolution if base is within a project source tree.
     // Scanning arbitrary dirs like /tmp or / for numbered subdirs wastes ~90 syscalls.
     let base_str = base.to_string_lossy();
-    if !base_str.contains("/src/") && !base_str.ends_with("/src") {
+    let in_src = base_str.contains("/src/") || base_str.ends_with("/src")
+        || base_str.starts_with("src/") || base_str == "src";
+    if !in_src {
         return None;
     }
 
     let result = resolve_with_numbered_dirs_recursive(base, parts, 0);
 
-    // Blocklist: prevent test files (outside src/compiler) from accidentally resolving
-    // into the compiler tree (~600K lines), which would OOM the interpreter.
+    // Blocklist: prevent test files (outside src/compiler) from accidentally loading
+    // the entire compiler tree (~600K lines) via package __init__.spl imports.
+    // Individual module file imports (e.g., ast.spl, wide_public.spl) are allowed
+    // since they're small and won't cause OOM.
     if let Some(ref resolved) = result {
         if is_blocked_compiler_resolution(base, resolved) {
             return None;
@@ -201,12 +205,18 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 }
 
 /// Check if a resolved path would pull in the compiler tree from an external caller.
-/// Returns true if the resolution should be blocked (prevents OOM from loading ~600K lines).
+/// Only blocks package-level imports (__init__.spl) which could trigger loading entire
+/// subtrees. Individual module file imports are allowed.
 fn is_blocked_compiler_resolution(base: &Path, resolved: &Path) -> bool {
     let base_str = base.to_string_lossy();
     let resolved_str = resolved.to_string_lossy();
-    // Block if caller is NOT in src/compiler but resolved path IS in src/compiler
-    !base_str.contains("src/compiler") && resolved_str.contains("src/compiler")
+    // Only block if: caller is NOT in src/compiler, resolved IS in src/compiler,
+    // AND the resolved path is a package __init__.spl (which loads entire subtrees).
+    // Individual .spl files are safe to load.
+    if !base_str.contains("src/compiler") && resolved_str.contains("src/compiler") {
+        return resolved_str.ends_with("__init__.spl");
+    }
+    false
 }
 
 fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth: usize) -> Option<PathBuf> {

@@ -812,6 +812,59 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     }
 }
 
+/// Find index of a substring in a string
+/// Returns Option<i64> as enum: Some(index) or None
+#[no_mangle]
+pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    let needle_len = rt_string_len(needle);
+
+    if str_len < 0 || needle_len < 0 {
+        return RuntimeValue::NIL;
+    }
+
+    if needle_len == 0 {
+        // Empty needle: return Some(0)
+        let payload = RuntimeValue::from_int(0);
+        return super::objects::rt_enum_new(0, {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            "Some".hash(&mut hasher);
+            (hasher.finish() & 0xFFFFFFFF) as u32
+        }, payload);
+    }
+
+    if needle_len > str_len {
+        return RuntimeValue::NIL;
+    }
+
+    let str_data = rt_string_data(string);
+    let needle_data = rt_string_data(needle);
+
+    if str_data.is_null() || needle_data.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let haystack = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let needle_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(needle_data, needle_len as usize));
+        match haystack.find(needle_str) {
+            Some(idx) => {
+                let payload = RuntimeValue::from_int(idx as i64);
+                super::objects::rt_enum_new(0, {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    "Some".hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as u32
+                }, payload)
+            }
+            None => RuntimeValue::NIL,
+        }
+    }
+}
+
 /// Convert any value to a string representation
 #[no_mangle]
 pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {

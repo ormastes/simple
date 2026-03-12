@@ -112,17 +112,64 @@ impl<'a> MirLowerer<'a> {
                     let left_reg = self.lower_expr(left)?;
                     let right_reg = self.lower_expr(right)?;
 
-                    self.with_func(|func, current_block| {
-                        let dest = func.new_vreg();
-                        let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::BinOp {
-                            dest,
-                            op,
-                            left: left_reg,
-                            right: right_reg,
-                        });
-                        dest
-                    })
+                    // String concatenation: if either side is text/string and op is Add,
+                    // emit rt_string_concat call instead of iadd
+                    let is_string_add = op == BinOp::Add
+                        && (left.ty == TypeId::STRING || right.ty == TypeId::STRING
+                            || left.ty == TypeId::ANY || right.ty == TypeId::ANY);
+                    if is_string_add {
+                        // Convert non-string side to string via rt_to_string if needed
+                        let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
+                            self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name("rt_to_string"),
+                                    args: vec![left_reg],
+                                });
+                                dest
+                            })?
+                        } else {
+                            left_reg
+                        };
+                        let right_str = if right.ty != TypeId::STRING && right.ty != TypeId::ANY {
+                            self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name("rt_to_string"),
+                                    args: vec![right_reg],
+                                });
+                                dest
+                            })?
+                        } else {
+                            right_reg
+                        };
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(dest),
+                                target: crate::mir::CallTarget::from_name("rt_string_concat"),
+                                args: vec![left_str, right_str],
+                            });
+                            dest
+                        })
+                    } else {
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BinOp {
+                                dest,
+                                op,
+                                left: left_reg,
+                                right: right_reg,
+                            });
+                            dest
+                        })
+                    }
                 }
             }
 

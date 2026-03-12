@@ -167,8 +167,73 @@ impl LintChecker {
         self.diagnostics.push(diagnostic);
     }
 
+    /// Apply file-level lint directives from source.
+    ///
+    /// Scans the source file for standalone `#[allow(...)]`, `#[deny(...)]`,
+    /// `#[warn(...)]` lines that appear before the first definition.
+    /// The parser currently drops these attributes, so we pre-scan the raw source.
+    fn apply_file_level_lint_directives(&mut self) {
+        let source_file = match &self.source_file {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        let content = match std::fs::read_to_string(&source_file) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Stop scanning at first definition-like line
+            if trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub ")
+                    && (trimmed.contains("fn ") || trimmed.contains("struct ") || trimmed.contains("class ") || trimmed.contains("enum "))
+                || trimmed.starts_with("struct ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("trait ")
+                || trimmed.starts_with("impl ")
+                || trimmed.starts_with("extern ")
+            {
+                break;
+            }
+            // Parse #[allow(...)], #[deny(...)], #[warn(...)]
+            if let Some(rest) = trimmed.strip_prefix("#[allow(") {
+                if let Some(args) = rest.strip_suffix(")]") {
+                    for lint_name in args.split(',') {
+                        let lint_name = lint_name.trim();
+                        if let Some(lint) = LintName::from_str(lint_name) {
+                            self.config.set_level(lint, LintLevel::Allow);
+                        }
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("#[deny(") {
+                if let Some(args) = rest.strip_suffix(")]") {
+                    for lint_name in args.split(',') {
+                        let lint_name = lint_name.trim();
+                        if let Some(lint) = LintName::from_str(lint_name) {
+                            self.config.set_level(lint, LintLevel::Deny);
+                        }
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("#[warn(") {
+                if let Some(args) = rest.strip_suffix(")]") {
+                    for lint_name in args.split(',') {
+                        let lint_name = lint_name.trim();
+                        if let Some(lint) = LintName::from_str(lint_name) {
+                            self.config.set_level(lint, LintLevel::Warn);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Check a module for lint violations
     pub fn check_module(&mut self, items: &[Node]) {
+        // Apply file-level lint directives (e.g., #[allow(primitive_api)])
+        self.apply_file_level_lint_directives();
+
         // First pass: collect function definitions for call-site checks
         self.collect_functions(items);
 

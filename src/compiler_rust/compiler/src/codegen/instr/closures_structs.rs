@@ -333,6 +333,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
+        "index_of" | "find" | "find_str" => "rt_string_index_of",
         "to_string" | "str" => "rt_to_string",
         // Dict/collection methods
         "get" => "rt_index_get",

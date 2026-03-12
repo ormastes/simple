@@ -323,14 +323,13 @@ pub fn compile_call<M: Module>(
         .map(|(_, tail)| tail)
         .unwrap_or(func_name_raw);
     // Map Simple builtin names to runtime FFI function names (for FFI lookup only)
+    // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
     let ffi_name: &str = match func_name_for_ffi {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
         "rt_file_read_text" => "rt_file_read_text_rv",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
-        "int" | "i64" => "rt_string_to_int",
-        "str" | "to_string" => "rt_to_string",
         other => other,
     };
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
@@ -492,6 +491,7 @@ pub fn compile_call<M: Module>(
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "index_of" | "find" | "find_str" => Some("rt_string_index_of"),
                 "to_string" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
                 "get" => Some("rt_index_get"),

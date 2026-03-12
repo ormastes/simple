@@ -2,7 +2,11 @@
 
 ## Purpose
 
-This document defines a layered MDSOC view for the Rust Simple workspace with emphasis on `common`, `compiler`, `loader`, `runtime/loader`, `driver`, and the interpreter path inside `compiler`.
+This document defines a layered MDSOC view for Simple.
+
+**Part 1 — Pure Simple** (current, self-hosted compiler): shared tree nodes across numbered layers (`00.common` → `99.loader`).
+
+**Part 2 — Rust Bootstrap** (legacy reference): shared tree nodes across the Rust workspace (`common`, `compiler`, `loader`, `runtime`, `driver`).
 
 It covers:
 
@@ -10,6 +14,142 @@ It covers:
 2. to-be tree encapsulation
 3. common tree-node extraction
 4. sibling-private versus tree-private guidance
+
+---
+
+# Part 1 — Pure Simple Compiler
+
+## Layer List
+
+| Layer | Name | Responsibility |
+|---|---|---|
+| 00 | Common | Error types, config, effects, visibility, diagnostics, DI |
+| 10 | Frontend | Lexer, parser, AST, tokens, treesitter, desugar |
+| 15 | Blocks | Block definition system |
+| 20 | HIR | HIR types, definitions, lowering, inference |
+| 25 | Traits | Trait def, impl, solver, coherence, validation |
+| 30 | Types | Type inference, type system, dimension constraints |
+| 35 | Semantics | Semantic analysis, lint, macro check, resolve, const eval |
+| 40 | Mono | Monomorphization, instantiation |
+| 50 | MIR | MIR types, data, instructions, lowering, serialization |
+| 55 | Borrow | Borrow checking, GC analysis |
+| 60 | MIR Opt | MIR optimization passes |
+| 70 | Backend | Backends (LLVM, C, Cranelift, WASM, CUDA, Vulkan, Native), linker |
+| 80 | Driver | Driver, pipeline, project, build mode, incremental |
+| 85 | MDSOC | Virtual capsules, feature/construct dimensions, weaving |
+| 90 | Tools | API surface, coverage, query, symbol analyzer, AOP |
+| 95 | Interp | Interpreter, MIR interpreter, execution |
+| 99 | Loader | Module resolver, loader |
+
+## Shared Tree Nodes (Cross-Layer)
+
+### Tier 1 — Critical Foundations (4+ consuming layers)
+
+These are the shared tree nodes that cross the most layer boundaries. They are candidates for L0 extraction or explicit facade contracts.
+
+| Shared Node | Source Layer | Consuming Layers | Import Count | Role |
+|---|---|---|---|---|
+| `hir.hir` | 20.hir | 25.traits, 30.types, 35.semantics, 70.backend, 80.driver, 85.mdsoc, 90.tools | 36 | Core HIR — foundation of entire middle-end |
+| `mir.mir_data` | 50.mir | 55.borrow, 60.mir_opt, 70.backend, 90.tools | 82 | MIR data structures — highest single-module import count |
+| `frontend.core.lexer` (Span) | 10.frontend | 25.traits, 30.types, 35.semantics, 70.backend, 80.driver | 33 | Source location tracking |
+| `common.config` | 00.common | 10.frontend, 20.hir, 80.driver, 99.loader | ~10 | Central global configuration |
+
+### Tier 2 — Key Interface Types (3 consuming layers)
+
+| Shared Node | Source Layer | Consuming Layers | Import Count | Role |
+|---|---|---|---|---|
+| `frontend.core.ast` | 10.frontend | 20.hir, 35.semantics, 70.backend | 135 | AST representation |
+| `frontend.core.tokens` | 10.frontend | 20.hir, 35.semantics, 70.backend | 200 | Token definitions |
+| `mir.mir` | 50.mir | 55.borrow, 60.mir_opt, 70.backend | 19 | MIR module facade |
+| `hir.hir_definitions` | 20.hir | 30.types, 70.backend, 80.driver | ~15 | HIR definition types |
+| `frontend.parser_types` | 10.frontend | 25.traits, 30.types, 70.backend | ~12 | Parser output types |
+
+### Layer Dependency Flow
+
+```
+00.common ─────────────────────────────────────────────────── (config, errors, effects)
+    ↓                                                              ↓
+10.frontend ──────────────────────────────────────────── (AST, Span, tokens)
+    ↓              ↓                                          ↓
+15.blocks     20.hir ──────────────────────────────── (HIR: 7 consumers)
+                  ↓         ↓         ↓
+              25.traits  30.types  35.semantics
+                             ↓
+                         40.mono
+                             ↓
+                         50.mir ────────────────────── (MIR: 4 consumers, 82 imports)
+                          ↓       ↓
+                      55.borrow  60.mir_opt
+                                   ↓
+                         70.backend ←←←←←←←←←←←←←← (convergence: imports HIR+MIR+frontend)
+                             ↓
+                         80.driver ←←←←←←←←←←←←←←← (orchestrator: imports 13 layers)
+                          ↓      ↓
+                      85.mdsoc  90.tools
+                                   ↓
+                         95.interp
+                             ↓
+                         99.loader
+```
+
+### Critical Narrowing Points
+
+The pipeline has three narrowing points where many-to-few data flows converge. These are where shared tree-node contracts matter most:
+
+| Narrowing Point | From | To | Shared Contract |
+|---|---|---|---|
+| AST → HIR | 10.frontend | 20.hir | `core.ast`, `core.tokens`, `Span` |
+| HIR → MIR | 20.hir + 30.types + 25.traits | 50.mir | `hir.hir`, `hir.hir_definitions` |
+| MIR → Backend | 50.mir + 60.mir_opt | 70.backend | `mir.mir_data` (82 imports!) |
+
+### Most Prolific Exporters
+
+| Layer | Exports to N layers | Key exported types |
+|---|---|---|
+| 10.frontend | 11 | AST, Span, tokens, parser_types |
+| 20.hir | 7 | hir, hir_definitions |
+| 50.mir | 6 | mir_data, mir |
+| 00.common | 4+ | config, errors, effects, diagnostics |
+
+### Most Diverse Consumer
+
+| Layer | Imports from N layers | Role |
+|---|---|---|
+| 80.driver | 13 | Pipeline orchestrator |
+| 70.backend | 6+ | Convergence point (needs HIR + MIR + frontend) |
+
+## To-Be Tree Encapsulation (Pure Simple)
+
+### Visibility Rules
+
+Same principles as the Rust to-be, applied to numbered layers:
+
+- **Tree-private by default**: internal modules within a layer are not exported
+- **Parent-public**: a layer exports its facade types (e.g., `hir.hir` exports `HirModule`, `HirFunction`)
+- **Next-layer-public**: a layer's facade is consumed by the immediately downstream layer
+- **Common-node-public**: types needed by 4+ layers should be in `00.common` or have explicit facade contracts
+
+### Extraction Candidates
+
+| Current Location | Issue | To-Be |
+|---|---|---|
+| `frontend.core.lexer.Span` | Used by 5+ layers far downstream | Extract to `00.common/span.spl` or keep in frontend with explicit facade |
+| `hir.hir` | 7-layer fan-out — widest shared contract | Acceptable: HIR is the canonical middle-end IR; enforce facade discipline |
+| `mir.mir_data` | 82 imports from backend alone | Acceptable: MIR is the canonical low-level IR; backend convergence is by design |
+
+### Construct Dimension (Vertical Sharing)
+
+The MDSOC construct dimension (`85.mdsoc/construct_types/`) already models vertical sharing explicitly:
+
+- `ConstructCapsule` groups files by language construct (Func, Trait, Enum, etc.) across all layers
+- `SharedBinding` tracks files that belong to multiple construct capsules
+- `CrossDimensionQuery` enables intersection queries ("all trait code in layers 10-15")
+
+This is the Pure Simple equivalent of the Rust doc's "common tree nodes" — but modeled as data rather than module re-exports.
+
+---
+
+# Part 2 — Rust Bootstrap (Legacy Reference)
 
 ## Research Result
 

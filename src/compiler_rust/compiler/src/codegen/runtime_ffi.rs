@@ -316,6 +316,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_upper", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
@@ -519,6 +520,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_println_value", &[I64], &[]),  // RuntimeValue
     RuntimeFuncSpec::new("rt_eprint_value", &[I64], &[]),   // RuntimeValue
     RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]), // RuntimeValue
+    RuntimeFuncSpec::new("rt_read_stdin_line", &[], &[I64]),  // -> RuntimeValue (string)
     RuntimeFuncSpec::new("rt_capture_stdout_start", &[], &[]),
     RuntimeFuncSpec::new("rt_capture_stderr_start", &[], &[]),
     // =========================================================================
