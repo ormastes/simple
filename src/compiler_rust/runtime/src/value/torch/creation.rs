@@ -268,6 +268,12 @@ pub extern "C" fn rt_torch_tensor(
 ) -> u64 {
     #[cfg(feature = "pytorch")]
     {
+        if std::env::var_os("SIMPLE_TORCH_TRACE").is_some() {
+            eprintln!(
+                "rt_torch_tensor data_ptr={:?} data_len={} shape_ptr={:?} shape_len={} dtype={} device={}",
+                data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code
+            );
+        }
         // Validate pointers
         if data_ptr.is_null() || shape_ptr.is_null() {
             tracing::error!("rt_torch_tensor: null pointer");
@@ -414,8 +420,18 @@ pub extern "C" fn rt_ps_torch_tensor_from_data(data: RuntimeValue, dims: Runtime
 
 #[no_mangle]
 pub extern "C" fn rt_ps_torch_tensor_from_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> u64 {
+    rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr, data_len)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> u64 {
     if data_bits_ptr.is_null() || data_len <= 0 {
         return 0;
+    }
+
+    #[cfg(not(feature = "pytorch"))]
+    {
+        return dynamic_runtime::call_dyn_bits_1d(data_bits_ptr, data_len).unwrap_or(0);
     }
 
     let bits = unsafe { std::slice::from_raw_parts(data_bits_ptr, data_len as usize) };

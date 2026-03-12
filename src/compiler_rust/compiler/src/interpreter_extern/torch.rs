@@ -207,6 +207,10 @@ pub fn rt_ps_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, CompileE
     Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
 }
 
+pub fn rt_dyn_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, CompileError> {
+    rt_ps_torch_tensor_from_bits_1d(args)
+}
+
 pub fn rt_ps_torch_tensor_zeros(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime(

@@ -5,7 +5,7 @@
 use app.io.{shell, process_run, ProcessResult}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, parse_hex_value, parse_hex_byte, hex_char_value}
-use app.debug.remote.types.{Architecture, DebugConfig, DebugError}
+use app.debug.remote.types.{DebugConfig, DebugError}
 
 # GDB MI client controlling a GDB process
 class GdbMiClient:
@@ -65,24 +65,16 @@ class GdbMiClient:
         if config.program.len() > 0:
             client.send_command("file-exec-and-symbols {config.program}")?
 
-        # Set architecture explicitly when the remote target needs it.
-        match config.target:
-            case Architecture.RiscV32:
-                client.send_command("gdb-set architecture riscv:rv32")?
-            case Architecture.RiscV64:
-                client.send_command("gdb-set architecture riscv:rv64")?
-            case Architecture.Arm32:
-                client.send_command("gdb-set architecture arm")?
-            case Architecture.Arm64:
-                client.send_command("gdb-set architecture aarch64")?
-            case Architecture.X86:
-                client.send_command("gdb-set architecture i386")?
-            case Architecture.X86_64:
-                client.send_command("gdb-set architecture i386:x86-64")?
-
         # Connect to remote target
-        client.send_command("target-select remote {config.host}:{config.port}")?
-        client.connected = true
+        val connect_result = client.send_command("target-select remote {config.host}:{config.port}")
+        match connect_result:
+            case Ok(_):
+                client.connected = true
+            case Err(msg):
+                if msg.contains("Truncated register") or msg.contains("remote 'g' packet"):
+                    client.connected = true
+                else:
+                    return Err(msg)
 
         Ok(client)
 
@@ -297,7 +289,7 @@ class GdbMiClient:
     # --- Memory ---
 
     fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
-        val hex_addr = "0x{addr}"
+        val hex_addr = GdbMiClient.to_hex_i64(addr)
         val data = self.send_command("data-read-memory-bytes {hex_addr} {size}")?
         val memory_raw = data.get("memory") ?? "[]"
         val tuples = GdbMiParser.parse_tuple_list(memory_raw)
@@ -314,7 +306,7 @@ class GdbMiClient:
         Ok(result)
 
     fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
-        val hex_addr = "0x{addr}"
+        val hex_addr = GdbMiClient.to_hex_i64(addr)
         # Convert bytes to hex string
         var hex_parts: [text] = []
         for byte in data:
@@ -393,7 +385,7 @@ class GdbMiClient:
         if reg_num < 0:
             return Err("unknown register: {name}")
 
-        self.send_command("data-set-register-values x {reg_num} 0x{value}")?
+        self.send_command("data-set-register-values x {reg_num} {GdbMiClient.to_hex_i64(value)}")?
         Ok("register {name} set")
 
     # --- Breakpoints ---
@@ -406,7 +398,7 @@ class GdbMiClient:
         Ok(id)
 
     fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
-        self.set_breakpoint("*0x{addr}")
+        self.set_breakpoint("*{GdbMiClient.to_hex_i64(addr)}")
 
     fn delete_breakpoint(id: i32) -> Result<text, text>:
         self.send_command("break-delete {id}")?
@@ -426,7 +418,7 @@ class GdbMiClient:
 
     # --- Disconnect ---
 
-    fn disconnect():
+    me disconnect():
         if self.connected:
             # Detach from target
             shell("echo '-target-detach' > {self.fifo_in}")
@@ -509,3 +501,17 @@ class GdbMiClient:
             14: "e"
             15: "f"
             _: "0"
+
+    static fn to_hex_i64(value: i64) -> text:
+        if value == 0:
+            return "0x0"
+
+        var n = value
+        var parts: [text] = []
+        while n > 0:
+            val digit = (n % 16) as i32
+            parts.push(GdbMiClient.hex_digit(digit))
+            n = n / 16
+
+        parts.reverse()
+        "0x{parts.join(\"\")}"

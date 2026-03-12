@@ -307,6 +307,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_ptr_write_u8",
     "rt_ptr_write_i32",
     "rt_ptr_write_i64",
+    "rt_dyn_torch_tensor_from_bits_1d",
     "rt_memset",
     "rt_memcpy",
     // Async/concurrency operations

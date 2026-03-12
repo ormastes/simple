@@ -1597,6 +1597,15 @@ fn mangle_mir(
         }
     }
 
+    // Build a set of all known mangled names (values from import_map/use_map + local_mangled)
+    // so we can recognize already-qualified call targets and skip re-mangling them.
+    let known_mangled: std::collections::HashSet<&str> = import_map
+        .values()
+        .chain(use_map.values())
+        .chain(local_mangled.values())
+        .map(|s| s.as_str())
+        .collect();
+
     // Phase 3: Rename call targets and global references in instructions.
     // Resolution order: local definition first (prevents imported name shadowing
     // a module's own function), then use_map, then import_map, then raw fallback.
@@ -1607,6 +1616,12 @@ fn mangle_mir(
                     MirInst::Call { target, .. } => {
                         let name = target.name().to_string();
                         if is_runtime_or_builtin(&name) {
+                            continue;
+                        }
+                        // If the call target is already a known fully-qualified mangled name,
+                        // skip it — don't re-mangle. This handles cases where Simple source
+                        // uses fully-qualified function names like `module__func`.
+                        if known_mangled.contains(name.as_str()) {
                             continue;
                         }
                         if let Some(mangled) = local_mangled.get(&name) {
@@ -1670,7 +1685,7 @@ fn mangle_mir(
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
-                        if is_runtime_or_builtin(func_name) {
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {
@@ -1688,7 +1703,7 @@ fn mangle_mir(
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
-                        if is_runtime_or_builtin(global_name) {
+                        if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) {
                             continue;
                         }
                         if let Some(mangled) = local_global_mangled.get(global_name.as_str()) {
@@ -1706,7 +1721,7 @@ fn mangle_mir(
                         }
                     }
                     MirInst::MethodCallStatic { func_name, .. } => {
-                        if is_runtime_or_builtin(func_name) {
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {

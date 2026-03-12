@@ -531,6 +531,7 @@ pub(crate) fn call_extern_function(
         "rt_memcpy" => memory::rt_memcpy(&evaluated),
         "rt_torch_tensor" => torch::rt_torch_tensor(&evaluated),
         "rt_ps_torch_tensor" => torch::rt_ps_torch_tensor(&evaluated),
+        "rt_dyn_torch_tensor_from_bits_1d" => torch::rt_dyn_torch_tensor_from_bits_1d(&evaluated),
         "rt_ps_torch_tensor_from_bits_1d" => torch::rt_ps_torch_tensor_from_bits_1d(&evaluated),
         "rt_ps_torch_tensor_from_data" => torch::rt_ps_torch_tensor_from_data(&evaluated),
         "rt_ps_torch_tensor_zeros" => torch::rt_ps_torch_tensor_zeros(&evaluated),

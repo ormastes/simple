@@ -90,9 +90,25 @@ pub(super) fn call_tensor(
 ) -> Option<u64> {
     let lib = library()?;
     unsafe {
+        if std::env::var_os("SIMPLE_TORCH_TRACE").is_some() {
+            eprintln!(
+                "dynamic_runtime::call_tensor data_ptr={:?} data_len={} shape_ptr={:?} shape_len={} dtype={} device={}",
+                data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code
+            );
+        }
         let func: Symbol<unsafe extern "C" fn(*const f64, i64, *const i64, i32, i32, i32) -> u64> =
             lib.get(b"rt_torch_tensor").ok()?;
         Some(func(data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code))
+    }
+}
+
+#[cfg(not(feature = "pytorch"))]
+pub(super) fn call_dyn_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> Option<u64> {
+    let lib = library()?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const i64, i64) -> u64> =
+            lib.get(b"rt_dyn_torch_tensor_from_bits_1d").ok()?;
+        Some(func(data_bits_ptr, data_len))
     }
 }
 
