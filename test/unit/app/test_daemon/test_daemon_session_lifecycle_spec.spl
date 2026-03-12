@@ -1,0 +1,373 @@
+# Test Daemon Session Lifecycle Specification
+#
+# Tests the complete lifecycle of test sessions:
+# create → configure → start → run tests → auto-reset → release → cleanup.
+# Simulates QemuTestSession and QemuMultiTestRunner patterns.
+#
+# **Feature IDs:** #TDMN-051 to #TDMN-070
+# **Category:** Infrastructure
+
+# ============================================================================
+# Module-level mock state — simulates QemuTestSession lifecycle
+# ============================================================================
+
+val TS_CREATED: i64 = 0
+val TS_STARTED: i64 = 1
+val TS_RUNNING: i64 = 2
+val TS_RESETTING: i64 = 3
+val TS_STOPPED: i64 = 4
+val TS_ERROR: i64 = 5
+
+var ts_session_ids: [text] = []
+var ts_archs: [text] = []
+var ts_states: [i64] = []
+var ts_test_counts: [i64] = []
+var ts_reset_counts: [i64] = []
+var ts_auto_reset: [bool] = []
+var ts_auto_reload: [bool] = []
+var ts_binary_paths: [text] = []
+var ts_gdb_ports: [i64] = []
+var ts_errors: [text] = []
+var ts_next_id: i64 = 1
+
+fn ts_reset_all():
+    ts_session_ids = []
+    ts_archs = []
+    ts_states = []
+    ts_test_counts = []
+    ts_reset_counts = []
+    ts_auto_reset = []
+    ts_auto_reload = []
+    ts_binary_paths = []
+    ts_gdb_ports = []
+    ts_errors = []
+    ts_next_id = 1
+
+fn ts_find(id: text) -> i64:
+    var i = 0
+    while i < ts_session_ids.len():
+        if ts_session_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn ts_create(arch: text, binary_path: text, gdb_port: i64) -> text:
+    val id = "session_{ts_next_id}"
+    ts_next_id = ts_next_id + 1
+    ts_session_ids = ts_session_ids + [id]
+    ts_archs = ts_archs + [arch]
+    ts_states = ts_states + [TS_CREATED]
+    ts_test_counts = ts_test_counts + [0]
+    ts_reset_counts = ts_reset_counts + [0]
+    ts_auto_reset = ts_auto_reset + [false]
+    ts_auto_reload = ts_auto_reload + [false]
+    ts_binary_paths = ts_binary_paths + [binary_path]
+    ts_gdb_ports = ts_gdb_ports + [gdb_port]
+    ts_errors = ts_errors + [""]
+    id
+
+fn ts_set_auto_reset(id: text, enabled: bool):
+    val idx = ts_find(id)
+    if idx >= 0:
+        ts_auto_reset[idx] = enabled
+
+fn ts_set_auto_reload(id: text, enabled: bool):
+    val idx = ts_find(id)
+    if idx >= 0:
+        ts_auto_reload[idx] = enabled
+
+fn ts_start(id: text) -> bool:
+    val idx = ts_find(id)
+    if idx < 0:
+        return false
+    if ts_states[idx] != TS_CREATED and ts_states[idx] != TS_STOPPED:
+        return false
+    ts_states[idx] = TS_STARTED
+    true
+
+fn ts_run_test(id: text) -> bool:
+    val idx = ts_find(id)
+    if idx < 0:
+        return false
+    if ts_states[idx] != TS_STARTED:
+        ts_errors[idx] = "session not started"
+        return false
+    # Auto-reset before each test if enabled
+    if ts_auto_reset[idx] and ts_test_counts[idx] > 0:
+        ts_states[idx] = TS_RESETTING
+        ts_reset_counts[idx] = ts_reset_counts[idx] + 1
+        ts_states[idx] = TS_STARTED
+    ts_states[idx] = TS_RUNNING
+    ts_test_counts[idx] = ts_test_counts[idx] + 1
+    # Simulate test completion
+    ts_states[idx] = TS_STARTED
+    true
+
+fn ts_reset(id: text) -> bool:
+    val idx = ts_find(id)
+    if idx < 0:
+        return false
+    ts_states[idx] = TS_RESETTING
+    ts_reset_counts[idx] = ts_reset_counts[idx] + 1
+    ts_states[idx] = TS_STARTED
+    true
+
+fn ts_stop(id: text) -> bool:
+    val idx = ts_find(id)
+    if idx < 0:
+        return false
+    ts_states[idx] = TS_STOPPED
+    true
+
+fn ts_set_error(id: text, err: text):
+    val idx = ts_find(id)
+    if idx >= 0:
+        ts_errors[idx] = err
+        ts_states[idx] = TS_ERROR
+
+# Getters
+fn ts_count() -> i64:
+    ts_session_ids.len()
+
+fn ts_get_state(id: text) -> i64:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_states[idx]
+    -1
+
+fn ts_get_test_count(id: text) -> i64:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_test_counts[idx]
+    0
+
+fn ts_get_reset_count(id: text) -> i64:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_reset_counts[idx]
+    0
+
+fn ts_get_error(id: text) -> text:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_errors[idx]
+    ""
+
+fn ts_get_arch(id: text) -> text:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_archs[idx]
+    ""
+
+fn ts_get_gdb_port(id: text) -> i64:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_gdb_ports[idx]
+    0
+
+fn ts_is_auto_reset(id: text) -> bool:
+    val idx = ts_find(id)
+    if idx >= 0:
+        return ts_auto_reset[idx]
+    false
+
+# ============================================================================
+# Multi-test runner helpers
+# ============================================================================
+
+var mtr_results: [bool] = []
+
+fn mtr_reset():
+    mtr_results = []
+
+fn mtr_run_tests_on_session(id: text, n: i64) -> i64:
+    mtr_results = []
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val ok = ts_run_test(id)
+        mtr_results = mtr_results + [ok]
+        if ok:
+            passed = passed + 1
+        i = i + 1
+    passed
+
+fn mtr_get_passed() -> i64:
+    var c: i64 = 0
+    var i = 0
+    while i < mtr_results.len():
+        if mtr_results[i]:
+            c = c + 1
+        i = i + 1
+    c
+
+fn mtr_create_and_start(arch: text, binary: text, port: i64) -> text:
+    val id = ts_create(arch, binary, port)
+    ts_start(id)
+    id
+
+fn mtr_full_lifecycle(arch: text, binary: text, n_tests: i64) -> (i64, i64):
+    val id = ts_create(arch, binary, 1234)
+    ts_set_auto_reset(id, true)
+    ts_start(id)
+    val passed = mtr_run_tests_on_session(id, n_tests)
+    ts_stop(id)
+    val resets = ts_get_reset_count(id)
+    (passed, resets)
+
+fn mtr_create_multi_arch_sessions() -> [text]:
+    var ids: [text] = []
+    ids = ids + [mtr_create_and_start("arm64", "/tmp/test.elf", 1234)]
+    ids = ids + [mtr_create_and_start("riscv64", "/tmp/test_rv.elf", 1235)]
+    ids = ids + [mtr_create_and_start("x86_64", "/tmp/test_x86.elf", 1236)]
+    ids
+
+fn mtr_run_on_all_sessions(ids: [text], n: i64) -> i64:
+    var total: i64 = 0
+    var i = 0
+    while i < ids.len():
+        total = total + mtr_run_tests_on_session(ids[i], n)
+        i = i + 1
+    total
+
+fn mtr_stop_all_sessions(ids: [text]):
+    var i = 0
+    while i < ids.len():
+        ts_stop(ids[i])
+        i = i + 1
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Session Lifecycle":
+    describe "creation":
+        it "creates session in CREATED state":
+            ts_reset_all()
+            val id = ts_create("arm64", "/tmp/test.elf", 1234)
+            expect(ts_get_state(id)).to_equal(TS_CREATED)
+            expect(ts_get_arch(id)).to_equal("arm64")
+            expect(ts_get_gdb_port(id)).to_equal(1234)
+
+        it "assigns unique session IDs":
+            ts_reset_all()
+            val id1 = ts_create("arm64", "/tmp/a.elf", 1234)
+            val id2 = ts_create("arm64", "/tmp/b.elf", 1235)
+            expect(id1 != id2).to_equal(true)
+            expect(ts_count()).to_equal(2)
+
+        it "creates with defaults disabled":
+            ts_reset_all()
+            val id = ts_create("riscv64", "/tmp/test.elf", 1234)
+            expect(ts_is_auto_reset(id)).to_equal(false)
+            expect(ts_get_test_count(id)).to_equal(0)
+            expect(ts_get_reset_count(id)).to_equal(0)
+
+    describe "start and stop":
+        it "transitions CREATED to STARTED":
+            ts_reset_all()
+            val id = ts_create("arm64", "/tmp/test.elf", 1234)
+            expect(ts_start(id)).to_equal(true)
+            expect(ts_get_state(id)).to_equal(TS_STARTED)
+
+        it "transitions STARTED to STOPPED":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            expect(ts_stop(id)).to_equal(true)
+            expect(ts_get_state(id)).to_equal(TS_STOPPED)
+
+        it "can restart after stop":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            ts_stop(id)
+            expect(ts_start(id)).to_equal(true)
+            expect(ts_get_state(id)).to_equal(TS_STARTED)
+
+    describe "test execution":
+        it "runs test and increments count":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            expect(ts_run_test(id)).to_equal(true)
+            expect(ts_get_test_count(id)).to_equal(1)
+
+        it "fails to run test on non-started session":
+            ts_reset_all()
+            val id = ts_create("arm64", "/tmp/test.elf", 1234)
+            expect(ts_run_test(id)).to_equal(false)
+            expect(ts_get_error(id)).to_equal("session not started")
+
+        it "runs multiple tests sequentially":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            val passed = mtr_run_tests_on_session(id, 5)
+            expect(passed).to_equal(5)
+            expect(ts_get_test_count(id)).to_equal(5)
+
+    describe "auto-reset":
+        it "resets between tests when enabled":
+            ts_reset_all()
+            val result = mtr_full_lifecycle("arm64", "/tmp/test.elf", 5)
+            expect(result[0]).to_equal(5)
+            # Auto-reset happens before tests 2,3,4,5 (not before first)
+            expect(result[1]).to_equal(4)
+
+        it "does not reset when disabled":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            mtr_run_tests_on_session(id, 5)
+            expect(ts_get_reset_count(id)).to_equal(0)
+
+        it "manual reset increments count":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            ts_reset(id)
+            ts_reset(id)
+            expect(ts_get_reset_count(id)).to_equal(2)
+
+    describe "multi-architecture sessions":
+        it "runs tests on 3 different arch sessions":
+            ts_reset_all()
+            val ids = mtr_create_multi_arch_sessions()
+            val total = mtr_run_on_all_sessions(ids, 3)
+            expect(total).to_equal(9)
+            expect(ts_count()).to_equal(3)
+
+        it "stops all sessions cleanly":
+            ts_reset_all()
+            val ids = mtr_create_multi_arch_sessions()
+            mtr_run_on_all_sessions(ids, 2)
+            mtr_stop_all_sessions(ids)
+            expect(ts_get_state(ids[0])).to_equal(TS_STOPPED)
+            expect(ts_get_state(ids[1])).to_equal(TS_STOPPED)
+            expect(ts_get_state(ids[2])).to_equal(TS_STOPPED)
+
+    describe "error handling":
+        it "session enters error state on failure":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            ts_set_error(id, "QEMU crash")
+            expect(ts_get_state(id)).to_equal(TS_ERROR)
+            expect(ts_get_error(id)).to_equal("QEMU crash")
+
+        it "cannot run test in error state":
+            ts_reset_all()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            ts_set_error(id, "boot failure")
+            expect(ts_run_test(id)).to_equal(false)
+
+    describe "multi-test runner":
+        it "runs full lifecycle with results":
+            ts_reset_all()
+            mtr_reset()
+            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
+            val passed = mtr_run_tests_on_session(id, 10)
+            ts_stop(id)
+            expect(passed).to_equal(10)
+            expect(mtr_get_passed()).to_equal(10)
+            expect(ts_get_state(id)).to_equal(TS_STOPPED)
+
+        it "complete lifecycle: create, configure, start, run, stop":
+            ts_reset_all()
+            val result = mtr_full_lifecycle("riscv64", "/tmp/rv_test.elf", 3)
+            expect(result[0]).to_equal(3)
+            expect(result[1]).to_equal(2)

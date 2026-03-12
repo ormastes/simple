@@ -1,0 +1,202 @@
+# Daemon SDK Lock System Test
+#
+# Tests real PID lock file behavior: writes actual lock files,
+# checks our own PID, verifies stale lock detection with real process checks.
+#
+# **Feature IDs:** #DSDK-SYS-011 to #DSDK-SYS-020
+# **Category:** Infrastructure / System Test
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_exists(pid: i64) -> bool
+extern fn rt_env_get(key: text) -> text
+
+fn _check_process_exists_works() -> bool:
+    val our_pid = rt_getpid()
+    if our_pid <= 0:
+        print "SKIP: rt_getpid() not available"
+        false
+    else:
+        val alive = rt_process_exists(our_pid)
+        if not alive:
+            print "SKIP: rt_process_exists() not working (cannot detect own PID)"
+            false
+        else:
+            true
+
+val _can_run = _check_process_exists_works()
+
+# Platform-aware temp directory and OS detection
+val _tmp = rt_env_get("TEMP") ?? rt_env_get("TMPDIR") ?? "/tmp"
+val _os_val = rt_env_get("OS") ?? ""
+val _os_lower = _os_val.lower()
+val _is_windows = _os_lower.contains("windows")
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var lock_dir: text = ""
+var lock_file: text = ""
+
+fn lock_sys_setup():
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    lock_dir = "{_tmp}/daemon_lock_test_{pid}_{ts}"
+    lock_file = "{lock_dir}/test.lock"
+    rt_dir_create_all(lock_dir)
+
+fn lock_sys_cleanup():
+    rt_file_delete(lock_file)
+    rt_file_delete(lock_dir)
+
+fn lock_write(pid: i64):
+    val ts = rt_time_now_unix_micros()
+    rt_file_write_text(lock_file, "{pid}\n{ts}")
+
+fn lock_read_pid() -> i64:
+    val content = rt_file_read_text(lock_file) ?? ""
+    if content == "":
+        return -1
+    val lines = content.split("\n")
+    if lines.len() == 0:
+        return -1
+    val trimmed = lines[0].trim()
+    trimmed.to_i64() ?? -1
+
+fn lock_acquire() -> i64:
+    if rt_file_exists(lock_file):
+        val existing = lock_read_pid()
+        if existing > 0 and rt_process_exists(existing):
+            return -1
+        rt_file_delete(lock_file)
+    val our_pid = rt_getpid()
+    lock_write(our_pid)
+    our_pid
+
+fn lock_release(pid: i64) -> bool:
+    if not rt_file_exists(lock_file):
+        return true
+    val lock_pid = lock_read_pid()
+    if lock_pid != pid:
+        return false
+    rt_file_delete(lock_file)
+    true
+
+fn lock_is_running() -> bool:
+    if not rt_file_exists(lock_file):
+        return false
+    val pid = lock_read_pid()
+    if pid <= 0:
+        return false
+    rt_process_exists(pid)
+
+# Getters
+fn lock_get_dir() -> text:
+    lock_dir
+fn lock_get_file() -> text:
+    lock_file
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "DaemonLock System":
+    describe "real lock acquisition":
+        it "acquires lock with our PID":
+            lock_sys_setup()
+            val pid = lock_acquire()
+            val our_pid = rt_getpid()
+            expect(pid).to_equal(our_pid)
+            expect(rt_file_exists(lock_get_file())).to_equal(true)
+            lock_sys_cleanup()
+
+        it "writes correct PID to lock file":
+            lock_sys_setup()
+            lock_acquire()
+            val stored_pid = lock_read_pid()
+            val our_pid = rt_getpid()
+            expect(stored_pid).to_equal(our_pid)
+            lock_sys_cleanup()
+
+        it "detects our own process as alive":
+            if _can_run:
+                lock_sys_setup()
+                val our_pid = rt_getpid()
+                expect(rt_process_exists(our_pid)).to_equal(true)
+                lock_sys_cleanup()
+            else:
+                print "SKIP: rt_process_exists() not available"
+
+    describe "stale lock detection":
+        it "detects stale lock from dead PID":
+            lock_sys_setup()
+            # PID 99999999 almost certainly doesn't exist
+            lock_write(99999999)
+            # On Windows rt_process_exists may behave differently for invalid PIDs
+            if not _is_windows:
+                expect(lock_is_running()).to_equal(false)
+            lock_sys_cleanup()
+
+        it "acquires over stale lock":
+            lock_sys_setup()
+            lock_write(99999999)
+            # On Windows rt_process_exists may report invalid PIDs differently
+            if not _is_windows:
+                val pid = lock_acquire()
+                val our_pid = rt_getpid()
+                expect(pid).to_equal(our_pid)
+                expect(lock_read_pid()).to_equal(our_pid)
+            lock_sys_cleanup()
+
+        it "detects our own lock as active":
+            if _can_run:
+                lock_sys_setup()
+                lock_acquire()
+                expect(lock_is_running()).to_equal(true)
+                lock_sys_cleanup()
+            else:
+                print "SKIP: rt_process_exists() not available"
+
+    describe "lock release":
+        it "releases and removes lock file":
+            lock_sys_setup()
+            val pid = lock_acquire()
+            expect(rt_file_exists(lock_get_file())).to_equal(true)
+            val ok = lock_release(pid)
+            expect(ok).to_equal(true)
+            expect(rt_file_exists(lock_get_file())).to_equal(false)
+            lock_sys_cleanup()
+
+        it "refuses release with wrong PID":
+            lock_sys_setup()
+            lock_acquire()
+            val ok = lock_release(99999999)
+            expect(ok).to_equal(false)
+            expect(rt_file_exists(lock_get_file())).to_equal(true)
+            lock_sys_cleanup()
+
+    describe "reacquisition":
+        it "reacquires after release":
+            lock_sys_setup()
+            val pid1 = lock_acquire()
+            lock_release(pid1)
+            val pid2 = lock_acquire()
+            expect(pid2).to_equal(pid1)
+            lock_sys_cleanup()
+
+        it "blocks reacquisition when held":
+            if _can_run:
+                lock_sys_setup()
+                lock_acquire()
+                # Our own process holds the lock, so re-acquire should fail
+                val pid2 = lock_acquire()
+                expect(pid2).to_equal(-1)
+                lock_sys_cleanup()
+            else:
+                print "SKIP: rt_process_exists() not available"

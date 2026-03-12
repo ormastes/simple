@@ -1,0 +1,104 @@
+# DAP System Test: Variable Inspection
+# tag: slow, system
+#
+# Tests that type inference and variable-related modules parse without crashes.
+# These modules (type system, semantic analysis) are the ones exercised when
+# a debugger inspects variable values, types, and scopes.
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn _check_release_binary() -> bool:
+    if not rt_file_exists("bin/release/simple"):
+        print "SKIP: bin/release/simple not found"
+        false
+    else:
+        val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["--version"])
+        if code > 1:
+            print "SKIP: bin/release/simple not executable on this platform"
+            false
+        else:
+            true
+
+val _can_run = _check_release_binary()
+
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+fn tmp_dir() -> text:
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    "/tmp/dap_test_{pid}_{ts}"
+
+fn run_file(file: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", [file])
+    code
+
+fn run_file_with_timeout(file: text) -> i64:
+    # Run a .spl file; if it takes too long, it may hang (timeout handled by test runner)
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", [file])
+    code
+
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var k = 0
+        while k < crashes.len():
+            print "    - {crashes[k]}"
+            k = k + 1
+    crashes.len()
+
+# Collect type system files (most relevant for variable inspection)
+var type_files = find_spl_files("src/compiler/30.types")
+print "DAP System: variables — found {type_files.len()} type system files"
+
+# Collect semantic analysis files and merge
+val sem_files = find_spl_files("src/compiler/35.semantics")
+var i = 0
+while i < sem_files.len():
+    type_files.push(sem_files[i])
+    i = i + 1
+print "DAP System: variables — total {type_files.len()} files (types + semantics)"
+
+# Lint-parse check: exit code > 1 means crash
+fn check_lint_parse(files: [text]) -> [text]:
+    var crashes: [text] = []
+    var idx = 0
+    while idx < files.len():
+        val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["lint", files[idx]])
+        if code > 1:
+            crashes.push(files[idx])
+        idx = idx + 1
+    crashes
+
+describe "DAP System: variable inspection":
+    it "type system and semantics files parse without crashes":
+        if _can_run:
+            val crashes = check_lint_parse(type_files)
+            report_crashes("variables lint", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"

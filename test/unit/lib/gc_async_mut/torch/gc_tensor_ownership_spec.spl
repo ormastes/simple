@@ -1,0 +1,58 @@
+# GC Tensor Ownership Pattern Spec
+# Documents the owns_handle pattern in gc_async_mut/torch/mod.spl
+
+class MockTensor:
+    handle: i64
+    owns_handle: bool
+
+    fn should_free() -> bool:
+        self.owns_handle
+
+    fn sub_workaround() -> MockTensor:
+        # In GC mode, sub() creates a temp with owns_handle=false
+        # to prevent double-free when GC collects both original and result
+        var result = MockTensor(handle: self.handle + 100, owns_handle: true)
+        # Intermediate reference -- mark as non-owning
+        var temp = MockTensor(handle: self.handle, owns_handle: false)
+        result
+
+    fn mark_borrowed() -> MockTensor:
+        # Pattern from gc_async_mut/torch/mod.spl line 182:
+        # scaled.owns_handle = false
+        MockTensor(handle: self.handle, owns_handle: false)
+
+fn create_tensor(h: i64) -> MockTensor:
+    MockTensor(handle: h, owns_handle: true)
+
+describe "GC Tensor Ownership":
+    describe "Basic ownership":
+        it "owned tensor frees on drop":
+            val t = create_tensor(10)
+            # Verify the tensor would free (owns_handle is true)
+            expect(t.should_free()).to_equal(true)
+
+        it "borrowed tensor does not free":
+            val t = MockTensor(handle: 10, owns_handle: false)
+            # Verify the tensor would NOT free
+            expect(t.should_free()).to_equal(false)
+
+    describe "Sub/div workaround":
+        it "sub workaround does not double-free":
+            val original = create_tensor(20)
+            val result = original.sub_workaround()
+            # Result should own its handle
+            expect(result.should_free()).to_equal(true)
+            expect(result.handle).to_equal(120)
+            # Original still owns its handle
+            expect(original.should_free()).to_equal(true)
+
+    describe "Mark borrowed pattern":
+        it "marking as borrowed prevents free":
+            val t = create_tensor(30)
+            val borrowed = t.mark_borrowed()
+            # Borrowed should not free
+            expect(borrowed.should_free()).to_equal(false)
+            # Original should still free
+            expect(t.should_free()).to_equal(true)
+            # Same handle
+            expect(borrowed.handle).to_equal(t.handle)

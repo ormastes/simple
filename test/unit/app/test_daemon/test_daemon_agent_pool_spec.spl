@@ -1,0 +1,242 @@
+# Test: Agent pool — registration, batch claiming, stale detection, result reporting
+#
+# Tests agent pool logic using local mock implementations
+# (imports from app modules don't work in test runner).
+
+# ============================================================================
+# Mock AgentInfo
+# ============================================================================
+
+var agent_ids: [text] = []
+var agent_heartbeats: [i64] = []
+var agent_completed: [i64] = []
+var agent_in_progress: [i64] = []
+
+var pending_tests: [text] = []
+var progress_test: [text] = []
+var progress_agent: [text] = []
+var completed_tests: [text] = []
+var completed_status: [i64] = []
+
+var mock_batch_size = 3
+
+fn set_batch_size(n: i64):
+    mock_batch_size = n
+
+fn pool_reset():
+    agent_ids = []
+    agent_heartbeats = []
+    agent_completed = []
+    agent_in_progress = []
+    pending_tests = []
+    progress_test = []
+    progress_agent = []
+    completed_tests = []
+    completed_status = []
+    mock_batch_size = 3
+
+fn pool_find_agent(agent_id: text) -> i64:
+    var i = 0
+    while i < agent_ids.len():
+        if agent_ids[i] == agent_id:
+            return i
+        i = i + 1
+    -1
+
+fn pool_register(agent_id: text) -> bool:
+    val idx = pool_find_agent(agent_id)
+    if idx >= 0:
+        return false
+    agent_ids = agent_ids + [agent_id]
+    agent_heartbeats = agent_heartbeats + [1000]
+    agent_completed = agent_completed + [0]
+    agent_in_progress = agent_in_progress + [0]
+    true
+
+fn pool_active_count() -> i64:
+    agent_ids.len()
+
+fn pool_pending_count() -> i64:
+    pending_tests.len()
+
+fn pool_completed_count() -> i64:
+    completed_tests.len()
+
+fn pool_load_pending(files: [text]):
+    for f in files:
+        pending_tests = pending_tests + [f]
+
+fn pool_claim_batch(agent_id: text) -> [text]:
+    val idx = pool_find_agent(agent_id)
+    if idx < 0:
+        return []
+    var batch: [text] = []
+    var remaining: [text] = []
+    var claimed = 0
+    var i = 0
+    while i < pending_tests.len():
+        if claimed < mock_batch_size:
+            batch = batch + [pending_tests[i]]
+            progress_test = progress_test + [pending_tests[i]]
+            progress_agent = progress_agent + [agent_id]
+            claimed = claimed + 1
+        else:
+            remaining = remaining + [pending_tests[i]]
+        i = i + 1
+    pending_tests = remaining
+    agent_in_progress[idx] = agent_in_progress[idx] + claimed
+    batch
+
+fn pool_report_result(agent_id: text, test_path: text, status: i64) -> bool:
+    val idx = pool_find_agent(agent_id)
+    if idx < 0:
+        return false
+    completed_tests = completed_tests + [test_path]
+    completed_status = completed_status + [status]
+    agent_completed[idx] = agent_completed[idx] + 1
+    if agent_in_progress[idx] > 0:
+        agent_in_progress[idx] = agent_in_progress[idx] - 1
+    # Remove from in-progress
+    var new_pt: [text] = []
+    var new_pa: [text] = []
+    var i = 0
+    while i < progress_test.len():
+        if progress_test[i] != test_path:
+            new_pt = new_pt + [progress_test[i]]
+            new_pa = new_pa + [progress_agent[i]]
+        i = i + 1
+    progress_test = new_pt
+    progress_agent = new_pa
+    true
+
+fn pool_deregister(agent_id: text) -> bool:
+    val idx = pool_find_agent(agent_id)
+    if idx < 0:
+        return false
+    # Return in-progress tests to pending
+    var new_pt: [text] = []
+    var new_pa: [text] = []
+    var i = 0
+    while i < progress_test.len():
+        if progress_agent[i] == agent_id:
+            pending_tests = pending_tests + [progress_test[i]]
+        else:
+            new_pt = new_pt + [progress_test[i]]
+            new_pa = new_pa + [progress_agent[i]]
+        i = i + 1
+    progress_test = new_pt
+    progress_agent = new_pa
+    # Remove agent
+    var new_ids: [text] = []
+    var new_hb: [i64] = []
+    var new_comp: [i64] = []
+    var new_ip: [i64] = []
+    var j = 0
+    while j < agent_ids.len():
+        if j != idx:
+            new_ids = new_ids + [agent_ids[j]]
+            new_hb = new_hb + [agent_heartbeats[j]]
+            new_comp = new_comp + [agent_completed[j]]
+            new_ip = new_ip + [agent_in_progress[j]]
+        j = j + 1
+    agent_ids = new_ids
+    agent_heartbeats = new_hb
+    agent_completed = new_comp
+    agent_in_progress = new_ip
+    true
+
+# ============================================================================
+# Test helpers — wrap it block logic in module-level fns
+# ============================================================================
+
+fn test_register_one() -> bool:
+    pool_reset()
+    val ok = pool_register("agent-1")
+    ok and pool_active_count() == 1
+
+fn test_register_two() -> bool:
+    pool_reset()
+    pool_register("agent-1")
+    pool_register("agent-2")
+    pool_active_count() == 2
+
+fn test_claim_batch() -> bool:
+    pool_reset()
+    set_batch_size(2)
+    pool_register("agent-1")
+    pool_load_pending(["test/a.spl", "test/b.spl", "test/c.spl"])
+    val batch = pool_claim_batch("agent-1")
+    batch.len() == 2 and pool_pending_count() == 1
+
+fn test_claim_unknown() -> bool:
+    pool_reset()
+    pool_load_pending(["test/a.spl"])
+    val batch = pool_claim_batch("unknown")
+    batch.len() == 0
+
+fn test_claim_empty() -> bool:
+    pool_reset()
+    pool_register("agent-1")
+    val batch = pool_claim_batch("agent-1")
+    batch.len() == 0
+
+fn test_no_double_assign() -> bool:
+    pool_reset()
+    set_batch_size(5)
+    pool_register("agent-1")
+    pool_register("agent-2")
+    pool_load_pending(["test/a.spl", "test/b.spl", "test/c.spl"])
+    val batch1 = pool_claim_batch("agent-1")
+    val batch2 = pool_claim_batch("agent-2")
+    val total = batch1.len() + batch2.len()
+    total == 3
+
+fn test_report_result() -> bool:
+    pool_reset()
+    set_batch_size(5)
+    pool_register("agent-1")
+    pool_load_pending(["test/a.spl"])
+    pool_claim_batch("agent-1")
+    val ok = pool_report_result("agent-1", "test/a.spl", 2)
+    ok and pool_completed_count() == 1
+
+fn test_deregister_returns_work() -> bool:
+    pool_reset()
+    set_batch_size(5)
+    pool_register("agent-1")
+    pool_load_pending(["test/a.spl", "test/b.spl"])
+    pool_claim_batch("agent-1")
+    pool_deregister("agent-1")
+    pool_active_count() == 0 and pool_pending_count() > 0
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "AgentPool registration":
+    it "registers an agent":
+        expect(test_register_one()).to_equal(true)
+
+    it "registers multiple agents":
+        expect(test_register_two()).to_equal(true)
+
+describe "AgentPool batch claiming":
+    it "claims a batch of tests":
+        expect(test_claim_batch()).to_equal(true)
+
+    it "returns empty batch for unknown agent":
+        expect(test_claim_unknown()).to_equal(true)
+
+    it "returns empty batch when no pending tests":
+        expect(test_claim_empty()).to_equal(true)
+
+    it "does not double-assign tests":
+        expect(test_no_double_assign()).to_equal(true)
+
+describe "AgentPool result reporting":
+    it "records completed results":
+        expect(test_report_result()).to_equal(true)
+
+describe "AgentPool deregistration":
+    it "deregisters agent and returns work to pending":
+        expect(test_deregister_returns_work()).to_equal(true)

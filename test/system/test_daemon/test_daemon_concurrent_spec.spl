@@ -1,0 +1,398 @@
+# Test Daemon Concurrent System Test
+#
+# Tests concurrent request submission and deduplication via real
+# file-based IPC. Simulates multiple "agents" writing requests
+# to the same directory and verifies correct handling.
+#
+# **Feature IDs:** #TDMN-SYS-001 to #TDMN-SYS-020
+# **Category:** Infrastructure / System Test
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn simple_hash(s: text) -> i64:
+    val bs = s.bytes()
+    var h: i64 = 5381
+    var i = 0
+    while i < bs.len():
+        h = h * 33 + bs[i]
+        i = i + 1
+    if h < 0:
+        h = 0 - h
+    h
+
+fn list_dir_files(dir: text) -> [text]:
+    val names = rt_dir_list(dir) ?? []
+    var full: [text] = []
+    var i = 0
+    while i < names.len():
+        full = full + ["{dir}/{names[i]}"]
+        i = i + 1
+    full
+
+# ============================================================================
+# Module-level test infrastructure
+# ============================================================================
+
+var base_dir: text = ""
+var req_dir: text = ""
+var resp_dir: text = ""
+
+fn conc_setup():
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    base_dir = "/tmp/test_daemon_conc_{pid}_{ts}"
+    req_dir = "{base_dir}/requests"
+    resp_dir = "{base_dir}/responses"
+    rt_dir_create_all(base_dir)
+    rt_dir_create_all(req_dir)
+    rt_dir_create_all(resp_dir)
+
+fn conc_cleanup():
+    cleanup_conc_dir(req_dir)
+    cleanup_conc_dir(resp_dir)
+    rt_file_delete(base_dir)
+
+fn cleanup_conc_dir(dir: text):
+    if not rt_file_exists(dir):
+        return
+    val files = list_dir_files(dir)
+    var i = 0
+    while i < files.len():
+        rt_file_delete(files[i])
+        i = i + 1
+
+# Simulate agent writing a request
+fn agent_submit(agent_id: i64, test_path: text, kind: i64) -> text:
+    val ts = rt_time_now_unix_micros()
+    val req_id = "agent{agent_id}_{ts}"
+    var parts: [text] = []
+    parts.push("id={req_id}")
+    parts.push("kind={kind}")
+    parts.push("timestamp={ts}")
+    parts.push("field.test_path={test_path}")
+    parts.push("field.agent_id={agent_id}")
+    val content = parts.join("\n") + "\n"
+    val hash = simple_hash(req_id)
+    val path = "{req_dir}/{hash}_{req_id}.req"
+    rt_file_write_text(path, content)
+    req_id
+
+# Simulate daemon writing a response
+fn daemon_respond(req_id: text, status: i64, test_path: text, passed: i64, failed: i64):
+    var parts: [text] = []
+    parts.push("request_id={req_id}")
+    parts.push("status={status}")
+    parts.push("timestamp={rt_time_now_unix_micros()}")
+    parts.push("field.test_path={test_path}")
+    parts.push("field.passed={passed}")
+    parts.push("field.failed={failed}")
+    parts.push("field.cached=false")
+    val content = parts.join("\n") + "\n"
+    val path = "{resp_dir}/{req_id}.resp"
+    rt_file_write_text(path, content)
+
+fn daemon_respond_cached(req_id: text, test_path: text, passed: i64):
+    var parts: [text] = []
+    parts.push("request_id={req_id}")
+    parts.push("status=6")
+    parts.push("timestamp={rt_time_now_unix_micros()}")
+    parts.push("field.test_path={test_path}")
+    parts.push("field.passed={passed}")
+    parts.push("field.failed=0")
+    parts.push("field.cached=true")
+    val content = parts.join("\n") + "\n"
+    val path = "{resp_dir}/{req_id}.resp"
+    rt_file_write_text(path, content)
+
+# Read all pending requests
+fn read_all_requests() -> [(text, text, i64)]:
+    var results: [(text, text, i64)] = []
+    if not rt_file_exists(req_dir):
+        return results
+    val files = list_dir_files(req_dir)
+    var i = 0
+    while i < files.len():
+        val path = files[i]
+        if path.ends_with(".req"):
+            val content = rt_file_read_text(path) ?? ""
+            val id = extract_val(content, "id=")
+            val test_path = extract_val(content, "field.test_path=")
+            val kind_str = extract_val(content, "kind=")
+            val kind = kind_str.to_i64() ?? 0
+            results = results + [(id, test_path, kind)]
+        i = i + 1
+    results
+
+# Read a specific response
+fn read_response(req_id: text) -> (i64, text, i64, i64, bool):
+    val path = "{resp_dir}/{req_id}.resp"
+    if not rt_file_exists(path):
+        return (-1, "", 0, 0, false)
+    val content = rt_file_read_text(path) ?? ""
+    val status = (extract_val(content, "status=")).to_i64() ?? -1
+    val test_path = extract_val(content, "field.test_path=")
+    val passed = (extract_val(content, "field.passed=")).to_i64() ?? 0
+    val failed = (extract_val(content, "field.failed=")).to_i64() ?? 0
+    val cached = extract_val(content, "field.cached=") == "true"
+    (status, test_path, passed, failed, cached)
+
+fn extract_val(content: text, prefix: text) -> text:
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with(prefix):
+            return lines[i].substring(prefix.len())
+        i = i + 1
+    ""
+
+fn count_req_files() -> i64:
+    if not rt_file_exists(req_dir):
+        return 0
+    val files = list_dir_files(req_dir)
+    var c: i64 = 0
+    var i = 0
+    while i < files.len():
+        if files[i].ends_with(".req"):
+            c = c + 1
+        i = i + 1
+    c
+
+fn count_resp_files() -> i64:
+    if not rt_file_exists(resp_dir):
+        return 0
+    val files = list_dir_files(resp_dir)
+    var c: i64 = 0
+    var i = 0
+    while i < files.len():
+        if files[i].ends_with(".resp"):
+            c = c + 1
+        i = i + 1
+    c
+
+fn get_base_dir() -> text:
+    base_dir
+
+# ============================================================================
+# Helper functions (extracted from it blocks to avoid closure mutation bugs)
+# ============================================================================
+
+fn submit_n_rapid_agents(n: i64):
+    var i: i64 = 0
+    while i < n:
+        agent_submit(i, "test/rapid_{i}_spec.spl", 1)
+        i = i + 1
+
+fn delete_req_files_in_dir():
+    val files = list_dir_files(req_dir)
+    var i = 0
+    while i < files.len():
+        if files[i].ends_with(".req"):
+            rt_file_delete(files[i])
+        i = i + 1
+
+fn submit_n_agents_stress(n: i64, path_prefix: text) -> [text]:
+    var ids: [text] = []
+    var i: i64 = 0
+    while i < n:
+        val id = agent_submit(i, "{path_prefix}{i}_spec.spl", 1)
+        ids = ids + [id]
+        i = i + 1
+    ids
+
+fn respond_n_agents_stress(ids: [text], n: i64, path_prefix: text):
+    var j: i64 = 0
+    while j < n:
+        daemon_respond(ids[j], 2, "{path_prefix}{j}_spec.spl", 1, 0)
+        j = j + 1
+
+fn verify_n_agents_stress(ids: [text], n: i64):
+    var k: i64 = 0
+    while k < n:
+        val resp = read_response(ids[k])
+        expect(resp[0]).to_equal(2)
+        k = k + 1
+
+fn submit_n_agents_same_test(n: i64, test_path: text) -> [text]:
+    var ids: [text] = []
+    var i: i64 = 0
+    while i < n:
+        val id = agent_submit(i, test_path, 1)
+        ids = ids + [id]
+        i = i + 1
+    ids
+
+fn respond_n_agents_same_test(ids: [text], n: i64, test_path: text, passed: i64):
+    var j: i64 = 0
+    while j < n:
+        daemon_respond(ids[j], 2, test_path, passed, 0)
+        j = j + 1
+
+fn verify_n_agents_same_test(ids: [text], n: i64, expected_passed: i64):
+    var k: i64 = 0
+    while k < n:
+        val resp = read_response(ids[k])
+        expect(resp[0]).to_equal(2)
+        expect(resp[2]).to_equal(expected_passed)
+        k = k + 1
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "TestDaemon Concurrent IPC":
+    describe "multi-agent submission":
+        it "handles requests from 5 concurrent agents":
+            conc_setup()
+            agent_submit(1, "test/a_spec.spl", 1)
+            agent_submit(2, "test/b_spec.spl", 1)
+            agent_submit(3, "test/c_spec.spl", 1)
+            agent_submit(4, "test/d_spec.spl", 1)
+            agent_submit(5, "test/e_spec.spl", 1)
+            expect(count_req_files()).to_equal(5)
+            conc_cleanup()
+
+        it "preserves all request data":
+            conc_setup()
+            val id1 = agent_submit(10, "test/foo_spec.spl", 1)
+            val id2 = agent_submit(20, "test/bar_spec.spl", 3)
+            val reqs = read_all_requests()
+            expect(reqs.len()).to_equal(2)
+            conc_cleanup()
+
+        it "handles 20 rapid sequential submissions":
+            conc_setup()
+            submit_n_rapid_agents(20)
+            expect(count_req_files()).to_equal(20)
+            conc_cleanup()
+
+    describe "deduplication simulation":
+        it "allows same test from different agents":
+            conc_setup()
+            val id1 = agent_submit(1, "test/shared_spec.spl", 1)
+            val id2 = agent_submit(2, "test/shared_spec.spl", 1)
+            # Both should create separate request files (dedup happens in daemon)
+            expect(count_req_files()).to_equal(2)
+            expect(id1 != id2).to_equal(true)
+            conc_cleanup()
+
+        it "daemon responds to first, redirects second":
+            conc_setup()
+            val id1 = agent_submit(1, "test/dedup_spec.spl", 1)
+            val id2 = agent_submit(2, "test/dedup_spec.spl", 1)
+            # Daemon runs test once, responds to both
+            daemon_respond(id1, 2, "test/dedup_spec.spl", 5, 0)
+            daemon_respond(id2, 2, "test/dedup_spec.spl", 5, 0)
+            val resp1 = read_response(id1)
+            val resp2 = read_response(id2)
+            expect(resp1[0]).to_equal(2)
+            expect(resp2[0]).to_equal(2)
+            expect(resp1[2]).to_equal(5)
+            expect(resp2[2]).to_equal(5)
+            conc_cleanup()
+
+    describe "cache simulation":
+        it "returns cached response for unchanged test":
+            conc_setup()
+            val id = agent_submit(1, "test/cached_spec.spl", 1)
+            daemon_respond_cached(id, "test/cached_spec.spl", 10)
+            val resp = read_response(id)
+            expect(resp[0]).to_equal(6)
+            expect(resp[2]).to_equal(10)
+            expect(resp[4]).to_equal(true)
+            conc_cleanup()
+
+        it "executes and caches new test":
+            conc_setup()
+            val id = agent_submit(1, "test/new_spec.spl", 1)
+            daemon_respond(id, 2, "test/new_spec.spl", 8, 0)
+            val resp = read_response(id)
+            expect(resp[0]).to_equal(2)
+            expect(resp[4]).to_equal(false)
+            conc_cleanup()
+
+    describe "clean run bypass":
+        it "always executes clean run (kind=3)":
+            conc_setup()
+            val id = agent_submit(1, "test/force_spec.spl", 3)
+            daemon_respond(id, 2, "test/force_spec.spl", 7, 0)
+            val resp = read_response(id)
+            expect(resp[0]).to_equal(2)
+            expect(resp[4]).to_equal(false)
+            conc_cleanup()
+
+    describe "mixed request types":
+        it "handles RUN_SINGLE, CLEAN, and STATUS simultaneously":
+            conc_setup()
+            val id1 = agent_submit(1, "test/a_spec.spl", 1)
+            val id2 = agent_submit(2, "test/b_spec.spl", 3)
+            val id3 = agent_submit(3, "", 4)
+            expect(count_req_files()).to_equal(3)
+            val reqs = read_all_requests()
+            # All three requests present
+            expect(reqs.len()).to_equal(3)
+            conc_cleanup()
+
+    describe "response delivery":
+        it "each agent gets its own response":
+            conc_setup()
+            val id1 = agent_submit(1, "test/a_spec.spl", 1)
+            val id2 = agent_submit(2, "test/b_spec.spl", 1)
+            val id3 = agent_submit(3, "test/c_spec.spl", 1)
+            daemon_respond(id1, 2, "test/a_spec.spl", 10, 0)
+            daemon_respond(id2, 3, "test/b_spec.spl", 3, 2)
+            daemon_respond(id3, 2, "test/c_spec.spl", 7, 0)
+            val r1 = read_response(id1)
+            val r2 = read_response(id2)
+            val r3 = read_response(id3)
+            expect(r1[0]).to_equal(2)
+            expect(r1[2]).to_equal(10)
+            expect(r2[0]).to_equal(3)
+            expect(r2[3]).to_equal(2)
+            expect(r3[0]).to_equal(2)
+            expect(r3[2]).to_equal(7)
+            conc_cleanup()
+
+        it "response arrives after request cleanup":
+            conc_setup()
+            val id = agent_submit(1, "test/x_spec.spl", 1)
+            # Daemon reads and processes request
+            val reqs = read_all_requests()
+            expect(reqs.len()).to_equal(1)
+            # Daemon deletes request files after processing
+            delete_req_files_in_dir()
+            expect(count_req_files()).to_equal(0)
+            # Daemon writes response
+            daemon_respond(id, 2, "test/x_spec.spl", 5, 0)
+            # Agent can still read response
+            val resp = read_response(id)
+            expect(resp[0]).to_equal(2)
+            conc_cleanup()
+
+    describe "stress test":
+        it "handles 50 agents submitting different tests":
+            conc_setup()
+            val ids = submit_n_agents_stress(50, "test/stress_")
+            expect(count_req_files()).to_equal(50)
+            # Daemon processes all and writes responses
+            respond_n_agents_stress(ids, 50, "test/stress_")
+            expect(count_resp_files()).to_equal(50)
+            # All agents get correct responses
+            verify_n_agents_stress(ids, 50)
+            conc_cleanup()
+
+        it "handles 10 agents all requesting same test":
+            conc_setup()
+            val ids = submit_n_agents_same_test(10, "test/same_spec.spl")
+            expect(count_req_files()).to_equal(10)
+            # Daemon deduplicates — responds to all with same result
+            respond_n_agents_same_test(ids, 10, "test/same_spec.spl", 15)
+            # All agents get response
+            verify_n_agents_same_test(ids, 10, 15)
+            conc_cleanup()

@@ -51,7 +51,7 @@ These are the shared tree nodes that cross the most layer boundaries. They are c
 |---|---|---|---|---|
 | `hir.hir` | 20.hir | 25.traits, 30.types, 35.semantics, 70.backend, 80.driver, 85.mdsoc, 90.tools | 36 | Core HIR — foundation of entire middle-end |
 | `mir.mir_data` | 50.mir | 55.borrow, 60.mir_opt, 70.backend, 90.tools | 82 | MIR data structures — highest single-module import count |
-| `frontend.core.lexer` (Span) | 10.frontend | 25.traits, 30.types, 35.semantics, 70.backend, 80.driver | 33 | Source location tracking |
+| `common.diagnostics.span` (Span) | 00.common | 10.frontend, 25.traits, 30.types, 35.semantics, 70.backend, 80.driver | 33 | Source location tracking (canonical definition) |
 | `common.config` | 00.common | 10.frontend, 20.hir, 80.driver, 99.loader | ~10 | Central global configuration |
 
 ### Tier 2 — Key Interface Types (3 consuming layers)
@@ -67,9 +67,9 @@ These are the shared tree nodes that cross the most layer boundaries. They are c
 ### Layer Dependency Flow
 
 ```
-00.common ─────────────────────────────────────────────────── (config, errors, effects)
+00.common ─────────────────────────────────────────────────── (config, errors, effects, Span)
     ↓                                                              ↓
-10.frontend ──────────────────────────────────────────── (AST, Span, tokens)
+10.frontend ──────────────────────────────────────────── (AST, tokens; Span re-imported from L0)
     ↓              ↓                                          ↓
 15.blocks     20.hir ──────────────────────────────── (HIR: 7 consumers)
                   ↓         ↓         ↓
@@ -133,7 +133,7 @@ Same principles as the Rust to-be, applied to numbered layers:
 
 | Current Location | Issue | To-Be |
 |---|---|---|
-| `frontend.core.lexer.Span` | Used by 5+ layers far downstream | Extract to `00.common/span.spl` or keep in frontend with explicit facade |
+| ~~`frontend.core.lexer.Span`~~ `common.diagnostics.span.Span` | ~~Used by 5+ layers far downstream~~ **DONE** — extracted to `00.common/diagnostics/span.spl` | **Completed 2026-03-12**: canonical Span in L0, `lexer_types.spl` and `block_types.spl` re-import from common |
 | `hir.hir` | 7-layer fan-out — widest shared contract | Acceptable: HIR is the canonical middle-end IR; enforce facade discipline |
 | `mir.mir_data` | 82 imports from backend alone | Acceptable: MIR is the canonical low-level IR; backend convergence is by design |
 
@@ -317,6 +317,28 @@ common/src/platform/
 - New OS support: add variant to `PlatformLinkConfig::for_target()`
 - New CPU arch: add variant to `asm_helpers.rs`
 - Consumers (compiler/linker) never use `#[cfg(target_os)]` for link config — use `PlatformLinkConfig`
+
+## Layer Violation Fixes Applied (Pure Simple, 2026-03-12)
+
+### L0→L1: Span Unification
+- **Canonical Span** now in `00.common/diagnostics/span.spl` (renamed `column`→`col`, added `empty()`, `merge()`, desugared free functions)
+- 8 files in `00.common/` updated: `error.spl`, `gc_config.spl`, `gc_boundary.spl`, `attributes.spl`, `visibility_checker.spl`, `visibility_integration.spl`, `unsafe.spl`, `volatile.spl`
+- Duplicate Span removed from `10.frontend/lexer_types.spl` and `10.frontend/block_types.spl` (now re-import from common)
+
+### L0→L7: env_get Inlined
+- `config.spl` no longer imports from `compiler.backend.ffi` — inlined `extern fn rt_env_get`
+- `compiler_services.spl` BackendPort import documented as orchestration bypass (depends on L2 HirModule + L7 BackendResult)
+
+### L0→L2: HIR-Dependent Files Moved to L35
+- `unsafe.spl`, `volatile.spl`, `visibility_checker.spl`, `visibility_integration.spl` moved from `00.common/` to `35.semantics/`
+- These files imported HIR types (HirType, HirExpr, etc.) — they are semantic analysis passes, not common utilities
+- Driver consumers updated: `80.driver/driver.spl`, `80.driver/driver_api.spl`
+
+### Remaining Documented Bypasses
+| File | Bypass | Reason |
+|---|---|---|
+| `compiler_services.spl` | L0→L7 (BackendPort) | Orchestration type — cross-cutting by design |
+| `attributes.spl` | L0→L1 (Attribute/Expr), L0→L3 (LayoutAttr) | Parsing functions needed by L1 consumer (`spawn_analysis.spl`); split deferred |
 
 ## Migration Sequence
 

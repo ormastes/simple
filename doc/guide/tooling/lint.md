@@ -59,6 +59,14 @@ Line-by-line text analysis with machine-applicable fixes.
 | L:deprecated_if_let | Likely | Replace `if let` with `if val` |
 | L:struct_construction_parens | Safe | Fix struct construction syntax |
 | L:stub_impl | Likely | Function with params returns trivial literal |
+| L:unknown_decorator | Likely | Unknown `@decorator` not in whitelist |
+| L:unknown_attribute | Likely | Unknown `#[attribute]` not in whitelist |
+| L:export_outside_init | Certain | `export` statement outside `__init__.spl` |
+| L:init_boundary_violation | Uncertain | Import bypasses `__init__.spl` boundary |
+| L:bypass_with_code_files | Uncertain | `#[bypass]` in `__init__.spl` with sibling code |
+| L:bare_bool | Uncertain | Bare `bool` parameter — suggest enum |
+| L:sspec_no_print_based_tests | Certain | Print-based BDD framework in `_spec.spl` |
+| L:sspec_minimal_docstrings | Likely | Test file has too few docstrings |
 
 ### 3. Semantic Linter Tool (`src/compiler/90.tools/lint/main.spl`)
 
@@ -221,6 +229,58 @@ fn gc_malloc(size: i64) -> i64:
 fn gc_malloc(size: i64) -> i64:
     pass_todo("implement GC allocation")
     0
+```
+
+---
+
+## Lint Configuration (`simple.sdn`)
+
+The linter reads project-wide lint levels from `simple.sdn`:
+
+```sdn
+[lints]
+primitive_api = "warn"
+bare_bool = "warn"
+export_outside_init = "deny"
+too_many_arguments = "warn"
+wildcard_match = "allow"
+```
+
+### All Configurable Lints
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `primitive_api` | warn | Bare primitives in public APIs |
+| `bare_bool` | warn | Boolean parameters (suggest enum) |
+| `print_in_test_spec` | warn | `print()` in test specs |
+| `todo_format` | warn | TODO/FIXME format compliance |
+| `sspec_no_print_based_tests` | **deny** | Print-based BDD tests |
+| `sspec_missing_docstrings` | warn | Missing docstrings in describe/context |
+| `sspec_minimal_docstrings` | warn | Too few docstrings in test files |
+| `sspec_manual_assertions` | warn | Manual pass/fail instead of expect() |
+| `unnamed_duplicate_typed_args` | warn | Same-typed params without names |
+| `resource_leak` | warn | Unclosed resources |
+| `wildcard_match` | allow | Wildcard `_` in match |
+| `non_exhaustive_match` | warn | Missing match arms |
+| `export_outside_init` | **deny** | Exports outside `__init__.spl` |
+| `init_boundary_violation` | warn | Import bypasses `__init__.spl` |
+| `bypass_with_code_files` | warn | `#[bypass]` with sibling code |
+| `unknown_decorator` | warn | Unknown `@decorator` |
+| `unknown_attribute` | warn | Unknown `#[attribute]` |
+| `too_many_arguments` | warn | Functions with >7 params |
+
+### File-Level Overrides
+
+Use attributes to override lint levels per-file:
+
+```simple
+#![allow(primitive_api, bare_bool)]   # Inner attribute — file-level
+
+#[allow(too_many_arguments)]          # Outer attribute — file-level (before first definition)
+fn complex_fn(a, b, c, d, e, f, g, h):
+    ...
+
+#[allow(unknown_annotation)]          # Meta-lint: suppresses both unknown_decorator + unknown_attribute
 ```
 
 ---

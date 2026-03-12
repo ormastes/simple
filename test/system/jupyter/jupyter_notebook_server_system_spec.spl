@@ -1,0 +1,140 @@
+# Jupyter Notebook Server End-to-End System Test
+#
+# Tests the full Jupyter integration through Docker:
+#   1. Builds Docker image with Jupyter + Simple kernel
+#   2. Inside Docker: starts real Jupyter notebook server on localhost
+#   3. HTTP GET /api/status — server is alive
+#   4. HTTP GET /api/kernelspecs — "simple" kernel is listed
+#   5. HTTP POST /api/sessions — Simple kernel session starts
+#   6. ZMQ execute_request: `print "Hello from Simple!"` — output verified
+#   7. ZMQ execute_request: `val x = 42\nprint x` — output "42" verified
+#
+# Non-Docker tests (run locally with Python deps):
+#   - kernel.json static validation
+#   - kernel_wrapper.py Python syntax check
+#   - nbconvert --execute with hello.ipynb fixture
+#
+# Requirements:
+#   Docker tests: docker (or podman), bin/release/simple
+#   Local tests:  python3, pyzmq, jupyter_client, notebook, nbconvert
+
+# tag: slow, system
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn check_docker() -> bool:
+    val (stdout, stderr, code) = rt_process_run("docker", ["info"])
+    code == 0
+
+fn check_python_jupyter() -> bool:
+    val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import jupyter_client; import nbconvert; print('ok')"])
+    if code != 0:
+        return false
+    val (stdout2, stderr2, code2) = rt_process_run("python3", ["-c", "import zmq; print('ok')"])
+    code2 == 0
+
+fn check_notebook_package() -> bool:
+    val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import notebook; print('ok')"])
+    code == 0
+
+fn check_simple_binary() -> bool:
+    rt_file_exists("bin/release/simple")
+
+val _has_docker = check_docker()
+val _has_jupyter = check_python_jupyter()
+val _has_notebook = check_notebook_package()
+val _has_binary = check_simple_binary()
+
+describe "Jupyter Notebook Server E2E":
+
+    # -----------------------------------------------------------------------
+    # Docker E2E: Full integration test inside container
+    # Builds image, starts Jupyter server, creates kernel session via HTTP,
+    # executes cells via ZMQ, verifies output
+    # -----------------------------------------------------------------------
+    it "should pass full E2E test in Docker container":
+        if not _has_docker:
+            print "SKIP: docker not available"
+            return
+        if not _has_binary:
+            print "SKIP: bin/release/simple not found"
+            return
+        print "Building Docker image and running E2E test (this takes ~60s)..."
+        val (stdout, stderr, code) = rt_process_run("sh", ["scripts/test/jupyter-docker-test.shs"])
+        print stdout
+        if code != 0 and stderr.trim() != "":
+            print "stderr (tail): {stderr.substring(stderr.len() - 300)}"
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("ALL CHECKS PASSED")
+
+    # -----------------------------------------------------------------------
+    # Local E2E: Start real Jupyter server, HTTP + ZMQ checks
+    # Same checks as Docker but runs on host (needs python deps installed)
+    # -----------------------------------------------------------------------
+    it "should start server and execute cell via HTTP + ZMQ locally":
+        if not _has_notebook or not _has_binary or not _has_jupyter:
+            print "SKIP: missing notebook/jupyter/binary"
+            return
+        val helper = "test/system/jupyter/helpers/run_server_check.py"
+        val (stdout, stderr, code) = rt_process_run("python3", [helper])
+        print stdout
+        if code != 0 and stderr.trim() != "":
+            val tail_start = stderr.len() - 300
+            if tail_start < 0:
+                print "stderr: {stderr}"
+            else:
+                print "stderr (tail): {stderr.substring(tail_start)}"
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("ALL CHECKS PASSED")
+
+    # -----------------------------------------------------------------------
+    # nbconvert E2E: Execute hello.ipynb, verify cell outputs
+    # Input:
+    #   Cell 0: print "Hello from Simple!"    -> expect "Hello from Simple!"
+    #   Cell 1: val x = 42 / print x          -> expect "42"
+    #   Cell 2: fn double(...) / print double(21) -> expect "42"
+    # -----------------------------------------------------------------------
+    it "should execute hello.ipynb via nbconvert and verify output":
+        if not _has_jupyter or not _has_binary:
+            print "SKIP: missing dependencies"
+            return
+        val helper = "test/system/jupyter/helpers/run_notebook_server_test.py"
+        val (stdout, stderr, code) = rt_process_run("python3", [helper, "--notebook", "test/system/jupyter/fixtures/hello.ipynb", "--skip-server"])
+        print stdout
+        if code != 0 and stderr.trim() != "":
+            print "stderr: {stderr}"
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("ALL CHECKS PASSED")
+
+    # -----------------------------------------------------------------------
+    # nbconvert E2E: Execute state_persistence.ipynb
+    # Input:
+    #   Cell 0: val x = 42                    -> no output
+    #   Cell 1: print x                       -> expect "42"
+    #   Cell 2: fn greet(name: text) -> text  -> no output
+    #   Cell 3: print greet("World")          -> expect "Hello, World!"
+    # -----------------------------------------------------------------------
+    it "should execute state_persistence.ipynb and verify cross-cell state":
+        if not _has_jupyter or not _has_binary:
+            print "SKIP: missing dependencies"
+            return
+        val helper = "test/system/jupyter/helpers/run_notebook_server_test.py"
+        val (stdout, stderr, code) = rt_process_run("python3", [helper, "--notebook", "test/system/jupyter/fixtures/state_persistence.ipynb", "--skip-server"])
+        print stdout
+        if code != 0 and stderr.trim() != "":
+            print "stderr: {stderr}"
+        expect(code).to_equal(0)
+
+    # -----------------------------------------------------------------------
+    # Static checks
+    # -----------------------------------------------------------------------
+    it "should have kernel.json with display_name 'Simple'":
+        val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import json; d=json.load(open('tools/jupyter/kernel.json')); print(d['display_name'])"])
+        expect(code).to_equal(0)
+        expect(stdout.trim()).to_equal("Simple")
+
+    it "should have kernel_wrapper.py with valid Python syntax":
+        val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import ast; ast.parse(open('tools/jupyter/kernel_wrapper.py').read()); print('ok')"])
+        expect(code).to_equal(0)
+        expect(stdout.trim()).to_equal("ok")

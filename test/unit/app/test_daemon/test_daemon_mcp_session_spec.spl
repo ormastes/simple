@@ -1,0 +1,495 @@
+# Test Daemon MCP Debug Session Specification
+#
+# Tests MCP debug session management: creation, breakpoints,
+# state transitions, data breakpoints, multi-session coordination,
+# and session cleanup.
+#
+# **Feature IDs:** #TDMN-091 to #TDMN-110
+# **Category:** Infrastructure
+
+# ============================================================================
+# Module-level mock state — simulates SessionManager/DebugSession
+# ============================================================================
+
+val SESS_CREATED: i64 = 0
+val SESS_RUNNING: i64 = 1
+val SESS_PAUSED: i64 = 2
+val SESS_TERMINATED: i64 = 3
+
+val TGT_INTERPRETER: i64 = 0
+val TGT_SMF: i64 = 1
+val TGT_NATIVE: i64 = 2
+val TGT_REMOTE: i64 = 3
+
+var ds_ids: [text] = []
+var ds_target_types: [i64] = []
+var ds_program_paths: [text] = []
+var ds_states: [i64] = []
+var ds_next_id: i64 = 1
+
+# Breakpoint storage — flat arrays with session references
+var bp_ids: [i64] = []
+var bp_session_ids: [text] = []
+var bp_files: [text] = []
+var bp_lines: [i64] = []
+var bp_conditions: [text] = []
+var bp_enabled: [bool] = []
+var bp_hit_counts: [i64] = []
+var bp_next_id: i64 = 1
+
+# Data breakpoint storage
+var dbp_ids: [i64] = []
+var dbp_session_ids: [text] = []
+var dbp_var_names: [text] = []
+var dbp_access_types: [text] = []   # "write", "readWrite"
+var dbp_conditions: [text] = []
+var dbp_next_id: i64 = 1
+
+fn ds_reset_all():
+    ds_ids = []
+    ds_target_types = []
+    ds_program_paths = []
+    ds_states = []
+    ds_next_id = 1
+    bp_ids = []
+    bp_session_ids = []
+    bp_files = []
+    bp_lines = []
+    bp_conditions = []
+    bp_enabled = []
+    bp_hit_counts = []
+    bp_next_id = 1
+    dbp_ids = []
+    dbp_session_ids = []
+    dbp_var_names = []
+    dbp_access_types = []
+    dbp_conditions = []
+    dbp_next_id = 1
+
+fn ds_find(id: text) -> i64:
+    var i = 0
+    while i < ds_ids.len():
+        if ds_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn ds_create(target_type: i64, program_path: text) -> text:
+    val id = "ds_{ds_next_id}"
+    ds_next_id = ds_next_id + 1
+    ds_ids = ds_ids + [id]
+    ds_target_types = ds_target_types + [target_type]
+    ds_program_paths = ds_program_paths + [program_path]
+    ds_states = ds_states + [SESS_CREATED]
+    id
+
+fn ds_set_state(id: text, state: i64) -> bool:
+    val idx = ds_find(id)
+    if idx < 0:
+        return false
+    ds_states[idx] = state
+    true
+
+fn ds_remove(id: text) -> bool:
+    val idx = ds_find(id)
+    if idx < 0:
+        return false
+    # Remove session
+    var ni: [text] = []
+    var nt: [i64] = []
+    var np: [text] = []
+    var ns: [i64] = []
+    var j = 0
+    while j < ds_ids.len():
+        if j != idx:
+            ni = ni + [ds_ids[j]]
+            nt = nt + [ds_target_types[j]]
+            np = np + [ds_program_paths[j]]
+            ns = ns + [ds_states[j]]
+        j = j + 1
+    ds_ids = ni
+    ds_target_types = nt
+    ds_program_paths = np
+    ds_states = ns
+    # Also remove associated breakpoints
+    ds_remove_bps_for_session(id)
+    ds_remove_dbps_for_session(id)
+    true
+
+fn ds_remove_bps_for_session(session_id: text):
+    var ni: [i64] = []
+    var ns: [text] = []
+    var nf: [text] = []
+    var nl: [i64] = []
+    var nc: [text] = []
+    var ne: [bool] = []
+    var nh: [i64] = []
+    var i = 0
+    while i < bp_ids.len():
+        if bp_session_ids[i] != session_id:
+            ni = ni + [bp_ids[i]]
+            ns = ns + [bp_session_ids[i]]
+            nf = nf + [bp_files[i]]
+            nl = nl + [bp_lines[i]]
+            nc = nc + [bp_conditions[i]]
+            ne = ne + [bp_enabled[i]]
+            nh = nh + [bp_hit_counts[i]]
+        i = i + 1
+    bp_ids = ni
+    bp_session_ids = ns
+    bp_files = nf
+    bp_lines = nl
+    bp_conditions = nc
+    bp_enabled = ne
+    bp_hit_counts = nh
+
+fn ds_remove_dbps_for_session(session_id: text):
+    var ni: [i64] = []
+    var ns: [text] = []
+    var nv: [text] = []
+    var na: [text] = []
+    var nc: [text] = []
+    var i = 0
+    while i < dbp_ids.len():
+        if dbp_session_ids[i] != session_id:
+            ni = ni + [dbp_ids[i]]
+            ns = ns + [dbp_session_ids[i]]
+            nv = nv + [dbp_var_names[i]]
+            na = na + [dbp_access_types[i]]
+            nc = nc + [dbp_conditions[i]]
+        i = i + 1
+    dbp_ids = ni
+    dbp_session_ids = ns
+    dbp_var_names = nv
+    dbp_access_types = na
+    dbp_conditions = nc
+
+fn ds_add_breakpoint(session_id: text, file: text, line: i64, condition: text) -> i64:
+    if ds_find(session_id) < 0:
+        return -1
+    val id = bp_next_id
+    bp_next_id = bp_next_id + 1
+    bp_ids = bp_ids + [id]
+    bp_session_ids = bp_session_ids + [session_id]
+    bp_files = bp_files + [file]
+    bp_lines = bp_lines + [line]
+    bp_conditions = bp_conditions + [condition]
+    bp_enabled = bp_enabled + [true]
+    bp_hit_counts = bp_hit_counts + [0]
+    id
+
+fn ds_remove_breakpoint(session_id: text, bp_id: i64) -> bool:
+    var found = false
+    var ni: [i64] = []
+    var ns: [text] = []
+    var nf: [text] = []
+    var nl: [i64] = []
+    var nc: [text] = []
+    var ne: [bool] = []
+    var nh: [i64] = []
+    var i = 0
+    while i < bp_ids.len():
+        if bp_ids[i] == bp_id and bp_session_ids[i] == session_id:
+            found = true
+        else:
+            ni = ni + [bp_ids[i]]
+            ns = ns + [bp_session_ids[i]]
+            nf = nf + [bp_files[i]]
+            nl = nl + [bp_lines[i]]
+            nc = nc + [bp_conditions[i]]
+            ne = ne + [bp_enabled[i]]
+            nh = nh + [bp_hit_counts[i]]
+        i = i + 1
+    bp_ids = ni
+    bp_session_ids = ns
+    bp_files = nf
+    bp_lines = nl
+    bp_conditions = nc
+    bp_enabled = ne
+    bp_hit_counts = nh
+    found
+
+fn ds_add_data_breakpoint(session_id: text, var_name: text, access_type: text, condition: text) -> i64:
+    if ds_find(session_id) < 0:
+        return -1
+    val id = dbp_next_id
+    dbp_next_id = dbp_next_id + 1
+    dbp_ids = dbp_ids + [id]
+    dbp_session_ids = dbp_session_ids + [session_id]
+    dbp_var_names = dbp_var_names + [var_name]
+    dbp_access_types = dbp_access_types + [access_type]
+    dbp_conditions = dbp_conditions + [condition]
+    id
+
+fn ds_hit_breakpoint(bp_id: i64):
+    var i = 0
+    while i < bp_ids.len():
+        if bp_ids[i] == bp_id:
+            bp_hit_counts[i] = bp_hit_counts[i] + 1
+            return
+        i = i + 1
+
+# Getters
+fn ds_count() -> i64:
+    ds_ids.len()
+
+fn ds_get_state(id: text) -> i64:
+    val idx = ds_find(id)
+    if idx >= 0:
+        return ds_states[idx]
+    -1
+
+fn ds_get_target(id: text) -> i64:
+    val idx = ds_find(id)
+    if idx >= 0:
+        return ds_target_types[idx]
+    -1
+
+fn ds_get_program(id: text) -> text:
+    val idx = ds_find(id)
+    if idx >= 0:
+        return ds_program_paths[idx]
+    ""
+
+fn ds_bp_count_for_session(session_id: text) -> i64:
+    var c: i64 = 0
+    var i = 0
+    while i < bp_session_ids.len():
+        if bp_session_ids[i] == session_id:
+            c = c + 1
+        i = i + 1
+    c
+
+fn ds_dbp_count_for_session(session_id: text) -> i64:
+    var c: i64 = 0
+    var i = 0
+    while i < dbp_session_ids.len():
+        if dbp_session_ids[i] == session_id:
+            c = c + 1
+        i = i + 1
+    c
+
+fn ds_get_bp_hit_count(bp_id: i64) -> i64:
+    var i = 0
+    while i < bp_ids.len():
+        if bp_ids[i] == bp_id:
+            return bp_hit_counts[i]
+        i = i + 1
+    0
+
+fn ds_total_bp_count() -> i64:
+    bp_ids.len()
+
+fn ds_total_dbp_count() -> i64:
+    dbp_ids.len()
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn ds_create_multi_sessions() -> [text]:
+    var ids: [text] = []
+    ids = ids + [ds_create(TGT_INTERPRETER, "test/foo_spec.spl")]
+    ids = ids + [ds_create(TGT_SMF, "test/bar_spec.spl")]
+    ids = ids + [ds_create(TGT_NATIVE, "/tmp/test_native")]
+    ids = ids + [ds_create(TGT_REMOTE, "localhost:1234")]
+    ids
+
+fn ds_add_n_breakpoints(session_id: text, file: text, start_line: i64, n: i64) -> [i64]:
+    var ids: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        val bp_id = ds_add_breakpoint(session_id, file, start_line + i, "")
+        ids = ids + [bp_id]
+        i = i + 1
+    ids
+
+fn ds_hit_breakpoint_n_times(bp_id: i64, n: i64):
+    var i: i64 = 0
+    while i < n:
+        ds_hit_breakpoint(bp_id)
+        i = i + 1
+
+fn ds_remove_all_sessions(ids: [text]):
+    var i = 0
+    while i < ids.len():
+        ds_remove(ids[i])
+        i = i + 1
+
+fn ds_start_all_sessions(ids: [text]):
+    var i = 0
+    while i < ids.len():
+        ds_set_state(ids[i], SESS_RUNNING)
+        i = i + 1
+
+fn ds_terminate_all_sessions(ids: [text]):
+    var i = 0
+    while i < ids.len():
+        ds_set_state(ids[i], SESS_TERMINATED)
+        i = i + 1
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "MCP Debug Sessions":
+    describe "session creation":
+        it "creates session with correct target type":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test/spec.spl")
+            expect(ds_get_target(id)).to_equal(TGT_INTERPRETER)
+            expect(ds_get_program(id)).to_equal("test/spec.spl")
+            expect(ds_get_state(id)).to_equal(SESS_CREATED)
+
+        it "creates sessions for all target types":
+            ds_reset_all()
+            val ids = ds_create_multi_sessions()
+            expect(ds_count()).to_equal(4)
+            expect(ds_get_target(ids[0])).to_equal(TGT_INTERPRETER)
+            expect(ds_get_target(ids[1])).to_equal(TGT_SMF)
+            expect(ds_get_target(ids[2])).to_equal(TGT_NATIVE)
+            expect(ds_get_target(ids[3])).to_equal(TGT_REMOTE)
+
+        it "assigns unique session IDs":
+            ds_reset_all()
+            val id1 = ds_create(TGT_INTERPRETER, "a.spl")
+            val id2 = ds_create(TGT_INTERPRETER, "b.spl")
+            expect(id1 != id2).to_equal(true)
+
+    describe "state transitions":
+        it "transitions CREATED to RUNNING":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            ds_set_state(id, SESS_RUNNING)
+            expect(ds_get_state(id)).to_equal(SESS_RUNNING)
+
+        it "transitions RUNNING to PAUSED":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            ds_set_state(id, SESS_RUNNING)
+            ds_set_state(id, SESS_PAUSED)
+            expect(ds_get_state(id)).to_equal(SESS_PAUSED)
+
+        it "transitions to TERMINATED":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            ds_set_state(id, SESS_RUNNING)
+            ds_set_state(id, SESS_TERMINATED)
+            expect(ds_get_state(id)).to_equal(SESS_TERMINATED)
+
+        it "returns false for nonexistent session":
+            ds_reset_all()
+            expect(ds_set_state("nonexistent", SESS_RUNNING)).to_equal(false)
+
+    describe "breakpoints":
+        it "adds breakpoint to session":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            val bp = ds_add_breakpoint(id, "test.spl", 42, "")
+            expect(bp).to_be_greater_than(0)
+            expect(ds_bp_count_for_session(id)).to_equal(1)
+
+        it "adds multiple breakpoints":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            val bps = ds_add_n_breakpoints(id, "test.spl", 10, 5)
+            expect(ds_bp_count_for_session(id)).to_equal(5)
+
+        it "adds conditional breakpoint":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            val bp = ds_add_breakpoint(id, "test.spl", 20, "x > 10")
+            expect(bp).to_be_greater_than(0)
+
+        it "removes breakpoint":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            val bp = ds_add_breakpoint(id, "test.spl", 42, "")
+            expect(ds_remove_breakpoint(id, bp)).to_equal(true)
+            expect(ds_bp_count_for_session(id)).to_equal(0)
+
+        it "tracks breakpoint hit count":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            val bp = ds_add_breakpoint(id, "test.spl", 42, "")
+            ds_hit_breakpoint_n_times(bp, 5)
+            expect(ds_get_bp_hit_count(bp)).to_equal(5)
+
+        it "rejects breakpoint for nonexistent session":
+            ds_reset_all()
+            expect(ds_add_breakpoint("nonexistent", "f.spl", 1, "")).to_equal(-1)
+
+    describe "data breakpoints":
+        it "adds write data breakpoint":
+            ds_reset_all()
+            val id = ds_create(TGT_NATIVE, "/tmp/test")
+            val dbp = ds_add_data_breakpoint(id, "counter", "write", "")
+            expect(dbp).to_be_greater_than(0)
+            expect(ds_dbp_count_for_session(id)).to_equal(1)
+
+        it "adds readWrite data breakpoint with condition":
+            ds_reset_all()
+            val id = ds_create(TGT_NATIVE, "/tmp/test")
+            val dbp = ds_add_data_breakpoint(id, "buffer", "readWrite", "size > 1024")
+            expect(dbp).to_be_greater_than(0)
+
+        it "rejects data breakpoint for nonexistent session":
+            ds_reset_all()
+            expect(ds_add_data_breakpoint("none", "x", "write", "")).to_equal(-1)
+
+    describe "session removal":
+        it "removes session and its breakpoints":
+            ds_reset_all()
+            val id = ds_create(TGT_INTERPRETER, "test.spl")
+            ds_add_breakpoint(id, "test.spl", 10, "")
+            ds_add_breakpoint(id, "test.spl", 20, "")
+            ds_add_data_breakpoint(id, "x", "write", "")
+            expect(ds_total_bp_count()).to_equal(2)
+            expect(ds_total_dbp_count()).to_equal(1)
+            ds_remove(id)
+            expect(ds_count()).to_equal(0)
+            expect(ds_total_bp_count()).to_equal(0)
+            expect(ds_total_dbp_count()).to_equal(0)
+
+        it "removes only targeted session":
+            ds_reset_all()
+            val id1 = ds_create(TGT_INTERPRETER, "a.spl")
+            val id2 = ds_create(TGT_NATIVE, "/tmp/b")
+            ds_add_breakpoint(id1, "a.spl", 10, "")
+            ds_add_breakpoint(id2, "b.spl", 20, "")
+            ds_remove(id1)
+            expect(ds_count()).to_equal(1)
+            expect(ds_bp_count_for_session(id2)).to_equal(1)
+
+    describe "multi-session coordination":
+        it "manages 4 concurrent debug sessions":
+            ds_reset_all()
+            val ids = ds_create_multi_sessions()
+            ds_start_all_sessions(ids)
+            expect(ds_get_state(ids[0])).to_equal(SESS_RUNNING)
+            expect(ds_get_state(ids[3])).to_equal(SESS_RUNNING)
+
+        it "terminates all sessions":
+            ds_reset_all()
+            val ids = ds_create_multi_sessions()
+            ds_start_all_sessions(ids)
+            ds_terminate_all_sessions(ids)
+            expect(ds_get_state(ids[0])).to_equal(SESS_TERMINATED)
+            expect(ds_get_state(ids[3])).to_equal(SESS_TERMINATED)
+
+        it "removes all sessions cleanly":
+            ds_reset_all()
+            val ids = ds_create_multi_sessions()
+            ds_remove_all_sessions(ids)
+            expect(ds_count()).to_equal(0)
+
+    describe "isolation":
+        it "breakpoints are isolated per session":
+            ds_reset_all()
+            val id1 = ds_create(TGT_INTERPRETER, "a.spl")
+            val id2 = ds_create(TGT_INTERPRETER, "b.spl")
+            ds_add_n_breakpoints(id1, "a.spl", 1, 3)
+            ds_add_n_breakpoints(id2, "b.spl", 1, 5)
+            expect(ds_bp_count_for_session(id1)).to_equal(3)
+            expect(ds_bp_count_for_session(id2)).to_equal(5)
+            expect(ds_total_bp_count()).to_equal(8)

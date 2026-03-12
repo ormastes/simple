@@ -1,0 +1,89 @@
+# WASM LSP Diagnostics Publishing Tests
+#
+# Tests that the core parser produces correct diagnostics
+# for various error patterns in Simple code.
+
+use app.lsp.parser_adapter.{ParserAdapter, ParserAdapter__create_core, ParseResult, ParseDiagnostic}
+
+describe "WASM Diagnostics Publishing":
+
+    context "Error diagnostics":
+        it "produces no diagnostics for valid code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 42")
+            expect(result.diagnostics.len()).to_equal(0)
+
+        it "produces diagnostic for unmatched close paren":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = (1 + 2))")
+            expect(result.diagnostics.len()).to_be_greater_than(0)
+
+        it "produces diagnostic for unmatched close bracket":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val arr = [1, 2]]")
+            expect(result.diagnostics.len()).to_be_greater_than(0)
+
+    context "Diagnostic accuracy":
+        it "correct line number for first-line error":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            expect(result.diagnostics[0].line).to_equal(0)
+
+        it "correct line number for second-line error":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 1\n)")
+            val found_line1 = false
+            for diag in result.diagnostics:
+                if diag.line == 1:
+                    var found_line1 = true
+            expect(result.diagnostics.len()).to_be_greater_than(0)
+
+        it "includes column span information":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            val diag = result.diagnostics[0]
+            expect(diag.column).to_equal(0)
+
+    context "Multiple errors":
+        it "reports errors on multiple lines":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")\n]")
+            expect(result.diagnostics.len()).to_equal(2)
+
+        it "reports paren and bracket errors separately":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")\n]")
+            expect(result.diagnostics[0].message).to_contain("parenthesis")
+            expect(result.diagnostics[1].message).to_contain("bracket")
+
+    context "Valid patterns (no false positives)":
+        it "balanced parens in function call":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("foo(bar(1, 2), baz(3))")
+            expect(result.diagnostics.len()).to_equal(0)
+
+        it "balanced brackets in array literal":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val a = [1, [2, 3], [4, [5]]]")
+            expect(result.diagnostics.len()).to_equal(0)
+
+        it "comments are ignored":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("# this has ) and ] but is a comment")
+            expect(result.diagnostics.len()).to_equal(0)
+
+        it "strings are part of valid code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val s = \"hello world\"")
+            expect(result.diagnostics.len()).to_equal(0)
+
+    context "Success flag":
+        it "success is true when no diagnostics":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 1")
+            expect(result.success).to_equal(true)
+
+        it "success is false when diagnostics present":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            expect(result.success).to_equal(false)

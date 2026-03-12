@@ -419,7 +419,8 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             Ok(Some(zero))
         }
         "str" | "to_string" => {
-            // Convert value to string: box int if needed, then call rt_to_string
+            // Convert value to string: calls rt_to_string directly.
+            // Arguments should already be RuntimeValues (tagged ints, heap strings, etc.)
             if args.is_empty() {
                 let nil = builder.ins().iconst(types::I64, 0);
                 return Ok(Some(nil));
@@ -428,20 +429,9 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 Some(&v) => v,
                 None => builder.ins().iconst(types::I64, 0),
             };
-            // Box the argument as RuntimeValue int if it might be a raw integer.
-            // We use rt_value_int to ensure proper tagging.
-            // If the value is already a RuntimeValue (heap string, tagged int, etc.),
-            // rt_to_string handles all types, but raw untagged ints need boxing first.
-            let boxed_arg = if let Some(&value_int_id) = ctx.runtime_funcs.get("rt_value_int") {
-                let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
-                let call = adapted_call(builder, value_int_ref, &[arg_val]);
-                builder.inst_results(call)[0]
-            } else {
-                arg_val
-            };
             if let Some(&to_str_id) = ctx.runtime_funcs.get("rt_to_string") {
                 let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
-                let call = adapted_call(builder, to_str_ref, &[boxed_arg]);
+                let call = adapted_call(builder, to_str_ref, &[arg_val]);
                 let result = builder.inst_results(call)[0];
                 return Ok(Some(result));
             }

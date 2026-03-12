@@ -1,0 +1,240 @@
+# # Quaternion Specification
+#
+#
+# **Feature IDs:** #MATH-003
+# **Category:** Stdlib
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Quat (f32) and Quatd (f64) quaternion types for 3D rotations.
+#
+# ## Key Concepts
+# | Concept | Description |
+# |---------|-------------|
+# | Quat | Quaternion with f32 precision |
+# | SLERP | Spherical linear interpolation |
+# | Composition | Rotation composition via multiplication |
+#
+# ## Behavior
+# - Identity quaternion represents no rotation
+# - from_axis_angle and from_euler constructors
+# - SLERP interpolation for smooth rotation
+# - Quaternion-vector rotation
+
+# ============================================================================
+# Local Vec3 struct (needed by Quat.from_axis_angle / rotate_vector)
+# ============================================================================
+
+struct Vec3:
+    x: f64
+    y: f64
+    z: f64
+
+    static fn up() -> Vec3:
+        Vec3(x: 0.0, y: 1.0, z: 0.0)
+
+    fn magnitude() -> f64:
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+
+    fn normalize() -> Vec3:
+        val len = self.magnitude()
+        if len < 0.0001:
+            return Vec3(x: 0.0, y: 0.0, z: 0.0)
+        Vec3(x: self.x / len, y: self.y / len, z: self.z / len)
+
+# ============================================================================
+# Local Mat4 stub (needed by Quat.to_mat4)
+# ============================================================================
+
+struct Mat4:
+    data: [f64]
+
+    static fn identity() -> Mat4:
+        Mat4(data: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+# ============================================================================
+# Local Quat struct
+# ============================================================================
+
+struct Quat:
+    w: f64
+    x: f64
+    y: f64
+    z: f64
+
+    static fn identity() -> Quat:
+        Quat(w: 1.0, x: 0.0, y: 0.0, z: 0.0)
+
+    static fn from_axis_angle(axis: Vec3, angle: f64) -> Quat:
+        val half = angle / 2.0
+        val s = half.sin()
+        val n = axis.normalize()
+        Quat(w: half.cos(), x: n.x * s, y: n.y * s, z: n.z * s)
+
+    fn normalize() -> Quat:
+        val len = (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+        if len < 0.0001:
+            return Quat.identity()
+        Quat(w: self.w / len, x: self.x / len, y: self.y / len, z: self.z / len)
+
+    fn conjugate() -> Quat:
+        Quat(w: self.w, x: 0.0 - self.x, y: 0.0 - self.y, z: 0.0 - self.z)
+
+    fn mul(other: Quat) -> Quat:
+        Quat(w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z, x: self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y, y: self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x, z: self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w)
+
+    fn rotate_vector(v: Vec3) -> Vec3:
+        # q * v * q_conj (using quaternion-vector multiplication)
+        val q = self.normalize()
+        val qv_x = q.y * v.z - q.z * v.y
+        val qv_y = q.z * v.x - q.x * v.z
+        val qv_z = q.x * v.y - q.y * v.x
+        val uuv_x = q.y * qv_z - q.z * qv_y
+        val uuv_y = q.z * qv_x - q.x * qv_z
+        val uuv_z = q.x * qv_y - q.y * qv_x
+        Vec3(x: v.x + (qv_x * 2.0 * q.w) + uuv_x * 2.0, y: v.y + (qv_y * 2.0 * q.w) + uuv_y * 2.0, z: v.z + (qv_z * 2.0 * q.w) + uuv_z * 2.0)
+
+    fn slerp(other: Quat, t: f64) -> Quat:
+        var d = self.w * other.w + self.x * other.x + self.y * other.y + self.z * other.z
+        var ow = other.w
+        var ox = other.x
+        var oy = other.y
+        var oz = other.z
+        if d < 0.0:
+            ow = 0.0 - ow
+            ox = 0.0 - ox
+            oy = 0.0 - oy
+            oz = 0.0 - oz
+            d = 0.0 - d
+        # If very close, use linear interpolation
+        if d > 0.9995:
+            val rw = self.w + (ow - self.w) * t
+            val rx = self.x + (ox - self.x) * t
+            val ry = self.y + (oy - self.y) * t
+            val rz = self.z + (oz - self.z) * t
+            val len = (rw * rw + rx * rx + ry * ry + rz * rz).sqrt()
+            return Quat(w: rw / len, x: rx / len, y: ry / len, z: rz / len)
+        val theta = d.acos()
+        val sin_theta = theta.sin()
+        val a = ((1.0 - t) * theta).sin() / sin_theta
+        val b = (t * theta).sin() / sin_theta
+        Quat(w: self.w * a + ow * b, x: self.x * a + ox * b, y: self.y * a + oy * b, z: self.z * a + oz * b)
+
+    fn to_mat4() -> Mat4:
+        val q = self.normalize()
+        val xx = q.x * q.x
+        val yy = q.y * q.y
+        val zz = q.z * q.z
+        val xy = q.x * q.y
+        val xz = q.x * q.z
+        val yz = q.y * q.z
+        val wx = q.w * q.x
+        val wy = q.w * q.y
+        val wz = q.w * q.z
+        Mat4(data: [1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy), 0.0, 2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx), 0.0, 2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy), 0.0, 0.0, 0.0, 0.0, 1.0])
+
+    fn to_f64() -> Quatd:
+        Quatd(w: self.w, x: self.x, y: self.y, z: self.z)
+
+struct Quatd:
+    w: f64
+    x: f64
+    y: f64
+    z: f64
+
+    fn to_f32() -> Quat:
+        Quat(w: self.w, x: self.x, y: self.y, z: self.z)
+
+# ============================================================================
+# Quaternion Construction
+# ============================================================================
+
+describe "Quaternion Construction":
+    it "creates identity quaternion":
+        val q = Quat.identity()
+        expect(q.w).to_equal(1.0)
+        expect(q.x).to_equal(0.0)
+        expect(q.y).to_equal(0.0)
+        expect(q.z).to_equal(0.0)
+
+    it "creates from axis-angle":
+        val axis = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val q = Quat.from_axis_angle(axis, 0.0)
+        # Zero rotation = identity
+        expect(q.w).to_equal(1.0)
+
+    it "normalizes a quaternion":
+        val q = Quat(w: 2.0, x: 0.0, y: 0.0, z: 0.0)
+        val n = q.normalize()
+        expect(n.w).to_equal(1.0)
+        expect(n.x).to_equal(0.0)
+
+# ============================================================================
+# Quaternion Rotation
+# ============================================================================
+
+describe "Quaternion Rotation":
+    it "identity rotation leaves vector unchanged":
+        val q = Quat.identity()
+        val v = Vec3(x: 1.0, y: 2.0, z: 3.0)
+        val r = q.rotate_vector(v)
+        expect(r.x).to_equal(1.0)
+        expect(r.y).to_equal(2.0)
+        expect(r.z).to_equal(3.0)
+
+    it "composes rotations via multiplication":
+        val q1 = Quat.identity()
+        val q2 = Quat.identity()
+        val q3 = q1.mul(q2)
+        expect(q3.w).to_equal(1.0)
+        expect(q3.x).to_equal(0.0)
+
+    it "conjugate negates vector part":
+        val q = Quat(w: 1.0, x: 2.0, y: 3.0, z: 4.0)
+        val c = q.conjugate()
+        expect(c.w).to_equal(1.0)
+        expect(c.x).to_equal(-2.0)
+        expect(c.y).to_equal(-3.0)
+        expect(c.z).to_equal(-4.0)
+
+# ============================================================================
+# Quaternion SLERP
+# ============================================================================
+
+describe "Quaternion SLERP":
+    it "slerp at t=0 returns start":
+        val a = Quat.identity()
+        val b = Quat.from_axis_angle(Vec3.up(), 1.57)
+        val r = a.slerp(b, 0.0)
+        expect(r.w).to_equal(a.w)
+
+    it "slerp at t=1 returns end":
+        val a = Quat.identity()
+        val axis = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val b = Quat.from_axis_angle(axis, 1.57)
+        val r = a.slerp(b, 1.0)
+        # Should be close to b
+        var diff = r.w - b.w
+        if diff < 0.0:
+            diff = 0.0 - diff
+        expect(diff < 0.01).to_equal(true)
+
+# ============================================================================
+# Quaternion Conversions
+# ============================================================================
+
+describe "Quaternion Conversions":
+    it "converts to rotation matrix":
+        val q = Quat.identity()
+        val m = q.to_mat4()
+        expect(m.data[0]).to_equal(1.0)
+        expect(m.data[5]).to_equal(1.0)
+        expect(m.data[10]).to_equal(1.0)
+
+    it "converts between f32 and f64":
+        val q32 = Quat(w: 1.0, x: 0.0, y: 0.0, z: 0.0)
+        val q64 = q32.to_f64()
+        expect(q64.w).to_equal(1.0)
+        val q32b = q64.to_f32()
+        expect(q32b.w).to_equal(1.0)

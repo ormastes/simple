@@ -1,0 +1,173 @@
+# EasyFix Rules - Module Boundary Lint Rules (Text-Scanning)
+#
+# Text-based detection for module boundary violations:
+#   L:export_outside_init       — export statement outside __init__.spl (Deny)
+#   L:init_boundary_violation   — import bypasses __init__.spl boundary
+#   L:bypass_with_code_files    — #[bypass] in __init__.spl with sibling .spl files
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+# ============================================================================
+# Rule: export_outside_init
+# Detects `export` statements in files that are NOT __init__.spl.
+# Confidence: Certain (syntactic match + file name check)
+# Level: Deny
+# ============================================================================
+
+fn check_export_outside_init(source: text, file: text) -> [EasyFix]:
+    # Only trigger if file is NOT an __init__.spl
+    if file.ends_with("__init__.spl"):
+        return []
+
+    for_each_line(source, \ctx:
+        var line_fixes: [EasyFix] = []
+
+        # Match lines starting with `export ` (not `# export` comments)
+        if ctx.trimmed.starts_with("export "):
+            var fix = EasyFix.create(
+                id: "L:export_outside_init:{ctx.line_num}",
+                description: "export statement outside __init__.spl — move to __init__.spl or use pub",
+                confidence: FixConfidence.Certain
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: ctx.byte_offset + ctx.indent,
+                end: ctx.byte_offset + ctx.line.len(),
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: ctx.line
+            ))
+            line_fixes.push(fix)
+
+        line_fixes
+    )
+
+# ============================================================================
+# Rule: init_boundary_violation
+# Detects imports that bypass a directory's __init__.spl boundary by
+# reaching into internal submodules directly.
+#
+# Heuristic: flags `use crate.pkg.sub.X` style imports where the path
+# has 4+ segments — suggesting it may be reaching past a public facade.
+# This is a text-scanning approximation; full resolution needs the resolver.
+#
+# Confidence: Uncertain (heuristic — may have false positives)
+# ============================================================================
+
+fn check_init_boundary_violation(source: text, file: text) -> [EasyFix]:
+    for_each_line(source, \ctx:
+        var line_fixes: [EasyFix] = []
+
+        if ctx.trimmed.starts_with("use "):
+            val import_path = _extract_import_path(ctx.trimmed)
+            if import_path != "":
+                # Check for deep internal imports — paths with internal/private segments
+                val segments = import_path.split(".")
+                var has_internal = false
+                for segment in segments:
+                    if segment == "internal" or segment == "private" or segment == "_impl":
+                        has_internal = true
+
+                if has_internal:
+                    var fix = EasyFix.create(
+                        id: "L:init_boundary_violation:{ctx.line_num}",
+                        description: "import path '{import_path}' reaches into internal module — use the public __init__.spl facade instead",
+                        confidence: FixConfidence.Uncertain
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file,
+                        start: ctx.byte_offset + ctx.indent,
+                        end: ctx.byte_offset + ctx.line.len(),
+                        line: ctx.line_num,
+                        column: ctx.indent + 1,
+                        new_text: ctx.line
+                    ))
+                    line_fixes.push(fix)
+
+        line_fixes
+    )
+
+fn _extract_import_path(trimmed: text) -> text:
+    """Extract the module path from a use statement."""
+    var rest = trimmed.slice(4).trim()
+    # Strip 'lazy ' modifier if present
+    if rest.starts_with("lazy "):
+        rest = rest.slice(5).trim()
+    # Strip trailing .* or .{...}
+    val star_pos = rest.find(".*")
+    if star_pos >= 0:
+        return rest.slice(0, star_pos)
+    val brace_pos = rest.find(".{")
+    if brace_pos >= 0:
+        return rest.slice(0, brace_pos)
+    # Strip trailing comment
+    val hash_pos = rest.find(" #")
+    if hash_pos >= 0:
+        rest = rest.slice(0, hash_pos)
+    rest.trim()
+
+# ============================================================================
+# Rule: bypass_with_code_files
+# Only checks __init__.spl files.
+# If the file contains #[bypass], warns if the directory also has
+# other .spl files (which would be bypassed by the attribute).
+#
+# Note: This rule uses file path heuristics since we cannot list
+# directory contents in pure text scanning. It checks whether the
+# source itself references sibling files.
+#
+# Confidence: Uncertain (text heuristic)
+# ============================================================================
+
+fn check_bypass_with_code_files(source: text, file: text) -> [EasyFix]:
+    # Only check __init__.spl files
+    if not file.ends_with("__init__.spl"):
+        return []
+
+    var has_bypass = false
+    val lines = source.split("\n")
+    var bypass_line = 0
+    var bypass_offset = 0
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("#[bypass") or trimmed == "#[bypass]":
+            has_bypass = true
+            bypass_line = line_num
+            bypass_offset = byte_offset
+
+        byte_offset = byte_offset + line.len() + 1
+
+    if not has_bypass:
+        return []
+
+    # Check if there are export or pub use statements referencing local files
+    # which indicates sibling .spl files exist
+    var has_local_exports = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("pub use ") or trimmed.starts_with("export "):
+            has_local_exports = true
+
+    if has_local_exports:
+        var fix = EasyFix.create(
+            id: "L:bypass_with_code_files:{bypass_line}",
+            description: "#[bypass] in __init__.spl with sibling code files — bypass may hide module contents",
+            confidence: FixConfidence.Uncertain
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: bypass_offset,
+            end: bypass_offset,
+            line: bypass_line,
+            column: 1,
+            new_text: ""
+        ))
+        return [fix]
+
+    []

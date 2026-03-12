@@ -1,7 +1,7 @@
 # Compiler MDSoC Migration Status
 
-**Last Updated:** 2026-03-02
-**Overall Status:** Architecture code complete. All 288 tests passing.
+**Last Updated:** 2026-03-12
+**Overall Status:** Architecture code complete. All 288 tests passing. L0 layer violations fixed (Span unification, HIR-dep files moved to L35).
 
 ## Summary
 
@@ -135,6 +135,21 @@ backend_to_linker, loading_to_parsing
 - `src/compiler/00.common/dependency/visibility.spl` - `extract_layer_number()`
 - `src/app/cli/arch_check.spl` - `check-arch` command
 - `src/app/cli/check_capsule.spl` - `check-capsule` command
+
+## L0 Layer Violation Fixes (2026-03-12)
+
+### Span Unification (L0→L1 eliminated)
+Canonical `Span` now lives in `00.common/diagnostics/span.spl`. Previously 4 duplicate definitions existed across `00.common`, `10.frontend/lexer_types.spl`, `10.frontend/block_types.spl`, and `10.frontend/core/lexer_types.spl` (bootstrap, untouched). All 8 L0 files that imported Span from frontend now import from `diagnostics.span`. The frontend files re-import from common.
+
+### env_get Inlined (L0→L7 eliminated)
+`config.spl` inlined `extern fn rt_env_get` to remove its import from `compiler.backend.ffi`. `compiler_services.spl` BackendPort import documented as orchestration bypass.
+
+### HIR Files Moved to L35 (L0→L2 eliminated)
+4 files moved from `00.common/` to `35.semantics/`: `unsafe.spl`, `volatile.spl`, `visibility_checker.spl`, `visibility_integration.spl`. These are semantic analysis passes that import HIR types — they don't belong in L0.
+
+### Remaining Bypasses
+- `compiler_services.spl`: BackendPort (L0→L7, orchestration type)
+- `attributes.spl`: Attribute/Expr from L1, LayoutAttr from L3 (split deferred — L1 consumer blocks clean separation)
 
 ## What Was NOT Implemented
 

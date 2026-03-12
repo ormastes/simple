@@ -1,0 +1,243 @@
+# LSP System Test: lib/async (nogc_async_mut + gc_async_mut + noalloc)
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use app.cli.query_engine.{engine_find_definition, engine_find_references, engine_hover, engine_completions, _parse_file}
+use app.cli.query_lsp_extras.{query_document_highlight, query_type_definition, query_folding_range}
+use app.cli.query_rich.{query_semantic_tokens}
+
+fn ensure_parsed(file: text):
+    _ = _parse_file(file)
+
+val _can_run = true
+
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+fn find_first_code_line(file: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return 1
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            return i + 1
+        i = i + 1
+    1
+
+fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return ""
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        return ""
+    val target_line = lines[line_num - 1]
+    if target_line.trim() == "":
+        return ""
+
+    if col > 0 and col <= target_line.len():
+        var start = col - 1
+        var end_pos = col - 1
+        while start > 0:
+            val ch = target_line.substring(start - 1, start)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            start = start - 1
+        while end_pos < target_line.len():
+            val ch = target_line.substring(end_pos, end_pos + 1)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            end_pos = end_pos + 1
+        if end_pos > start:
+            return target_line.substring(start, end_pos)
+
+    val trimmed = target_line.trim()
+    val keywords = ["fn ", "val ", "var ", "class ", "struct ", "enum ", "use ", "import ", "me ", "static fn "]
+    var rest = trimmed
+    for kw in keywords:
+        if rest.starts_with(kw):
+            rest = rest.substring(kw.len())
+            break
+
+    var parts: [text] = []
+    for ch in rest:
+        val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_word:
+            break
+        parts.push(ch)
+    parts.join("")
+
+fn run_lsp_inproc(subcmd: text, file: text, line: i64, col: i64) -> i64:
+    ensure_parsed(file)
+    val symbol = extract_symbol_at(file, line, col)
+
+    if subcmd == "hover":
+        if symbol == "":
+            return 0
+        return engine_hover(file, line, symbol)
+
+    if subcmd == "definition":
+        if symbol == "":
+            return 0
+        return engine_find_definition(file, symbol)
+
+    if subcmd == "references":
+        if symbol == "":
+            return 0
+        return engine_find_references(file, symbol)
+
+    if subcmd == "completions":
+        return engine_completions(file, line, "")
+
+    if subcmd == "document-highlight":
+        return query_document_highlight(file, line, col)
+
+    if subcmd == "type-definition":
+        return query_type_definition(file, line, col)
+
+    if subcmd == "semantic-tokens":
+        return query_semantic_tokens(file, [])
+
+    if subcmd == "folding-range":
+        return query_folding_range(file)
+
+    print "Unknown subcommand: {subcmd}"
+    1
+
+fn batch_lsp(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val line = find_first_code_line(files[i])
+        val code = run_lsp_inproc(subcmd, files[i], line, 5)
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn batch_lsp_no_pos(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lsp_inproc(subcmd, files[i], 1, 1)
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var k = 0
+        while k < crashes.len():
+            print "    - {crashes[k]}"
+            k = k + 1
+    crashes.len()
+
+var files: [text] = []
+val f1 = find_spl_files("src/lib/nogc_async_mut")
+var i = 0
+while i < f1.len():
+    files.push(f1[i])
+    i = i + 1
+val f2 = find_spl_files("src/lib/gc_async_mut")
+i = 0
+while i < f2.len():
+    files.push(f2[i])
+    i = i + 1
+val f3 = find_spl_files("src/lib/nogc_async_mut_noalloc")
+i = 0
+while i < f3.len():
+    files.push(f3[i])
+    i = i + 1
+print "Discovered {files.len()} files"
+
+describe "LSP System: lib/async (nogc_async_mut + gc_async_mut + noalloc)":
+    it "hover: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("hover", files)
+            report_crashes("hover", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "definition: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("definition", files)
+            report_crashes("definition", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "references: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("references", files)
+            report_crashes("references", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "completions: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("completions", files)
+            report_crashes("completions", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "semantic-tokens: no crashes":
+        if _can_run:
+            val crashes = batch_lsp_no_pos("semantic-tokens", files)
+            report_crashes("semantic-tokens", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "folding-range: no crashes":
+        if _can_run:
+            val crashes = batch_lsp_no_pos("folding-range", files)
+            report_crashes("folding-range", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "document-highlight: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("document-highlight", files)
+            report_crashes("document-highlight", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"
+
+    it "type-definition: no crashes":
+        if _can_run:
+            val crashes = batch_lsp("type-definition", files)
+            report_crashes("type-definition", crashes)
+            expect(crashes.len()).to_equal(0)
+        else:
+            print "SKIP: bin/release/simple not available"

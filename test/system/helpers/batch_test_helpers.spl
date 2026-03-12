@@ -1,0 +1,121 @@
+# Batch Test Helpers — Shared utilities for system-level LSP, lint, and DAP tests
+#
+# These functions are meant to be copied into each spec file since the test runner
+# doesn't support cross-file imports from test directories reliably.
+#
+# Usage: Copy the relevant extern declarations and functions into each spec.
+#
+# Functions:
+#   find_spl_files(dir) -> [text]            Recursive .spl discovery
+#   find_first_code_line(file) -> i64        First non-comment line number
+#   run_lsp_query(sub, file, ln, col) -> i64 Run LSP query subprocess
+#   run_lsp_no_pos(sub, file) -> i64         Run position-less LSP query
+#   run_lint_file(file) -> i64               Run lint subprocess
+#   batch_lsp(sub, files) -> [text]          Batch LSP query, return crash files
+#   batch_lsp_no_pos(sub, files) -> [text]   Batch no-pos LSP query
+#   batch_lint(files) -> [text]              Batch lint, return crash files
+#   report_crashes(label, crashes) -> i64    Print crash summary
+#
+# Crash definition: exit code > 1 (0 = success, 1 = not-found/normal-error)
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Recursively find all .spl files under dir
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            # Try to recurse — rt_dir_list returns nil for non-directories
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+# Find the first non-comment, non-empty line in a file
+fn find_first_code_line(file: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return 1
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            return i + 1
+        i = i + 1
+    1
+
+# Run LSP query with position via subprocess
+fn run_lsp_query(subcmd: text, file: text, line: i64, col: i64) -> i64:
+    val args = ["src/app/cli/query.spl", subcmd, file, "{line}", "{col}"]
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", args)
+    code
+
+# Run LSP query without position (semantic-tokens, folding-range, etc.)
+fn run_lsp_no_pos(subcmd: text, file: text) -> i64:
+    val args = ["src/app/cli/query.spl", subcmd, file]
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", args)
+    code
+
+# Run lint on a single file
+fn run_lint_file(file: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["lint", file])
+    code
+
+# Batch LSP query over a file list, return list of files that crashed (exit > 1)
+fn batch_lsp(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val line = find_first_code_line(files[i])
+        val code = run_lsp_query(subcmd, files[i], line, 5)
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+# Batch LSP no-position query, return crash files
+fn batch_lsp_no_pos(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lsp_no_pos(subcmd, files[i])
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+# Batch lint over a file list, return crash files
+fn batch_lint(files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lint_file(files[i])
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+# Print crash summary and return crash count
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var i = 0
+        while i < crashes.len():
+            print "    - {crashes[i]}"
+            i = i + 1
+    crashes.len()

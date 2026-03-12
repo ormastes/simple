@@ -1051,12 +1051,12 @@ static inline int64_t _rt_now_nanos(void) {{
             });
 
             if let Some(runtime_dir) = &runtime_dir {
-                let native_all_lib = runtime_dir.join("libsimple_native_all.a");
-                let compiler_lib = runtime_dir.join("libsimple_compiler.a");
                 let runtime_lib = runtime_dir.join("libsimple_runtime.a");
-                if native_all_lib.exists() {
-                    builder = builder.object(&native_all_lib);
-                } else if runtime_lib.exists() {
+                let compiler_lib = runtime_dir.join("libsimple_compiler.a");
+                // Prefer libsimple_runtime.a for standalone binary linking.
+                // libsimple_native_all.a contains LLVM C++ objects that require
+                // libstdc++ and are not needed for simple programs.
+                if runtime_lib.exists() {
                     builder = builder.object(&runtime_lib);
                 } else if compiler_lib.exists() {
                     builder = builder.object(&compiler_lib);
