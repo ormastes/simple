@@ -52,6 +52,8 @@ use app.test_runner_new.test_executor_composite.{
     find_baremetal_elf
 }
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.target.stm32h7.Stm32H7Target
+use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 use app.debug.remote.protocol.trace32.Trace32Client
 
@@ -261,6 +263,51 @@ fn trace32_remote_status() -> text:
         return "blocked: no TRACE32 response"
     "blocked: {trimmed}"
 
+fn openocd_stm_status() -> text:
+    if not command_available("openocd"):
+        return "skip: openocd unavailable"
+    if not command_available("gdb"):
+        return "skip: gdb unavailable"
+
+    val h7 = Stm32H7Target.default()
+    val wb = Stm32WbTarget.default()
+    if h7.openocd_cfg == "" or wb.openocd_cfg == "":
+        return "error: stm openocd config missing"
+
+    val probe = shell("timeout 5 openocd -f '{h7.openocd_cfg}' -c 'transport list' -c shutdown 2>&1")
+    val combined = (probe.stdout + probe.stderr).trim()
+
+    if probe.exit_code == 0:
+        return "ready: {h7.openocd_cfg}"
+    if combined.contains("Can't find") or combined.contains("No such file"):
+        return "blocked: openocd board config unavailable"
+    if combined.contains("unable to open CMSIS-DAP") or combined.contains("unable to find a matching CMSIS-DAP device") or combined.contains("unable to open ftdi device") or combined.contains("init mode failed"):
+        return "blocked: stm openocd probe unavailable"
+    if combined == "":
+        return "blocked: openocd produced no readiness output"
+    "blocked: {combined}"
+
+fn stlink_tools_stm_status() -> text:
+    if not command_available("st-info"):
+        return "skip: st-info unavailable"
+    if not command_available("st-flash"):
+        return "skip: st-flash unavailable"
+
+    val h7 = Stm32H7Target.default()
+    val wb = Stm32WbTarget.default()
+    val serials = shell("st-info --serial 2>&1")
+    val combined = (serials.stdout + serials.stderr).trim()
+
+    if serials.exit_code != 0:
+        if combined.contains("Couldn't find any ST-Link") or combined.contains("No ST-Link detected"):
+            return "blocked: no st-link probe detected"
+        return "blocked: {combined}"
+    if combined.contains(h7.stlink_serial) or combined.contains(wb.stlink_serial):
+        return "ready"
+    if combined == "":
+        return "blocked: st-info returned no probe serials"
+    "blocked: expected stm probe serials not present"
+
 describe "Remote baremetal composite parsing":
 
     it "extracts runtime, platform, and arch from nested remote spec":
@@ -287,4 +334,14 @@ describe "TRACE32 readiness":
 
     it "resolves to a non-error readiness state":
         val status = trace32_remote_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+describe "STM debugger readiness":
+
+    it "reports openocd readiness for stm targets without treating host blockers as hard failures":
+        val status = openocd_stm_status()
+        expect(status_is_acceptable(status)).to_equal(true)
+
+    it "reports st-link tools readiness for stm targets without treating host blockers as hard failures":
+        val status = stlink_tools_stm_status()
         expect(status_is_acceptable(status)).to_equal(true)
