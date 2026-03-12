@@ -8,7 +8,7 @@ Development and integration tools for the Simple Language project.
 
 | Directory | Description |
 |-----------|-------------|
-| `claude-plugin/` | MCP server configuration for Claude Code / Claude Desktop integration |
+| `claude-plugin/` | Claude Code plugin bundles, local marketplace, and MCP configuration |
 
 ### `claude-plugin/simple-codex/`
 
@@ -22,6 +22,16 @@ MCP configuration that enables the Simple language MCP server:
   }
 }
 ```
+
+### `claude-plugin/simple-lsp/`
+
+Claude Code LSP plugin bundle for `.spl` / `.shs` files.
+
+### `claude-plugin/marketplace/`
+
+Checked-in local Claude marketplace exposing:
+- `simple-lsp`
+- `cmm-lsp`
 
 ---
 

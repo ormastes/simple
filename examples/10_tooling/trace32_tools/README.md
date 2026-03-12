@@ -6,7 +6,7 @@ MCP servers and development tools for [Lauterbach TRACE32](https://www.lauterbac
 
 ## Install
 
-### Pre-built binaries (recommended)
+### Pre-built binaries
 
 ```bash
 # One-line install (Linux x86_64)
@@ -20,31 +20,45 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 | `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
 | `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
 | `cmm-lsp` | Linux, Windows | CMM Language Server executable (LSP over stdio) |
-| `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle for repo checkout installs |
+| `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data, pending marketplace-based install support in repo docs |
 | `t32-cli` | Linux, Windows | Interactive TRACE32 CLI shell |
+
+As of March 12, 2026:
+- the latest published T32 release is `t32-v1.1.0`
+- the repo source has moved to `1.1.1`, but that release is not published yet
+- the published Linux MCP binaries did not complete a Claude MCP handshake in local testing
+
+Use the published binaries for experimentation, but prefer the source-backed
+`bin/release/simple .../main.spl` commands below until `t32-v1.1.1` is
+published and re-verified.
 
 ### Manual download
 
 ```bash
 # Download specific binary
-VERSION="1.1.1"
+VERSION="1.1.0"
 curl -fsSL -o t32-mcp-server \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/t32-mcp-server-linux-x86_64"
 chmod +x t32-mcp-server
 ```
 
 ```bash
-# Download Claude Code plugin bundle
+# Download Claude Code plugin bundle data
 VERSION="1.1.1"
 curl -fsSL -O \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/cmm-lsp-claude-plugin-${VERSION}.tar.gz"
 tar -xzf "cmm-lsp-claude-plugin-${VERSION}.tar.gz"
 ```
 
-The plugin tarball is currently config/package data, not a standalone runtime.
-It assumes a source checkout with:
+The plugin tarball is config/package data, not a standalone runtime. It still
+assumes a source checkout with:
 - `bin/release/simple`
 - `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl`
+
+As of March 12, 2026:
+- that tarball is configured in repo and release workflow source
+- it is not present in the latest published `t32-v1.1.0` release
+- current Claude Code CLI builds expect marketplace-based plugin installs, not `claude plugin install --dir`
 
 ### Build from source
 
@@ -65,7 +79,26 @@ bin/release/simple native-build \
 
 ### Claude Code
 
-Add to `.mcp.json` in your project root:
+Recommended local install from a repo checkout:
+
+```bash
+claude mcp add t32-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+
+claude mcp add t32-lsp-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+```
+
+For the CMM LSP Claude plugin itself, use the checked-in marketplace:
+
+```bash
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install cmm-lsp@simple-local
+```
+
+Project `.mcp.json` is also valid:
 
 ```json
 {
@@ -80,7 +113,11 @@ Add to `.mcp.json` in your project root:
 }
 ```
 
-> If the binary is not in PATH, use the full path: `"/home/user/.local/bin/t32-mcp-server"`
+> If a future standalone binary is in PATH, you can use `t32-mcp-server` and
+> `t32-lsp-mcp-server` directly. In local testing on March 12, 2026, the
+> published `t32-v1.1.0` Linux binaries did not handshake successfully with
+> Claude Code, while the source-backed `bin/release/simple .../main.spl`
+> commands did.
 
 ### Claude Desktop
 
@@ -103,10 +140,16 @@ Add to `~/.config/Claude/claude_desktop_config.json`:
 
 ```bash
 # Check the server responds to MCP initialize
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' | t32-mcp-server
+msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 
 # List available tools
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | t32-mcp-server
+msg='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 ```
 
 ---

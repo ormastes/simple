@@ -6,8 +6,12 @@ Simple runtime path that the plugin launches.
 
 ## Install
 
+Current Claude Code CLI builds install plugins from marketplaces, not from a
+local `--dir` path. Use the checked-in marketplace:
+
 ```bash
-claude plugin install --dir examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install cmm-lsp@simple-local
 ```
 
 Release package:
@@ -17,12 +21,13 @@ cmm-lsp-claude-plugin-1.1.1.tar.gz
 ```
 
 Current limitation:
-the packaged bundle is intended for use from a repo checkout. The checked-in
-`.lsp.json` still launches the workspace-relative Simple source entrypoint.
+- the checked-in bundle is intended for use from a repo checkout
+- the release tarball is not published in the latest public T32 release as of March 12, 2026
+- the checked-in `.lsp.json` still launches the workspace-relative Simple source entrypoint
 
 ## Runtime
 
-The plugin launches:
+The checked-in plugin launches:
 
 ```bash
 bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp

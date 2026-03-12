@@ -26,10 +26,15 @@ bin/simple build --release
 
 ### Install plugin
 The Claude Code plugin is a bundle/package, not a separate executable.
-It wraps the checked-in `cmm-lsp` entrypoint and lives in the TRACE32 tools submodule:
+It wraps the checked-in `cmm-lsp` entrypoint and lives in the TRACE32 tools
+submodule.
+
+Current Claude Code CLI builds install plugins from marketplaces, not from a
+local `--dir` path. Use the checked-in marketplace:
 
 ```bash
-claude plugin install --dir examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install cmm-lsp@simple-local
 ```
 
 Release asset:
@@ -39,17 +44,9 @@ cmm-lsp-claude-plugin-1.1.1.tar.gz
 ```
 
 Current limitation:
-the release tarball is not self-contained. Its `.lsp.json` still expects a repo
-checkout containing `bin/release/simple` and this `cmm_lsp/` source tree.
-
-Manual install is also possible:
-
-```bash
-mkdir -p ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local
-cp -r examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.claude-plugin ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
-cp examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.lsp.json ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
-cp examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
-```
+- the release tarball is not self-contained
+- as of March 12, 2026, the latest published T32 release does not include the plugin tarball yet
+- the checked-in `.lsp.json` still expects a repo checkout containing `bin/release/simple` and this `cmm_lsp/` source tree
 
 The bundled `.lsp.json` already points at the checked-in CMM LSP entrypoint via
 the workspace-relative path `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`.
