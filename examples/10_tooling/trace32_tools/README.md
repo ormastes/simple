@@ -15,11 +15,12 @@ curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_to
 
 Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q=t32-v):
 
-| Binary | Platform | Description |
-|--------|----------|-------------|
+| Asset | Platform | Description |
+|-------|----------|-------------|
 | `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
 | `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
-| `cmm-lsp` | Linux, Windows | CMM Language Server (LSP over stdio) |
+| `cmm-lsp` | Linux, Windows | CMM Language Server executable (LSP over stdio) |
+| `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle for CMM LSP |
 | `t32-cli` | Linux, Windows | Interactive TRACE32 CLI shell |
 
 ### Manual download
@@ -30,6 +31,14 @@ VERSION="1.1.1"
 curl -fsSL -o t32-mcp-server \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/t32-mcp-server-linux-x86_64"
 chmod +x t32-mcp-server
+```
+
+```bash
+# Download Claude Code plugin bundle
+VERSION="1.1.1"
+curl -fsSL -O \
+  "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/cmm-lsp-claude-plugin-${VERSION}.tar.gz"
+tar -xzf "cmm-lsp-claude-plugin-${VERSION}.tar.gz"
 ```
 
 ### Build from source
@@ -145,6 +154,10 @@ Full LSP implementation for `.cmm` files, for IDE integration:
 - **Go to definition** — Jump to label and macro definitions
 - **Document symbols** — Labels and macros as outline
 - **Diagnostics** — Parse errors, undefined labels, unreachable code, unused macros
+
+The release contains two different CMM LSP assets:
+- `cmm-lsp` — the standalone executable
+- `cmm-lsp-claude-plugin-${VERSION}.tar.gz` — the Claude Code plugin bundle (`.claude-plugin/` + `.lsp.json`)
 
 See [`cmm_lsp/README.md`](cmm_lsp/README.md) for IDE-specific setup.
 

@@ -25,10 +25,17 @@ bin/simple build --release
 ```
 
 ### Install plugin
-The plugin bundle lives in the TRACE32 tools submodule:
+The Claude Code plugin is a bundle/package, not a separate executable.
+It wraps the checked-in `cmm-lsp` entrypoint and lives in the TRACE32 tools submodule:
 
 ```bash
 claude plugin install --dir examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp
+```
+
+Release asset:
+
+```text
+cmm-lsp-claude-plugin-1.1.1.tar.gz
 ```
 
 Manual install is also possible:
@@ -42,6 +49,7 @@ cp examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md ~/.claude/p
 
 The bundled `.lsp.json` already points at the checked-in CMM LSP entrypoint via
 the workspace-relative path `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`.
+The actual executable/runtime remains `bin/release/simple`.
 
 ### Verify
 Restart Claude Code and open a `.cmm` file. Hover and completion should work automatically.
