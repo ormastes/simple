@@ -359,6 +359,155 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
     }
 }
 
+// ============================================================================
+// Async Process Management (spawn, check, wait, kill)
+// ============================================================================
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    /// Global registry of spawned child processes, keyed by PID.
+    static ref SPAWNED_CHILDREN: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
+}
+
+/// Spawn a process asynchronously without waiting.
+/// Returns process ID (pid) or -1 on error.
+/// The child is stored internally so it can be waited on or killed later.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
+    use std::process::{Command, Stdio};
+
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut command = Command::new(cmd_str);
+
+    // Extract args from List[String]
+    let args_len = rt_array_len(args);
+    if args_len > 0 {
+        for i in 0..args_len {
+            let arg_val = rt_array_get(args, i);
+            if let Some(arg_str) = extract_string(arg_val) {
+                command.arg(arg_str);
+            }
+        }
+    }
+
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(child) => {
+            let pid = child.id() as i64;
+            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+                map.insert(pid, child);
+            }
+            pid
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Check if a previously spawned async process is still running.
+/// Returns true if the process exists in the registry and has not yet exited.
+#[no_mangle]
+pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
+    if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+        if let Some(child) = map.get_mut(&pid) {
+            match child.try_wait() {
+                Ok(None) => true,   // Still running
+                Ok(Some(_)) => false, // Already exited
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// Wait for a previously spawned async process to finish.
+/// If timeout_ms <= 0, waits indefinitely.
+/// If timeout_ms > 0, polls in a loop up to the timeout.
+/// Returns exit code, or -1 on error/timeout.
+/// Removes the child from the registry on success.
+#[no_mangle]
+pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
+    if timeout_ms <= 0 {
+        // Wait indefinitely
+        if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+            if let Some(mut child) = map.remove(&pid) {
+                match child.wait() {
+                    Ok(status) => status.code().unwrap_or(-1) as i64,
+                    Err(_) => -1,
+                }
+            } else {
+                -1
+            }
+        } else {
+            -1
+        }
+    } else {
+        // Poll with timeout
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+        loop {
+            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+                if let Some(child) = map.get_mut(&pid) {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            // Process exited, remove from map
+                            map.remove(&pid);
+                            return status.code().unwrap_or(-1) as i64;
+                        }
+                        Ok(None) => {
+                            // Still running, check timeout
+                            if std::time::Instant::now() >= deadline {
+                                return -1; // Timeout
+                            }
+                        }
+                        Err(_) => {
+                            map.remove(&pid);
+                            return -1;
+                        }
+                    }
+                } else {
+                    return -1; // Not found
+                }
+            } else {
+                return -1; // Lock failed
+            }
+            // Sleep briefly before next poll
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+/// Kill a previously spawned async process.
+/// Returns true if the process was found and killed successfully.
+/// Removes the child from the registry.
+#[no_mangle]
+pub extern "C" fn rt_process_kill(pid: i64) -> bool {
+    if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+        if let Some(mut child) = map.remove(&pid) {
+            child.kill().is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 /// Execute a command and return just the exit code
 /// Returns exit code or -1 on error
 #[no_mangle]

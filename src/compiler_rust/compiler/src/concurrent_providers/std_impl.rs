@@ -8,6 +8,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use super::{
     Handle, MapProvider, ConcurrentMapProvider, ChannelProvider, ThreadProvider, LockProvider, ParallelIterProvider,
+    ParMapFn, ParFilterFn, ParReduceFn, ParForEachFn,
 };
 
 // ============================================================================
@@ -675,7 +676,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
     fn par_map(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
+        f: ParMapFn,
     ) -> Result<Vec<Value>, CompileError> {
         items.into_iter().map(f).collect()
     }
@@ -683,7 +684,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
     fn par_filter(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
+        f: ParFilterFn,
     ) -> Result<Vec<Value>, CompileError> {
         items.into_iter().filter(|v| f(v).unwrap_or(false)).map(Ok).collect()
     }
@@ -692,7 +693,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
         &self,
         items: Vec<Value>,
         init: Value,
-        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
+        f: ParReduceFn,
     ) -> Result<Value, CompileError> {
         let mut acc = init;
         for item in items {
@@ -704,7 +705,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
     fn par_for_each(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
+        f: ParForEachFn,
     ) -> Result<(), CompileError> {
         for item in items {
             f(item)?;

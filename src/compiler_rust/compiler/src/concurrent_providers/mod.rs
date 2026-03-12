@@ -165,6 +165,15 @@ pub trait LockProvider: Send + Sync + Debug {
     fn rwlock_set(&self, rwlock: &Value, new_value: Value) -> Result<Value, CompileError>;
 }
 
+/// Boxed closure: `Value -> Result<Value>`, thread-safe.
+pub type ParMapFn = Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>;
+/// Boxed closure: `&Value -> Result<bool>`, thread-safe.
+pub type ParFilterFn = Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>;
+/// Boxed closure: `(Value, Value) -> Result<Value>`, thread-safe.
+pub type ParReduceFn = Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>;
+/// Boxed closure: `Value -> Result<()>`, thread-safe.
+pub type ParForEachFn = Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>;
+
 /// Provider for parallel iteration operations.
 ///
 /// In PureStd mode, all operations fall back to sequential iteration.
@@ -173,23 +182,23 @@ pub trait ParallelIterProvider: Send + Sync + Debug {
     fn par_map(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
+        f: ParMapFn,
     ) -> Result<Vec<Value>, CompileError>;
     fn par_filter(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
+        f: ParFilterFn,
     ) -> Result<Vec<Value>, CompileError>;
     fn par_reduce(
         &self,
         items: Vec<Value>,
         init: Value,
-        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
+        f: ParReduceFn,
     ) -> Result<Value, CompileError>;
     fn par_for_each(
         &self,
         items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
+        f: ParForEachFn,
     ) -> Result<(), CompileError>;
     fn par_pool_init(&self, num_threads: usize) -> Result<(), CompileError>;
 }

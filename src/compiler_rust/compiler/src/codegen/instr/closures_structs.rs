@@ -394,6 +394,7 @@ fn try_compile_builtin_method_call<M: Module>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_method_call_virtual<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

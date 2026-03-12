@@ -22,6 +22,7 @@ pub use torch_eval::cuda_synchronize;
 
 /// Computation backend for math expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum MathBackend {
     /// Runtime auto-select (default) - picks fastest available backend
     Auto,

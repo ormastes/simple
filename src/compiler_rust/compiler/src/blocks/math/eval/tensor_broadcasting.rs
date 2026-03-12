@@ -116,10 +116,10 @@ where
     let result_size: usize = result_shape.iter().product();
     let mut result_data = vec![0.0; result_size];
 
-    for i in 0..result_size {
+    for (i, result_elem) in result_data.iter_mut().enumerate() {
         let a_idx = broadcast_index(i, &result_shape, &a.shape);
         let b_idx = broadcast_index(i, &result_shape, &b.shape);
-        result_data[i] = op(scalar_a.data[a_idx], scalar_b.data[b_idx]);
+        *result_elem = op(scalar_a.data[a_idx], scalar_b.data[b_idx]);
     }
 
     Tensor::new(result_data, result_shape)

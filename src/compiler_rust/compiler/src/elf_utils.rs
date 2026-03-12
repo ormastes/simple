@@ -169,6 +169,7 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Apply ELF relocations to extracted code.
+#[allow(clippy::too_many_arguments)]
 fn apply_elf_relocations(
     code: &mut [u8],
     elf_data: &[u8],

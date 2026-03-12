@@ -78,6 +78,7 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
 /// Iterate over items with pattern binding and optional condition filtering.
 /// Returns a vector of environments for items that match the pattern and pass the condition.
 /// This is used by both ListComprehension and DictComprehension to avoid code duplication.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn comprehension_iterate(
     iterable: &Value,
     pattern: &Pattern,

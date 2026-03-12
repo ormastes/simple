@@ -168,10 +168,8 @@ impl<'a> VerificationChecker<'a> {
     fn check_statement_effects(&mut self, stmt: &HirStmt, func_name: &str) {
         match stmt {
             HirStmt::Expr(expr) => self.check_expr_effects(expr, func_name),
-            HirStmt::Let { value, .. } => {
-                if let Some(e) = value {
-                    self.check_expr_effects(e, func_name);
-                }
+            HirStmt::Let { value: Some(e), .. } => {
+                self.check_expr_effects(e, func_name);
             }
             HirStmt::If {
                 condition,
@@ -235,10 +233,8 @@ impl<'a> VerificationChecker<'a> {
     fn check_statement_safety(&mut self, stmt: &HirStmt, func_name: &str) {
         match stmt {
             HirStmt::Expr(expr) => self.check_expr_safety(expr, func_name),
-            HirStmt::Let { value, .. } => {
-                if let Some(e) = value {
-                    self.check_expr_safety(e, func_name);
-                }
+            HirStmt::Let { value: Some(e), .. } => {
+                self.check_expr_safety(e, func_name);
             }
             HirStmt::If {
                 condition,

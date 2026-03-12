@@ -645,7 +645,6 @@ impl Default for RuntimeProfiler {
 static GLOBAL_PROFILER: OnceLock<RuntimeProfiler> = OnceLock::new();
 
 /// Get the global runtime profiler
-
 pub fn global_profiler() -> &'static RuntimeProfiler {
     GLOBAL_PROFILER.get_or_init(RuntimeProfiler::default_profiler)
 }

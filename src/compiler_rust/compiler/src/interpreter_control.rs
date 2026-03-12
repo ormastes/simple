@@ -406,6 +406,7 @@ pub fn exec_with(
 }
 
 /// Helper to execute a method body with self and fields bound
+#[allow(clippy::too_many_arguments)]
 fn exec_method_body(
     method: &FunctionDef,
     receiver: &Value,
@@ -451,6 +452,7 @@ fn exec_method_body(
 }
 
 /// Helper to call a method if it exists on an object
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn call_method_if_exists(
     receiver: &Value,
     method_name: &str,

@@ -32,6 +32,7 @@ pub fn evaluate_module_with_di_and_aop(
 }
 
 /// Helper to execute a method function with self context (for auto-forwarding properties)
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_method_function(
     method: &simple_parser::ast::FunctionDef,
     args: &[simple_parser::ast::Argument],

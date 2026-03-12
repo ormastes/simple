@@ -12,6 +12,7 @@ use super::super::{
 };
 use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn call_method_on_value(
     recv_val: Value,
     method: &str,
@@ -504,6 +505,7 @@ pub(crate) fn build_method_missing_args(
 /// Internal helper: find and execute a method by name on a class/struct object.
 /// Searches in class_def methods first, then impl_methods, then blanket impls.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
+#[allow(clippy::too_many_arguments)]
 fn find_method_and_exec(
     method_name: &str,
     args: &[simple_parser::ast::Argument],
@@ -605,6 +607,7 @@ fn find_method_and_exec(
 /// Find and execute a method on a class/struct object.
 /// Searches in class_def methods first, then impl_methods.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_and_exec_method(
     method: &str,
     args: &[simple_parser::ast::Argument],
@@ -631,6 +634,7 @@ pub(crate) fn find_and_exec_method(
 
 /// Try to call method_missing hook on a class/struct object.
 /// Returns Ok(Some(value)) if method_missing found, Ok(None) if not found.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_method_missing(
     method: &str,
     args: &[simple_parser::ast::Argument],

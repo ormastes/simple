@@ -239,6 +239,7 @@ pub struct SequenceEvent {
 
 impl SequenceEvent {
     /// Create a new call event
+    #[allow(clippy::too_many_arguments)]
     pub fn new_call(
         sequence_num: u64,
         timestamp_ns: u64,
@@ -266,6 +267,7 @@ impl SequenceEvent {
     }
 
     /// Create a new return event
+    #[allow(clippy::too_many_arguments)]
     pub fn new_return(
         sequence_num: u64,
         timestamp_ns: u64,

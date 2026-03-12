@@ -519,14 +519,13 @@ impl<'a> ExprTranslator<'a> {
                     // Get the local name
                     let name = locals
                         .get(*local_index)
-                        .map(|l| {
+                        .and_then(|l| {
                             if l.is_ghost {
                                 // Skip ghost variables
                                 return None;
                             }
                             Some(self.to_lean_name(&l.name))
                         })
-                        .flatten()
                         .unwrap_or_else(|| format!("local{}", local_index));
 
                     if let Some(val_expr) = value {

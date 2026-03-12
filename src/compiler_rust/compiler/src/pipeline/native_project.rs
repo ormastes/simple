@@ -20,6 +20,22 @@ use crate::incremental::SourceInfo;
 use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
+/// Cross-module import resolution data shared across compilation units.
+///
+/// Groups the four `Arc`-wrapped maps that are always passed together during
+/// parallel and sequential compilation of native projects.
+#[derive(Clone)]
+pub(crate) struct ModuleImports {
+    /// Map from unmangled function name to its unique mangled name.
+    pub import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Set of function names that have multiple definitions (ambiguous).
+    pub ambiguous_names: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Map from unmangled name to all mangled variants.
+    pub all_mangled: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
+    /// Per-module re-export maps.
+    pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+}
+
 /// Configuration for native project builds.
 #[derive(Debug, Clone)]
 pub struct NativeBuildConfig {
@@ -267,7 +283,7 @@ impl NativeProjectBuilder {
         // Parse all files to find top-level function definitions and compute their
         // mangled names. Functions with unique names get direct import map entries;
         // ambiguous names (multiple definitions) are left unresolved.
-        let (import_map, ambiguous_names, all_mangled, re_exports) = if !self.config.no_mangle {
+        let imports = if !self.config.no_mangle {
             let result = build_import_map(&file_sources, &self.source_root);
             if self.config.verbose {
                 eprintln!(
@@ -277,19 +293,19 @@ impl NativeProjectBuilder {
                     result.re_exports.len()
                 );
             }
-            (
-                std::sync::Arc::new(result.map),
-                std::sync::Arc::new(result.ambiguous),
-                std::sync::Arc::new(result.all_mangled),
-                std::sync::Arc::new(result.re_exports),
-            )
+            ModuleImports {
+                import_map: std::sync::Arc::new(result.map),
+                ambiguous_names: std::sync::Arc::new(result.ambiguous),
+                all_mangled: std::sync::Arc::new(result.all_mangled),
+                re_exports: std::sync::Arc::new(result.re_exports),
+            }
         } else {
-            (
-                std::sync::Arc::new(std::collections::HashMap::new()),
-                std::sync::Arc::new(std::collections::HashSet::new()),
-                std::sync::Arc::new(std::collections::HashMap::new()),
-                std::sync::Arc::new(std::collections::HashMap::new()),
-            )
+            ModuleImports {
+                import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+                ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+                all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+                re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+            }
         };
 
         // 5. Compile dirty files
@@ -298,20 +314,14 @@ impl NativeProjectBuilder {
                 &to_compile,
                 &temp_dir_path,
                 &canonical_entry,
-                &import_map,
-                &ambiguous_names,
-                &all_mangled,
-                &re_exports,
+                &imports,
             )
         } else {
             self.compile_entries_sequential(
                 &to_compile,
                 &temp_dir_path,
                 &canonical_entry,
-                &import_map,
-                &ambiguous_names,
-                &all_mangled,
-                &re_exports,
+                &imports,
             )
         };
         let compile_time = compile_start.elapsed();
@@ -377,19 +387,21 @@ impl NativeProjectBuilder {
         let link_time = link_start.elapsed();
 
         // On link failure, optionally keep objects for debugging
-        if link_result.is_err() {
+        if let Err(e) = link_result {
             if let Some(dir) = temp_dir.take() {
-                let path = dir.into_path();
+                let path = dir.path().to_path_buf();
                 eprintln!("Link failed. Objects kept at: {}", path.display());
+                dir.keep();
             }
-            return Err(link_result.unwrap_err());
+            return Err(e);
         }
 
         // Optionally keep the temporary object directory for debugging.
         if std::env::var("SIMPLE_KEEP_NATIVE_OBJS").is_ok() {
             if let Some(dir) = temp_dir.take() {
-                let path = dir.into_path();
+                let path = dir.path().to_path_buf();
                 eprintln!("Keeping native object files in {}", path.display());
+                dir.keep();
             }
         }
 
@@ -441,10 +453,7 @@ impl NativeProjectBuilder {
         entries: &[(usize, PathBuf, String)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
-        import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
-        ambiguous_names: &std::sync::Arc<std::collections::HashSet<String>>,
-        all_mangled: &std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
-        re_exports: &std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+        imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         // Configure rayon thread pool if needed
         if let Some(n) = self.config.num_threads {
@@ -460,10 +469,7 @@ impl NativeProjectBuilder {
         let total = entries.len();
         let no_mangle = self.config.no_mangle;
         let canonical_entry = canonical_entry.clone();
-        let import_map = import_map.clone();
-        let ambiguous_names = ambiguous_names.clone();
-        let all_mangled = all_mangled.clone();
-        let re_exports = re_exports.clone();
+        let imports = imports.clone();
 
         entries
             .par_iter()
@@ -482,10 +488,7 @@ impl NativeProjectBuilder {
                     stack_size,
                     no_mangle,
                     is_entry,
-                    import_map.clone(),
-                    ambiguous_names.clone(),
-                    all_mangled.clone(),
-                    re_exports.clone(),
+                    imports.clone(),
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -510,10 +513,7 @@ impl NativeProjectBuilder {
         entries: &[(usize, PathBuf, String)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
-        import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
-        ambiguous_names: &std::sync::Arc<std::collections::HashSet<String>>,
-        all_mangled: &std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
-        re_exports: &std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+        imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
         entries
@@ -533,10 +533,7 @@ impl NativeProjectBuilder {
                     self.config.stack_size,
                     self.config.no_mangle,
                     is_entry,
-                    import_map.clone(),
-                    ambiguous_names.clone(),
-                    all_mangled.clone(),
-                    re_exports.clone(),
+                    imports.clone(),
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -1717,10 +1714,7 @@ fn compile_file_to_object(
     source_root: &Path,
     no_mangle: bool,
     is_entry: bool,
-    import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
-    ambiguous_names: &std::sync::Arc<std::collections::HashSet<String>>,
-    all_mangled: &std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
-    re_exports: &std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    imports: &ModuleImports,
 ) -> Result<Vec<u8>, String> {
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
@@ -1999,7 +1993,7 @@ fn compile_file_to_object(
 
     // Build per-module use_map from AST `use` statements.
     // Maps local imported name → mangled symbol name.
-    let use_map = build_use_map_from_ast(&ast, all_mangled, re_exports);
+    let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
 
     // Mono
     let ast = monomorphize_module(&ast);
@@ -2032,13 +2026,13 @@ fn compile_file_to_object(
             // Without this, same-named functions from different modules collide.
             if !no_mangle {
                 let prefix = module_prefix_from_path(file_path, source_root);
-                let global_suffix_index = build_suffix_index(all_mangled.as_ref());
+                let global_suffix_index = build_suffix_index(imports.all_mangled.as_ref());
                 let unresolved = mangle_mir(
                     &mut mir,
                     &prefix,
                     is_entry,
-                    import_map.as_ref(),
-                    ambiguous_names.as_ref(),
+                    imports.import_map.as_ref(),
+                    imports.ambiguous_names.as_ref(),
                     &use_map,
                     &global_suffix_index,
                 );
@@ -2063,7 +2057,7 @@ fn compile_file_to_object(
 
             let mut llvm = LlvmBackend::new(simple_common::target::Target::host())
                 .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
-            llvm.set_import_map(import_map.clone());
+            llvm.set_import_map(imports.import_map.clone());
             llvm.set_use_map(use_map.clone());
             let obj = llvm
                 .compile(&mir)
@@ -2090,8 +2084,8 @@ fn compile_file_to_object(
     // Cranelift backend (default)
     let mut codegen = Codegen::new().map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
-    codegen.set_import_map(import_map.clone());
-    codegen.set_ambiguous_names(ambiguous_names.clone());
+    codegen.set_import_map(imports.import_map.clone());
+    codegen.set_ambiguous_names(imports.ambiguous_names.clone());
     codegen.set_use_map(use_map);
     if !no_mangle {
         let prefix = module_prefix_from_path(file_path, source_root);
@@ -2114,10 +2108,7 @@ fn compile_file_safe(
     stack_size: usize,
     no_mangle: bool,
     is_entry: bool,
-    import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
-    ambiguous_names: std::sync::Arc<std::collections::HashSet<String>>,
-    all_mangled: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
-    re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    imports: ModuleImports,
 ) -> Result<Vec<u8>, String> {
     use std::sync::mpsc;
 
@@ -2138,10 +2129,7 @@ fn compile_file_safe(
                     &source_root,
                     no_mangle,
                     is_entry,
-                    &import_map,
-                    &ambiguous_names,
-                    &all_mangled,
-                    &re_exports,
+                    &imports,
                 )
             } else {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2152,10 +2140,7 @@ fn compile_file_safe(
                         &source_root,
                         no_mangle,
                         is_entry,
-                        &import_map,
-                        &ambiguous_names,
-                        &all_mangled,
-                        &re_exports,
+                        &imports,
                     )
                 })) {
                     Ok(r) => r,

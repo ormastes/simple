@@ -44,6 +44,7 @@ pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> b
 
 /// Handle functional update expression: target.&method(args)
 /// Returns Ok(Some(new_value)) if successfully processed, Ok(None) if not applicable
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_functional_update(
     target: &Expr,
     method: &str,

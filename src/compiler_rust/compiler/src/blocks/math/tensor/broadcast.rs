@@ -49,7 +49,7 @@ where
     let result_strides = compute_strides(&result_shape);
 
     // Iterate over result indices
-    for flat_idx in 0..result_size {
+    for (flat_idx, result_elem) in result_data.iter_mut().enumerate() {
         let mut remaining = flat_idx;
         let mut a_idx = 0;
         let mut b_idx = 0;
@@ -71,7 +71,7 @@ where
         } else {
             b.data[b_idx % b.data.len()]
         };
-        result_data[flat_idx] = op(a_val, b_val);
+        *result_elem = op(a_val, b_val);
     }
 
     Tensor::new(result_data, result_shape)

@@ -560,8 +560,9 @@ impl NativeBinaryBuilder {
         let temp_dir =
             tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
         let (temp_path, _temp_guard) = if std::env::var("SIMPLE_KEEP_TEMP").is_ok() {
-            let path = temp_dir.into_path();
+            let path = temp_dir.path().to_path_buf();
             eprintln!("SIMPLE_KEEP_TEMP=1: keeping temp objects in {}", path.display());
+            temp_dir.keep();
             (path, None)
         } else {
             (temp_dir.path().to_path_buf(), Some(temp_dir))

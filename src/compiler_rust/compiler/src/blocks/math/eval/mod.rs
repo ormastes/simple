@@ -45,7 +45,7 @@ pub enum MathValue {
 }
 
 impl MathValue {
-    pub fn to_value(self) -> Value {
+    pub fn into_value(self) -> Value {
         match self {
             MathValue::Int(n) => Value::Int(n),
             MathValue::Float(f) => Value::Float(f),
@@ -75,7 +75,7 @@ impl MathValue {
 pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
     let mut env = HashMap::new();
     let result = eval_with_env(expr, &mut env)?;
-    Ok(result.to_value())
+    Ok(result.into_value())
 }
 
 /// Evaluate math expression with a specific preferred backend.
@@ -124,7 +124,7 @@ pub fn evaluate_with_env_bridge(expr: &MathExpr, interpreter_env: &crate::value:
     }
 
     let result = eval_with_env(expr, &mut math_env)?;
-    Ok(result.to_value())
+    Ok(result.into_value())
 }
 
 /// Convert an interpreter Value to a MathValue (if numeric/bool/array).

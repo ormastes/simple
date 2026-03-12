@@ -126,6 +126,7 @@ pub(crate) fn compile_unit_widen<M: Module>(
 
 /// Compile a UnitNarrow instruction - narrow a unit value to a smaller representation.
 /// This may overflow and requires bounds checking.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_unit_narrow<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
