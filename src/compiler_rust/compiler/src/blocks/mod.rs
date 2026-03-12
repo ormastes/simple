@@ -74,7 +74,7 @@ pub fn display_block(kind: &str, payload: &str) -> String {
     match current_render_mode() {
         RenderMode::Plain => format!("{}{{{}}}", kind, payload),
         RenderMode::Unicode => match kind {
-            "m" => MathBlock.display_string(payload),
+            "m" | "loss" | "nograd" => MathBlock.display_string(payload),
             "sh" => ShellBlock.display_string(payload),
             "sql" => SqlBlock.display_string(payload),
             "re" => RegexBlock.display_string(payload),
@@ -82,7 +82,7 @@ pub fn display_block(kind: &str, payload: &str) -> String {
         },
         RenderMode::Rich => {
             let unicode = match kind {
-                "m" => MathBlock.display_string(payload),
+                "m" | "loss" | "nograd" => MathBlock.display_string(payload),
                 _ => format!("{}{{{}}}", kind, payload),
             };
             format!(
@@ -96,7 +96,7 @@ pub fn display_block(kind: &str, payload: &str) -> String {
 /// Evaluate a custom block based on its kind
 pub fn evaluate_block(kind: &str, payload: &str) -> BlockResult {
     match kind {
-        "m" => MathBlock.evaluate(payload),
+        "m" | "loss" | "nograd" => MathBlock.evaluate(payload),
         "sh" => ShellBlock.evaluate(payload),
         "sql" => SqlBlock.evaluate(payload),
         "re" => RegexBlock.evaluate(payload),
@@ -112,7 +112,7 @@ pub fn evaluate_block(kind: &str, payload: &str) -> BlockResult {
 /// visible inside the math evaluator. Other block types ignore the env.
 pub fn evaluate_block_with_env(kind: &str, payload: &str, env: &Env) -> BlockResult {
     match kind {
-        "m" => MathBlock.evaluate_with_env(payload, env),
+        "m" | "loss" | "nograd" => MathBlock.evaluate_with_env(payload, env),
         // Other blocks don't need env access
         "sh" => ShellBlock.evaluate(payload),
         "sql" => SqlBlock.evaluate(payload),

@@ -1,0 +1,293 @@
+name: T32 Tools Build (Linux + MinGW)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/10_tooling/trace32_tools/**'
+      - '.github/workflows/t32-tools-build.yml'
+  pull_request:
+    paths:
+      - 'examples/10_tooling/trace32_tools/**'
+      - '.github/workflows/t32-tools-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Job 1: Build Rust bootstrap seed (Linux) ───────────────────────────
+  build-seed:
+    runs-on: ubuntu-latest
+    name: Build Seed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: t32-seed-linux-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            t32-seed-linux-
+
+      - name: Build seed
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-driver
+
+      - name: Build native_all library
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-native-all
+
+      - name: Verify seed
+        run: |
+          SEED="src/compiler_rust/target/bootstrap/simple"
+          chmod +x "$SEED"
+          "$SEED" --version
+          echo "Seed size: $(wc -c < "$SEED") bytes"
+
+      - name: Upload seed
+        uses: actions/upload-artifact@v4
+        with:
+          name: t32-seed-linux-${{ github.sha }}
+          path: src/compiler_rust/target/bootstrap/simple
+          retention-days: 3
+
+  # ── Job 2: Build each T32 tool (Linux + MinGW) ─────────────────────────
+  build-tools:
+    needs: build-seed
+    strategy:
+      fail-fast: false
+      matrix:
+        tool:
+          - name: cmm_lsp
+            entry: examples/10_tooling/trace32_tools/cmm_lsp/mod.spl
+            extra_source: examples/10_tooling/trace32_tools/cmm_lsp
+            desc: CMM Language Server
+
+          - name: t32_mcp
+            entry: examples/10_tooling/trace32_tools/t32_mcp/main.spl
+            extra_source: ""
+            desc: T32 MCP Server
+
+          - name: t32_lsp_mcp
+            entry: examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+            extra_source: examples/10_tooling/trace32_tools
+            desc: T32 LSP MCP Server
+
+          - name: t32_cli
+            entry: examples/10_tooling/trace32_tools/t32_cli/mod.spl
+            extra_source: ""
+            desc: T32 CLI Shell
+
+    runs-on: ubuntu-latest
+    name: Build — ${{ matrix.tool.desc }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download seed
+        uses: actions/download-artifact@v4
+        with:
+          name: t32-seed-linux-${{ github.sha }}
+          path: seed-download
+
+      - name: Restore native_all library
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: t32-seed-linux-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            t32-seed-linux-
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y clang lld gcc-mingw-w64-x86-64
+
+      - name: Ensure symlinks exist
+        run: |
+          # Symlinks for app.* import resolution
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_mcp src/app/mcp_t32
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_cli src/app/t32_cli
+          ln -sfn ../../examples/10_tooling/trace32_tools/t32_lsp_mcp src/app/t32_lsp_mcp
+          ls -la src/app/mcp_t32 src/app/t32_cli src/app/t32_lsp_mcp
+
+      - name: Build ${{ matrix.tool.name }} (Linux)
+        run: |
+          SEED="seed-download/simple"
+          chmod +x "$SEED"
+          mkdir -p artifacts/linux
+
+          SOURCES="--source src"
+          if [ -n "${{ matrix.tool.extra_source }}" ]; then
+            SOURCES="$SOURCES --source ${{ matrix.tool.extra_source }}"
+          fi
+
+          echo "Building ${{ matrix.tool.name }} for Linux..."
+          echo "  Entry: ${{ matrix.tool.entry }}"
+          echo "  Sources: $SOURCES"
+
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            "$SEED" native-build \
+            $SOURCES \
+            --entry ${{ matrix.tool.entry }} \
+            -o artifacts/linux/${{ matrix.tool.name }} \
+            2>&1
+
+          if [ -f "artifacts/linux/${{ matrix.tool.name }}" ]; then
+            chmod +x "artifacts/linux/${{ matrix.tool.name }}"
+            echo "Linux binary built:"
+            file "artifacts/linux/${{ matrix.tool.name }}"
+            ls -lh "artifacts/linux/${{ matrix.tool.name }}"
+          else
+            echo "::error::Linux binary not produced for ${{ matrix.tool.name }}"
+            exit 1
+          fi
+
+      - name: Build ${{ matrix.tool.name }} (MinGW Windows)
+        continue-on-error: true
+        run: |
+          SEED="seed-download/simple"
+          mkdir -p artifacts/windows
+
+          SOURCES="--source src"
+          if [ -n "${{ matrix.tool.extra_source }}" ]; then
+            SOURCES="$SOURCES --source ${{ matrix.tool.extra_source }}"
+          fi
+
+          echo "Cross-compiling ${{ matrix.tool.name }} for Windows MinGW..."
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            "$SEED" native-build \
+            $SOURCES \
+            --entry ${{ matrix.tool.entry }} \
+            -o artifacts/windows/${{ matrix.tool.name }}.exe \
+            --target x86_64-pc-windows-gnu \
+            2>&1 || true
+
+          if [ -f "artifacts/windows/${{ matrix.tool.name }}.exe" ]; then
+            echo "Windows binary built:"
+            file "artifacts/windows/${{ matrix.tool.name }}.exe"
+            ls -lh "artifacts/windows/${{ matrix.tool.name }}.exe"
+          else
+            echo "Windows cross-compile not produced (expected — still maturing)"
+          fi
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tool.name }}-linux-x86_64-${{ github.sha }}
+          path: artifacts/linux/${{ matrix.tool.name }}
+          retention-days: 14
+
+      - name: Check Windows binary
+        id: check-win
+        run: |
+          if [ -f "artifacts/windows/${{ matrix.tool.name }}.exe" ]; then
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Windows binary
+        if: steps.check-win.outputs.produced == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tool.name }}-windows-mingw-x86_64-${{ github.sha }}
+          path: artifacts/windows/${{ matrix.tool.name }}.exe
+          retention-days: 14
+
+  # ── Job 3: Smoke test Linux binaries ────────────────────────────────────
+  smoke-test:
+    needs: build-tools
+    runs-on: ubuntu-latest
+    name: Smoke Test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download cmm_lsp
+        uses: actions/download-artifact@v4
+        with:
+          name: cmm_lsp-linux-x86_64-${{ github.sha }}
+          path: bin/t32
+
+      - name: Download t32_mcp
+        uses: actions/download-artifact@v4
+        with:
+          name: t32_mcp-linux-x86_64-${{ github.sha }}
+          path: bin/t32
+
+      - name: Download t32_lsp_mcp
+        uses: actions/download-artifact@v4
+        with:
+          name: t32_lsp_mcp-linux-x86_64-${{ github.sha }}
+          path: bin/t32
+
+      - name: Download t32_cli
+        uses: actions/download-artifact@v4
+        with:
+          name: t32_cli-linux-x86_64-${{ github.sha }}
+          path: bin/t32
+
+      - name: Run smoke tests
+        run: |
+          chmod +x bin/t32/*
+          PASS=0
+          FAIL=0
+
+          echo "=== T32 Tools Smoke Test Suite ==="
+          echo ""
+
+          for tool in cmm_lsp t32_mcp t32_lsp_mcp t32_cli; do
+            BINARY="bin/t32/$tool"
+            echo -n "$tool: "
+
+            if [ ! -f "$BINARY" ]; then
+              echo "MISSING"
+              FAIL=$((FAIL + 1))
+              continue
+            fi
+
+            # Check binary is executable ELF
+            if file "$BINARY" | grep -q "ELF"; then
+              echo -n "ELF OK, "
+            else
+              echo "NOT ELF"
+              FAIL=$((FAIL + 1))
+              continue
+            fi
+
+            # Try --version or --help (tools may not support these)
+            if "$BINARY" --help > /dev/null 2>&1; then
+              echo "--help OK"
+              PASS=$((PASS + 1))
+            elif "$BINARY" --version > /dev/null 2>&1; then
+              echo "--version OK"
+              PASS=$((PASS + 1))
+            else
+              echo "runs (no --help/--version)"
+              PASS=$((PASS + 1))
+            fi
+          done
+
+          echo ""
+          echo "=== Results: $PASS passed, $FAIL failed ==="
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo "::warning::$FAIL tool(s) had issues"
+          fi

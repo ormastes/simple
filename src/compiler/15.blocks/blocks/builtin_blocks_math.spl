@@ -4,11 +4,143 @@
 # - Math blocks (m{...}): Mathematical notation
 # - Loss blocks (loss{...}): Automatic differentiation
 # - Nograd blocks (nograd{...}): Gradient-free zones
+#
+# Shared logic is extracted into module-level _math_* helpers.
+# All three block types delegate to these helpers to avoid duplication.
 
 use compiler.blocks.blocks.{BlockDefinition, BlockValue, BlockRegistry}
 use compiler.blocks.modes.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo, BlockToken, BlockTokenKind, TextSpan}
 use compiler.blocks.context.{BlockContext, BlockError}
 use value.ConstValue
+
+# ============================================================================
+# Shared helpers for math-mode blocks (m{}, loss{}, nograd{})
+# ============================================================================
+
+fn _math_parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+    """Shared parse_payload: math-mode blocks return raw payload."""
+    Ok(BlockValue.Raw(payload))
+
+fn _math_highlight(payload: text) -> [HighlightToken]:
+    """Shared highlighting for math expressions: operators and numbers."""
+    var tokens: [HighlightToken] = []
+    var i = 0
+    while i < payload.len():
+        val c = payload[i]
+        match c:
+            case '^' | '\'' | '@' | '+' | '-' | '*' | '/':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Operator
+                ))
+            case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
+                val start = i
+                while i < payload.len() and payload[i].is_digit():
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i,
+                    kind: HighlightKind.Number
+                ))
+                continue
+            case _:
+                pass
+        i = i + 1
+    tokens
+
+fn _math_lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+    """Shared sub-lexer for math-mode blocks. Tokenizes identifiers, numbers, operators."""
+    var tokens: [BlockToken] = []
+    var i = 0
+    while i < payload.len():
+        # Skip whitespace
+        if payload[i].is_whitespace():
+            val start = i
+            while i < payload.len() and payload[i].is_whitespace():
+                i = i + 1
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Whitespace, start, i, payload[start:i]))
+            continue
+
+        # Skip positions inside pre-scanned comments
+        if pre_lex.is_in_comment(i):
+            val start = i
+            while i < payload.len() and pre_lex.is_in_comment(i):
+                i = i + 1
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Comment, start, i, payload[start:i]))
+            continue
+
+        # Numbers
+        if payload[i].is_digit():
+            val start = i
+            while i < payload.len() and (payload[i].is_digit() or payload[i] == '.'):
+                i = i + 1
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Number, start, i, payload[start:i]))
+            continue
+
+        # Identifiers
+        if payload[i].is_alphabetic() or payload[i] == '_':
+            val start = i
+            while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                i = i + 1
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Identifier, start, i, payload[start:i]))
+            continue
+
+        # Operators: ^ ' @ + - * / . = < > ! ( )
+        val c = payload[i]
+        if c == '^' or c == '\'' or c == '@' or c == '+' or c == '-' or c == '*' or c == '/':
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Operator, i, i + 1, payload[i:i+1]))
+            i = i + 1
+            continue
+
+        # Punctuation: ( ) , ;
+        if c == '(' or c == ')' or c == ',' or c == ';':
+            tokens = tokens.push(BlockToken.new(BlockTokenKind.Punctuation, i, i + 1, payload[i:i+1]))
+            i = i + 1
+            continue
+
+        # Everything else
+        tokens = tokens.push(BlockToken.new(BlockTokenKind.Error, i, i + 1, payload[i:i+1]))
+        i = i + 1
+
+    Ok(tokens)
+
+fn _math_treesitter_outline(kind: text, payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+    """Shared outline extraction for math-mode blocks. Takes kind to set on the result."""
+    var identifiers: [text] = []
+    var i = 0
+    while i < payload.len():
+        # Skip protected regions
+        if pre_lex.is_protected(i):
+            i = i + 1
+            continue
+
+        if payload[i].is_alphabetic() or payload[i] == '_':
+            val start = i
+            while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                i = i + 1
+            val ident = payload[start:i]
+            if not (ident in identifiers):
+                identifiers = identifiers.push(ident)
+            continue
+
+        i = i + 1
+
+    BlockOutlineInfo(
+        kind: kind,
+        identifiers: identifiers,
+        external_refs: [],
+        structure_kind: Some("expression"),
+        is_opaque: false
+    )
+
+fn _math_skip_policy() -> BlockSkipPolicy:
+    """Shared skip policy: math-mode blocks need outline for IDE features."""
+    BlockSkipPolicy.OutlineRequired
+
+# ============================================================================
+# Math Block (m{})
+# ============================================================================
 
 struct MathBlockDef(BlockDefinition):
     r"""Math block: enables math-like syntax.
@@ -30,8 +162,7 @@ impl MathBlockDef:
         "m"
 
     fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
-        # Math blocks return raw payload - parsed with math mode by parser
-        Ok(BlockValue.Raw(payload))
+        _math_parse_payload(payload, ctx)
 
     fn lexer_mode() -> LexerMode:
         LexerMode.Math
@@ -62,127 +193,19 @@ impl MathBlockDef:
         ]
 
     fn highlight(payload: text) -> [HighlightToken]:
-        # Basic highlighting for math expressions
-        var tokens: [HighlightToken] = []
-        var i = 0
-        while i < payload.len():
-            val c = payload[i]
-            match c:
-                case '^' | '\'' | '@' | '+' | '-' | '*' | '/':
-                    tokens = tokens.push(HighlightToken(
-                        start: i,
-                        end: i + 1,
-                        kind: HighlightKind.Operator
-                    ))
-                case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
-                    val start = i
-                    while i < payload.len() and payload[i].is_digit():
-                        i = i + 1
-                    tokens = tokens.push(HighlightToken(
-                        start: start,
-                        end: i,
-                        kind: HighlightKind.Number
-                    ))
-                    continue
-                case _:
-                    pass
-            i = i + 1
-        tokens
-
-    # --- Three-level interface (reference implementation) ---
+        _math_highlight(payload)
 
     fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
-        """Sub-lexer for math blocks. Tokenizes identifiers, numbers, operators."""
-        var tokens: [BlockToken] = []
-        var i = 0
-        while i < payload.len():
-            # Skip whitespace
-            if payload[i].is_whitespace():
-                val start = i
-                while i < payload.len() and payload[i].is_whitespace():
-                    i = i + 1
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Whitespace, start, i, payload[start:i]))
-                continue
-
-            # Skip positions inside pre-scanned comments
-            if pre_lex.is_in_comment(i):
-                val start = i
-                while i < payload.len() and pre_lex.is_in_comment(i):
-                    i = i + 1
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Comment, start, i, payload[start:i]))
-                continue
-
-            # Numbers
-            if payload[i].is_digit():
-                val start = i
-                while i < payload.len() and (payload[i].is_digit() or payload[i] == '.'):
-                    i = i + 1
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Number, start, i, payload[start:i]))
-                continue
-
-            # Identifiers
-            if payload[i].is_alphabetic() or payload[i] == '_':
-                val start = i
-                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
-                    i = i + 1
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Identifier, start, i, payload[start:i]))
-                continue
-
-            # Operators: ^ ' @ + - * / . = < > ! ( )
-            val c = payload[i]
-            if c == '^' or c == '\'' or c == '@' or c == '+' or c == '-' or c == '*' or c == '/':
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Operator, i, i + 1, payload[i:i+1]))
-                i = i + 1
-                continue
-
-            # Punctuation: ( ) , ;
-            if c == '(' or c == ')' or c == ',' or c == ';':
-                tokens = tokens.push(BlockToken.new(BlockTokenKind.Punctuation, i, i + 1, payload[i:i+1]))
-                i = i + 1
-                continue
-
-            # Everything else
-            tokens = tokens.push(BlockToken.new(BlockTokenKind.Error, i, i + 1, payload[i:i+1]))
-            i = i + 1
-
-        Ok(tokens)
+        _math_lex(payload, pre_lex, ctx)
 
     fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
-        """Extract identifiers from math expressions for outline."""
-        var identifiers: [text] = []
-        var i = 0
-        while i < payload.len():
-            # Skip protected regions
-            if pre_lex.is_protected(i):
-                i = i + 1
-                continue
-
-            if payload[i].is_alphabetic() or payload[i] == '_':
-                val start = i
-                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
-                    i = i + 1
-                val ident = payload[start:i]
-                if not (ident in identifiers):
-                    identifiers = identifiers.push(ident)
-                continue
-
-            i = i + 1
-
-        BlockOutlineInfo(
-            kind: "m",
-            identifiers: identifiers,
-            external_refs: [],
-            structure_kind: Some("expression"),
-            is_opaque: false
-        )
+        _math_treesitter_outline("m", payload, pre_lex)
 
     fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
-        """Full parse using pre-lex info. Delegates to parse_payload for now."""
-        self.parse_payload(payload, ctx)
+        _math_parse_payload(payload, ctx)
 
     fn skip_policy() -> BlockSkipPolicy:
-        """Math blocks need outline for IDE features."""
-        BlockSkipPolicy.OutlineRequired
+        _math_skip_policy()
 
 # ============================================================================
 # Loss Block (loss{})
@@ -207,8 +230,7 @@ impl LossBlockDef:
         "loss"
 
     fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
-        # Loss blocks return raw payload - converted to LossBlock by parser
-        Ok(BlockValue.Raw(payload))
+        _math_parse_payload(payload, ctx)
 
     fn lexer_mode() -> LexerMode:
         LexerMode.Math
@@ -233,6 +255,21 @@ impl LossBlockDef:
             )
         ]
 
+    fn highlight(payload: text) -> [HighlightToken]:
+        _math_highlight(payload)
+
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        _math_lex(payload, pre_lex, ctx)
+
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        _math_treesitter_outline("loss", payload, pre_lex)
+
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        _math_parse_payload(payload, ctx)
+
+    fn skip_policy() -> BlockSkipPolicy:
+        _math_skip_policy()
+
 # ============================================================================
 # Nograd Block (nograd{})
 # ============================================================================
@@ -256,8 +293,7 @@ impl NogradBlockDef:
         "nograd"
 
     fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
-        # Nograd blocks return raw payload - converted to NogradBlock by parser
-        Ok(BlockValue.Raw(payload))
+        _math_parse_payload(payload, ctx)
 
     fn lexer_mode() -> LexerMode:
         LexerMode.Math
@@ -276,5 +312,20 @@ impl NogradBlockDef:
                 output: nil
             )
         ]
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        _math_highlight(payload)
+
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        _math_lex(payload, pre_lex, ctx)
+
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        _math_treesitter_outline("nograd", payload, pre_lex)
+
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        _math_parse_payload(payload, ctx)
+
+    fn skip_policy() -> BlockSkipPolicy:
+        _math_skip_policy()
 
 export MathBlockDef, LossBlockDef, NogradBlockDef

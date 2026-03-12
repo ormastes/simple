@@ -415,6 +415,18 @@ impl<'a> super::Lexer<'a> {
                 }
             }
             'l' => {
+                // Check for loss{...} custom block
+                if self.peek() == Some('o')
+                    && self.peek_ahead(1) == Some('s')
+                    && self.peek_ahead(2) == Some('s')
+                    && self.peek_ahead(3) == Some('{')
+                {
+                    self.advance(); // consume 'o'
+                    self.advance(); // consume 's'
+                    self.advance(); // consume 's'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("loss"));
+                }
                 // Check for lean{...} custom block
                 if self.peek() == Some('e')
                     && self.peek_ahead(1) == Some('a')
@@ -426,6 +438,21 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume 'n'
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("lean"));
+                }
+            }
+            'n' => {
+                // Check for nograd{...} custom block
+                if self.peek() == Some('o')
+                    && self.peek_ahead(1) == Some('g')
+                    && self.peek_ahead(2) == Some('r')
+                    && self.peek_ahead(3) == Some('a')
+                    && self.peek_ahead(4) == Some('d')
+                    && self.peek_ahead(5) == Some('{')
+                {
+                    for _ in 0..6 {
+                        self.advance();
+                    }
+                    return Some(self.scan_custom_block_payload("nograd"));
                 }
             }
             _ => {}

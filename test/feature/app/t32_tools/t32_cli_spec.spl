@@ -1,0 +1,259 @@
+"""
+# T32 CLI Shell -- Parser, Error Code, and Type Tests
+
+**Feature IDs:** #T32-CLI-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for the T32 CLI shell: text parsers (split, trim, find_char),
+error code builders with suggestion helpers, join utility,
+type constructors (T32WindowNode, T32Action, T32Field),
+and SDN catalog entry helpers.
+
+## Source
+
+`examples/10_tooling/trace32_tools/t32_cli/text_parser.spl`
+`examples/10_tooling/trace32_tools/t32_cli/error_codes.spl`
+`examples/10_tooling/trace32_tools/t32_cli/types.spl`
+"""
+
+use app.t32_cli.text_parser.{split_whitespace, split_lines, trim, find_char, split_on, parse_tabular_output}
+use app.t32_cli.error_codes.{t32_err_unknown_cmd, t32_err_session_not_found, t32_err_session_duplicate, t32_err_no_session, t32_suggest_similar, t32_did_you_mean, t32_join_list, cli_commands}
+use app.t32_cli.types.{T32WindowNode, T32Action, T32Field, T32Catalogs}
+
+# Inline entry_get from catalog_loader (avoids importing file-I/O module)
+fn entry_get(dict: Dict<text, text>, key: text) -> text:
+    val found = dict.get(key)
+    match found:
+        Some(v): v
+        nil: ""
+
+# ============================================================================
+# Text Parsers
+# ============================================================================
+
+describe "T32 CLI Text Parsers":
+
+    context "split_lines":
+        it "handles single line without newline":
+            val lines = split_lines("single")
+            expect(lines.len()).to_equal(1)
+            expect(lines[0]).to_equal("single")
+
+        it "handles empty string":
+            val lines = split_lines("")
+            expect(lines.len()).to_equal(0)
+
+    context "split_whitespace":
+        it "splits on spaces":
+            val parts = split_whitespace("hello  world  test")
+            expect(parts.len()).to_equal(3)
+            expect(parts[0]).to_equal("hello")
+            expect(parts[1]).to_equal("world")
+            expect(parts[2]).to_equal("test")
+
+        it "handles leading and trailing spaces":
+            val parts = split_whitespace("  hello  ")
+            expect(parts.len()).to_equal(1)
+            expect(parts[0]).to_equal("hello")
+
+    context "trim":
+        it "removes leading spaces":
+            val result = trim("   hello")
+            expect(result).to_equal("hello")
+
+        it "removes trailing spaces":
+            val result = trim("hello   ")
+            expect(result).to_equal("hello")
+
+        it "removes both sides":
+            val result = trim("  hello  ")
+            expect(result).to_equal("hello")
+
+        it "returns empty for whitespace-only":
+            val result = trim("   ")
+            expect(result).to_equal("")
+
+    context "find_char":
+        it "finds first occurrence":
+            val pos = find_char("hello=world", '=')
+            expect(pos).to_equal(5)
+
+        it "returns -1 for missing char":
+            val pos = find_char("hello world", '=')
+            expect(pos).to_equal(-1)
+
+    context "split_on":
+        it "splits on delimiter":
+            val parts = split_on("a:b:c", ":")
+            expect(parts.len()).to_equal(3)
+            expect(parts[0]).to_equal("a")
+            expect(parts[1]).to_equal("b")
+            expect(parts[2]).to_equal("c")
+
+        it "handles no delimiter":
+            val parts = split_on("abc", ":")
+            expect(parts.len()).to_equal(1)
+            expect(parts[0]).to_equal("abc")
+
+    context "parse_tabular_output":
+        it "parses single-line header with no data":
+            val raw = "name  type  value"
+            val rows = parse_tabular_output(raw, " ")
+            expect(rows.len()).to_equal(0)
+
+# ============================================================================
+# Error Codes
+# ============================================================================
+
+describe "T32 CLI Error Codes":
+
+    context "error message builders":
+        it "builds unknown command error":
+            val msg = t32_err_unknown_cmd("xyz")
+            expect(msg).to_start_with("T4001:")
+            expect(msg).to_contain("xyz")
+            expect(msg).to_contain("Available:")
+
+        it "builds session not found error":
+            val msg = t32_err_session_not_found("s99", ["s1", "s2"])
+            expect(msg).to_start_with("T4010:")
+            expect(msg).to_contain("s99")
+            expect(msg).to_contain("Available:")
+
+        it "builds duplicate session error":
+            val msg = t32_err_session_duplicate("main", "s1")
+            expect(msg).to_start_with("T4011:")
+            expect(msg).to_contain("main")
+            expect(msg).to_contain("s1")
+
+        it "builds no active session error":
+            val msg = t32_err_no_session()
+            expect(msg).to_start_with("T4013:")
+            expect(msg).to_contain("No active session")
+
+    context "suggestion helpers":
+        it "suggests similar names by prefix":
+            val candidates = ["sessions", "cores", "windows", "shell"]
+            val matches = t32_suggest_similar("se", candidates)
+            expect(matches.len()).to_be_greater_than(0)
+            expect(matches[0]).to_equal("sessions")
+
+        it "returns empty for no matches":
+            val matches = t32_suggest_similar("zzz", ["alpha", "beta"])
+            expect(matches.len()).to_equal(0)
+
+        it "builds did-you-mean hint":
+            val hint = t32_did_you_mean("ses", ["sessions", "cores"])
+            expect(hint).to_contain("Did you mean:")
+            expect(hint).to_contain("sessions")
+
+        it "returns empty hint when no matches":
+            val hint = t32_did_you_mean("zzz", ["alpha", "beta"])
+            expect(hint).to_equal("")
+
+    context "join_list":
+        it "joins empty list":
+            val result = t32_join_list([], ", ")
+            expect(result).to_equal("")
+
+        it "joins single item":
+            val result = t32_join_list(["hello"], ", ")
+            expect(result).to_equal("hello")
+
+        it "joins multiple items":
+            val result = t32_join_list(["a", "b", "c"], ", ")
+            expect(result).to_equal("a, b, c")
+
+    context "cli_commands list":
+        it "contains expected commands":
+            val cmds = cli_commands()
+            expect(cmds).to_contain("sessions")
+            expect(cmds).to_contain("help")
+            expect(cmds).to_contain("shell")
+
+# ============================================================================
+# SDN Catalog Entry Helpers
+# ============================================================================
+
+describe "T32 CLI SDN Catalog Helpers":
+
+    context "entry_get":
+        it "returns empty for missing key":
+            var d: Dict<text, text> = {}
+            val result = entry_get(d, "missing")
+            expect(result).to_equal("")
+
+# ============================================================================
+# Type System
+# ============================================================================
+
+describe "T32 CLI Type System":
+
+    context "T32WindowNode":
+        it "creates with key and title":
+            val win = T32WindowNode.create("break_list", "Breakpoints", "built_in", "print_parse")
+            expect(win.window_key).to_equal("break_list")
+            expect(win.title).to_equal("Breakpoints")
+            expect(win.kind).to_equal("built_in")
+            expect(win.capture_mode).to_equal("print_parse")
+
+        it "creates built-in with commands":
+            val win = T32WindowNode.built_in("regs", "Registers", "Register.view", "Register.dump")
+            expect(win.window_key).to_equal("regs")
+            expect(win.open_command).to_equal("Register.view")
+            expect(win.capture_command).to_equal("Register.dump")
+            expect(win.kind).to_equal("built_in")
+
+    context "T32Action":
+        it "creates with command template":
+            val action = T32Action.create("step_into", "Step Into", "execute", "Step")
+            expect(action.action_key).to_equal("step_into")
+            expect(action.label).to_equal("Step Into")
+            expect(action.command_template).to_equal("Step")
+
+        it "creates execute action":
+            val action = T32Action.execute("go", "Run", "Go")
+            expect(action.action_type).to_equal("execute")
+            expect(action.command_template).to_equal("Go")
+
+        it "creates open_window action":
+            val action = T32Action.open_window("show_regs", "Show Registers", "Register.view", "regs")
+            expect(action.action_type).to_equal("open_window")
+            expect(action.target_window_key).to_equal("regs")
+
+    context "T32Field":
+        it "creates with scope and type":
+            val field = T32Field.create("bp_address", "Address", "hex", "window")
+            expect(field.field_key).to_equal("bp_address")
+            expect(field.label).to_equal("Address")
+            expect(field.value_type).to_equal("hex")
+            expect(field.scope).to_equal("window")
+
+    context "T32Catalogs":
+        it "creates empty catalog":
+            val cat = T32Catalogs.empty()
+            expect(cat.windows.len()).to_equal(0)
+            expect(cat.actions.len()).to_equal(0)
+            expect(cat.fields.len()).to_equal(0)
+
+        it "finds window by key":
+            var cat = T32Catalogs.empty()
+            val win = T32WindowNode.create("test_win", "Test", "built_in", "print_parse")
+            cat.windows.push(win)
+            val found = cat.find_window("test_win")
+            match found:
+                Some(w): expect(w.title).to_equal("Test")
+                nil: expect("should find window").to_equal("found")
+
+        it "returns nil for missing window":
+            val cat = T32Catalogs.empty()
+            val found = cat.find_window("nonexistent")
+            var is_nil = false
+            match found:
+                Some(w): is_nil = false
+                nil: is_nil = true
+            expect(is_nil).to_equal(true)

@@ -1,0 +1,260 @@
+"""
+# Remote Baremetal Runtime Checks
+
+**Feature IDs:** #RBRT-001
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** [doc/plan/baremetal_remote_remaining_checklist_2026-03-08.md](doc/plan/baremetal_remote_remaining_checklist_2026-03-08.md)
+**Design:** [doc/design/remote_jit_architecture.md](doc/design/remote_jit_architecture.md)
+**Research:** [doc/research/trace32_remote_interfaces_2026-03-08.md](doc/research/trace32_remote_interfaces_2026-03-08.md)
+
+## Overview
+
+Checks the current remote baremetal execution plumbing used by the Simple test
+runner. The spec covers:
+
+- composite mode parsing for `interpreter(remote(baremetal(...)))`
+- QEMU RISC-V32 remote debug smoke using a temporary ELF plus GDB memory read
+- TRACE32 readiness state through `t32rem` discovery and repo-managed config
+
+This spec is intentionally host-aware. It treats missing optional host tools as
+`skip:` and host/runtime blockers as `blocked:` so the test captures current
+environment state without claiming a full hardware verification that the repo
+does not currently provide.
+
+## Syntax
+
+```simple
+val spec = "interpreter(remote(baremetal(riscv32)))"
+val base = extract_base_runtime(spec)
+val layer = extract_platform_layer(spec)
+val arch = extract_arch_from_spec(spec)
+```
+
+## Examples
+
+```simple
+val qemu_status = qemu_riscv32_remote_memory_status()
+val t32_status = trace32_remote_status()
+expect(status_is_acceptable(t32_status)).to_equal(true)
+```
+"""
+
+use app.io.{shell, file_exists, file_write, file_delete}
+use app.test_runner_new.test_executor_composite.{
+    extract_base_runtime,
+    extract_platform_layer,
+    extract_arch_from_spec,
+    qemu_binary_for_arch,
+    qemu_machine_for_arch,
+    find_baremetal_elf
+}
+use std.nogc_sync_mut.debug.remote.test.qemu_runner.QemuRunner
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
+use app.debug.remote.protocol.trace32.Trace32Client
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn status_is_acceptable(status: text) -> bool:
+    status == "ok" or status.starts_with("ready") or status.starts_with("blocked:") or status.starts_with("skip:")
+
+fn cleanup_temp_remote_files(tmpdir: text):
+    shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn parse_leading_hex_address(raw: text) -> i64:
+    val trimmed = raw.trim()
+    val start = trimmed.index_of("0x") ?? -1
+    if start < 0:
+        return -1
+
+    var end = start + 2
+    while end < trimmed.len():
+        val ch = trimmed[end:end + 1]
+        val is_digit = ch >= "0" and ch <= "9"
+        val is_lower = ch >= "a" and ch <= "f"
+        val is_upper = ch >= "A" and ch <= "F"
+        if not is_digit and not is_lower and not is_upper:
+            break
+        end = end + 1
+
+    if end <= start + 2:
+        return -1
+
+    val hex = trimmed[start + 2:end]
+    var result: i64 = 0
+    var i = 0
+    while i < hex.len():
+        val ch = hex[i:i + 1]
+        var digit: i64 = 0
+        if ch >= "0" and ch <= "9":
+            digit = int(ch) - int("0")
+        elif ch >= "a" and ch <= "f":
+            digit = 10 + (int(ch) - int("a"))
+        else:
+            digit = 10 + (int(ch) - int("A"))
+        result = result * 16 + digit
+        i = i + 1
+    result
+
+fn qemu_riscv32_remote_memory_status() -> text:
+    if not command_available("clang"):
+        return "skip: clang unavailable"
+    if not command_available("qemu-system-riscv32"):
+        return "skip: qemu-system-riscv32 unavailable"
+    if not command_available("gdb"):
+        return "skip: gdb unavailable"
+
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    if tmpdir == "":
+        return "error: mktemp failed"
+
+    val asm_path = "{tmpdir}/loop.S"
+    val elf_path = "{tmpdir}/loop.elf"
+    val log_path = "{tmpdir}/qemu.log"
+    val port = 1234
+    val asm_source = ".section .text\n.globl _start\n_start:\n  j _start\n.section .data\n.globl marker\nmarker:\n  .word 0x12345678\n"
+
+    if not file_write(asm_path, asm_source):
+        cleanup_temp_remote_files(tmpdir)
+        return "error: failed to write temporary assembly"
+
+    val compile = shell("clang --target=riscv32-none-elf -march=rv32imac -mabi=ilp32 -nostdlib -fuse-ld=lld -Wl,-Ttext=0x80000000 -Wl,-e,_start -o '{elf_path}' '{asm_path}' 2>&1")
+    if compile.exit_code != 0:
+        cleanup_temp_remote_files(tmpdir)
+        return "error: compile failed: {compile.stdout.trim()}"
+
+    val qemu_result = QemuRunner.start(elf_path, port)
+    if qemu_result.is_err():
+        cleanup_temp_remote_files(tmpdir)
+        return "error: failed to launch qemu: {qemu_result.err().unwrap()}"
+
+    var qemu = qemu_result.ok.unwrap()
+    shell("sleep 1")
+
+    val config = DebugConfig(
+        host: "localhost",
+        port: port,
+        target: Architecture.RiscV32,
+        program: elf_path,
+        options: {}
+    )
+    val gdb_result = GdbMiClient.connect(config)
+    if gdb_result.is_err():
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: gdb-mi connect failed: {gdb_result.err().unwrap()}"
+
+    var gdb = gdb_result.ok.unwrap()
+    val addr_text = gdb.evaluate("&marker")
+    if addr_text.is_err():
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: could not evaluate marker address"
+
+    val addr = parse_leading_hex_address(addr_text.ok.unwrap())
+    if addr < 0:
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: could not parse marker address"
+
+    val initial = gdb.read_memory(addr, 4)
+    if initial.is_err():
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial memory read failed"
+
+    val initial_bytes = initial.ok.unwrap()
+    if initial_bytes.len() < 4:
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial memory read too short"
+
+    if initial_bytes[0] != 0x78 or initial_bytes[1] != 0x56 or initial_bytes[2] != 0x34 or initial_bytes[3] != 0x12:
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: initial marker value mismatch"
+
+    val write_result = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
+    if write_result.is_err():
+        gdb.disconnect()
+        qemu.stop()
+        cleanup_temp_remote_files(tmpdir)
+        return "error: memory write failed"
+
+    val updated = gdb.read_memory(addr, 4)
+    gdb.disconnect()
+    qemu.stop()
+    cleanup_temp_remote_files(tmpdir)
+
+    if updated.is_err():
+        return "error: updated memory read failed"
+
+    val updated_bytes = updated.ok.unwrap()
+    if updated_bytes.len() < 4:
+        return "error: updated memory read too short"
+
+    if updated_bytes[0] == 0x21 and updated_bytes[1] == 0x43 and updated_bytes[2] == 0x65 and updated_bytes[3] == 0x87:
+        return "ok"
+    "error: updated marker value mismatch"
+
+fn trace32_remote_status() -> text:
+    if not file_exists("config/t32/t32_stm_headless.t32"):
+        return "error: missing config/t32/t32_stm_headless.t32"
+
+    val t32rem = Trace32Client.find_t32rem()
+    if t32rem == "":
+        return "skip: t32rem unavailable"
+
+    val ping = shell("{t32rem} localhost port=20000 PING 2>&1")
+    val combined = ping.stdout + ping.stderr
+    val trimmed = combined.trim()
+
+    if ping.exit_code == 0:
+        return "ready"
+    if trimmed.contains("error initializing TRACE32"):
+        return "blocked: trace32 session not initialized"
+    if trimmed.contains("Can't open display"):
+        return "blocked: trace32 display not available"
+    if trimmed.contains("Authorization required"):
+        return "blocked: trace32 display authorization required"
+    if trimmed == "":
+        return "blocked: no TRACE32 response"
+    "blocked: {trimmed}"
+
+describe "Remote baremetal composite parsing":
+
+    it "extracts runtime, platform, and arch from nested remote spec":
+        val spec = "interpreter(remote(baremetal(riscv32)))"
+        expect(extract_base_runtime(spec)).to_equal("interpreter")
+        expect(extract_platform_layer(spec)).to_equal("remote")
+        expect(extract_arch_from_spec(spec)).to_equal("riscv32")
+
+    it "maps riscv32 to qemu-system-riscv32 and virt machine":
+        expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
+        expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
+
+    it "documents that no checked-in rv32 baremetal elf is currently discoverable":
+        val elf = find_baremetal_elf("test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl", "riscv32")
+        expect(elf).to_equal("")
+
+describe "QEMU RISC-V32 remote smoke":
+
+    it "can build a temporary rv32 elf and read memory through gdb remote":
+        val status = qemu_riscv32_remote_memory_status()
+        expect(status).to_equal("ok")
+
+describe "TRACE32 readiness":
+
+    it "resolves to a non-error readiness state":
+        val status = trace32_remote_status()
+        expect(status_is_acceptable(status)).to_equal(true)
