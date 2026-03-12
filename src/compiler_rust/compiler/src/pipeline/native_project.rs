@@ -1228,24 +1228,6 @@ fn resolve_name_variants(
     use_map: &std::collections::HashMap<String, String>,
     import_map: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    // Try _dot_ → . conversion (Simple source uses _dot_ for cross-module method calls)
-    // e.g., "compiler__driver__driver__CompilerDriver_dot_compile" →
-    //        "compiler__driver__driver__CompilerDriver.compile"
-    if name.contains("_dot_") {
-        let converted = name.replace("_dot_", ".");
-        if let Some(resolved) = use_map.get(&converted).or_else(|| import_map.get(&converted)) {
-            return Some(resolved.clone());
-        }
-        // The converted name might itself be a known mangled function name
-        // Check if it exists directly (e.g., "module__Type.method" is a valid mangled name)
-        // We check import_map values for this
-        for v in import_map.values().chain(use_map.values()) {
-            if *v == converted {
-                return Some(converted);
-            }
-        }
-    }
-
     // Try Type__method → Type.method
     if let Some(pos) = name.find("__") {
         let type_part = &name[..pos];
@@ -1637,10 +1619,18 @@ fn mangle_mir(
                             continue;
                         }
                         // If the call target is already a known fully-qualified mangled name,
-                        // skip it — don't re-mangle. This handles cases where Simple source
-                        // uses fully-qualified function names like `module__func`.
+                        // skip it — don't re-mangle.
                         if known_mangled.contains(name.as_str()) {
                             continue;
+                        }
+                        // Also try _dot_ → . conversion for cross-module method calls
+                        // e.g., "mod__Type_dot_method" → "mod__Type.method"
+                        if name.contains("_dot_") {
+                            let converted = name.replace("_dot_", ".");
+                            if known_mangled.contains(converted.as_str()) {
+                                *target = target.with_name(converted);
+                                continue;
+                            }
                         }
                         if let Some(mangled) = local_mangled.get(&name) {
                             *target = target.with_name(mangled.clone());

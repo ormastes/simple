@@ -396,6 +396,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_free", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_to_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dyn_torch_tensor_from_bits_1d", &[I64, I64], &[I64]),
     // =========================================================================
     // Async/concurrency operations
     // =========================================================================

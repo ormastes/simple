@@ -360,14 +360,38 @@ impl ExecCore {
     /// Load an SMF module from file
     pub fn load_module(&self, path: &Path) -> Result<LoadedModule, String> {
         self.loader
-            .load_with_resolver(path, |name| self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize))
+            .load_with_resolver(path, |name| {
+                if std::env::var_os("SIMPLE_RESOLVER_TRACE").is_some() {
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/simple_resolver.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "resolve {}", name)
+                        });
+                }
+                self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize)
+            })
             .map_err(|e| format!("load failed: {e}"))
     }
 
     /// Load an SMF module from memory buffer
     pub fn load_module_from_memory(&self, bytes: &[u8]) -> Result<LoadedModule, String> {
         self.loader
-            .load_from_memory_with_resolver(bytes, |name| self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize))
+            .load_from_memory_with_resolver(bytes, |name| {
+                if std::env::var_os("SIMPLE_RESOLVER_TRACE").is_some() {
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/simple_resolver.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "resolve {}", name)
+                        });
+                }
+                self.symbol_provider.get_symbol(name).map(|ptr| ptr as usize)
+            })
             .map_err(|e| format!("load failed: {e}"))
     }
 
