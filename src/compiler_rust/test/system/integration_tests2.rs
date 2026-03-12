@@ -8,6 +8,7 @@ use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
 use simple_parser::{Lexer, Parser};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::tempdir;
 
 // =============================================================================
@@ -102,6 +103,40 @@ fn test_smf_header_properties_integration() {
     assert!(header.is_executable());
     assert!(!header.is_reloadable());
     assert!(!header.has_debug_info());
+}
+
+#[test]
+fn test_compiled_smf_preserves_runtime_extern_imports() {
+    extern "C" fn fake_runtime_symbol(_a: i64, _b: i64) -> i64 {
+        0
+    }
+
+    let source = r#"
+extern fn rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr: i64, data_len: i64) -> i64
+
+fn main() -> i64:
+    return rt_dyn_torch_tensor_from_bits_1d(0, 0)
+"#;
+
+    let mut pipeline = CompilerPipeline::new().expect("pipeline");
+    let smf_bytes = pipeline.compile_source_to_memory(source).expect("compile ok");
+
+    let saw_torch_import = AtomicBool::new(false);
+    let loader = ModuleLoader::new();
+    let module = loader
+        .load_from_memory_with_resolver(&smf_bytes, |name| {
+            if name == "rt_dyn_torch_tensor_from_bits_1d" {
+                saw_torch_import.store(true, Ordering::SeqCst);
+            }
+            Some(fake_runtime_symbol as usize)
+        })
+        .expect("load with resolver");
+
+    assert!(
+        saw_torch_import.load(Ordering::SeqCst),
+        "compiled SMF should preserve rt_dyn_torch_tensor_from_bits_1d as an imported symbol"
+    );
+    assert!(module.entry_point::<fn() -> i64>().is_some(), "module should still have an entry point");
 }
 
 /// Test SmfSection name_str

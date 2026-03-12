@@ -59,6 +59,9 @@ fn command_available(cmd: text) -> bool:
     val result = shell("command -v {cmd} >/dev/null 2>&1")
     result.exit_code == 0
 
+fn has_target_aware_riscv_gdb() -> bool:
+    command_available("riscv32-unknown-elf-gdb") or command_available("riscv64-unknown-elf-gdb") or command_available("gdb-multiarch")
+
 fn status_is_acceptable(status: text) -> bool:
     status == "ok" or status.starts_with("ready") or status.starts_with("blocked:") or status.starts_with("skip:")
 
@@ -196,6 +199,21 @@ fn qemu_riscv32_remote_memory_status() -> text:
     val write_result = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
     if write_result.is_err():
         val write_msg = write_result.err().unwrap()
+        if has_target_aware_riscv_gdb():
+            val phys_mode = gdb.set_qemu_physical_memory_mode(true)
+            if phys_mode.is_ok():
+                val retry_write = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
+                if retry_write.is_ok():
+                    val retry_updated = gdb.read_memory(addr, 4)
+                    gdb.disconnect()
+                    stop_process_if_running(qemu_pid)
+                    cleanup_temp_remote_files(tmpdir)
+                    if retry_updated.is_err():
+                        return "error: updated memory read failed after qemu physical mode switch"
+                    val retry_bytes = retry_updated.ok.unwrap()
+                    if retry_bytes.len() >= 4 and retry_bytes[0] == 0x21 and retry_bytes[1] == 0x43 and retry_bytes[2] == 0x65 and retry_bytes[3] == 0x87:
+                        return "ok"
+                    return "blocked: qemu physical mode write retry did not persist"
         gdb.disconnect()
         stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)

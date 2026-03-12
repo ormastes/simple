@@ -28,6 +28,23 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
     crate::smf_builder::generate_smf_from_object(object_code, gc)
 }
 
+fn generate_linked_smf_from_object(
+    object_code: &[u8],
+    mir_module: &crate::mir::MirModule,
+) -> Result<Vec<u8>, CompileError> {
+    let mut writer = crate::linker::SmfWriter::from_object_code(object_code, mir_module).map_err(|e| {
+        CompileError::Codegen(format!(
+            "Failed to preserve SMF imports/relocations from object code: {}",
+            e
+        ))
+    })?;
+    let mut buf = Vec::new();
+    writer
+        .write(&mut buf)
+        .map_err(|e| CompileError::Codegen(format!("Failed to write linked SMF: {}", e)))?;
+    Ok(buf)
+}
+
 /// Link a WASM object file into a complete WASM module using wasm-ld.
 ///
 /// LLVM emits WASM object files (.o) which are relocatable format.
@@ -122,7 +139,8 @@ impl CompilerPipeline {
 
     /// Compile source string to SMF bytes in memory (no disk I/O).
     ///
-    /// This uses the interpreter mode which supports all language features.
+    /// This prefers the native pure-Simple pipeline and falls back to the
+    /// interpreter only when the module cannot be compiled to native code.
     /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
@@ -225,10 +243,10 @@ impl CompilerPipeline {
             }
         }
 
-        // Extract the main function's return value
-        let main_value = self.evaluate_module_with_project(&module.items)?;
-
-        Ok(generate_smf_bytes(main_value, self.gc.as_ref()))
+        // Prefer the native pure-Simple compilation path for ordinary SMF output.
+        // The native path already falls back to interpreter execution for
+        // script-style modules and modules without a compilable `main`.
+        self.compile_module_to_memory_native_with_context(module, source_file)
     }
 
     /// Compile a Simple source file to an SMF at `out` using native codegen.
@@ -350,8 +368,7 @@ impl CompilerPipeline {
 
         // 11. Wrap object code in SMF format with optional templates
         if templates.is_empty() {
-            // No templates - use simple builder
-            Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
+            generate_linked_smf_from_object(&object_code, &mir_module)
         } else {
             // Include templates in SMF
             Ok(crate::smf_writer::generate_smf_with_templates(
@@ -449,11 +466,7 @@ impl CompilerPipeline {
         } else {
             // Wrap object code in SMF format for native targets with optional templates
             if templates.is_empty() {
-                Ok(generate_smf_from_object_for_target(
-                    &object_code,
-                    self.gc.as_ref(),
-                    target,
-                ))
+                generate_linked_smf_from_object(&object_code, &mir_module)
             } else {
                 Ok(crate::smf_writer::generate_smf_with_templates(
                     &object_code,

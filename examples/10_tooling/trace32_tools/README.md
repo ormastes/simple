@@ -1,17 +1,171 @@
-# trace32_tools
+# TRACE32 MCP Tools
 
-TRACE32 development tools — CMM Language Server, MCP servers, and interactive CLI shell.
+MCP servers and development tools for [Lauterbach TRACE32](https://www.lauterbach.com/en/) hardware debuggers. Enables AI assistants (Claude, Copilot, etc.) to control debug sessions, analyze CMM scripts, and interact with embedded targets.
 
-Written in [Simple](https://github.com/ormastes/simple) — a self-hosted programming language.
+**Protocol:** [MCP 2025-06-18](https://modelcontextprotocol.io/) (JSON-RPC 2.0, stdio transport)
 
-## Tools Overview
+## Install
 
-| Tool | Directory | Description |
-|------|-----------|-------------|
-| CMM Language Server | `cmm_lsp/` | LSP for `.cmm` files — completions, hover, diagnostics, go-to-definition |
-| T32 MCP Server | `t32_mcp/` | Direct TRACE32 control via MCP — session, window capture, actions |
-| T32 LSP MCP Server | `t32_lsp_mcp/` | CMM language intelligence exposed as MCP tools — parse, diagnose, complete |
-| T32 Interactive CLI | `t32_cli/` | Interactive TRACE32 shell with session management |
+### Pre-built binaries (recommended)
+
+```bash
+# One-line install (Linux x86_64)
+curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_tooling/trace32_tools/install.sh | bash
+```
+
+Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q=t32-v):
+
+| Binary | Platform | Description |
+|--------|----------|-------------|
+| `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
+| `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
+| `cmm-lsp` | Linux, Windows | CMM Language Server (LSP over stdio) |
+| `t32-cli` | Linux, Windows | Interactive TRACE32 CLI shell |
+
+### Manual download
+
+```bash
+# Download specific binary
+VERSION="1.0.0"
+curl -fsSL -o t32-mcp-server \
+  "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/t32-mcp-server-linux-x86_64"
+chmod +x t32-mcp-server
+```
+
+### Build from source
+
+Requires the [Simple](https://github.com/ormastes/simple) compiler:
+
+```bash
+git clone https://github.com/ormastes/simple.git
+cd simple
+# Build the compiler first (see main README)
+bin/release/simple native-build \
+  --source src --entry examples/10_tooling/trace32_tools/t32_mcp/main.spl \
+  -o t32-mcp-server
+```
+
+---
+
+## Setup
+
+### Claude Code
+
+Add to `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "t32-mcp": {
+      "command": "t32-mcp-server"
+    },
+    "t32-lsp-mcp": {
+      "command": "t32-lsp-mcp-server"
+    }
+  }
+}
+```
+
+> If the binary is not in PATH, use the full path: `"/home/user/.local/bin/t32-mcp-server"`
+
+### Claude Desktop
+
+Add to `~/.config/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "t32-mcp": {
+      "command": "/path/to/t32-mcp-server"
+    },
+    "t32-lsp-mcp": {
+      "command": "/path/to/t32-lsp-mcp-server"
+    }
+  }
+}
+```
+
+### Verify
+
+```bash
+# Check the server responds to MCP initialize
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' | t32-mcp-server
+
+# List available tools
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | t32-mcp-server
+```
+
+---
+
+## Tools
+
+### T32 MCP Server (20 tools)
+
+Controls live TRACE32 debug sessions. Requires a running TRACE32 PowerView instance.
+
+| Category | Tools | Description |
+|----------|-------|-------------|
+| **Session** | `t32_sessions_list`, `t32_session_open`, `t32_session_resume`, `t32_session_close` | Connect to TRACE32 PowerView instances |
+| **Core** | `t32_core_list`, `t32_core_select` | Multi-core target management |
+| **Command** | `t32_cmd_run`, `t32_cmm_run`, `t32_eval` | Execute PRACTICE commands and scripts |
+| **Window** | `t32_window_list`, `t32_window_open`, `t32_window_capture`, `t32_window_describe`, `t32_screenshot` | Capture register views, memory dumps, source listings |
+| **Action** | `t32_action_invoke`, `t32_field_get`, `t32_field_set` | Named actions from SDN catalogs |
+| **History** | `t32_history_tail`, `t32_resources_list`, `t32_resource_read` | Command history and MCP resources |
+
+**Example workflow:**
+
+```
+1. t32_session_open(host: "localhost", port: "20000")
+2. t32_cmd_run(command: "SYStem.Up")
+3. t32_window_capture(window: "register_view")
+4. t32_cmd_run(command: "Break.Set main")
+5. t32_cmd_run(command: "Go")
+6. t32_window_capture(window: "var_local")
+```
+
+### T32 LSP MCP Server (6 tools)
+
+CMM (PRACTICE) script analysis. Standalone — no TRACE32 hardware needed.
+
+| Tool | Description |
+|------|-------------|
+| `cmm_parse` | Parse CMM script, return AST summary |
+| `cmm_diagnostics` | Errors, warnings, unused macros, unreachable code |
+| `cmm_complete` | Auto-complete commands and PRACTICE functions |
+| `cmm_hover` | Command/function documentation |
+| `cmm_symbols` | Document symbols (labels, macros) |
+| `cmm_validate_cli` | Validate CLI-mode converted scripts |
+
+### CMM Language Server (LSP)
+
+Full LSP implementation for `.cmm` files, for IDE integration:
+
+- **Completions** — 100+ TRACE32 commands, 50+ PRACTICE functions, macro names
+- **Hover** — Command documentation with syntax descriptions
+- **Go to definition** — Jump to label and macro definitions
+- **Document symbols** — Labels and macros as outline
+- **Diagnostics** — Parse errors, undefined labels, unreachable code, unused macros
+
+See [`cmm_lsp/README.md`](cmm_lsp/README.md) for IDE-specific setup.
+
+### T32 Interactive CLI
+
+Interactive shell for TRACE32 session management with SDN catalog support.
+
+---
+
+## Requirements
+
+| Tool | TRACE32 Required | Notes |
+|------|:---:|-------|
+| t32-mcp-server | Yes | Needs running PowerView instance with Remote API enabled |
+| t32-lsp-mcp-server | No | Pure CMM analysis, no hardware needed |
+| cmm-lsp | No | Pure CMM analysis |
+| t32-cli | Yes | Interactive session management |
+
+**TRACE32 setup:** Enable the Remote API in PowerView: `RCL.Port 20000` or set `RCL=NETASSIST` in your `config.t32`.
+
+---
 
 ## Directory Structure
 
@@ -23,103 +177,37 @@ trace32_tools/
 ├── t32_cli/           # Interactive T32 CLI Shell
 ├── config/            # T32 configuration & catalogs
 │   └── catalogs/      # Action, field, window definitions (SDN)
-├── test_fixtures/     # CMM script test corpus
+├── test_fixtures/     # CMM script test corpus (29 scripts)
 │   ├── riscv/         # RISC-V platform scripts
 │   ├── stm32/         # STM32 platform scripts (real hardware)
 │   ├── web/           # Various SoC platform scripts
 │   └── expected_cli/  # CLI-mode conversions (batch-friendly)
-└── doc/               # Documentation
-```
-
-## Requirements
-
-- Simple compiler (`bin/release/simple` from [ormastes/simple](https://github.com/ormastes/simple))
-- For T32 MCP/CLI: Lauterbach TRACE32 installation (tested with Power Debug II + STM32H7/WB)
-
-## Quick Start
-
-```bash
-# CMM LSP Server (for IDE integration)
-bin/release/simple run cmm_lsp/lsp_server.spl
-
-# T32 MCP Server (for Claude Code / AI tools)
-bin/release/simple run t32_mcp/main.spl
-
-# T32 LSP MCP Server (CMM intelligence via MCP)
-bin/release/simple run t32_lsp_mcp/main.spl
-
-# T32 Interactive CLI
-bin/release/simple run t32_cli/mod.spl
+├── install.sh         # One-line installer
+└── README.md          # This file
 ```
 
 ## Test Fixtures
 
-The `test_fixtures/` directory contains 29 CMM scripts across three platform families:
+29 CMM scripts across three platform families:
 
-- **RISC-V** (8 scripts) — BL602, CH32V307, ESP32-C3, SiFive E31, and others
-- **STM32** (6 scripts) — Real hardware scripts for STM32H7 and STM32WB targets
-- **Web/SoC** (15 scripts) — EDK2/UEFI, i.MX6, PolarFire, R-Car3, QNX, and others
+- **RISC-V** (8 scripts) — BL602, CH32V307, ESP32-C3, SiFive E31
+- **STM32** (6 scripts) — Real hardware scripts for STM32H7 and STM32WB
+- **Web/SoC** (15 scripts) — EDK2/UEFI, i.MX6, PolarFire, R-Car3, QNX
 
-An additional 18 CLI batch-mode conversions are provided under `test_fixtures/expected_cli/`. These conversions include `SCREEN.OFF`, AREA channel setup, `ON ERROR` handlers, structured text output, and metadata headers for headless/CI execution.
+Plus 18 CLI batch-mode conversions under `test_fixtures/expected_cli/`.
 
-## CMM LSP Features
+---
 
-The CMM Language Server implements LSP over stdio with Content-Length framing (JSON-RPC 2.0):
+## CI/CD
 
-- **Completions** — 100+ TRACE32 commands, 50+ PRACTICE functions, macro names, with `.`, `&`, `/` triggers
-- **Hover** — Command and function documentation with syntax descriptions
-- **Go to definition** — Jump to label and macro definitions
-- **Document symbols** — Labels and macros as outline symbols
-- **Diagnostics** — Parse errors, undefined labels/macros, unreachable code, unused macros
+Binaries are built automatically on every push to `main` that touches `trace32_tools/`:
 
-See `cmm_lsp/README.md` for IDE installation instructions.
+- **Build workflow:** [`.github/workflows/t32-tools-build.yml`](../../.github/workflows/t32-tools-build.yml) — builds + smoke tests
+- **Release workflow:** [`.github/workflows/t32-tools-release.yml`](../../.github/workflows/t32-tools-release.yml) — publishes to GitHub Releases on `t32-v*` tags
 
-## T32 MCP Tools
+Platforms: Linux x86_64 (primary), Windows MinGW x86_64 (cross-compiled).
 
-The T32 MCP Server exposes 20 tools over MCP (protocol version 2025-06-18, Content-Length framing with JSON-Lines auto-detect):
-
-**Session management:**
-- `t32_sessions_list` — List all open TRACE32 sessions
-- `t32_session_open` — Open a new debug session
-- `t32_session_resume` — Resume an existing session
-- `t32_session_close` — Close a session
-
-**Core control:**
-- `t32_core_list` — List available cores in a session
-- `t32_core_select` — Select active core
-
-**Command execution:**
-- `t32_cmd_run` — Execute a TRACE32 command
-- `t32_cmm_run` — Run a CMM script
-- `t32_eval` — Evaluate a PRACTICE expression
-
-**Window management:**
-- `t32_window_list` — List open windows
-- `t32_window_open` — Open a window
-- `t32_window_capture` — Capture window content as text
-- `t32_window_describe` — Describe window layout and fields
-- `t32_screenshot` — Take a screenshot
-
-**Actions and fields:**
-- `t32_action_invoke` — Invoke a named action from the catalog
-- `t32_field_get` — Read a field value
-- `t32_field_set` — Write a field value
-
-**History and resources:**
-- `t32_history_tail` — Get recent command history
-- `t32_resources_list` — List available resources
-- `t32_resource_read` — Read a resource
-
-## T32 LSP MCP Tools
-
-The T32 LSP MCP Server exposes CMM language intelligence as 6 MCP tools:
-
-- `cmm_parse` — Parse a CMM script and return the AST
-- `cmm_diagnostics` — Run diagnostics on a CMM script (errors, warnings)
-- `cmm_complete` — Get completions at a given position
-- `cmm_hover` — Get hover information at a given position
-- `cmm_symbols` — Extract document symbols (labels, macros)
-- `cmm_validate_cli` — Validate a CLI-mode converted script
+---
 
 ## License
 

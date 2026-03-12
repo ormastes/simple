@@ -1,4 +1,4 @@
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 use super::symbol::{SymbolBinding, SymbolTable};
 
@@ -59,7 +59,6 @@ pub fn apply_relocations(
             "Processing relocation"
         );
 
-        // Resolve symbol address
         let sym_addr = if sym.binding == SymbolBinding::Local {
             base_address.wrapping_add(sym.value as usize)
         } else {
@@ -82,10 +81,8 @@ pub fn apply_relocations(
 
         let offset = reloc.offset as usize;
 
-        // Bounds check for the relocation offset
         match reloc.reloc_type {
             RelocationType::Abs64 => {
-                // Abs64 needs 8 bytes
                 if offset.checked_add(8).map_or(true, |end| end > code_len) {
                     let msg = format!(
                         "Relocation {} (Abs64) at offset {} exceeds code buffer size {} (needs 8 bytes)",
@@ -96,7 +93,7 @@ pub fn apply_relocations(
                 }
 
                 let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
-                let value = sym_addr.wrapping_add(reloc.addend as usize);
+                let value = sym_addr.wrapping_add(reloc.addend as usize) as u64;
                 trace!(
                     reloc_idx,
                     offset,
@@ -104,12 +101,11 @@ pub fn apply_relocations(
                     "Applying Abs64 relocation"
                 );
                 unsafe {
-                    *(patch_ptr as *mut u64) = value as u64;
+                    std::ptr::write_unaligned(patch_ptr as *mut u64, value);
                 }
             }
 
             RelocationType::Pc32 | RelocationType::Plt32 => {
-                // Pc32/Plt32 needs 4 bytes
                 if offset.checked_add(4).map_or(true, |end| end > code_len) {
                     let msg = format!(
                         "Relocation {} ({:?}) at offset {} exceeds code buffer size {} (needs 4 bytes)",
@@ -133,7 +129,7 @@ pub fn apply_relocations(
                     "Applying PC-relative relocation"
                 );
                 unsafe {
-                    *(patch_ptr as *mut i32) = value;
+                    std::ptr::write_unaligned(patch_ptr as *mut i32, value);
                 }
             }
 
@@ -142,7 +138,33 @@ pub fn apply_relocations(
             }
 
             RelocationType::GotPcRel => {
-                warn!(reloc_idx, "GotPcRel relocation not yet implemented, skipping");
+                if offset.checked_add(4).map_or(true, |end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} (GotPcRel) at offset {} exceeds code buffer size {} (needs 4 bytes)",
+                        reloc_idx, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let got_value = sym_addr as u64;
+                let got_slot = Box::leak(Box::new(got_value)) as *mut u64 as usize;
+                let patch_addr = base_address.wrapping_add(offset);
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
+                let value = (got_slot as i64)
+                    .wrapping_sub(patch_addr as i64)
+                    .wrapping_add(reloc.addend) as i32;
+
+                trace!(
+                    reloc_idx,
+                    offset,
+                    got_slot = format!("{:#x}", got_slot),
+                    got_value = format!("{:#x}", got_value),
+                    "Applying GOT PC-relative relocation"
+                );
+                unsafe {
+                    std::ptr::write_unaligned(patch_ptr as *mut i32, value);
+                }
             }
         }
     }

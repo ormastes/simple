@@ -192,141 +192,190 @@ impl SmfWriter {
 
     /// Write SMF file to a writer
     pub fn write<W: Write>(&mut self, writer: &mut W) -> SmfWriteResult<()> {
-        // Build symbol table section if we have symbols
-        if !self.symbols.is_empty() {
-            // First, collect all symbol names and add to string table
-            let name_offsets: Vec<u32> = self
-                .symbols
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|name| self.add_string(&name))
-                .collect();
+        use simple_runtime::loader::smf::{hash_name, Arch, Platform, SmfHeader as LoaderHeader, SmfSection as LoaderSection};
+        use simple_runtime::loader::smf::symbol_flags;
 
-            let mut symtab_data = Vec::new();
-            for (i, symbol) in self.symbols.iter().enumerate() {
-                let name_offset = name_offsets[i];
-                symtab_data.extend_from_slice(&name_offset.to_le_bytes());
-                symtab_data.push(symbol.binding as u8);
-                symtab_data.push(symbol.sym_type as u8);
-                symtab_data.extend_from_slice(&[0u8; 2]); // Padding
-                symtab_data.extend_from_slice(&symbol.section_index.to_le_bytes());
-                symtab_data.extend_from_slice(&[0u8; 2]); // Padding
-                symtab_data.extend_from_slice(&symbol.value.to_le_bytes());
-                symtab_data.extend_from_slice(&symbol.size.to_le_bytes());
-                symtab_data.push(symbol.layout_phase);
-                symtab_data.push(if symbol.is_event_loop_anchor { 1 } else { 0 });
-                symtab_data.push(if symbol.layout_pinned { 1 } else { 0 });
-                symtab_data.extend_from_slice(&[0u8; 5]); // Padding to 32 bytes
-            }
+        let symbol_names: Vec<String> = self.symbols.iter().map(|symbol| symbol.name.clone()).collect();
+        let name_offsets: Vec<u32> = symbol_names.iter().map(|name| self.add_string(name)).collect();
 
-            let symtab_section = SmfSection {
-                name: ".symtab".to_string(),
-                section_type: SectionType::SymTab,
-                flags: 0,
-                data: symtab_data,
-                alignment: 8,
-            };
-            self.sections.push(symtab_section);
-        }
-
-        // Build relocation sections if we have relocations
-        if !self.relocations.is_empty() {
-            let mut rela_data = Vec::new();
-            for reloc in &self.relocations {
-                rela_data.extend_from_slice(&reloc.offset.to_le_bytes());
-                rela_data.extend_from_slice(&reloc.symbol_index.to_le_bytes());
-                rela_data.push(reloc.reloc_type as u8);
-                rela_data.extend_from_slice(&[0u8; 3]); // Padding
-                rela_data.extend_from_slice(&reloc.addend.to_le_bytes());
-            }
-
-            let rela_section = SmfSection {
-                name: ".rela".to_string(),
-                section_type: SectionType::Reloc,
-                flags: 0,
-                data: rela_data,
-                alignment: 8,
-            };
-            self.sections.push(rela_section);
-        }
-
-        // Build string table section
-        let strtab_section = SmfSection {
-            name: ".strtab".to_string(),
-            section_type: SectionType::StrTab,
-            flags: 0,
-            data: self.string_table.clone(),
-            alignment: 1,
-        };
-        self.sections.push(strtab_section);
-
-        // Calculate offsets
-        let header_size = 64;
-        let section_header_size = 48;
-        let section_table_offset = header_size;
-        let section_table_size = self.sections.len() * section_header_size;
-
-        let mut data_offset = section_table_offset + section_table_size;
-        let mut section_offsets = Vec::new();
+        let mut loader_sections: Vec<LoaderSection> = Vec::with_capacity(self.sections.len() + usize::from(!self.relocations.is_empty()));
+        let mut section_payloads: Vec<Vec<u8>> = self.sections.iter().map(|section| section.data.clone()).collect();
 
         for section in &self.sections {
-            // Align
-            let align = section.alignment as usize;
-            if align > 0 {
-                data_offset = (data_offset + align - 1) & !(align - 1);
+            let mut name = [0u8; 16];
+            let bytes = section.name.as_bytes();
+            let copy_len = bytes.len().min(name.len());
+            name[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            loader_sections.push(LoaderSection {
+                section_type: section.section_type,
+                flags: section.flags,
+                offset: 0,
+                size: section.data.len() as u64,
+                virtual_size: section.data.len() as u64,
+                alignment: section.alignment as u64,
+                name,
+            });
+        }
+
+        if !self.relocations.is_empty() {
+            let mut rela_data = Vec::with_capacity(self.relocations.len() * std::mem::size_of::<simple_runtime::loader::smf::SmfRelocation>());
+            for reloc in &self.relocations {
+                let loader_reloc = simple_runtime::loader::smf::SmfRelocation {
+                    offset: reloc.offset,
+                    symbol_index: reloc.symbol_index,
+                    reloc_type: reloc.reloc_type,
+                    addend: reloc.addend,
+                };
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        &loader_reloc as *const simple_runtime::loader::smf::SmfRelocation as *const u8,
+                        std::mem::size_of::<simple_runtime::loader::smf::SmfRelocation>(),
+                    )
+                };
+                rela_data.extend_from_slice(bytes);
             }
-            section_offsets.push(data_offset);
-            data_offset += section.data.len();
+            let mut name = [0u8; 16];
+            name[..5].copy_from_slice(b".rela");
+            loader_sections.push(LoaderSection {
+                section_type: SectionType::Reloc,
+                flags: 0,
+                offset: 0,
+                size: rela_data.len() as u64,
+                virtual_size: rela_data.len() as u64,
+                alignment: 8,
+                name,
+            });
+            section_payloads.push(rela_data);
         }
 
-        // Write header
-        writer.write_all(SMF_MAGIC)?;
-        writer.write_all(&[SMF_VERSION_MAJOR, SMF_VERSION_MINOR])?;
-        writer.write_all(&[0u8; 2])?; // Platform, Arch
-        writer.write_all(&0u32.to_le_bytes())?; // Flags
-        writer.write_all(&(self.sections.len() as u32).to_le_bytes())?;
-        writer.write_all(&(section_table_offset as u64).to_le_bytes())?;
-        writer.write_all(&(self.symbols.len() as u32).to_le_bytes())?;
-        writer.write_all(&0u32.to_le_bytes())?; // Entry point symbol index
-        writer.write_all(&[0u8; 32])?; // Reserved
-
-        // Pre-compute name offsets (add all names to string table first)
-        let name_offsets: Vec<u32> = self
-            .sections
-            .iter()
-            .map(|s| s.name.clone())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|name| self.add_string(&name))
-            .collect();
-
-        // Write section headers
-        for (i, section) in self.sections.iter().enumerate() {
-            writer.write_all(&name_offsets[i].to_le_bytes())?;
-            writer.write_all(&[section.section_type as u8])?;
-            writer.write_all(&[0u8; 3])?; // Padding
-            writer.write_all(&section.flags.to_le_bytes())?;
-            writer.write_all(&(section_offsets[i] as u64).to_le_bytes())?;
-            writer.write_all(&(section.data.len() as u64).to_le_bytes())?;
-            writer.write_all(&(section.data.len() as u64).to_le_bytes())?; // Virtual size
-            writer.write_all(&section.alignment.to_le_bytes())?;
-            writer.write_all(&[0u8; 12])?; // Reserved
-        }
-
-        // Write section data with padding
+        let section_table_offset = LoaderHeader::SIZE as u64;
+        let section_table_size = (loader_sections.len() * std::mem::size_of::<LoaderSection>()) as u64;
         let mut current_offset = section_table_offset + section_table_size;
-        for (i, section) in self.sections.iter().enumerate() {
-            let target_offset = section_offsets[i];
-            while current_offset < target_offset {
-                writer.write_all(&[0])?;
-                current_offset += 1;
-            }
-            writer.write_all(&section.data)?;
-            current_offset += section.data.len();
+
+        for (section, payload) in loader_sections.iter_mut().zip(section_payloads.iter()) {
+            let align = section.alignment.max(1);
+            current_offset = (current_offset + align - 1) & !(align - 1);
+            section.offset = current_offset;
+            section.size = payload.len() as u64;
+            section.virtual_size = payload.len() as u64;
+            current_offset += payload.len() as u64;
         }
 
+        let symbol_table_offset = current_offset;
+        let string_table_offset =
+            symbol_table_offset + (self.symbols.len() as u64 * std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>() as u64);
+
+        let entry_point = self
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "spl_main")
+            .or_else(|| self.symbols.iter().find(|symbol| symbol.name == "main"))
+            .map(|symbol| symbol.value)
+            .unwrap_or(0);
+        let exported_count = self
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.binding != SymbolBinding::Local)
+            .count() as u32;
+
+        let target = simple_common::target::Target::host();
+        let header = LoaderHeader {
+            magic: *SMF_MAGIC,
+            version_major: SMF_VERSION_MAJOR,
+            version_minor: SMF_VERSION_MINOR,
+            platform: Platform::from_target_os(target.os) as u8,
+            arch: Arch::from_target_arch(target.arch) as u8,
+            flags: SMF_FLAG_EXECUTABLE,
+            compression: 0,
+            compression_level: 0,
+            reserved_compression: [0; 2],
+            section_count: loader_sections.len() as u32,
+            section_table_offset,
+            symbol_table_offset,
+            symbol_count: self.symbols.len() as u32,
+            exported_count,
+            entry_point,
+            stub_size: 0,
+            smf_data_offset: 0,
+            module_hash: 0,
+            source_hash: 0,
+            app_type: 0,
+            window_width: 0,
+            window_height: 0,
+            prefetch_hint: 0,
+            prefetch_file_count: 0,
+            reserved: [0; 5],
+        };
+
+        let header_bytes = unsafe {
+            std::slice::from_raw_parts(&header as *const LoaderHeader as *const u8, std::mem::size_of::<LoaderHeader>())
+        };
+        writer.write_all(header_bytes)?;
+
+        for section in &loader_sections {
+            let section_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    section as *const LoaderSection as *const u8,
+                    std::mem::size_of::<LoaderSection>(),
+                )
+            };
+            writer.write_all(section_bytes)?;
+        }
+
+        let mut written_offset = section_table_offset + section_table_size;
+        for (section, payload) in loader_sections.iter().zip(section_payloads.iter()) {
+            while written_offset < section.offset {
+                writer.write_all(&[0])?;
+                written_offset += 1;
+            }
+            writer.write_all(payload)?;
+            written_offset += payload.len() as u64;
+        }
+
+        while written_offset < symbol_table_offset {
+            writer.write_all(&[0])?;
+            written_offset += 1;
+        }
+
+        for (symbol, name_offset) in self.symbols.iter().zip(name_offsets.iter()) {
+            let mut flags = symbol.layout_phase & symbol_flags::LAYOUT_PHASE_MASK;
+            if symbol.is_event_loop_anchor {
+                flags |= symbol_flags::EVENT_LOOP_ANCHOR;
+            }
+            if symbol.layout_pinned {
+                flags |= symbol_flags::LAYOUT_PINNED;
+            }
+            let loader_symbol = simple_runtime::loader::smf::SmfSymbol {
+                name_offset: *name_offset,
+                name_hash: hash_name(&symbol.name),
+                sym_type: symbol.sym_type,
+                binding: symbol.binding,
+                visibility: 0,
+                flags,
+                value: symbol.value,
+                size: symbol.size,
+                type_id: 0,
+                version: 0,
+                template_param_count: 0,
+                reserved: [0; 3],
+                template_offset: 0,
+            };
+            let symbol_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &loader_symbol as *const simple_runtime::loader::smf::SmfSymbol as *const u8,
+                    std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>(),
+                )
+            };
+            writer.write_all(symbol_bytes)?;
+        }
+
+        writer.write_all(&self.string_table)?;
+        debug_assert_eq!(
+            string_table_offset + self.string_table.len() as u64,
+            symbol_table_offset
+                + (self.symbols.len() as u64 * std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>() as u64)
+                + self.string_table.len() as u64
+        );
         Ok(())
     }
 
