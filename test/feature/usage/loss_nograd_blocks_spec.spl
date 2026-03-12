@@ -1,0 +1,247 @@
+"""
+# loss{} and nograd{} Block Tests
+
+**Feature IDs:** #1099-1102 (loss/nograd block support)
+**Category:** Syntax / Math DSL
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render
+identically to `m{}` blocks. Both are syntax sugar over m{} with flags
+for auto-backward (loss) and gradient disabling (nograd).
+"""
+
+use std.math_repr.{render_latex_raw, to_pretty}
+
+# Helper for floating point comparison
+fn close(a: f64, b: f64, eps: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+    abs_diff < eps
+
+# ============================================================================
+# loss{} Block Evaluation
+# ============================================================================
+
+describe "loss{} block evaluation":
+
+    context "basic arithmetic":
+        it "evaluates addition":
+            expect(loss{ 2 + 3 }).to_equal(5)
+
+        it "evaluates subtraction":
+            expect(loss{ 10 - 4 }).to_equal(6)
+
+        it "evaluates multiplication":
+            expect(loss{ 3 * 4 }).to_equal(12)
+
+        it "evaluates division":
+            expect(loss{ 10 / 2 }).to_equal(5)
+
+    context "power operator":
+        it "evaluates integer power":
+            val x = 3.0
+            expect(loss{ x^2 }).to_equal(9.0)
+
+        it "evaluates fractional power":
+            val x = 4.0
+            expect(loss{ x^0.5 }).to_equal(2.0)
+
+    context "fractions":
+        it "evaluates frac":
+            expect(loss{ frac(1, 2) }).to_equal(0.5)
+
+        it "evaluates nested frac":
+            expect(loss{ frac(1, frac(1, 2)) }).to_equal(2.0)
+
+    context "scope variable bridging":
+        it "reads outer variables":
+            val x = 5.0
+            val y = 3.0
+            expect(loss{ x + y }).to_equal(8.0)
+
+        it "reads multiple outer variables":
+            val a = 2.0
+            val b = 3.0
+            val c = 4.0
+            expect(loss{ a * b + c }).to_equal(10.0)
+
+    context "math functions":
+        it "evaluates sqrt":
+            expect(loss{ sqrt(16) }).to_equal(4.0)
+
+        it "evaluates exp":
+            expect(close(loss{ exp(0) }, 1.0, 0.01)).to_equal(true)
+
+        it "evaluates abs":
+            expect(loss{ abs(-5) }).to_equal(5)
+
+# ============================================================================
+# nograd{} Block Evaluation
+# ============================================================================
+
+describe "nograd{} block evaluation":
+
+    context "basic arithmetic":
+        it "evaluates addition":
+            expect(nograd{ 2 + 3 }).to_equal(5)
+
+        it "evaluates subtraction":
+            expect(nograd{ 10 - 4 }).to_equal(6)
+
+        it "evaluates multiplication":
+            expect(nograd{ 3 * 4 }).to_equal(12)
+
+        it "evaluates division":
+            expect(nograd{ 10 / 2 }).to_equal(5)
+
+    context "power operator":
+        it "evaluates integer power":
+            val x = 3.0
+            expect(nograd{ x^2 }).to_equal(9.0)
+
+        it "evaluates fractional power":
+            val x = 4.0
+            expect(nograd{ x^0.5 }).to_equal(2.0)
+
+    context "fractions":
+        it "evaluates frac":
+            expect(nograd{ frac(1, 2) }).to_equal(0.5)
+
+    context "scope variable bridging":
+        it "reads outer variables":
+            val x = 5.0
+            val y = 3.0
+            expect(nograd{ x + y }).to_equal(8.0)
+
+    context "math functions":
+        it "evaluates sqrt":
+            expect(nograd{ sqrt(16) }).to_equal(4.0)
+
+        it "evaluates exp":
+            expect(close(nograd{ exp(0) }, 1.0, 0.01)).to_equal(true)
+
+# ============================================================================
+# DL Equations in loss{} and nograd{}
+# ============================================================================
+
+describe "DL equations in loss{} block":
+
+    context "Sigmoid":
+        it "evaluates sigmoid(2)":
+            val x = 2.0
+            expect(close(loss{ frac(1, 1 + exp(-x)) }, 0.8808, 0.01)).to_equal(true)
+
+    context "MSE component":
+        it "evaluates squared error":
+            val pred = 3.0
+            val target = 5.0
+            expect(loss{ (pred - target)^2 }).to_equal(4.0)
+
+    context "Temperature scaling":
+        it "evaluates logits/T":
+            val logits = 6.0
+            val T = 2.0
+            expect(close(loss{ frac(logits, T) }, 3.0, 0.01)).to_equal(true)
+
+describe "DL equations in nograd{} block":
+
+    context "Sigmoid":
+        it "evaluates sigmoid(2)":
+            val x = 2.0
+            expect(close(nograd{ frac(1, 1 + exp(-x)) }, 0.8808, 0.01)).to_equal(true)
+
+    context "Xavier init":
+        it "evaluates xavier init":
+            val fan_in = 256.0
+            val fan_out = 128.0
+            expect(close(nograd{ sqrt(frac(6, fan_in + fan_out)) }, 0.1250, 0.01)).to_equal(true)
+
+# ============================================================================
+# Rendering: LaTeX and Unicode
+# ============================================================================
+
+describe "loss{} rendering":
+
+    it "renders LaTeX via render_latex_raw":
+        val latex = render_latex_raw("frac(1, 1 + exp(-x))")
+        expect(latex).to_contain("\\frac")
+        expect(latex).to_contain("\\exp")
+
+    it "renders Unicode via to_pretty":
+        val pretty = to_pretty("frac(1, 1 + exp(-x))")
+        expect(pretty).to_contain("exp")
+
+describe "nograd{} rendering":
+
+    it "renders LaTeX via render_latex_raw":
+        val latex = render_latex_raw("sqrt(frac(6, fan_in + fan_out))")
+        expect(latex).to_contain("\\sqrt")
+        expect(latex).to_contain("\\frac")
+
+    it "renders Unicode via to_pretty":
+        val pretty = to_pretty("sqrt(frac(6, fan_in + fan_out))")
+        expect(pretty).to_contain("√")
+
+# ============================================================================
+# m{} / loss{} / nograd{} Parity
+# ============================================================================
+
+describe "m{}/loss{}/nograd{} parity":
+
+    context "simple expressions":
+        it "all produce same result for addition":
+            val m_result = m{ 2 + 3 }
+            val l_result = loss{ 2 + 3 }
+            val n_result = nograd{ 2 + 3 }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)
+
+        it "all produce same result for power":
+            val x = 3.0
+            val m_result = m{ x^2 }
+            val l_result = loss{ x^2 }
+            val n_result = nograd{ x^2 }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)
+
+        it "all produce same result for frac":
+            val m_result = m{ frac(1, 2) }
+            val l_result = loss{ frac(1, 2) }
+            val n_result = nograd{ frac(1, 2) }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)
+
+    context "DL equations":
+        it "all produce same sigmoid result":
+            val x = 2.0
+            val m_result = m{ frac(1, 1 + exp(-x)) }
+            val l_result = loss{ frac(1, 1 + exp(-x)) }
+            val n_result = nograd{ frac(1, 1 + exp(-x)) }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)
+
+        it "all produce same SGD update":
+            val theta = 5.0
+            val alpha = 0.1
+            val grad = 2.0
+            val m_result = m{ theta - alpha * grad }
+            val l_result = loss{ theta - alpha * grad }
+            val n_result = nograd{ theta - alpha * grad }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)
+
+        it "all produce same layer norm result":
+            val x = 5.0
+            val mu = 3.0
+            val sigma = 2.0
+            val epsilon = 0.00001
+            val gamma = 1.0
+            val beta = 0.0
+            val m_result = m{ frac(x - mu, sqrt(sigma^2 + epsilon)) * gamma + beta }
+            val l_result = loss{ frac(x - mu, sqrt(sigma^2 + epsilon)) * gamma + beta }
+            val n_result = nograd{ frac(x - mu, sqrt(sigma^2 + epsilon)) * gamma + beta }
+            expect(m_result).to_equal(l_result)
+            expect(m_result).to_equal(n_result)

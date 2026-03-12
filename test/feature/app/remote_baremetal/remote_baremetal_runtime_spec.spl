@@ -51,7 +51,6 @@ use app.test_runner_new.test_executor_composite.{
     qemu_machine_for_arch,
     find_baremetal_elf
 }
-use std.nogc_sync_mut.debug.remote.test.qemu_runner.QemuRunner
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 use app.debug.remote.protocol.trace32.Trace32Client
@@ -65,6 +64,12 @@ fn status_is_acceptable(status: text) -> bool:
 
 fn cleanup_temp_remote_files(tmpdir: text):
     shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn stop_process_if_running(pid: i64):
+    if pid > 0:
+        shell("kill {pid} >/dev/null 2>&1 || true")
+        shell("sleep 0.1")
+        shell("kill -9 {pid} >/dev/null 2>&1 || true")
 
 fn parse_leading_hex_address(raw: text) -> i64:
     val trimmed = raw.trim()
@@ -115,7 +120,6 @@ fn qemu_riscv32_remote_memory_status() -> text:
 
     val asm_path = "{tmpdir}/loop.S"
     val elf_path = "{tmpdir}/loop.elf"
-    val log_path = "{tmpdir}/qemu.log"
     val port = 1234
     val asm_source = ".section .text\n.globl _start\n_start:\n  j _start\n.section .data\n.globl marker\nmarker:\n  .word 0x12345678\n"
 
@@ -128,13 +132,18 @@ fn qemu_riscv32_remote_memory_status() -> text:
         cleanup_temp_remote_files(tmpdir)
         return "error: compile failed: {compile.stdout.trim()}"
 
-    val qemu_result = QemuRunner.start(elf_path, port)
-    if qemu_result.is_err():
+    val qemu_start = shell("sh -c 'qemu-system-riscv32 -machine virt -bios none -kernel \"{elf_path}\" -gdb tcp::{port} -S -nographic -no-reboot >/dev/null 2>&1 & echo $!'")
+    val qemu_pid_text = qemu_start.stdout.trim()
+    val qemu_pid = if qemu_pid_text.len() > 0: int(qemu_pid_text) else: -1
+    if qemu_start.exit_code != 0 or qemu_pid <= 0:
         cleanup_temp_remote_files(tmpdir)
-        return "error: failed to launch qemu: {qemu_result.err().unwrap()}"
+        return "error: failed to launch qemu"
 
-    var qemu = qemu_result.ok.unwrap()
-    shell("sleep 1")
+    val port_ready = shell("timeout 5 bash -c 'while ! ss -tln | grep -q :{port}; do sleep 0.1; done' 2>/dev/null")
+    if port_ready.exit_code != 0:
+        stop_process_if_running(qemu_pid)
+        cleanup_temp_remote_files(tmpdir)
+        return "error: qemu gdb port did not become ready"
 
     val config = DebugConfig(
         host: "localhost",
@@ -145,7 +154,7 @@ fn qemu_riscv32_remote_memory_status() -> text:
     )
     val gdb_result = GdbMiClient.connect(config)
     if gdb_result.is_err():
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: gdb-mi connect failed: {gdb_result.err().unwrap()}"
 
@@ -153,47 +162,47 @@ fn qemu_riscv32_remote_memory_status() -> text:
     val addr_text = gdb.evaluate("&marker")
     if addr_text.is_err():
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: could not evaluate marker address"
 
     val addr = parse_leading_hex_address(addr_text.ok.unwrap())
     if addr < 0:
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: could not parse marker address"
 
     val initial = gdb.read_memory(addr, 4)
     if initial.is_err():
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: initial memory read failed"
 
     val initial_bytes = initial.ok.unwrap()
     if initial_bytes.len() < 4:
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: initial memory read too short"
 
     if initial_bytes[0] != 0x78 or initial_bytes[1] != 0x56 or initial_bytes[2] != 0x34 or initial_bytes[3] != 0x12:
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: initial marker value mismatch"
 
     val write_result = gdb.write_memory(addr, [0x21, 0x43, 0x65, 0x87])
     if write_result.is_err():
         gdb.disconnect()
-        qemu.stop()
+        stop_process_if_running(qemu_pid)
         cleanup_temp_remote_files(tmpdir)
         return "error: memory write failed"
 
     val updated = gdb.read_memory(addr, 4)
     gdb.disconnect()
-    qemu.stop()
+    stop_process_if_running(qemu_pid)
     cleanup_temp_remote_files(tmpdir)
 
     if updated.is_err():

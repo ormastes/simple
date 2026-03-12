@@ -5,7 +5,7 @@
 use app.io.{shell, process_run, ProcessResult}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, parse_hex_value, parse_hex_byte, hex_char_value}
-use app.debug.remote.types.{DebugConfig, DebugError}
+use app.debug.remote.types.{Architecture, DebugConfig, DebugError}
 
 # GDB MI client controlling a GDB process
 class GdbMiClient:
@@ -34,16 +34,17 @@ class GdbMiClient:
         # Determine GDB binary (prefer riscv-specific, fall back to gdb-multiarch)
         val gdb_bin = GdbMiClient.find_gdb_binary()
 
-        # Start GDB with MI interface, reading from/writing to FIFOs
-        # Run in background: gdb --interpreter=mi3 -nx < fifo_in > fifo_out 2>&1 &
-        val start_result = shell("{gdb_bin} --interpreter=mi3 -nx < {fifo_in} > {fifo_out} 2>&1 &")
+        # Start GDB with MI interface, reading from/writing to FIFOs.
+        # Capture the PID in the same shell that launches the background job.
+        val start_result = shell("sh -c 'exec 3<>\"{fifo_in}\"; exec 4<>\"{fifo_out}\"; {gdb_bin} --interpreter=mi3 -nx <&3 >&4 2>&1 & echo $!'")
         if start_result.exit_code != 0:
             shell("rm -f {fifo_in} {fifo_out}")
             return Err("failed to start GDB: {start_result.stderr}")
 
-        # Get GDB PID (most recent background process)
-        val pid_result = shell("echo $!")
-        val pid = pid_result.stdout.trim()
+        val pid = start_result.stdout.trim()
+        if pid.len() == 0:
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err("failed to capture GDB pid")
 
         # Small delay for GDB to start
         shell("sleep 0.3")
@@ -60,13 +61,28 @@ class GdbMiClient:
         # Read initial GDB banner/prompt
         client.read_until_prompt()
 
-        # Connect to remote target
-        val connect_result = client.send_command("target-select remote {config.host}:{config.port}")?
-        client.connected = true
-
-        # Load symbols if program specified
+        # Load symbols before connecting so GDB can infer the target layout.
         if config.program.len() > 0:
             client.send_command("file-exec-and-symbols {config.program}")?
+
+        # Set architecture explicitly when the remote target needs it.
+        match config.target:
+            case Architecture.RiscV32:
+                client.send_command("gdb-set architecture riscv:rv32")?
+            case Architecture.RiscV64:
+                client.send_command("gdb-set architecture riscv:rv64")?
+            case Architecture.Arm32:
+                client.send_command("gdb-set architecture arm")?
+            case Architecture.Arm64:
+                client.send_command("gdb-set architecture aarch64")?
+            case Architecture.X86:
+                client.send_command("gdb-set architecture i386")?
+            case Architecture.X86_64:
+                client.send_command("gdb-set architecture i386:x86-64")?
+
+        # Connect to remote target
+        client.send_command("target-select remote {config.host}:{config.port}")?
+        client.connected = true
 
         Ok(client)
 
@@ -90,7 +106,7 @@ class GdbMiClient:
         "gdb"
 
     # Send a GDB MI command and wait for result
-    fn send_command(cmd: text) -> Result<Dict<text, text>, text>:
+    me send_command(cmd: text) -> Result<Dict<text, text>, text>:
         val token = self.token_counter
         self.token_counter = self.token_counter + 1
 
@@ -111,15 +127,31 @@ class GdbMiClient:
         val lines = output.stdout.split("\n")
 
         for line in lines:
-            val record = GdbMiParser.parse_line(line)
-            match record:
-                GdbMiRecord.Result(t, cls, data):
-                    if cls == "error":
-                        val msg = data.get("msg") ?? "unknown GDB error"
-                        return Err("GDB error: {msg}")
-                    return Ok(data)
-                _:
-                    pass  # skip async/stream records
+            val trimmed = line.trim()
+            if not trimmed.contains("^"):
+                continue
+
+            val caret_parts = trimmed.split("^")
+            if caret_parts.len() < 2:
+                continue
+
+            val token_text = caret_parts[0]
+            val parsed_token = token_text.parse_int() ?? -1
+            if parsed_token != token:
+                continue
+
+            var rest_parts: [text] = []
+            var i = 1
+            while i < caret_parts.len():
+                rest_parts.push(caret_parts[i])
+                i = i + 1
+
+            val rest = rest_parts.join("^")
+            val (cls_val, data) = GdbMiParser.parse_class_and_data(rest)
+            if cls_val == "error":
+                val msg = data.get("msg") ?? "unknown GDB error"
+                return Err("GDB error: {msg}")
+            return Ok(data)
 
         Err("no result received from GDB (timeout?)")
 

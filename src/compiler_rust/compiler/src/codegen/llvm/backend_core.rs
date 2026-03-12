@@ -241,7 +241,16 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let func = self.create_function_signature(name, param_types, return_type)?;
         if has_body {
-            func.set_linkage(inkwell::module::Linkage::WeakAny);
+            // Module-qualified names (containing "__") use External linkage so they
+            // override weak stubs.  Bare names use WeakAny to avoid duplicate-symbol
+            // errors when the same bare name appears in multiple modules.
+            // The linker uses --allow-multiple-definition to handle the rare case of
+            // genuinely duplicated mangled names across modules.
+            if name.contains("__") || name == "spl_main" {
+                func.set_linkage(inkwell::module::Linkage::External);
+            } else {
+                func.set_linkage(inkwell::module::Linkage::WeakAny);
+            }
         } else {
             func.set_linkage(inkwell::module::Linkage::External);
         }

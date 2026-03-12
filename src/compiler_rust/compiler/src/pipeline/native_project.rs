@@ -835,7 +835,10 @@ int main(int argc, char** argv) {
         {
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
-            // Keep --unresolved-symbols=ignore-all for system symbols not in our stubs
+            // --allow-multiple-definition: picks first definition (compiled code from
+            // the archive wins over weak stubs because it's linked first).
+            // --unresolved-symbols=ignore-all: for system symbols not in our stubs.
+            cmd.arg("-Wl,--allow-multiple-definition");
             cmd.arg("-Wl,--unresolved-symbols=ignore-all");
         }
         #[cfg(target_os = "windows")]
