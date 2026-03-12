@@ -904,6 +904,27 @@ impl<'a> MirLowerer<'a> {
                     field_regs.push(self.lower_expr(field)?);
                 }
 
+                // For builtin type "constructors" (str, int), box integer-typed
+                // fields as RuntimeValues so the codegen receives tagged values.
+                if (*ty == TypeId::STRING || *ty == TypeId::ANY) && field_regs.len() == 1 {
+                    let field_ty = fields[0].ty;
+                    let needs_boxing = field_ty == TypeId::I64 || field_ty == TypeId::I32
+                        || field_ty == TypeId::I8 || field_ty == TypeId::BOOL;
+                    if needs_boxing {
+                        let reg = field_regs[0];
+                        let boxed = self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxInt {
+                                dest: boxed,
+                                value: reg,
+                            });
+                            boxed
+                        })?;
+                        field_regs[0] = boxed;
+                    }
+                }
+
                 // Check if this type has an @inject constructor (ClassName.new)
                 // If so, we need to call the constructor with DI injection
                 let type_name = self

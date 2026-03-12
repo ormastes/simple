@@ -350,6 +350,8 @@ pub fn rt_ast_expr_binary_op(args: &[Value]) -> Result<Value, CompileError> {
                     BinOp::NotIn => "not_in",
                     BinOp::PipeForward => "|>",
                     BinOp::Parallel => "//",
+                    BinOp::Compose => ">>",
+                    BinOp::LayerConnect => "~>",
                 };
                 Ok(Value::Str(s.to_string()))
             }

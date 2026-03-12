@@ -115,6 +115,16 @@ impl TypeChecker {
                     BinOp::Parallel => {
                         Ok(Type::Tuple(vec![left_ty, right_ty]))
                     }
+                    // Compose (>>): function composition, result is a function
+                    BinOp::Compose => {
+                        // f >> g creates \x: g(f(x)), result type depends on composed functions
+                        Ok(self.fresh_var())
+                    }
+                    // LayerConnect (~>): ML layer composition
+                    BinOp::LayerConnect => {
+                        // l1 ~> l2 connects neural network layers
+                        Ok(self.fresh_var())
+                    }
                 }
             }
             Expr::Unary { op, operand } => {

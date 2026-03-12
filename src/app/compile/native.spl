@@ -35,7 +35,7 @@ use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use std.log.{error, warn, info, debug}
 use compiler.driver.driver.{aot_c_file}
 use compiler.driver.driver_api.{aot_llvm_native_file, aot_native_file_with_backend}
-use compiler.driver.driver_types.{CompileResult, CompileResult__get_errors}
+use compiler.driver.driver_types.{CompileResult}
 
 # ============================================================================
 # Platform Detection
@@ -252,7 +252,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
                 return 0
             case _:
                 error("compile", "LLVM native compilation failed")
-                val errors = CompileResult__get_errors(llvm_result)
+                val errors = llvm_result.get_errors()
                 _cli_eprint("[DEBUG] errors: {errors}")
                 for err in errors:
                     error("compile", err)
@@ -270,7 +270,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
             pass
         case _:
             error("compile", "C generation failed")
-            val errors = CompileResult__get_errors(aot_result)
+            val errors = aot_result.get_errors()
             for err in errors:
                 error("compile", err)
             return 1
@@ -287,9 +287,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         return 1
 
     # Step 3: Build compile command
-    var san_flags = ""
-    if sanitize:
-        san_flags = "-fsanitize=address,leak -fno-omit-frame-pointer -g "
+    val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
 
     val mold_path = find_mold_for_native()
     var mold_link = ""
@@ -336,9 +334,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         val size = file_size(output_file)
         info("compile", "Compiled: {output_file} ({size} bytes)")
         if verbose:
-            var linker_name = "system"
-            if used_mold:
-                linker_name = "mold"
+            val linker_name = if used_mold then "mold" else "system"
             debug("compile", "Linker: {linker_name}")
     else:
         error("compile", "Output file not created: {output_file}")
@@ -351,9 +347,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 # ============================================================================
 
 fn compile_c_to_object(c_file: text, obj_file: text, verbose: bool, cc: text, sanitize: bool) -> bool:
-    var san_flags = ""
-    if sanitize:
-        san_flags = "-fsanitize=address,leak -fno-omit-frame-pointer -g "
+    val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
     val cmd = "{cc} {san_flags}-c -fPIE -o '{obj_file}' '{c_file}'"
     if verbose:
         debug("compile", "{cc} -c: {c_file} -> {obj_file}")
@@ -424,7 +418,7 @@ fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i6
             pass
         case _:
             error("compile", "C generation failed")
-            val errors = CompileResult__get_errors(aot_result)
+            val errors = aot_result.get_errors()
             for err in errors:
                 error("compile", err)
             if use_stdout:

@@ -357,6 +357,7 @@ pub enum TokenKind {
     AndSuspend,  // and~ (suspending boolean AND)
     OrSuspend,   // or~ (suspending boolean OR)
     Tilde,       // ~
+    TildeArrow,  // ~> (layer connect operator for ML layer composition)
     ShiftLeft,   // <<
     ShiftRight,  // >>
     TripleLt,    // <<<  (CUDA kernel launch open)

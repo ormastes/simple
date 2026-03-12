@@ -720,6 +720,8 @@ impl<'a> ExprTranslator<'a> {
             BinOp::NotIn => "∉".to_string(),        // Not in
             BinOp::PipeForward => "|>".to_string(), // Function application
             BinOp::Parallel => "//".to_string(),    // Parallel execution
+            BinOp::Compose => "∘".to_string(),      // Function composition
+            BinOp::LayerConnect => "~>".to_string(), // Layer connect
         }
     }
 

@@ -160,7 +160,7 @@ pub(super) fn eval_op_expr(
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::Bool(right_val.truthy())));
                 }
-                BinOp::ShiftRight => {
+                BinOp::ShiftRight | BinOp::Compose => {
                     // Compose operator: f >> g → \__c0: g(f(__c0))
                     // Creates a lambda that chains the two functions
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
@@ -804,6 +804,22 @@ pub(super) fn eval_op_expr(
                             ))
                         }
                     }
+                }
+                BinOp::Compose => {
+                    // Compose (>>): handled in early-return block above for function operands.
+                    // If we reach here, operands are non-function integers — fall through like ShiftRight.
+                    Ok(Value::Int(left_val.as_int()? >> right_val.as_int()?))
+                }
+                BinOp::LayerConnect => {
+                    // LayerConnect (~>): l1 ~> l2 connects neural network layers
+                    // Requires ML runtime support
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("~> (layer connect) requires ML runtime support");
+                    Err(CompileError::semantic_with_context(
+                        "~> (layer connect) operator not yet supported in interpreter".to_string(),
+                        ctx,
+                    ))
                 }
             };
 

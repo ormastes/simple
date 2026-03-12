@@ -1127,6 +1127,8 @@ impl PrettyPrinter {
                     BinOp::NotIn => "not in",
                     BinOp::PipeForward => "|>",
                     BinOp::Parallel => "//",
+                    BinOp::Compose => ">>",
+                    BinOp::LayerConnect => "~>",
                 });
                 self.write(" ");
                 self.print_expr(right);

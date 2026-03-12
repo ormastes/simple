@@ -1054,8 +1054,9 @@ static inline int64_t _rt_now_nanos(void) {{
                 let runtime_lib = runtime_dir.join("libsimple_runtime.a");
                 let compiler_lib = runtime_dir.join("libsimple_compiler.a");
                 // Prefer libsimple_runtime.a for standalone binary linking.
-                // libsimple_native_all.a contains LLVM C++ objects that require
-                // libstdc++ and are not needed for simple programs.
+                // With thin LTO (bootstrap profile), all #[no_mangle] symbols
+                // are preserved in the archive. Do NOT link libsimple_native_all.a
+                // as it contains C++ LLVM objects requiring libstdc++.
                 if runtime_lib.exists() {
                     builder = builder.object(&runtime_lib);
                 } else if compiler_lib.exists() {

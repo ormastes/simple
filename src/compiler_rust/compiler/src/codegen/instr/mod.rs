@@ -473,29 +473,28 @@ pub fn compile_instruction<M: Module>(
         } => {
             // Intercept builtin type "constructors" that should be conversion calls
             if *type_id == TypeId::STRING && field_values.len() == 1 {
-                // str(x) → rt_to_string(tagged_x)
+                // str(x) → rt_to_string(x)
+                // Value is already a tagged RuntimeValue (BoxInt inserted by MIR lowering
+                // for integer-typed fields, or already tagged from function calls).
                 let arg_val = ctx.vreg_values.get(&field_values[0]).copied().unwrap_or_else(|| {
                     builder.ins().iconst(types::I64, 0)
                 });
-                // Tag as RuntimeValue int if needed (value << 3)
-                let three = builder.ins().iconst(types::I64, 3);
-                let tagged = builder.ins().ishl(arg_val, three);
                 if let Some(&to_str_id) = ctx.runtime_funcs.get("rt_to_string") {
                     let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
-                    let call = adapted_call(builder, to_str_ref, &[tagged]);
+                    let call = helpers::adapted_call(builder, to_str_ref, &[arg_val]);
                     let result = builder.inst_results(call)[0];
                     ctx.vreg_values.insert(*dest, result);
                 } else {
-                    ctx.vreg_values.insert(*dest, tagged);
+                    ctx.vreg_values.insert(*dest, arg_val);
                 }
-            } else if (*type_id == TypeId::I64 || *type_id == TypeId::INT) && field_values.len() == 1 {
+            } else if *type_id == TypeId::I64 && field_values.len() == 1 {
                 // int(x) → rt_string_to_int(x)
                 let arg_val = ctx.vreg_values.get(&field_values[0]).copied().unwrap_or_else(|| {
                     builder.ins().iconst(types::I64, 0)
                 });
                 if let Some(&str_to_int_id) = ctx.runtime_funcs.get("rt_string_to_int") {
                     let str_to_int_ref = ctx.module.declare_func_in_func(str_to_int_id, builder.func);
-                    let call = adapted_call(builder, str_to_int_ref, &[arg_val]);
+                    let call = helpers::adapted_call(builder, str_to_int_ref, &[arg_val]);
                     let result = builder.inst_results(call)[0];
                     ctx.vreg_values.insert(*dest, result);
                 } else {

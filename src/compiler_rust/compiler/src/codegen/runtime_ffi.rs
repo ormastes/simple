@@ -817,6 +817,18 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     // rt_process_run_timeout(cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (tuple of stdout, stderr, exit_code)
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
+    // rt_process_is_running(pid) -> bool (as i64: 0/1)
+    RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
+    // rt_process_wait(pid, timeout_ms) -> exit_code
+    RuntimeFuncSpec::new("rt_process_wait", &[I64, I64], &[I64]),
+    // rt_process_kill(pid) -> bool (as i64: 0/1)
+    RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
+    // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
+    RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
+    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_mb) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_process_exists(pid) -> bool (as i64: 0/1)
+    RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
     // =========================================================================
     // CLI FFI functions (for Simple-based CLI)
     // =========================================================================

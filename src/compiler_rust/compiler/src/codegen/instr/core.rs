@@ -364,6 +364,14 @@ pub(crate) fn compile_binop<M: Module>(
             // Parallel execution requires async runtime
             return Err("Parallel operator (//) requires interpreter mode for concurrent execution".to_string());
         }
+        BinOp::Compose => {
+            // Function composition (>>) should be desugared to lambda before codegen
+            return Err("Compose operator (>>) should be desugared before native codegen".to_string());
+        }
+        BinOp::LayerConnect => {
+            // Layer connect (~>) requires ML runtime
+            return Err("Layer connect operator (~>) requires ML runtime support".to_string());
+        }
     };
     Ok(val)
 }

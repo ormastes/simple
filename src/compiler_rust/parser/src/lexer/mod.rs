@@ -251,8 +251,12 @@ impl<'a> Lexer<'a> {
             }
             '^' => TokenKind::Xor,
             '~' => {
+                // Check for ~> (layer connect operator)
+                if self.check('>') {
+                    self.advance();
+                    TokenKind::TildeArrow
                 // Check for compound suspension operators: ~+=, ~-=, ~*=, ~/=
-                if self.check('+') {
+                } else if self.check('+') {
                     self.advance();
                     if self.check('=') {
                         self.advance();

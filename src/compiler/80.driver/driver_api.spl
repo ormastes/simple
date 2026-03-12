@@ -5,8 +5,8 @@
 #   - compile_file, compile_files: High-level compilation entry points
 #   - interpret_file, jit_file, aot_file, aot_c_file, aot_vhdl_file
 #   - check_file, parse_sdn_file, compile_to_smf
-#   - Manual ctor wrappers: CompileContext__create, CompilerDriver__create
-#   - CompilerDriver__run_compile
+#   - Manual ctor wrappers: CompileContext__create, CompilerDriver__create (bootstrap)
+#   - CompilerDriver__run_compile (FFI wrapper)
 #
 # Split from driver.spl.
 
@@ -61,16 +61,16 @@ fn find_runtime_lib_dir() -> text:
 # ------------------------------------------------------------------------------
 
 fn compile_file(path: text) -> CompileResult:
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = paths
     options.mode = mode
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn interpret_file(path: text) -> CompileResult:
@@ -80,26 +80,26 @@ fn jit_file(path: text) -> CompileResult:
     compile_files([path], CompileMode.Jit)
 
 fn aot_file(path: text, output: text) -> CompileResult:
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_c_file(path: text, output: text) -> CompileResult:
     """Compile a source file to C++20 output using the MIR C backend."""
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
     options.backend = "c"
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_llvm_file(path: text, output: text) -> CompileResult:
     """Compile a source file to SMF module using the LLVM backend with -O3."""
-    var options = CompileOptions__default()
+    var options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
@@ -108,12 +108,12 @@ fn aot_llvm_file(path: text, output: text) -> CompileResult:
     options.release = true
     options.optimize = true
     options.opt_level = 3
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_llvm_native_file(path: text, output: text) -> CompileResult:
     """Compile a source file to native executable using LLVM backend with -O3."""
-    var options = CompileOptions__default()
+    var options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
@@ -122,12 +122,12 @@ fn aot_llvm_native_file(path: text, output: text) -> CompileResult:
     options.release = true
     options.optimize = true
     options.opt_level = 3
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_native_file_with_backend(path: text, output: text, backend: text) -> CompileResult:
     """Compile a source file to native executable using the specified backend with -O3."""
-    var options = CompileOptions__default()
+    var options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
@@ -136,26 +136,26 @@ fn aot_native_file_with_backend(path: text, output: text, backend: text) -> Comp
     options.release = true
     options.optimize = true
     options.opt_level = 3
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_cuda_file(path: text, output: text) -> CompileResult:
     """Compile a source file to PTX assembly using the CUDA backend."""
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
     options.backend = "cuda"
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn aot_vhdl_file(path: text, output: text) -> CompileResult:
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
     options.backend = "vhdl"
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     CompilerDriver__run_compile(driver)
 
 fn check_file(path: text) -> CompileResult:
@@ -173,20 +173,20 @@ fn compile_to_smf(path: text, output: text) -> Result<text, text>:
     in interpreter mode without requiring Rust FFI.
     Returns Ok(output_path) on success or Err(message) on failure.
     """
-    val options = CompileOptions__default()
+    val options = CompileOptions.default()
     options.input_files = [path]
     options.output_file = output
     options.mode = CompileMode.Aot
     options.output_format = OutputFormat.Smf
 
-    val driver = CompilerDriver__create(options)
+    val driver = CompilerDriver.create(options)
     val result = CompilerDriver__run_compile(driver)
 
     match result:
         case CompileResult.Success(_):
             Ok(output)
         case _:
-            val errors = CompileResult__get_errors(result)
+            val errors = result.get_errors()
             val error_msg = if errors.len() > 0:
                 errors.join("\n")
             else:
@@ -206,7 +206,7 @@ fn CompileContext__create(options: CompileOptions) -> CompileContext:
                 target_triple_fn: fn(): "interpreter"
             )
         case CompileMode.Jit:
-            val jit_impl = CompilerBackendImpl__jit()
+            val jit_impl = CompilerBackendImpl.jit()
             BackendPort(
                 name: "jit",
                 run_fn: fn(m): jit_impl.process_module(m),
@@ -215,7 +215,7 @@ fn CompileContext__create(options: CompileOptions) -> CompileContext:
             )
         case CompileMode.Aot:
             val output = options.output_file ?? "a.out"
-            val aot_impl = CompilerBackendImpl__aot(output)
+            val aot_impl = CompilerBackendImpl.aot(output)
             BackendPort(
                 name: "aot",
                 run_fn: fn(m): aot_impl.process_module(m),

@@ -308,10 +308,11 @@ fn test_parse_binary_shift_left() {
 }
 
 #[test]
-fn test_parse_binary_shift_right() {
+fn test_parse_binary_compose() {
+    // >> is now parsed as Compose (function composition), not ShiftRight
     let module = parse("x >> y").unwrap();
     if let Node::Expression(Expr::Binary { op, .. }) = &module.items[0] {
-        assert_eq!(*op, BinOp::ShiftRight);
+        assert_eq!(*op, BinOp::Compose);
     } else {
         panic!("Expected binary expression");
     }

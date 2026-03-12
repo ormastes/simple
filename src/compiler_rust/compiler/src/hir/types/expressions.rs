@@ -437,6 +437,9 @@ pub enum BinOp {
     ShiftRight,
     PipeForward,
     Parallel,
+    // Composition
+    Compose,      // >> function composition: f >> g means \x: g(f(x))
+    LayerConnect, // ~> ML layer composition (neural network layer connection)
 }
 
 impl From<simple_parser::BinOp> for BinOp {
@@ -469,6 +472,8 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::NotIn => BinOp::NotIn,
             simple_parser::BinOp::PipeForward => BinOp::PipeForward,
             simple_parser::BinOp::Parallel => BinOp::Parallel,
+            simple_parser::BinOp::Compose => BinOp::Compose,
+            simple_parser::BinOp::LayerConnect => BinOp::LayerConnect,
         }
     }
 }
