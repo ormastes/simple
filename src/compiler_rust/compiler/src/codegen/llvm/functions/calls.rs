@@ -58,6 +58,41 @@ impl LlvmBackend {
             return Ok(());
         }
 
+        // Special case: substring(text, start) → rt_slice(text, start, rt_len(text))
+        // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
+        if func_name == "substring" && args.len() == 2 {
+            let text_val = self.get_vreg(&args[0], vreg_map)?;
+            let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
+            let start_val = self.get_vreg(&args[1], vreg_map)?;
+            let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
+            // Call rt_len(text) to get the end index
+            let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            let len_func = module.get_function("rt_len").unwrap_or_else(|| {
+                module.add_function("rt_len", len_fn_type, None)
+            });
+            let len_call = builder
+                .build_call(len_func, &[text_casted.into()], "text_len")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
+            let end_val = len_call.try_as_basic_value().left()
+                .unwrap_or_else(|| i64_type.const_int(0, false).into());
+            // Call rt_slice(text, start, end)
+            let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+            let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
+                module.add_function("rt_slice", slice_fn_type, None)
+            });
+            let slice_call = builder
+                .build_call(slice_func, &[text_casted.into(), start_casted.into(), end_val.into()], "substr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?;
+            if let Some(d) = dest {
+                if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                    vreg_map.insert(d, ret_val);
+                } else {
+                    vreg_map.insert(d, i64_type.const_int(0, false).into());
+                }
+            }
+            return Ok(());
+        }
+
         // Redirect bare builtin method names to runtime functions.
         // When MIR emits Call { target: "starts_with" } instead of BuiltinMethod,
         // we must map these to rt_* functions. The first arg is the receiver.

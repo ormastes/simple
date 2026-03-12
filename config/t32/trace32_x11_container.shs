@@ -41,8 +41,9 @@ case "$cmd" in
             -v /dev/bus/usb:/dev/bus/usb \
             -w /workspace \
             -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
-            "$IMAGE_NAME" \
-            sh -lc 'xvfb-run -a /opt/t32/bin/pc_linux64/t32marm -c "$T32_CONFIG"' "$@"
+            -e HOME=/tmp \
+            -e XAPPLRESDIR=/opt/t32 \
+            "$IMAGE_NAME" "$@"
         ;;
     up-d)
         "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -55,8 +56,37 @@ case "$cmd" in
             -v /dev/bus/usb:/dev/bus/usb \
             -w /workspace \
             -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
+            -e HOME=/tmp \
+            -e XAPPLRESDIR=/opt/t32 \
+            "$IMAGE_NAME" "$@"
+        ;;
+    wait)
+        echo "waiting for T32 Remote API on port 20000..."
+        for i in $(seq 1 30); do
+            if "$T32REM" localhost port=20000 PING >/dev/null 2>&1; then
+                echo "T32 ready (${i}s)"
+                exit 0
+            fi
+            sleep 1
+        done
+        echo "ERROR: T32 did not respond within 30s" >&2
+        exit 1
+        ;;
+    qt)
+        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        "$RUNTIME" run --rm --name "$CONTAINER_NAME" \
+            --privileged \
+            -p 20000:20000 \
+            -v "$REPO_ROOT:/workspace" \
+            -v /opt/t32:/opt/t32:ro \
+            -v /dev/lauterbach:/dev/lauterbach \
+            -v /dev/bus/usb:/dev/bus/usb \
+            -w /workspace \
+            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
+            -e HOME=/tmp \
+            -e XAPPLRESDIR=/opt/t32 \
             "$IMAGE_NAME" \
-            sh -lc 'xvfb-run -a /opt/t32/bin/pc_linux64/t32marm -c "$T32_CONFIG"' "$@"
+            /opt/t32/bin/pc_linux64/t32marm-qt -c /workspace/config/t32/t32_stm_headless.t32 "$@"
         ;;
     down)
         "$RUNTIME" rm -f "$CONTAINER_NAME" "$@" >/dev/null 2>&1 || true
@@ -68,7 +98,7 @@ case "$cmd" in
         "$T32REM" localhost port=20000 PING "$@"
         ;;
     *)
-        echo "usage: $0 {build|up|up-d|down|logs|ping}" >&2
+        echo "usage: $0 {build|up|up-d|wait|qt|down|logs|ping}" >&2
         exit 1
         ;;
 esac

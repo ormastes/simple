@@ -381,19 +381,31 @@ fn handle_t32_window_capture(id: text, body: text) -> text:
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
-            # Execute capture command (PRinTer.FILE ...)
+            # Execute WinPrint capture command
             var stdout = ""
             var rc: i64 = 0
             (stdout, rc) = t32_run_remote(session, found_capture)
-            # The capture command writes to a temp file, then we'd read it.
-            # For now, we return the stdout which may contain the captured text.
-            # In practice, t32rem returns the printed area content.
+            var content = stdout.trim()
+            var capture_method = "winprint"
+            # Fallback: if WinPrint result is empty, try PRinTer.FILE to temp file
+            if content == "" and rc == 0:
+                val temp_file = "/tmp/t32_capture_" + window_key + ".txt"
+                val printer_cmd = "PRinTer.FILE " + temp_file + " " + found_capture.replace("WinPrint.", "")
+                var stdout2 = ""
+                var rc2: i64 = 0
+                (stdout2, rc2) = t32_run_remote(session, printer_cmd)
+                if rc2 == 0:
+                    val file_content = rt_file_read_text(temp_file) ?? ""
+                    if file_content != "":
+                        content = file_content.trim()
+                        capture_method = "printer_file"
             t32_add_history("capture " + window_key, "captured", session.id, MCP_T32_CURRENT_CORE)
             var r = t32_LB()
             r = r + t32_jp("window", t32_js(window_key))
             r = r + "," + t32_jp("title", t32_js(found_title))
-            r = r + "," + t32_jp("content", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("content", t32_js(content))
             r = r + "," + t32_jp("capture_command", t32_js(found_capture))
+            r = r + "," + t32_jp("capture_method", t32_js(capture_method))
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 

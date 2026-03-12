@@ -203,22 +203,47 @@ fn handle_t32_core_list(id: text, body: text) -> text:
     match found:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(s):
+            # Query T32 for real core count via EVAL CORE.NUMBER()
+            var count_out = ""
+            var count_rc: i64 = 0
+            (count_out, count_rc) = t32_run_remote(s, "EVAL CORE.NUMBER()")
+            var core_count: i64 = 0
+            if count_rc == 0:
+                val trimmed_count = count_out.trim().replace(".", "")
+                core_count = int(trimmed_count)
+            # If query failed or returned 0, fall back to at least 1 core
+            if core_count < 1:
+                core_count = 1
             var arr = t32_SB_L()
             var first = true
-            for c in s.cores:
+            var ci: i64 = 0
+            while ci < core_count:
+                # Query core name via EVAL CORE.NAME(n)
+                var name_out = ""
+                var name_rc: i64 = 0
+                (name_out, name_rc) = t32_run_remote(s, "EVAL CORE.NAME(" + str(ci) + ".)")
+                var core_name = "core" + str(ci)
+                if name_rc == 0 and name_out.trim() != "":
+                    core_name = name_out.trim().replace("\"", "")
                 if not first:
                     arr = arr + ","
                 first = false
+                var is_selected = "false"
+                if MCP_T32_CURRENT_CORE == core_name or (MCP_T32_CURRENT_CORE == "" and ci == 0):
+                    is_selected = "true"
                 var obj = t32_LB()
-                obj = obj + t32_jp("core_id", t32_js(c.core_id))
-                obj = obj + "," + t32_jp("label", t32_js(c.label))
-                obj = obj + "," + t32_jp("instance_binding", t32_js(c.instance_binding))
+                obj = obj + t32_jp("id", str(ci))
+                obj = obj + "," + t32_jp("name", t32_js(core_name))
+                obj = obj + "," + t32_jp("selected", is_selected)
                 obj = obj + t32_RB()
                 arr = arr + obj
+                ci = ci + 1
             arr = arr + t32_SB_R()
+            t32_add_history("core_list", str(core_count) + " cores", s.id, MCP_T32_CURRENT_CORE)
             var result = t32_LB()
             result = result + t32_jp("session_id", t32_js(s.id))
             result = result + "," + t32_jp("current_core", t32_js(MCP_T32_CURRENT_CORE))
+            result = result + "," + t32_jp("core_count", str(core_count))
             result = result + "," + t32_jp("cores", arr)
             result = result + t32_RB()
             return t32_make_tool_result(id, result)
@@ -227,8 +252,21 @@ fn handle_t32_core_select(id: text, body: text) -> text:
     val core_id = t32_extract_field(body, "core_id")
     if core_id == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("core_id", "t32_core_select", "t32_core_select(core_id: \"<id>\")", "t32_core_select(core_id: \"core0\")"))
-    MCP_T32_CURRENT_CORE = core_id
-    t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            # Send real CORE.select command to T32
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, "CORE.select " + core_id + ".")
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, "Core select failed (exit " + str(rc) + "): " + stdout.trim())
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            MCP_T32_CURRENT_CORE = core_id
+            t32_add_history("CORE.select " + core_id, "ok", session.id, core_id)
+            return t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
 
 fn handle_t32_cmd_run(id: text, body: text) -> text:
     val command = t32_extract_field(body, "command")
@@ -268,10 +306,30 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
         timeout_ms = int(timeout_str)
         if timeout_ms < 1000:
             timeout_ms = 30000
+    val capture_area_str = t32_extract_field(body, "capture_area")
+    var capture_area = false
+    if capture_area_str == "true":
+        capture_area = true
     val session_opt = t32_find_current_session()
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
+            # Auto-setup AREA if capture requested and not yet ready
+            if capture_area and not MCP_T32_AREA_READY:
+                var area_name = MCP_T32_AREA_NAME
+                if area_name == "":
+                    area_name = "MCP_OUT"
+                var s1 = ""
+                var r1: i64 = 0
+                (s1, r1) = t32_run_remote(session, "SCREEN.OFF")
+                var s2 = ""
+                var r2: i64 = 0
+                (s2, r2) = t32_run_remote(session, "AREA.Create " + area_name)
+                var s3 = ""
+                var r3: i64 = 0
+                (s3, r3) = t32_run_remote(session, "AREA.Select " + area_name)
+                MCP_T32_AREA_READY = true
+                MCP_T32_AREA_NAME = area_name
             val do_cmd = "DO " + script
             var stdout = ""
             var rc: i64 = 0
@@ -285,11 +343,24 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
             var practice_status = "fired"
             if wait:
                 practice_status = t32_poll_practice_state(session, timeout_ms)
+            # Capture AREA output if requested
+            var area_output = ""
+            if capture_area and MCP_T32_AREA_READY:
+                var area_name = MCP_T32_AREA_NAME
+                if area_name == "":
+                    area_name = "MCP_OUT"
+                var area_stdout = ""
+                var area_rc: i64 = 0
+                (area_stdout, area_rc) = t32_run_remote(session, "WinPrint.AREA " + area_name)
+                if area_rc == 0:
+                    area_output = area_stdout.trim()
             var r = t32_LB()
             r = r + t32_jp("script", t32_js(script))
             r = r + "," + t32_jp("output", t32_js(stdout.trim()))
             r = r + "," + t32_jp("exit_code", str(rc))
             r = r + "," + t32_jp("practice_state", t32_js(practice_status))
+            if area_output != "":
+                r = r + "," + t32_jp("area_output", t32_js(area_output))
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 

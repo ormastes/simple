@@ -969,6 +969,38 @@ impl LlvmBackend {
                 // Extract plain method name from qualified name (e.g., "text.len" -> "len")
                 let method = func_name.rsplit('.').next().unwrap_or(func_name);
 
+                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver))
+                if method == "substring" && args.len() == 1 {
+                    let recv_val = self.get_vreg(receiver, vreg_map)?;
+                    let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
+                    let start_val = self.get_vreg(&args[0], vreg_map)?;
+                    let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
+                    let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    let len_func = module.get_function("rt_len").unwrap_or_else(|| {
+                        module.add_function("rt_len", len_fn_type, None)
+                    });
+                    let len_call = builder
+                        .build_call(len_func, &[recv_casted.into()], "text_len")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
+                    let end_val = len_call.try_as_basic_value().left()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                    let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
+                        module.add_function("rt_slice", slice_fn_type, None)
+                    });
+                    let slice_call = builder
+                        .build_call(slice_func, &[recv_casted.into(), start_casted.into(), end_val.into()], "substr")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                            vreg_map.insert(*d, ret_val);
+                        } else {
+                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
+                        }
+                    }
+                    return Ok(());
+                }
+
                 // Map well-known methods to runtime functions
                 let runtime_func = match method {
                     // Collection methods
@@ -1001,7 +1033,8 @@ impl LlvmBackend {
                     "to_string" | "str" => Some("rt_to_string"),
                     // Index methods
                     "get" => Some("rt_index_get"),
-                    "slice" | "substring" => Some("rt_slice"),
+                    "slice" => Some("rt_slice"),
+                    // Note: "substring" is handled specially above (expands to rt_len + rt_slice)
                     // Dict methods
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
