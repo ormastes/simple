@@ -479,7 +479,6 @@ pub use gpu_vulkan::{
     VulkanFfiError,
 };
 
-// Re-export PyTorch tensor FFI functions
 #[cfg(feature = "pytorch")]
 pub use torch::{
     rt_torch_adam_new,
@@ -494,7 +493,7 @@ pub use torch::{
     rt_torch_argmax,
     rt_torch_argmin,
     // Availability
-    rt_dyn_torch_tensor_from_bits_1d, rt_torch_available,
+    rt_torch_available,
     rt_torch_avg_pool2d,
     // Autograd - backward pass
     rt_torch_backward,
