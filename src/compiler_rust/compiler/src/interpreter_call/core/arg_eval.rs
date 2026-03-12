@@ -16,6 +16,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 ///
 /// Uses `handle_method_call_with_self_update` to ensure that method calls
 /// on mutable objects (with 'me' methods) are properly persisted back to the environment.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_arg(
     args: &[Argument],
     index: usize,
@@ -46,6 +47,7 @@ pub(crate) fn eval_arg(
 ///
 /// # Arguments
 /// * `error_context` - Description of what the argument is for (e.g., "builtin function", "mock matcher")
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_arg_int(
     args: &[Argument],
     index: usize,

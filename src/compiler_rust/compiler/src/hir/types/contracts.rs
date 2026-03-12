@@ -91,35 +91,33 @@ impl HirRefinedType {
     /// Some(false) if it's definitely violated, or None if we can't determine.
     pub fn try_const_eval(&self, value: &HirExpr) -> Option<bool> {
         // Simple constant folding for common cases
-        match (&self.predicate.kind, &value.kind) {
-            // For predicates like `self > 0` with integer constants
-            (HirExprKind::Binary { op, left, right }, HirExprKind::Integer(val)) => {
-                // Check if predicate is in form: self <op> <const>
-                if let (HirExprKind::Local(0), HirExprKind::Integer(bound)) = (&left.kind, &right.kind) {
-                    match op {
-                        BinOp::Gt => return Some(*val > *bound),
-                        BinOp::GtEq => return Some(*val >= *bound),
-                        BinOp::Lt => return Some(*val < *bound),
-                        BinOp::LtEq => return Some(*val <= *bound),
-                        BinOp::Eq => return Some(*val == *bound),
-                        BinOp::NotEq => return Some(*val != *bound),
-                        _ => {}
-                    }
-                }
-                // Check reversed: <const> <op> self
-                if let (HirExprKind::Integer(bound), HirExprKind::Local(0)) = (&left.kind, &right.kind) {
-                    match op {
-                        BinOp::Gt => return Some(*bound > *val),
-                        BinOp::GtEq => return Some(*bound >= *val),
-                        BinOp::Lt => return Some(*bound < *val),
-                        BinOp::LtEq => return Some(*bound <= *val),
-                        BinOp::Eq => return Some(*bound == *val),
-                        BinOp::NotEq => return Some(*bound != *val),
-                        _ => {}
-                    }
+        if let (HirExprKind::Binary { op, left, right }, HirExprKind::Integer(val)) =
+            (&self.predicate.kind, &value.kind)
+        {
+            // Check if predicate is in form: self <op> <const>
+            if let (HirExprKind::Local(0), HirExprKind::Integer(bound)) = (&left.kind, &right.kind) {
+                match op {
+                    BinOp::Gt => return Some(*val > *bound),
+                    BinOp::GtEq => return Some(*val >= *bound),
+                    BinOp::Lt => return Some(*val < *bound),
+                    BinOp::LtEq => return Some(*val <= *bound),
+                    BinOp::Eq => return Some(*val == *bound),
+                    BinOp::NotEq => return Some(*val != *bound),
+                    _ => {}
                 }
             }
-            _ => {}
+            // Check reversed: <const> <op> self
+            if let (HirExprKind::Integer(bound), HirExprKind::Local(0)) = (&left.kind, &right.kind) {
+                match op {
+                    BinOp::Gt => return Some(*bound > *val),
+                    BinOp::GtEq => return Some(*bound >= *val),
+                    BinOp::Lt => return Some(*bound < *val),
+                    BinOp::LtEq => return Some(*bound <= *val),
+                    BinOp::Eq => return Some(*bound == *val),
+                    BinOp::NotEq => return Some(*bound != *val),
+                    _ => {}
+                }
+            }
         }
         None
     }

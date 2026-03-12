@@ -45,7 +45,7 @@ pub enum InstantiationMode {
 /// Stores the original generic definition for later instantiation.
 #[derive(Debug, Clone)]
 pub enum GenericTemplate {
-    Function(FunctionDef),
+    Function(Box<FunctionDef>),
     Struct(StructDef),
     Class(ClassDef),
     Enum(EnumDef),
@@ -128,7 +128,7 @@ impl GenericTemplate {
 /// Compiled specialization code.
 #[derive(Debug, Clone)]
 pub enum CompiledCode {
-    Function(FunctionDef),
+    Function(Box<FunctionDef>),
     Struct(StructDef),
     Class(ClassDef),
     Enum(EnumDef),
@@ -288,7 +288,7 @@ impl DeferredMonomorphizer {
                     specialization_of: None,
                     type_bindings: HashMap::new(),
                 };
-                Ok(GenericTemplate::Function(func))
+                Ok(GenericTemplate::Function(Box::new(func)))
             }
             1 => {
                 // Struct
@@ -440,7 +440,7 @@ impl DeferredMonomorphizer {
 
         // Check cache first
         if let Some(CompiledCode::Function(f)) = self.specialization_cache.get(&key) {
-            return Ok(f.clone());
+            return Ok(*f.clone());
         }
 
         // Get template
@@ -465,7 +465,7 @@ impl DeferredMonomorphizer {
 
         // Cache the result
         self.specialization_cache
-            .insert(key, CompiledCode::Function(specialized.clone()));
+            .insert(key, CompiledCode::Function(Box::new(specialized.clone())));
 
         Ok(specialized)
     }

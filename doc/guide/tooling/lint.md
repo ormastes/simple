@@ -75,6 +75,68 @@ Combined pattern-based + EasyFix pipeline with severity control.
 | TODO (T) | T001-T004 | TODO/FIXME format compliance |
 | Import (I) | I001-I003 | Unfold declarations, missing __init__.spl |
 | Stub (STUB) | STUB001-STUB002 | Trivial/dummy implementations |
+| Arguments (ARG) | ARG001-ARG002 | Too many function parameters |
+
+---
+
+## Argument Count Lint (ARG001/ARG002)
+
+Detects functions with too many parameters, which hurts readability and is often a sign the function should be refactored.
+
+### ARG001: Too Many Parameters (WARNING)
+
+Fires when a function has more than 7 parameters (excluding `self`).
+
+```simple
+# WARNED — 8 parameters
+fn create_user(name: text, email: text, age: i64, role: text,
+               dept: text, manager: text, office: text, phone: text):
+    ...
+```
+
+### ARG002: Excessive Parameters (ERROR)
+
+Fires when a function has more than 12 parameters.
+
+### What is NOT Flagged
+
+```simple
+# Constructors (need all struct fields)
+fn new(name: text, email: text, age: i64, role: text,
+       dept: text, manager: text, office: text, phone: text) -> User:
+    ...
+
+# FFI wrappers (_ffi_ or _raw_ prefix)
+fn _ffi_create_window(x: i64, y: i64, w: i64, h: i64,
+                      title: text, flags: i64, parent: i64, style: i64):
+    ...
+
+# extern fn (separate AST node, not checked)
+extern fn rt_create_window(x: i64, y: i64, w: i64, h: i64,
+                           title: text, flags: i64, parent: i64, style: i64)
+```
+
+### Fixing ARG Warnings
+
+Group related parameters into a struct:
+
+```simple
+# Before (warns)
+fn create_user(name: text, email: text, age: i64, role: text,
+               dept: text, manager: text, office: text, phone: text):
+    ...
+
+# After (clean)
+struct UserInfo:
+    name: text
+    email: text
+    age: i64
+    role: text
+    dept: text
+
+fn create_user(info: UserInfo, manager: text, office: text):
+    ...
+```
 
 ---
 
@@ -205,6 +267,8 @@ bin/simple lint file.spl --warn-all    # Enable all style lints
 | Collection lint | `src/compiler/35.semantics/lint/collection_patterns.spl` |
 | Duplicate typed args lint | `src/compiler/35.semantics/lint/duplicate_typed_args.spl` |
 | Primitive API lint | `src/compiler/35.semantics/lint/primitive_api.spl` |
+| Argument count lint (AST) | `src/compiler/35.semantics/lint/argument_count.spl` |
+| Argument count lint (Rust) | `src/compiler_rust/compiler/src/lint/checker.rs` |
 | Stub impl lint (AST) | `src/compiler/35.semantics/lint/stub_impl.spl` |
 | Stub impl lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_stub.spl` |
 | EasyFix registry | `src/compiler/90.tools/fix/rules/registry.spl` |

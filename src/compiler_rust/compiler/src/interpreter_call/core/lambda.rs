@@ -10,6 +10,7 @@ use std::collections::HashMap;
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_lambda(
     params: &[String],
     body: &simple_parser::ast::Expr,

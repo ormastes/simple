@@ -424,7 +424,7 @@ pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
     if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
         if let Some(child) = map.get_mut(&pid) {
             match child.try_wait() {
-                Ok(None) => true,   // Still running
+                Ok(None) => true,     // Still running
                 Ok(Some(_)) => false, // Already exited
                 Err(_) => false,
             }

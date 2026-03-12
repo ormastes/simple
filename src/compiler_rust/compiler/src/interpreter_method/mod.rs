@@ -34,7 +34,7 @@ pub fn clear_pinned_strings() {
 pub use special::{exec_function_with_self_return, find_and_exec_method_with_self};
 
 /// Main entry point for method call evaluation
-#[allow(clippy::borrowed_box)]
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)]
 pub(crate) fn evaluate_method_call(
     receiver: &Box<Expr>,
     method: &str,
@@ -1057,7 +1057,7 @@ pub(crate) fn evaluate_method_call(
 
 /// Evaluate a method call and return both the result and the potentially modified self.
 /// This is used when we need to persist mutations to self back to the calling environment.
-#[allow(clippy::borrowed_box)]
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)]
 pub(crate) fn evaluate_method_call_with_self_update(
     receiver: &Box<Expr>,
     method: &str,

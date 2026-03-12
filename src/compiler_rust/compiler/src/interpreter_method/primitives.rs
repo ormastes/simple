@@ -7,6 +7,7 @@ use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
 /// Handle Int methods
+#[allow(clippy::too_many_arguments)]
 pub fn handle_int_methods(
     n: i64,
     method: &str,
@@ -231,6 +232,7 @@ pub fn handle_int_methods(
 }
 
 /// Handle Float methods
+#[allow(clippy::too_many_arguments)]
 pub fn handle_float_methods(
     f: f64,
     method: &str,
@@ -433,6 +435,7 @@ pub fn handle_float_methods(
 }
 
 /// Handle Bool methods
+#[allow(clippy::too_many_arguments)]
 pub fn handle_bool_methods(
     b: bool,
     method: &str,

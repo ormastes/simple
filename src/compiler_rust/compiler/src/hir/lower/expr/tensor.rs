@@ -3,6 +3,7 @@
 //! This module contains expression lowering logic for:
 //! - Grid literals (matrix notation with | delimiters)
 //! - Tensor literals (multidimensional arrays)
+//!
 //! Both lower to torch.tensor() calls for PyTorch integration.
 
 use simple_parser::{self as ast, Expr};
@@ -29,6 +30,7 @@ impl Lowerer {
     ///     | 3 | 1 |
     /// ```
     /// Becomes: torch.tensor([[3, 1]], device="cuda")
+    #[allow(clippy::vec_box)]
     pub(super) fn lower_grid_literal(
         &mut self,
         rows: &[Vec<Box<Expr>>],
@@ -253,7 +255,7 @@ impl Lowerer {
     /// This optimization would detect sparsity ratio and choose appropriate
     /// representation automatically. See PyTorch sparse tensor documentation
     /// for COO (coordinate) format details.
-    #[allow(clippy::borrowed_box)]
+    #[allow(clippy::borrowed_box, clippy::vec_box)]
     pub(super) fn create_sparse_tensor(
         &mut self,
         values: &[Vec<Box<Expr>>],

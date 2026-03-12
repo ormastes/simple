@@ -302,7 +302,8 @@ pub use ffi::rt_time_now_seconds;
 pub use ffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_home,
     rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe, rt_platform_name,
-    rt_process_execute, rt_process_run, rt_process_run_timeout, rt_process_spawn, rt_set_env,
+    rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run, rt_process_run_timeout,
+    rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_env,
 };
 
 // Re-export runtime configuration FFI functions

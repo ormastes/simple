@@ -22,6 +22,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 /// 2. Executing the function body
 /// 3. Validating the return type
 /// 4. Wrapping in Promise if async
+#[allow(clippy::too_many_arguments)]
 fn execute_function_body(
     func: &FunctionDef,
     bound_args: HashMap<String, Value>,
@@ -102,6 +103,7 @@ fn execute_function_body(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
@@ -132,6 +134,7 @@ pub(crate) fn exec_function_with_values(
 }
 
 /// Execute function with already-evaluated Values and self context for method calls
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_function_with_values_and_self(
     func: &FunctionDef,
     args: &[Value],
@@ -193,6 +196,7 @@ pub(crate) fn exec_function_with_values_and_self(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_function_with_captured_env(
     func: &FunctionDef,
     args: &[Argument],
@@ -231,6 +235,7 @@ pub(crate) fn exec_function_with_captured_env(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],

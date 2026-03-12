@@ -310,19 +310,9 @@ impl NativeProjectBuilder {
 
         // 5. Compile dirty files
         let results = if self.config.parallel {
-            self.compile_entries_parallel(
-                &to_compile,
-                &temp_dir_path,
-                &canonical_entry,
-                &imports,
-            )
+            self.compile_entries_parallel(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         } else {
-            self.compile_entries_sequential(
-                &to_compile,
-                &temp_dir_path,
-                &canonical_entry,
-                &imports,
-            )
+            self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
         let compile_time = compile_start.elapsed();
 
@@ -389,9 +379,8 @@ impl NativeProjectBuilder {
         // On link failure, optionally keep objects for debugging
         if let Err(e) = link_result {
             if let Some(dir) = temp_dir.take() {
-                let path = dir.path().to_path_buf();
+                let path = dir.keep();
                 eprintln!("Link failed. Objects kept at: {}", path.display());
-                dir.keep();
             }
             return Err(e);
         }
@@ -399,9 +388,8 @@ impl NativeProjectBuilder {
         // Optionally keep the temporary object directory for debugging.
         if std::env::var("SIMPLE_KEEP_NATIVE_OBJS").is_ok() {
             if let Some(dir) = temp_dir.take() {
-                let path = dir.path().to_path_buf();
+                let path = dir.keep();
                 eprintln!("Keeping native object files in {}", path.display());
-                dir.keep();
             }
         }
 
@@ -2099,6 +2087,7 @@ fn compile_file_to_object(
 }
 
 /// Compile a file with panic catching and timeout.
+#[allow(clippy::too_many_arguments)]
 fn compile_file_safe(
     source: String,
     file_path: PathBuf,

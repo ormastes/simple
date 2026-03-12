@@ -610,9 +610,12 @@ pub enum Value {
     Nil,
 }
 
+/// Boxed native function callable from the interpreter.
+pub type NativeFnArc = Arc<dyn Fn(&[Value]) -> Result<Value, CompileError> + Send + Sync>;
+
 pub struct NativeFunction {
     pub name: String,
-    pub func: Arc<dyn Fn(&[Value]) -> Result<Value, CompileError> + Send + Sync>,
+    pub func: NativeFnArc,
 }
 
 impl fmt::Debug for NativeFunction {

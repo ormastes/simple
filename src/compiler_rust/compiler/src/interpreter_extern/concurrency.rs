@@ -22,13 +22,15 @@ use super::super::{evaluate_expr, exec_block_value};
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
+type ChannelRegistry = Arc<Mutex<HashMap<i64, (Sender<Value>, Arc<Mutex<Receiver<Value>>>)>>>;
+
 // Global storage for thread handles, channels, and results
 lazy_static::lazy_static! {
     static ref THREAD_HANDLES: Arc<Mutex<HashMap<i64, thread::JoinHandle<Value>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     static ref THREAD_RESULTS: Arc<Mutex<HashMap<i64, Value>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    static ref CHANNELS: Arc<Mutex<HashMap<i64, (Sender<Value>, Arc<Mutex<Receiver<Value>>>)>>> =
+    static ref CHANNELS: ChannelRegistry =
         Arc::new(Mutex::new(HashMap::new()));
     static ref NEXT_HANDLE_ID: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
     static ref NEXT_CHANNEL_ID: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));

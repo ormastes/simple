@@ -241,6 +241,19 @@ impl<'a> MirLowerer<'a> {
                         }
                     }
 
+                    // Global variable assignment: use GlobalStore directly
+                    HirExprKind::Global(name) => {
+                        let global_name = name.clone();
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::GlobalStore {
+                                global_name,
+                                value: val_reg,
+                                ty,
+                            });
+                        })?;
+                    }
+
                     // Local variable assignment: use address + store pattern
                     _ => {
                         let addr_reg = self.lower_lvalue(target)?;

@@ -673,28 +673,15 @@ impl StdParallelIterProvider {
 }
 
 impl ParallelIterProvider for StdParallelIterProvider {
-    fn par_map(
-        &self,
-        items: Vec<Value>,
-        f: ParMapFn,
-    ) -> Result<Vec<Value>, CompileError> {
+    fn par_map(&self, items: Vec<Value>, f: ParMapFn) -> Result<Vec<Value>, CompileError> {
         items.into_iter().map(f).collect()
     }
 
-    fn par_filter(
-        &self,
-        items: Vec<Value>,
-        f: ParFilterFn,
-    ) -> Result<Vec<Value>, CompileError> {
+    fn par_filter(&self, items: Vec<Value>, f: ParFilterFn) -> Result<Vec<Value>, CompileError> {
         items.into_iter().filter(|v| f(v).unwrap_or(false)).map(Ok).collect()
     }
 
-    fn par_reduce(
-        &self,
-        items: Vec<Value>,
-        init: Value,
-        f: ParReduceFn,
-    ) -> Result<Value, CompileError> {
+    fn par_reduce(&self, items: Vec<Value>, init: Value, f: ParReduceFn) -> Result<Value, CompileError> {
         let mut acc = init;
         for item in items {
             acc = f(acc, item)?;
@@ -702,11 +689,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
         Ok(acc)
     }
 
-    fn par_for_each(
-        &self,
-        items: Vec<Value>,
-        f: ParForEachFn,
-    ) -> Result<(), CompileError> {
+    fn par_for_each(&self, items: Vec<Value>, f: ParForEachFn) -> Result<(), CompileError> {
         for item in items {
             f(item)?;
         }

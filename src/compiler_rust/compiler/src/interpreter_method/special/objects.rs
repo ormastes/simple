@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 // Import IN_NEW_METHOD from interpreter_call module
 use crate::interpreter::IN_NEW_METHOD;
 
-#[allow(clippy::borrowed_box)]
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)]
 pub fn handle_trait_object_methods(
     trait_name: &str,
     inner: &Box<Value>,
@@ -74,6 +74,7 @@ pub fn handle_trait_object_methods(
 }
 
 /// Handle Constructor static method calls
+#[allow(clippy::too_many_arguments)]
 pub fn handle_constructor_methods(
     class_name: &str,
     method: &str,

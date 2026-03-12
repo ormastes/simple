@@ -41,6 +41,7 @@ macro_rules! with_configuring_method {
     }};
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_mock_methods(
     mock: &crate::value::MockValue,
     method: &str,

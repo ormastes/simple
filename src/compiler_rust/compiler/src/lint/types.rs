@@ -64,6 +64,8 @@ pub enum LintName {
     UnknownDecorator,
     /// Unknown attribute (#[name]) not in known whitelist
     UnknownAttribute,
+    /// Function has too many parameters (> 7)
+    TooManyArguments,
 }
 
 impl LintName {
@@ -87,6 +89,7 @@ impl LintName {
             LintName::BypassWithCodeFiles => "bypass_with_code_files",
             LintName::UnknownDecorator => "unknown_decorator",
             LintName::UnknownAttribute => "unknown_attribute",
+            LintName::TooManyArguments => "too_many_arguments",
         }
     }
 
@@ -111,6 +114,7 @@ impl LintName {
             "bypass_with_code_files" => Some(LintName::BypassWithCodeFiles),
             "unknown_decorator" => Some(LintName::UnknownDecorator),
             "unknown_attribute" => Some(LintName::UnknownAttribute),
+            "too_many_arguments" | "too_many_args" => Some(LintName::TooManyArguments),
             "unknown_annotation" => {
                 // Meta-lint: suppresses both unknown_decorator and unknown_attribute
                 // Handled specially in config.rs apply_attributes
@@ -141,6 +145,7 @@ impl LintName {
             LintName::BypassWithCodeFiles => LintLevel::Warn,
             LintName::UnknownDecorator => LintLevel::Warn,
             LintName::UnknownAttribute => LintLevel::Warn,
+            LintName::TooManyArguments => LintLevel::Warn,
         }
     }
 
@@ -709,6 +714,44 @@ Directory structure controls visibility:
 
 This lint cannot be suppressed. All exports must be in __init__.spl files.
 "#.to_string(),
+            LintName::TooManyArguments => r#"Lint: too_many_arguments
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when a function has more than 7 parameters (excluding `self`).
+Functions with more than 12 parameters are flagged as errors.
+
+=== Why it matters ===
+
+Functions with many parameters are hard to read and error-prone:
+
+    fn create_user(name: text, email: text, age: i64, role: text,
+                   dept: text, manager: text, office: text, phone: text):
+        ...
+
+Callers can easily mix up positional arguments of the same type.
+
+=== How to fix ===
+
+Group related parameters into a struct:
+
+    struct UserInfo:
+        name: text
+        email: text
+        age: i64
+        role: text
+        dept: text
+
+    fn create_user(info: UserInfo, manager: text, office: text):
+        ...
+
+=== How to suppress ===
+
+    #[allow(too_many_arguments)]
+    fn my_complex_function(a, b, c, d, e, f, g, h):
+        ...
+"#.to_string(),
         }
     }
 
@@ -732,6 +775,7 @@ This lint cannot be suppressed. All exports must be in __init__.spl files.
             LintName::BypassWithCodeFiles,
             LintName::UnknownDecorator,
             LintName::UnknownAttribute,
+            LintName::TooManyArguments,
         ]
     }
 }

@@ -92,8 +92,10 @@ pub struct HybridStats {
 impl HybridStats {
     /// Calculate hybrid execution statistics for a module.
     pub fn from_module(module: &MirModule, non_compilable: &HashSet<String>) -> Self {
-        let mut stats = HybridStats::default();
-        stats.total_functions = module.functions.len();
+        let mut stats = HybridStats {
+            total_functions: module.functions.len(),
+            ..HybridStats::default()
+        };
 
         for func in &module.functions {
             if non_compilable.contains(&func.name) {

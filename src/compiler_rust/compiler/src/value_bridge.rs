@@ -473,7 +473,7 @@ impl From<&Value> for BridgeValue {
 
 impl BridgeValue {
     /// Helper to convert vector-like BridgeValue to Value
-    unsafe fn to_vec_value<F>(&self, wrapper: F) -> Value
+    unsafe fn to_vec_value<F>(self, wrapper: F) -> Value
     where
         F: FnOnce(Vec<Value>) -> Value,
     {
@@ -561,19 +561,7 @@ impl BridgeValue {
                 Value::Constructor { class_name }
             }
             // For complex types that we can't fully reconstruct, return Nil
-            bridge_tags::LAMBDA
-            | bridge_tags::FUNCTION
-            | bridge_tags::ACTOR
-            | bridge_tags::FUTURE
-            | bridge_tags::GENERATOR
-            | bridge_tags::UNIQUE
-            | bridge_tags::SHARED
-            | bridge_tags::WEAK
-            | bridge_tags::HANDLE
-            | bridge_tags::BORROW
-            | bridge_tags::BORROW_MUT
-            | bridge_tags::ERROR
-            | _ => Value::Nil,
+            _ => Value::Nil,
         }
     }
 }

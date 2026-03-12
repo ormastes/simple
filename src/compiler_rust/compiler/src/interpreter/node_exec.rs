@@ -962,72 +962,68 @@ fn exec_assignment(
                 // Handle nested field access: self.ctx.dict[key] = value
                 // This is obj.field1.field2[index] = value
                 if let Expr::Identifier(root_name) = inner_obj_expr.as_ref() {
-                    if let Some(root_val) = env.get(root_name).cloned() {
-                        if let Value::Object {
-                            class: r_class,
-                            fields: r_fields,
-                        } = root_val
+                    if let Some(Value::Object {
+                        class: r_class,
+                        fields: r_fields,
+                    }) = env.get(root_name).cloned()
+                    {
+                        let mut root_fields = r_fields;
+                        let root_class = r_class;
+                        if let Some(Value::Object {
+                            class: i_class,
+                            fields: i_fields,
+                        }) = root_fields.get(inner_field_name).cloned()
                         {
-                            let mut root_fields = r_fields;
-                            let root_class = r_class;
-                            if let Some(inner_obj) = root_fields.get(inner_field_name).cloned() {
-                                if let Value::Object {
-                                    class: i_class,
-                                    fields: i_fields,
-                                } = inner_obj
-                                {
-                                    let mut inner_fields = i_fields;
-                                    let inner_class = i_class;
-                                    if let Some(container) = inner_fields.get(field_name).cloned() {
-                                        let new_container = match container {
-                                            Value::Array(mut arc) => {
-                                                let arr = Arc::make_mut(&mut arc);
-                                                let idx = index_val.as_int()? as usize;
-                                                if idx < arr.len() {
-                                                    arr[idx] = value;
-                                                } else {
-                                                    while arr.len() < idx {
-                                                        arr.push(Value::Nil);
-                                                    }
-                                                    arr.push(value);
-                                                }
-                                                Value::Array(arc)
+                            let mut inner_fields = i_fields;
+                            let inner_class = i_class;
+                            if let Some(container) = inner_fields.get(field_name).cloned() {
+                                let new_container = match container {
+                                    Value::Array(mut arc) => {
+                                        let arr = Arc::make_mut(&mut arc);
+                                        let idx = index_val.as_int()? as usize;
+                                        if idx < arr.len() {
+                                            arr[idx] = value;
+                                        } else {
+                                            while arr.len() < idx {
+                                                arr.push(Value::Nil);
                                             }
-                                            Value::Dict(mut dict) => {
-                                                let key = index_val.to_key_string();
-                                                dict.insert(key, value);
-                                                Value::Dict(dict)
-                                            }
-                                            _ => {
-                                                let ctx = ErrorContext::new()
-                                                    .with_code(codes::INVALID_ASSIGNMENT)
-                                                    .with_help("nested index assignment requires an array or dict");
-                                                return Err(CompileError::semantic_with_context(
-                                                    format!(
-                                                        "invalid assignment: cannot index assign to field `{}` of type {}",
-                                                        field_name,
-                                                        container.type_name()
-                                                    ),
-                                                    ctx,
-                                                ));
-                                            }
-                                        };
-                                        Arc::make_mut(&mut inner_fields).insert(field_name.clone(), new_container);
-                                        let new_inner_obj = Value::Object {
-                                            class: inner_class,
-                                            fields: inner_fields,
-                                        };
-                                        Arc::make_mut(&mut root_fields).insert(inner_field_name.clone(), new_inner_obj);
-                                        env.insert(
-                                            root_name.clone(),
-                                            Value::Object {
-                                                class: root_class,
-                                                fields: root_fields,
-                                            },
-                                        );
-                                        return Ok(Control::Next);
+                                            arr.push(value);
+                                        }
+                                        Value::Array(arc)
                                     }
-                                }
+                                    Value::Dict(mut dict) => {
+                                        let key = index_val.to_key_string();
+                                        dict.insert(key, value);
+                                        Value::Dict(dict)
+                                    }
+                                    _ => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::INVALID_ASSIGNMENT)
+                                            .with_help("nested index assignment requires an array or dict");
+                                        return Err(CompileError::semantic_with_context(
+                                            format!(
+                                                "invalid assignment: cannot index assign to field `{}` of type {}",
+                                                field_name,
+                                                container.type_name()
+                                            ),
+                                            ctx,
+                                        ));
+                                    }
+                                };
+                                Arc::make_mut(&mut inner_fields).insert(field_name.clone(), new_container);
+                                let new_inner_obj = Value::Object {
+                                    class: inner_class,
+                                    fields: inner_fields,
+                                };
+                                Arc::make_mut(&mut root_fields).insert(inner_field_name.clone(), new_inner_obj);
+                                env.insert(
+                                    root_name.clone(),
+                                    Value::Object {
+                                        class: root_class,
+                                        fields: root_fields,
+                                    },
+                                );
+                                return Ok(Control::Next);
                             }
                         }
                     }

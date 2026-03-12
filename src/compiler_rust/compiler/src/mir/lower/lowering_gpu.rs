@@ -589,11 +589,10 @@ impl<'a> MirLowerer<'a> {
             .as_ref()
             .and_then(|path| {
                 // Convert file path like "app/domain/user.spl" to "app.domain.user"
-                if let Some(stem) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
-                    Some(path.trim_end_matches(".spl").replace(['/', '\\'], "."))
-                } else {
-                    None
-                }
+                std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|_stem| path.trim_end_matches(".spl").replace(['/', '\\'], "."))
             })
             .unwrap_or_default()
     }

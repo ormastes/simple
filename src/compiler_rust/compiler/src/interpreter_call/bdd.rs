@@ -356,6 +356,7 @@ pub(crate) fn exec_block_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_arg(
     args: &[Argument],
     index: usize,

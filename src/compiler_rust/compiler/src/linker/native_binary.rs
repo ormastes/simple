@@ -560,9 +560,8 @@ impl NativeBinaryBuilder {
         let temp_dir =
             tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
         let (temp_path, _temp_guard) = if std::env::var("SIMPLE_KEEP_TEMP").is_ok() {
-            let path = temp_dir.path().to_path_buf();
+            let path = temp_dir.keep();
             eprintln!("SIMPLE_KEEP_TEMP=1: keeping temp objects in {}", path.display());
-            temp_dir.keep();
             (path, None)
         } else {
             (temp_dir.path().to_path_buf(), Some(temp_dir))
@@ -1066,10 +1065,12 @@ static inline int64_t _rt_now_nanos(void) {{
 
             // Allow multiple definitions so bootstrap stubs don't conflict
             // with real runtime symbols linked above.
-            if !extra_stubs.is_empty() && runtime_dir.is_some() && linker_flavor == LinkerFlavor::Gnu {
-                if !matches!(self.options.target.os, TargetOS::MacOS) {
-                    builder = builder.flag("--allow-multiple-definition".to_string());
-                }
+            if !extra_stubs.is_empty()
+                && runtime_dir.is_some()
+                && linker_flavor == LinkerFlavor::Gnu
+                && !matches!(self.options.target.os, TargetOS::MacOS)
+            {
+                builder = builder.flag("--allow-multiple-definition".to_string());
             }
 
             // Whole-archive flags differ by linker flavor

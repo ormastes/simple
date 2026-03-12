@@ -229,12 +229,10 @@ pub(super) fn exec_block_closure(
                 } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
-                        if let Some(obj_val) = local_env.get(obj_name).cloned() {
-                            if let Value::Object { class, fields } = obj_val {
-                                let mut fields = fields;
-                                Arc::make_mut(&mut fields).insert(field.clone(), val);
-                                local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                            }
+                        if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
+                            let mut fields = fields;
+                            Arc::make_mut(&mut fields).insert(field.clone(), val);
+                            local_env.insert(obj_name.clone(), Value::Object { class, fields });
                         }
                     }
                 } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
@@ -877,12 +875,10 @@ fn exec_block_closure_mut(
                 } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
-                        if let Some(obj_val) = local_env.get(obj_name).cloned() {
-                            if let Value::Object { class, fields } = obj_val {
-                                let mut fields = fields;
-                                Arc::make_mut(&mut fields).insert(field.clone(), val);
-                                local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                            }
+                        if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
+                            let mut fields = fields;
+                            Arc::make_mut(&mut fields).insert(field.clone(), val);
+                            local_env.insert(obj_name.clone(), Value::Object { class, fields });
                         }
                     }
                 } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {

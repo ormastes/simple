@@ -48,6 +48,7 @@ impl Lowerer {
     /// Captures variables based on capture_all flag:
     /// - true: captures all immutable variables from outer scope
     /// - false: only captures variables explicitly used in body
+    ///
     /// Parameters default to I64 type if not explicitly typed.
     /// Result type is taken from the lambda body.
     pub(super) fn lower_lambda(
@@ -1009,11 +1010,10 @@ fn collect_identifiers_recursive(expr: &Expr, identifiers: &mut HashSet<String>)
         Expr::New { expr, .. } => {
             collect_identifiers_recursive(expr, identifiers);
         }
-        Expr::Yield(value) => {
-            if let Some(v) = value {
-                collect_identifiers_recursive(v, identifiers);
-            }
+        Expr::Yield(Some(v)) => {
+            collect_identifiers_recursive(v, identifiers);
         }
+        Expr::Yield(None) => {}
         Expr::Spawn(inner) => {
             collect_identifiers_recursive(inner, identifiers);
         }

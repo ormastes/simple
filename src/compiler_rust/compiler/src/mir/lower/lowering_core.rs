@@ -106,6 +106,7 @@ pub struct ContractContext {
 
 /// Explicit lowerer state - makes state transitions verifiable
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum LowererState {
     /// Not currently lowering any function
     Idle,

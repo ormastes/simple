@@ -204,41 +204,37 @@ pub(crate) fn handle_method_call_with_self_update(
                     mut fields,
                 }) = env.get(parent_name).cloned()
                 {
-                    // Get the field value
-                    if let Some(field_val) = fields.get(field).cloned() {
-                        // For Object field values, use find_and_exec_method_with_self
-                        // to properly execute the method and get the updated self
-                        if let Value::Object {
-                            class: field_class,
-                            fields: field_fields,
-                        } = &field_val
-                        {
-                            if let Some((result, updated_field)) = find_and_exec_method_with_self(
-                                method,
-                                args,
-                                field_class,
-                                field_fields,
-                                env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )? {
-                                // Update the field in parent with the mutated nested object
-                                Arc::make_mut(&mut fields).insert(field.clone(), updated_field);
+                    // Get the field value - for Object field values, use find_and_exec_method_with_self
+                    // to properly execute the method and get the updated self.
+                    // For non-Object field values, fall through to regular evaluation.
+                    if let Some(Value::Object {
+                        class: field_class,
+                        fields: field_fields,
+                    }) = fields.get(field).cloned().as_ref()
+                    {
+                        if let Some((result, updated_field)) = find_and_exec_method_with_self(
+                            method,
+                            args,
+                            field_class,
+                            field_fields,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )? {
+                            // Update the field in parent with the mutated nested object
+                            Arc::make_mut(&mut fields).insert(field.clone(), updated_field);
 
-                                // Create updated parent
-                                let updated_parent = Value::Object {
-                                    class: parent_class.clone(),
-                                    fields,
-                                };
+                            // Create updated parent
+                            let updated_parent = Value::Object {
+                                class: parent_class.clone(),
+                                fields,
+                            };
 
-                                // Return result and update instruction for parent
-                                return Ok((result, Some((parent_name.clone(), updated_parent))));
-                            }
+                            // Return result and update instruction for parent
+                            return Ok((result, Some((parent_name.clone(), updated_parent))));
                         }
-
-                        // For non-Object field values, fall through to regular evaluation
                     }
                 }
             }

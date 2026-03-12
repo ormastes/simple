@@ -13,6 +13,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_injected_args(
     params: &[Parameter],
     args: &[Argument],

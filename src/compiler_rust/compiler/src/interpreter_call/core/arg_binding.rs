@@ -17,6 +17,7 @@ const METHOD_SELF: &str = "self";
 /// Static empty map to avoid allocation on every `bind_args` call.
 static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::LazyLock::new(HashMap::new);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
@@ -40,6 +41,7 @@ pub(crate) fn bind_args(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_args_with_injected(
     params: &[Parameter],
     args: &[Argument],
@@ -275,6 +277,7 @@ pub(crate) fn bind_args_with_injected(
     Ok(bound)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],

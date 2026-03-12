@@ -16,12 +16,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // ============================================================================
 
 type HashMapHandle = usize;
+type HashMapRegistry = Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>>;
 
 // Global registry for HashMaps
-static HASHMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>>> = OnceLock::new();
+static HASHMAP_REGISTRY: OnceLock<HashMapRegistry> = OnceLock::new();
 static NEXT_HASHMAP_ID: AtomicUsize = AtomicUsize::new(1);
 
-fn get_hashmap_registry() -> Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>> {
+fn get_hashmap_registry() -> HashMapRegistry {
     HASHMAP_REGISTRY
         .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
         .clone()
@@ -338,12 +339,13 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 type HashSetHandle = usize;
+type HashSetRegistry = Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>>;
 
 // Global registry for HashSets
-static HASHSET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>>> = OnceLock::new();
+static HASHSET_REGISTRY: OnceLock<HashSetRegistry> = OnceLock::new();
 static NEXT_HASHSET_ID: AtomicUsize = AtomicUsize::new(100000);
 
-fn get_hashset_registry() -> Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>> {
+fn get_hashset_registry() -> HashSetRegistry {
     HASHSET_REGISTRY
         .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
         .clone()
@@ -842,13 +844,13 @@ pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 type BTreeMapHandle = usize;
+type BTreeMapRegistry = Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>;
 
 // Global registry for BTreeMaps
-static BTREEMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> =
-    OnceLock::new();
+static BTREEMAP_REGISTRY: OnceLock<BTreeMapRegistry> = OnceLock::new();
 static NEXT_BTREEMAP_ID: AtomicUsize = AtomicUsize::new(200000);
 
-fn get_btreemap_registry() -> Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>> {
+fn get_btreemap_registry() -> BTreeMapRegistry {
     BTREEMAP_REGISTRY
         .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
         .clone()
@@ -1234,12 +1236,13 @@ pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 type BTreeSetHandle = usize;
+type BTreeSetRegistry = Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>>;
 
 // Global registry for BTreeSets
-static BTREESET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>>> = OnceLock::new();
+static BTREESET_REGISTRY: OnceLock<BTreeSetRegistry> = OnceLock::new();
 static NEXT_BTREESET_ID: AtomicUsize = AtomicUsize::new(300000);
 
-fn get_btreeset_registry() -> Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>> {
+fn get_btreeset_registry() -> BTreeSetRegistry {
     BTREESET_REGISTRY
         .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
         .clone()

@@ -1946,6 +1946,84 @@ impl LintChecker {
         }
     }
 
+    /// Check for functions with too many parameters
+    fn check_too_many_arguments(&mut self, items: &[Node]) {
+        const WARN_THRESHOLD: usize = 7;
+        const DENY_THRESHOLD: usize = 12;
+
+        fn check_func_args(checker: &mut LintChecker, func: &FunctionDef) {
+            // Count params, excluding 'self'
+            let effective_count = func.params.iter().filter(|p| p.name != "self").count();
+
+            if effective_count <= WARN_THRESHOLD {
+                return;
+            }
+
+            // Skip FFI wrapper naming conventions
+            if func.name.starts_with("_ffi_") || func.name.starts_with("_raw_") || func.name.starts_with("rt_") {
+                return;
+            }
+
+            // Skip constructors (they often need all struct fields)
+            if func.name == "new"
+                || func.name == "create"
+                || func.name == "build"
+                || func.name.starts_with("new_")
+                || func.name.starts_with("create_")
+                || func.name.starts_with("build_")
+            {
+                return;
+            }
+
+            // Check scoped config for allow
+            let mut scoped = checker.config.child();
+            scoped.apply_attributes(&func.attributes);
+
+            if scoped.get_level(LintName::TooManyArguments) == LintLevel::Allow {
+                return;
+            }
+
+            if effective_count > DENY_THRESHOLD {
+                checker.emit(
+                    LintName::TooManyArguments,
+                    func.span,
+                    format!(
+                        "function `{}` has {} parameters (limit: {}). Group related parameters into a struct.",
+                        func.name, effective_count, DENY_THRESHOLD
+                    ),
+                    Some("Consider using an options/config struct".to_string()),
+                );
+            } else {
+                checker.emit(
+                    LintName::TooManyArguments,
+                    func.span,
+                    format!(
+                        "function `{}` has {} parameters (recommended max: {}). Consider grouping related parameters.",
+                        func.name, effective_count, WARN_THRESHOLD
+                    ),
+                    Some("Group related parameters into a struct".to_string()),
+                );
+            }
+        }
+
+        for item in items {
+            match item {
+                Node::Function(func) => check_func_args(self, func),
+                Node::Class(c) => {
+                    for method in &c.methods {
+                        check_func_args(self, method);
+                    }
+                }
+                Node::Struct(s) => {
+                    for method in &s.methods {
+                        check_func_args(self, method);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Find the source root directory by walking up from the source file.
     /// Returns None if unable to determine.
     fn find_source_root(&self, source_file: &Path) -> Option<std::path::PathBuf> {

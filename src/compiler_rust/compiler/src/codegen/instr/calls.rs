@@ -329,6 +329,8 @@ pub fn compile_call<M: Module>(
         "rt_file_read_text" => "rt_file_read_text_rv",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
+        "int" | "i64" => "rt_string_to_int",
+        "str" | "to_string" => "rt_to_string",
         other => other,
     };
     // Use raw name for user-function lookups (func_ids, use_map, import_map)

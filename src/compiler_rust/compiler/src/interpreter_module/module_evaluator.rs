@@ -22,6 +22,15 @@ use evaluation_helpers::{
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
 
+/// Collected module exports: (env, exports, functions, classes, enums).
+type ModuleExports = (
+    Env,
+    HashMap<String, Value>,
+    HashMap<String, simple_parser::ast::FunctionDef>,
+    HashMap<String, ClassDef>,
+    Enums,
+);
+
 /// Evaluate a module's statements and collect its environment and exports
 pub fn evaluate_module_exports(
     items: &[Node],
@@ -29,16 +38,7 @@ pub fn evaluate_module_exports(
     global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
-) -> Result<
-    (
-        Env,
-        HashMap<String, Value>,
-        HashMap<String, simple_parser::ast::FunctionDef>,
-        HashMap<String, ClassDef>,
-        Enums,
-    ),
-    CompileError,
-> {
+) -> Result<ModuleExports, CompileError> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
     let mut local_functions: HashMap<String, simple_parser::ast::FunctionDef> = HashMap::new();

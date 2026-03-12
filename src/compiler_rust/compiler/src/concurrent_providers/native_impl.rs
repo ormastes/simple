@@ -10,6 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use super::{
     Handle, MapProvider, ConcurrentMapProvider, ChannelProvider, ThreadProvider, LockProvider, ParallelIterProvider,
+    ParMapFn, ParFilterFn, ParReduceFn, ParForEachFn,
 };
 
 use dashmap::DashMap;
@@ -993,11 +994,7 @@ impl NativeParallelIterProvider {
 }
 
 impl ParallelIterProvider for NativeParallelIterProvider {
-    fn par_map(
-        &self,
-        items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
-    ) -> Result<Vec<Value>, CompileError> {
+    fn par_map(&self, items: Vec<Value>, f: ParMapFn) -> Result<Vec<Value>, CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             // Sequential fallback for small collections
@@ -1009,11 +1006,7 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         results.into_iter().collect()
     }
 
-    fn par_filter(
-        &self,
-        items: Vec<Value>,
-        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
-    ) -> Result<Vec<Value>, CompileError> {
+    fn par_filter(&self, items: Vec<Value>, f: ParFilterFn) -> Result<Vec<Value>, CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             return items.into_iter().filter(|v| f(v).unwrap_or(false)).map(Ok).collect();
@@ -1030,12 +1023,7 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         Ok(results.into_iter().filter(|(_, keep)| *keep).map(|(v, _)| v).collect())
     }
 
-    fn par_reduce(
-        &self,
-        items: Vec<Value>,
-        init: Value,
-        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
-    ) -> Result<Value, CompileError> {
+    fn par_reduce(&self, items: Vec<Value>, init: Value, f: ParReduceFn) -> Result<Value, CompileError> {
         // Parallel reduce is tricky because Value doesn't implement Send
         // in all variants. Use sequential for safety, rayon for large collections
         // when we can confirm sendability.
@@ -1046,11 +1034,7 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         Ok(acc)
     }
 
-    fn par_for_each(
-        &self,
-        items: Vec<Value>,
-        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
-    ) -> Result<(), CompileError> {
+    fn par_for_each(&self, items: Vec<Value>, f: ParForEachFn) -> Result<(), CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             for item in items {

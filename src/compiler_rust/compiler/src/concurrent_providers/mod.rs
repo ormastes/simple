@@ -179,26 +179,9 @@ pub type ParForEachFn = Box<dyn Fn(Value) -> Result<(), CompileError> + Send + S
 /// In PureStd mode, all operations fall back to sequential iteration.
 /// In Native mode, uses rayon for work-stealing parallel execution.
 pub trait ParallelIterProvider: Send + Sync + Debug {
-    fn par_map(
-        &self,
-        items: Vec<Value>,
-        f: ParMapFn,
-    ) -> Result<Vec<Value>, CompileError>;
-    fn par_filter(
-        &self,
-        items: Vec<Value>,
-        f: ParFilterFn,
-    ) -> Result<Vec<Value>, CompileError>;
-    fn par_reduce(
-        &self,
-        items: Vec<Value>,
-        init: Value,
-        f: ParReduceFn,
-    ) -> Result<Value, CompileError>;
-    fn par_for_each(
-        &self,
-        items: Vec<Value>,
-        f: ParForEachFn,
-    ) -> Result<(), CompileError>;
+    fn par_map(&self, items: Vec<Value>, f: ParMapFn) -> Result<Vec<Value>, CompileError>;
+    fn par_filter(&self, items: Vec<Value>, f: ParFilterFn) -> Result<Vec<Value>, CompileError>;
+    fn par_reduce(&self, items: Vec<Value>, init: Value, f: ParReduceFn) -> Result<Value, CompileError>;
+    fn par_for_each(&self, items: Vec<Value>, f: ParForEachFn) -> Result<(), CompileError>;
     fn par_pool_init(&self, num_threads: usize) -> Result<(), CompileError>;
 }
