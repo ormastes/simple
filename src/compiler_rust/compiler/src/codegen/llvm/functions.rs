@@ -749,16 +749,129 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
 
-            // Enum/Union instructions (default values for unimplemented)
-            MirInst::EnumDiscriminant { dest, .. }
-            | MirInst::EnumPayload { dest, .. }
-            | MirInst::EnumUnit { dest, .. }
-            | MirInst::EnumWith { dest, .. }
-            | MirInst::UnionDiscriminant { dest, .. }
-            | MirInst::UnionPayload { dest, .. }
-            | MirInst::UnionWrap { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
-                vreg_map.insert(*dest, default_val.into());
+            // Enum instructions
+            MirInst::EnumDiscriminant { dest, value } => {
+                let i64_t = self.context.i64_type();
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                let rt_fn = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i64_t.into()], false);
+                    module.add_function("rt_enum_discriminant", fn_type, None)
+                });
+                let result = builder.build_call(rt_fn, &[val.into()], "disc")
+                    .map_err(|e| CompileError::Semantic(format!("enum disc call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            MirInst::EnumPayload { dest, value } => {
+                let i64_t = self.context.i64_type();
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i64_t.into()], false);
+                    module.add_function("rt_enum_payload", fn_type, None)
+                });
+                let result = builder.build_call(rt_fn, &[val.into()], "payload")
+                    .map_err(|e| CompileError::Semantic(format!("enum payload call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            MirInst::EnumUnit { dest, variant_name, .. } => {
+                // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    variant_name.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
+                let enum_id_val = i32_t.const_int(0, false);
+                let disc_val = i32_t.const_int(disc as u64, false);
+                // NIL = 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
+                let nil_val = i64_t.const_int(3, false);
+                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), nil_val.into()], "enum_unit")
+                    .map_err(|e| CompileError::Semantic(format!("enum unit call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            MirInst::EnumWith { dest, variant_name, payload, .. } => {
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    variant_name.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
+                let enum_id_val = i32_t.const_int(0, false);
+                let disc_val = i32_t.const_int(disc as u64, false);
+                let payload_val = vreg_map.get(payload).copied()
+                    .unwrap_or_else(|| i64_t.const_int(3, false).into());
+                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), payload_val.into()], "enum_with")
+                    .map_err(|e| CompileError::Semantic(format!("enum with call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            // Union instructions — use same enum runtime functions
+            MirInst::UnionDiscriminant { dest, value } => {
+                let i64_t = self.context.i64_type();
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                let rt_fn = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i64_t.into()], false);
+                    module.add_function("rt_enum_discriminant", fn_type, None)
+                });
+                let result = builder.build_call(rt_fn, &[val.into()], "union_disc")
+                    .map_err(|e| CompileError::Semantic(format!("union disc call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            MirInst::UnionPayload { dest, value, .. } => {
+                let i64_t = self.context.i64_type();
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i64_t.into()], false);
+                    module.add_function("rt_enum_payload", fn_type, None)
+                });
+                let result = builder.build_call(rt_fn, &[val.into()], "union_payload")
+                    .map_err(|e| CompileError::Semantic(format!("union payload call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
+            }
+            MirInst::UnionWrap { dest, value, type_index } => {
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
+                let enum_id_val = i32_t.const_int(*type_index as u64, false);
+                let disc_val = i32_t.const_int(0, false);
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(3, false).into());
+                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), val.into()], "union_wrap")
+                    .map_err(|e| CompileError::Semantic(format!("union wrap call: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
 
             // Async/Actor instructions (interpreter-only — insert default dest values)
@@ -778,30 +891,105 @@ impl LlvmBackend {
             | MirInst::Yield { .. } => {
             }
 
-            // Error handling instructions
+            // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
-                // Option::Some(v) = v (in tagged runtime, non-nil is Some)
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    "Some".hash(&mut h);
+                    (h.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
                 let val = self.get_vreg(value, vreg_map)?;
-                vreg_map.insert(*dest, val);
+                let result = builder.build_call(rt_fn, &[i32_t.const_int(1, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "opt_some")
+                    .map_err(|e| CompileError::Semantic(format!("option some: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
             MirInst::OptionNone { dest } => {
-                // Option::None = 0 (nil)
-                let default_val = self.context.i64_type().const_int(0, false);
-                vreg_map.insert(*dest, default_val.into());
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    "None".hash(&mut h);
+                    (h.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
+                let nil_val = i64_t.const_int(3, false); // NIL = 3
+                let result = builder.build_call(rt_fn, &[i32_t.const_int(1, false).into(), i32_t.const_int(disc as u64, false).into(), nil_val.into()], "opt_none")
+                    .map_err(|e| CompileError::Semantic(format!("option none: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
             MirInst::ResultOk { dest, value } => {
-                // Result::Ok(v) = v (in tagged runtime)
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    "Ok".hash(&mut h);
+                    (h.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
                 let val = self.get_vreg(value, vreg_map)?;
-                vreg_map.insert(*dest, val);
+                let result = builder.build_call(rt_fn, &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "res_ok")
+                    .map_err(|e| CompileError::Semantic(format!("result ok: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
             MirInst::ResultErr { dest, value } => {
-                // Result::Err(v) = v (in tagged runtime, error handling via runtime)
+                let i64_t = self.context.i64_type();
+                let i32_t = self.context.i32_type();
+                let disc = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    "Err".hash(&mut h);
+                    (h.finish() & 0xFFFFFFFF) as u32
+                };
+                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+                    module.add_function("rt_enum_new", fn_type, None)
+                });
                 let val = self.get_vreg(value, vreg_map)?;
-                vreg_map.insert(*dest, val);
+                let result = builder.build_call(rt_fn, &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "res_err")
+                    .map_err(|e| CompileError::Semantic(format!("result err: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
-            MirInst::TryUnwrap { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
-                vreg_map.insert(*dest, default_val.into());
+            MirInst::TryUnwrap { dest, value, error_block: _, error_dest: _ } => {
+                let i64_t = self.context.i64_type();
+                // Extract payload from Result/Option enum
+                let val = vreg_map.get(value).copied()
+                    .unwrap_or_else(|| i64_t.const_int(3, false).into());
+                let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                    let fn_type = i64_t.fn_type(&[i64_t.into()], false);
+                    module.add_function("rt_enum_payload", fn_type, None)
+                });
+                let result = builder.build_call(rt_fn, &[val.into()], "try_unwrap")
+                    .map_err(|e| CompileError::Semantic(format!("try unwrap: {e}")))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_t.const_int(0, false).into());
+                vreg_map.insert(*dest, result);
             }
 
             // Contract instructions (not yet implemented)
