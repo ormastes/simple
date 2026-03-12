@@ -19,7 +19,7 @@ val stdout = ""
 val stderr = ""
 
 # Direct sub-module imports (bypass app.io.mod hub for faster startup)
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, env_set}
 use app.io.cli_ops.{cli_file_exists, cli_get_args,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -38,74 +38,7 @@ use app.cli.arch_check.{run_arch_check}
 use app.cli.check_dbs.{run_check_dbs}
 use app.cli.fix_dbs.{run_fix_dbs}
 use app.stats.doc_coverage_dynamic.{run_doc_coverage}
-use std.database.feature_utils
-use std.database.feature.{Feature}
-use std.database.checker.{DbIssue}
-use std.database.test.{TestDatabase, load_test_database as load_test_database_impl}
-use std.common.target_spec as target_spec
 use compiler.backend.backend_port.{BackendPort}
-
-# Provide thin wrappers so legacy callers resolve to the std implementations
-fn sort_features_by_id(features: [Feature]) -> [Feature]:
-    feature_utils.sort_features_by_id(features)
-
-fn find_duplicate_ids(features: [Feature]) -> [Feature]:
-    feature_utils.find_duplicate_ids(features)
-
-fn mark_orphaned_features(features: [Feature], ids: [text]) -> [Feature]:
-    feature_utils.mark_orphaned_features(features, ids)
-
-fn load_test_database(path: text) -> TestDatabase?:
-    load_test_database_impl(path)
-
-fn all_target_archs() -> [text]:
-    target_spec.all_target_archs()
-
-fn check_exhaustiveness(arms_archs: [[text]], arms_is_wildcard: [bool], all_archs: [text]) -> [text]:
-    target_spec.check_exhaustiveness(arms_archs, arms_is_wildcard, all_archs)
-
-fn match_target_spec(
-    archs: [text], has_os: bool, os: text,
-    has_abi: bool, abi: text, has_backend: bool, backend: text,
-    ver_ops: [text], ver_vals: [i64],
-    target_arch: text, target_os: text,
-    target_abi: text, target_backend: text,
-    target_backend_version: i64
-) -> target_spec.MatchResult:
-    target_spec.match_target_spec(
-        archs, has_os, os,
-        has_abi, abi, has_backend, backend,
-        ver_ops, ver_vals,
-        target_arch, target_os,
-        target_abi, target_backend,
-        target_backend_version)
-
-fn s_len(s: text) -> i64:
-    s.len()
-
-fn id_str_len(s: text) -> i64:
-    s.len()
-
-fn parse_int_literal(s: text) -> i64:
-    s.to_int()
-
-fn parts_len(parts) -> i64:
-    parts.len()
-
-fn exp_parts_len(parts) -> i64:
-    parts.len()
-
-fn ch_ord(ch) -> i64:
-    ch.ord()
-
-fn text_parse_int(t: text) -> i64:
-    t.to_int()
-
-fn default() -> i64:
-    0
-
-fn from_text(t: text) -> text:
-    t
 
 use app.stats.dynamic.{run_stats}
 use app.leak_check.main.{run_leak_check}
@@ -115,10 +48,7 @@ use app.leak_check.main.{run_leak_check}
 
 use app.cli.cli_helpers (print_cli_help, handle_init, read_sdn_run_config, sdn_line_indent, strip_sdn_quotes, check_self_contained)
 
-extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_env_get(key: text) -> text
-use compiler.driver.driver_api.{aot_native_file_with_backend}
-use compiler.driver.driver_types.{CompileResult, CompileResult__get_errors}
 
 # Extract CLI args, skipping program name and script path
 fn get_cli_args() -> [text]:
@@ -126,10 +56,11 @@ fn get_cli_args() -> [text]:
     var start_idx = 1
     if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
         start_idx = 2
-    val args = if start_idx < all_args.len():
-        all_args.slice(start_idx, all_args.len())
-    else:
-        []
+    var args: [text] = []
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
     args
 
 # =========================================================================
@@ -352,82 +283,14 @@ fn apply_fault_detection(flags: GlobalFlags):
 
 fn apply_jit_env_vars(flags: GlobalFlags):
     if flags.no_jit:
-        rt_env_set("SIMPLE_NO_JIT", "1")
+        env_set("SIMPLE_NO_JIT", "1")
     if flags.jit_threshold != 10:
         val t = "{flags.jit_threshold}"
-        rt_env_set("SIMPLE_JIT_THRESHOLD", t)
+        env_set("SIMPLE_JIT_THRESHOLD", t)
     if flags.backend != "auto":
-        rt_env_set("SIMPLE_JIT_BACKEND", flags.backend)
+        env_set("SIMPLE_JIT_BACKEND", flags.backend)
 
 fn run_native_build_bootstrap(args: [text]) -> i64:
-    var backend = ""
-    var backend_explicit = false
-    # Check env var first (workaround for LLVM backend while-loop arg parsing)
-    val env_backend = rt_env_get("SIMPLE_BACKEND_OVERRIDE")
-    if env_backend != "":
-        backend = env_backend
-        backend_explicit = true
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg.starts_with("--backend="):
-            backend = arg.substring(10)
-            backend_explicit = true
-        elif arg.starts_with("--backend") and i + 1 < args.len():
-            i = i + 1
-            backend = args[i]
-            backend_explicit = true
-        i = i + 1
-
-    if backend_explicit and (backend.starts_with("llvm-lib") or backend.starts_with("llvmlib")):
-        var entry_point = ""
-        var output = "a.out"
-        # Check env var overrides first (workaround for LLVM backend string ops)
-        val env_entry = rt_env_get("SIMPLE_ENTRY_OVERRIDE")
-        if env_entry != "":
-            entry_point = env_entry
-        val env_output = rt_env_get("SIMPLE_OUTPUT_OVERRIDE")
-        if env_output != "":
-            output = env_output
-        if entry_point == "":
-            var j = 0
-            if args.len() > 0 and args[0].starts_with("native-build"):
-                j = 1
-            while j < args.len():
-                val a = args[j]
-                if a.starts_with("--entry="):
-                    entry_point = a.substring(8)
-                elif a.starts_with("--entry") and j + 1 < args.len():
-                    j = j + 1
-                    entry_point = args[j]
-                elif a.starts_with("-o") and a.len() == 2 and j + 1 < args.len():
-                    j = j + 1
-                    output = args[j]
-                elif a.starts_with("-o"):
-                    output = a.substring(2)
-                elif a == "native-build":
-                    pass
-                elif not a.starts_with("-") and entry_point == "":
-                    entry_point = a
-                j = j + 1
-
-        if entry_point == "":
-            print "Error: No entry point specified for llvm-lib backend"
-            return 1
-
-        print "LLVM-LIB bootstrap: entry={entry_point} output={output}"
-        val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
-        match result:
-            case CompileResult.Success(_):
-                print "LLVM-LIB bootstrap: SUCCESS"
-                return 0
-            case _:
-                val errors = CompileResult__get_errors(result)
-                print "LLVM-LIB bootstrap: FAILED with {errors.len()} errors"
-                for err in errors:
-                    print "error: {err}"
-                return 1
-
     return cli_run_file("src/app/compile/native.spl", args, false, false)
 
 fn filter_internal_flags(args: [text]) -> [text]:
@@ -441,7 +304,7 @@ fn filter_internal_flags(args: [text]) -> [text]:
         elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret" and arg != "--interpret-optimized" and arg != "--no-jit":
             if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config") and not arg.starts_with("--jit-threshold="):
                 # Keep --backend flags (used by both JIT and compile commands)
-                result = result.push(arg)
+                result.push(arg)
     result
 
 

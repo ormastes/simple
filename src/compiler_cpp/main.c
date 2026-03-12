@@ -160,17 +160,13 @@ static void fault_set_max_recursion_depth(long long v) { (void)v; }
 static void fault_set_timeout(long long v) { (void)v; }
 static void fault_set_execution_limit(long long v) { (void)v; }
 static int jit_available(void) { return 0; }
-static long long cli_native_build(SimpleStringArray args) { (void)args; return 0; }
+static long long cli_test_daemon() { return 0; }
 static long long handle_build(SimpleStringArray a) { (void)a; return 0; }
 static long long run_check(SimpleStringArray a) { (void)a; return 0; }
 static long long run_arch_check(SimpleStringArray a) { (void)a; return 0; }
 static long long run_check_dbs(SimpleStringArray a) { (void)a; return 0; }
 static long long run_fix_dbs(SimpleStringArray a) { (void)a; return 0; }
 static long long run_doc_coverage(SimpleStringArray a) { (void)a; return 0; }
-static long long Feature() { return 0; }
-static long long DbIssue() { return 0; }
-static long long TestDatabase() { return 0; }
-static long long load_test_database_impl() { return 0; }
 static long long BackendPort() { return 0; }
 static long long run_stats(SimpleStringArray a) { (void)a; return 0; }
 static long long run_leak_check() { return 0; }
@@ -183,21 +179,6 @@ static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
 static void error(const char* cat, const char* msg) { simple_error(cat, msg); }
 static int jit_native_available(void) { return 0; }
-SimpleStructArray sort_features_by_id(SimpleStructArray features);
-SimpleStructArray find_duplicate_ids(SimpleStructArray features);
-SimpleStructArray mark_orphaned_features(SimpleStructArray features, SimpleStringArray ids);
-const char* load_test_database(const char* path);
-SimpleStringArray all_target_archs(void);
-SimpleStringArray check_exhaustiveness(SimpleStringArrayArray arms_archs, SimpleIntArray arms_is_wildcard, SimpleStringArray all_archs);
-long long s_len(const char* s);
-long long id_str_len(const char* s);
-long long parse_int_literal(const char* s);
-long long parts_len(long long parts);
-long long exp_parts_len(long long parts);
-long long ch_ord(long long ch);
-long long text_parse_int(const char* t);
-long long default_(void);
-const char* from_text(const char* t);
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);
 void print_version(void);
@@ -209,78 +190,16 @@ long long run_lex_command(const char* path);
 GlobalFlags parse_global_flags(SimpleStringArray args);
 void apply_fault_detection(GlobalFlags flags);
 void apply_jit_env_vars(GlobalFlags flags);
+long long run_native_build_bootstrap(SimpleStringArray args);
 SimpleStringArray filter_internal_flags(SimpleStringArray args);
-
-SimpleStructArray sort_features_by_id(SimpleStructArray features) {
-    return features;  /* stub: passthrough */
-}
-
-SimpleStructArray find_duplicate_ids(SimpleStructArray features) {
-    SimpleStructArray empty = {NULL, 0, 0};
-    return empty;  /* stub */
-}
-
-SimpleStructArray mark_orphaned_features(SimpleStructArray features, SimpleStringArray ids) {
-    return features;  /* stub: passthrough */
-}
-
-const char* load_test_database(const char* path) {
-    return NULL;  /* stub */
-}
-
-SimpleStringArray all_target_archs(void) {
-    SimpleStringArray empty = {NULL, 0, 0};
-    return empty;  /* stub */
-}
-
-SimpleStringArray check_exhaustiveness(SimpleStringArrayArray arms_archs, SimpleIntArray arms_is_wildcard, SimpleStringArray all_archs) {
-    SimpleStringArray empty = {NULL, 0, 0};
-    return empty;  /* stub */
-}
-
-long long s_len(const char* s) {
-    return simple_strlen(s);
-}
-
-long long id_str_len(const char* s) {
-    return simple_strlen(s);
-}
-
-long long parse_int_literal(const char* s) {
-    return atoll(s);
-}
-
-long long parts_len(long long parts) {
-    return 0;  /* stub: would need array length */
-}
-
-long long exp_parts_len(long long parts) {
-    return 0;  /* stub: would need array length */
-}
-
-long long ch_ord(long long ch) {
-    return ch;  /* ch is already the ordinal value */
-}
-
-long long text_parse_int(const char* t) {
-    return atoll(t);
-}
-
-long long default_(void) {
-    return 0;
-}
-
-const char* from_text(const char* t) {
-    return t;
-}
 
 SimpleStringArray get_cli_args(void) {
     SimpleStringArray all_args = cli_get_args();
-    SimpleStringArray args = simple_new_string_array();
     long long start_idx = 1;
     if (((all_args.len > 1) && simple_ends_with(all_args.items[1], "main.spl"))) {
     start_idx = 2;
     }
+    SimpleStringArray args = simple_new_string_array();
     long long i = start_idx;
     while ((i < all_args.len)) {
     simple_string_push(&args, all_args.items[i]);
@@ -294,7 +213,7 @@ const char* get_version(void) {
     if (((strcmp(version, "") != 0) && (version != NULL))) {
     return version;
     }
-    return "0.5.0";
+    return "0.8.0";
 }
 
 void print_version(void) {
@@ -495,6 +414,10 @@ void apply_jit_env_vars(GlobalFlags flags) {
     }
 }
 
+long long run_native_build_bootstrap(SimpleStringArray args) {
+    return cli_run_file("src/app/compile/native.spl", args, 0, 0);
+}
+
 SimpleStringArray filter_internal_flags(SimpleStringArray args) {
     SimpleStringArray result = simple_new_string_array();
     int skip_next = 0;
@@ -522,8 +445,8 @@ int main(void) {
     GlobalFlags flags = parse_global_flags(args);
     apply_fault_detection(flags);
     apply_jit_env_vars(flags);
-    if (((args.len > 0) && (strcmp(args.items[0], "native-build") == 0))) {
-    return cli_native_build(args);
+    if (((args.len > 0) && simple_starts_with(args.items[0], "native-build"))) {
+    return run_native_build_bootstrap(args);
     }
     SimpleStringArray filtered_args = filter_internal_flags(args);
     if ((filtered_args.len == 0)) {
@@ -562,6 +485,8 @@ int main(void) {
     } else if (strcmp(_match_val, "test") == 0) {
     SimpleStringArray test_args = simple_string_array_slice(filtered_args, 1);
     return cli_run_tests(test_args, flags.gc_log, flags.gc_off);
+    } else if (strcmp(_match_val, "test-daemon") == 0) {
+    return cli_test_daemon(simple_string_array_slice(filtered_args, 1));
     } else if (strcmp(_match_val, "lex") == 0) {
     if ((filtered_args.len < 2)) {
     print_error("lex requires a source file");
