@@ -382,37 +382,48 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
     if backend_explicit and (backend.starts_with("llvm-lib") or backend.starts_with("llvmlib")):
         var entry_point = ""
         var output = "a.out"
-        var j = 0
-        if args.len() > 0 and args[0].starts_with("native-build"):
-            j = 1
-        while j < args.len():
-            val a = args[j]
-            if a.starts_with("--entry="):
-                entry_point = a.substring(8)
-            elif a.starts_with("--entry") and j + 1 < args.len():
+        # Check env var overrides first (workaround for LLVM backend string ops)
+        val env_entry = rt_env_get("SIMPLE_ENTRY_OVERRIDE")
+        if env_entry != "":
+            entry_point = env_entry
+        val env_output = rt_env_get("SIMPLE_OUTPUT_OVERRIDE")
+        if env_output != "":
+            output = env_output
+        if entry_point == "":
+            var j = 0
+            if args.len() > 0 and args[0].starts_with("native-build"):
+                j = 1
+            while j < args.len():
+                val a = args[j]
+                if a.starts_with("--entry="):
+                    entry_point = a.substring(8)
+                elif a.starts_with("--entry") and j + 1 < args.len():
+                    j = j + 1
+                    entry_point = args[j]
+                elif a.starts_with("-o") and a.len() == 2 and j + 1 < args.len():
+                    j = j + 1
+                    output = args[j]
+                elif a.starts_with("-o"):
+                    output = a.substring(2)
+                elif a == "native-build":
+                    pass
+                elif not a.starts_with("-") and entry_point == "":
+                    entry_point = a
                 j = j + 1
-                entry_point = args[j]
-            elif a.starts_with("-o") and a.len() == 2 and j + 1 < args.len():
-                j = j + 1
-                output = args[j]
-            elif a.starts_with("-o"):
-                output = a.substring(2)
-            elif a == "native-build":
-                pass
-            elif not a.starts_with("-") and entry_point == "":
-                entry_point = a
-            j = j + 1
 
         if entry_point == "":
             print "Error: No entry point specified for llvm-lib backend"
             return 1
 
+        print "LLVM-LIB bootstrap: entry={entry_point} output={output}"
         val result = aot_native_file_with_backend(entry_point, output, "llvm-lib")
         match result:
             case CompileResult.Success(_):
+                print "LLVM-LIB bootstrap: SUCCESS"
                 return 0
             case _:
                 val errors = CompileResult__get_errors(result)
+                print "LLVM-LIB bootstrap: FAILED with {errors.len()} errors"
                 for err in errors:
                     print "error: {err}"
                 return 1
