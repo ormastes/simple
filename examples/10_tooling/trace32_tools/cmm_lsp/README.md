@@ -38,6 +38,10 @@ Release asset:
 cmm-lsp-claude-plugin-1.1.1.tar.gz
 ```
 
+Current limitation:
+the release tarball is not self-contained. Its `.lsp.json` still expects a repo
+checkout containing `bin/release/simple` and this `cmm_lsp/` source tree.
+
 Manual install is also possible:
 
 ```bash

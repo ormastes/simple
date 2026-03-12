@@ -16,6 +16,10 @@ Release package:
 cmm-lsp-claude-plugin-1.1.1.tar.gz
 ```
 
+Current limitation:
+the packaged bundle is intended for use from a repo checkout. The checked-in
+`.lsp.json` still launches the workspace-relative Simple source entrypoint.
+
 ## Runtime
 
 The plugin launches:
