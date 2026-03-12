@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_tooling/trace32_tools/install.sh | bash
-#   curl -fsSL ... | bash -s -- --version 1.0.0 --dir ~/.local/bin
+#   curl -fsSL ... | bash -s -- --version 1.1.1 --dir ~/.local/bin
 #
 set -euo pipefail
 

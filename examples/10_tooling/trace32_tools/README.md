@@ -26,7 +26,7 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 
 ```bash
 # Download specific binary
-VERSION="1.0.0"
+VERSION="1.1.1"
 curl -fsSL -o t32-mcp-server \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/t32-mcp-server-linux-x86_64"
 chmod +x t32-mcp-server
