@@ -332,7 +332,11 @@ bin/simple lint file.spl --warn-all    # Enable all style lints
 | Stub impl lint (AST) | `src/compiler/35.semantics/lint/stub_impl.spl` |
 | Stub impl lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_stub.spl` |
 | EasyFix registry | `src/compiler/90.tools/fix/rules/registry.spl` |
-| Semantic linter | `src/compiler/90.tools/lint/main.spl` |
+| Semantic linter + LintConfig | `src/compiler/90.tools/lint/main.spl` |
+| Annotation lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_annotation.spl` |
+| Module boundary lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_module.spl` |
+| Bare bool lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_bool.spl` |
+| Spec lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_spec.spl` |
 | Diagnostics | `src/compiler/00.common/diagnostics/` |
 | Error codes | `src/compiler/00.common/error_codes.spl` |
 

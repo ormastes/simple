@@ -465,21 +465,53 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::StructInit {
             dest,
-            type_id: _,
+            type_id,
             struct_size,
             field_offsets,
             field_types,
             field_values,
         } => {
-            compile_struct_init(
-                ctx,
-                builder,
-                *dest,
-                *struct_size as usize,
-                field_offsets,
-                field_types,
-                field_values,
-            );
+            // Intercept builtin type "constructors" that should be conversion calls
+            if *type_id == TypeId::STRING && field_values.len() == 1 {
+                // str(x) → rt_to_string(tagged_x)
+                let arg_val = ctx.vreg_values.get(&field_values[0]).copied().unwrap_or_else(|| {
+                    builder.ins().iconst(types::I64, 0)
+                });
+                // Tag as RuntimeValue int if needed (value << 3)
+                let three = builder.ins().iconst(types::I64, 3);
+                let tagged = builder.ins().ishl(arg_val, three);
+                if let Some(&to_str_id) = ctx.runtime_funcs.get("rt_to_string") {
+                    let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
+                    let call = adapted_call(builder, to_str_ref, &[tagged]);
+                    let result = builder.inst_results(call)[0];
+                    ctx.vreg_values.insert(*dest, result);
+                } else {
+                    ctx.vreg_values.insert(*dest, tagged);
+                }
+            } else if (*type_id == TypeId::I64 || *type_id == TypeId::INT) && field_values.len() == 1 {
+                // int(x) → rt_string_to_int(x)
+                let arg_val = ctx.vreg_values.get(&field_values[0]).copied().unwrap_or_else(|| {
+                    builder.ins().iconst(types::I64, 0)
+                });
+                if let Some(&str_to_int_id) = ctx.runtime_funcs.get("rt_string_to_int") {
+                    let str_to_int_ref = ctx.module.declare_func_in_func(str_to_int_id, builder.func);
+                    let call = adapted_call(builder, str_to_int_ref, &[arg_val]);
+                    let result = builder.inst_results(call)[0];
+                    ctx.vreg_values.insert(*dest, result);
+                } else {
+                    ctx.vreg_values.insert(*dest, arg_val);
+                }
+            } else {
+                compile_struct_init(
+                    ctx,
+                    builder,
+                    *dest,
+                    *struct_size as usize,
+                    field_offsets,
+                    field_types,
+                    field_values,
+                );
+            }
         }
 
         MirInst::FieldGet {
