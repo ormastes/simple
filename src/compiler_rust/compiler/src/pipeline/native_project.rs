@@ -548,8 +548,39 @@ impl NativeProjectBuilder {
     /// proper static constructor/destructor ordering.
     fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        std::fs::write(
-            &main_cpp,
+        // Use platform-appropriate weak symbol declarations:
+        // - GCC/Clang (Linux, macOS, FreeBSD, MinGW): __attribute__((weak))
+        // - MSVC/clang-cl: no weak symbols, use linker /FORCE:UNRESOLVED instead
+        let cxx = find_cxx_compiler();
+        let is_clang_cl = cxx.contains("clang-cl");
+
+        let stub_code = if is_clang_cl {
+            // MSVC ABI: declare as regular extern, linker resolves
+            r#"
+extern "C" {
+    int spl_main(void);
+    void rt_set_args(int argc, char** argv);
+    void __simple_runtime_init(void);
+    void __simple_runtime_shutdown(void);
+}
+#pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
+#pragma comment(linker, "/ALTERNATENAME:rt_set_args=_rt_set_args_stub")
+#pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
+#pragma comment(linker, "/ALTERNATENAME:__simple_runtime_shutdown=___simple_runtime_shutdown_stub")
+extern "C" int _spl_main_stub(void) { return 0; }
+extern "C" void _rt_set_args_stub(int, char**) {}
+extern "C" void ___simple_runtime_init_stub(void) {}
+extern "C" void ___simple_runtime_shutdown_stub(void) {}
+int main(int argc, char** argv) {
+    __simple_runtime_init();
+    rt_set_args(argc, argv);
+    int r = spl_main();
+    __simple_runtime_shutdown();
+    return r;
+}
+"#
+        } else {
+            // GCC/Clang: use __attribute__((weak)) for all platforms
             r#"
 extern "C" {
     int __attribute__((weak)) spl_main(void);
@@ -564,30 +595,32 @@ int main(int argc, char** argv) {
     if (__simple_runtime_shutdown) __simple_runtime_shutdown();
     return r;
 }
-"#,
-        )
-        .map_err(|e| format!("write main stub: {e}"))?;
+"#
+        };
+
+        std::fs::write(&main_cpp, stub_code)
+            .map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        // Use clang++ to compile C++ main stub — ensures C++ runtime init hooks
-        let cxx = find_cxx_compiler();
-        let status = if cxx.contains("clang-cl") {
+        // Use C++ compiler for main stub — ensures C++ runtime init hooks
+        let output = if is_clang_cl {
             std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(format!("/Fo{}", main_o.display()))
                 .arg(&main_cpp)
-                .status()
+                .output()
                 .map_err(|e| format!("compile main stub: {e}"))?
         } else {
             std::process::Command::new(&cxx)
                 .args(["-c", "-o"])
                 .arg(&main_o)
                 .arg(&main_cpp)
-                .status()
+                .output()
                 .map_err(|e| format!("compile main stub: {e}"))?
         };
-        if !status.success() {
-            return Err("Failed to compile main stub".to_string());
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to compile main stub ({}): {}", cxx, stderr));
         }
         Ok(main_o)
     }
@@ -618,8 +651,9 @@ int main(int argc, char** argv) {
             find_c_compiler()
         };
         let is_clang_cl = cc.contains("clang-cl");
+        let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
         let mut cmd = std::process::Command::new(&cc);
-        if !is_clang_cl {
+        if !is_msvc {
             cmd.arg("-fPIC");
         }
 
@@ -728,10 +762,16 @@ int main(int argc, char** argv) {
             }
             #[cfg(target_os = "windows")]
             {
-                if is_clang_cl {
-                    // clang-cl: pass MSVC linker flags via -Xlinker
-                    cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
+                if is_msvc {
+                    // MSVC-compatible linker: use /WHOLEARCHIVE
+                    if is_clang_cl {
+                        cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
+                    } else {
+                        // clang targeting MSVC: use -Wl, prefix for lld-link
+                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
+                    }
                 } else {
+                    // MinGW/GNU linker
                     cmd.arg("-Wl,--whole-archive")
                         .arg(&archive_path)
                         .arg("-Wl,--no-whole-archive");
@@ -762,6 +802,7 @@ int main(int argc, char** argv) {
                 cmd.arg(format!("{}.lib", lib));
             }
         } else {
+            // clang/g++: use -l flag (works for both GNU and MSVC targets)
             for lib in &link_config.libraries {
                 cmd.arg(format!("-l{}", lib));
             }
@@ -787,8 +828,12 @@ int main(int argc, char** argv) {
             cmd.arg(flag);
         }
         #[cfg(target_os = "windows")]
-        if is_clang_cl {
-            cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
+        if is_msvc {
+            if is_clang_cl {
+                cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
+            } else {
+                cmd.arg("-Wl,/FORCE:UNRESOLVED");
+            }
         }
 
         if self.config.strip {
@@ -797,8 +842,12 @@ int main(int argc, char** argv) {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
-            if is_clang_cl {
-                cmd.arg("-Xlinker").arg("/DEBUG:NONE");
+            if is_msvc {
+                if is_clang_cl {
+                    cmd.arg("-Xlinker").arg("/DEBUG:NONE");
+                } else {
+                    cmd.arg("-Wl,/DEBUG:NONE");
+                }
             } else {
                 cmd.arg("-Wl,-s");
             }

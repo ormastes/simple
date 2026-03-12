@@ -52,15 +52,19 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
 }
 
 /// Find a C++ compiler.
+///
+/// On Windows, tries clang++ then g++.
+/// On Unix, tries clang++ then g++.
 pub fn find_cxx_compiler() -> String {
     if let Ok(cxx) = std::env::var("CXX") {
         return cxx;
     }
-    if command_exists("clang++") {
-        "clang++".to_string()
-    } else {
-        "g++".to_string()
+    for cxx in &["clang++", "g++"] {
+        if command_exists(cxx) {
+            return cxx.to_string();
+        }
     }
+    "g++".to_string()
 }
 
 /// Find an archive tool (ar, llvm-ar, or lib.exe on Windows).
@@ -113,12 +117,45 @@ pub fn is_msvc_compiler(cc: &str) -> bool {
     base.eq_ignore_ascii_case("cl") || base.eq_ignore_ascii_case("cl.exe")
 }
 
-/// Check if a command exists on the system by running `--version`.
+/// Check if a C/C++ compiler targets the MSVC ABI.
+///
+/// Returns true for clang-cl, cl.exe, or any clang whose default target
+/// triple contains "windows-msvc". This determines whether to use
+/// MSVC-style linker flags (/WHOLEARCHIVE, /FORCE:UNRESOLVED) or
+/// GNU-style (-Wl,--whole-archive, etc.).
+pub fn is_msvc_target(cc: &str) -> bool {
+    let base = std::path::Path::new(cc)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cc);
+    // clang-cl and cl.exe always target MSVC
+    if base.contains("clang-cl") || is_msvc_compiler(cc) {
+        return true;
+    }
+    // For plain clang/clang++, check the effective target triple
+    if base.starts_with("clang") {
+        if let Ok(output) = std::process::Command::new(cc)
+            .arg("--print-effective-triple")
+            .output()
+        {
+            let triple = String::from_utf8_lossy(&output.stdout);
+            return triple.contains("windows-msvc");
+        }
+    }
+    false
+}
+
+/// Check if a command exists and works by running `--version`.
+///
+/// Verifies both that the process can be spawned AND that it exits
+/// successfully (exit code 0). This catches cases like a clang++
+/// that exists on PATH but crashes due to missing shared libraries.
 pub fn command_exists(name: &str) -> bool {
     std::process::Command::new(name)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
