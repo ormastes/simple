@@ -25,28 +25,23 @@ bin/simple build --release
 ```
 
 ### Install plugin
-Copy the plugin to the Claude Code plugins cache:
+The plugin bundle lives in the TRACE32 tools submodule:
+
+```bash
+claude plugin install --dir examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp
+```
+
+Manual install is also possible:
 
 ```bash
 mkdir -p ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local
-cp -r tools/claude-plugin/cmm-lsp/.claude-plugin ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
-cp tools/claude-plugin/cmm-lsp/README.md ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
+cp -r examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.claude-plugin ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
+cp examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.lsp.json ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
+cp examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md ~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/
 ```
 
-Then create `~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/.lsp.json` with absolute paths:
-
-```json
-{
-  "cmm": {
-    "command": "/absolute/path/to/simple/bin/release/simple",
-    "args": ["run", "/absolute/path/to/simple/examples/10_tooling/trace32_tools/cmm_lsp/lsp_server.spl"],
-    "extensionToLanguage": {
-      ".cmm": "cmm"
-    },
-    "startupTimeout": 30000
-  }
-}
-```
+The bundled `.lsp.json` already points at the checked-in CMM LSP entrypoint via
+the workspace-relative path `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`.
 
 ### Verify
 Restart Claude Code and open a `.cmm` file. Hover and completion should work automatically.
