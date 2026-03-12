@@ -19,6 +19,7 @@ RUN apt-get update && \
         libxpm4 \
         libxrender1 \
         libxt6t64 \
+        netcat-openbsd \
         procps \
         usbutils \
         x11-utils \

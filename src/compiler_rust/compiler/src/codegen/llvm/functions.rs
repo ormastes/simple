@@ -36,6 +36,21 @@ impl LlvmBackend {
         use std::collections::HashMap;
         use std::collections::HashSet;
 
+        // Debug: dump MIR for specific functions when SIMPLE_DUMP_IR env var is set
+        if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
+            eprintln!("=== MIR for {} ===", func.name);
+            eprintln!("  params: {:?}", func.params.iter().map(|p| (&p.name, &p.ty)).collect::<Vec<_>>());
+            eprintln!("  locals: {:?}", func.locals.iter().map(|l| (&l.name, &l.ty)).collect::<Vec<_>>());
+            for block in &func.blocks {
+                eprintln!("  block {}:", block.id.0);
+                for inst in &block.instructions {
+                    eprintln!("    {:?}", inst);
+                }
+                eprintln!("    terminator: {:?}", block.terminator);
+            }
+            eprintln!("=== END MIR ===");
+        }
+
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -249,6 +264,16 @@ impl LlvmBackend {
 
             // Compile terminator
             self.compile_terminator(&block.terminator, &llvm_blocks, &vreg_map, builder)?;
+        }
+
+        // Debug: dump LLVM IR to file for specific functions
+        if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
+            let ir_path = format!("/tmp/llvm_ir_{}.ll", func.name.replace(|c: char| !c.is_alphanumeric(), "_"));
+            if let Err(e) = module.print_to_file(&ir_path) {
+                eprintln!("Warning: could not dump LLVM IR to {}: {}", ir_path, e);
+            } else {
+                eprintln!("Dumped LLVM IR for {} to {}", func.name, ir_path);
+            }
         }
 
         Ok(())
