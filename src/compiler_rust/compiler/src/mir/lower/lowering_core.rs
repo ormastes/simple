@@ -565,6 +565,7 @@ impl<'a> MirLowerer<'a> {
 
         // Copy compile-time constant init values from HIR to MIR
         module.global_init_values = hir.global_init_values.clone();
+        module.global_init_strings = hir.global_init_strings.clone();
 
         // Copy local globals set from HIR to MIR for codegen linkage decisions
         module.local_globals = hir.local_globals.clone();

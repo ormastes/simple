@@ -726,7 +726,152 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
+        // Generate module initialization function for string constants.
+        // This creates a constructor function that allocates runtime strings
+        // from static byte data and stores them to global variables.
+        if !mir.global_init_strings.is_empty() {
+            self.generate_module_init(&mir.global_init_strings)?;
+        }
+
         Ok(functions)
+    }
+
+    /// Generate a `__module_init` function that initializes string global variables.
+    ///
+    /// For each string constant (e.g., `val NL = "\n"`), this function:
+    /// 1. Creates static byte data in .rodata
+    /// 2. Calls `rt_string_new(ptr, len)` to create a RuntimeValue
+    /// 3. Stores the result to the global variable
+    ///
+    /// The function is registered via `.init_array` so it runs before `main()`.
+    fn generate_module_init(
+        &mut self,
+        init_strings: &std::collections::HashMap<String, String>,
+    ) -> BackendResult<()> {
+        use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
+
+        let init_name = match &self.module_prefix {
+            Some(prefix) => format!("__module_init_{}", prefix),
+            None => "__module_init".to_string(),
+        };
+
+        // Declare the init function: fn() -> void
+        let call_conv = super::shared::platform_call_conv();
+        let sig = cranelift_codegen::ir::Signature::new(call_conv);
+        let func_id = self
+            .module
+            .declare_function(&init_name, cranelift_module::Linkage::Export, &sig)
+            .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
+
+        // Get rt_string_new function ID
+        let string_new_id = *self
+            .runtime_funcs
+            .get("rt_string_new")
+            .ok_or_else(|| BackendError::ModuleError("rt_string_new not declared".into()))?;
+
+        // Build the function body
+        self.ctx.func.signature = sig;
+        self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
+
+        let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
+        let mut builder = cranelift_frontend::FunctionBuilder::new(&mut self.ctx.func, &mut func_ctx);
+        let entry_block = builder.create_block();
+        builder.switch_to_block(entry_block);
+        builder.seal_block(entry_block);
+
+        // Sort by name for deterministic output
+        let mut sorted_strings: Vec<_> = init_strings.iter().collect();
+        sorted_strings.sort_by_key(|(name, _)| (*name).clone());
+
+        for (global_name, string_val) in &sorted_strings {
+            // 1. Create static byte data for the string
+            let bytes = string_val.as_bytes();
+            let data_name = format!(".Linit_str_{:016x}", {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for &b in global_name.as_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                for &b in bytes {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                h
+            });
+            let data_id = self
+                .module
+                .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
+                .map_err(|e| BackendError::ModuleError(format!("declare string data: {e}")))?;
+            {
+                let mut data_desc = cranelift_module::DataDescription::new();
+                data_desc.define(bytes.to_vec().into_boxed_slice());
+                let _ = self.module.define_data(data_id, &data_desc);
+            }
+
+            // 2. Load string bytes pointer and length
+            let data_ref = self.module.declare_data_in_func(data_id, builder.func);
+            let str_ptr = builder.ins().global_value(types::I64, data_ref);
+            let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
+
+            // 3. Call rt_string_new(ptr, len) -> RuntimeValue
+            let string_new_ref = self.module.declare_func_in_func(string_new_id, builder.func);
+            let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
+            let string_rv = builder.inst_results(call_inst)[0];
+
+            // 4. Store to global variable
+            if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
+                let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                builder.ins().store(MemFlags::new(), string_rv, global_addr, 0);
+            } else {
+                // Global might not be in global_ids if it's cross-module.
+                // Try the mangled name from the module prefix.
+                let mangled = match &self.module_prefix {
+                    Some(prefix) => format!("{}__{}", prefix, global_name),
+                    None => global_name.to_string(),
+                };
+                if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
+                    let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    builder.ins().store(MemFlags::new(), string_rv, global_addr, 0);
+                }
+                // If still not found, skip silently (global might be in another module)
+            }
+        }
+
+        builder.ins().return_(&[]);
+        builder.finalize();
+
+        // Define the function
+        self.module
+            .define_function(func_id, &mut self.ctx)
+            .map_err(|e| BackendError::ModuleError(format!("define __module_init: {e}")))?;
+        self.module.clear_context(&mut self.ctx);
+
+        // Register in .init_array so it runs before main()
+        let init_array_name = format!(".init_array_{}", init_name);
+        let init_array_id = self
+            .module
+            .declare_data(
+                &init_array_name,
+                cranelift_module::Linkage::Local,
+                false,
+                false,
+            )
+            .map_err(|e| BackendError::ModuleError(format!("declare .init_array: {e}")))?;
+
+        let mut init_desc = cranelift_module::DataDescription::new();
+        init_desc.define_zeroinit(8); // 8 bytes for function pointer
+        let func_ref = self.module.declare_func_in_data(func_id, &mut init_desc);
+        init_desc.write_function_addr(0, func_ref);
+        // Set section to .init_array for automatic constructor invocation
+        init_desc.set_segment_section("", ".init_array");
+
+        self.module
+            .define_data(init_array_id, &init_desc)
+            .map_err(|e| BackendError::ModuleError(format!("define .init_array: {e}")))?;
+
+        Ok(())
     }
 }
 

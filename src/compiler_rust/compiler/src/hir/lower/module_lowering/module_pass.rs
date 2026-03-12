@@ -154,6 +154,18 @@ impl Lowerer {
                 // Extract compile-time constant value from initializer
                 if let Expr::Integer(val) = &s.value {
                     self.global_init_values.insert(s.name.clone(), *val);
+                } else if let Expr::String(val) = &s.value {
+                    self.global_init_strings.insert(s.name.clone(), val.clone());
+                } else if let Expr::FString { parts, .. } = &s.value {
+                    if parts.len() == 1 {
+                        if let ast::FStringPart::Literal(val) = &parts[0] {
+                            self.global_init_strings.insert(s.name.clone(), val.clone());
+                        }
+                    }
+                } else if let Expr::Bool(val) = &s.value {
+                    // Store tagged boolean value: TAG_SPECIAL(0b011) | (payload << 3)
+                    let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                    self.global_init_values.insert(s.name.clone(), tagged);
                 }
             }
             Node::Const(c) => {
@@ -168,6 +180,17 @@ impl Lowerer {
                 // Extract compile-time constant value from initializer
                 if let Expr::Integer(val) = &c.value {
                     self.global_init_values.insert(c.name.clone(), *val);
+                } else if let Expr::String(val) = &c.value {
+                    self.global_init_strings.insert(c.name.clone(), val.clone());
+                } else if let Expr::FString { parts, .. } = &c.value {
+                    if parts.len() == 1 {
+                        if let ast::FStringPart::Literal(val) = &parts[0] {
+                            self.global_init_strings.insert(c.name.clone(), val.clone());
+                        }
+                    }
+                } else if let Expr::Bool(val) = &c.value {
+                    let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                    self.global_init_values.insert(c.name.clone(), tagged);
                 }
             }
             Node::Let(l) => {
@@ -185,6 +208,17 @@ impl Lowerer {
                     // Extract compile-time constant value from initializer
                     if let Some(Expr::Integer(val)) = &l.value {
                         self.global_init_values.insert(n, *val);
+                    } else if let Some(Expr::String(val)) = &l.value {
+                        self.global_init_strings.insert(n.clone(), val.clone());
+                    } else if let Some(Expr::FString { parts, .. }) = &l.value {
+                        if parts.len() == 1 {
+                            if let ast::FStringPart::Literal(val) = &parts[0] {
+                                self.global_init_strings.insert(n.clone(), val.clone());
+                            }
+                        }
+                    } else if let Some(Expr::Bool(val)) = &l.value {
+                        let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                        self.global_init_values.insert(n, tagged);
                     }
                 }
             }
@@ -520,6 +554,7 @@ impl Lowerer {
 
         // Copy compile-time constant init values to HirModule for codegen
         self.module.global_init_values = self.global_init_values.clone();
+        self.module.global_init_strings = self.global_init_strings.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
@@ -712,6 +747,7 @@ impl Lowerer {
             self.module.globals.push((name.clone(), *ty));
         }
         self.module.global_init_values = self.global_init_values.clone();
+        self.module.global_init_strings = self.global_init_strings.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();

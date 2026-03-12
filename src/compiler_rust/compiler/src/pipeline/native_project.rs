@@ -1472,6 +1472,15 @@ fn mangle_mir(
         }
     }
 
+    let old_init_strings = std::mem::take(&mut mir.global_init_strings);
+    for (name, val) in old_init_strings {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_strings.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_strings.insert(name, val);
+        }
+    }
+
     let old_local = std::mem::take(&mut mir.local_globals);
     for name in old_local {
         if let Some(mangled) = local_global_mangled.get(&name) {

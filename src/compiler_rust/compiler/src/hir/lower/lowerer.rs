@@ -16,6 +16,8 @@ pub struct Lowerer {
     pub(super) globals: HashMap<String, TypeId>,
     /// Compile-time constant initial values for module-level `val` declarations.
     pub(super) global_init_values: HashMap<String, i64>,
+    /// String constant initial values for module-level `val`/`var` declarations.
+    pub(super) global_init_strings: HashMap<String, String>,
     /// Set of globals that are defined locally in this module (not imported).
     pub(super) local_globals: HashSet<String>,
     /// Set of function names that are marked with #[pure] (CTR-031)
@@ -69,6 +71,7 @@ impl Lowerer {
             module: HirModule::new(),
             globals: HashMap::new(),
             global_init_values: HashMap::new(),
+            global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
@@ -99,6 +102,7 @@ impl Lowerer {
             module: HirModule::new(),
             globals: HashMap::new(),
             global_init_values: HashMap::new(),
+            global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
@@ -152,6 +156,7 @@ impl Lowerer {
             module: HirModule::new(),
             globals: HashMap::new(),
             global_init_values: HashMap::new(),
+            global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,

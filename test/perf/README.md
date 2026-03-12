@@ -42,8 +42,8 @@ use std.text.{NL}
 # Import from compiler_runtime.spl
 # (Note: This is a local module, adjust imports as needed)
 
-val config = BenchmarkConfig__quick()
-var runner = BenchmarkRunner__create(config)
+val config = BenchmarkConfig.quick()
+var runner = BenchmarkRunner.create(config)
 
 # Add standard benchmarks
 runner.add_benchmark(fibonacci_benchmark())
@@ -61,7 +61,7 @@ for result in results:
 
 ```simple
 # Create a custom benchmark
-val my_benchmark = Benchmark__create("custom_test", \\:
+val my_benchmark = Benchmark.create("custom_test", \\:
     # Your code to benchmark
     var sum = 0
     for i in 0..10000:
@@ -71,7 +71,7 @@ val my_benchmark = Benchmark__create("custom_test", \\:
  .with_category("math")
 
 # Run it
-var runner = BenchmarkRunner__default_runner()
+var runner = BenchmarkRunner.default_runner()
 runner.add_benchmark(my_benchmark)
 val results = runner.run_all()
 ```
@@ -99,7 +99,7 @@ val results = runner.run_all()
 
 ### Quick (for CI)
 ```simple
-val config = BenchmarkConfig__quick()
+val config = BenchmarkConfig.quick()
 # - 1 warmup iteration
 # - 3 measurement iterations
 # - 10ms minimum duration
@@ -108,7 +108,7 @@ val config = BenchmarkConfig__quick()
 
 ### Default (standard)
 ```simple
-val config = BenchmarkConfig__default_config()
+val config = BenchmarkConfig.default_config()
 # - 3 warmup iterations
 # - 10 measurement iterations
 # - 100ms minimum duration
@@ -117,7 +117,7 @@ val config = BenchmarkConfig__default_config()
 
 ### Thorough (release validation)
 ```simple
-val config = BenchmarkConfig__thorough()
+val config = BenchmarkConfig.thorough()
 # - 10 warmup iterations
 # - 100 measurement iterations
 # - 1s minimum duration

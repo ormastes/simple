@@ -305,6 +305,9 @@ pub struct MirModule {
     pub globals: Vec<(String, crate::hir::TypeId, bool)>,
     /// Compile-time constant initial values for module-level `val` declarations.
     pub global_init_values: std::collections::HashMap<String, i64>,
+    /// String constant initial values for module-level `val`/`var` declarations.
+    /// These require runtime initialization (heap allocation via rt_string_from_bytes).
+    pub global_init_strings: std::collections::HashMap<String, String>,
     /// Set of globals that are defined locally in this module (not imported).
     /// Used by codegen to choose Import vs Export/Preemptible linkage.
     pub local_globals: std::collections::HashSet<String>,
@@ -321,6 +324,7 @@ impl MirModule {
             functions: Vec::new(),
             globals: Vec::new(),
             global_init_values: std::collections::HashMap::new(),
+            global_init_strings: std::collections::HashMap::new(),
             local_globals: std::collections::HashSet::new(),
             extern_fn_names: std::collections::HashSet::new(),
         }

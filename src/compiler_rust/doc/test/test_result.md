@@ -1,15 +1,15 @@
 # Test Results
 
-**Generated:** 2026-03-12 10:22:52
-**Total Tests:** 92
-**Status:** ⚠️ 12 FAILED
+**Generated:** 2026-03-12 14:42:58
+**Total Tests:** 91
+**Status:** ⚠️ 11 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 80 | 87.0% |
-| ❌ Failed | 12 | 13.0% |
+| ✅ Passed | 80 | 87.9% |
+| ❌ Failed | 11 | 12.1% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
@@ -43,29 +43,11 @@
 
 ---
 
-## ❌ Failed Tests (12)
+## ❌ Failed Tests (11)
 
-### 🔴 gpu_kernel_launch_syntax_spec
+### 🔴 tensor_bridge_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
-
----
-
-### 🔴 comment_only_spec
-
-**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 fixed_size_arrays_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_arrays_spec.spl`
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
 **Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
@@ -76,30 +58,6 @@
 
 **File:** `test/unit/compiler/lint/stub_impl_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-12T10:22:52.855563359+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-failed to read test/unit/compiler/lint/stub_impl_spec.spl: No such file or directory (os error 2)
-Location: test/unit/compiler/lint/stub_impl_spec.spl
-```
-
----
-
-### 🔴 mat4_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 sdn_minimal_spec
-
-**File:** `test/tmp/sdn_minimal_spec.spl`
-**Category:** Unknown
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -114,28 +72,10 @@ Location: test/unit/compiler/lint/stub_impl_spec.spl
 
 ---
 
-### 🔴 gpu_kernel_launch_syntax_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_kernel_launch_syntax_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
-
----
-
 ### 🔴 fixed_size_edge_cases_spec
 
 **File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
 **Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 stub_impl_spec
-
-**File:** `test/unit/compiler/lint/stub_impl_spec.spl`
-**Category:** Unit
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -150,10 +90,55 @@ Location: test/unit/compiler/lint/stub_impl_spec.spl
 
 ---
 
-### 🔴 tensor_bridge_spec
+### 🔴 gpu_kernel_launch_syntax_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
+**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_kernel_launch_syntax_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
+### 🔴 sdn_minimal_spec
+
+**File:** `test/tmp/sdn_minimal_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 gpu_kernel_launch_syntax_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
+### 🔴 fixed_size_arrays_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_arrays_spec.spl`
 **Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 mat4_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 comment_only_spec
+
+**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
+**Category:** Unknown
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -167,11 +152,11 @@ Location: test/unit/compiler/lint/stub_impl_spec.spl
 
 ## 🎯 Action Items
 
-### Priority 1: Fix Failing Tests (12)
+### Priority 1: Fix Failing Tests (11)
 
-1. **gpu_kernel_launch_syntax_spec** - 
-2. **comment_only_spec** - 
-3. **fixed_size_arrays_spec** - 
-4. **stub_impl_spec** - failed to read test/unit/compiler/lint/stub_impl_spec.spl: No such file or directory (os error 2)
-5. **mat4_spec** - 
+1. **tensor_bridge_spec** - 
+2. **stub_impl_spec** - 
+3. **type_conversion_spec** - 
+4. **fixed_size_edge_cases_spec** - 
+5. **loss_nograd_blocks_spec** - 
 
