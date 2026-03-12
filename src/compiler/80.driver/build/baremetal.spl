@@ -10,6 +10,7 @@
 
 use app.build.types.{BuildResult, TestResult}
 use app.io.mod.{dir_create, file_write, file_exists, process_run, current_time_ms}
+use app.build.compile_to_llvm.{compile_to_llvm_ir_pure}
 
 export BaremetalConfig, BaremetalBuilder, QemuRunner
 export baremetal_config_arm, baremetal_config_x86_64, baremetal_config_riscv
@@ -35,8 +36,8 @@ impl BaremetalConfig:
         BaremetalConfig(
             target: BaremetalTarget.Arm,
             output_dir: "build/baremetal-arm",
-            linker_script: "src/compiler/baremetal/arm/linker.ld",
-            crt0_path: "src/compiler/baremetal/arm/crt0.s",
+            linker_script: "src/compiler/70.backend/baremetal/arm/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/arm/crt0.s",
             entry_point: "reset_handler",
             alloc_allowed: false
         )
@@ -46,8 +47,8 @@ impl BaremetalConfig:
         BaremetalConfig(
             target: BaremetalTarget.X86_64,
             output_dir: "build/baremetal-x86_64",
-            linker_script: "src/compiler/baremetal/x86_64/linker.ld",
-            crt0_path: "src/compiler/baremetal/x86_64/crt0.s",
+            linker_script: "src/compiler/70.backend/baremetal/x86_64/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/x86_64/crt0.s",
             entry_point: "_start",
             alloc_allowed: false
         )
@@ -57,8 +58,8 @@ impl BaremetalConfig:
         BaremetalConfig(
             target: BaremetalTarget.Riscv,
             output_dir: "build/baremetal-riscv",
-            linker_script: "src/compiler/baremetal/riscv/linker.ld",
-            crt0_path: "src/compiler/baremetal/riscv/crt0.s",
+            linker_script: "src/compiler/70.backend/baremetal/riscv/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/riscv/crt0.s",
             entry_point: "_start",
             alloc_allowed: false
         )
@@ -101,6 +102,15 @@ impl BaremetalBuilder:
 
     # Build a bare-metal binary
     fn build(source_files: [text]) -> BuildResult:
+        if source_files.len() == 0:
+            return BuildResult(
+                success: false,
+                exit_code: 1,
+                stdout: "",
+                stderr: "No Simple source files provided for bare-metal build",
+                duration_ms: 0
+            )
+
         # Create output directory
         dir_create(self.config.output_dir, true)
 
@@ -131,10 +141,22 @@ impl BaremetalBuilder:
         if not crt0_result.success:
             return crt0_result
 
-        # Step 2: Compile Simple source files to object files
-        var object_files: [text] = [crt0_result.stdout]  # crt0.o path
+        # Step 2: Compile minimal runtime support
+        val runtime_result = self.compile_runtime_support()
+        if not runtime_result.success:
+            return BuildResult(
+                success: false,
+                exit_code: runtime_result.exit_code,
+                stdout: crt0_result.stdout + "\n" + runtime_result.stdout,
+                stderr: crt0_result.stderr + runtime_result.stderr,
+                duration_ms: current_time_ms() - start_time
+            )
+
+        # Step 3: Compile Simple source files to object files
+        var object_files: [text] = [crt0_result.stdout, runtime_result.stdout]
         var all_stdout = crt0_result.stdout + "\n"
-        var all_stderr = crt0_result.stderr
+        all_stdout = all_stdout + runtime_result.stdout + "\n"
+        var all_stderr = crt0_result.stderr + runtime_result.stderr
 
         for source_file in source_files:
             val obj_result = self.compile_source(source_file)
@@ -150,7 +172,7 @@ impl BaremetalBuilder:
             all_stdout = all_stdout + obj_result.stdout + "\n"
             all_stderr = all_stderr + obj_result.stderr
 
-        # Step 3: Link object files to ELF binary
+        # Step 4: Link object files to ELF binary
         val link_result = self.link_to_elf(object_files)
         val end_time = current_time_ms()
 
@@ -174,30 +196,43 @@ impl BaremetalBuilder:
     # Assemble crt0.s to crt0.o
     fn assemble_crt0() -> BuildResult:
         val obj_file = "{self.config.output_dir}/crt0.o"
+        var args = self.target_clang_args()
+        args.push("-x")
+        args.push("assembler-with-cpp")
+        args.push("-c")
+        args.push(self.config.crt0_path)
+        args.push("-o")
+        args.push(obj_file)
 
-        var assembler = "arm-none-eabi-as"
-        var args: [text] = []
-
-        match self.config.target:
-            case BaremetalTarget.Arm:
-                assembler = "arm-none-eabi-as"
-                args = ["-mcpu=cortex-m4", "-mthumb", "-o", obj_file, self.config.crt0_path]
-            case BaremetalTarget.X86_64:
-                assembler = "as"
-                args = ["--64", "-o", obj_file, self.config.crt0_path]
-            case BaremetalTarget.Riscv:
-                assembler = "riscv64-unknown-elf-as"
-                args = ["-march=rv64gc", "-mabi=lp64d", "-o", obj_file, self.config.crt0_path]
-
-        val (stdout, stderr, exit_code) = process_run(assembler, args)
+        val (stdout, stderr, exit_code) = process_run("clang", args)
 
         if exit_code == 0:
             BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
         else:
             BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Assembly failed: {stderr}", duration_ms: 0)
 
+    fn compile_runtime_support() -> BuildResult:
+        val source_path = "src/runtime/startup/baremetal/runtime_minimal.c"
+        val obj_file = "{self.config.output_dir}/runtime_minimal.o"
+        var args = self.target_clang_args()
+        args.push("-ffreestanding")
+        args.push("-fno-builtin")
+        args.push("-fdata-sections")
+        args.push("-ffunction-sections")
+        args.push("-fno-stack-protector")
+        args.push("-fno-exceptions")
+        args.push("-c")
+        args.push(source_path)
+        args.push("-o")
+        args.push(obj_file)
+
+        val (stdout, stderr, exit_code) = process_run("clang", args)
+        if exit_code == 0:
+            BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
+        else:
+            BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Runtime support compilation failed: {stderr}", duration_ms: 0)
+
     # Compile Simple source to object file
-    # For now, this is a placeholder - actual compilation would use Simple compiler
     fn compile_source(source_file: text) -> BuildResult:
         # Extract base name
         var base_name = source_file
@@ -207,28 +242,27 @@ impl BaremetalBuilder:
         if base_name.ends_with(".spl"):
             base_name = base_name[0:base_name.len() - 4]
 
+        val ir_file = "{self.config.output_dir}/{base_name}.ll"
         val obj_file = "{self.config.output_dir}/{base_name}.o"
+        val (llvm_ir, compile_err, compile_exit) = compile_to_llvm_ir_pure(source_file, self.config.target_triple(), true)
+        if compile_exit != 0 or llvm_ir == "":
+            val err = if compile_err != "": compile_err else: "Pure Simple LLVM IR generation returned no output"
+            return BuildResult(success: false, exit_code: if compile_exit == 0: 1 else: compile_exit, stdout: "", stderr: err, duration_ms: 0)
 
-        # TODO: Use actual Simple compiler when bare-metal backend is integrated
-        # For now, return a placeholder result
-        val msg = "Compilation not yet implemented - needs Simple compiler with bare-metal backend"
-        BuildResult(success: false, exit_code: 1, stdout: obj_file, stderr: msg, duration_ms: 0)
+        if not file_write(ir_file, llvm_ir):
+            return BuildResult(success: false, exit_code: 1, stdout: "", stderr: "Failed to write LLVM IR: {ir_file}", duration_ms: 0)
+
+        var args = self.llc_args(ir_file, obj_file)
+        val (stdout, stderr, exit_code) = process_run("llc", args)
+        if exit_code == 0:
+            BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
+        else:
+            BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "LLVM object generation failed: {stderr}", duration_ms: 0)
 
     # Link object files to ELF binary using linker script
     fn link_to_elf(object_files: [text]) -> BuildResult:
         val elf_file = "{self.config.output_dir}/kernel.elf"
-
-        var linker = "ld"
-        var args: [text] = ["-T", self.config.linker_script, "-nostdlib", "--entry={self.config.entry_point}"]
-
-        # Target-specific linker flags
-        match self.config.target:
-            case BaremetalTarget.Arm:
-                linker = "arm-none-eabi-ld"
-            case BaremetalTarget.X86_64:
-                linker = "ld"
-            case BaremetalTarget.Riscv:
-                linker = "riscv64-unknown-elf-ld"
+        var args: [text] = ["-T", self.config.linker_script, "-nostdlib", "--entry={self.config.entry_point}", "--gc-sections"]
 
         # Add all object files
         for obj_file in object_files:
@@ -238,12 +272,33 @@ impl BaremetalBuilder:
         args.push("-o")
         args.push(elf_file)
 
-        val (stdout, stderr, exit_code) = process_run(linker, args)
+        val (stdout, stderr, exit_code) = process_run("ld.lld", args)
 
         if exit_code == 0:
             BuildResult(success: true, exit_code: 0, stdout: elf_file, stderr: stderr, duration_ms: 0)
         else:
             BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Linking failed: {stderr}", duration_ms: 0)
+
+    fn target_clang_args() -> [text]:
+        match self.config.target:
+            case BaremetalTarget.Arm:
+                ["--target=armv7m-none-eabi", "-mcpu=cortex-m4", "-mthumb"]
+            case BaremetalTarget.X86_64:
+                ["--target=x86_64-unknown-none-elf"]
+            case BaremetalTarget.Riscv:
+                ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d"]
+
+    fn llc_args(ir_file: text, obj_file: text) -> [text]:
+        var args = ["--filetype=obj", "--relocation-model=static", "-mtriple", self.config.target_triple(), ir_file, "-o", obj_file]
+        match self.config.target:
+            case BaremetalTarget.Arm:
+                args.push("-mcpu=cortex-m4")
+                args.push("-mattr=+thumb2")
+            case BaremetalTarget.Riscv:
+                args.push("-march=riscv64")
+                args.push("-mattr=+m,+a,+f,+d,+c")
+            case _: ()
+        args
 
 # QEMU test runner
 class QemuRunner:

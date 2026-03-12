@@ -73,12 +73,14 @@ SECTIONS
     .bss :
     {
         . = ALIGN(4);
+        __bss_start = .;
         _sbss = .;
         *(.bss*)
         *(COMMON)
         *(.bss.fault_info)
         . = ALIGN(4);
         _ebss = .;
+        __bss_end = .;
     } > RAM
 
     /* Heap (grows upward) */

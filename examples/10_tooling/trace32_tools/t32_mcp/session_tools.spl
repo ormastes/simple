@@ -2,35 +2,91 @@
 # Handles: sessions_list, session_open, session_resume, session_close,
 #          core_list, core_select, cmd_run, cmm_run, eval
 
-use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_t32rem_not_found, t32_err_cmd_failed}
+use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed}
 
-# --- t32rem helper ---
+# --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
-fn t32_find_t32rem() -> text:
+var MCP_T32_BACKEND_TYPE = ""    # "t32rem" | "python_rcl" | ""
+var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
+
+fn t32_find_python_rcl_bridge() -> text:
+    # Check if python3 has lauterbach.trace32.rcl installed
+    var py_stdout = ""
+    var py_stderr = ""
+    var py_rc: i64 = 0
+    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", "python3 -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
+    if py_rc != 0:
+        return ""
+    # Check T32_PYTHON_BRIDGE env var
+    val bridge_env = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
+    if bridge_env != "" and rt_file_exists(bridge_env):
+        return "python3 " + bridge_env
+    # Search common paths for bridge script
+    val candidates = [
+        "examples/10_tooling/trace32_tools/t32_mcp/t32_python_bridge.py",
+        "t32_python_bridge.py",
+        "/opt/t32/python/t32_python_bridge.py"
+    ]
+    for path in candidates:
+        if rt_file_exists(path):
+            return "python3 " + path
+    # Try PATH
+    var which_stdout = ""
+    var which_stderr = ""
+    var which_rc: i64 = 0
+    (which_stdout, which_stderr, which_rc) = rt_process_run("/bin/sh", ["-c", "which t32_python_bridge.py 2>/dev/null"])
+    if which_rc == 0 and which_stdout.trim() != "":
+        return "python3 " + which_stdout.trim()
+    ""
+
+fn t32_find_backend() -> text:
+    # Return cached result
+    if MCP_T32_BACKEND_CMD != "":
+        return MCP_T32_BACKEND_CMD
+    # --- Primary: t32rem binary ---
     # Check T32REM env var first
     val env_path = rt_env_get("T32REM") ?? ""
     if env_path != "":
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = env_path
         return env_path
     # Check common paths
     if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
-        return "/opt/t32/bin/pc_linux64/t32rem"
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = "/opt/t32/bin/pc_linux64/t32rem"
+        return MCP_T32_BACKEND_CMD
     if rt_file_exists("/opt/t32/bin/t32rem"):
-        return "/opt/t32/bin/t32rem"
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = "/opt/t32/bin/t32rem"
+        return MCP_T32_BACKEND_CMD
     # Try PATH
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
     (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
     if rc == 0 and stdout.trim() != "":
-        return stdout.trim()
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = stdout.trim()
+        return MCP_T32_BACKEND_CMD
+    # --- Fallback: python lauterbach-trace32-rcl ---
+    val python_bridge = t32_find_python_rcl_bridge()
+    if python_bridge != "":
+        MCP_T32_BACKEND_TYPE = "python_rcl"
+        MCP_T32_BACKEND_CMD = python_bridge
+        return python_bridge
     ""
 
+fn t32_get_backend_type() -> text:
+    if MCP_T32_BACKEND_TYPE == "":
+        t32_find_backend()
+    MCP_T32_BACKEND_TYPE
+
 fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
-    val t32rem = t32_find_t32rem()
-    if t32rem == "":
-        return (t32_err_t32rem_not_found(), -1)
+    val backend = t32_find_backend()
+    if backend == "":
+        return (t32_err_backend_not_found(), -1)
     val intercom = session.intercom_name
-    var full_cmd = t32rem + " " + session.host + " port=" + str(session.port)
+    var full_cmd = backend + " " + session.host + " port=" + str(session.port)
     if intercom != "":
         full_cmd = full_cmd + " INTERCOM=" + intercom
     full_cmd = full_cmd + " " + cmd
@@ -39,7 +95,8 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
     var rc: i64 = 0
     (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
     if rc != 0 and stderr != "":
-        return ("t32rem error (exit " + str(rc) + "): " + stderr.trim(), rc)
+        val backend_label = MCP_T32_BACKEND_TYPE
+        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc)
     (stdout, rc)
 
 fn t32_find_current_session() -> Option<McpT32Session>:
@@ -160,6 +217,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     if connected:
         conn_str = "true"
     r = r + "," + t32_jp("connected", conn_str)
+    r = r + "," + t32_jp("backend", t32_js(t32_get_backend_type()))
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 

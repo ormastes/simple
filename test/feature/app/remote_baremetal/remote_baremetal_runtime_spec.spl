@@ -104,14 +104,7 @@ fn parse_leading_hex_address(raw: text) -> i64:
     var i = 0
     while i < hex.len():
         val ch = hex[i:i + 1]
-        var digit: i64 = 0
-        if ch >= "0" and ch <= "9":
-            digit = int(ch) - int("0")
-        elif ch >= "a" and ch <= "f":
-            digit = 10 + (int(ch) - int("a"))
-        else:
-            digit = 10 + (int(ch) - int("A"))
-        result = result * 16 + digit
+        result = result * 16 + hex_nibble_value(ch)
         i = i + 1
     result
 
@@ -120,16 +113,35 @@ fn parse_hex_byte_pair(pair: text) -> i64:
     var i = 0
     while i < pair.len():
         val ch = pair[i:i + 1]
-        var digit: i64 = 0
-        if ch >= "0" and ch <= "9":
-            digit = int(ch) - int("0")
-        elif ch >= "a" and ch <= "f":
-            digit = 10 + (int(ch) - int("a"))
-        else:
-            digit = 10 + (int(ch) - int("A"))
-        result = result * 16 + digit
+        result = result * 16 + hex_nibble_value(ch)
         i = i + 1
     result
+
+fn hex_nibble_value(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0
 
 fn bytes_to_u32_le(bytes: [i32]) -> i64:
     if bytes.len() < 4:
@@ -138,7 +150,8 @@ fn bytes_to_u32_le(bytes: [i32]) -> i64:
 
 fn parse_stlink_hex_dump(raw: text) -> [i32]:
     var result: [i32] = []
-    val parts = raw.replace("\n", " ").split(" ")
+    val flattened = raw.replace("\n", " ")
+    val parts = flattened.split(" ")
     for part in parts:
         val trimmed = part.trim()
         if trimmed.len() != 2:
@@ -160,6 +173,21 @@ fn extract_hex_field(raw: text, prefix: text) -> i64:
         val trimmed = line.trim()
         if trimmed.starts_with(prefix):
             return parse_leading_hex_address(trimmed)
+    -1
+
+fn extract_hex_after_colon(raw: text, prefix: text) -> i64:
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with(prefix):
+            continue
+        val colon = trimmed.index_of(":") ?? -1
+        if colon < 0:
+            return -1
+        val tail = trimmed[colon + 1:].trim()
+        if tail.starts_with("0x") or tail.starts_with("0X"):
+            return parse_leading_hex_address(tail)
+        return parse_leading_hex_address("0x{tail}")
     -1
 
 fn qemu_riscv32_remote_memory_status() -> text:
@@ -321,12 +349,12 @@ fn openocd_live_cpuid_status(cfg_path: text, serial: text, gdb_port: i32, expect
     val combined = (run.stdout + run.stderr).trim()
     if run.exit_code != 0:
         return "blocked: {combined}"
-    val cpuid = extract_hex_field(combined, "0xe000ed00:")
+    val cpuid = extract_hex_after_colon(combined, "0xe000ed00:")
     if cpuid == expected_cpuid:
         return "ok"
     "error: unexpected cpuid 0x{cpuid}"
 
-fn stlink_live_cpuid_status(serial: text, expected_chip_id: i64, expected_flash: i64, expected_sram: i64, expected_cpuid: i64) -> text:
+fn stlink_live_cpuid_status(serial: text, expected_chip_id: text, expected_flash: text, expected_sram: text, expected_cpuid: i64) -> text:
     if not command_available("st-info"):
         return "skip: st-info unavailable"
     if not command_available("st-flash"):
@@ -338,9 +366,8 @@ fn stlink_live_cpuid_status(serial: text, expected_chip_id: i64, expected_flash:
     val block = extract_probe_block(probe_output.stdout + probe_output.stderr, serial)
     if block == "":
         return "blocked: probe {serial} not present"
-    val chip_id = extract_hex_field(block, "chipid:")
-    if chip_id != expected_chip_id:
-        return "error: unexpected st-link chip id 0x{chip_id}"
+    if not block.contains("chipid:     {expected_chip_id}"):
+        return "error: unexpected st-link chip id block"
     if not block.contains("flash:      {expected_flash}"):
         return "error: unexpected st-link flash size block"
     if not block.contains("sram:       {expected_sram}"):
@@ -349,7 +376,9 @@ fn stlink_live_cpuid_status(serial: text, expected_chip_id: i64, expected_flash:
     val cpuid_dump = shell("sh -c 'tmp=$(mktemp) && st-flash --serial={serial} read \"$tmp\" 0xE000ED00 4 >/dev/null 2>&1 && od -An -t x1 \"$tmp\" && rm -f \"$tmp\"' 2>&1")
     if cpuid_dump.exit_code != 0:
         return "blocked: {(cpuid_dump.stdout + cpuid_dump.stderr).trim()}"
-    val cpuid = bytes_to_u32_le(parse_stlink_hex_dump(cpuid_dump.stdout + cpuid_dump.stderr))
+    val cpuid_text = cpuid_dump.stdout + cpuid_dump.stderr
+    val cpuid_bytes = parse_stlink_hex_dump(cpuid_text)
+    val cpuid = bytes_to_u32_le(cpuid_bytes)
     if cpuid == expected_cpuid:
         return "ok"
     "error: unexpected st-link cpuid 0x{cpuid}"
@@ -455,14 +484,14 @@ describe "STM live debugger smoke":
 
     it "reads the H7 cpuid through st-link tools":
         val h7 = Stm32H7Target.default()
-        val status = stlink_live_cpuid_status(h7.stlink_serial, 0x480, 2097152, 131072, CORTEX_M7_CPUID)
+        val status = stlink_live_cpuid_status(h7.stlink_serial, "0x480", "2097152", "131072", CORTEX_M7_CPUID)
         expect(status_is_acceptable(status)).to_equal(true)
         if not status.starts_with("skip:") and not status.starts_with("blocked:"):
             expect(status).to_equal("ok")
 
     it "reads the WB cpuid through st-link tools":
         val wb = Stm32WbTarget.default()
-        val status = stlink_live_cpuid_status(wb.stlink_serial, 0x495, 1048576, 262144, CORTEX_M4_CPUID)
+        val status = stlink_live_cpuid_status(wb.stlink_serial, "0x495", "1048576", "262144", CORTEX_M4_CPUID)
         expect(status_is_acceptable(status)).to_equal(true)
         if not status.starts_with("skip:") and not status.starts_with("blocked:"):
             expect(status).to_equal("ok")
