@@ -28,7 +28,16 @@ pub(crate) fn compile_closure_create<M: Module>(
     let call = adapted_call(builder, alloc_ref, &[size_val]);
     let closure_ptr = builder.inst_results(call)[0];
 
-    if let Some(&func_id) = ctx.func_ids.get(func_name) {
+    let local_func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
+        if func_name.contains('.') {
+            ctx.func_ids.get(&func_name.replace('.', "_dot_")).copied()
+        } else if func_name.contains("_dot_") {
+            ctx.func_ids.get(&func_name.replace("_dot_", ".")).copied()
+        } else {
+            None
+        }
+    });
+    if let Some(func_id) = local_func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
         builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
@@ -38,8 +47,55 @@ pub(crate) fn compile_closure_create<M: Module>(
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
-        // Try: TypeName__method → typename_method (factory/constructor convention)
+        // If func_name contains _dot_, try the . form
+        let mut dot_unsanitized_storage = String::new();
+        if resolved_name.is_none() && func_name.contains("_dot_") {
+            dot_unsanitized_storage = func_name.replace("_dot_", ".");
+            resolved_name = ctx.use_map.get(&dot_unsanitized_storage)
+                .or_else(|| ctx.import_map.get(&dot_unsanitized_storage))
+                .map(|s| s.as_str());
+        }
+
+        // If func_name contains '.', try _dot_ sanitized form and other variants
+        let mut dot_sanitized_storage = String::new();
+        let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
+        if resolved_name.is_none() && func_name.contains('.') {
+            dot_sanitized_storage = func_name.replace('.', "_dot_");
+            resolved_name = ctx.use_map.get(&dot_sanitized_storage)
+                .or_else(|| ctx.import_map.get(&dot_sanitized_storage))
+                .map(|s| s.as_str());
+
+            if resolved_name.is_none() {
+                if let Some(dot_pos) = func_name.rfind('.') {
+                    let type_name = &func_name[..dot_pos];
+                    let method = &func_name[dot_pos + 1..];
+
+                    // Try: bare method name
+                    resolved_name = ctx.use_map.get(method)
+                        .or_else(|| ctx.import_map.get(method))
+                        .map(|s| s.as_str());
+
+                    // Try: lowercase_type_method
+                    if resolved_name.is_none() {
+                        type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
+                        resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                            .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                            .map(|s| s.as_str());
+                    }
+
+                    // Try: Type__method
+                    if resolved_name.is_none() {
+                        dunder_storage = format!("{}__{}", type_name, method);
+                        resolved_name = ctx.use_map.get(&dunder_storage)
+                            .or_else(|| ctx.import_map.get(&dunder_storage))
+                            .map(|s| s.as_str());
+                    }
+                }
+            }
+        }
+
+        // Try: TypeName__method → typename_method (factory/constructor convention)
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
                 if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
@@ -52,8 +108,9 @@ pub(crate) fn compile_closure_create<M: Module>(
         }
 
         if let Some(resolved) = resolved_name {
-            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
-                std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
+            let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+            let resolved = if codegen_cfg.sanitize_dots_in_symbols && resolved.contains('.') {
+                std::borrow::Cow::Owned(codegen_cfg.sanitize_symbol(resolved))
             } else {
                 std::borrow::Cow::Borrowed(resolved)
             };
@@ -180,18 +237,32 @@ pub(crate) fn compile_method_call_static<M: Module>(
 
     // Try to find the function - check multiple patterns
     // 1. Exact match (func_name)
-    // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
-    let func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
-        // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
-        // When multiple matches exist, pick the shortest name (most specific) for
-        // deterministic output regardless of HashMap iteration order.
-        let suffix = format!(".{}", func_name);
-        ctx.func_ids
-            .iter()
-            .filter(|(k, _)| k.ends_with(&suffix))
-            .min_by_key(|(k, _)| k.len())
-            .map(|(_, &v)| v)
-    });
+    // 2. Sanitized dot form (Type.method → Type_dot_method)
+    // 3. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
+    let func_id = ctx.func_ids.get(func_name).copied()
+        .or_else(|| {
+            // Try _dot_ ↔ . bidirectional lookup
+            if func_name.contains('.') {
+                let sanitized = func_name.replace('.', "_dot_");
+                ctx.func_ids.get(sanitized.as_str()).copied()
+            } else if func_name.contains("_dot_") {
+                let dotted = func_name.replace("_dot_", ".");
+                ctx.func_ids.get(dotted.as_str()).copied()
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
+            // When multiple matches exist, pick the shortest name (most specific) for
+            // deterministic output regardless of HashMap iteration order.
+            let suffix = format!(".{}", func_name);
+            ctx.func_ids
+                .iter()
+                .filter(|(k, _)| k.ends_with(&suffix))
+                .min_by_key(|(k, _)| k.len())
+                .map(|(_, &v)| v)
+        });
 
     if let Some(func_id) = func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
@@ -216,18 +287,38 @@ pub(crate) fn compile_method_call_static<M: Module>(
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
+        // If func_name contains _dot_, try the . form
+        let mut dot_unsanitized_storage = String::new();
+        if resolved_name.is_none() && func_name.contains("_dot_") {
+            dot_unsanitized_storage = func_name.replace("_dot_", ".");
+            resolved_name = ctx.use_map.get(&dot_unsanitized_storage)
+                .or_else(|| ctx.import_map.get(&dot_unsanitized_storage))
+                .map(|s| s.as_str());
+        }
+
         // If not found and func_name contains '.', try additional name variants
         let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
+        let mut dot_sanitized_storage = String::new();
         if resolved_name.is_none() {
             if let Some(dot_pos) = func_name.rfind('.') {
                 let type_name = &func_name[..dot_pos];
                 let method = &func_name[dot_pos + 1..];
 
+                // Try: Type_dot_method (sanitized dot variant — bootstrap rewrite uses this)
+                if resolved_name.is_none() {
+                    dot_sanitized_storage = func_name.replace('.', "_dot_");
+                    resolved_name = ctx.use_map.get(&dot_sanitized_storage)
+                        .or_else(|| ctx.import_map.get(&dot_sanitized_storage))
+                        .map(|s| s.as_str());
+                }
+
                 // Try: bare method name
-                resolved_name = ctx.use_map.get(method)
-                    .or_else(|| ctx.import_map.get(method))
-                    .map(|s| s.as_str());
+                if resolved_name.is_none() {
+                    resolved_name = ctx.use_map.get(method)
+                        .or_else(|| ctx.import_map.get(method))
+                        .map(|s| s.as_str());
+                }
 
                 // Try: lowercase_type_method (Simple convention)
                 if resolved_name.is_none() {
@@ -261,8 +352,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
 
         if let Some(resolved) = resolved_name {
-            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
-                std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
+            let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+            let resolved = if codegen_cfg.sanitize_dots_in_symbols && resolved.contains('.') {
+                std::borrow::Cow::Owned(codegen_cfg.sanitize_symbol(resolved))
             } else {
                 std::borrow::Cow::Borrowed(resolved)
             };

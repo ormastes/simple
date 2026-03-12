@@ -292,13 +292,15 @@ impl<M: Module> CodegenBackend<M> {
         self.sanitize_symbol(&mangled)
     }
 
-    /// Sanitize a symbol name for the target platform.
+    /// Sanitize a symbol name by replacing dots with `_dot_`.
     ///
-    /// Mach-O (macOS) does not support dots in symbol names — Apple ld crashes.
-    /// Replace dots with `_dot_` to produce valid symbols on macOS.
-    /// ELF (Linux) allows dots, so no transformation is needed.
+    /// Dots in symbol names crash Apple ld (Mach-O) and are unusual in ELF too.
+    /// Use `_dot_` consistently on all platforms so that definitions (from
+    /// `impl Type { fn method }` → `Type.method`) and calls (from bootstrap
+    /// rewriter converting `Type.method()` → `Type_dot_method()`) produce the
+    /// same mangled names.
     pub fn sanitize_symbol(&self, name: &str) -> String {
-        if self.target.os == simple_common::target::TargetOS::MacOS && name.contains('.') {
+        if name.contains('.') {
             name.replace('.', "_dot_")
         } else {
             name.to_string()
@@ -861,11 +863,13 @@ impl<M: Module> CodegenBackend<M> {
             .map_err(|e| BackendError::ModuleError(format!("declare .init_array: {e}")))?;
 
         let mut init_desc = cranelift_module::DataDescription::new();
-        init_desc.define_zeroinit(8); // 8 bytes for function pointer
+        init_desc.define(vec![0u8; 8].into_boxed_slice()); // 8 bytes for function pointer
+        init_desc.set_align(8); // Must be pointer-aligned for mod_init_func
         let func_ref = self.module.declare_func_in_data(func_id, &mut init_desc);
         init_desc.write_function_addr(0, func_ref);
-        // Set section to .init_array for automatic constructor invocation
-        init_desc.set_segment_section("", ".init_array");
+        // Set section for automatic constructor invocation (platform-specific).
+        let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+        init_desc.set_segment_section(codegen_cfg.init_section_segment, codegen_cfg.init_section_name);
 
         self.module
             .define_data(init_array_id, &init_desc)

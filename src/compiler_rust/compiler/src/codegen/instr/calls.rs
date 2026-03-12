@@ -473,7 +473,15 @@ pub fn compile_call<M: Module>(
         if !is_profiler_function(ffi_name) {
             emit_profiler_return(ctx, builder)?;
         }
-    } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
+    } else if let Some(callee_id) = ctx.func_ids.get(func_name).copied().or_else(|| {
+        if func_name.contains('.') {
+            ctx.func_ids.get(&func_name.replace('.', "_dot_")).copied()
+        } else if func_name.contains("_dot_") {
+            ctx.func_ids.get(&func_name.replace("_dot_", ".")).copied()
+        } else {
+            None
+        }
+    }) {
         // User-defined function (not a known runtime FFI function)
         if !is_profiler_function(func_name) {
             emit_profiler_call(ctx, builder, func_name)?;
@@ -566,18 +574,38 @@ pub fn compile_call<M: Module>(
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
+        // If func_name contains _dot_, try the . form
+        let mut dot_unsanitized_storage = String::new();
+        if resolved_name.is_none() && func_name.contains("_dot_") {
+            dot_unsanitized_storage = func_name.replace("_dot_", ".");
+            resolved_name = ctx.use_map.get(&dot_unsanitized_storage)
+                .or_else(|| ctx.import_map.get(&dot_unsanitized_storage))
+                .map(|s| s.as_str());
+        }
+
         // If not found and func_name contains '.', try additional name variants
         let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
+        let mut dot_sanitized_storage = String::new();
         if resolved_name.is_none() {
             if let Some(dot_pos) = func_name.rfind('.') {
                 let type_name = &func_name[..dot_pos];
                 let method = &func_name[dot_pos + 1..];
 
+                // Try: Type_dot_method (sanitized dot variant — bootstrap rewrite uses this)
+                if resolved_name.is_none() {
+                    dot_sanitized_storage = func_name.replace('.', "_dot_");
+                    resolved_name = ctx.use_map.get(&dot_sanitized_storage)
+                        .or_else(|| ctx.import_map.get(&dot_sanitized_storage))
+                        .map(|s| s.as_str());
+                }
+
                 // Try: bare method name
-                resolved_name = ctx.use_map.get(method)
-                    .or_else(|| ctx.import_map.get(method))
-                    .map(|s| s.as_str());
+                if resolved_name.is_none() {
+                    resolved_name = ctx.use_map.get(method)
+                        .or_else(|| ctx.import_map.get(method))
+                        .map(|s| s.as_str());
+                }
 
                 // Try: lowercase_type_method (Simple convention)
                 if resolved_name.is_none() {
@@ -612,10 +640,10 @@ pub fn compile_call<M: Module>(
 
         let resolved_name = resolved_name.unwrap_or(func_name);
 
-        // Sanitize symbol name for macOS: Mach-O does not support dots in symbols.
-        // Apple ld crashes on dot-containing symbol names.
-        let resolved_name = if cfg!(target_os = "macos") && resolved_name.contains('.') {
-            std::borrow::Cow::Owned(resolved_name.replace('.', "_dot_"))
+        // Sanitize symbol name if required by object format (e.g., Mach-O forbids dots).
+        let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+        let resolved_name = if codegen_cfg.sanitize_dots_in_symbols && resolved_name.contains('.') {
+            std::borrow::Cow::Owned(codegen_cfg.sanitize_symbol(resolved_name))
         } else {
             std::borrow::Cow::Borrowed(resolved_name)
         };

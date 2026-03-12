@@ -234,6 +234,15 @@ impl NativeProjectBuilder {
             file_sources.push((path.clone(), source));
         }
 
+        // Apply bootstrap rewrite to all sources BEFORE building import map,
+        // so import map keys match the rewritten source used during compilation.
+        let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+        if is_bootstrap {
+            for (_path, source) in file_sources.iter_mut() {
+                *source = apply_bootstrap_rewrite(source);
+            }
+        }
+
         // Determine which files need recompilation via content hash
         let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
@@ -419,19 +428,19 @@ impl NativeProjectBuilder {
     /// Discover all .spl files in source directories.
     fn discover_files(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for dir in &self.source_dirs {
             if dir.is_dir() {
-                collect_spl_files_recursive(dir, &mut files);
+                collect_spl_files_inner(dir, &mut files, &mut seen);
             }
         }
         if let Some(entry_file) = &self.entry_file {
             let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.clone());
-            if !files.iter().any(|path| same_file_path(path, &canonical_entry)) {
+            if seen.insert(canonical_entry.clone()) {
                 files.push(canonical_entry);
             }
         }
         files.sort();
-        files.dedup_by(|a, b| same_file_path(a, b));
         files
     }
 
@@ -548,36 +557,46 @@ impl NativeProjectBuilder {
     /// proper static constructor/destructor ordering.
     fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        let cxx = find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
-
-        // Stub variant (weak attribute vs MSVC ALTERNATENAME) selected by PlatformLinkConfig
-        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&cxx);
-        let stub_code = link_config.main_stub_code();
-
-        std::fs::write(&main_cpp, stub_code)
-            .map_err(|e| format!("write main stub: {e}"))?;
+        std::fs::write(
+            &main_cpp,
+            r#"
+extern "C" {
+    int __attribute__((weak)) spl_main(void);
+    void __attribute__((weak)) rt_set_args(int argc, char** argv);
+    void __attribute__((weak)) __simple_runtime_init(void);
+    void __attribute__((weak)) __simple_runtime_shutdown(void);
+}
+int main(int argc, char** argv) {
+    if (__simple_runtime_init) __simple_runtime_init();
+    if (rt_set_args) rt_set_args(argc, argv);
+    int r = spl_main ? spl_main() : 0;
+    if (__simple_runtime_shutdown) __simple_runtime_shutdown();
+    return r;
+}
+"#,
+        )
+        .map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        // Use C++ compiler for main stub — ensures C++ runtime init hooks
-        let output = if is_clang_cl {
+        // Use clang++ to compile C++ main stub — ensures C++ runtime init hooks
+        let cxx = find_cxx_compiler();
+        let status = if cxx.contains("clang-cl") {
             std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(format!("/Fo{}", main_o.display()))
                 .arg(&main_cpp)
-                .output()
+                .status()
                 .map_err(|e| format!("compile main stub: {e}"))?
         } else {
             std::process::Command::new(&cxx)
                 .args(["-c", "-o"])
                 .arg(&main_o)
                 .arg(&main_cpp)
-                .output()
+                .status()
                 .map_err(|e| format!("compile main stub: {e}"))?
         };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to compile main stub ({}): {}", cxx, stderr));
+        if !status.success() {
+            return Err("Failed to compile main stub".to_string());
         }
         Ok(main_o)
     }
@@ -608,25 +627,20 @@ impl NativeProjectBuilder {
             find_c_compiler()
         };
         let is_clang_cl = cc.contains("clang-cl");
-
-        // All platform-specific linker behavior comes from PlatformLinkConfig.
-        // On Windows, auto-detect MSVC vs MinGW ABI from the compiler.
-        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&cc);
-
         let mut cmd = std::process::Command::new(&cc);
-        if link_config.use_fpic {
+        if !is_clang_cl {
             cmd.arg("-fPIC");
         }
 
-        // Platform-specific extra linker flags (e.g., macOS -ld_classic)
-        for flag in &link_config.extra_link_flags {
-            cmd.arg(flag);
-        }
+        // macOS: Apple's new ld (ld-1230+) crashes on some Cranelift-generated Mach-O objects
+        // (missing LC_BUILD_VERSION, unusual relocation patterns). Use -ld_classic as workaround.
+        // PIE is the default on macOS so -no-pie is not needed.
+        #[cfg(target_os = "macos")]
+        cmd.arg("-Wl,-ld_classic");
 
-        // PIE control
-        if link_config.disable_pie {
-            cmd.arg("-no-pie");
-        }
+        // Linux/FreeBSD: disable PIE for simpler static linking.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        cmd.arg("-no-pie");
 
         if is_clang_cl {
             cmd.arg(&main_o);
@@ -637,7 +651,11 @@ impl NativeProjectBuilder {
 
         // For large builds, archive objects into a static library first to avoid
         // linker crashes when passing thousands of individual .o files.
-        if object_paths.len() > 100 {
+        // On macOS, skip archiving to avoid ranlib/ar issues with Cranelift Mach-O objects.
+        // macOS ld can handle thousands of .o files directly via -filelist.
+        let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+        let archive_threshold = codegen_cfg.archive_threshold;
+        if object_paths.len() > archive_threshold {
             let archive_path = temp_dir.join("libspl_objects.a");
             let ar_tool = find_archive_tool();
             let is_msvc_lib = ar_tool == "lib";
@@ -648,6 +666,9 @@ impl NativeProjectBuilder {
             let mut ar_ok = true;
             for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
                 let status = if is_msvc_lib {
+                    // MSVC lib.exe: lib /OUT:archive.lib [existing.lib] obj1.o obj2.o ...
+                    // lib.exe has no append mode — always recreate with /OUT: and include
+                    // the existing archive as input on subsequent batches.
                     let mut lib_cmd = std::process::Command::new(&ar_tool);
                     lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
                     if i > 0 {
@@ -672,16 +693,82 @@ impl NativeProjectBuilder {
                 }
             }
             if !ar_ok {
-                link_config.run_ar_fallback(
-                    temp_dir,
-                    &archive_path,
-                    object_paths,
-                    BATCH_SIZE,
-                )?;
+                // Fallback: try libtool on macOS (also batched)
+                #[cfg(target_os = "macos")]
+                {
+                    let mut sub_archives = Vec::new();
+                    for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                        let sub = temp_dir.join(format!("_batch_{}.a", i));
+                        let s = std::process::Command::new("libtool")
+                            .arg("-static")
+                            .arg("-o")
+                            .arg(&sub)
+                            .args(chunk)
+                            .status()
+                            .map_err(|e| format!("libtool batch {i}: {e}"))?;
+                        if !s.success() {
+                            return Err(format!("libtool failed on batch {i}"));
+                        }
+                        sub_archives.push(sub);
+                    }
+                    let s = std::process::Command::new("libtool")
+                        .arg("-static")
+                        .arg("-o")
+                        .arg(&archive_path)
+                        .args(&sub_archives)
+                        .status()
+                        .map_err(|e| format!("libtool merge: {e}"))?;
+                    if !s.success() {
+                        return Err("libtool merge failed".to_string());
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err("ar failed to create archive".to_string());
             }
-            // Link the archive with whole-archive flags (per-platform via PlatformLinkConfig)
-            link_config.add_whole_archive_args(&mut cmd, &archive_path, is_clang_cl);
+            // Link the archive. Use -force_load/--whole-archive to include all symbols,
+            // not just referenced ones (needed for runtime dispatch tables).
+            // On macOS, also pass -no_deduplicate for faster linking with large archives.
+            #[cfg(target_os = "macos")]
+            {
+                cmd.arg("-Wl,-force_load").arg(&archive_path);
+                cmd.arg("-Wl,-no_deduplicate");
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                cmd.arg("-Wl,--whole-archive")
+                    .arg(&archive_path)
+                    .arg("-Wl,--no-whole-archive");
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if is_clang_cl {
+                    // clang-cl: pass MSVC linker flags via -Xlinker
+                    cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
+                } else {
+                    cmd.arg("-Wl,--whole-archive")
+                        .arg(&archive_path)
+                        .arg("-Wl,--no-whole-archive");
+                }
+            }
         } else {
+            // On macOS with many objects, use -filelist to avoid argument length limits.
+            #[cfg(target_os = "macos")]
+            if object_paths.len() > 100 {
+                let filelist_path = temp_dir.join("objects.filelist");
+                let filelist_content: String = object_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                std::fs::write(&filelist_path, &filelist_content)
+                    .map_err(|e| format!("write filelist: {e}"))?;
+                cmd.arg("-Wl,-filelist").arg(&filelist_path);
+            } else {
+                for obj in object_paths {
+                    cmd.arg(obj);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             for obj in object_paths {
                 cmd.arg(obj);
             }
@@ -696,10 +783,12 @@ impl NativeProjectBuilder {
         }
 
         // Libraries — via PlatformLinkConfig (single source of truth per OS)
+        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
         if is_clang_cl {
+            // clang-cl: pass .lib names directly (MSVC linker convention)
             for lib in &link_config.libraries {
                 cmd.arg(format!("{}.lib", lib));
             }
@@ -708,8 +797,11 @@ impl NativeProjectBuilder {
                 cmd.arg(format!("-l{}", lib));
             }
         }
-        // macOS: c++ linking when native_all is present
-        if link_config.generate_builtin_trampolines && find_native_all_library().is_some() {
+        // macOS-specific: c++ linking when native_all is present
+        // (native_all/Cargo.toml hard-codes features=["llvm"])
+        if codegen_cfg.object_format == simple_common::platform::link_config::ObjectFormat::MachO
+            && find_native_all_library().is_some()
+        {
             if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
                 cmd.arg(format!("-L{}", llvm_lib));
                 cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
@@ -717,18 +809,32 @@ impl NativeProjectBuilder {
             cmd.arg("-lc++");
         }
 
-        // Generate stub object for unresolved symbols (not on Windows — uses /FORCE:UNRESOLVED)
-        if link_config.supports_asm_stubs {
+        // Generate stub object for unresolved symbols + apply linker flags.
+        // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
+        #[cfg(not(target_os = "windows"))]
+        {
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
         }
         for flag in &link_config.unresolved_symbol_flags {
             cmd.arg(flag);
         }
-        link_config.add_force_unresolved_args(&mut cmd, is_clang_cl);
+        #[cfg(target_os = "windows")]
+        if is_clang_cl {
+            cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
+        }
 
         if self.config.strip {
-            link_config.add_strip_args(&mut cmd, is_clang_cl);
+            #[cfg(target_os = "macos")]
+            cmd.arg("-Wl,-S");
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            cmd.arg("-Wl,-s");
+            #[cfg(target_os = "windows")]
+            if is_clang_cl {
+                cmd.arg("-Xlinker").arg("/DEBUG:NONE");
+            } else {
+                cmd.arg("-Wl,-s");
+            }
         }
 
         if self.config.verbose {
@@ -738,6 +844,7 @@ impl NativeProjectBuilder {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
+            // Report binary size
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!("Linked: {} ({} KB) via {cc}", self.output.display(), meta.len() / 1024);
             }
@@ -752,11 +859,9 @@ impl NativeProjectBuilder {
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 ///
 /// Scans the given object files / archive for undefined symbols that have no definition,
-/// then generates a small assembly file with weak stub functions returning nil for each.
+/// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
-///
-/// Only called when `PlatformLinkConfig::supports_asm_stubs` is true (Linux, macOS, FreeBSD,
-/// MinGW). Windows MSVC uses `/FORCE:UNRESOLVED` instead.
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
@@ -892,6 +997,11 @@ fn generate_stub_object(
         "Generating {} stub functions for unresolved symbols...",
         needs_stub.len()
     );
+    if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
+        for sym in &needs_stub {
+            eprintln!("  STUB: {}", sym);
+        }
+    }
 
     // Generate pure assembly stubs via PlatformLinkConfig + asm_helpers.
     // Each stub returns tagged nil (3). Strategy is per-OS (Weak/WeakDefinition/Strong).
@@ -901,14 +1011,15 @@ fn generate_stub_object(
     let host_target = simple_common::target::Target::host();
     let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
     let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
+    let stub_codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
 
     for sym in &needs_stub {
         if !plat_config.is_valid_asm_label(sym) {
             continue;
         }
 
-        // __builtin_* symbols → trampoline to real function (macOS only)
-        if plat_config.generate_builtin_trampolines && sym.starts_with("___builtin_") {
+        // __builtin_* symbols → trampoline to real function (platforms with C underscore prefix)
+        if stub_codegen_cfg.c_symbol_underscore_prefix && sym.starts_with("___builtin_") {
             let real_fn = format!("_{}", &sym["___builtin_".len()..]);
             asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
             continue;
@@ -939,6 +1050,7 @@ fn generate_stub_object(
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn is_system_symbol(sym: &str) -> bool {
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
@@ -1015,13 +1127,13 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
 }
 
 /// Try alternate name forms to resolve a call target through use_map/import_map.
-/// MIR generates `Type__method` but import_map uses `Type.method` (and vice versa).
+/// Names may use `.`, `__`, or `_dot_` as separators between Type and method.
 fn resolve_name_variants(
     name: &str,
     use_map: &std::collections::HashMap<String, String>,
     import_map: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    // Try Type__method → Type.method
+    // Try Type__method → Type.method and Type_dot_method
     if let Some(pos) = name.find("__") {
         let type_part = &name[..pos];
         let method_part = &name[pos + 2..];
@@ -1029,26 +1141,44 @@ fn resolve_name_variants(
         if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
             return Some(resolved.clone());
         }
+        let dot_form = format!("{}_dot_{}", type_part, method_part);
+        if let Some(resolved) = use_map.get(&dot_form).or_else(|| import_map.get(&dot_form)) {
+            return Some(resolved.clone());
+        }
         // Also try all-lowercase joined: "OptimizationConfig__speed" → "optimizationconfig_speed"
-        // (desugar creates Type__method but actual fn may be typename_method in lowercase)
         let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
         if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
             return Some(resolved.clone());
         }
-        // Try lowercase no-separator: "OptimizationConfig__speed" → "optimizationconfigspeed"
         let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
         if let Some(resolved) = import_map.get(&lower_no_sep) {
             return Some(resolved.clone());
         }
     }
-    // Try Type.method → Type__method
+    // Try Type_dot_method → Type.method and Type__method
+    if let Some(pos) = name.find("_dot_") {
+        let type_part = &name[..pos];
+        let method_part = &name[pos + 5..];
+        let dotted = format!("{}.{}", type_part, method_part);
+        if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
+            return Some(resolved.clone());
+        }
+        let dunder = format!("{}__{}", type_part, method_part);
+        if let Some(resolved) = use_map.get(&dunder).or_else(|| import_map.get(&dunder)) {
+            return Some(resolved.clone());
+        }
+    }
+    // Try Type.method → Type__method and Type_dot_method
     if let Some(pos) = name.find('.') {
         let underscored = format!("{}__{}", &name[..pos], &name[pos + 1..]);
         if let Some(resolved) = use_map.get(&underscored).or_else(|| import_map.get(&underscored)) {
             return Some(resolved.clone());
         }
+        let dot_form = format!("{}_dot_{}", &name[..pos], &name[pos + 1..]);
+        if let Some(resolved) = use_map.get(&dot_form).or_else(|| import_map.get(&dot_form)) {
+            return Some(resolved.clone());
+        }
         // Also try replacing ALL dots with `__` for module-qualified names
-        // e.g., "types.locale_en_us" → "types__locale_en_us"
         let all_under = name.replace('.', "__");
         if all_under != underscored {
             if let Some(resolved) = use_map.get(&all_under).or_else(|| import_map.get(&all_under)) {
@@ -1474,12 +1604,24 @@ fn mangle_mir(
                                 continue;
                             }
                         }
+                        // Also try _dot_ sanitized form for names with dots
+                        let dot_resolved = if name.contains('.') {
+                            let dot_sanitized = name.replace('.', "_dot_");
+                            local_mangled.get(&dot_sanitized)
+                                .or_else(|| use_map.get(&dot_sanitized))
+                                .or_else(|| import_map.get(&dot_sanitized))
+                                .cloned()
+                        } else {
+                            None
+                        };
                         if let Some(mangled) = local_mangled.get(&name) {
                             *target = target.with_name(mangled.clone());
                         } else if let Some(resolved) = use_map.get(&name) {
                             *target = target.with_name(resolved.clone());
                         } else if let Some(resolved) = import_map.get(&name) {
                             *target = target.with_name(resolved.clone());
+                        } else if let Some(resolved) = dot_resolved {
+                            *target = target.with_name(resolved);
                         } else if let Some(resolved) = resolve_name_variants(&name, use_map, import_map) {
                             *target = target.with_name(resolved);
                         } else if name.contains('.') {
@@ -1636,6 +1778,445 @@ fn mangle_mir(
     unresolved_count
 }
 
+/// Fix Mach-O object files with corrupted symbol table string references.
+///
+/// The cranelift `object` crate (0.36.x) sometimes emits Mach-O files where
+/// symbol entries (nlist_64.n_strx) reference offsets past the end of the string
+/// table. This causes ar/ranlib/ld to reject or crash on the objects.
+///
+/// Fix strategy: scan all symbol n_strx values. If any exceed strsize, grow the
+/// string table and write placeholder names for invalid symbols.
+#[cfg(target_os = "macos")]
+fn fix_macho_strtab_overflow(mut data: Vec<u8>) -> Vec<u8> {
+    if data.len() < 32 {
+        return data;
+    }
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if magic != 0xFEED_FACF {
+        return data;
+    }
+    let ncmds = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    let mut off = 32usize;
+    for _ in 0..ncmds {
+        if off + 8 > data.len() {
+            break;
+        }
+        let cmd = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        let cmdsize =
+            u32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]])
+                as usize;
+        if cmd == 2 && off + 24 <= data.len() {
+            // LC_SYMTAB
+            let symoff = u32::from_le_bytes([
+                data[off + 8], data[off + 9], data[off + 10], data[off + 11],
+            ]) as usize;
+            let nsyms = u32::from_le_bytes([
+                data[off + 12], data[off + 13], data[off + 14], data[off + 15],
+            ]) as usize;
+            let stroff = u32::from_le_bytes([
+                data[off + 16], data[off + 17], data[off + 18], data[off + 19],
+            ]) as usize;
+            let strsize = u32::from_le_bytes([
+                data[off + 20], data[off + 21], data[off + 22], data[off + 23],
+            ]) as usize;
+
+            // Find max n_strx across all symbols
+            let mut max_strx: usize = 0;
+            let mut bad_count = 0usize;
+            for i in 0..nsyms {
+                let soff = symoff + i * 16; // nlist_64 = 16 bytes
+                if soff + 4 > data.len() { break; }
+                let n_strx = u32::from_le_bytes([
+                    data[soff], data[soff + 1], data[soff + 2], data[soff + 3],
+                ]) as usize;
+                if n_strx >= strsize {
+                    bad_count += 1;
+                    if n_strx > max_strx {
+                        max_strx = n_strx;
+                    }
+                }
+            }
+
+            if bad_count == 0 {
+                // No overflow — check if file needs padding
+                let needed = stroff + strsize;
+                if needed > data.len() {
+                    data.resize(needed, 0);
+                }
+                return data;
+            }
+
+            // Rebuild: rewrite bad symbol n_strx values to point to valid placeholder names.
+            // Append placeholder strings to the string table.
+            // Ensure the file and strsize are consistent.
+            let strtab_end = stroff + strsize;
+            let mut extra_strings = Vec::new();
+            let mut new_strsize = strsize;
+            for i in 0..nsyms {
+                let soff = symoff + i * 16;
+                if soff + 4 > data.len() { break; }
+                let n_strx = u32::from_le_bytes([
+                    data[soff], data[soff + 1], data[soff + 2], data[soff + 3],
+                ]) as usize;
+                if n_strx >= strsize {
+                    // Rewrite this symbol's n_strx to point to a new placeholder string
+                    let placeholder = format!("__stub_sym_{}\0", i);
+                    let new_offset = new_strsize;
+                    new_strsize += placeholder.len();
+                    extra_strings.push((soff, new_offset, placeholder));
+                }
+            }
+
+            // Extend file to accommodate new string table
+            let new_file_end = stroff + new_strsize;
+            if new_file_end > data.len() {
+                data.resize(new_file_end, 0);
+            }
+
+            // Write placeholder strings into the extended string table
+            for (soff, new_offset, placeholder) in &extra_strings {
+                // Write new n_strx to the symbol entry
+                let new_strx_bytes = (*new_offset as u32).to_le_bytes();
+                data[*soff] = new_strx_bytes[0];
+                data[*soff + 1] = new_strx_bytes[1];
+                data[*soff + 2] = new_strx_bytes[2];
+                data[*soff + 3] = new_strx_bytes[3];
+                // Write the placeholder string into the string table
+                let str_pos = stroff + new_offset;
+                for (j, &b) in placeholder.as_bytes().iter().enumerate() {
+                    if str_pos + j < data.len() {
+                        data[str_pos + j] = b;
+                    }
+                }
+            }
+
+            // Update strsize in the LC_SYMTAB command
+            let new_strsize_bytes = (new_strsize as u32).to_le_bytes();
+            data[off + 20] = new_strsize_bytes[0];
+            data[off + 21] = new_strsize_bytes[1];
+            data[off + 22] = new_strsize_bytes[2];
+            data[off + 23] = new_strsize_bytes[3];
+
+            eprintln!(
+                "[WARN] Mach-O strtab: fixed {bad_count} bad symbols (strsize {strsize} -> {new_strsize})"
+            );
+            break;
+        }
+        off += cmdsize;
+    }
+    data
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fix_macho_strtab_overflow(data: Vec<u8>) -> Vec<u8> {
+    data
+}
+
+/// Apply bootstrap source rewriting for the Rust seed parser.
+///
+/// Transforms Simple source code to be compatible with the Rust bootstrap parser:
+/// - `??` protection/restoration
+/// - `.?` → `!= nil` (optional chaining)
+/// - `?` suffix stripping from types
+/// - `Type.method()` → `Type_dot_method()` (static method calls)
+/// - `fn(...)` type annotations → `any`
+/// - `cli` blocks → commented out
+/// - `impl<...>` → `impl` (strip generics)
+/// - `~>` → `|>` (layer connect)
+/// - `/* complex expr */` → `0`
+///
+/// This is idempotent: applying it twice produces the same result.
+fn apply_bootstrap_rewrite(source: &str) -> String {
+    let mut s = source.replace("??", "\x00COALESCE\x00");
+
+    // Handle `.?` (optional chaining / nil-check) before general ? stripping.
+    for pat in [".?:", ".?\n", ".?\r\n", ".? ", ".?\t", ".?)", ".?,", ".?]", ".?;"] {
+        s = s.replace(pat, &format!(" != nil{}", &pat[2..]));
+    }
+    s = s.replace(".? =", " != nil =");
+    if s.ends_with(".?") {
+        let len = s.len();
+        s.replace_range(len - 2.., " != nil");
+    }
+
+    // Strip `?` suffix from nullable types
+    for pat in ["? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;"] {
+        while s.contains(pat) {
+            s = s.replace(pat, &pat[1..]);
+        }
+    }
+
+    // Restore ?? (null coalesce)
+    s = s.replace("\x00COALESCE\x00", "??");
+
+    // Additional type normalizations
+    s = s.replace("text?", "text");
+    s = s.replace("Option<text>", "text");
+    s = s.replace("Option<i64>", "i64");
+    s = s.replace("Result<text, text>", "text");
+
+    // complex expr + layer connect
+    s = s.replace("/* complex expr */", "0");
+    s = s.replace(" ~> ", " |> ");
+
+    // Static method dot syntax: Type.method → Type_dot_method
+    {
+        let mut result = String::new();
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        let mut in_triple_quote = false;
+        let mut in_single_quote = false;
+        let mut in_comment = false;
+        while i < len {
+            if !in_single_quote && !in_comment && i + 2 < len
+                && bytes[i] == b'"' && bytes[i+1] == b'"' && bytes[i+2] == b'"'
+            {
+                in_triple_quote = !in_triple_quote;
+                result.push('"'); result.push('"'); result.push('"');
+                i += 3;
+                continue;
+            }
+            if in_triple_quote {
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            if !in_comment && !in_single_quote && bytes[i] == b'"' {
+                in_single_quote = true;
+                result.push('"');
+                i += 1;
+                continue;
+            }
+            if in_single_quote {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    result.push(bytes[i] as char);
+                    result.push(bytes[i+1] as char);
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    in_single_quote = false;
+                }
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            if bytes[i] == b'#' {
+                in_comment = true;
+            }
+            if in_comment {
+                if bytes[i] == b'\n' {
+                    in_comment = false;
+                }
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+
+            // Look for UpperCase.identifier pattern
+            if bytes[i] == b'.' && i > 0 && i + 1 < len
+                && bytes[i + 1].is_ascii_lowercase()
+            {
+                let mut j = i;
+                while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                    j -= 1;
+                }
+                let prefix = &s[j..i];
+                // Only rewrite PascalCase type names (e.g., CompileOptions.default),
+                // NOT ALL_CAPS constants (e.g., ALPHA_LOWER.contains) or
+                // single-char variables (e.g., A.length)
+                let is_pascal_type = !prefix.is_empty()
+                    && prefix.as_bytes()[0].is_ascii_uppercase()
+                    && prefix.len() > 1
+                    && prefix.bytes().any(|b| b.is_ascii_lowercase())
+                    && (j == 0 || bytes[j - 1] != b'.');
+                if is_pascal_type {
+                    let mut k = i + 1;
+                    while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                        k += 1;
+                    }
+                    let method = &s[i + 1..k];
+                    if !method.is_empty() {
+                        result.push_str("_dot_");
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        s = result;
+    }
+
+    // Function-type parameters → `any` (string/comment aware)
+    {
+        let mut result = String::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        let mut in_triple_quote = false;
+        let mut in_single_quote = false;
+        let mut in_comment = false;
+        while i < bytes.len() {
+            if !in_single_quote && !in_comment && i + 2 < bytes.len()
+                && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"'
+            {
+                in_triple_quote = !in_triple_quote;
+                result.push('"'); result.push('"'); result.push('"');
+                i += 3;
+                continue;
+            }
+            if in_triple_quote { result.push(bytes[i] as char); i += 1; continue; }
+            if !in_comment && !in_single_quote && bytes[i] == b'"' {
+                in_single_quote = true;
+                result.push('"'); i += 1; continue;
+            }
+            if in_single_quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i] as char); result.push(bytes[i + 1] as char); i += 2; continue;
+                }
+                if bytes[i] == b'"' { in_single_quote = false; }
+                result.push(bytes[i] as char); i += 1; continue;
+            }
+            if bytes[i] == b'#' { in_comment = true; }
+            if in_comment {
+                if bytes[i] == b'\n' { in_comment = false; }
+                result.push(bytes[i] as char); i += 1; continue;
+            }
+            // Detect `: fn(` or `, fn(`
+            if i + 4 < bytes.len()
+                && (bytes[i] == b':' || bytes[i] == b',')
+                && bytes[i + 1] == b' '
+                && bytes[i + 2] == b'f'
+                && bytes[i + 3] == b'n'
+                && bytes[i + 4] == b'('
+            {
+                result.push(bytes[i] as char);
+                result.push(b' ' as char);
+                let mut j = i + 4;
+                let mut depth = 1i32;
+                j += 1;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                if j + 4 <= bytes.len() && &s[j..j + 4] == " -> " {
+                    j += 4;
+                    let mut type_depth = 0i32;
+                    while j < bytes.len() {
+                        let c = bytes[j];
+                        if c == b'<' || c == b'(' || c == b'[' { type_depth += 1; }
+                        else if c == b'>' || c == b')' || c == b']' {
+                            if type_depth > 0 { type_depth -= 1; } else { break; }
+                        } else if type_depth == 0
+                            && (c == b',' || c == b':' || c == b'\n' || c == b'\r' || c == b'#' || c == b' ')
+                        { break; }
+                        j += 1;
+                    }
+                }
+                if j < bytes.len() && bytes[j] == b':' {
+                    result.push_str("fn()");
+                } else {
+                    result.push_str("any");
+                }
+                i = j;
+            } else {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        s = result;
+    }
+    // Bare `fn` as field type
+    s = s.replace(": fn\n", ": any\n");
+    s = s.replace(": fn\r\n", ": any\r\n");
+
+    // `cli Name:` blocks → commented out
+    {
+        let mut result = String::new();
+        let mut in_cli_block = false;
+        let mut cli_indent: Option<usize> = None;
+        for line in s.lines() {
+            let trimmed = line.trim_start();
+            if !in_cli_block && trimmed.starts_with("cli ") && trimmed.ends_with(':') {
+                in_cli_block = true;
+                cli_indent = Some(line.len() - trimmed.len());
+                result.push_str("# ");
+                result.push_str(line);
+            } else if in_cli_block {
+                let indent = line.len() - trimmed.len();
+                if trimmed.is_empty() || indent > cli_indent.unwrap_or(0) {
+                    result.push_str("# ");
+                    result.push_str(line);
+                } else {
+                    in_cli_block = false;
+                    cli_indent = None;
+                    result.push_str(line);
+                }
+            } else {
+                result.push_str(line);
+            }
+            result.push('\n');
+        }
+        if !s.ends_with('\n') && result.ends_with('\n') {
+            result.pop();
+        }
+        s = result;
+    }
+
+    // Generic impl blocks: `impl<T, E> Type<T, E>:` → `impl Type:`
+    {
+        let mut result = String::new();
+        for line in s.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("impl<") {
+                let indent = &line[..line.len() - trimmed.len()];
+                let rest = &trimmed[4..];
+                let after_generic = if let Some(gt) = find_balanced_gt(rest) {
+                    &rest[gt + 1..]
+                } else {
+                    rest
+                };
+                let after_generic = after_generic.trim_start();
+                let clean_type = if let Some(lt_pos) = after_generic.find('<') {
+                    if let Some(rest_after) = after_generic.get(lt_pos..) {
+                        if let Some(gt) = find_balanced_gt(rest_after) {
+                            format!("{}{}", &after_generic[..lt_pos], &rest_after[gt + 1..])
+                        } else {
+                            after_generic.to_string()
+                        }
+                    } else {
+                        after_generic.to_string()
+                    }
+                } else {
+                    after_generic.to_string()
+                };
+                let clean_type = if let Some(w) = clean_type.find(" where ") {
+                    format!("{}:", &clean_type[..w])
+                } else {
+                    clean_type
+                };
+                result.push_str(indent);
+                result.push_str("impl ");
+                result.push_str(&clean_type);
+                result.push('\n');
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        if !s.ends_with('\n') && result.ends_with('\n') {
+            result.pop();
+        }
+        s = result;
+    }
+
+    s
+}
+
 fn compile_file_to_object(
     source: &str,
     file_path: &Path,
@@ -1645,7 +2226,9 @@ fn compile_file_to_object(
     is_entry: bool,
     imports: &ModuleImports,
 ) -> Result<Vec<u8>, String> {
-    // Bootstrap hack: normalize optional types that older lenient type resolver misses
+    // Bootstrap hack: normalize optional types that older lenient type resolver misses.
+    // NOTE: when SIMPLE_BOOTSTRAP=1, sources are already rewritten in the build()
+    // method before build_import_map, so this is a no-op (idempotent).
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let mut source = if is_bootstrap {
         // Protect ?? (null coalesce) before stripping ? from types
@@ -1684,6 +2267,110 @@ fn compile_file_to_object(
         s = s.replace("/* complex expr */", "0");
         // Layer connect operator ~> not yet in parser — rewrite to pipe |> for bootstrap
         s = s.replace(" ~> ", " |> ");
+
+        // Static method dot syntax: Type.method → Type_dot_method
+        // The full Simple compiler supports `Type.method()` for static calls, but
+        // the Rust bootstrap parser only understands identifier-style calls.
+        // We use `_dot_` to match `sanitize_symbol()` in the codegen, which replaces
+        // dots with `_dot_` on all platforms.
+        // Convert in: use statements, call expressions, and import lists.
+        // IMPORTANT: Must be string/comment-aware to avoid mangling docstrings.
+        {
+            let mut result = String::new();
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            let mut i = 0;
+            let mut in_triple_quote = false;
+            let mut in_single_quote = false;
+            let mut in_comment = false;
+            while i < len {
+                // Track triple-quoted strings
+                if !in_single_quote && !in_comment && i + 2 < len
+                    && bytes[i] == b'"' && bytes[i+1] == b'"' && bytes[i+2] == b'"'
+                {
+                    in_triple_quote = !in_triple_quote;
+                    result.push('"'); result.push('"'); result.push('"');
+                    i += 3;
+                    continue;
+                }
+                if in_triple_quote {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                // Track single-quoted strings
+                if !in_comment && !in_single_quote && bytes[i] == b'"' {
+                    in_single_quote = true;
+                    result.push('"');
+                    i += 1;
+                    continue;
+                }
+                if in_single_quote {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        result.push(bytes[i] as char);
+                        result.push(bytes[i+1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        in_single_quote = false;
+                    }
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                // Track comments
+                if bytes[i] == b'#' {
+                    in_comment = true;
+                }
+                if in_comment {
+                    if bytes[i] == b'\n' {
+                        in_comment = false;
+                    }
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+
+                // Look for UpperCase.identifier pattern: e.g., Type.method
+                // Pattern: uppercase letter followed by identifier chars, then '.', then lowercase identifier
+                if bytes[i] == b'.' && i > 0 && i + 1 < len
+                    && bytes[i + 1].is_ascii_lowercase()
+                {
+                    // Check that the character before '.' is part of an identifier
+                    // ending with an uppercase-starting word (Type name)
+                    let mut j = i;
+                    while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                        j -= 1;
+                    }
+                    let prefix = &s[j..i];
+                    // Must start with uppercase (Type name) and not be a module path
+                    // Skip: self.method, module.something (lowercase start)
+                    if !prefix.is_empty()
+                        && prefix.as_bytes()[0].is_ascii_uppercase()
+                        // Not inside a module path (preceded by another dot)
+                        && (j == 0 || bytes[j - 1] != b'.')
+                    {
+                        // Check what follows: must be an identifier (method name)
+                        let mut k = i + 1;
+                        while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                            k += 1;
+                        }
+                        let method = &s[i + 1..k];
+                        if !method.is_empty() {
+                            // Replace '.' with '_dot_' to match sanitize_symbol()
+                            result.push_str("_dot_");
+                            i += 1; // skip the dot
+                            continue;
+                        }
+                    }
+                }
+
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            s = result;
+        }
 
         // Function-type parameters not yet supported in Rust parser.
         // Replace `fn(...)` type annotations with `any`.
@@ -2024,6 +2711,11 @@ fn compile_file_to_object(
         .compile_module(&mir)
         .map_err(|e| format!("{}: codegen: {e}", file_path.display()))?;
 
+    // Fix cranelift-object Mach-O string table bug: the `object` crate (0.36.x)
+    // sometimes emits a Mach-O file where stroff + strsize exceeds the file length
+    // by exactly 8 bytes. Pad the file to satisfy the linker.
+    let obj = fix_macho_strtab_overflow(obj);
+
     Ok(obj)
 }
 
@@ -2172,8 +2864,7 @@ struct ImportMapResult {
 /// This replaces dots with `_dot_` to produce valid symbols, matching what
 /// `CommonBackend::sanitize_symbol` does during codegen.
 fn sanitize_mangled(name: String) -> String {
-    let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
-    if link_config.dots_forbidden_in_symbols() && name.contains('.') {
+    if name.contains('.') {
         name.replace('.', "_dot_")
     } else {
         name
@@ -2209,6 +2900,9 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
+                        // Index class name as constructor (e.g., CompileOptions → module__CompileOptions)
+                        let ctor_mangled = format!("{}__{}", prefix, c.name);
+                        raw_to_mangled.entry(c.name.clone()).or_default().push(ctor_mangled);
                         // Also index class methods (needed for cross-module static calls like Logger.from_env)
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -2255,8 +2949,11 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                         let mangled = format!("{}__{}", prefix, s.name);
                         raw_to_mangled.entry(s.name.clone()).or_default().push(mangled);
                     }
-                    // Struct methods (needed for cross-module calls like Span.empty)
+                    // Struct name as constructor + methods
                     simple_parser::ast::Node::Struct(s) => {
+                        // Index struct name as constructor (e.g., Span → module__Span)
+                        let ctor_mangled = format!("{}__{}", prefix, s.name);
+                        raw_to_mangled.entry(s.name.clone()).or_default().push(ctor_mangled);
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", s.name, m.name);
@@ -2266,8 +2963,11 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             }
                         }
                     }
-                    // Enum methods and variant constructors
+                    // Enum name as constructor + methods + variant constructors
                     simple_parser::ast::Node::Enum(e) => {
+                        // Index enum name as constructor
+                        let ctor_mangled = format!("{}__{}", prefix, e.name);
+                        raw_to_mangled.entry(e.name.clone()).or_default().push(ctor_mangled);
                         for m in &e.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);
@@ -2343,6 +3043,25 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
             // Pick the first mangled name as a fallback resolution
             map.insert(raw.clone(), mangled_list[0].clone());
         }
+    }
+    // Index alternate forms: Type.method → also index as Type_dot_method and Type__method
+    // so that calls using any naming convention can resolve.
+    let extras: Vec<(String, String)> = map
+        .iter()
+        .filter(|(k, _)| k.contains('.'))
+        .flat_map(|(k, v)| {
+            let mut alts = Vec::new();
+            // Type.method → Type_dot_method
+            let dot_form = k.replace('.', "_dot_");
+            alts.push((dot_form, v.clone()));
+            // Type.method → Type__method
+            let dunder_form = k.replace('.', "__");
+            alts.push((dunder_form, v.clone()));
+            alts
+        })
+        .collect();
+    for (k, v) in extras {
+        map.entry(k).or_insert(v);
     }
     // Second pass: build re-export index.
     // For each module's `use` statements, resolve the imported functions and record
@@ -2605,10 +3324,19 @@ fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
 /// Recursively collect .spl files from a directory.
 /// Skips broken symlinks and non-regular files.
 fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+    let mut seen = std::collections::HashSet::new();
+    collect_spl_files_inner(dir, out, &mut seen);
+}
+
+fn collect_spl_files_inner(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>) {
+    let resolved_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !seen.insert(resolved_dir.clone()) {
+        return; // Already visited this canonical directory
+    }
+    for entry in std::fs::read_dir(&resolved_dir).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_spl_files_recursive(&path, out);
+            collect_spl_files_inner(&path, out, seen);
         } else if path.extension().is_some_and(|e| e == "spl") {
             // Skip known problematic files for bootstrap
             if let Some(p) = path.to_str() {
@@ -2616,9 +3344,12 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                     continue;
                 }
             }
-            // Skip broken symlinks: is_file() returns false for broken symlinks
+            // Skip broken symlinks and deduplicate by canonical path
             if path.is_file() {
-                out.push(path);
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if seen.insert(canonical) {
+                    out.push(path);
+                }
             }
         }
     }
@@ -2634,24 +3365,39 @@ fn find_native_all_library() -> Option<PathBuf> {
         }
     }
 
-    // Try both lib*.a (Unix) and *.lib (MSVC) naming conventions
-    let names = ["libsimple_native_all.a", "simple_native_all.lib"];
-    let profiles = ["bootstrap", "release", "debug"];
+    let mut candidates: Vec<&str> = vec![
+        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
+        "src/compiler_rust/target/release/libsimple_native_all.a",
+        "src/compiler_rust/target/debug/libsimple_native_all.a",
+    ];
 
-    for profile in &profiles {
-        for name in &names {
-            let path = PathBuf::from(format!("src/compiler_rust/target/{}/{}", profile, name));
-            if path.exists() {
-                return Some(path);
-            }
+    // Windows MSVC produces .lib instead of lib*.a
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
+            "src/compiler_rust/target/release/simple_native_all.lib",
+            "src/compiler_rust/target/debug/simple_native_all.lib",
+        ]);
+    }
+
+    for candidate in &candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
         }
     }
 
     // Try relative to current exe
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in &names {
-                let path = dir.join(name);
+            let path = dir.join("libsimple_native_all.a");
+            if path.exists() {
+                return Some(path);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let path = dir.join("simple_native_all.lib");
                 if path.exists() {
                     return Some(path);
                 }
@@ -2664,35 +3410,53 @@ fn find_native_all_library() -> Option<PathBuf> {
 
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
-    // Try both lib*.a (Unix) and *.lib (MSVC) naming conventions
-    let names = ["libsimple_runtime.a", "simple_runtime.lib"];
-    let profiles = ["bootstrap", "release", "debug"];
-    let subdirs = ["", "deps/"];
+    // Check common locations
+    let mut candidates: Vec<&str> = vec![
+        // Bootstrap profile (smallest optimized build, used for seed compiler)
+        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
+        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
+        // Release layout (optimized)
+        "src/compiler_rust/target/release/libsimple_runtime.a",
+        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
+        // Debug layout (fallback, may be very large)
+        "src/compiler_rust/target/debug/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
+    ];
 
-    for profile in &profiles {
-        for subdir in &subdirs {
-            for name in &names {
-                let path = PathBuf::from(format!(
-                    "src/compiler_rust/target/{}/{}{}", profile, subdir, name
-                ));
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-        }
+    // Windows MSVC produces .lib instead of lib*.a
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
+            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
+            "src/compiler_rust/target/release/simple_runtime.lib",
+            "src/compiler_rust/target/release/deps/simple_runtime.lib",
+            "src/compiler_rust/target/debug/simple_runtime.lib",
+            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
+        ]);
     }
 
-    // System-installed (Unix convention)
-    let sys_path = PathBuf::from("/usr/local/lib/libsimple_runtime.a");
-    if sys_path.exists() {
-        return Some(sys_path);
+    // System-installed (Unix only)
+    #[cfg(not(target_os = "windows"))]
+    candidates.push("/usr/local/lib/libsimple_runtime.a");
+
+    for candidate in &candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
     }
 
     // Try relative to current exe
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in &names {
-                let path = dir.join(name);
+            let path = dir.join("libsimple_runtime.a");
+            if path.exists() {
+                return Some(path);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let path = dir.join("simple_runtime.lib");
                 if path.exists() {
                     return Some(path);
                 }

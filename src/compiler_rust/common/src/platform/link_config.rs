@@ -470,6 +470,134 @@ int main(int argc, char** argv) {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Object-format / codegen platform helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Object format of the target (drives section naming, symbol prefixes, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFormat {
+    ELF,
+    MachO,
+    COFF,
+}
+
+impl ObjectFormat {
+    pub fn for_target(target: &Target) -> Self {
+        match target.os {
+            TargetOS::MacOS => ObjectFormat::MachO,
+            TargetOS::Windows => ObjectFormat::COFF,
+            _ => ObjectFormat::ELF,
+        }
+    }
+
+    pub fn for_host() -> Self {
+        Self::for_target(&Target::host())
+    }
+}
+
+/// Platform-specific codegen configuration.
+/// Centralises decisions that were previously scattered as `cfg!(target_os)` checks.
+#[derive(Debug, Clone)]
+pub struct PlatformCodegenConfig {
+    pub object_format: ObjectFormat,
+    /// Section for auto-init function pointers (e.g., `.init_array` / `__DATA,__mod_init_func`).
+    pub init_section_segment: &'static str,
+    pub init_section_name: &'static str,
+    /// Whether symbol names must not contain `.` (Mach-O requirement).
+    pub sanitize_dots_in_symbols: bool,
+    /// Whether the C ABI prepends `_` to symbols.
+    pub c_symbol_underscore_prefix: bool,
+    /// Extra linker flags for the native project pipeline.
+    pub extra_linker_flags: Vec<&'static str>,
+    /// Whether to use `-filelist` for large object counts (macOS).
+    pub use_filelist: bool,
+    /// Max objects before using archive or filelist (0 = unlimited).
+    pub archive_threshold: usize,
+    /// Strip flag for the linker.
+    pub strip_flag: &'static str,
+}
+
+impl PlatformCodegenConfig {
+    pub fn for_host() -> Self {
+        Self::for_target(&Target::host())
+    }
+
+    pub fn for_target(target: &Target) -> Self {
+        match target.os {
+            TargetOS::MacOS => Self::macos(),
+            TargetOS::Windows => Self::windows(),
+            TargetOS::FreeBSD => Self::freebsd(),
+            _ => Self::linux(),
+        }
+    }
+
+    fn linux() -> Self {
+        Self {
+            object_format: ObjectFormat::ELF,
+            init_section_segment: "",
+            init_section_name: ".init_array",
+            sanitize_dots_in_symbols: false,
+            c_symbol_underscore_prefix: false,
+            extra_linker_flags: vec!["-no-pie"],
+            use_filelist: false,
+            archive_threshold: 100,
+            strip_flag: "-Wl,-s",
+        }
+    }
+
+    fn macos() -> Self {
+        Self {
+            object_format: ObjectFormat::MachO,
+            init_section_segment: "__DATA",
+            init_section_name: "__mod_init_func",
+            sanitize_dots_in_symbols: true,
+            c_symbol_underscore_prefix: true,
+            extra_linker_flags: vec![],
+            use_filelist: true,
+            archive_threshold: usize::MAX, // skip archiving — ranlib issues with cranelift objects
+            strip_flag: "-Wl,-dead_strip",
+        }
+    }
+
+    fn freebsd() -> Self {
+        Self {
+            object_format: ObjectFormat::ELF,
+            init_section_segment: "",
+            init_section_name: ".init_array",
+            sanitize_dots_in_symbols: false,
+            c_symbol_underscore_prefix: false,
+            extra_linker_flags: vec!["-no-pie"],
+            use_filelist: false,
+            archive_threshold: 100,
+            strip_flag: "-Wl,-s",
+        }
+    }
+
+    fn windows() -> Self {
+        Self {
+            object_format: ObjectFormat::COFF,
+            init_section_segment: "",
+            init_section_name: ".CRT$XCU",
+            sanitize_dots_in_symbols: false,
+            c_symbol_underscore_prefix: true,
+            extra_linker_flags: vec![],
+            use_filelist: false,
+            archive_threshold: 100,
+            strip_flag: "/DEBUG:NONE",
+        }
+    }
+
+    /// Sanitize a symbol name if required by the object format.
+    pub fn sanitize_symbol(&self, name: &str) -> String {
+        if self.sanitize_dots_in_symbols && name.contains('.') {
+            name.replace('.', "_dot_")
+        } else {
+            name.to_string()
+        }
+    }
+}
+
 /// Default libraries for standalone native binary linking.
 /// Used by `NativeBinaryOptions` in `native_binary.rs`.
 pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
