@@ -1,0 +1,79 @@
+# Unreachable Code Lint Specification
+#
+# Tests for UNREACH001-UNREACH003 detection of code after terminal
+# statements (return, break, continue, pass_todo).
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_for_warnings(name: text, code: text) -> text:
+    """Write code to a temp file and run query check with JSON format."""
+    val path = "/tmp/simple_lint_unreach_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
+    stdout ?? ""
+
+fn output_has_unreach(output: text) -> bool:
+    """Check if output contains an unreachable code warning."""
+    output.contains("UNREACH")
+
+fn output_has_tag_unnecessary(output: text) -> bool:
+    """Check if output contains the Unnecessary tag (value 1)."""
+    output.contains("\"tags\":[1]") or output.contains("\"tags\": [1]")
+
+# ============================================================================
+# Code after return is flagged
+# ============================================================================
+
+describe "Unreachable Code Lint":
+    context "code after return":
+        it "flags code after return statement":
+            val code = "fn test() -> i64:\n    return 42\n    val x = 10\n"
+            val output = check_file_for_warnings("after_return", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(true)
+
+        it "flags code after return with value":
+            val code = "fn compute() -> text:\n    return \"done\"\n    print \"never reached\"\n"
+            val output = check_file_for_warnings("after_return_val", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(true)
+
+        it "unreachable code has Unnecessary tag":
+            val code = "fn test() -> i64:\n    return 1\n    val dead = 2\n"
+            val output = check_file_for_warnings("unreach_tag", code)
+            val has_tag = output_has_tag_unnecessary(output)
+            expect(has_tag).to_equal(true)
+
+    # ============================================================================
+    # Code NOT after return is NOT flagged
+    # ============================================================================
+
+    context "reachable code":
+        it "does not flag code before return":
+            val code = "fn test() -> i64:\n    val x = 10\n    return x\n"
+            val output = check_file_for_warnings("before_return", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(false)
+
+        it "does not flag code in different branches":
+            val code = "fn test(flag: bool) -> i64:\n    if flag:\n        return 1\n    return 0\n"
+            val output = check_file_for_warnings("branches", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(false)
+
+        it "does not flag code after return in nested if":
+            val code = "fn test(x: i64) -> text:\n    if x > 0:\n        return \"positive\"\n    \"non-positive\"\n"
+            val output = check_file_for_warnings("nested_if", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(false)
+
+        it "does not flag empty function body":
+            val code = "fn noop():\n    pass_do_nothing\n"
+            val output = check_file_for_warnings("empty_body", code)
+            val has_warning = output_has_unreach(output)
+            expect(has_warning).to_equal(false)

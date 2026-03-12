@@ -110,17 +110,28 @@ local function default_on_attach(client, bufnr)
   end, opts)
 
   -- Diagnostics
+  -- Note: Pull diagnostics (textDocument/diagnostic) are supported by the
+  -- Simple LSP server. Neovim handles this automatically when the server
+  -- advertises the diagnosticProvider capability.
   vim.keymap.set("n", "[d", vim.diagnostic.goto_prev, opts)
   vim.keymap.set("n", "]d", vim.diagnostic.goto_next, opts)
   vim.keymap.set("n", "<leader>e", vim.diagnostic.open_float, opts)
   vim.keymap.set("n", "<leader>q", vim.diagnostic.setloclist, opts)
 
   -- Inlay hints (Neovim 0.10+)
+  -- Supports parameter name hints and inferred type hints from the LSP server
   if client.supports_method("textDocument/inlayHint") then
     if vim.lsp.inlay_hint then
       vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
     end
   end
+
+  -- Toggle inlay hints with <leader>ih
+  vim.keymap.set("n", "<leader>ih", function()
+    if vim.lsp.inlay_hint then
+      vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled({ bufnr = bufnr }), { bufnr = bufnr })
+    end
+  end, opts)
 end
 
 --- Setup LSP for Simple language files

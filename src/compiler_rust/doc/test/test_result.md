@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-03-12 21:18:01
+**Generated:** 2026-03-12 22:53:16
 **Total Tests:** 91
 **Status:** ⚠️ 11 FAILED
 
@@ -45,36 +45,18 @@
 
 ## ❌ Failed Tests (11)
 
-### 🔴 fixed_size_edge_cases_spec
+### 🔴 loss_nograd_blocks_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 type_conversion_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/type_conversion_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 comment_only_spec
-
-**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
+**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
 **Category:** Unknown
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
 ---
 
-### 🔴 mat4_spec
+### 🔴 fixed_size_edge_cases_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
 **Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
@@ -90,30 +72,12 @@
 
 ---
 
-### 🔴 loss_nograd_blocks_spec
+### 🔴 tensor_bridge_spec
 
-**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
-**Category:** Unknown
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
+**Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 gpu_kernel_launch_syntax_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_kernel_launch_syntax_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
-
----
-
-### 🔴 gpu_kernel_launch_syntax_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
 
 ---
 
@@ -135,9 +99,45 @@
 
 ---
 
-### 🔴 tensor_bridge_spec
+### 🔴 comment_only_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
+**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 gpu_kernel_launch_syntax_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_kernel_launch_syntax_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
+### 🔴 type_conversion_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/type_conversion_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 gpu_kernel_launch_syntax_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
+### 🔴 mat4_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
 **Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
@@ -154,9 +154,9 @@
 
 ### Priority 1: Fix Failing Tests (11)
 
-1. **fixed_size_edge_cases_spec** - 
-2. **type_conversion_spec** - 
-3. **comment_only_spec** - 
-4. **mat4_spec** - 
-5. **sdn_minimal_spec** - 
+1. **loss_nograd_blocks_spec** - 
+2. **fixed_size_edge_cases_spec** - 
+3. **sdn_minimal_spec** - 
+4. **tensor_bridge_spec** - 
+5. **fixed_size_arrays_spec** - 
 

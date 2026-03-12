@@ -98,6 +98,11 @@ fn lsp_handle_initialize(id: text) -> text:
     caps.push(jp("implementationProvider", "true"))
     caps.push(jp("workspaceSymbolProvider", "true"))
     caps.push(jp("callHierarchyProvider", "true"))
+    caps.push(jp("inlayHintProvider", "true"))
+    val code_action_kinds = SB_L() + js("quickfix") + "," + js("refactor") + SB_R()
+    caps.push(jp("codeActionProvider", jo1(jp("codeActionKinds", code_action_kinds))))
+    val diag_provider = jo2(jp("interFileDependencies", "false"), jp("workspaceDiagnostics", "false"))
+    caps.push(jp("diagnosticProvider", diag_provider))
     val capabilities_obj = LB() + caps.join(",") + RB()
     val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
     val result = jo2(jp("capabilities", capabilities_obj), jp("serverInfo", server_info))
@@ -130,11 +135,33 @@ fn lsp_handle_did_save(body: text):
 # --- Diagnostics (heavy — uses full query.spl with compiler) ---
 
 fn _publish_diagnostics(uri: text, file_path: text):
+    val diags = _collect_diagnostics(file_path)
+    val diags_str = SB_L() + diags.join(",") + SB_R()
+    val params = jo2(jp("uri", js(uri)), jp("diagnostics", diags_str))
+    lsp_write_notification("textDocument/publishDiagnostics", params)
+
+fn _collect_diagnostics(file_path: text) -> [text]:
+    var diags: [text] = []
+    # Try structured JSON format first
+    var cmd_json = _heavy_query_cmd("check " + file_path + " --format=json")
+    var out_json = ""
+    var exit_json: i64 = 0
+    (out_json, exit_json) = _shell_cmd(cmd_json)
+    if out_json.trim() != "":
+        val lines = out_json.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val diag = _parse_diagnostic_line(trimmed, file_path)
+            if diag != "":
+                diags.push(diag)
+        return diags
+    # Fallback to plain text format
     var cmd = _heavy_query_cmd("check " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
-    var diags: [text] = []
     if exit_code != 0 and out != "":
         val lines = out.split("\n")
         for line in lines:
@@ -144,11 +171,81 @@ fn _publish_diagnostics(uri: text, file_path: text):
             val diag = _parse_diagnostic_line(trimmed, file_path)
             if diag != "":
                 diags.push(diag)
-    val diags_str = SB_L() + diags.join(",") + SB_R()
-    val params = jo2(jp("uri", js(uri)), jp("diagnostics", diags_str))
-    lsp_write_notification("textDocument/publishDiagnostics", params)
+    diags
 
 fn _parse_diagnostic_line(line: text, file_path: text) -> text:
+    # JSON structured format: line starts with "{"
+    if line.starts_with("{"):
+        return _parse_json_diagnostic(line)
+    # Fallback: plain text format (file:line:col: severity: message)
+    _parse_text_diagnostic(line, file_path)
+
+fn _parse_json_diagnostic(line: text) -> text:
+    val msg = extract_field(line, "message")
+    val sev_str = extract_field(line, "severity")
+    val code = extract_field(line, "code")
+    val source = extract_field(line, "source")
+    val line_str = extract_field(line, "line")
+    val col_str = extract_field(line, "col")
+    val tags_raw = extract_field(line, "tags")
+    var diag_line = 0
+    var diag_col = 0
+    if line_str != "":
+        val ln = int(line_str)
+        if ln > 0:
+            diag_line = ln - 1
+    if col_str != "":
+        val cn = int(col_str)
+        if cn > 0:
+            diag_col = cn - 1
+    var severity = 1
+    if sev_str == "error" or sev_str == "1":
+        severity = 1
+    elif sev_str == "warning" or sev_str == "2":
+        severity = 2
+    elif sev_str == "information" or sev_str == "info" or sev_str == "3":
+        severity = 3
+    elif sev_str == "hint" or sev_str == "4":
+        severity = 4
+    val range = jo2(
+        jp("start", jo2(jp("line", str(diag_line)), jp("character", str(diag_col)))),
+        jp("end", jo2(jp("line", str(diag_line)), jp("character", str(diag_col + 1))))
+    )
+    var parts: [text] = []
+    parts.push(jp("range", range))
+    parts.push(jp("severity", str(severity)))
+    parts.push(jp("message", js(msg)))
+    if source != "":
+        parts.push(jp("source", js(source)))
+    elif source == "":
+        parts.push(jp("source", js("simple")))
+    if code != "":
+        parts.push(jp("code", js(code)))
+    # Parse tags (Unnecessary=1, Deprecated=2)
+    var tag_items: [text] = []
+    if tags_raw != "":
+        if tags_raw.contains("Unnecessary") or tags_raw.contains("unnecessary"):
+            tag_items.push("1")
+        if tags_raw.contains("Deprecated") or tags_raw.contains("deprecated"):
+            tag_items.push("2")
+    if tag_items.len() > 0:
+        parts.push(jp("tags", SB_L() + tag_items.join(",") + SB_R()))
+    # Parse relatedInformation if present
+    val related_raw = extract_field(line, "relatedFile")
+    val related_msg = extract_field(line, "relatedMessage")
+    if related_raw != "" and related_msg != "":
+        val related_loc = jo2(
+            jp("uri", js("file://" + related_raw)),
+            jp("range", jo2(
+                jp("start", jo2(jp("line", "0"), jp("character", "0"))),
+                jp("end", jo2(jp("line", "0"), jp("character", "0")))
+            ))
+        )
+        val related_info = jo2(jp("location", related_loc), jp("message", js(related_msg)))
+        parts.push(jp("relatedInformation", SB_L() + related_info + SB_R()))
+    LB() + parts.join(",") + RB()
+
+fn _parse_text_diagnostic(line: text, file_path: text) -> text:
     var diag_line = 0
     var diag_col = 0
     var diag_msg = line
@@ -465,3 +562,158 @@ fn lsp_handle_incoming_calls(id: text, body: text) -> text:
 
 fn lsp_handle_outgoing_calls(id: text, body: text) -> text:
     make_json_result(id, SB_L() + SB_R())
+
+# --- Inlay Hints (heavy — calls query engine) ---
+
+fn lsp_handle_inlay_hint(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_json_result(id, SB_L() + SB_R())
+    var cmd = _heavy_query_cmd("inlay-hints " + file_path)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var hints: [text] = []
+    for hint_line in lines:
+        val trimmed = hint_line.trim()
+        if trimmed == "":
+            continue
+        val hint = _parse_inlay_hint(trimmed)
+        if hint != "":
+            hints.push(hint)
+    make_json_result(id, SB_L() + hints.join(",") + SB_R())
+
+fn _parse_inlay_hint(line: text) -> text:
+    # JSON format: {"line":N,"character":N,"label":"text","kind":1|2}
+    if line.starts_with("{"):
+        val hint_line = extract_field(line, "line")
+        val hint_char = extract_field(line, "character")
+        val hint_label = extract_field(line, "label")
+        val hint_kind = extract_field(line, "kind")
+        if hint_label == "":
+            return ""
+        var ln = 0
+        var ch = 0
+        if hint_line != "":
+            val ln_val = int(hint_line)
+            if ln_val > 0:
+                ln = ln_val - 1
+        if hint_char != "":
+            ch = int(hint_char)
+        var kind_num = 1
+        if hint_kind == "2" or hint_kind == "parameter":
+            kind_num = 2
+        val pos = jo2(jp("line", str(ln)), jp("character", str(ch)))
+        return jo3(jp("position", pos), jp("label", js(hint_label)), jp("kind", str(kind_num)))
+    # Text format: line:col:label:kind
+    val parts = line.split(":")
+    if parts.len() < 3:
+        return ""
+    var ln = 0
+    val ln_val = int(parts[0])
+    if ln_val > 0:
+        ln = ln_val - 1
+    val ch = int(parts[1])
+    val label = parts[2]
+    var kind_num = 1
+    if parts.len() >= 4:
+        if parts[3].trim() == "2" or parts[3].trim() == "parameter":
+            kind_num = 2
+    val pos = jo2(jp("line", str(ln)), jp("character", str(ch)))
+    jo3(jp("position", pos), jp("label", js(label)), jp("kind", str(kind_num)))
+
+# --- Code Action (heavy — calls query engine) ---
+
+fn lsp_handle_code_action(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    val line = _extract_line(body)
+    val query_line = str(int(line) + 1)
+    if file_path == "":
+        return make_json_result(id, SB_L() + SB_R())
+    var cmd = _heavy_query_cmd("code-actions " + file_path + " " + query_line)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, SB_L() + SB_R())
+    val lines = out.split("\n")
+    var actions: [text] = []
+    for action_line in lines:
+        val trimmed = action_line.trim()
+        if trimmed == "":
+            continue
+        val action = _parse_code_action(trimmed, uri)
+        if action != "":
+            actions.push(action)
+    make_json_result(id, SB_L() + actions.join(",") + SB_R())
+
+fn _parse_code_action(line: text, uri: text) -> text:
+    # JSON format: {"title":"...","kind":"quickfix|refactor","edit":{...}}
+    if line.starts_with("{"):
+        val title = extract_field(line, "title")
+        val kind = extract_field(line, "kind")
+        val new_text = extract_field(line, "newText")
+        val edit_line = extract_field(line, "editLine")
+        val edit_col = extract_field(line, "editCol")
+        val edit_end_line = extract_field(line, "editEndLine")
+        val edit_end_col = extract_field(line, "editEndCol")
+        if title == "":
+            return ""
+        var action_kind = "quickfix"
+        if kind != "":
+            action_kind = kind
+        # Build workspace edit if edit details are present
+        if new_text != "" and edit_line != "":
+            var start_ln = 0
+            val sln = int(edit_line)
+            if sln > 0:
+                start_ln = sln - 1
+            var start_col = 0
+            if edit_col != "":
+                start_col = int(edit_col)
+            var end_ln = start_ln
+            if edit_end_line != "":
+                val eln = int(edit_end_line)
+                if eln > 0:
+                    end_ln = eln - 1
+            var end_col = start_col
+            if edit_end_col != "":
+                end_col = int(edit_end_col)
+            val edit_range = jo2(
+                jp("start", jo2(jp("line", str(start_ln)), jp("character", str(start_col)))),
+                jp("end", jo2(jp("line", str(end_ln)), jp("character", str(end_col))))
+            )
+            val text_edit = jo2(jp("range", edit_range), jp("newText", js(new_text)))
+            val doc_changes = jo2(jp("textDocument", jo2(jp("uri", js(uri)), jp("version", "null"))), jp("edits", SB_L() + text_edit + SB_R()))
+            val workspace_edit = jo1(jp("documentChanges", SB_L() + doc_changes + SB_R()))
+            return jo3(jp("title", js(title)), jp("kind", js(action_kind)), jp("edit", workspace_edit))
+        return jo2(jp("title", js(title)), jp("kind", js(action_kind)))
+    # Text format: title\tkind
+    val tab_idx = line.index_of("\t")
+    var title = line
+    var action_kind = "quickfix"
+    match tab_idx:
+        Some(ti):
+            title = line.substring(0, ti)
+            action_kind = line.substring(ti + 1).trim()
+        nil:
+            val _x = 0
+    jo2(jp("title", js(title)), jp("kind", js(action_kind)))
+
+# --- Pull Diagnostics (LSP 3.17 — textDocument/diagnostic) ---
+
+fn lsp_handle_pull_diagnostic(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        val empty_result = jo2(jp("kind", js("full")), jp("items", SB_L() + SB_R()))
+        return make_json_result(id, empty_result)
+    val diags = _collect_diagnostics(file_path)
+    val diags_str = SB_L() + diags.join(",") + SB_R()
+    val result = jo2(jp("kind", js("full")), jp("items", diags_str))
+    make_json_result(id, result)

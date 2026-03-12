@@ -158,6 +158,16 @@ impl LspDiagnostic:
         match report.kind:
             case ReportKind.DeprecationWarning:
                 diag.tags.push(LspDiagnosticTag.Deprecated)
+            case ReportKind.UnusedWarning:
+                diag.tags.push(LspDiagnosticTag.Unnecessary)
+            case ReportKind.UnreachableWarning:
+                diag.tags.push(LspDiagnosticTag.Unnecessary)
+            case ReportKind.LintWarning:
+                # Check code for unused/unreachable patterns
+                if report.code.?:
+                    val code = report.code.unwrap()
+                    if code.starts_with("unused_") or code.contains("unreachable"):
+                        diag.tags.push(LspDiagnosticTag.Unnecessary)
             case _:
                 pass
 
@@ -264,6 +274,33 @@ impl LspEmitter:
             parts.push(info_parts.join(","))
             parts.push("]")
 
+        parts.push("}")
+        parts.join("")
+
+    # Emit a single-line JSON diagnostic for query bridge output.
+    # Format: {"severity":N,"code":"...","message":"...","line":N,"col":N,"end_line":N,"end_col":N,"tags":[...],"source":"simple"}
+    fn emit_diagnostic_line(report: Report, uri: text) -> text:
+        val diag = LspDiagnostic.from_report(report, uri)
+        var parts: [text] = []
+        parts.push("{\"severity\":{diag.severity.value()}")
+
+        if diag.code.?:
+            parts.push(",\"code\":{self.encode_string(diag.code.unwrap())}")
+
+        parts.push(",\"message\":{self.encode_string(diag.message)}")
+        parts.push(",\"line\":{diag.start_line + 1}")
+        parts.push(",\"col\":{diag.start_character + 1}")
+        parts.push(",\"end_line\":{diag.end_line + 1}")
+        parts.push(",\"end_col\":{diag.end_character + 1}")
+
+        if not diag.tags.is_empty():
+            var tag_parts: [text] = []
+            for tag in diag.tags:
+                tag_parts.push("{tag.value()}")
+            parts.push(",\"tags\":[{tag_parts.join(\",\")}]")
+
+        val source = if diag.source.?: diag.source.unwrap() else: self.source_name
+        parts.push(",\"source\":{self.encode_string(source)}")
         parts.push("}")
         parts.join("")
 

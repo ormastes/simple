@@ -1,0 +1,71 @@
+# Match Exhaustiveness Lint Specification
+#
+# Tests for MEXH001-MEXH002 detection of non-exhaustive match expressions.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn check_file_for_warnings(name: text, code: text) -> text:
+    """Write code to a temp file and run query check with JSON format."""
+    val path = "/tmp/simple_lint_match_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
+    stdout ?? ""
+
+fn check_file_text(name: text, code: text) -> (text, i64):
+    """Write code to a temp file and run query check with text format."""
+    val path = "/tmp/simple_lint_match_{name}.spl"
+    rt_file_write_text(path, code)
+    val (stdout, _stderr, code_val) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "text"])
+    (stdout ?? "", code_val)
+
+fn output_has_match_warning(output: text) -> bool:
+    """Check if output contains a match exhaustiveness warning."""
+    output.contains("MEXH") or output.contains("exhaustive") or output.contains("wildcard")
+
+# ============================================================================
+# Match with all variants covered
+# ============================================================================
+
+describe "Match Exhaustiveness Lint":
+    context "exhaustive matches":
+        it "does not flag match with wildcard arm":
+            val code = "fn classify(x: i64) -> text:\n    match x:\n        case 1: \"one\"\n        case 2: \"two\"\n        case _: \"other\"\n"
+            val output = check_file_for_warnings("with_wildcard", code)
+            val has_warning = output_has_match_warning(output)
+            expect(has_warning).to_equal(false)
+
+        it "does not flag match on bool with both cases":
+            val code = "fn test(flag: bool) -> text:\n    match flag:\n        case true: \"yes\"\n        case false: \"no\"\n"
+            val (output, _exit) = check_file_text("bool_complete", code)
+            # Bool match with both branches covered should not produce MEXH warnings
+            val has_match_warning = output.contains("MEXH")
+            expect(has_match_warning).to_equal(false)
+
+        it "does not flag match with default catch-all":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 0: \"zero\"\n        case _: \"nonzero\"\n"
+            val output = check_file_for_warnings("default_arm", code)
+            val has_warning = output_has_match_warning(output)
+            expect(has_warning).to_equal(false)
+
+    # ============================================================================
+    # Non-exhaustive matches
+    # ============================================================================
+
+    context "non-exhaustive matches":
+        it "flags match without wildcard or default case":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 1: \"one\"\n        case 2: \"two\"\n"
+            val output = check_file_for_warnings("no_wildcard", code)
+            # Should produce either MEXH001 or MEXH002 depending on type inference
+            val has_warning = output_has_match_warning(output)
+            expect(has_warning).to_equal(true)
+
+        it "flags match with only one case and no default":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 42: \"the answer\"\n"
+            val output = check_file_for_warnings("single_case", code)
+            val has_warning = output_has_match_warning(output)
+            expect(has_warning).to_equal(true)

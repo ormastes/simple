@@ -141,6 +141,9 @@ async function startLspClient(context: vscode.ExtensionContext) {
         // Initialize options
         initializationOptions: {
             semanticTokens: config.get<boolean>('lsp.enableSemanticTokens', true),
+            inlayHints: config.get<boolean>('lsp.enableInlayHints', true),
+            codeActions: config.get<boolean>('lsp.enableCodeActions', true),
+            pullDiagnostics: config.get<boolean>('lsp.enablePullDiagnostics', true),
             debounceDelay: config.get<number>('lsp.debounceDelay', 300),
             wasmMode: usingWasmLsp,
         }
