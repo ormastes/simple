@@ -305,8 +305,7 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
 }
 
 /// Check if a value is None/nil.

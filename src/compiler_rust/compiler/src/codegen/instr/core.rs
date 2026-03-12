@@ -378,8 +378,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
     _dest: &Option<VReg>,
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     match func_name {
-        "print" | "println" | "eprint" | "eprintln"
-        | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" => {
+        "print" | "println" | "eprint" | "eprintln" | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" => {
             // Determine which runtime function to use
             // Note: In Simple, 'print' adds a newline (Python 3 convention)
             // Accepts both bare names and spl_ prefixed names (safe symbol exports).
@@ -416,19 +415,21 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 // Print the argument value using rt_print_value / rt_println_value
                 // For the last arg of print/println/eprintln, use the ln variant
                 let is_last = i == args.len() - 1;
-                let fn_to_use =
-                    if is_last && matches!(func_name, "print" | "println" | "eprintln"
-                        | "spl_print" | "spl_println" | "spl_eprintln") {
-                        print_value_fn
-                    } else {
-                        // Use non-newline variant for intermediate args
-                        match func_name {
-                            "print" | "spl_print" => "rt_print_value",
-                            "println" | "spl_println" => "rt_print_value",
-                            "eprintln" | "spl_eprintln" => "rt_eprint_value",
-                            _ => print_value_fn,
-                        }
-                    };
+                let fn_to_use = if is_last
+                    && matches!(
+                        func_name,
+                        "print" | "println" | "eprintln" | "spl_print" | "spl_println" | "spl_eprintln"
+                    ) {
+                    print_value_fn
+                } else {
+                    // Use non-newline variant for intermediate args
+                    match func_name {
+                        "print" | "spl_print" => "rt_print_value",
+                        "println" | "spl_println" => "rt_print_value",
+                        "eprintln" | "spl_eprintln" => "rt_eprint_value",
+                        _ => print_value_fn,
+                    }
+                };
 
                 let print_id = ctx.runtime_funcs[fn_to_use];
                 let print_ref = ctx.module.declare_func_in_func(print_id, builder.func);
@@ -440,8 +441,12 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             }
 
             // Handle empty print (just prints nothing or newline)
-            if args.is_empty() && matches!(func_name, "print" | "println" | "eprintln"
-                | "spl_print" | "spl_println" | "spl_eprintln") {
+            if args.is_empty()
+                && matches!(
+                    func_name,
+                    "print" | "println" | "eprintln" | "spl_print" | "spl_println" | "spl_eprintln"
+                )
+            {
                 // Print just a newline
                 let newline_data_id = declare_named_bytes(ctx, b"\n")?;
                 let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);

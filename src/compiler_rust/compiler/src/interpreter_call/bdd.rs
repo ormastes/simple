@@ -136,11 +136,9 @@ fn create_example(description: String, block: Value, resource_limits: Option<Val
 fn add_example_to_current_group(example: Value) {
     BDD_GROUP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        if let Some(group) = stack.last_mut() {
-            if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(examples)) = Arc::make_mut(fields).get_mut("test_examples") {
-                    Arc::make_mut(examples).push(example);
-                }
+        if let Some(Value::Object { fields, .. }) = stack.last_mut() {
+            if let Some(Value::Array(examples)) = Arc::make_mut(fields).get_mut("test_examples") {
+                Arc::make_mut(examples).push(example);
             }
         }
     });
@@ -150,11 +148,9 @@ fn add_example_to_current_group(example: Value) {
 fn add_child_to_current_group(child: &Value) {
     BDD_GROUP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        if let Some(group) = stack.last_mut() {
-            if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
-                    Arc::make_mut(children).push(child.clone());
-                }
+        if let Some(Value::Object { fields, .. }) = stack.last_mut() {
+            if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
+                Arc::make_mut(children).push(child.clone());
             }
         }
     });
@@ -164,11 +160,9 @@ fn add_child_to_current_group(child: &Value) {
 fn add_hook_to_current_group(hook: Value) {
     BDD_GROUP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        if let Some(group) = stack.last_mut() {
-            if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(hooks)) = Arc::make_mut(fields).get_mut("hooks") {
-                    Arc::make_mut(hooks).push(hook);
-                }
+        if let Some(Value::Object { fields, .. }) = stack.last_mut() {
+            if let Some(Value::Array(hooks)) = Arc::make_mut(fields).get_mut("hooks") {
+                Arc::make_mut(hooks).push(hook);
             }
         }
     });
@@ -178,14 +172,12 @@ fn add_hook_to_current_group(hook: Value) {
 fn update_last_child_in_current_group(updated_child: &Value) {
     BDD_GROUP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        if let Some(group) = stack.last_mut() {
-            if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
-                    let vec = Arc::make_mut(children);
-                    if !vec.is_empty() {
-                        let last_idx = vec.len() - 1;
-                        vec[last_idx] = updated_child.clone();
-                    }
+        if let Some(Value::Object { fields, .. }) = stack.last_mut() {
+            if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
+                let vec = Arc::make_mut(children);
+                if !vec.is_empty() {
+                    let last_idx = vec.len() - 1;
+                    vec[last_idx] = updated_child.clone();
                 }
             }
         }

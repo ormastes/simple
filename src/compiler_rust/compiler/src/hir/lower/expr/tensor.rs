@@ -131,6 +131,7 @@ impl Lowerer {
     ///         | 0 | 0 | 0 | 1.0   |
     ///         | 1 | 2 | 3 | 2.0   |
     /// ```
+    #[allow(clippy::borrowed_box)]
     pub(super) fn lower_tensor_literal(
         &mut self,
         _dtype: &str,
@@ -252,6 +253,7 @@ impl Lowerer {
     /// This optimization would detect sparsity ratio and choose appropriate
     /// representation automatically. See PyTorch sparse tensor documentation
     /// for COO (coordinate) format details.
+    #[allow(clippy::borrowed_box)]
     pub(super) fn create_sparse_tensor(
         &mut self,
         values: &[Vec<Box<Expr>>],

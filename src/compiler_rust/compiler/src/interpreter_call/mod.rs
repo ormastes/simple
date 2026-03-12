@@ -34,6 +34,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
 
+#[allow(clippy::borrowed_box)]
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
@@ -212,34 +213,32 @@ pub(crate) fn evaluate_call(
     if let Expr::FieldAccess { receiver, field } = callee.as_ref() {
         if let Expr::Identifier(module_name) = receiver.as_ref() {
             // First, check if the receiver is a module dict in env
-            if let Some(module_val) = env.get(module_name).cloned() {
-                if let Value::Dict(module_dict) = module_val {
-                    // Look up function in the module's exports
-                    if let Some(func_val) = module_dict.get(field).cloned() {
-                        if let Value::Function { def, captured_env, .. } = func_val {
-                            let mut captured_env_clone = captured_env.clone();
-                            return core::exec_function_with_captured_env(
-                                &def,
-                                args,
-                                env,
-                                &mut captured_env_clone,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            );
-                        }
-                        if let Value::Constructor { class_name } = func_val {
-                            return core::instantiate_class(
-                                &class_name,
-                                args,
-                                env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            );
-                        }
+            if let Some(Value::Dict(module_dict)) = env.get(module_name).cloned() {
+                // Look up function in the module's exports
+                if let Some(func_val) = module_dict.get(field).cloned() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        let mut captured_env_clone = captured_env.clone();
+                        return core::exec_function_with_captured_env(
+                            &def,
+                            args,
+                            env,
+                            &mut captured_env_clone,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        );
+                    }
+                    if let Value::Constructor { class_name } = func_val {
+                        return core::instantiate_class(
+                            &class_name,
+                            args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        );
                     }
                 }
             }
@@ -349,20 +348,18 @@ pub(crate) fn evaluate_call(
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
-            } else if let Some(func) = env.get(field).cloned() {
-                if let Value::Function { def, captured_env, .. } = func {
-                    let mut captured_env_clone = captured_env.clone();
-                    return core::exec_function_with_captured_env(
-                        &def,
-                        args,
-                        env,
-                        &mut captured_env_clone,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                }
+            } else if let Some(Value::Function { def, captured_env, .. }) = env.get(field).cloned() {
+                let mut captured_env_clone = captured_env.clone();
+                return core::exec_function_with_captured_env(
+                    &def,
+                    args,
+                    env,
+                    &mut captured_env_clone,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
 
             // Cross-module fallback for FieldAccess: search MODULE_CLASSES_CACHE

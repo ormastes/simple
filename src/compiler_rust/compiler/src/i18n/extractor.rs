@@ -202,13 +202,8 @@ impl I18nExtractor {
                 let template_vars: Vec<String> = parts
                     .iter()
                     .filter_map(|p| {
-                        if let FStringPart::Expr(expr) = p {
-                            // Extract variable names from simple identifiers
-                            if let Expr::Identifier(id) = expr {
-                                Some(id.clone())
-                            } else {
-                                None
-                            }
+                        if let FStringPart::Expr(Expr::Identifier(id)) = p {
+                            Some(id.clone())
                         } else {
                             None
                         }

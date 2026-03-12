@@ -546,7 +546,11 @@ impl<'a> Parser<'a> {
         // Handle "with expr as name:" where "as name" was parsed as a type cast
         // We detect this by checking if target_type is a simple lowercase identifier (variable name)
         // rather than an actual type (which would be capitalized or a primitive like i64, str, etc.)
-        if let Expr::Cast { expr, target_type: Type::Simple(type_name) } = resource.clone() {
+        if let Expr::Cast {
+            expr,
+            target_type: Type::Simple(type_name),
+        } = resource.clone()
+        {
             // Check if it looks like a variable name (lowercase first char) rather than a type
             let first_char = type_name.chars().next().unwrap_or('A');
             let is_primitive = matches!(

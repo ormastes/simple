@@ -40,7 +40,7 @@ fn try_dunder_binop(
             let self_ctx = Some((class.as_str(), fields));
             return Some(super::super::interpreter_call::exec_function_with_values_and_self(
                 &method,
-                &[right.clone()],
+                std::slice::from_ref(right),
                 env,
                 functions,
                 classes,
@@ -1083,8 +1083,8 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
     }
 
     let mut result = Vec::with_capacity(m);
-    for i in 0..m {
-        let a_row = match &a[i] {
+    for a_item in a.iter().take(m) {
+        let a_row = match a_item {
             Value::Array(row) => row,
             _ => {
                 let ctx = ErrorContext::new()
@@ -1182,8 +1182,8 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
     }
 
     let mut result = Vec::with_capacity(m);
-    for i in 0..m {
-        let a_row = match &a[i] {
+    for a_item in a.iter().take(m) {
+        let a_row = match a_item {
             Value::Array(row) => row,
             _ => {
                 let ctx = ErrorContext::new()

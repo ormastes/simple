@@ -267,11 +267,7 @@ impl NativeLibConfig {
             (false, _) => "a",
         };
 
-        let prefix = if target.os != TargetOS::Windows {
-            "lib"
-        } else {
-            ""
-        };
+        let prefix = if target.os != TargetOS::Windows { "lib" } else { "" };
 
         self.output_dir.join(format!("{}{}.{}", prefix, self.name, ext))
     }

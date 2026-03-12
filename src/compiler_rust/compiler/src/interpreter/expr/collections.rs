@@ -284,7 +284,7 @@ pub(super) fn eval_collection_expr(
                                 let self_ctx = Some((class.as_str(), fields));
                                 super::super::interpreter_call::exec_function_with_values_and_self(
                                     &method,
-                                    &[idx_val.clone()],
+                                    std::slice::from_ref(&idx_val),
                                     env,
                                     functions,
                                     classes,
@@ -515,7 +515,7 @@ pub(super) fn eval_collection_expr(
                         let self_ctx = Some((class.as_str(), fields));
                         super::super::interpreter_call::exec_function_with_values_and_self(
                             &method,
-                            &[idx_val.clone()],
+                            std::slice::from_ref(&idx_val),
                             env,
                             functions,
                             classes,

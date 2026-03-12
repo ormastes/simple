@@ -439,10 +439,8 @@ impl DeferredMonomorphizer {
         let key = SpecializationKey::new(name.to_string(), type_args.to_vec());
 
         // Check cache first
-        if let Some(cached) = self.specialization_cache.get(&key) {
-            if let CompiledCode::Function(f) = cached {
-                return Ok(f.clone());
-            }
+        if let Some(CompiledCode::Function(f)) = self.specialization_cache.get(&key) {
+            return Ok(f.clone());
         }
 
         // Get template

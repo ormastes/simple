@@ -794,18 +794,14 @@ impl LintChecker {
 
             match node {
                 Node::Expression(expr) => check_expr(checker, expr),
-                Node::Let(LetStmt { value, .. }) => {
-                    if let Some(ref v) = value {
-                        check_expr(checker, v);
-                    }
+                Node::Let(LetStmt { value: Some(ref v), .. }) => {
+                    check_expr(checker, v);
                 }
                 Node::Assignment(assign) => {
                     check_expr(checker, &assign.value);
                 }
-                Node::Return(ReturnStmt { value, .. }) => {
-                    if let Some(ref v) = value {
-                        check_expr(checker, v);
-                    }
+                Node::Return(ReturnStmt { value: Some(ref v), .. }) => {
+                    check_expr(checker, v);
                 }
                 Node::If(if_stmt) => {
                     check_expr(checker, &if_stmt.condition);
@@ -1084,10 +1080,8 @@ impl LintChecker {
             use simple_parser::ast::LetStmt;
             match node {
                 Node::Expression(expr) => check_expr(checker, expr),
-                Node::Let(LetStmt { value, .. }) => {
-                    if let Some(v) = value {
-                        check_expr(checker, v);
-                    }
+                Node::Let(LetStmt { value: Some(v), .. }) => {
+                    check_expr(checker, v);
                 }
                 Node::If(if_stmt) => {
                     for stmt in &if_stmt.then_block.statements {
@@ -1400,22 +1394,18 @@ impl LintChecker {
 
         // Recursively check statements
         fn check_stmt(checker: &mut LintChecker, node: &Node) {
-            use simple_parser::ast::LetStmt;
+            use simple_parser::ast::{LetStmt, ReturnStmt};
 
             match node {
                 Node::Expression(expr) => check_expr(checker, expr),
-                Node::Let(LetStmt { value, .. }) => {
-                    if let Some(v) = value {
-                        check_expr(checker, v);
-                    }
+                Node::Let(LetStmt { value: Some(v), .. }) => {
+                    check_expr(checker, v);
                 }
                 Node::Assignment(assign) => {
                     check_expr(checker, &assign.value);
                 }
-                Node::Return(ret) => {
-                    if let Some(v) = &ret.value {
-                        check_expr(checker, v);
-                    }
+                Node::Return(ReturnStmt { value: Some(v), .. }) => {
+                    check_expr(checker, v);
                 }
                 Node::If(if_stmt) => {
                     check_expr(checker, &if_stmt.condition);
@@ -1644,30 +1634,28 @@ impl LintChecker {
             match node {
                 Node::Let(LetStmt {
                     pattern,
-                    value,
+                    value: Some(val),
                     ty,
                     span,
                     ..
                 }) => {
-                    if let Some(val) = value {
-                        // Check if value creates a resource
-                        if let Some(resource_type) = creates_resource(val) {
-                            if let Some(name) = get_pattern_name(pattern) {
-                                scope.add_resource(name.to_string(), *span, resource_type);
-                            }
+                    // Check if value creates a resource
+                    if let Some(resource_type) = creates_resource(val) {
+                        if let Some(name) = get_pattern_name(pattern) {
+                            scope.add_resource(name.to_string(), *span, resource_type);
                         }
-                        // Also check if type annotation indicates a resource
-                        else if let Some(type_ann) = ty {
-                            if is_resource_type(type_ann) {
-                                if let Some(name) = get_pattern_name(pattern) {
-                                    let type_str = format_type(type_ann);
-                                    scope.add_resource(name.to_string(), *span, type_str);
-                                }
-                            }
-                        }
-
-                        check_expr_for_close(scope, val);
                     }
+                    // Also check if type annotation indicates a resource
+                    else if let Some(type_ann) = ty {
+                        if is_resource_type(type_ann) {
+                            if let Some(name) = get_pattern_name(pattern) {
+                                let type_str = format_type(type_ann);
+                                scope.add_resource(name.to_string(), *span, type_str);
+                            }
+                        }
+                    }
+
+                    check_expr_for_close(scope, val);
                 }
                 Node::Expression(expr) => {
                     check_expr_for_close(scope, expr);

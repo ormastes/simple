@@ -70,10 +70,7 @@ impl PlatformLinkConfig {
             nm_flags: vec!["-D", "-g", "-p"],
             stub_strategy: StubStrategy::Weak,
             asm_label_extra_chars: vec!['.', '$'],
-            unresolved_symbol_flags: vec![
-                "-Wl,--allow-multiple-definition",
-                "-Wl,--unresolved-symbols=ignore-all",
-            ],
+            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition", "-Wl,--unresolved-symbols=ignore-all"],
             disable_pie: true,
         }
     }
@@ -134,10 +131,7 @@ impl PlatformLinkConfig {
     pub fn generate_stub_asm(&self, sym: &str, ret_nil: &str) -> String {
         match self.stub_strategy {
             StubStrategy::WeakDefinition => {
-                format!(
-                    ".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n",
-                    sym, ret_nil
-                )
+                format!(".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n", sym, ret_nil)
             }
             StubStrategy::StrongWithAllowMultiple => {
                 format!(".globl {0}\n{0}:\n  {1}\n\n", sym, ret_nil)
@@ -149,12 +143,7 @@ impl PlatformLinkConfig {
     }
 
     /// Generate assembly for a builtin trampoline (e.g., `___builtin_X` → `_X`).
-    pub fn generate_builtin_trampoline_asm(
-        &self,
-        sym: &str,
-        jmp_prefix: &str,
-        real_fn: &str,
-    ) -> String {
+    pub fn generate_builtin_trampoline_asm(&self, sym: &str, jmp_prefix: &str, real_fn: &str) -> String {
         match self.stub_strategy {
             StubStrategy::WeakDefinition => {
                 format!(
@@ -164,10 +153,7 @@ impl PlatformLinkConfig {
             }
             StubStrategy::StrongWithAllowMultiple | StubStrategy::Weak => {
                 // Use weak for trampolines on ELF regardless
-                format!(
-                    ".weak {0}\n.globl {0}\n{0}:\n  {1} {2}\n\n",
-                    sym, jmp_prefix, real_fn
-                )
+                format!(".weak {0}\n.globl {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn)
             }
         }
     }

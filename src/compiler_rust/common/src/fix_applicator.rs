@@ -143,11 +143,14 @@ impl FixApplicator {
     pub fn filter_by_confidence(fixes: &[EasyFix], min_confidence: FixConfidence) -> Vec<&EasyFix> {
         fixes
             .iter()
-            .filter(|f| matches!((min_confidence, f.confidence),
-                (FixConfidence::Safe, FixConfidence::Safe) |
-                (FixConfidence::Likely, FixConfidence::Safe | FixConfidence::Likely) |
-                (FixConfidence::Uncertain, _)
-            ))
+            .filter(|f| {
+                matches!(
+                    (min_confidence, f.confidence),
+                    (FixConfidence::Safe, FixConfidence::Safe)
+                        | (FixConfidence::Likely, FixConfidence::Safe | FixConfidence::Likely)
+                        | (FixConfidence::Uncertain, _)
+                )
+            })
             .collect()
     }
 

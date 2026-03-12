@@ -53,7 +53,13 @@ pub struct ModuleDocs {
 }
 
 /// Grouped documentation items by kind
-type DocItemGroups<'a> = (Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>);
+type DocItemGroups<'a> = (
+    Vec<&'a DocItem>,
+    Vec<&'a DocItem>,
+    Vec<&'a DocItem>,
+    Vec<&'a DocItem>,
+    Vec<&'a DocItem>,
+);
 
 impl ModuleDocs {
     /// Group items by kind for documentation generation

@@ -468,9 +468,7 @@ impl StartupLoader {
                         .map_err(StartupError::NativeLibLoadFailed)?;
                 }
                 NATIVE_LIB_SYSTEM => {
-                    manager
-                        .add_system(&name)
-                        .map_err(StartupError::NativeLibLoadFailed)?;
+                    manager.add_system(&name).map_err(StartupError::NativeLibLoadFailed)?;
                 }
                 _ => {
                     // Static libs are embedded - data is in the settlement

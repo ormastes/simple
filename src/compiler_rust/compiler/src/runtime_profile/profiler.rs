@@ -391,11 +391,9 @@ impl RuntimeProfiler {
             .count();
 
         // Estimate pages for startup code
-        let startup_pages = (startup_count * AVG_FUNC_SIZE).div_ceil(PAGE_SIZE);
-
         // Without optimization, startup code is scattered
         // Estimate 2x more pages touched
-        startup_pages
+        (startup_count * AVG_FUNC_SIZE).div_ceil(PAGE_SIZE)
     }
 
     /// Generate layout feedback based on profiling data

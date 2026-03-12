@@ -684,43 +684,81 @@ pub extern "C" fn spl_to_string(val: i64) -> i64 {
 // compiled objects are regenerated.
 
 #[no_mangle]
-pub extern "C" fn print(val: i64) -> i64 { spl_print(val) }
+pub extern "C" fn print(val: i64) -> i64 {
+    spl_print(val)
+}
 #[no_mangle]
-pub extern "C" fn println(val: i64) -> i64 { spl_println(val) }
+pub extern "C" fn println(val: i64) -> i64 {
+    spl_println(val)
+}
 #[no_mangle]
-pub extern "C" fn eprint(val: i64) -> i64 { spl_eprint(val) }
+pub extern "C" fn eprint(val: i64) -> i64 {
+    spl_eprint(val)
+}
 #[no_mangle]
-pub extern "C" fn eprintln(val: i64) -> i64 { spl_eprintln(val) }
+pub extern "C" fn eprintln(val: i64) -> i64 {
+    spl_eprintln(val)
+}
 #[no_mangle]
-pub extern "C" fn print_raw(val: i64) -> i64 { spl_print_raw(val) }
+pub extern "C" fn print_raw(val: i64) -> i64 {
+    spl_print_raw(val)
+}
 #[no_mangle]
-pub extern "C" fn eprint_raw(val: i64) -> i64 { spl_eprint_raw(val) }
+pub extern "C" fn eprint_raw(val: i64) -> i64 {
+    spl_eprint_raw(val)
+}
 #[no_mangle]
-pub extern "C" fn dbg(val: i64) -> i64 { spl_dbg(val) }
+pub extern "C" fn dbg(val: i64) -> i64 {
+    spl_dbg(val)
+}
 #[no_mangle]
-pub extern "C" fn dprint(val: i64) -> i64 { spl_dprint(val) }
+pub extern "C" fn dprint(val: i64) -> i64 {
+    spl_dprint(val)
+}
 #[no_mangle]
-pub extern "C" fn input(prompt: i64) -> i64 { spl_input(prompt) }
+pub extern "C" fn input(prompt: i64) -> i64 {
+    spl_input(prompt)
+}
 #[no_mangle]
-pub extern "C" fn panic(msg: i64) -> i64 { spl_panic(msg) }
+pub extern "C" fn panic(msg: i64) -> i64 {
+    spl_panic(msg)
+}
 #[no_mangle]
-pub extern "C" fn abs(val: i64) -> i64 { spl_abs(val) }
+pub extern "C" fn abs(val: i64) -> i64 {
+    spl_abs(val)
+}
 #[no_mangle]
-pub extern "C" fn min(a: i64, b: i64) -> i64 { spl_min(a, b) }
+pub extern "C" fn min(a: i64, b: i64) -> i64 {
+    spl_min(a, b)
+}
 #[no_mangle]
-pub extern "C" fn max(a: i64, b: i64) -> i64 { spl_max(a, b) }
+pub extern "C" fn max(a: i64, b: i64) -> i64 {
+    spl_max(a, b)
+}
 #[no_mangle]
-pub extern "C" fn pow(base: i64, exp: i64) -> i64 { spl_pow(base, exp) }
+pub extern "C" fn pow(base: i64, exp: i64) -> i64 {
+    spl_pow(base, exp)
+}
 #[no_mangle]
-pub extern "C" fn sqrt(val: i64) -> i64 { spl_sqrt(val) }
+pub extern "C" fn sqrt(val: i64) -> i64 {
+    spl_sqrt(val)
+}
 #[no_mangle]
-pub extern "C" fn ceil(val: i64) -> i64 { spl_ceil(val) }
+pub extern "C" fn ceil(val: i64) -> i64 {
+    spl_ceil(val)
+}
 #[no_mangle]
-pub extern "C" fn floor(val: i64) -> i64 { spl_floor(val) }
+pub extern "C" fn floor(val: i64) -> i64 {
+    spl_floor(val)
+}
 #[no_mangle]
-pub extern "C" fn to_int(val: i64) -> i64 { spl_to_int(val) }
+pub extern "C" fn to_int(val: i64) -> i64 {
+    spl_to_int(val)
+}
 #[no_mangle]
-pub extern "C" fn to_string(val: i64) -> i64 { spl_to_string(val) }
+pub extern "C" fn to_string(val: i64) -> i64 {
+    spl_to_string(val)
+}
 
 // -- Compiler backend stubs --
 
@@ -864,6 +902,16 @@ pub extern "C" fn stdout_flush() -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_stdout_write(data: i64) -> i64 {
+    stdout_write(data)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_stdout_flush() -> i64 {
+    stdout_flush()
+}
+
+#[no_mangle]
 pub extern "C" fn stderr_write(data: i64) -> i64 {
     use std::io::Write;
     if let Some(s) = stub_extract_path(data) {
@@ -880,11 +928,24 @@ pub extern "C" fn stderr_flush() -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_stderr_write(data: i64) -> i64 {
+    stderr_write(data)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_stderr_flush() -> i64 {
+    stderr_flush()
+}
+
+#[no_mangle]
 pub extern "C" fn stdin_read_char() -> i64 {
     use std::io::Read;
     let mut buf = [0u8; 1];
-    let _ = std::io::stdin().read(&mut buf);
-    buf[0] as i64
+    match std::io::stdin().read(&mut buf) {
+        Ok(0) => stub_make_string(""),
+        Ok(_) => stub_make_string(&String::from_utf8_lossy(&buf)),
+        Err(_) => stub_make_string(""),
+    }
 }
 
 // -- Memory stubs --

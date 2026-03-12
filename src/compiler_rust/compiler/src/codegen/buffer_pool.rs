@@ -244,10 +244,7 @@ impl BufferPool {
         stats.returns += 1;
 
         // Check if buffer is too large or pool is full
-        if buffer.capacity() > self.config.max_buffer_size {
-            stats.drops += 1;
-            // Buffer is dropped automatically
-        } else if buffers.len() >= self.config.max_pool_size {
+        if buffer.capacity() > self.config.max_buffer_size || buffers.len() >= self.config.max_pool_size {
             stats.drops += 1;
             // Buffer is dropped automatically
         } else {
@@ -362,9 +359,7 @@ impl LocalBufferPool {
 
         stats.returns += 1;
 
-        if buffer.capacity() > self.config.max_buffer_size {
-            stats.drops += 1;
-        } else if buffers.len() >= self.config.max_pool_size {
+        if buffer.capacity() > self.config.max_buffer_size || buffers.len() >= self.config.max_pool_size {
             stats.drops += 1;
         } else {
             buffers.push(buffer);

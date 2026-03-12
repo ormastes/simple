@@ -138,14 +138,18 @@ pub fn lint_file(path: &Path, json_output: bool, fix_flags: &FixFlags) -> i32 {
 }
 
 /// Result of internal lint operation
-pub type LintResult = (bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>, Vec<EasyFix>, Option<String>);
+pub type LintResult = (
+    bool,
+    usize,
+    usize,
+    Vec<simple_common::diagnostic::Diagnostic>,
+    Vec<EasyFix>,
+    Option<String>,
+);
 
 /// Internal lint function that returns diagnostic information
 /// Returns: (has_errors, error_count, warning_count, diagnostics, easy_fixes, source_text)
-pub fn lint_file_internal(
-    path: &std::path::Path,
-    json_output: bool,
-) -> Option<LintResult> {
+pub fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<LintResult> {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,

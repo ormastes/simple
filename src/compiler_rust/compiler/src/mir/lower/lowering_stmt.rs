@@ -966,17 +966,13 @@ impl<'a> MirLowerer<'a> {
 
         // Strategy 2: Check if the type is Result and look up variant info
         if let Some(registry) = self.type_registry {
-            if let Some(hir_type) = registry.get(expr.ty) {
-                if let HirType::Enum { name, variants: _, .. } = hir_type {
-                    // If the type is named "Result", check the expression pattern
-                    if name == "Result" {
-                        // For StructInit, check if the type name contains "Err"
-                        if let HirExprKind::StructInit { ty, fields: _ } = &expr.kind {
-                            if let Some(struct_type) = registry.get(*ty) {
-                                if let HirType::Struct { name: struct_name, .. } = struct_type {
-                                    return struct_name.contains("Err");
-                                }
-                            }
+            if let Some(HirType::Enum { name, variants: _, .. }) = registry.get(expr.ty) {
+                // If the type is named "Result", check the expression pattern
+                if name == "Result" {
+                    // For StructInit, check if the type name contains "Err"
+                    if let HirExprKind::StructInit { ty, fields: _ } = &expr.kind {
+                        if let Some(HirType::Struct { name: struct_name, .. }) = registry.get(*ty) {
+                            return struct_name.contains("Err");
                         }
                     }
                 }

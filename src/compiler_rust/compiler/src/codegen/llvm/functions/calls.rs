@@ -30,9 +30,20 @@ impl LlvmBackend {
         // Accepts both bare names and spl_ prefixed names (safe symbol exports).
         if matches!(
             func_name,
-            "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
-            | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln"
-            | "spl_print_raw" | "spl_eprint_raw" | "spl_dprint"
+            "print"
+                | "println"
+                | "eprint"
+                | "eprintln"
+                | "print_raw"
+                | "eprint_raw"
+                | "dprint"
+                | "spl_print"
+                | "spl_println"
+                | "spl_eprint"
+                | "spl_eprintln"
+                | "spl_print_raw"
+                | "spl_eprint_raw"
+                | "spl_dprint"
         ) {
             let (value_fn, ln_value_fn) = match func_name {
                 "print" | "println" | "spl_print" | "spl_println" => ("rt_print_value", "rt_println_value"),

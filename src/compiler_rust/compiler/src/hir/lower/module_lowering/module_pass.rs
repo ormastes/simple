@@ -513,7 +513,7 @@ impl Lowerer {
         // Copy global variables from HashMap to module's globals Vec.
         // Sort by name for deterministic output regardless of HashMap iteration order.
         let mut sorted_globals: Vec<_> = self.globals.iter().collect();
-        sorted_globals.sort_by_key(|(name, _)| name.clone());
+        sorted_globals.sort_by_key(|(name, _)| *name);
         for (name, ty) in sorted_globals {
             self.module.globals.push((name.clone(), *ty));
         }
@@ -707,7 +707,7 @@ impl Lowerer {
 
         // Copy globals and init values to HirModule
         let mut sorted_globals: Vec<_> = self.globals.iter().collect();
-        sorted_globals.sort_by_key(|(name, _)| name.clone());
+        sorted_globals.sort_by_key(|(name, _)| *name);
         for (name, ty) in sorted_globals {
             self.module.globals.push((name.clone(), *ty));
         }

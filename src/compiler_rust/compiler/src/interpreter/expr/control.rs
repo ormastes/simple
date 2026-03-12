@@ -29,7 +29,7 @@ pub(super) fn eval_control_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = if move_mode.is_move() { env.clone() } else { env.clone() };
+            let captured_env = env.clone();
             Ok(Some(Value::Lambda {
                 params: names,
                 body: body.clone(),

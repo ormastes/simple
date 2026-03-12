@@ -162,74 +162,68 @@ pub(crate) fn call_method_on_value(
                 return Ok(Value::array(rev));
             }
             "map" => {
-                if let Some(func_val) = _args.first() {
-                    if let Value::Function { def, captured_env, .. } = func_val {
-                        let mut result = Vec::new();
-                        for item in arr.iter() {
-                            let mut call_env = captured_env.clone();
-                            let val = exec_function_with_values(
-                                def,
-                                &[item.clone()],
-                                &mut call_env,
-                                _functions,
-                                _classes,
-                                _enums,
-                                _impl_methods,
-                            )?;
-                            result.push(val);
-                        }
-                        return Ok(Value::array(result));
+                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
+                    let mut result = Vec::new();
+                    for item in arr.iter() {
+                        let mut call_env = captured_env.clone();
+                        let val = exec_function_with_values(
+                            def,
+                            std::slice::from_ref(item),
+                            &mut call_env,
+                            _functions,
+                            _classes,
+                            _enums,
+                            _impl_methods,
+                        )?;
+                        result.push(val);
                     }
+                    return Ok(Value::array(result));
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
             "filter" => {
-                if let Some(func_val) = _args.first() {
-                    if let Value::Function { def, captured_env, .. } = func_val {
-                        let mut result = Vec::new();
-                        for item in arr.iter() {
-                            let mut call_env = captured_env.clone();
-                            let val = exec_function_with_values(
-                                def,
-                                &[item.clone()],
-                                &mut call_env,
-                                _functions,
-                                _classes,
-                                _enums,
-                                _impl_methods,
-                            )?;
-                            if val.truthy() {
-                                result.push(item.clone());
-                            }
+                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
+                    let mut result = Vec::new();
+                    for item in arr.iter() {
+                        let mut call_env = captured_env.clone();
+                        let val = exec_function_with_values(
+                            def,
+                            std::slice::from_ref(item),
+                            &mut call_env,
+                            _functions,
+                            _classes,
+                            _enums,
+                            _impl_methods,
+                        )?;
+                        if val.truthy() {
+                            result.push(item.clone());
                         }
-                        return Ok(Value::array(result));
                     }
+                    return Ok(Value::array(result));
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
             "flat_map" | "flatmap" => {
-                if let Some(func_val) = _args.first() {
-                    if let Value::Function { def, captured_env, .. } = func_val {
-                        let mut result = Vec::new();
-                        for item in arr.iter() {
-                            let mut call_env = captured_env.clone();
-                            let val = exec_function_with_values(
-                                def,
-                                &[item.clone()],
-                                &mut call_env,
-                                _functions,
-                                _classes,
-                                _enums,
-                                _impl_methods,
-                            )?;
-                            if let Value::Array(inner) = val {
-                                result.extend(inner.iter().cloned());
-                            } else {
-                                result.push(val);
-                            }
+                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
+                    let mut result = Vec::new();
+                    for item in arr.iter() {
+                        let mut call_env = captured_env.clone();
+                        let val = exec_function_with_values(
+                            def,
+                            std::slice::from_ref(item),
+                            &mut call_env,
+                            _functions,
+                            _classes,
+                            _enums,
+                            _impl_methods,
+                        )?;
+                        if let Value::Array(inner) = val {
+                            result.extend(inner.iter().cloned());
+                        } else {
+                            result.push(val);
                         }
-                        return Ok(Value::array(result));
                     }
+                    return Ok(Value::array(result));
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
@@ -267,48 +261,44 @@ pub(crate) fn call_method_on_value(
                 });
             }
             "any" => {
-                if let Some(func_val) = _args.first() {
-                    if let Value::Function { def, captured_env, .. } = func_val {
-                        for item in arr.iter() {
-                            let mut call_env = captured_env.clone();
-                            let val = exec_function_with_values(
-                                def,
-                                &[item.clone()],
-                                &mut call_env,
-                                _functions,
-                                _classes,
-                                _enums,
-                                _impl_methods,
-                            )?;
-                            if val.truthy() {
-                                return Ok(Value::Bool(true));
-                            }
+                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
+                    for item in arr.iter() {
+                        let mut call_env = captured_env.clone();
+                        let val = exec_function_with_values(
+                            def,
+                            std::slice::from_ref(item),
+                            &mut call_env,
+                            _functions,
+                            _classes,
+                            _enums,
+                            _impl_methods,
+                        )?;
+                        if val.truthy() {
+                            return Ok(Value::Bool(true));
                         }
-                        return Ok(Value::Bool(false));
                     }
+                    return Ok(Value::Bool(false));
                 }
                 return Ok(Value::Bool(!arr.is_empty()));
             }
             "all" => {
-                if let Some(func_val) = _args.first() {
-                    if let Value::Function { def, captured_env, .. } = func_val {
-                        for item in arr.iter() {
-                            let mut call_env = captured_env.clone();
-                            let val = exec_function_with_values(
-                                def,
-                                &[item.clone()],
-                                &mut call_env,
-                                _functions,
-                                _classes,
-                                _enums,
-                                _impl_methods,
-                            )?;
-                            if !val.truthy() {
-                                return Ok(Value::Bool(false));
-                            }
+                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
+                    for item in arr.iter() {
+                        let mut call_env = captured_env.clone();
+                        let val = exec_function_with_values(
+                            def,
+                            std::slice::from_ref(item),
+                            &mut call_env,
+                            _functions,
+                            _classes,
+                            _enums,
+                            _impl_methods,
+                        )?;
+                        if !val.truthy() {
+                            return Ok(Value::Bool(false));
                         }
-                        return Ok(Value::Bool(true));
                     }
+                    return Ok(Value::Bool(true));
                 }
                 return Ok(Value::Bool(true));
             }
@@ -615,7 +605,7 @@ fn find_method_and_exec(
 /// Find and execute a method on a class/struct object.
 /// Searches in class_def methods first, then impl_methods.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
-pub(crate) fn find_and_exec_method<'a>(
+pub(crate) fn find_and_exec_method(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
@@ -641,7 +631,7 @@ pub(crate) fn find_and_exec_method<'a>(
 
 /// Try to call method_missing hook on a class/struct object.
 /// Returns Ok(Some(value)) if method_missing found, Ok(None) if not found.
-pub(crate) fn try_method_missing<'a>(
+pub(crate) fn try_method_missing(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,

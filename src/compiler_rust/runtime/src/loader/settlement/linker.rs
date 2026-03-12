@@ -187,16 +187,10 @@ impl SettlementLinker {
                     dependencies.push(export.module);
 
                     // Update dependency graph
-                    self.dependencies
-                        .entry(handle)
-                        .or_default()
-                        .push(export.module);
+                    self.dependencies.entry(handle).or_default().push(export.module);
 
                     // Update reverse dependencies
-                    self.dependents
-                        .entry(export.module)
-                        .or_default()
-                        .push(handle);
+                    self.dependents.entry(export.module).or_default().push(handle);
                 }
             } else if !import.weak {
                 // Required symbol not found

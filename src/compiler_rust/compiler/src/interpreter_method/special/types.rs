@@ -27,6 +27,7 @@ macro_rules! extract_block_result {
     };
 }
 
+#[allow(clippy::borrowed_box)]
 pub fn handle_unit_methods(
     value: &Box<Value>,
     suffix: &str,

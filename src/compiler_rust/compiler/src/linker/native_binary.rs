@@ -1065,11 +1065,9 @@ static inline int64_t _rt_now_nanos(void) {{
 
             // Allow multiple definitions so bootstrap stubs don't conflict
             // with real runtime symbols linked above.
-            if !extra_stubs.is_empty() && runtime_dir.is_some() {
-                if linker_flavor == LinkerFlavor::Gnu {
-                    if !matches!(self.options.target.os, TargetOS::MacOS) {
-                        builder = builder.flag("--allow-multiple-definition".to_string());
-                    }
+            if !extra_stubs.is_empty() && runtime_dir.is_some() && linker_flavor == LinkerFlavor::Gnu {
+                if !matches!(self.options.target.os, TargetOS::MacOS) {
+                    builder = builder.flag("--allow-multiple-definition".to_string());
                 }
             }
 

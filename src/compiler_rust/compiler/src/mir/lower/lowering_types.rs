@@ -42,22 +42,20 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn emit_unit_bound_check(&mut self, ty: TypeId, value: VReg) -> MirLowerResult<()> {
         // Look up type info from registry
         if let Some(registry) = self.type_registry {
-            if let Some(hir_type) = registry.get(ty) {
-                if let HirType::UnitType { name, constraints, .. } = hir_type {
-                    // Only emit check if there's a range constraint
-                    if let Some((min, max)) = constraints.range {
-                        let overflow: UnitOverflowBehavior = constraints.overflow.into();
-                        self.with_func(|func, current_block| {
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::UnitBoundCheck {
-                                value,
-                                unit_name: name.clone(),
-                                min,
-                                max,
-                                overflow,
-                            });
-                        })?;
-                    }
+            if let Some(HirType::UnitType { name, constraints, .. }) = registry.get(ty) {
+                // Only emit check if there's a range constraint
+                if let Some((min, max)) = constraints.range {
+                    let overflow: UnitOverflowBehavior = constraints.overflow.into();
+                    self.with_func(|func, current_block| {
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::UnitBoundCheck {
+                            value,
+                            unit_name: name.clone(),
+                            min,
+                            max,
+                            overflow,
+                        });
+                    })?;
                 }
             }
         }

@@ -631,10 +631,8 @@ impl<'a> MirLowerer<'a> {
         let mut effects = func.effects.clone();
 
         // Add inferred effects from concurrency mode (if not already present)
-        if func.concurrency_mode == crate::hir::ConcurrencyMode::Actor {
-            if !effects.contains(&"async".to_string()) {
-                effects.push("async".to_string());
-            }
+        if func.concurrency_mode == crate::hir::ConcurrencyMode::Actor && !effects.contains(&"async".to_string()) {
+            effects.push("async".to_string());
         }
 
         effects
