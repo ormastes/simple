@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 
 /// Check options
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CheckOptions {
     /// Output JSON format for tooling
     pub json: bool,
@@ -25,7 +24,6 @@ pub struct CheckOptions {
     /// Quiet mode (only show errors, no progress)
     pub quiet: bool,
 }
-
 
 /// Check result for a single file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,10 +77,9 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     let mut has_errors = false;
 
     for file in files {
-        if !options.quiet
-            && options.verbose {
-                println!("Checking {}...", file.display());
-            }
+        if !options.quiet && options.verbose {
+            println!("Checking {}...", file.display());
+        }
 
         let result = check_file(file);
 

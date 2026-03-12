@@ -153,7 +153,7 @@ fn app_to_mathml(name: &str, args: &[MathExpr]) -> String {
         "abs" if args.len() == 1 => format!("<mrow><mo>|</mo>{}<mo>|</mo></mrow>", expr_to_mathml(&args[0])),
         "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "sinh" | "cosh" | "tanh" | "asin" | "acos" | "atan"
         | "arcsin" | "arccos" | "arctan" => {
-            let args_ml: Vec<String> = args.iter().map(|a| expr_to_mathml(a)).collect();
+            let args_ml: Vec<String> = args.iter().map(expr_to_mathml).collect();
             format!(
                 "<mrow><mi>{}</mi><mo>&ApplyFunction;</mo><mrow><mo>(</mo>{}<mo>)</mo></mrow></mrow>",
                 name,
@@ -161,7 +161,7 @@ fn app_to_mathml(name: &str, args: &[MathExpr]) -> String {
             )
         }
         _ => {
-            let args_ml: Vec<String> = args.iter().map(|a| expr_to_mathml(a)).collect();
+            let args_ml: Vec<String> = args.iter().map(expr_to_mathml).collect();
             format!(
                 "<mrow><mi>{}</mi><mo>(</mo>{}<mo>)</mo></mrow>",
                 name,

@@ -43,6 +43,12 @@ pub struct NativeMapProvider {
     next_btreeset_id: AtomicI64,
 }
 
+impl Default for NativeMapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeMapProvider {
     pub fn new() -> Self {
         NativeMapProvider {
@@ -569,6 +575,12 @@ pub struct NativeConcurrentMapProvider {
     next_id: AtomicI64,
 }
 
+impl Default for NativeConcurrentMapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeConcurrentMapProvider {
     pub fn new() -> Self {
         NativeConcurrentMapProvider {
@@ -639,6 +651,12 @@ pub struct NativeThreadProvider {
     next_id: AtomicI64,
     results: DashMap<Handle, Value>,
     handles: Mutex<StdHashMap<Handle, std::thread::JoinHandle<Value>>>,
+}
+
+impl Default for NativeThreadProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeThreadProvider {
@@ -725,6 +743,12 @@ pub struct NativeChannelProvider {
     next_id: AtomicI64,
 }
 
+impl Default for NativeChannelProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeChannelProvider {
     pub fn new() -> Self {
         NativeChannelProvider {
@@ -803,6 +827,12 @@ pub struct NativeLockProvider {
     rwlocks: DashMap<i64, Arc<parking_lot::RwLock<Value>>>,
     next_mutex_id: AtomicI64,
     next_rwlock_id: AtomicI64,
+}
+
+impl Default for NativeLockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeLockProvider {
@@ -948,6 +978,12 @@ pub struct NativeParallelIterProvider {
     threshold: AtomicUsize,
 }
 
+impl Default for NativeParallelIterProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeParallelIterProvider {
     pub fn new() -> Self {
         NativeParallelIterProvider {
@@ -965,11 +1001,11 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             // Sequential fallback for small collections
-            return items.into_iter().map(|v| f(v)).collect();
+            return items.into_iter().map(&f).collect();
         }
 
         use rayon::prelude::*;
-        let results: Vec<Result<Value, CompileError>> = items.into_par_iter().map(|v| f(v)).collect();
+        let results: Vec<Result<Value, CompileError>> = items.into_par_iter().map(f).collect();
         results.into_iter().collect()
     }
 

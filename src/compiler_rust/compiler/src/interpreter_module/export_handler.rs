@@ -37,7 +37,7 @@ pub fn load_export_source(
 
     // Build a UseStmt to load the source module
     let use_stmt = UseStmt {
-        span: export_stmt.span.clone(),
+        span: export_stmt.span,
         path: export_stmt.path.clone(),
         target: ImportTarget::Glob, // Load entire module to get all exports
         is_type_only: false,        // Runtime export loading is never type-only

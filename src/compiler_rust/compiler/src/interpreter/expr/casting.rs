@@ -116,9 +116,9 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             }
         }
         _ => {
-            let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
-                "only int, float, bool, and single-char strings can be cast to numeric types"
-            ));
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only int, float, bool, and single-char strings can be cast to numeric types".to_string());
             Err(CompileError::semantic_with_context(
                 format!("type mismatch: cannot cast {} to {}", val.type_name(), target.name()),
                 ctx,
@@ -170,7 +170,7 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
 fn cast_to_char(val: Value) -> Result<Value, CompileError> {
     match val {
         Value::Int(i) => {
-            if i >= 0 && i <= 0x10FFFF {
+            if (0..=0x10FFFF).contains(&i) {
                 if let Some(c) = char::from_u32(i as u32) {
                     return Ok(Value::Str(c.to_string()));
                 }

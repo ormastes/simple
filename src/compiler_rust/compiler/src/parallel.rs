@@ -370,21 +370,12 @@ pub fn load_module_parallel(path: &Path) -> Result<Module, CompileError> {
 }
 
 /// Configuration for parallel parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParallelConfig {
     /// Number of threads to use. None means use all available.
     pub num_threads: Option<usize>,
     /// Whether to use memory-mapped files.
     pub use_mmap: bool,
-}
-
-impl Default for ParallelConfig {
-    fn default() -> Self {
-        Self {
-            num_threads: None,
-            use_mmap: false,
-        }
-    }
 }
 
 impl ParallelConfig {

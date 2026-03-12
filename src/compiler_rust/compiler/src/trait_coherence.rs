@@ -209,10 +209,10 @@ impl CoherenceChecker {
                 }
 
                 // If trait type params differ (e.g., Add<&str> vs Add<text>), not overlapping
-                if !impl_block.trait_type_params.is_empty() || !existing.trait_type_params.is_empty() {
-                    if impl_block.trait_type_params != existing.trait_type_params {
-                        continue;
-                    }
+                if (!impl_block.trait_type_params.is_empty() || !existing.trait_type_params.is_empty())
+                    && impl_block.trait_type_params != existing.trait_type_params
+                {
+                    continue;
                 }
 
                 if self.types_could_unify(
@@ -324,10 +324,7 @@ impl CoherenceChecker {
                 span: impl_block.span,
             };
 
-            self.impl_registry
-                .entry(trait_name.clone())
-                .or_insert_with(Vec::new)
-                .push(entry);
+            self.impl_registry.entry(trait_name.clone()).or_default().push(entry);
         }
     }
 

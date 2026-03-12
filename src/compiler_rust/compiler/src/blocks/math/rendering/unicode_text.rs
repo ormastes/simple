@@ -30,7 +30,7 @@ fn expr_to_text(expr: &MathExpr) -> String {
                     .iter()
                     .map(|row| {
                         if let MathExpr::Array(cols) = row {
-                            cols.iter().map(|e| expr_to_text(e)).collect::<Vec<_>>().join(", ")
+                            cols.iter().map(expr_to_text).collect::<Vec<_>>().join(", ")
                         } else {
                             expr_to_text(row)
                         }
@@ -38,7 +38,7 @@ fn expr_to_text(expr: &MathExpr) -> String {
                     .collect();
                 format!("[{}]", rows.join("; "))
             } else {
-                let items: Vec<String> = elements.iter().map(|e| expr_to_text(e)).collect();
+                let items: Vec<String> = elements.iter().map(expr_to_text).collect();
                 format!("[{}]", items.join(", "))
             }
         }
@@ -167,7 +167,7 @@ fn app_to_text(name: &str, args: &[MathExpr]) -> String {
         "cbrt" if args.len() == 1 => format!("\u{221b}({})", expr_to_text(&args[0])),
         "abs" if args.len() == 1 => format!("|{}|", expr_to_text(&args[0])),
         _ => {
-            let args_str: Vec<String> = args.iter().map(|a| expr_to_text(a)).collect();
+            let args_str: Vec<String> = args.iter().map(expr_to_text).collect();
             format!("{}({})", name, args_str.join(", "))
         }
     }

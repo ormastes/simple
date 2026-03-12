@@ -65,10 +65,7 @@ impl MethodRegistry {
     /// Register a method.
     pub fn register(&mut self, type_name: &'static str, info: MethodInfo) {
         let method_name = info.name;
-        self.methods
-            .entry(type_name)
-            .or_insert_with(HashMap::new)
-            .insert(method_name, info);
+        self.methods.entry(type_name).or_default().insert(method_name, info);
     }
 
     /// Look up a method by type and name.

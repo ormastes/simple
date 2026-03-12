@@ -282,9 +282,7 @@ pub fn safe_index<T>(slice: &[T], index: usize) -> Result<&T, IndexError> {
 /// Safe mutable array indexing with bounds checking
 pub fn safe_index_mut<T>(slice: &mut [T], index: usize) -> Result<&mut T, IndexError> {
     let len = slice.len();
-    slice
-        .get_mut(index)
-        .ok_or(IndexError::OutOfBounds { index, len })
+    slice.get_mut(index).ok_or(IndexError::OutOfBounds { index, len })
 }
 
 /// Safe indexing with negative index support (Python-style)

@@ -266,7 +266,7 @@ pub fn rt_function_not_found_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Create error value for method not found
 pub fn rt_method_not_found_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let type_name = match args.get(0) {
+    let type_name = match args.first() {
         Some(Value::Str(s)) => s.as_str(),
         _ => {
             return Err(CompileError::semantic_with_context(

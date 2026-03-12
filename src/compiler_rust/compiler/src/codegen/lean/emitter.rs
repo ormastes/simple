@@ -88,7 +88,7 @@ impl LeanEmitter {
         self.output.push_str("import Mathlib.Tactic\n");
         self.output.push_str("import Mathlib.Data.Int.Basic\n");
         self.output.push_str("import Mathlib.Data.Nat.Basic\n");
-        self.output.push_str("\n");
+        self.output.push('\n');
 
         self.output.push_str(&format!("namespace {}\n\n", module_name));
     }

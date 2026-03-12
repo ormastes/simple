@@ -25,10 +25,8 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     // Display hints to stderr
     for hint in hints {
         // Skip deprecation warnings if --allow-deprecated is set
-        if allow_deprecated && hint.level == ErrorHintLevel::Warning {
-            if hint.message.contains("Deprecated syntax") {
-                continue;
-            }
+        if allow_deprecated && hint.level == ErrorHintLevel::Warning && hint.message.contains("Deprecated syntax") {
+            continue;
         }
 
         let level_str = match hint.level {
@@ -434,7 +432,7 @@ pub fn load_module_with_imports_validated(
                         if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(&format!(
+                                .with_help(format!(
                                     "Function `{}` uses effects not allowed by module capabilities",
                                     func_name
                                 ));
@@ -458,7 +456,7 @@ pub fn load_module_with_imports_validated(
                 continue;
             }
             let temp_use = UseStmt {
-                span: export_use.span.clone(),
+                span: export_use.span,
                 path: export_use.path.clone(),
                 target: export_use.target.clone(),
                 is_type_only: false,
@@ -473,7 +471,7 @@ pub fn load_module_with_imports_validated(
                         if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(&format!(
+                                .with_help(format!(
                                     "Function `{}` uses effects not allowed by module capabilities",
                                     func_name
                                 ));
@@ -489,7 +487,7 @@ pub fn load_module_with_imports_validated(
         } else if let Node::CommonUseStmt(common_use) = &item {
             // Handle common use statements
             let temp_use = UseStmt {
-                span: common_use.span.clone(),
+                span: common_use.span,
                 path: common_use.path.clone(),
                 target: common_use.target.clone(),
                 is_type_only: false,
@@ -504,7 +502,7 @@ pub fn load_module_with_imports_validated(
                         if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(&format!(
+                                .with_help(format!(
                                     "Function `{}` uses effects not allowed by module capabilities",
                                     func_name
                                 ));
@@ -522,7 +520,7 @@ pub fn load_module_with_imports_validated(
             for (module_path, target) in &multi_use.imports {
                 // Create a temporary UseStmt to reuse the resolution logic
                 let temp_use = UseStmt {
-                    span: multi_use.span.clone(),
+                    span: multi_use.span,
                     path: module_path.clone(),
                     target: target.clone(),
                     is_type_only: multi_use.is_type_only,
@@ -536,13 +534,12 @@ pub fn load_module_with_imports_validated(
                         let func_effects = extract_function_effects(&imported);
                         for (func_name, effects) in func_effects {
                             if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                                let ctx =
-                                    ErrorContext::new()
-                                        .with_code(codes::UNSUPPORTED_FEATURE)
-                                        .with_help(&format!(
-                                            "Function `{}` uses effects not allowed by module capabilities",
-                                            func_name
-                                        ));
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNSUPPORTED_FEATURE)
+                                    .with_help(format!(
+                                        "Function `{}` uses effects not allowed by module capabilities",
+                                        func_name
+                                    ));
                                 return Err(CompileError::semantic_with_context(err, ctx));
                             }
                         }

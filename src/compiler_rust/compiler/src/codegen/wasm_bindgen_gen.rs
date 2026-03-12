@@ -58,6 +58,12 @@ pub struct BindingExtractor {
     bindings: Vec<BrowserBinding>,
 }
 
+impl Default for BindingExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BindingExtractor {
     pub fn new() -> Self {
         Self { bindings: Vec::new() }
@@ -157,10 +163,7 @@ impl BindgenCodeGenerator {
         // Group bindings by module
         let mut by_module: HashMap<String, Vec<&BrowserBinding>> = HashMap::new();
         for binding in &self.bindings {
-            by_module
-                .entry(binding.module.clone())
-                .or_insert_with(Vec::new)
-                .push(binding);
+            by_module.entry(binding.module.clone()).or_default().push(binding);
         }
 
         // Generate extern blocks per module
@@ -186,7 +189,7 @@ impl BindgenCodeGenerator {
 
         // Parse module path (e.g., "browser.console" -> namespace = console)
         let js_namespace = if binding.module.contains('.') {
-            binding.module.split('.').last().unwrap()
+            binding.module.split('.').next_back().unwrap()
         } else {
             &binding.module
         };

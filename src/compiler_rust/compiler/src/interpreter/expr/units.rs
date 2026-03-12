@@ -386,7 +386,7 @@ pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Va
                 .with_code(codes::INVALID_UNARY_OP)
                 .with_help("this operator cannot be applied to unit values");
             Err(CompileError::semantic_with_context(
-                format!("unsupported unary operation on unit value"),
+                "unsupported unary operation on unit value".to_string(),
                 ctx,
             ))
         }

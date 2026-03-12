@@ -289,10 +289,7 @@ fn process_inject_item(inject: &MacroInject, result: &mut MacroContractResult) -
         .insert(inject.label.clone(), inject.spec.anchor.clone());
 
     // Initialize the injection vector for this anchor if not present
-    result
-        .injections
-        .entry(inject.spec.anchor.clone())
-        .or_insert_with(Vec::new);
+    result.injections.entry(inject.spec.anchor.clone()).or_default();
 
     Ok(())
 }

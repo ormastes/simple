@@ -22,7 +22,7 @@ fn compute_slice_indices(start: i64, end: Option<i64>, len: i64, inclusive: bool
     };
     let end_idx = match end {
         Some(e) => {
-            let e = if e < 0 { (len + e).max(0) as i64 } else { e };
+            let e = if e < 0 { (len + e).max(0) } else { e };
             if inclusive {
                 (e + 1).min(len) as usize
             } else {
@@ -223,7 +223,7 @@ pub(super) fn eval_collection_expr(
             }
             // Evaluate the value once and clone it
             let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
-            let arr: Vec<Value> = std::iter::repeat(val).take(count_int as usize).collect();
+            let arr: Vec<Value> = std::iter::repeat_n(val, count_int as usize).collect();
             Ok(Some(Value::array(arr)))
         }
         Expr::Tuple(items) => {

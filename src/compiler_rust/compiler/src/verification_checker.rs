@@ -242,7 +242,7 @@ impl VerificationChecker {
 
 /// Check if an AST effect list contains unsafe
 pub fn has_unsafe_effect(effects: &[Effect]) -> bool {
-    effects.iter().any(|e| *e == Effect::Unsafe)
+    effects.contains(&Effect::Unsafe)
 }
 
 /// Check if an AST effect list is pure (no impure effects)

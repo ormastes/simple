@@ -37,9 +37,7 @@ impl JJConnector {
             .output()?;
 
         if !output.status.success() {
-            return Err(io::Error::other(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).to_string()));
         }
 
         let commit_id = String::from_utf8_lossy(&output.stdout).trim().to_string();

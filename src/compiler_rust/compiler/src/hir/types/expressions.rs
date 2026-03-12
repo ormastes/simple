@@ -191,20 +191,15 @@ pub enum NeighborDirection {
 }
 
 /// Dispatch mode for method calls - determines static vs dynamic dispatch
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DispatchMode {
     /// Static dispatch - monomorphized call, direct function invocation
     /// Used when there's a `bind Interface = ImplType` declaration
     Static,
     /// Dynamic dispatch - vtable lookup at runtime
     /// Default behavior when no binding exists
+    #[default]
     Dynamic,
-}
-
-impl Default for DispatchMode {
-    fn default() -> Self {
-        DispatchMode::Dynamic
-    }
 }
 
 impl HirExprKind {

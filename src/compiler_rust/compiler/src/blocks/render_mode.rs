@@ -8,24 +8,19 @@
 use std::cell::Cell;
 
 /// Rendering mode for block display
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// ASCII-only output (e.g., `x^2 + y^2`)
     Plain,
     /// Unicode characters (e.g., `x² + y²`, `√`, `∑`, `α`) — default
+    #[default]
     Unicode,
     /// Structured JSON metadata for editor plugins
     Rich,
 }
 
-impl Default for RenderMode {
-    fn default() -> Self {
-        RenderMode::Unicode
-    }
-}
-
 thread_local! {
-    static RENDER_MODE: Cell<RenderMode> = Cell::new(RenderMode::Unicode);
+    static RENDER_MODE: Cell<RenderMode> = const { Cell::new(RenderMode::Unicode) };
 }
 
 /// Get the current render mode

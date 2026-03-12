@@ -348,5 +348,5 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
 
     let c_str = unsafe { CStr::from_ptr(ptr) };
     let s = c_str.to_string_lossy().into_owned();
-    Ok(Value::Str(s.into()))
+    Ok(Value::Str(s))
 }

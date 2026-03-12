@@ -21,6 +21,12 @@ use super::{
 #[derive(Debug)]
 pub struct StdMapProvider;
 
+impl Default for StdMapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdMapProvider {
     pub fn new() -> Self {
         StdMapProvider
@@ -401,6 +407,12 @@ impl MapProvider for StdMapProvider {
 #[derive(Debug)]
 pub struct StdConcurrentMapProvider;
 
+impl Default for StdConcurrentMapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdConcurrentMapProvider {
     pub fn new() -> Self {
         StdConcurrentMapProvider
@@ -454,6 +466,12 @@ impl ConcurrentMapProvider for StdConcurrentMapProvider {
 
 #[derive(Debug)]
 pub struct StdChannelProvider;
+
+impl Default for StdChannelProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StdChannelProvider {
     pub fn new() -> Self {
@@ -511,6 +529,12 @@ pub struct StdThreadProvider {
     results: std::sync::Mutex<std::collections::HashMap<Handle, Value>>,
 }
 
+impl Default for StdThreadProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdThreadProvider {
     pub fn new() -> Self {
         StdThreadProvider {
@@ -563,6 +587,12 @@ impl ThreadProvider for StdThreadProvider {
 
 #[derive(Debug)]
 pub struct StdLockProvider;
+
+impl Default for StdLockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StdLockProvider {
     pub fn new() -> Self {
@@ -629,6 +659,12 @@ impl LockProvider for StdLockProvider {
 #[derive(Debug)]
 pub struct StdParallelIterProvider;
 
+impl Default for StdParallelIterProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdParallelIterProvider {
     pub fn new() -> Self {
         StdParallelIterProvider
@@ -641,7 +677,7 @@ impl ParallelIterProvider for StdParallelIterProvider {
         items: Vec<Value>,
         f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
     ) -> Result<Vec<Value>, CompileError> {
-        items.into_iter().map(|v| f(v)).collect()
+        items.into_iter().map(f).collect()
     }
 
     fn par_filter(

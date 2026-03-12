@@ -108,15 +108,12 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
     // Extract arguments
     let mut cmd_args = Vec::new();
     if !args.is_empty() {
-        match &args[0] {
-            Value::Array(arr) => {
-                for val in arr.iter() {
-                    if let Value::Str(s) = val {
-                        cmd_args.push(s.clone());
-                    }
+        if let Value::Array(arr) = &args[0] {
+            for val in arr.iter() {
+                if let Value::Str(s) = val {
+                    cmd_args.push(s.clone());
                 }
             }
-            _ => {}
         }
     }
 

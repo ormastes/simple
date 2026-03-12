@@ -222,7 +222,7 @@ impl Default for HirArena {
 
 /// Thread-local HIR arena for use during lowering.
 thread_local! {
-    static THREAD_ARENA: RefCell<Option<HirArena>> = RefCell::new(None);
+    static THREAD_ARENA: RefCell<Option<HirArena>> = const { RefCell::new(None) };
 }
 
 /// Initialize the thread-local HIR arena.

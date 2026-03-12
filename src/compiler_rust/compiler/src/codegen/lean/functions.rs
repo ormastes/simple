@@ -65,7 +65,7 @@ impl LeanFunction {
         if !self.type_params.is_empty() {
             out.push_str(" {");
             out.push_str(&self.type_params.join(" "));
-            out.push_str("}");
+            out.push('}');
         }
 
         // Parameters
@@ -109,7 +109,7 @@ impl LeanFunction {
         if !self.type_params.is_empty() {
             out.push_str(" {");
             out.push_str(&self.type_params.join(" "));
-            out.push_str("}");
+            out.push('}');
         }
 
         // Parameters as function type

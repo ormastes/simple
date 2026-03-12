@@ -22,8 +22,7 @@ pub enum StatusCodeCategory {
 ///
 /// This enum provides type-safe representation of all standard HTTP status codes.
 /// Each variant includes the numeric code and a canonical reason phrase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StatusCode {
     // 1xx Informational
     Continue = 100,
@@ -288,7 +287,6 @@ impl StatusCode {
         }
     }
 }
-
 
 impl std::fmt::Display for StatusCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

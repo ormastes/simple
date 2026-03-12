@@ -20,7 +20,7 @@ use std::sync::Arc;
 // Strings are kept alive here so that raw pointers returned to FFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
 thread_local! {
-    static PINNED_STRINGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static PINNED_STRINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Clear the thread-local pinned-string cache to free memory.
@@ -424,7 +424,7 @@ pub(crate) fn evaluate_method_call(
         }
         Value::FrozenArray(arc_arr) => {
             if let Some(result) = collections::handle_frozen_array_methods(
-                &arc_arr,
+                arc_arr,
                 method,
                 args,
                 env,
@@ -467,7 +467,7 @@ pub(crate) fn evaluate_method_call(
         }
         Value::FrozenDict(arc_map) => {
             if let Some(result) = collections::handle_frozen_dict_methods(
-                &arc_map,
+                arc_map,
                 method,
                 args,
                 env,
@@ -580,7 +580,7 @@ pub(crate) fn evaluate_method_call(
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
                 if let Some(variant) = variant_opt {
                     // Construct enum variant with payload
-                    let has_fields = variant.fields.as_ref().map_or(false, |f| !f.is_empty());
+                    let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                     if !has_fields && args.is_empty() {
                         // Unit variant
                         return Ok(Value::Enum {
@@ -613,7 +613,7 @@ pub(crate) fn evaluate_method_call(
 
                 // Check if it's a static method on the enum
                 for m in &enum_def.methods {
-                    if m.name == method && m.params.first().map_or(true, |p| p.name != "self") {
+                    if m.name == method && m.params.first().is_none_or(|p| p.name != "self") {
                         return exec_function(m, args, env, functions, classes, enums, impl_methods, None);
                     }
                 }

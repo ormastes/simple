@@ -721,11 +721,10 @@ impl<'a> Parser<'a> {
                             };
                             targets.push(target);
                             self.skip_newlines();
-                            if !self.check(&TokenKind::RBrace)
-                                && self.check(&TokenKind::Comma) {
-                                    self.advance();
-                                    self.skip_newlines();
-                                }
+                            if !self.check(&TokenKind::RBrace) && self.check(&TokenKind::Comma) {
+                                self.advance();
+                                self.skip_newlines();
+                            }
                         }
                         self.expect(&TokenKind::RBrace)?;
                         return Ok(Node::ExportUseStmt(ExportUseStmt {

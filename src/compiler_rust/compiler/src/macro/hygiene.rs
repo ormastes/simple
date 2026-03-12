@@ -282,7 +282,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             type_meta: type_meta.clone(),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
-            op: op.clone(),
+            op: *op,
             left: Box::new(apply_macro_hygiene_expr(left, ctx)),
             right: Box::new(apply_macro_hygiene_expr(right, ctx)),
         },

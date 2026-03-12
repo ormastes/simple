@@ -430,7 +430,7 @@ pub(super) fn eval_op_expr(
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
                     // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
                     (Value::Array(a), Value::Array(b)) => {
-                        let mut arc = Arc::clone(&a);
+                        let mut arc = Arc::clone(a);
                         Arc::make_mut(&mut arc).extend(b.iter().cloned());
                         Ok(Value::Array(arc))
                     }
@@ -704,8 +704,8 @@ pub(super) fn eval_op_expr(
                                 ));
                             }
 
-                            let is_a_2d = is_2d_array(&a);
-                            let is_b_2d = is_2d_array(&b);
+                            let is_a_2d = is_2d_array(a);
+                            let is_b_2d = is_2d_array(b);
 
                             match (is_a_2d, is_b_2d) {
                                 (false, false) => matmul_dot_product_1d(a, b),

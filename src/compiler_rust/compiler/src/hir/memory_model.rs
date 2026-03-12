@@ -185,7 +185,7 @@ impl HappensBeforeGraph {
 
         // Update program order for the thread (AFTER establishing edges)
         let thread = self.get_thread_id(&op);
-        self.program_order.entry(thread).or_insert_with(Vec::new).push(op_id);
+        self.program_order.entry(thread).or_default().push(op_id);
 
         // Update synchronization tracking
         match &op {
@@ -195,7 +195,7 @@ impl HappensBeforeGraph {
             MemoryOperation::AtomicRMW { location, ordering, .. } => {
                 self.atomic_stores
                     .entry(*location)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((op_id, *ordering));
             }
             MemoryOperation::ThreadSpawn { child, .. } => {
@@ -205,13 +205,10 @@ impl HappensBeforeGraph {
                 self.thread_joins.insert(*child, op_id);
             }
             MemoryOperation::ChannelSend { channel, .. } => {
-                self.channel_sends.entry(*channel).or_insert_with(Vec::new).push(op_id);
+                self.channel_sends.entry(*channel).or_default().push(op_id);
             }
             MemoryOperation::ChannelReceive { channel, .. } => {
-                self.channel_receives
-                    .entry(*channel)
-                    .or_insert_with(Vec::new)
-                    .push(op_id);
+                self.channel_receives.entry(*channel).or_default().push(op_id);
             }
             _ => {}
         }
@@ -346,7 +343,7 @@ impl HappensBeforeGraph {
 
     /// Add a happens-before edge
     fn add_edge(&mut self, from: OperationId, to: OperationId) {
-        self.edges.entry(from).or_insert_with(HashSet::new).insert(to);
+        self.edges.entry(from).or_default().insert(to);
     }
 
     /// Check if operation `from` happens-before operation `to`
@@ -394,7 +391,7 @@ impl HappensBeforeGraph {
         for (&op_id, op) in &self.operations {
             match op {
                 MemoryOperation::Read { location, .. } | MemoryOperation::Write { location, .. } => {
-                    location_ops.entry(*location).or_insert_with(Vec::new).push(op_id);
+                    location_ops.entry(*location).or_default().push(op_id);
                 }
                 _ => {}
             }

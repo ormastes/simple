@@ -54,7 +54,7 @@ pub fn rt_random_next_fn(_args: &[Value]) -> Result<Value, CompileError> {
 /// rt_random_randint - Generate random integer in range
 pub fn rt_random_randint_fn(args: &[Value]) -> Result<Value, CompileError> {
     let min = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_random_randint expects 2 arguments".to_string(),
@@ -82,7 +82,7 @@ pub fn rt_random_random_fn(_args: &[Value]) -> Result<Value, CompileError> {
 /// rt_random_uniform - Generate random float in range
 pub fn rt_random_uniform_fn(args: &[Value]) -> Result<Value, CompileError> {
     let min = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_random_uniform expects 2 arguments".to_string(),

@@ -35,7 +35,7 @@ pub fn rt_dict_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Set key-value pair in dictionary
 pub fn rt_dict_set_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dict_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_dict_set expects 3 arguments".to_string(),
@@ -75,7 +75,7 @@ pub fn rt_dict_set_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Get value from dictionary by key
 pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dict_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_dict_get expects 2 arguments".to_string(),

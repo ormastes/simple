@@ -90,7 +90,7 @@ impl Lowerer {
                 let ty = if let Some(t) = &let_stmt.ty {
                     // Type on the let statement itself
                     self.resolve_type(t)?
-                } else if let Some(ref pt) = pattern_type {
+                } else if let Some(pt) = pattern_type {
                     // Type annotation on the pattern (var x: T = v)
                     self.resolve_type(pt)?
                 } else if let Some(ref v) = value {
@@ -1207,7 +1207,7 @@ impl Lowerer {
 
             "before_each" => {
                 // For now, just execute the block inline (simplified)
-                if args.len() > 0 {
+                if !args.is_empty() {
                     let mut stmts = Vec::new();
                     self.lower_bdd_body(&args[0].value, &mut stmts, ctx)?;
                     if !stmts.is_empty() {

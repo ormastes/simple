@@ -181,17 +181,14 @@ impl PhasePatterns {
     /// Returns None if no pattern matches.
     pub fn find_phase(&self, function_name: &str) -> Option<LayoutPhase> {
         // Check in priority order
-        for phase in [
+        [
             LayoutPhase::Startup,
             LayoutPhase::FirstFrame,
             LayoutPhase::Cold,
             LayoutPhase::Steady,
-        ] {
-            if self.matches(phase, function_name) {
-                return Some(phase);
-            }
-        }
-        None
+        ]
+        .into_iter()
+        .find(|&phase| self.matches(phase, function_name))
     }
 }
 
@@ -276,15 +273,13 @@ fn pattern_matches(pattern: &str, text: &str) -> bool {
         return text.contains(inner);
     }
 
-    if pattern.starts_with('*') {
+    if let Some(suffix) = pattern.strip_prefix('*') {
         // Suffix match: *_handler
-        let suffix = &pattern[1..];
         return text.ends_with(suffix);
     }
 
-    if pattern.ends_with('*') {
+    if let Some(prefix) = pattern.strip_suffix('*') {
         // Prefix match: parse_*
-        let prefix = &pattern[..pattern.len() - 1];
         return text.starts_with(prefix);
     }
 
@@ -524,7 +519,7 @@ impl LayoutConfig {
             self.anchor_patterns
                 .custom
                 .entry(name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .extend(patterns.iter().cloned());
         }
 

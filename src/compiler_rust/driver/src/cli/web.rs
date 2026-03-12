@@ -224,7 +224,8 @@ fn serve_file(stream: &mut std::net::TcpStream, base_dir: &Path, path: &str) {
         base_dir
             .join("index.html")
             .metadata()
-            .ok().map(|_| base_dir.join("index.html"))
+            .ok()
+            .map(|_| base_dir.join("index.html"))
             .or_else(|| {
                 // Find first .html file
                 fs::read_dir(base_dir)

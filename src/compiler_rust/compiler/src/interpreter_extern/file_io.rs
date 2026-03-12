@@ -192,7 +192,7 @@ pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
 
     // Create parent directories if needed
     if let Some(parent) = Path::new(&path).parent() {
-        if let Err(_) = fs::create_dir_all(parent) {
+        if fs::create_dir_all(parent).is_err() {
             return Ok(Value::Bool(false));
         }
     }
@@ -283,7 +283,7 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Create a byte array from a raw memory pointer
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
-    let ptr = match args.get(0) {
+    let ptr = match args.first() {
         Some(Value::Int(n)) => *n,
         _ => return Ok(Value::array(vec![])),
     };
@@ -333,10 +333,8 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     // Fallback: copy + delete
-    if fs::copy(&src, &dest).is_ok() {
-        if fs::remove_file(&src).is_ok() {
-            return Ok(Value::Bool(true));
-        }
+    if fs::copy(&src, &dest).is_ok() && fs::remove_file(&src).is_ok() {
+        return Ok(Value::Bool(true));
     }
 
     Ok(Value::Bool(false))

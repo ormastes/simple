@@ -590,7 +590,7 @@ impl<'a> MirLowerer<'a> {
             .and_then(|path| {
                 // Convert file path like "app/domain/user.spl" to "app.domain.user"
                 if let Some(stem) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
-                    Some(path.trim_end_matches(".spl").replace('/', ".").replace('\\', "."))
+                    Some(path.trim_end_matches(".spl").replace(['/', '\\'], "."))
                 } else {
                     None
                 }
@@ -631,13 +631,10 @@ impl<'a> MirLowerer<'a> {
         let mut effects = func.effects.clone();
 
         // Add inferred effects from concurrency mode (if not already present)
-        match func.concurrency_mode {
-            crate::hir::ConcurrencyMode::Actor => {
-                if !effects.contains(&"async".to_string()) {
-                    effects.push("async".to_string());
-                }
+        if func.concurrency_mode == crate::hir::ConcurrencyMode::Actor {
+            if !effects.contains(&"async".to_string()) {
+                effects.push("async".to_string());
             }
-            _ => {}
         }
 
         effects

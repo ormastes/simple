@@ -253,12 +253,12 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             type_meta: type_meta.clone(),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
-            op: op.clone(),
+            op: *op,
             left: Box::new(substitute_expr_templates(left, const_bindings)),
             right: Box::new(substitute_expr_templates(right, const_bindings)),
         },
         Expr::Unary { op, operand } => Expr::Unary {
-            op: op.clone(),
+            op: *op,
             operand: Box::new(substitute_expr_templates(operand, const_bindings)),
         },
         Expr::Call { callee, args } => Expr::Call {

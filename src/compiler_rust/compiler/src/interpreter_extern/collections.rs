@@ -35,7 +35,7 @@ fn alloc_hashmap_handle() -> HashMapHandle {
 pub fn __rt_hashmap_new(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.map.hashmap_new().map(|h| Value::Int(h));
+        return registry.map.hashmap_new().map(Value::Int);
     }
     let handle = alloc_hashmap_handle();
     let registry = get_hashmap_registry();
@@ -49,7 +49,7 @@ pub fn __rt_hashmap_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
@@ -63,7 +63,7 @@ pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.hashmap_insert(handle, key, value);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -95,7 +95,7 @@ pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
@@ -105,7 +105,7 @@ pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.hashmap_get(handle, &key);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -132,7 +132,7 @@ pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
@@ -140,9 +140,9 @@ pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> 
             Some(Value::Str(s)) => s.clone(),
             _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
         };
-        return registry.map.hashmap_contains_key(handle, &key).map(|b| Value::Bool(b));
+        return registry.map.hashmap_contains_key(handle, &key).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -167,7 +167,7 @@ pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> 
 pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
@@ -177,7 +177,7 @@ pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.hashmap_remove(handle, &key);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -204,13 +204,13 @@ pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         return registry.map.hashmap_len(handle).map(|n| Value::Int(n as i64));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -229,13 +229,13 @@ pub fn __rt_hashmap_len(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         return registry.map.hashmap_clear(handle).map(|_| Value::Bool(true));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -255,13 +255,13 @@ pub fn __rt_hashmap_clear(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_keys(handle).map(|v| Value::array(v));
+        return registry.map.hashmap_keys(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -281,13 +281,13 @@ pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_values(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_values(handle).map(|v| Value::array(v));
+        return registry.map.hashmap_values(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -307,13 +307,13 @@ pub fn __rt_hashmap_values(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_entries(handle).map(|v| Value::array(v));
+        return registry.map.hashmap_entries(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashMapHandle,
         _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
     };
@@ -357,7 +357,7 @@ fn alloc_hashset_handle() -> HashSetHandle {
 pub fn __rt_hashset_new(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.map.hashset_new().map(|h| Value::Int(h));
+        return registry.map.hashset_new().map(Value::Int);
     }
     let handle = alloc_hashset_handle();
     let registry = get_hashset_registry();
@@ -371,7 +371,7 @@ pub fn __rt_hashset_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -384,9 +384,9 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.hashset_insert(handle, value).map(|b| Value::Bool(b));
+        return registry.map.hashset_insert(handle, value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -415,7 +415,7 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -428,9 +428,9 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.hashset_contains(handle, &value).map(|b| Value::Bool(b));
+        return registry.map.hashset_contains(handle, &value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -460,7 +460,7 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -473,9 +473,9 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.hashset_remove(handle, &value).map(|b| Value::Bool(b));
+        return registry.map.hashset_remove(handle, &value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -504,13 +504,13 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
         return registry.map.hashset_len(handle).map(|n| Value::Int(n as i64));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -529,13 +529,13 @@ pub fn __rt_hashset_len(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
         return registry.map.hashset_clear(handle).map(|_| Value::Bool(true));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -555,13 +555,13 @@ pub fn __rt_hashset_clear(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_to_array(handle).map(|v| Value::array(v));
+        return registry.map.hashset_to_array(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -581,7 +581,7 @@ pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_union(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -589,9 +589,9 @@ pub fn __rt_hashset_union(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_union(a, b).map(|h| Value::Int(h));
+        return registry.map.hashset_union(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -627,7 +627,7 @@ pub fn __rt_hashset_union(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_intersection(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -635,9 +635,9 @@ pub fn __rt_hashset_intersection(args: &[Value]) -> Result<Value, CompileError> 
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_intersection(a, b).map(|h| Value::Int(h));
+        return registry.map.hashset_intersection(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -673,7 +673,7 @@ pub fn __rt_hashset_intersection(args: &[Value]) -> Result<Value, CompileError> 
 pub fn __rt_hashset_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -681,9 +681,9 @@ pub fn __rt_hashset_difference(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_difference(a, b).map(|h| Value::Int(h));
+        return registry.map.hashset_difference(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -719,7 +719,7 @@ pub fn __rt_hashset_difference(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_symmetric_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -727,9 +727,9 @@ pub fn __rt_hashset_symmetric_difference(args: &[Value]) -> Result<Value, Compil
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_symmetric_difference(a, b).map(|h| Value::Int(h));
+        return registry.map.hashset_symmetric_difference(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -765,7 +765,7 @@ pub fn __rt_hashset_symmetric_difference(args: &[Value]) -> Result<Value, Compil
 pub fn __rt_hashset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -773,9 +773,9 @@ pub fn __rt_hashset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_is_subset(a, b).map(|b| Value::Bool(b));
+        return registry.map.hashset_is_subset(a, b).map(Value::Bool);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -803,7 +803,7 @@ pub fn __rt_hashset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
@@ -811,9 +811,9 @@ pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_is_superset(a, b).map(|b| Value::Bool(b));
+        return registry.map.hashset_is_superset(a, b).map(Value::Bool);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as HashSetHandle,
         _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
     };
@@ -873,7 +873,7 @@ fn value_to_btree_key(value: &Value) -> String {
 pub fn __rt_btreemap_new(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.map.btreemap_new().map(|h| Value::Int(h));
+        return registry.map.btreemap_new().map(Value::Int);
     }
     let handle = alloc_btreemap_handle();
     let registry = get_btreemap_registry();
@@ -887,7 +887,7 @@ pub fn __rt_btreemap_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
@@ -901,7 +901,7 @@ pub fn __rt_btreemap_insert(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.btreemap_insert(handle, key, value);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -933,7 +933,7 @@ pub fn __rt_btreemap_insert(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
@@ -943,7 +943,7 @@ pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.btreemap_get(handle, &key);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -970,7 +970,7 @@ pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
@@ -978,9 +978,9 @@ pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError>
             Some(v) => value_to_btree_key(v),
             _ => return Err(CompileError::runtime("BTreeMap key required".to_string())),
         };
-        return registry.map.btreemap_contains_key(handle, &key).map(|b| Value::Bool(b));
+        return registry.map.btreemap_contains_key(handle, &key).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1005,7 +1005,7 @@ pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError>
 pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
@@ -1015,7 +1015,7 @@ pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
         };
         return registry.map.btreemap_remove(handle, &key);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1042,13 +1042,13 @@ pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
         return registry.map.btreemap_len(handle).map(|n| Value::Int(n as i64));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1067,13 +1067,13 @@ pub fn __rt_btreemap_len(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
         return registry.map.btreemap_clear(handle).map(|_| Value::Bool(true));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1093,13 +1093,13 @@ pub fn __rt_btreemap_clear(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_keys(handle).map(|v| Value::array(v));
+        return registry.map.btreemap_keys(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1119,13 +1119,13 @@ pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_values(handle).map(|v| Value::array(v));
+        return registry.map.btreemap_values(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1145,13 +1145,13 @@ pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_entries(handle).map(|v| Value::array(v));
+        return registry.map.btreemap_entries(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1176,13 +1176,13 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_first_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
         return registry.map.btreemap_first_key(handle);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1205,13 +1205,13 @@ pub fn __rt_btreemap_first_key(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
         return registry.map.btreemap_last_key(handle);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
     };
@@ -1253,7 +1253,7 @@ fn alloc_btreeset_handle() -> BTreeSetHandle {
 pub fn __rt_btreeset_new(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.map.btreeset_new().map(|h| Value::Int(h));
+        return registry.map.btreeset_new().map(Value::Int);
     }
     let handle = alloc_btreeset_handle();
     let registry = get_btreeset_registry();
@@ -1267,7 +1267,7 @@ pub fn __rt_btreeset_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1280,9 +1280,9 @@ pub fn __rt_btreeset_insert(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.btreeset_insert(handle, value).map(|b| Value::Bool(b));
+        return registry.map.btreeset_insert(handle, value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1311,7 +1311,7 @@ pub fn __rt_btreeset_insert(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_contains(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1324,9 +1324,9 @@ pub fn __rt_btreeset_contains(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.btreeset_contains(handle, &value).map(|b| Value::Bool(b));
+        return registry.map.btreeset_contains(handle, &value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1356,7 +1356,7 @@ pub fn __rt_btreeset_contains(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1369,9 +1369,9 @@ pub fn __rt_btreeset_remove(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.map.btreeset_remove(handle, &value).map(|b| Value::Bool(b));
+        return registry.map.btreeset_remove(handle, &value).map(Value::Bool);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1400,13 +1400,13 @@ pub fn __rt_btreeset_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
         return registry.map.btreeset_len(handle).map(|n| Value::Int(n as i64));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1425,13 +1425,13 @@ pub fn __rt_btreeset_len(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
         return registry.map.btreeset_clear(handle).map(|_| Value::Bool(true));
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1451,13 +1451,13 @@ pub fn __rt_btreeset_clear(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_to_array(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_to_array(handle).map(|v| Value::array(v));
+        return registry.map.btreeset_to_array(handle).map(Value::array);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1478,13 +1478,13 @@ pub fn __rt_btreeset_to_array(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_first(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
         return registry.map.btreeset_first(handle);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1507,13 +1507,13 @@ pub fn __rt_btreeset_first(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_last(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let handle = match args.get(0) {
+        let handle = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
         return registry.map.btreeset_last(handle);
     }
-    let handle = match args.get(0) {
+    let handle = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1535,7 +1535,7 @@ pub fn __rt_btreeset_last(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_union(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1543,9 +1543,9 @@ pub fn __rt_btreeset_union(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_union(a, b).map(|h| Value::Int(h));
+        return registry.map.btreeset_union(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1581,7 +1581,7 @@ pub fn __rt_btreeset_union(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_intersection(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1589,9 +1589,9 @@ pub fn __rt_btreeset_intersection(args: &[Value]) -> Result<Value, CompileError>
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_intersection(a, b).map(|h| Value::Int(h));
+        return registry.map.btreeset_intersection(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1627,7 +1627,7 @@ pub fn __rt_btreeset_intersection(args: &[Value]) -> Result<Value, CompileError>
 pub fn __rt_btreeset_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1635,9 +1635,9 @@ pub fn __rt_btreeset_difference(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_difference(a, b).map(|h| Value::Int(h));
+        return registry.map.btreeset_difference(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1673,7 +1673,7 @@ pub fn __rt_btreeset_difference(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_symmetric_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1681,9 +1681,9 @@ pub fn __rt_btreeset_symmetric_difference(args: &[Value]) -> Result<Value, Compi
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_symmetric_difference(a, b).map(|h| Value::Int(h));
+        return registry.map.btreeset_symmetric_difference(a, b).map(Value::Int);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1719,7 +1719,7 @@ pub fn __rt_btreeset_symmetric_difference(args: &[Value]) -> Result<Value, Compi
 pub fn __rt_btreeset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1727,9 +1727,9 @@ pub fn __rt_btreeset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_is_subset(a, b).map(|b| Value::Bool(b));
+        return registry.map.btreeset_is_subset(a, b).map(Value::Bool);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };
@@ -1757,7 +1757,7 @@ pub fn __rt_btreeset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
 pub fn __rt_btreeset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        let a = match args.get(0) {
+        let a = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
@@ -1765,9 +1765,9 @@ pub fn __rt_btreeset_is_superset(args: &[Value]) -> Result<Value, CompileError> 
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_is_superset(a, b).map(|b| Value::Bool(b));
+        return registry.map.btreeset_is_superset(a, b).map(Value::Bool);
     }
-    let handle1 = match args.get(0) {
+    let handle1 = match args.first() {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
         _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
     };

@@ -403,8 +403,8 @@ pub fn handle_result_methods(
 
     let res_variant = ResultVariant::from_name(variant);
     match method {
-        "is_ok" => return Ok(Some(Value::Bool(res_variant == Some(ResultVariant::Ok)))),
-        "is_err" => return Ok(Some(Value::Bool(res_variant == Some(ResultVariant::Err)))),
+        "is_ok" => Ok(Some(Value::Bool(res_variant == Some(ResultVariant::Ok)))),
+        "is_err" => Ok(Some(Value::Bool(res_variant == Some(ResultVariant::Err)))),
         "unwrap" => {
             if res_variant == Some(ResultVariant::Ok) {
                 if let Some(val) = payload {
@@ -425,10 +425,10 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Ok before calling unwrap");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "called unwrap on Err".to_string(),
                 ctx,
-            ));
+            ))
         }
         "expect" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -460,7 +460,7 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Ok before calling expect");
-            return Err(CompileError::semantic_with_context(msg.to_display_string(), ctx));
+            Err(CompileError::semantic_with_context(msg.to_display_string(), ctx))
         }
         "unwrap_or" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -468,7 +468,7 @@ pub fn handle_result_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            return Ok(Some(eval_arg(
+            Ok(Some(eval_arg(
                 args,
                 0,
                 Value::Nil,
@@ -477,7 +477,7 @@ pub fn handle_result_methods(
                 classes,
                 enums,
                 impl_methods,
-            )?));
+            )?))
         }
         "unwrap_or_else" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -508,7 +508,7 @@ pub fn handle_result_methods(
                     )?));
                 }
             }
-            return Ok(Some(Value::Nil));
+            Ok(Some(Value::Nil))
         }
         "unwrap_err" => {
             if res_variant == Some(ResultVariant::Err) {
@@ -519,10 +519,10 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Err before calling unwrap_err");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "called unwrap_err on Ok".to_string(),
                 ctx,
-            ));
+            ))
         }
         "expect_err" => {
             if res_variant == Some(ResultVariant::Err) {
@@ -543,7 +543,7 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Err before calling expect_err");
-            return Err(CompileError::semantic_with_context(msg.to_display_string(), ctx));
+            Err(CompileError::semantic_with_context(msg.to_display_string(), ctx))
         }
         "ok" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -554,7 +554,7 @@ pub fn handle_result_methods(
                         .unwrap_or_else(Value::none),
                 ));
             }
-            return Ok(Some(Value::none()));
+            Ok(Some(Value::none()))
         }
         "err" => {
             if res_variant == Some(ResultVariant::Err) {
@@ -565,14 +565,14 @@ pub fn handle_result_methods(
                         .unwrap_or_else(Value::none),
                 ));
             }
-            return Ok(Some(Value::none()));
+            Ok(Some(Value::none()))
         }
         "or" => {
             // Returns self if Ok, otherwise returns the other Result
             if res_variant == Some(ResultVariant::Ok) {
                 return Ok(Some(recv_val.clone()));
             }
-            return Ok(Some(eval_arg(
+            Ok(Some(eval_arg(
                 args,
                 0,
                 Value::err(Value::Nil),
@@ -581,56 +581,48 @@ pub fn handle_result_methods(
                 classes,
                 enums,
                 impl_methods,
-            )?));
+            )?))
         }
-        "map" => {
-            return Ok(Some(eval_result_map(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
-        }
-        "map_err" => {
-            return Ok(Some(eval_result_map_err(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
-        }
-        "and_then" => {
-            return Ok(Some(eval_result_and_then(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
-        }
-        "or_else" => {
-            return Ok(Some(eval_result_or_else(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
-        }
+        "map" => Ok(Some(eval_result_map(
+            variant,
+            payload,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
+        "map_err" => Ok(Some(eval_result_map_err(
+            variant,
+            payload,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
+        "and_then" => Ok(Some(eval_result_and_then(
+            variant,
+            payload,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
+        "or_else" => Ok(Some(eval_result_or_else(
+            variant,
+            payload,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
         "flatten" => {
             // Result<Result<T, E>, E> -> Result<T, E>
             if res_variant == Some(ResultVariant::Ok) {
@@ -647,8 +639,8 @@ pub fn handle_result_methods(
                 }
             }
             // Return Err as-is
-            return Ok(Some(recv_val.clone()));
+            Ok(Some(recv_val.clone()))
         }
-        _ => return Ok(None),
+        _ => Ok(None),
     }
 }

@@ -65,11 +65,11 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("{}[{}]", expr_to_source_string(receiver), expr_to_source_string(index))
         }
         Expr::Array(items) => {
-            let items_str: Vec<String> = items.iter().map(|i| expr_to_source_string(i)).collect();
+            let items_str: Vec<String> = items.iter().map(expr_to_source_string).collect();
             format!("[{}]", items_str.join(", "))
         }
         Expr::Tuple(items) => {
-            let items_str: Vec<String> = items.iter().map(|i| expr_to_source_string(i)).collect();
+            let items_str: Vec<String> = items.iter().map(expr_to_source_string).collect();
             format!("({})", items_str.join(", "))
         }
         Expr::Lambda { params, .. } => {

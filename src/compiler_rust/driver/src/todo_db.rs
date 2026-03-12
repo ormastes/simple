@@ -322,8 +322,7 @@ fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
 /// Save TODO database to SDN file
 pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
-    let _lock =
-        FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let fields = vec![
         "id".to_string(),

@@ -164,12 +164,12 @@ pub fn generate_smf_bytes_for_target(return_value: i32, gc: Option<&Arc<dyn GcAl
             let high16 = (val >> 16) & 0xFFFF;
 
             // movz w0, #low16
-            let movz = 0x52800000u32 | ((low16 as u32) << 5);
+            let movz = 0x52800000u32 | (low16 << 5);
             code.extend_from_slice(&movz.to_le_bytes());
 
             if high16 != 0 {
                 // movk w0, #high16, lsl #16
-                let movk = 0x72A00000u32 | ((high16 as u32) << 5);
+                let movk = 0x72A00000u32 | (high16 << 5);
                 code.extend_from_slice(&movk.to_le_bytes());
             }
 
@@ -194,9 +194,9 @@ pub fn generate_smf_bytes_for_target(return_value: i32, gc: Option<&Arc<dyn GcAl
         TargetArch::Riscv64 | TargetArch::Riscv32 => {
             // RISC-V: li a0, imm; ret
             let mut code = Vec::new();
-            let val = return_value as i32;
+            let val = return_value;
 
-            if val >= -2048 && val < 2048 {
+            if (-2048..2048).contains(&val) {
                 // addi a0, zero, imm (I-type)
                 let addi = 0x00000513u32 | (((val as u32) & 0xFFF) << 20);
                 code.extend_from_slice(&addi.to_le_bytes());

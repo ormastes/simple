@@ -536,7 +536,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // Regular impl - register as before
                     register_trait_impl(&mut trait_impl_registry, impl_block)?;
                     let type_name = get_type_name(&impl_block.target_type);
-                    let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
+                    let methods = impl_methods.entry(type_name.clone()).or_default();
                     for method in &impl_block.methods {
                         methods.push(method.clone());
                     }
@@ -1134,7 +1134,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                     fields: s.fields.clone(),
                                     methods: s.methods.clone(),
                                     parent: None,
-                                    visibility: s.visibility.clone(),
+                                    visibility: s.visibility,
                                     effects: vec![],
                                     attributes: s.attributes.clone(),
                                     doc_comment: s.doc_comment.clone(),

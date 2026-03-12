@@ -335,7 +335,7 @@ pub fn rt_dyn_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, Compile
             None => return Ok(Value::Int(0)),
         };
         let func: extern "C" fn(*const i64, i64) -> u64 = std::mem::transmute(fptr);
-        return Ok(Value::Int(func(ptr as *const i64, len) as i64));
+        Ok(Value::Int(func(ptr as *const i64, len) as i64))
     }
 }
 

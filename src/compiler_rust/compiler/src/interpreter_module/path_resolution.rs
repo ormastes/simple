@@ -94,10 +94,8 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
             let suffix = &name_str[after_dot + 1..];
-            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
-                if path.is_dir() {
-                    return Some(path);
-                }
+            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) && path.is_dir() {
+                return Some(path);
             }
         }
     }
@@ -115,12 +113,10 @@ fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
         // Check if this is a numbered directory (NN.name pattern)
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
-            if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
-                if numbered_path.is_dir() {
-                    let sub = numbered_path.join(segment);
-                    if sub.is_dir() {
-                        results.push(sub);
-                    }
+            if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) && numbered_path.is_dir() {
+                let sub = numbered_path.join(segment);
+                if sub.is_dir() {
+                    results.push(sub);
                 }
             }
         }

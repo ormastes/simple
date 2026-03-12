@@ -92,7 +92,7 @@ impl LeanTheorem {
         if !self.type_params.is_empty() {
             out.push_str(" {");
             out.push_str(&self.type_params.join(" "));
-            out.push_str("}");
+            out.push('}');
         }
 
         // Hypotheses
@@ -138,7 +138,7 @@ impl LeanTheorem {
         if !self.type_params.is_empty() {
             out.push_str(" {");
             out.push_str(&self.type_params.join(" "));
-            out.push_str("}");
+            out.push('}');
         }
 
         // Hypotheses as implication

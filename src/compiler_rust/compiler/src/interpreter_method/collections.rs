@@ -211,7 +211,7 @@ pub fn handle_array_methods(
         }
         "index_of" => {
             let needle = args
-                .get(0)
+                .first()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
                 .unwrap_or(Value::Nil);
@@ -523,11 +523,10 @@ pub fn handle_array_methods(
                 return Ok(Some(Value::Nil));
             }
             let n = args
-                .get(0)
+                .first()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
-                .map(|v| v.as_int().ok())
-                .flatten();
+                .and_then(|v| v.as_int().ok());
 
             let mut rng = thread_rng();
             match n {

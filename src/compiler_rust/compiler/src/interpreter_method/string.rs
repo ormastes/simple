@@ -123,7 +123,7 @@ if let Value::Str(ref s) = recv_val {
         "squeeze" => {
             // Remove duplicate adjacent characters
             // If no argument, squeeze all duplicates. If argument provided, only squeeze those chars
-            let chars_to_squeeze = args.get(0)
+            let chars_to_squeeze = args.first()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
                 .map(|v| v.to_key_string());
@@ -358,7 +358,7 @@ if let Value::Str(ref s) = recv_val {
             if current_len >= width {
                 return Ok(Value::Str(s.clone()));
             }
-            let padding: String = std::iter::repeat(pad_char).take(width - current_len).collect();
+            let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
             return Ok(Value::Str(format!("{}{}", padding, s)));
         }
         "pad_right" | "pad_end" => {
@@ -372,7 +372,7 @@ if let Value::Str(ref s) = recv_val {
             if current_len >= width {
                 return Ok(Value::Str(s.clone()));
             }
-            let padding: String = std::iter::repeat(pad_char).take(width - current_len).collect();
+            let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
             return Ok(Value::Str(format!("{}{}", s, padding)));
         }
         "center" => {
@@ -390,8 +390,8 @@ if let Value::Str(ref s) = recv_val {
             let total_padding = width - current_len;
             let left_padding = total_padding / 2;
             let right_padding = total_padding - left_padding;
-            let left: String = std::iter::repeat(pad_char).take(left_padding).collect();
-            let right: String = std::iter::repeat(pad_char).take(right_padding).collect();
+            let left: String = std::iter::repeat_n(pad_char, left_padding).collect();
+            let right: String = std::iter::repeat_n(pad_char, right_padding).collect();
             return Ok(Value::Str(format!("{}{}{}", left, s, right)));
         }
         "zfill" => {

@@ -42,7 +42,7 @@ pub fn abs(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `min(a, b)`
 pub fn min(args: &[Value]) -> Result<Value, CompileError> {
     let a = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -67,7 +67,7 @@ pub fn min(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `max(a, b)`
 pub fn max(args: &[Value]) -> Result<Value, CompileError> {
     let a = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -140,7 +140,7 @@ pub fn ceil(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `pow(base, exponent)`
 pub fn pow(args: &[Value]) -> Result<Value, CompileError> {
     let base = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -209,7 +209,7 @@ mod tests {
 /// rt_math_pow - Power function for floats
 pub fn rt_math_pow_fn(args: &[Value]) -> Result<Value, CompileError> {
     let base = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_math_pow expects 2 arguments".to_string(),
@@ -400,7 +400,7 @@ pub fn rt_math_atan_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// rt_math_atan2 - Two-argument arc tangent for floats
 pub fn rt_math_atan2_fn(args: &[Value]) -> Result<Value, CompileError> {
     let y = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_math_atan2 expects 2 arguments".to_string(),

@@ -88,15 +88,12 @@ pub fn handle_threadpool_methods(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    match method {
-        "submit" => {
-            // pool.submit(func, arg) - submit a task to the pool
-            let func_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let arg_val = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let future = spawn_future_with_callable(func_val, arg_val, functions, classes, enums, impl_methods);
-            return Ok(Some(Value::Future(future)));
-        }
-        _ => {}
+    if method == "submit" {
+        // pool.submit(func, arg) - submit a task to the pool
+        let func_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+        let arg_val = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+        let future = spawn_future_with_callable(func_val, arg_val, functions, classes, enums, impl_methods);
+        return Ok(Some(Value::Future(future)));
     }
     Ok(None)
 }

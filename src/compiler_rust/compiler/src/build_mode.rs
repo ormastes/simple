@@ -8,9 +8,10 @@
 use chrono::{DateTime, Utc};
 
 /// Build mode for compilation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BuildMode {
     /// Debug mode: Full diagnostics, minimal optimizations, all runtime checks
+    #[default]
     Debug,
     /// Release mode: Optimizations enabled, production-ready output
     Release,
@@ -116,12 +117,6 @@ impl BuildMode {
             BuildMode::Debug => "debug",
             BuildMode::Release => "release",
         }
-    }
-}
-
-impl Default for BuildMode {
-    fn default() -> Self {
-        BuildMode::Debug
     }
 }
 

@@ -23,8 +23,7 @@ pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
         AstType::Array { element, .. } => type_uses_param(element, param),
         AstType::Tuple(elems) => elems.iter().any(|e| type_uses_param(e, param)),
         AstType::Function { params, ret } => {
-            params.iter().any(|p| type_uses_param(p, param))
-                || ret.as_ref().map_or(false, |r| type_uses_param(r, param))
+            params.iter().any(|p| type_uses_param(p, param)) || ret.as_ref().is_some_and(|r| type_uses_param(r, param))
         }
         AstType::Optional(inner) => type_uses_param(inner, param),
         AstType::Pointer { inner, .. } => type_uses_param(inner, param),

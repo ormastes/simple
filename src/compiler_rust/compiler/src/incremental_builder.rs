@@ -28,7 +28,7 @@ impl IncrementalBuilder {
                 }
             } else if let Some(rest) = trimmed.strip_prefix("use ") {
                 // Track use statements as potential dependencies
-                if let Some(module) = rest.split(|c| c == '.' || c == ' ').next() {
+                if let Some(module) = rest.split(['.', ' ']).next() {
                     let mut dep_path = PathBuf::from(module);
                     dep_path.set_extension("spl");
                     if dep_path.is_relative() {
@@ -41,7 +41,7 @@ impl IncrementalBuilder {
                     }
                 }
             } else if let Some(rest) = trimmed.strip_prefix("fn ") {
-                if let Some(name) = rest.split(|c| c == '(' || c == '[').next() {
+                if let Some(name) = rest.split(['(', '[']).next() {
                     info.functions.push(name.trim().to_string());
                 }
             } else if let Some(rest) = trimmed.strip_prefix("struct ") {
@@ -57,7 +57,7 @@ impl IncrementalBuilder {
                     info.types.push(name.to_string());
                 }
             } else if let Some(rest) = trimmed.strip_prefix("macro ") {
-                if let Some(name) = rest.split(|c| c == '(' || c == '=').next() {
+                if let Some(name) = rest.split(['(', '=']).next() {
                     info.macros.push(name.trim().to_string());
                 }
             }

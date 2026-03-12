@@ -59,7 +59,7 @@ pub(crate) fn exec_lambda(
     }
 
     if let Expr::DoBlock(nodes) = body {
-        return exec_block_closure(nodes, &mut local_env, functions, classes, enums, impl_methods);
+        return exec_block_closure(nodes, &local_env, functions, classes, enums, impl_methods);
     }
 
     evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)

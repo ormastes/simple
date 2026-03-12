@@ -275,18 +275,12 @@ pub struct DependencyGraph {
 impl DependencyGraph {
     /// Add a dependency edge: `from_type` depends on `param_type`.
     pub fn add_dependency(&mut self, from_type: String, param_type: String) {
-        self.dependencies
-            .entry(from_type)
-            .or_insert_with(Vec::new)
-            .push(param_type);
+        self.dependencies.entry(from_type).or_default().push(param_type);
     }
 
     /// Add an implementation: `impl_type` implements `trait_type`.
     pub fn add_implementation(&mut self, trait_type: String, impl_type: String) {
-        self.implementations
-            .entry(trait_type)
-            .or_insert_with(Vec::new)
-            .push(impl_type);
+        self.implementations.entry(trait_type).or_default().push(impl_type);
     }
 
     /// Get dependencies for a type.

@@ -14,10 +14,7 @@ use crate::cli::interactive_fix;
 /// Run the linter on a file or directory
 pub fn run_lint(args: &[String]) -> i32 {
     // Parse arguments
-    let path = args
-        .get(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let path = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let json_output = args.iter().any(|a| a == "--json");
     let fix_flags = FixFlags::parse(args);
 
@@ -306,10 +303,7 @@ fn print_fix_report(report: &simple_common::fix_applicator::FixReport, dry_run: 
 /// Run the formatter on a file or directory
 pub fn run_fmt(args: &[String]) -> i32 {
     // Parse arguments
-    let path = args
-        .get(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let path = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let check_only = args.iter().any(|a| a == "--check");
 
     // Read file

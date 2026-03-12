@@ -198,13 +198,13 @@ impl BindingSpecializer {
             }
 
             Expr::Binary { op, left, right } => Expr::Binary {
-                op: op.clone(),
+                op: *op,
                 left: Box::new(self.specialize_expr(left)),
                 right: Box::new(self.specialize_expr(right)),
             },
 
             Expr::Unary { op, operand } => Expr::Unary {
-                op: op.clone(),
+                op: *op,
                 operand: Box::new(self.specialize_expr(operand)),
             },
 

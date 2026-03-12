@@ -56,7 +56,7 @@ pub fn handle_mock_methods(
         "when" => {
             let method_str = extract_method_name!(args, 0, "when", env, functions, classes, enums, impl_methods);
             mock.when_method(&method_str);
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // withArgs(args...) - Set argument matchers for current configuration
         "withArgs" | "with_args" => {
@@ -70,25 +70,25 @@ pub fn handle_mock_methods(
                 matchers.push(matcher);
             }
             mock.with_args(matchers);
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // returns(value) - Set return value for configured method
         "returns" => {
             let return_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             mock.returns(return_val);
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // returnsOnce(value) - Set return value for next call only
         "returnsOnce" | "returns_once" => {
             let return_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             mock.returns_once(return_val);
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // verify(:method_name) - Start verification for a method
         "verify" => {
             let method_str = extract_method_name!(args, 0, "verify", env, functions, classes, enums, impl_methods);
             mock.when_method(&method_str); // Reuse to set current method
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // called() - Check if method was called at least once
         "called" => {
@@ -120,14 +120,14 @@ pub fn handle_mock_methods(
         // reset() - Clear all call records
         "reset" => {
             mock.reset();
-            return Ok(Some(Value::Mock(mock.clone())));
+            Ok(Some(Value::Mock(mock.clone())))
         }
         // getCalls(:method) - Get all calls to a method
         "getCalls" | "get_calls" => {
             let method_str = extract_method_name!(args, 0, "getCalls", env, functions, classes, enums, impl_methods);
             let calls = mock.get_calls(&method_str);
             let call_arrays: Vec<Value> = calls.into_iter().map(Value::array).collect();
-            return Ok(Some(Value::array(call_arrays)));
+            Ok(Some(Value::array(call_arrays)))
         }
         // Any other method is treated as a mock call
         _ => {
@@ -140,7 +140,7 @@ pub fn handle_mock_methods(
             // Record the call
             mock.record_call(method, call_args.clone());
             // Return configured value
-            return Ok(Some(mock.get_return_value(method, &call_args)));
+            Ok(Some(mock.get_return_value(method, &call_args)))
         }
     }
 }

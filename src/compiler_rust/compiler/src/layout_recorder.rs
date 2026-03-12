@@ -219,7 +219,7 @@ impl RecordingSession {
 
 // Thread-local recording session
 thread_local! {
-    static RECORDING_SESSION: RefCell<Option<RecordingSession>> = RefCell::new(None);
+    static RECORDING_SESSION: RefCell<Option<RecordingSession>> = const { RefCell::new(None) };
 }
 
 /// Start recording function execution

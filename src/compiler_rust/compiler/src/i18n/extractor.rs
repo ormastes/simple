@@ -298,7 +298,7 @@ impl I18nExtractor {
             Expr::FString { parts, .. } => {
                 for part in parts {
                     if let FStringPart::Expr(e) = part {
-                        self.visit_expr(&e);
+                        self.visit_expr(e);
                     }
                 }
             }

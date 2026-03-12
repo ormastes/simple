@@ -7,6 +7,7 @@
 
 /// Configuration for a mocked method
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct MockMethodConfig {
     /// Return value when called (None means return Nil)
     pub return_value: Option<super::Value>,
@@ -16,15 +17,6 @@ pub struct MockMethodConfig {
     pub arg_matchers: Vec<(Vec<MatcherValue>, super::Value)>,
 }
 
-impl Default for MockMethodConfig {
-    fn default() -> Self {
-        Self {
-            return_value: None,
-            return_queue: Vec::new(),
-            arg_matchers: Vec::new(),
-        }
-    }
-}
 
 /// Record of a method call
 #[derive(Debug, Clone)]
@@ -348,7 +340,7 @@ fn values_equal(a: &super::Value, b: &super::Value) -> bool {
         }
         (super::Value::Dict(x), super::Value::Dict(y)) => {
             x.len() == y.len() && x.iter().all(|(k, v)| {
-                y.get(k).map_or(false, |yv| values_equal(v, yv))
+                y.get(k).is_some_and(|yv| values_equal(v, yv))
             })
         }
         (super::Value::Tuple(x), super::Value::Tuple(y)) => {

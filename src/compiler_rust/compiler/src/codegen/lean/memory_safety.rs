@@ -83,39 +83,39 @@ impl<'a> MemorySafetyLeanGen<'a> {
 
         // Module header
         lean.push_str(&self.generate_header());
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Core memory safety types
         lean.push_str(&self.generate_memory_types());
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Lifetime types and relations
         lean.push_str(&self.generate_lifetime_types());
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Reference safety predicates
         lean.push_str(&self.generate_reference_safety());
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Pointer types and rules
         lean.push_str(&self.generate_pointer_rules());
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Verification obligations (counts, move-only/aliasing expectations)
         lean.push_str(&self.generate_obligations(&summary, lifetime_violation_count));
-        lean.push_str("\n");
+        lean.push('\n');
 
         // Generate lifetime-specific verification if context available
         if let Some(ctx) = self.lifetime_ctx {
             lean.push_str(&self.generate_lifetime_verification(ctx));
-            lean.push_str("\n");
+            lean.push('\n');
         }
 
         // Generate violation documentation if any
         if let Some(warnings) = self.memory_warnings {
             if warnings.has_warnings() {
                 lean.push_str(&self.generate_warning_documentation(warnings));
-                lean.push_str("\n");
+                lean.push('\n');
             }
         }
 
@@ -445,7 +445,7 @@ axiom unique_move_only {{α : Type}} (ptr : TypedPtr α) :
                 continue;
             }
             lean.push_str(line);
-            lean.push_str("\n");
+            lean.push('\n');
         }
 
         // Generate violation checks if any
@@ -500,7 +500,7 @@ axiom unique_move_only {{α : Type}} (ptr : TypedPtr α) :
                         lean.push_str(&format!("-- {}\n", violation.description()));
                     }
                 }
-                lean.push_str("\n");
+                lean.push('\n');
             }
         }
 
@@ -523,7 +523,7 @@ axiom unique_move_only {{α : Type}} (ptr : TypedPtr α) :
         lean.push_str(&format!("-- W1004 (Borrow escapes): {}\n", summary.w1004));
         lean.push_str(&format!("-- W1005 (Potential cycle): {}\n", summary.w1005));
         lean.push_str(&format!("-- W1006 (Missing mut): {}\n", summary.w1006));
-        lean.push_str("\n");
+        lean.push('\n');
 
         lean
     }

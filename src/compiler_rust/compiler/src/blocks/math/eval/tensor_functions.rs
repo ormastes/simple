@@ -19,11 +19,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 pub fn args_to_shape(args: &[MathValue]) -> Result<Vec<usize>, CompileError> {
     if args.len() == 1 {
         // Could be a single int or a tensor/array of ints
-        match &args[0] {
-            MathValue::Tensor(t) => {
-                return Ok(t.data.iter().map(|&x| x as usize).collect());
-            }
-            _ => {}
+        if let MathValue::Tensor(t) = &args[0] {
+            return Ok(t.data.iter().map(|&x| x as usize).collect());
         }
     }
     args.iter()

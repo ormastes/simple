@@ -239,11 +239,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::Binary { op, left, right } => {
             analyze_expr(left, reasons);
             analyze_expr(right, reasons);
-            match op {
-                BinOp::In => {
-                    add_reason(reasons, FallbackReason::CollectionOps);
-                }
-                _ => {}
+            if op == &BinOp::In {
+                add_reason(reasons, FallbackReason::CollectionOps);
             }
         }
 
@@ -451,7 +448,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::FString { parts, .. } => {
             for part in parts {
                 if let simple_parser::ast::FStringPart::Expr(e) = part {
-                    analyze_expr(&e, reasons);
+                    analyze_expr(e, reasons);
                 }
             }
             add_reason(reasons, FallbackReason::StringOps);

@@ -275,7 +275,7 @@ pub fn generate_arch_from_events(
         output.push_str(&format!("    subgraph {}[\"{}\"]\n", sanitize_id(pkg), pkg));
         for member in members {
             if !emitted.contains(member) {
-                let short_name = member.split('.').last().unwrap_or(member);
+                let short_name = member.split('.').next_back().unwrap_or(member);
                 output.push_str(&format!("        {}[{}]\n", sanitize_id(member), short_name));
                 emitted.insert(member.clone());
             }
@@ -391,13 +391,11 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
         return name.contains(middle);
     }
 
-    if pattern.starts_with('*') {
-        let suffix = &pattern[1..];
+    if let Some(suffix) = pattern.strip_prefix('*') {
         return name.ends_with(suffix);
     }
 
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         return name.starts_with(prefix);
     }
 

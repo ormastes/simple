@@ -97,7 +97,7 @@ fn compile_ffi_static_call<M: Module>(
     };
 
     // Create method name string constant in data section (survives into binary)
-    let method_name_ptr = create_cstring_constant(ctx, builder, &full_method_name)?;
+    let method_name_ptr = create_cstring_constant(ctx, builder, full_method_name)?;
     let method_name_len = builder.ins().iconst(types::I64, full_method_name.len() as i64);
 
     // For static methods, receiver is 0 (null)

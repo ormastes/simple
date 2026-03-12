@@ -356,10 +356,7 @@ pub unsafe extern "C" fn simple_interp_run_module(items_ptr: *const Node, items_
     }
     let items = std::slice::from_raw_parts(items_ptr, items_len);
 
-    match evaluate_module(items) {
-        Ok(exit_code) => exit_code,
-        Err(_) => -1,
-    }
+    evaluate_module(items).unwrap_or(-1)
 }
 
 /// Set a variable in the interpreter environment.
@@ -456,7 +453,7 @@ pub fn get_interp_var(name: &str) -> Option<Value> {
 thread_local! {
     /// Registry of expressions for rt_interp_eval.
     /// Expressions are stored by index for efficient lookup from compiled code.
-    static EXPR_REGISTRY: RefCell<Vec<Expr>> = RefCell::new(Vec::new());
+    static EXPR_REGISTRY: RefCell<Vec<Expr>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register an expression for later evaluation via rt_interp_eval.

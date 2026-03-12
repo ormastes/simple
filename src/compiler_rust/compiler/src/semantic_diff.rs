@@ -19,7 +19,7 @@ pub struct SemanticDiff {
 }
 
 /// Summary of diff statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiffSummary {
     /// Total number of changes
     pub total_changes: usize,
@@ -39,22 +39,6 @@ pub struct DiffSummary {
     pub type_changes: usize,
     /// Control flow changes
     pub control_flow_changes: usize,
-}
-
-impl Default for DiffSummary {
-    fn default() -> Self {
-        Self {
-            total_changes: 0,
-            functions_added: 0,
-            functions_removed: 0,
-            functions_modified: 0,
-            classes_added: 0,
-            classes_removed: 0,
-            classes_modified: 0,
-            type_changes: 0,
-            control_flow_changes: 0,
-        }
-    }
 }
 
 /// A semantic change detected between two versions
@@ -419,7 +403,7 @@ impl SemanticDiffer {
         let new_fields: HashMap<_, _> = new.fields.iter().map(|f| (&f.name, f)).collect();
 
         // Detect field additions
-        for (field_name, _) in &new_fields {
+        for field_name in new_fields.keys() {
             if !old_fields.contains_key(field_name) {
                 changes.push(SemanticChange {
                     kind: ChangeKind::FieldAdded,
@@ -476,7 +460,7 @@ impl SemanticDiffer {
         let new_methods: HashMap<_, _> = new.methods.iter().map(|m| (&m.name, m)).collect();
 
         // Detect method additions
-        for (method_name, _) in &new_methods {
+        for method_name in new_methods.keys() {
             if !old_methods.contains_key(method_name) {
                 changes.push(SemanticChange {
                     kind: ChangeKind::MethodAdded,
@@ -494,7 +478,7 @@ impl SemanticDiffer {
         }
 
         // Detect method removals
-        for (method_name, _) in &old_methods {
+        for method_name in old_methods.keys() {
             if !new_methods.contains_key(method_name) {
                 changes.push(SemanticChange {
                     kind: ChangeKind::MethodRemoved,

@@ -35,7 +35,7 @@ fn expr_to_lean(expr: &MathExpr) -> String {
                     .iter()
                     .map(|row| {
                         if let MathExpr::Array(cols) = row {
-                            cols.iter().map(|e| expr_to_lean(e)).collect::<Vec<_>>().join(", ")
+                            cols.iter().map(expr_to_lean).collect::<Vec<_>>().join(", ")
                         } else {
                             expr_to_lean(row)
                         }
@@ -43,7 +43,7 @@ fn expr_to_lean(expr: &MathExpr) -> String {
                     .collect();
                 format!("!![{}]", rows.join("; "))
             } else {
-                let items: Vec<String> = elements.iter().map(|e| expr_to_lean(e)).collect();
+                let items: Vec<String> = elements.iter().map(expr_to_lean).collect();
                 format!("[{}]", items.join(", "))
             }
         }
@@ -178,7 +178,7 @@ fn app_to_lean(name: &str, args: &[MathExpr]) -> String {
             format!("Nat.lcm {} {}", lean_arg(&args[0]), lean_arg(&args[1]))
         }
         _ => {
-            let args_str: Vec<String> = args.iter().map(|a| lean_arg(a)).collect();
+            let args_str: Vec<String> = args.iter().map(lean_arg).collect();
             format!("{} {}", name, args_str.join(" "))
         }
     }

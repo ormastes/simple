@@ -126,9 +126,8 @@ impl Lowerer {
                             _ => {}
                         }
                     } else if recv_name == "thread_group" {
-                        match method.as_str() {
-                            "barrier" => return Ok(TypeId::VOID),
-                            _ => {}
+                        if method.as_str() == "barrier" {
+                            return Ok(TypeId::VOID);
                         }
                     } else if recv_name == "gpu" {
                         // gpu.* intrinsic functions
@@ -159,7 +158,7 @@ impl Lowerer {
                         // SIMD type static methods: f32x4.load(), f32x4.gather()
                         match method.as_str() {
                             "load" | "gather" | "load_masked" => {
-                                let simd_ty = self.register_simd_type(&recv_name);
+                                let simd_ty = self.register_simd_type(recv_name);
                                 return Ok(simd_ty);
                             }
                             _ => {}

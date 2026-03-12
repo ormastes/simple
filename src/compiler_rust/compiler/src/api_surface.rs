@@ -136,10 +136,10 @@ impl ApiSurface {
                 .iter()
                 .map(|p| ParamSignature {
                     name: p.name.clone(),
-                    type_name: p.ty.as_ref().map(|t| type_to_string(t)),
+                    type_name: p.ty.as_ref().map(type_to_string),
                 })
                 .collect(),
-            return_type: func.return_type.as_ref().map(|t| type_to_string(t)),
+            return_type: func.return_type.as_ref().map(type_to_string),
             is_async,
             is_generator: false, // Generator detection would need more analysis
         };

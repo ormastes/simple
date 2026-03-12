@@ -188,7 +188,7 @@ impl Default for MirArena {
 
 /// Thread-local MIR arena for use during lowering.
 thread_local! {
-    static THREAD_ARENA: RefCell<Option<MirArena>> = RefCell::new(None);
+    static THREAD_ARENA: RefCell<Option<MirArena>> = const { RefCell::new(None) };
 }
 
 /// Initialize the thread-local MIR arena.

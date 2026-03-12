@@ -350,7 +350,6 @@ impl SmfAppType {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[derive(Default)]
@@ -378,4 +377,3 @@ impl CompressionType {
         }
     }
 }
-

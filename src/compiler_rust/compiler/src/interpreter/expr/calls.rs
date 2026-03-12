@@ -385,7 +385,7 @@ pub(super) fn eval_call_expr(
                         if let Some(variant) = variant_opt {
                             // For unit variants (no fields), return the enum value directly
                             // For variants with data, we'd need to return a constructor function
-                            let has_fields = variant.fields.as_ref().map_or(false, |f| !f.is_empty());
+                            let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                             if !has_fields {
                                 Ok(Value::Enum {
                                     enum_name: enum_name.clone(),

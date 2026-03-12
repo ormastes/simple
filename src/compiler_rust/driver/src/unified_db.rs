@@ -342,8 +342,7 @@ impl<T: Record> Database<T> {
     /// Preserves other tables in the same file (multi-table support).
     pub fn save(&self) -> Result<(), io::Error> {
         // Acquire lock
-        let _lock =
-            FileLock::acquire(&self.path, 2).map_err(|e| io::Error::other(format!("{:?}", e)))?;
+        let _lock = FileLock::acquire(&self.path, 2).map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
         // Load existing file to preserve other tables
         let mut existing_dict = indexmap::IndexMap::new();

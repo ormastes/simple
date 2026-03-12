@@ -554,12 +554,12 @@ impl CompilerPipeline {
         }
 
         // Generate object code
-        let object_code = self.compile_mir_to_object(&mir_module, options.target.clone())?;
+        let object_code = self.compile_mir_to_object(&mir_module, options.target)?;
 
         // Build native binary
         let mut builder = NativeBinaryBuilder::new(object_code)
             .output(output)
-            .target(options.target.clone())
+            .target(options.target)
             .strip(options.strip)
             .pie(options.pie)
             .shared(options.shared)
@@ -712,12 +712,12 @@ impl CompilerPipeline {
         }
 
         // Generate object code
-        let object_code = self.compile_mir_to_object(&mir_module, options.target.clone())?;
+        let object_code = self.compile_mir_to_object(&mir_module, options.target)?;
 
         // Build native binary
         let mut builder = NativeBinaryBuilder::new(object_code)
             .output(output)
-            .target(options.target.clone())
+            .target(options.target)
             .strip(options.strip)
             .pie(options.pie)
             .shared(options.shared)

@@ -210,10 +210,8 @@ pub fn has_side_effects(name: &str) -> bool {
 pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
     CURRENT_EFFECTS.with(|cell| {
         let effects = cell.borrow();
-        if effects.contains(&Effect::Async) {
-            if is_blocking_operation(operation) {
-                return Err(crate::error::factory::blocking_in_async(operation));
-            }
+        if effects.contains(&Effect::Async) && is_blocking_operation(operation) {
+            return Err(crate::error::factory::blocking_in_async(operation));
         }
         Ok(())
     })
@@ -223,21 +221,19 @@ pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
 pub fn check_pure_violation(operation: &str) -> Result<(), CompileError> {
     CURRENT_EFFECTS.with(|cell| {
         let effects = cell.borrow();
-        if effects.contains(&Effect::Pure) {
-            if has_side_effects(operation) {
-                // Determine which effect is needed
-                let needed_effect = if is_io_operation(operation) {
-                    "@io"
-                } else if is_fs_operation(operation) {
-                    "@fs"
-                } else if is_net_operation(operation) {
-                    "@net"
-                } else {
-                    "@io" // default
-                };
+        if effects.contains(&Effect::Pure) && has_side_effects(operation) {
+            // Determine which effect is needed
+            let needed_effect = if is_io_operation(operation) {
+                "@io"
+            } else if is_fs_operation(operation) {
+                "@fs"
+            } else if is_net_operation(operation) {
+                "@net"
+            } else {
+                "@io" // default
+            };
 
-                return Err(crate::error::factory::side_effect_in_pure(operation, needed_effect));
-            }
+            return Err(crate::error::factory::side_effect_in_pure(operation, needed_effect));
         }
         Ok(())
     })

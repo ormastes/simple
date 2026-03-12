@@ -452,7 +452,6 @@ impl<'a> Parser<'a> {
         let first_token = self.current.clone();
 
         // Check if this token could start a type expression
-        
 
         match &first_token.kind {
             // If it's an identifier, we need to check what follows

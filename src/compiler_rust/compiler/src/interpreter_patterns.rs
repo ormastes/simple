@@ -187,7 +187,7 @@ pub(crate) fn pattern_matches(
                     let mut pattern_str = String::new();
                     for part in parts {
                         match part {
-                            FStringPart::Literal(s) => pattern_str.push_str(&s),
+                            FStringPart::Literal(s) => pattern_str.push_str(s),
                             FStringPart::Expr(_) => {
                                 // FStrings with expressions cannot be used as patterns
                                 return Ok(false);

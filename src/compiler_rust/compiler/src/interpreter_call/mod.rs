@@ -448,7 +448,7 @@ pub(crate) fn evaluate_call(
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
                     }
-                    let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
                     }
@@ -464,7 +464,7 @@ pub(crate) fn evaluate_call(
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
                     }
-                    let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
                     }
@@ -505,7 +505,7 @@ pub(crate) fn evaluate_call(
 
             if type_name == "Result" && (method_name == "Ok" || method_name == "Err") {
                 if args.is_empty() {
-                    return Err(CompileError::semantic(&format!(
+                    return Err(CompileError::semantic(format!(
                         "Result.{} requires one argument",
                         method_name
                     )));
@@ -758,7 +758,7 @@ pub(crate) fn evaluate_call(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let mut captured_clone = captured.clone();
-            block_execution::exec_block_closure(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)
+            block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
             let mut captured_env_clone = captured_env.clone();

@@ -1024,7 +1024,7 @@ impl<'a> MirLowerer<'a> {
                 let is_tuple = self
                     .type_registry
                     .and_then(|tr| tr.get(receiver_ty))
-                    .map_or(false, |t| matches!(t, crate::hir::HirType::Tuple(_)));
+                    .is_some_and(|t| matches!(t, crate::hir::HirType::Tuple(_)));
 
                 let raw_result = if is_tuple {
                     // Use rt_tuple_get(tuple_rv, index_u64) for tuples
@@ -1271,7 +1271,6 @@ impl<'a> MirLowerer<'a> {
                             target: insert_target,
                             args: vec![dict_reg, key_reg, value_reg],
                         });
-                        ()
                     })?;
                 }
 

@@ -997,7 +997,7 @@ fn collect_identifiers_recursive(expr: &Expr, identifiers: &mut HashSet<String>)
         Expr::FString { parts, .. } => {
             for part in parts {
                 if let simple_parser::FStringPart::Expr(e) = part {
-                    collect_identifiers_recursive(&e, identifiers);
+                    collect_identifiers_recursive(e, identifiers);
                 }
             }
         }

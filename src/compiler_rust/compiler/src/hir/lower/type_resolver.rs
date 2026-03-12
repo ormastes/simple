@@ -272,12 +272,10 @@ impl Lowerer {
                     }
                 }
             }
+        } else if self.lenient_types {
+            Ok(TypeId::ANY)
         } else {
-            if self.lenient_types {
-                Ok(TypeId::ANY)
-            } else {
-                Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
-            }
+            Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
         }
     }
 
@@ -291,7 +289,7 @@ impl Lowerer {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             let count = fields.len();
-                            if best.as_ref().map_or(true, |(_, _, c)| count > *c) {
+                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
                                 best = Some((idx, *field_ty, count));
                             }
                         }
@@ -315,7 +313,7 @@ impl Lowerer {
                             for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                                 if field_name == field {
                                     let count = fields.len();
-                                    if best.as_ref().map_or(true, |(_, _, c)| count > *c) {
+                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
                                         best = Some((idx, *field_ty, count));
                                     }
                                 }
@@ -325,7 +323,7 @@ impl Lowerer {
                     if let Some((idx, ty, _)) = best {
                         return Ok((idx, ty));
                     }
-                    return Ok((0, TypeId::ANY));
+                    Ok((0, TypeId::ANY))
                 }
                 HirType::Struct { name, fields, .. } => {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
@@ -401,12 +399,10 @@ impl Lowerer {
                     }
                 }
             }
+        } else if self.lenient_types {
+            Ok(TypeId::ANY)
         } else {
-            if self.lenient_types {
-                Ok(TypeId::ANY)
-            } else {
-                Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
-            }
+            Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
         }
     }
 }

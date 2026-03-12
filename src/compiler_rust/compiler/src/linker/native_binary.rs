@@ -1128,13 +1128,10 @@ static inline int64_t _rt_now_nanos(void) {{
             // Allow multiple definitions so bootstrap stubs don't conflict
             // with real runtime symbols linked above.
             if !extra_stubs.is_empty() && runtime_dir.is_some() {
-                match linker_flavor {
-                    LinkerFlavor::Gnu => {
-                        if !matches!(self.options.target.os, TargetOS::MacOS) {
-                            builder = builder.flag("--allow-multiple-definition".to_string());
-                        }
+                if linker_flavor == LinkerFlavor::Gnu {
+                    if !matches!(self.options.target.os, TargetOS::MacOS) {
+                        builder = builder.flag("--allow-multiple-definition".to_string());
                     }
-                    _ => {}
                 }
             }
 
@@ -1224,14 +1221,15 @@ static inline int64_t _rt_now_nanos(void) {{
             }
 
             // Dynamic linker and no-PIE flags (GNU/FreeBSD only, not macOS/Windows)
-            if !self.options.shared && matches!(linker_flavor, LinkerFlavor::Gnu) {
-                if !matches!(self.options.target.os, TargetOS::MacOS) {
-                    if let Some(dynamic_linker) = self.find_dynamic_linker() {
-                        builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
-                    }
-                    if !self.options.pie {
-                        builder = builder.flag("-no-pie".to_string());
-                    }
+            if !self.options.shared
+                && matches!(linker_flavor, LinkerFlavor::Gnu)
+                && !matches!(self.options.target.os, TargetOS::MacOS)
+            {
+                if let Some(dynamic_linker) = self.find_dynamic_linker() {
+                    builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+                }
+                if !self.options.pie {
+                    builder = builder.flag("-no-pie".to_string());
                 }
             }
 
@@ -1257,7 +1255,7 @@ static inline int64_t _rt_now_nanos(void) {{
             let (nm_cmd2, nm_args2) = detect_nm_command(&self.options.target);
             let nm_out = std::process::Command::new(&nm_cmd2)
                 .args(&nm_args2)
-                .arg(&first_out)
+                .arg(first_out)
                 .output()
                 .map_err(|e| {
                     LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e))
@@ -1788,8 +1786,8 @@ pub fn compile_to_native_binary(
         mir::lower_to_mir(&hir_module).map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
 
     // Generate object code
-    let codegen = Codegen::for_target(options.target.clone())
-        .map_err(|e| LinkerError::LinkFailed(format!("codegen error: {}", e)))?;
+    let codegen =
+        Codegen::for_target(options.target).map_err(|e| LinkerError::LinkFailed(format!("codegen error: {}", e)))?;
     let object_code = codegen
         .compile_module(&mir_module)
         .map_err(|e| LinkerError::LinkFailed(format!("compilation error: {}", e)))?;

@@ -142,9 +142,9 @@ pub(super) fn eval_literal_expr(
             let mut out = String::new();
             for part in parts {
                 match part {
-                    FStringPart::Literal(lit) => out.push_str(&lit),
+                    FStringPart::Literal(lit) => out.push_str(lit),
                     FStringPart::Expr(e) => {
-                        let v = evaluate_expr(&e, env, functions, classes, enums, impl_methods)?;
+                        let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
                         let display = try_call_fmt_method(&v, env, functions, classes, enums, impl_methods)
                             .unwrap_or_else(|| v.to_display_string());
                         out.push_str(&display);

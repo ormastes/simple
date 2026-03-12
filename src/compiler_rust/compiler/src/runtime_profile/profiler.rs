@@ -146,7 +146,7 @@ impl RuntimeProfiler {
             return;
         }
         let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
-        if counter % self.config.sample_rate as u64 != 0 {
+        if !counter.is_multiple_of(self.config.sample_rate as u64) {
             return;
         }
 
@@ -168,7 +168,7 @@ impl RuntimeProfiler {
             return;
         }
         let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
-        if counter % self.config.sample_rate as u64 != 0 {
+        if !counter.is_multiple_of(self.config.sample_rate as u64) {
             return;
         }
 
@@ -196,7 +196,7 @@ impl RuntimeProfiler {
             return;
         }
         let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
-        if counter % self.config.sample_rate as u64 != 0 {
+        if !counter.is_multiple_of(self.config.sample_rate as u64) {
             return;
         }
 
@@ -361,10 +361,8 @@ impl RuntimeProfiler {
         }
 
         // First frame: called early and moderately
-        if first_call_ns < self.first_frame_window_ns {
-            if stat.call_count <= 20 && calls_per_sec < 50.0 {
-                return (LayoutPhase::FirstFrame, 0.8);
-            }
+        if first_call_ns < self.first_frame_window_ns && stat.call_count <= 20 && calls_per_sec < 50.0 {
+            return (LayoutPhase::FirstFrame, 0.8);
         }
 
         // Hot (Steady): called frequently
@@ -393,7 +391,7 @@ impl RuntimeProfiler {
             .count();
 
         // Estimate pages for startup code
-        let startup_pages = (startup_count * AVG_FUNC_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+        let startup_pages = (startup_count * AVG_FUNC_SIZE).div_ceil(PAGE_SIZE);
 
         // Without optimization, startup code is scattered
         // Estimate 2x more pages touched

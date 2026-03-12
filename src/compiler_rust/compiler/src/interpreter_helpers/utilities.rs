@@ -212,7 +212,7 @@ fn execute_callable_with_arg(
                 local_env.insert(first_param.clone(), arg);
             }
             evaluate_expr(
-                &body,
+                body,
                 &mut local_env,
                 &mut ctx.functions,
                 &mut ctx.classes,

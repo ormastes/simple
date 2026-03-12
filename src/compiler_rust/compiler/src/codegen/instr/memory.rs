@@ -52,10 +52,8 @@ pub fn compile_load<M: Module>(
                 ctx.variables.keys().collect::<Vec<_>>()
             );
         }
-    } else {
-        if let Some(&val) = ctx.vreg_values.get(&addr) {
-            ctx.vreg_values.insert(dest, val);
-        }
+    } else if let Some(&val) = ctx.vreg_values.get(&addr) {
+        ctx.vreg_values.insert(dest, val);
     }
     Ok(())
 }

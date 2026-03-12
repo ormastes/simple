@@ -193,7 +193,7 @@ impl ArchRulesChecker {
         // Extract type usage from functions
         for func in &module.functions {
             // Get line number from function span if available
-            let func_line = func.span.map(|s| s.line as usize).unwrap_or(0);
+            let func_line = func.span.map(|s| s.line).unwrap_or(0);
 
             // Extract from function signature (parameters and return type)
             for param in &func.params {

@@ -13,8 +13,7 @@ use std::sync::Arc;
 /// Loading mode for runtime FFI symbols.
 ///
 /// Determines how runtime symbols are resolved at execution time.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub enum RuntimeLoadMode {
     /// Static linking (compiled into binary).
     ///
@@ -43,7 +42,6 @@ pub enum RuntimeLoadMode {
     /// or extend the base runtime.
     Chained(Vec<RuntimeLoadMode>),
 }
-
 
 impl RuntimeLoadMode {
     /// Get the default mode based on the build profile.

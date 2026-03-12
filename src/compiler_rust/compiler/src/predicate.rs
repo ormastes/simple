@@ -543,7 +543,7 @@ fn match_segment(pattern: &str, value: &str) -> bool {
     }
 
     if !pattern.ends_with('*') {
-        if let Some(last) = pattern.split('*').last() {
+        if let Some(last) = pattern.split('*').next_back() {
             return remainder.is_empty() && (last.is_empty() || pattern.ends_with(last));
         }
     }

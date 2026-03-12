@@ -185,11 +185,13 @@ fn expand_user_macro_inner(
                             let original_name = strip_gensym_suffix(&def.name);
 
                             // Check if this matches an intro stub by name
-                            if contract_result.introduced_functions.contains_key(&original_name) {
+                            if let std::collections::hash_map::Entry::Occupied(mut e) =
+                                contract_result.introduced_functions.entry(original_name.clone())
+                            {
                                 // Replace stub with real function definition
                                 let mut real_func = (**def).clone();
-                                real_func.name = original_name.clone();
-                                contract_result.introduced_functions.insert(original_name, real_func);
+                                real_func.name = original_name;
+                                e.insert(real_func);
                                 matched_by_name = true;
                             }
                         }

@@ -195,9 +195,10 @@ pub struct FunctionRuntimeStats {
 }
 
 /// Call type for sequence events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CallType {
     /// Direct function call
+    #[default]
     Direct,
     /// Method call on object
     Method,
@@ -207,12 +208,6 @@ pub enum CallType {
     Closure,
     /// Constructor call
     Constructor,
-}
-
-impl Default for CallType {
-    fn default() -> Self {
-        CallType::Direct
-    }
 }
 
 /// A single call event in the sequence

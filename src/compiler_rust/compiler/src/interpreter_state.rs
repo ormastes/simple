@@ -46,16 +46,16 @@ pub struct LiteralFunctionInfo {
 //==============================================================================
 
 thread_local! {
-    pub(crate) static DI_CONFIG: RefCell<Option<Arc<DiConfig>>> = RefCell::new(None);
+    pub(crate) static DI_CONFIG: RefCell<Option<Arc<DiConfig>>> = const { RefCell::new(None) };
     pub(crate) static DI_SINGLETONS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
-    pub(crate) static AOP_CONFIG: RefCell<Option<Arc<AopConfig>>> = RefCell::new(None);
+    pub(crate) static AOP_CONFIG: RefCell<Option<Arc<AopConfig>>> = const { RefCell::new(None) };
     /// Concurrent provider registry for DI-based backend switching.
     pub(crate) static CONCURRENT_REGISTRY: RefCell<Arc<ConcurrentProviderRegistry>> =
         RefCell::new(Arc::new(ConcurrentProviderRegistry::default()));
     /// Command line arguments passed to the Simple interpreter
-    pub(crate) static INTERPRETER_ARGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    pub(crate) static INTERPRETER_ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Current file being evaluated (for module resolution)
-    pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+    pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     /// Interface bindings for static polymorphism (trait_name -> impl_type_name)
     /// When a binding exists, method calls on trait objects use static dispatch
     /// to the bound implementation type.
@@ -104,27 +104,27 @@ pub(crate) use simple_common::fault_detection::TIMEOUT_EXCEEDED;
 
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
-    pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
-    pub(crate) static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
+    pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
+    pub(crate) static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = const { RefCell::new(None) };
     pub(crate) static CONST_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Immutable variables tracked by naming pattern (lowercase without underscore suffix)
     /// These cannot be reassigned but support functional update with ->
     pub(crate) static IMMUTABLE_VARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     pub(crate) static EXTERN_FUNCTIONS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Current context object for context blocks (DSL support)
-    pub(crate) static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);
+    pub(crate) static CONTEXT_OBJECT: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// Name of the variable holding the context object (for mutation persistence)
-    pub(crate) static CONTEXT_VAR_NAME: RefCell<Option<String>> = RefCell::new(None);
+    pub(crate) static CONTEXT_VAR_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Accumulated yield values during generator execution
-    pub(crate) static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = RefCell::new(None);
+    pub(crate) static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
     /// User-defined macros
     pub(crate) static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
     /// Order in which macros are defined (for validating defined-before-use)
-    pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Block-scoped enums (for enums defined inside closures like `it` blocks)
     pub(crate) static BLOCK_SCOPED_ENUMS: RefCell<HashMap<String, EnumDef>> = RefCell::new(HashMap::new());
     /// Type-safe execution mode (new, replaces Option fields above)
-    pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = RefCell::new(ExecutionMode::Normal);
+    pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = const { RefCell::new(ExecutionMode::Normal) };
     /// Maps unit suffix -> family name (for looking up which family a unit belongs to)
     pub(crate) static UNIT_SUFFIX_TO_FAMILY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     /// Maps family_name -> (suffix -> conversion_factor) for unit conversions
@@ -148,7 +148,7 @@ thread_local! {
     /// BDD Test Registry - shared across all modules that import spec.registry
     /// This ensures that describe/context/it blocks register to the same location
     /// regardless of how the registry module is imported.
-    pub(crate) static BDD_REGISTRY_GROUPS: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+    pub(crate) static BDD_REGISTRY_GROUPS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     /// BDD Context definitions registry (for context_def blocks)
     pub(crate) static BDD_REGISTRY_CONTEXTS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
     /// BDD Shared examples registry (for shared_examples blocks)
@@ -160,7 +160,7 @@ thread_local! {
     /// Tracks whether we're currently executing inside an immutable fn method.
     /// When true, self.field = value assignments should error.
     /// This is set when entering a fn method (not me method) and cleared when leaving.
-    pub(crate) static IN_IMMUTABLE_FN_METHOD: RefCell<bool> = RefCell::new(false);
+    pub(crate) static IN_IMMUTABLE_FN_METHOD: RefCell<bool> = const { RefCell::new(false) };
     /// Blanket impl methods registry.
     /// When an impl block has #[default] attribute and generic params (e.g., impl<T> Display for T:),
     /// its methods are stored here. Key is the trait name, value is the list of methods.

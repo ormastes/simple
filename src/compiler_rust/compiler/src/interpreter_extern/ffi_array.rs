@@ -38,7 +38,7 @@ pub fn rt_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Push element to array
 pub fn rt_array_push_fn(args: &[Value]) -> Result<Value, CompileError> {
     let arr_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_array_push expects 2 arguments".to_string(),
@@ -67,7 +67,7 @@ pub fn rt_array_push_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Get element from array at index
 pub fn rt_array_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     let arr_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_array_get expects 2 arguments".to_string(),
@@ -94,7 +94,7 @@ pub fn rt_array_get_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Set element in array at index
 pub fn rt_array_set_fn(args: &[Value]) -> Result<Value, CompileError> {
     let arr_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_array_set expects 3 arguments".to_string(),

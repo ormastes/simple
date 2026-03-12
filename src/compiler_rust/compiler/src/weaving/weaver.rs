@@ -47,7 +47,7 @@ impl Weaver {
                 // Group by block
                 insertions
                     .entry(join_point.block_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((join_point.instruction_index, advices));
             }
         }

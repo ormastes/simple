@@ -31,7 +31,7 @@ pub fn extract_node_location(node: &Node) -> Option<(String, usize, usize)> {
         _ => None,
     };
 
-    span.map(|s| span_to_location(s))
+    span.map(span_to_location)
 }
 
 /// Extract source location from specific expression types

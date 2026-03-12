@@ -42,7 +42,7 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
         let error_msg = format!("Source file not found: {}", source_file);
         return Ok(Value::Tuple(vec![
             Value::Str("".into()),
-            Value::Str(error_msg.into()),
+            Value::Str(error_msg),
             Value::Int(1),
         ]));
     }
@@ -64,11 +64,7 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
         _target_triple
     );
 
-    Ok(Value::Tuple(vec![
-        Value::Str(ir.into()),
-        Value::Str("".into()),
-        Value::Int(0),
-    ]))
+    Ok(Value::Tuple(vec![Value::Str(ir), Value::Str("".into()), Value::Int(0)]))
 }
 
 /// Compile Simple source to native executable using LLVM backend
@@ -96,7 +92,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     let source_path = PathBuf::from(source_path);
     if !source_path.exists() {
         let error_msg = format!("Source file not found: {}", source_path.display());
-        return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(error_msg.into())]));
+        return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(error_msg)]));
     }
 
     let mut output_path = if output_path.trim().is_empty() {
@@ -114,7 +110,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 let msg = format!("Failed to create output directory {}: {}", parent.display(), e);
-                return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg.into())]));
+                return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg)]));
             }
         }
     }
@@ -134,7 +130,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("Failed to create compiler pipeline: {}", e);
-            return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg.into())]));
+            return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg)]));
         }
     };
 
@@ -155,12 +151,9 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(res) => {
             // Ensure the output exists and return success
             let success = res.output.exists();
-            Ok(Value::Tuple(vec![
-                Value::Bool(success),
-                Value::Str(String::new().into()),
-            ]))
+            Ok(Value::Tuple(vec![Value::Bool(success), Value::Str(String::new())]))
         }
-        Err(e) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(e.to_string().into())])),
+        Err(e) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(e.to_string())])),
     }
 }
 
@@ -204,7 +197,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     if !Path::new(binary_path).exists() {
         return Ok(Value::Tuple(vec![
             Value::Str("".into()),
-            Value::Str(format!("Binary not found: {}", binary_path).into()),
+            Value::Str(format!("Binary not found: {}", binary_path)),
             Value::Int(127), // Command not found
         ]));
     }
@@ -227,7 +220,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         Err(e) => {
             return Ok(Value::Tuple(vec![
                 Value::Str("".into()),
-                Value::Str(format!("Execution error: {}", e).into()),
+                Value::Str(format!("Execution error: {}", e)),
                 Value::Int(-1),
             ]));
         }
@@ -279,8 +272,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     let exit_code = status.unwrap().code().unwrap_or(-1) as i64;
 
     Ok(Value::Tuple(vec![
-        Value::Str(stdout_str.into()),
-        Value::Str(stderr_str.into()),
+        Value::Str(stdout_str),
+        Value::Str(stderr_str),
         Value::Int(exit_code),
     ]))
 }

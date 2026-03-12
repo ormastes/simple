@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 thread_local! {
     static SPAN_REGISTRY: RefCell<HashMap<i64, simple_parser::token::Span>> = RefCell::new(HashMap::new());
-    static NEXT_SPAN_HANDLE: RefCell<i64> = RefCell::new(1);
+    static NEXT_SPAN_HANDLE: RefCell<i64> = const { RefCell::new(1) };
 }
 
 fn next_handle() -> i64 {

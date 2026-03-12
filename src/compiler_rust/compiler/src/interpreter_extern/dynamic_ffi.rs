@@ -415,7 +415,7 @@ fn i64_to_value(v: i64) -> Value {
 /// satellite library dispatch.
 fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
     // Marshal arguments to i64
-    let args: Vec<i64> = evaluated_args.iter().map(|v| value_to_i64(v)).collect();
+    let args: Vec<i64> = evaluated_args.iter().map(value_to_i64).collect();
     let nargs = args.len();
 
     // Call the function pointer with the appropriate number of arguments.

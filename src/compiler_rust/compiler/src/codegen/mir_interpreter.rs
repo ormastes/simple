@@ -49,6 +49,12 @@ pub struct MirInterpreterEmitter {
     pub locals: Vec<i64>,
 }
 
+impl Default for MirInterpreterEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MirInterpreterEmitter {
     pub fn new() -> Self {
         Self {

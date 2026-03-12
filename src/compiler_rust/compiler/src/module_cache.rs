@@ -38,12 +38,12 @@ thread_local! {
     // Track modules currently being loaded to prevent circular import infinite recursion
     pub static MODULES_LOADING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
     // Track current loading depth to prevent infinite recursion
-    pub static MODULE_LOAD_DEPTH: RefCell<usize> = RefCell::new(0);
+    pub static MODULE_LOAD_DEPTH: RefCell<usize> = const { RefCell::new(0) };
     // Cache for partial exports (type definitions only) - used for circular import resolution
     // This contains exports after register_definitions but before process_imports_and_assignments
     pub static PARTIAL_MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
     // Total modules loaded counter - reset between test files to prevent OOM
-    pub static TOTAL_MODULES_LOADED: RefCell<usize> = RefCell::new(0);
+    pub static TOTAL_MODULES_LOADED: RefCell<usize> = const { RefCell::new(0) };
 }
 
 /// Clear the module exports cache (useful between test runs)

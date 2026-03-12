@@ -247,7 +247,7 @@ impl VerificationSummary {
     pub fn format(&self) -> String {
         let mut out = String::new();
 
-        out.push_str(&format!("Verification Summary:\n"));
+        out.push_str(&"Verification Summary:\n".to_string());
         out.push_str(&format!(
             "  Files: {}/{} passed\n",
             self.files_passed, self.files_checked

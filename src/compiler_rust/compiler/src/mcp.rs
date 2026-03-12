@@ -410,17 +410,13 @@ impl McpTools {
         for node in nodes {
             match node {
                 Node::Function(func) => {
-                    if func.name.contains(query) {
-                        if !public_only || func.visibility.is_public() {
-                            results.push(func.name.clone());
-                        }
+                    if func.name.contains(query) && (!public_only || func.visibility.is_public()) {
+                        results.push(func.name.clone());
                     }
                 }
                 Node::Class(class) => {
-                    if class.name.contains(query) {
-                        if !public_only || class.visibility.is_public() {
-                            results.push(class.name.clone());
-                        }
+                    if class.name.contains(query) && (!public_only || class.visibility.is_public()) {
+                        results.push(class.name.clone());
                     }
                 }
                 Node::Trait(trait_def) => {

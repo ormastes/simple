@@ -131,7 +131,7 @@ pub(crate) fn create_resume_block(
 
         // Remap and set the terminator
         resume_block.terminator =
-            remap_terminator(orig_block.terminator.clone(), block_map).unwrap_or_else(|| Terminator::Return(None));
+            remap_terminator(orig_block.terminator.clone(), block_map).unwrap_or(Terminator::Return(None));
 
         write_block(rewritten, resume_block);
         resume

@@ -367,8 +367,8 @@ impl LayoutOptimizer {
         // Without optimization: all code interleaved
         // With optimization: startup and first_frame grouped together
 
-        let optimized_startup_pages = (startup_size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
-        let optimized_first_frame_pages = (first_frame_size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+        let optimized_startup_pages = (startup_size as usize).div_ceil(PAGE_SIZE);
+        let optimized_first_frame_pages = (first_frame_size as usize).div_ceil(PAGE_SIZE);
 
         // Estimate unoptimized would touch ~2x more pages due to interleaving
         let unoptimized_estimate = (optimized_startup_pages + optimized_first_frame_pages) * 2;

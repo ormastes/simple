@@ -504,10 +504,7 @@ fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord], last_id
         let parts = split_category(&category);
         for idx in 0..parts.len() {
             let key = parts[..=idx].join(".");
-            categories
-                .entry(key)
-                .or_default()
-                .add(record);
+            categories.entry(key).or_default().add(record);
         }
     }
 
@@ -969,8 +966,7 @@ fn slugify(value: &str) -> String {
 
 pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
-    let _lock =
-        FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let mut fields = vec![
         "id".to_string(),

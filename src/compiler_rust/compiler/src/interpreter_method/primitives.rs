@@ -197,7 +197,7 @@ pub fn handle_int_methods(
         }
         "chr" => {
             // Convert to Unicode character
-            if n < 0 || n > 0x10FFFF {
+            if !(0..=0x10FFFF).contains(&n) {
                 return Err(CompileError::Runtime(format!("chr() argument out of range: {}", n)));
             }
             match char::from_u32(n as u32) {

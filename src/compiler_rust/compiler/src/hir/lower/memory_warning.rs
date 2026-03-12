@@ -288,7 +288,7 @@ impl MemoryWarningCollector {
     pub fn by_code(&self) -> std::collections::HashMap<MemoryWarningCode, Vec<&MemoryWarning>> {
         let mut map = std::collections::HashMap::new();
         for warning in &self.warnings {
-            map.entry(warning.code.clone()).or_insert_with(Vec::new).push(warning);
+            map.entry(warning.code).or_insert_with(Vec::new).push(warning);
         }
         map
     }

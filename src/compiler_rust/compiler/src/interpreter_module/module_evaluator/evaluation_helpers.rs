@@ -103,14 +103,14 @@ pub(super) fn register_definitions(
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
                 let class_def = ClassDef {
-                    span: s.span.clone(),
+                    span: s.span,
                     name: s.name.clone(),
                     generic_params: s.generic_params.clone(),
                     where_clause: s.where_clause.clone(),
                     fields: s.fields.clone(),
                     methods: s.methods.clone(), // Include struct methods!
                     parent: None,
-                    visibility: s.visibility.clone(),
+                    visibility: s.visibility,
                     effects: vec![],
                     attributes: s.attributes.clone(),
                     doc_comment: s.doc_comment.clone(),
@@ -220,7 +220,7 @@ pub(super) fn register_definitions(
                     let mangled = format!("{}__{}", e.name, variant.name);
                     // Export variant as an enum value (unit variant) or constructor
                     let variant_value =
-                        if variant.fields.is_none() || variant.fields.as_ref().map_or(true, |f| f.is_empty()) {
+                        if variant.fields.is_none() || variant.fields.as_ref().is_none_or(|f| f.is_empty()) {
                             // Unit variant - export as enum value
                             Value::Enum {
                                 enum_name: e.name.clone(),

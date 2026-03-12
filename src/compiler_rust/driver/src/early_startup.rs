@@ -14,8 +14,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 /// Application type detected from arguments or binary metadata
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppType {
     /// Command-line tool (minimal resources)
     #[default]
@@ -29,7 +28,6 @@ pub enum AppType {
     /// Interactive REPL (history, line editor)
     Repl,
 }
-
 
 impl AppType {
     /// Parse app type from string argument

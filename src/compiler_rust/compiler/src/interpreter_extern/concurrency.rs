@@ -224,7 +224,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
     let mut local_env = captured_env.clone();
 
     // Bind parameters to data arguments
-    if params.len() >= 1 {
+    if !params.is_empty() {
         local_env.insert(params[0].clone(), data1);
     }
     if params.len() >= 2 {
@@ -350,7 +350,7 @@ pub fn rt_thread_free(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_new(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.channel.channel_new().map(|h| Value::Int(h));
+        return registry.channel.channel_new().map(Value::Int);
     }
 
     let (tx, rx) = channel::<Value>();
@@ -600,7 +600,7 @@ pub fn rt_set_concurrent_backend(args: &[Value]) -> Result<Value, CompileError> 
         }
     };
 
-    let backend = ConcurrentBackend::parse(&name).map_err(|e| CompileError::Runtime(e))?;
+    let backend = ConcurrentBackend::parse(&name).map_err(CompileError::Runtime)?;
     set_concurrent_registry(ConcurrentProviderRegistry::new(backend));
     Ok(Value::Nil)
 }

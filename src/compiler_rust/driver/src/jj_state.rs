@@ -219,10 +219,7 @@ impl JjStateManager {
         }
 
         // Create a new working copy for the next change
-        let output = Command::new("jj")
-            .args(["new"])
-            .current_dir(&self.repo_path)
-            .output()?;
+        let output = Command::new("jj").args(["new"]).current_dir(&self.repo_path).output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

@@ -87,7 +87,7 @@ impl Lowerer {
         // Generate array elements by repeating the value
         // For compile-time known sizes, expand to explicit array
         if let Some(n) = size {
-            let hir_exprs: Vec<_> = std::iter::repeat(hir_value).take(n).collect();
+            let hir_exprs: Vec<_> = std::iter::repeat_n(hir_value, n).collect();
             Ok(HirExpr {
                 kind: HirExprKind::Array(hir_exprs),
                 ty: arr_ty,

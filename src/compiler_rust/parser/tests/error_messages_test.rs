@@ -93,19 +93,13 @@ fn test():
 
     // Check if it's a ContextualSyntaxError
     match err {
-        ParseError::ContextualSyntaxError {
-            context,
-            message,
-            suggestion,
-            help,
-            ..
-        } => {
-            assert_eq!(context, "function arguments");
-            assert!(message.contains("b"));
-            assert!(suggestion.is_some(), "Should provide a suggestion");
-            assert!(help.is_some(), "Should provide help text");
+        ParseError::ContextualSyntaxError(data) => {
+            assert_eq!(data.context, "function arguments");
+            assert!(data.message.contains("b"));
+            assert!(data.suggestion.is_some(), "Should provide a suggestion");
+            assert!(data.help.is_some(), "Should provide help text");
 
-            let sugg = suggestion.unwrap();
+            let sugg = data.suggestion.unwrap();
             assert!(
                 sugg.contains("comma") || sugg.contains("b"),
                 "Suggestion should mention comma or 'b'. Got: {}",
@@ -156,18 +150,12 @@ fn test():
     let err = result.unwrap_err();
 
     match err {
-        ParseError::ContextualSyntaxError {
-            context,
-            message,
-            suggestion,
-            help,
-            ..
-        } => {
-            assert_eq!(context, "dict literal");
-            assert!(message.contains("comma"));
-            assert!(suggestion.is_some());
-            assert!(help.is_some());
-            let help_text = help.unwrap();
+        ParseError::ContextualSyntaxError(data) => {
+            assert_eq!(data.context, "dict literal");
+            assert!(data.message.contains("comma"));
+            assert!(data.suggestion.is_some());
+            assert!(data.help.is_some());
+            let help_text = data.help.unwrap();
             assert!(
                 help_text.contains("{a: 1, b: 2}"),
                 "Help should show example. Got: {}",
@@ -218,18 +206,12 @@ fn test():
     let err = result.unwrap_err();
 
     match err {
-        ParseError::ContextualSyntaxError {
-            context,
-            message,
-            suggestion,
-            help,
-            ..
-        } => {
-            assert_eq!(context, "array literal");
-            assert!(message.contains("comma"));
-            assert!(suggestion.is_some());
-            assert!(help.is_some());
-            let help_text = help.unwrap();
+        ParseError::ContextualSyntaxError(data) => {
+            assert_eq!(data.context, "array literal");
+            assert!(data.message.contains("comma"));
+            assert!(data.suggestion.is_some());
+            assert!(data.help.is_some());
+            let help_text = data.help.unwrap();
             assert!(
                 help_text.contains("[1, 2, 3]"),
                 "Help should show example. Got: {}",

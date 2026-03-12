@@ -921,13 +921,11 @@ pub enum Pattern {
 
 // Module level
 
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Module {
     pub name: Option<String>,
     pub items: Vec<Node>,
 }
-
 
 /// An argument to a macro invocation
 #[derive(Debug, Clone, PartialEq)]

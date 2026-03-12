@@ -505,11 +505,10 @@ impl Parser<'_> {
                 };
                 targets.push(target);
                 self.skip_newlines();
-                if !self.check(&TokenKind::RParen)
-                    && self.check(&TokenKind::Comma) {
-                        self.advance();
-                        self.skip_newlines();
-                    }
+                if !self.check(&TokenKind::RParen) && self.check(&TokenKind::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                }
             }
             self.expect(&TokenKind::RParen)?;
             Ok((path, ImportTarget::Group(targets)))

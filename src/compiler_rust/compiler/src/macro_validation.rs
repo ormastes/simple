@@ -79,6 +79,12 @@ pub struct BlockContext {
     pub current_position: BlockPosition,
 }
 
+impl Default for BlockContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockContext {
     pub fn new() -> Self {
         Self {

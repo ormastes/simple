@@ -25,6 +25,12 @@ pub struct GenericTemplates {
     pub traits: Vec<TraitDef>,
 }
 
+impl Default for GenericTemplates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GenericTemplates {
     pub fn new() -> Self {
         Self {
@@ -53,6 +59,12 @@ pub struct SpecializedInstances {
     pub classes: Vec<ClassDef>,
     pub enums: Vec<EnumDef>,
     // Trait implementations are tracked in metadata, not as separate instances
+}
+
+impl Default for SpecializedInstances {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SpecializedInstances {

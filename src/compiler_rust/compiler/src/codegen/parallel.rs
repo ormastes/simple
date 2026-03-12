@@ -119,7 +119,7 @@ impl ParallelCodegen {
 
     /// Compile a single MIR module to object code.
     pub fn compile_module(&self, mir_module: &MirModule) -> BackendResult<CompiledModule> {
-        let codegen = Codegen::for_target(self.config.backend_settings.target.clone())?;
+        let codegen = Codegen::for_target(self.config.backend_settings.target)?;
         let object_code = codegen.compile_module(mir_module)?;
         let function_count = mir_module.functions.len();
 

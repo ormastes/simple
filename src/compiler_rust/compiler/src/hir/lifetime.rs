@@ -560,7 +560,7 @@ impl LifetimeContext {
             for (i, violation) in self.violations.iter().enumerate() {
                 lean.push_str(&format!("-- Violation {}: {}\n", i + 1, violation.description()));
             }
-            lean.push_str("\n");
+            lean.push('\n');
         }
 
         lean.push_str("end LifetimeVerification\n");

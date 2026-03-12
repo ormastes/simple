@@ -188,7 +188,7 @@ impl Lowerer {
                     }));
                 }
                 // 2+ args → not a builtin, fall through to regular call
-                return Ok(None);
+                Ok(None)
             }
             "future" => {
                 if args.len() != 1 {

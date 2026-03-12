@@ -738,7 +738,7 @@ fn is_torch_accelerated(name: &str) -> bool {
 
 /// Evaluate a torch-accelerated function.
 fn eval_torch_function(name: &str, args: &[MathExpr], device: i32) -> Result<Value, CompileError> {
-    let eval_args: Vec<Value> = args.iter().map(|a| eval_cpu(a)).collect::<Result<_, _>>()?;
+    let eval_args: Vec<Value> = args.iter().map(eval_cpu).collect::<Result<_, _>>()?;
 
     match name {
         "zeros" | "ones" | "randn" => eval_torch_create(&eval_args, device, name),

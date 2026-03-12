@@ -234,32 +234,14 @@ fn extract_capture_groups(pattern: &str) -> Vec<String> {
         }
 
         // Look for (?P<name> or (?<name>
-        if ch == '(' {
-            if chars.peek() == Some(&'?') {
-                chars.next();
-                let next = chars.peek();
+        if ch == '(' && chars.peek() == Some(&'?') {
+            chars.next();
+            let next = chars.peek();
 
-                // (?P<name> format
-                if next == Some(&'P') {
-                    chars.next();
-                    if chars.peek() == Some(&'<') {
-                        chars.next();
-                        let mut name = String::new();
-                        while let Some(&c) = chars.peek() {
-                            if c == '>' {
-                                chars.next();
-                                break;
-                            }
-                            name.push(c);
-                            chars.next();
-                        }
-                        if !name.is_empty() {
-                            groups.push(name);
-                        }
-                    }
-                }
-                // (?<name> format
-                else if next == Some(&'<') {
+            // (?P<name> format
+            if next == Some(&'P') {
+                chars.next();
+                if chars.peek() == Some(&'<') {
                     chars.next();
                     let mut name = String::new();
                     while let Some(&c) = chars.peek() {
@@ -273,6 +255,22 @@ fn extract_capture_groups(pattern: &str) -> Vec<String> {
                     if !name.is_empty() {
                         groups.push(name);
                     }
+                }
+            }
+            // (?<name> format
+            else if next == Some(&'<') {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '>' {
+                        chars.next();
+                        break;
+                    }
+                    name.push(c);
+                    chars.next();
+                }
+                if !name.is_empty() {
+                    groups.push(name);
                 }
             }
         }

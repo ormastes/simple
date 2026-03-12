@@ -22,15 +22,15 @@ type BddSharedCell = RefCell<HashMap<String, Value>>;
 // Made pub(crate) so interpreter_control.rs can access for context statement handling
 thread_local! {
     // Current indentation level for nested describe/context blocks
-    pub(crate) static BDD_INDENT: RefCell<usize> = RefCell::new(0);
+    pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
     // (passed, failed) counts for current describe block
-    pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = RefCell::new((0, 0));
+    pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
     // Whether current "it" block has a failed expectation
-    pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = RefCell::new(false);
+    pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     // Whether we're currently inside an "it" block (expect should be silent)
-    pub(crate) static BDD_INSIDE_IT: RefCell<bool> = RefCell::new(false);
+    pub(crate) static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
-    pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = RefCell::new(None);
+    pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
 
     // TEST-010: Shared examples registry - maps name to block
     pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
@@ -52,7 +52,7 @@ thread_local! {
     pub(crate) static BDD_RESOURCE_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
 
     // Stack of current ExampleGroup objects for nested describe/context
-    pub(crate) static BDD_GROUP_STACK: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+    pub(crate) static BDD_GROUP_STACK: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
 
     // Hook caches: indexed by stack depth to avoid O(n²) recomputation
     // Maps stack_depth -> flattened hooks for that depth
@@ -60,10 +60,10 @@ thread_local! {
     static BDD_AFTER_EACH_CACHE: RefCell<HashMap<usize, Vec<Value>>> = RefCell::new(HashMap::new());
 
     // Track ignored/skipped test names for qualified ignore prompting
-    pub(crate) static BDD_IGNORED_TESTS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    pub(crate) static BDD_IGNORED_TESTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 
     // Track individual test results: (describe_path, test_name, passed, skipped)
-    pub(crate) static BDD_TEST_RESULTS: RefCell<Vec<(String, String, bool, bool)>> = RefCell::new(Vec::new());
+    pub(crate) static BDD_TEST_RESULTS: RefCell<Vec<(String, String, bool, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Create an ExampleGroup Value object
@@ -301,7 +301,7 @@ fn build_expect_failure_message(
         Expr::Identifier(name) => {
             let val = env
                 .get(name)
-                .map(|v| format_value_for_message(v))
+                .map(format_value_for_message)
                 .unwrap_or_else(|| "undefined".to_string());
             format!("expected {} ({}) to be truthy", name, val)
         }
@@ -318,7 +318,7 @@ fn format_value_for_message(val: &Value) -> String {
         Value::Str(s) => format!("\"{}\"", s),
         Value::Nil => "nil".to_string(),
         Value::Array(items) => {
-            let items_str: Vec<String> = items.iter().map(|v| format_value_for_message(v)).collect();
+            let items_str: Vec<String> = items.iter().map(format_value_for_message).collect();
             format!("[{}]", items_str.join(", "))
         }
         _ => format!("{:?}", val),
@@ -358,7 +358,7 @@ pub(crate) fn exec_block_value(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let mut captured_clone = captured.clone();
-            exec_block_closure(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)
+            exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),
     }
@@ -766,10 +766,10 @@ pub(super) fn eval_bdd_builtin(
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_VARIABLE)
                         .with_help("define the shared example with shared_examples() before using it_behaves_like()");
-                    return Err(CompileError::semantic_with_context(
+                    Err(CompileError::semantic_with_context(
                         format!("shared example '{}' not found", name_str),
                         ctx,
-                    ));
+                    ))
                 }
             }
         }
@@ -931,10 +931,10 @@ pub(super) fn eval_bdd_builtin(
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_VARIABLE)
                         .with_help("define the lazy value with let_lazy() or given_lazy() before using get_let()");
-                    return Err(CompileError::semantic_with_context(
+                    Err(CompileError::semantic_with_context(
                         format!("no lazy value found for '{}'", name_str),
                         ctx,
-                    ));
+                    ))
                 }
             }
         }
@@ -1020,10 +1020,10 @@ pub(super) fn eval_bdd_builtin(
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_VARIABLE)
                         .with_help("define the resource with resource() before using get_resource()");
-                    return Err(CompileError::semantic_with_context(
+                    Err(CompileError::semantic_with_context(
                         format!("no resource found for '{}'", name_str),
                         ctx,
-                    ));
+                    ))
                 }
             }
         }
@@ -1075,8 +1075,7 @@ pub(super) fn eval_bdd_builtin(
             let resource = BDD_RESOURCE_VALUES.with(|cell| {
                 let mut resources = cell.borrow_mut();
                 if let Some((factory, cached)) = resources.get_mut(&name_str) {
-                    let value = cached.take();
-                    value
+                    cached.take()
                 } else {
                     None
                 }

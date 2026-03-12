@@ -683,6 +683,7 @@ fn test_parse_error_unexpected_token() {
         expected: "identifier".to_string(),
         found: "number".to_string(),
         span,
+        context: None,
     };
     let display = format!("{}", err);
     assert!(!display.is_empty());

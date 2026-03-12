@@ -39,7 +39,7 @@ impl SymbolGraph {
         for target in &symbol.references {
             self.reverse_refs
                 .entry(target.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(name.clone());
         }
 
@@ -75,7 +75,7 @@ impl SymbolGraph {
     pub fn add_reverse_ref(&mut self, from: &str, to: &str) {
         self.reverse_refs
             .entry(to.to_string())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(from.to_string());
     }
 
@@ -183,7 +183,7 @@ impl SymbolGraph {
 
         for symbol in self.symbols.values() {
             if let Some(gid) = symbol.group_id {
-                groups.entry(gid).or_insert_with(Vec::new).push(symbol);
+                groups.entry(gid).or_default().push(symbol);
             }
         }
 

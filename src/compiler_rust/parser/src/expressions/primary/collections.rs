@@ -228,14 +228,16 @@ impl<'a> Parser<'a> {
                     | TokenKind::LBrace
                     | TokenKind::LParen
             ) {
-                return Err(ParseError::ContextualSyntaxError {
-                    context: "array literal".to_string(),
-                    message: "expected comma between array elements".to_string(),
-                    span: self.current.span,
-                    suggestion: Some("Insert comma after the previous element".to_string()),
-                    help: Some("Array elements must be separated by commas: [1, 2, 3]".to_string()),
-                    parse_context: None,
-                });
+                return Err(ParseError::ContextualSyntaxError(Box::new(
+                    crate::error::ContextualSyntaxErrorData {
+                        context: "array literal".to_string(),
+                        message: "expected comma between array elements".to_string(),
+                        span: self.current.span,
+                        suggestion: Some("Insert comma after the previous element".to_string()),
+                        help: Some("Array elements must be separated by commas: [1, 2, 3]".to_string()),
+                        parse_context: None,
+                    },
+                )));
             }
         }
 
@@ -261,7 +263,8 @@ impl<'a> Parser<'a> {
             }
 
             // Detect missing comma in loop
-            if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBracket)
+            if !self.check(&TokenKind::Comma)
+                && !self.check(&TokenKind::RBracket)
                 && matches!(
                     self.current.kind,
                     TokenKind::Identifier { .. }
@@ -277,16 +280,19 @@ impl<'a> Parser<'a> {
                         | TokenKind::LBracket
                         | TokenKind::LBrace
                         | TokenKind::LParen
-                ) {
-                    return Err(ParseError::ContextualSyntaxError {
+                )
+            {
+                return Err(ParseError::ContextualSyntaxError(Box::new(
+                    crate::error::ContextualSyntaxErrorData {
                         context: "array literal".to_string(),
                         message: "expected comma between array elements".to_string(),
                         span: self.current.span,
                         suggestion: Some("Insert comma after the previous element".to_string()),
                         help: Some("Array elements must be separated by commas: [1, 2, 3]".to_string()),
                         parse_context: None,
-                    });
-                }
+                    },
+                )));
+            }
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(Expr::Array(elements))
@@ -374,14 +380,16 @@ impl<'a> Parser<'a> {
         if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace) {
             // Check if current token is identifier followed by colon (pattern: key: value)
             if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
-                return Err(ParseError::ContextualSyntaxError {
-                    context: "dict literal".to_string(),
-                    message: "expected comma between dict entries".to_string(),
-                    span: self.current.span,
-                    suggestion: Some("Insert comma after the value".to_string()),
-                    help: Some("Dict entries must be separated by commas: {a: 1, b: 2}".to_string()),
-                    parse_context: None,
-                });
+                return Err(ParseError::ContextualSyntaxError(Box::new(
+                    crate::error::ContextualSyntaxErrorData {
+                        context: "dict literal".to_string(),
+                        message: "expected comma between dict entries".to_string(),
+                        span: self.current.span,
+                        suggestion: Some("Insert comma after the value".to_string()),
+                        help: Some("Dict entries must be separated by commas: {a: 1, b: 2}".to_string()),
+                        parse_context: None,
+                    },
+                )));
             }
         }
 
@@ -421,17 +429,22 @@ impl<'a> Parser<'a> {
                 pairs.push((k, v));
 
                 // Detect missing comma after this entry
-                if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace)
-                    && matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
-                        return Err(ParseError::ContextualSyntaxError {
+                if !self.check(&TokenKind::Comma)
+                    && !self.check(&TokenKind::RBrace)
+                    && matches!(self.current.kind, TokenKind::Identifier { .. })
+                    && self.peek_is(&TokenKind::Colon)
+                {
+                    return Err(ParseError::ContextualSyntaxError(Box::new(
+                        crate::error::ContextualSyntaxErrorData {
                             context: "dict literal".to_string(),
                             message: "expected comma between dict entries".to_string(),
                             span: self.current.span,
                             suggestion: Some("Insert comma after the value".to_string()),
                             help: Some("Dict entries must be separated by commas: {a: 1, b: 2}".to_string()),
                             parse_context: None,
-                        });
-                    }
+                        },
+                    )));
+                }
             }
         }
         self.expect(&TokenKind::RBrace)?;

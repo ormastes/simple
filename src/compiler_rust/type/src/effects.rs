@@ -362,13 +362,12 @@ pub fn validate_suspension_context(func: &FunctionDef, env: &EffectEnv) -> Resul
     let effect = infer_function_effect(func, env);
 
     // If function is sync, check that it doesn't use suspension operators
-    if effect == Effect::Sync
-        && contains_suspension(&func.body) {
-            return Err(format!(
-                "Sync function '{}' cannot use suspension operators (~=, if~, while~, for~)",
-                func.name
-            ));
-        }
+    if effect == Effect::Sync && contains_suspension(&func.body) {
+        return Err(format!(
+            "Sync function '{}' cannot use suspension operators (~=, if~, while~, for~)",
+            func.name
+        ));
+    }
 
     Ok(())
 }

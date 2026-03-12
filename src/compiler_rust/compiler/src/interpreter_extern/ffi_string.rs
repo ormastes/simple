@@ -37,7 +37,7 @@ pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Concatenate two strings
 pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
     let a_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_string_concat expects 2 arguments".to_string(),
@@ -83,7 +83,7 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Check if two strings are equal
 pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
     let a_raw = args
-        .get(0)
+        .first()
         .ok_or_else(|| {
             CompileError::semantic_with_context(
                 "rt_string_eq expects 2 arguments".to_string(),

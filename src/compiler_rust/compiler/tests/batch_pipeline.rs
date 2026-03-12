@@ -70,8 +70,8 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
                 simple_parser::ParseError::SyntaxError { line, column, .. } => format!(" [L{}:{}]", line, column),
                 simple_parser::ParseError::MissingToken { span, .. } => format!(" [L{}:{}]", span.line, span.column),
                 simple_parser::ParseError::InvalidPattern { span, .. } => format!(" [L{}:{}]", span.line, span.column),
-                simple_parser::ParseError::ContextualSyntaxError { span, .. } => {
-                    format!(" [L{}:{}]", span.line, span.column)
+                simple_parser::ParseError::ContextualSyntaxError(data) => {
+                    format!(" [L{}:{}]", data.span.line, data.span.column)
                 }
                 _ => String::new(),
             };

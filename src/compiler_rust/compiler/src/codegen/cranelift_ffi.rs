@@ -457,13 +457,13 @@ pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64
         let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
             return 0;
         };
-        mod_ctx.module.declare_func_in_func(func_id, &mut builder.func)
+        mod_ctx.module.declare_func_in_func(func_id, builder.func)
     } else {
         let mut modules = AOT_MODULES.lock().unwrap();
         let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
             return 0;
         };
-        mod_ctx.module.declare_func_in_func(func_id, &mut builder.func)
+        mod_ctx.module.declare_func_in_func(func_id, builder.func)
     };
 
     let id = ab.next_value_id;
@@ -1202,10 +1202,7 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValu
         if bytes.is_empty() {
             return false;
         }
-        match std::fs::write(&path_str, bytes) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        std::fs::write(&path_str, bytes).is_ok()
     } else {
         false
     }

@@ -270,10 +270,7 @@ impl IncrementalState {
 
         // Update reverse dependency map
         for dep in &info.dependencies {
-            self.dependents
-                .entry(dep.clone())
-                .or_insert_with(HashSet::new)
-                .insert(path.clone());
+            self.dependents.entry(dep.clone()).or_default().insert(path.clone());
         }
 
         self.sources.insert(path.clone(), info);

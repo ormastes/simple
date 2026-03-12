@@ -75,9 +75,9 @@ fn build_smf_with_all_sections(
     target: Target,
 ) -> Vec<u8> {
     // Serialize templates if present
-    let template_bytes = templates.map(|t| serialize_templates(t)).unwrap_or_default();
-    let metadata_bytes = metadata.map(|m| serialize_metadata(m)).unwrap_or_default();
-    let note_sdn_bytes = note_sdn.map(|n| serialize_note_sdn(n)).unwrap_or_default();
+    let template_bytes = templates.map(serialize_templates).unwrap_or_default();
+    let metadata_bytes = metadata.map(serialize_metadata).unwrap_or_default();
+    let note_sdn_bytes = note_sdn.map(serialize_note_sdn).unwrap_or_default();
 
     let has_templates = !template_bytes.is_empty();
     let has_metadata = !metadata_bytes.is_empty();

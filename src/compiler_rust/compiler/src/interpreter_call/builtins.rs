@@ -149,7 +149,7 @@ pub(super) fn eval_builtin(
             }
         }
         "send" => {
-            let target = args.get(0).ok_or_else(|| {
+            let target = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("send() requires an actor handle as first argument");
@@ -177,10 +177,10 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("send() requires an actor handle as first argument");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "send target must be an actor".to_string(),
                 ctx,
-            ));
+            ))
         }
         "recv" => {
             check_effect_violations("recv")?;
@@ -217,7 +217,7 @@ pub(super) fn eval_builtin(
                                 })
                         })
                 })?;
-                return Ok(Some(message_to_value(msg)));
+                Ok(Some(message_to_value(msg)))
             } else {
                 let handle_val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
                 if let Value::Actor(handle) = handle_val {
@@ -234,14 +234,14 @@ pub(super) fn eval_builtin(
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help("recv() requires an actor handle as argument");
-                return Err(CompileError::semantic_with_context(
+                Err(CompileError::semantic_with_context(
                     "recv expects actor handle".to_string(),
                     ctx,
-                ));
+                ))
             }
         }
         "reply" => {
-            let msg_arg = args.get(0).ok_or_else(|| {
+            let msg_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("reply() requires a message as argument");
@@ -272,7 +272,7 @@ pub(super) fn eval_builtin(
         }
         "join" => {
             check_effect_violations("join")?;
-            let handle_arg = args.get(0).ok_or_else(|| {
+            let handle_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("join() requires an actor handle as argument");
@@ -292,13 +292,13 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("join() requires an actor handle as argument");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "join target must be an actor".to_string(),
                 ctx,
-            ));
+            ))
         }
         "spawn" => {
-            let inner_expr = args.get(0).ok_or_else(|| {
+            let inner_expr = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("spawn() requires a thunk (lambda) as argument");
@@ -314,7 +314,7 @@ pub(super) fn eval_builtin(
             )))
         }
         "spawn_isolated" => {
-            let func_arg = args.get(0).ok_or_else(|| {
+            let func_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("spawn_isolated() requires a function as argument");
@@ -331,7 +331,7 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(future)))
         }
         "async" | "future" => {
-            let inner_expr = args.get(0).ok_or_else(|| {
+            let inner_expr = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("async/future requires an expression as argument");
@@ -341,7 +341,7 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(future)))
         }
         "is_ready" => {
-            let future_arg = args.get(0).ok_or_else(|| {
+            let future_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("is_ready() requires a future as argument");
@@ -354,10 +354,10 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("is_ready() requires a Future value");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "is_ready expects a future".to_string(),
                 ctx,
-            ));
+            ))
         }
         "async_mode" => {
             if args.is_empty() {
@@ -395,16 +395,16 @@ pub(super) fn eval_builtin(
                             ));
                         }
                     }
-                    return Ok(Some(Value::Nil));
+                    Ok(Some(Value::Nil))
                 }
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
                         .with_help("async_mode() requires a string argument");
-                    return Err(CompileError::semantic_with_context(
+                    Err(CompileError::semantic_with_context(
                         "async_mode expects a string".to_string(),
                         ctx,
-                    ));
+                    ))
                 }
             }
         }
@@ -424,7 +424,7 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Nil))
         }
         "poll_future" => {
-            let future_arg = args.get(0).ok_or_else(|| {
+            let future_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("poll_future() requires a future as argument");
@@ -437,10 +437,10 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("poll_future() requires a Future value");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "poll_future expects a future".to_string(),
                 ctx,
-            ));
+            ))
         }
         "poll_all_futures" => {
             let count = simple_runtime::poll_all();
@@ -469,7 +469,7 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(FutureValue::rejected(error_str))))
         }
         "generator" => {
-            let inner_expr = args.get(0).ok_or_else(|| {
+            let inner_expr = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("generator() requires a lambda function as argument");
@@ -491,13 +491,13 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("generator() requires a lambda function");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "generator expects a lambda".to_string(),
                 ctx,
-            ));
+            ))
         }
         "next" => {
-            let gen_arg = args.get(0).ok_or_else(|| {
+            let gen_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("next() requires a generator as argument");
@@ -510,13 +510,13 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("next() requires a Generator value");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "next expects a generator".to_string(),
                 ctx,
-            ));
+            ))
         }
         "collect" => {
-            let gen_arg = args.get(0).ok_or_else(|| {
+            let gen_arg = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("collect() requires a generator or array as argument");
@@ -532,10 +532,10 @@ pub(super) fn eval_builtin(
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("collect() requires a Generator or Array value");
-            return Err(CompileError::semantic_with_context(
+            Err(CompileError::semantic_with_context(
                 "collect expects a generator or array".to_string(),
                 ctx,
-            ));
+            ))
         }
         "ThreadPool" => {
             let workers = args
@@ -559,14 +559,11 @@ pub(super) fn eval_builtin(
             match val {
                 Value::Int(n) => Ok(Some(Value::Int(n))),
                 Value::Float(f) => Ok(Some(Value::Int(f as i64))),
-                Value::Str(s) => s.parse::<i64>().map(Value::Int).map(Some).or_else(|_| {
+                Value::Str(s) => s.parse::<i64>().map(Value::Int).map(Some).map_err(|_| {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
                         .with_help("string must contain a valid integer");
-                    Err(CompileError::semantic_with_context(
-                        format!("cannot parse '{}' as i64", s),
-                        ctx,
-                    ))
+                    CompileError::semantic_with_context(format!("cannot parse '{}' as i64", s), ctx)
                 }),
                 Value::Bool(b) => Ok(Some(Value::Int(if b { 1 } else { 0 }))),
                 _ => {
@@ -585,14 +582,11 @@ pub(super) fn eval_builtin(
             match val {
                 Value::Float(f) => Ok(Some(Value::Float(f))),
                 Value::Int(n) => Ok(Some(Value::Float(n as f64))),
-                Value::Str(s) => s.parse::<f64>().map(Value::Float).map(Some).or_else(|_| {
+                Value::Str(s) => s.parse::<f64>().map(Value::Float).map(Some).map_err(|_| {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
                         .with_help("string must contain a valid float");
-                    Err(CompileError::semantic_with_context(
-                        format!("cannot parse '{}' as f64", s),
-                        ctx,
-                    ))
+                    CompileError::semantic_with_context(format!("cannot parse '{}' as f64", s), ctx)
                 }),
                 _ => {
                     let ctx = ErrorContext::new()

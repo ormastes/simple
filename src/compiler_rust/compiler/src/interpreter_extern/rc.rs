@@ -33,17 +33,17 @@ fn get_ptr(val: &Value, func_name: &str) -> Result<*mut u8, CompileError> {
     match val {
         Value::Int(addr) => {
             if *addr == 0 {
-                return Err(CompileError::runtime(&format!("{}: ptr is null", func_name)));
+                return Err(CompileError::runtime(format!("{}: ptr is null", func_name)));
             }
             Ok(*addr as *mut u8)
         }
         Value::Array(bytes) => {
             if bytes.is_empty() {
-                return Err(CompileError::runtime(&format!("{}: ptr is null", func_name)));
+                return Err(CompileError::runtime(format!("{}: ptr is null", func_name)));
             }
             Ok(bytes.as_ptr() as *mut u8)
         }
-        _ => Err(CompileError::runtime(&format!(
+        _ => Err(CompileError::runtime(format!(
             "{}: ptr must be Int or Array",
             func_name
         ))),

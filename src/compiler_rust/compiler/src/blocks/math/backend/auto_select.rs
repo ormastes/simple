@@ -65,7 +65,7 @@ pub fn select_backend(complexity: &ExprComplexity, preferred: MathBackend) -> Ba
         let score = compute_score(backend, complexity);
         tracing::debug!("[math::backend] Backend.{}: available, score={:.1}", backend, score);
 
-        if best.as_ref().map_or(true, |b| score > b.score) {
+        if best.as_ref().is_none_or(|b| score > b.score) {
             best = Some(BackendSelection {
                 backend,
                 score,

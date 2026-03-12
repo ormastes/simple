@@ -230,13 +230,10 @@ pub(super) fn exec_block_closure(
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(obj_val) = local_env.get(obj_name).cloned() {
-                            match obj_val {
-                                Value::Object { class, fields } => {
-                                    let mut fields = fields;
-                                    Arc::make_mut(&mut fields).insert(field.clone(), val);
-                                    local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                                }
-                                _ => {}
+                            if let Value::Object { class, fields } = obj_val {
+                                let mut fields = fields;
+                                Arc::make_mut(&mut fields).insert(field.clone(), val);
+                                local_env.insert(obj_name.clone(), Value::Object { class, fields });
                             }
                         }
                     }
@@ -407,37 +404,35 @@ pub(super) fn exec_block_closure(
                     } else {
                         last_value = Value::Nil;
                     }
-                } else {
-                    if evaluate_expr(
-                        &if_stmt.condition,
+                } else if evaluate_expr(
+                    &if_stmt.condition,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?
+                .truthy()
+                {
+                    last_value = exec_block_closure_mut(
+                        &if_stmt.then_block.statements,
                         &mut local_env,
                         functions,
                         classes,
                         enums,
                         impl_methods,
-                    )?
-                    .truthy()
-                    {
-                        last_value = exec_block_closure_mut(
-                            &if_stmt.then_block.statements,
-                            &mut local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else if let Some(ref else_block) = if_stmt.else_block {
-                        last_value = exec_block_closure_mut(
-                            &else_block.statements,
-                            &mut local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else {
-                        last_value = Value::Nil;
-                    }
+                    )?;
+                } else if let Some(ref else_block) = if_stmt.else_block {
+                    last_value = exec_block_closure_mut(
+                        &else_block.statements,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                } else {
+                    last_value = Value::Nil;
                 }
             }
             Node::For(for_stmt) => {
@@ -883,13 +878,10 @@ fn exec_block_closure_mut(
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(obj_val) = local_env.get(obj_name).cloned() {
-                            match obj_val {
-                                Value::Object { class, fields } => {
-                                    let mut fields = fields;
-                                    Arc::make_mut(&mut fields).insert(field.clone(), val);
-                                    local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                                }
-                                _ => {}
+                            if let Value::Object { class, fields } = obj_val {
+                                let mut fields = fields;
+                                Arc::make_mut(&mut fields).insert(field.clone(), val);
+                                local_env.insert(obj_name.clone(), Value::Object { class, fields });
                             }
                         }
                     }
@@ -960,28 +952,28 @@ fn exec_block_closure_mut(
                     } else {
                         last_value = Value::Nil;
                     }
+                } else if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?
+                    .truthy()
+                {
+                    last_value = exec_block_closure_mut(
+                        &if_stmt.then_block.statements,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                } else if let Some(ref else_block) = if_stmt.else_block {
+                    last_value = exec_block_closure_mut(
+                        &else_block.statements,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                 } else {
-                    if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?.truthy() {
-                        last_value = exec_block_closure_mut(
-                            &if_stmt.then_block.statements,
-                            local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else if let Some(ref else_block) = if_stmt.else_block {
-                        last_value = exec_block_closure_mut(
-                            &else_block.statements,
-                            local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else {
-                        last_value = Value::Nil;
-                    }
+                    last_value = Value::Nil;
                 }
             }
             Node::For(for_stmt) => {

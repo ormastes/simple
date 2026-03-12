@@ -224,7 +224,7 @@ impl Lowerer {
                 if name == struct_name {
                     self.memory_warnings.warn(
                         MemoryWarning::new(MemoryWarningCode::W1005, span)
-                            .with_type(&format!("*{}", struct_name))
+                            .with_type(format!("*{}", struct_name))
                             .with_context("self-referential shared pointer creates cycle; use weak pointer (-T)"),
                     );
                 }

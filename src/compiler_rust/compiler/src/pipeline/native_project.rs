@@ -118,10 +118,14 @@ impl NativeProjectBuilder {
     }
 
     /// Add a source directory to scan.
-    /// Canonicalizes the path so it's absolute and consistent with source_root.
+    /// Preserves the logical path so symlinked source roots keep their module prefix.
     pub fn source_dir(mut self, dir: PathBuf) -> Self {
-        let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
-        self.source_dirs.push(canonical);
+        let absolute = if dir.is_absolute() {
+            dir
+        } else {
+            self.project_root.join(dir)
+        };
+        self.source_dirs.push(absolute);
         self
     }
 
@@ -585,7 +589,7 @@ int main(int argc, char** argv) {
         let status = if cxx.contains("clang-cl") {
             std::process::Command::new(&cxx)
                 .arg("/c")
-                .arg(&format!("/Fo{}", main_o.display()))
+                .arg(format!("/Fo{}", main_o.display()))
                 .arg(&main_cpp)
                 .status()
                 .map_err(|e| format!("compile main stub: {e}"))?
@@ -646,7 +650,7 @@ int main(int argc, char** argv) {
 
         if is_clang_cl {
             cmd.arg(&main_o);
-            cmd.arg(&format!("/Fe:{}", self.output.display()));
+            cmd.arg(format!("/Fe:{}", self.output.display()));
         } else {
             cmd.arg("-o").arg(&self.output).arg(&main_o);
         }
@@ -1303,7 +1307,7 @@ fn resolve_name_variants(
             continue;
         }
         // Variant part must start with uppercase (enum variant convention)
-        if !variant.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+        if !variant.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             continue;
         }
         let prefix_raw = &name[..i];
@@ -1736,18 +1740,16 @@ fn mangle_mir(
                                         );
                                     }
                                 }
+                            } else if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
+                                .or_else(|| resolve_by_suffix(&name, suffix_index))
+                            {
+                                *target = target.with_name(resolved);
                             } else {
-                                if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
-                                    .or_else(|| resolve_by_suffix(&name, suffix_index))
-                                {
-                                    *target = target.with_name(resolved);
-                                } else {
-                                    unresolved_count += 1;
-                                    eprintln!(
-                                        "warning: unresolved call `{}` in function `{}` (module: {})",
-                                        name, func.name, prefix
-                                    );
-                                }
+                                unresolved_count += 1;
+                                eprintln!(
+                                    "warning: unresolved call `{}` in function `{}` (module: {})",
+                                    name, func.name, prefix
+                                );
                             }
                         } else if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
                             .or_else(|| resolve_by_suffix(&name, suffix_index))
@@ -2837,7 +2839,7 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_spl_files_recursive(&path, out);
-        } else if path.extension().map_or(false, |e| e == "spl") {
+        } else if path.extension().is_some_and(|e| e == "spl") {
             // Skip known problematic files for bootstrap
             if let Some(p) = path.to_str() {
                 if p.contains("check.spl") {
@@ -3122,6 +3124,13 @@ mod tests {
     fn test_incremental_cache_dir_default() {
         let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
         assert_eq!(builder.cache_dir(), PathBuf::from("/project/.simple/native_cache"));
+    }
+
+    #[test]
+    fn test_source_dir_preserves_logical_path() {
+        let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"))
+            .source_dir(PathBuf::from("src/app/mcp_t32"));
+        assert_eq!(builder.source_dirs, vec![PathBuf::from("/project/src/app/mcp_t32")]);
     }
 
     #[test]

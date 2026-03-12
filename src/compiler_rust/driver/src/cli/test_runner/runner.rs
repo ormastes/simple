@@ -612,13 +612,12 @@ fn execute_test_files(
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
-    if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped)
-        && !quiet {
-            eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
-            eprintln!("   Tip: Limit scope with path argument, e.g.:");
-            eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
-            eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
-        }
+    if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped) && !quiet {
+        eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
+        eprintln!("   Tip: Limit scope with path argument, e.g.:");
+        eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
+        eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
+    }
 
     for (idx, path) in test_files.iter().enumerate() {
         if !quiet && !options.list && !options.list_ignored {
@@ -954,10 +953,7 @@ fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: boo
     let start = Instant::now();
 
     // Extract feature info from each file
-    let mut features: Vec<SkipFeatureInfo> = test_files
-        .iter()
-        .filter_map(extract_skip_feature_info)
-        .collect();
+    let mut features: Vec<SkipFeatureInfo> = test_files.iter().filter_map(extract_skip_feature_info).collect();
 
     // Filter to planned-only if requested
     if planned_only {

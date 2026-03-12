@@ -668,7 +668,7 @@ pub fn native_udp_leave_multicast_v6_interp(args: &[Value]) -> Result<Value, Com
 
 pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
     // Extract request details
-    let method = match args.get(0) {
+    let method = match args.first() {
         Some(Value::Enum { variant, .. }) => variant.clone(),
         Some(Value::Str(s)) => s.clone(),
         _ => "GET".to_string(),

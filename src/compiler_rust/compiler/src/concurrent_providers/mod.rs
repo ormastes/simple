@@ -17,9 +17,10 @@ use std::fmt::Debug;
 // ============================================================================
 
 /// Which concurrent backend to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConcurrentBackend {
     /// Pure std library implementation (current behavior).
+    #[default]
     PureStd,
     /// Native optimized crates (dashmap, crossbeam, parking_lot, rayon).
     Native,
@@ -36,12 +37,6 @@ impl ConcurrentBackend {
                 s
             )),
         }
-    }
-}
-
-impl Default for ConcurrentBackend {
-    fn default() -> Self {
-        ConcurrentBackend::PureStd
     }
 }
 

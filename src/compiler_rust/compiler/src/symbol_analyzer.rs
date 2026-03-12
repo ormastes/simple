@@ -184,7 +184,7 @@ impl SymbolUsageAnalyzer {
                     usage.used_functions.insert(name.clone());
                     // Also add as type (for class/struct constructors)
                     // The distinction will be resolved later
-                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         usage.used_types.insert(name.clone());
                     }
                 }

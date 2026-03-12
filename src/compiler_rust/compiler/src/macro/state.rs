@@ -17,20 +17,20 @@ const MAX_MACRO_EXPANSION_DEPTH: usize = 128;
 thread_local! {
     /// Accumulates symbols introduced by macro expansion
     /// These need to be registered by the caller after macro invocation
-    static MACRO_INTRODUCED_SYMBOLS: RefCell<Option<MacroContractResult>> = RefCell::new(None);
+    static MACRO_INTRODUCED_SYMBOLS: RefCell<Option<MacroContractResult>> = const { RefCell::new(None) };
 
     /// Flag to enable macro expansion tracing
-    static MACRO_TRACE_ENABLED: RefCell<bool> = RefCell::new(false);
+    static MACRO_TRACE_ENABLED: RefCell<bool> = const { RefCell::new(false) };
 
     /// Current macro expansion depth (for recursion limit)
-    static MACRO_EXPANSION_DEPTH: RefCell<usize> = RefCell::new(0);
+    static MACRO_EXPANSION_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 
     /// Pending tail injections - blocks to execute at the end of the current block
     /// Each entry is (depth, block) where depth is the block nesting level
-    static PENDING_TAIL_INJECTIONS: RefCell<Vec<(usize, Block)>> = RefCell::new(Vec::new());
+    static PENDING_TAIL_INJECTIONS: RefCell<Vec<(usize, Block)>> = const { RefCell::new(Vec::new()) };
 
     /// Current block nesting depth for tail injection tracking
-    static BLOCK_DEPTH: RefCell<usize> = RefCell::new(0);
+    static BLOCK_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 
     /// Cache for pre-processed macro contracts (definition-time optimization)
     /// For macros without const parameters, contracts can be processed once at definition
@@ -40,7 +40,7 @@ thread_local! {
     /// Current class context for field introduction
     /// When a macro is invoked inside a class body, this stores the class name
     /// so that field introductions can be registered to the correct class.
-    static CURRENT_CLASS_CONTEXT: RefCell<Option<String>> = RefCell::new(None);
+    static CURRENT_CLASS_CONTEXT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Enable or disable macro expansion tracing

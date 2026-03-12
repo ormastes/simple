@@ -153,10 +153,7 @@ impl MockRegistry {
             timestamp: std::time::SystemTime::now(),
         };
 
-        self.invocations
-            .entry(function_name)
-            .or_insert_with(Vec::new)
-            .push(invocation);
+        self.invocations.entry(function_name).or_default().push(invocation);
     }
 
     /// Verify that all mocks with verify=true were called

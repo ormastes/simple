@@ -128,8 +128,7 @@ fn parse_task_db(doc: &SdnDocument) -> Result<TaskDb, String> {
 
 pub fn save_task_db(path: &Path, db: &TaskDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
-    let _lock =
-        FileLock::acquire(path, 10).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
+    let _lock = FileLock::acquire(path, 10).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let fields = vec![
         "id".to_string(),

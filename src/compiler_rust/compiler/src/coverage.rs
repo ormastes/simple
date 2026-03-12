@@ -71,6 +71,12 @@ pub struct CoverageCollector {
     _data: Vec<(String, u64)>,
 }
 
+impl Default for CoverageCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoverageCollector {
     pub fn new() -> Self {
         Self { _data: Vec::new() }

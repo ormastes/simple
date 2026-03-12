@@ -331,6 +331,12 @@ pub struct ChannelValue {
     receiver: Arc<Mutex<std::sync::mpsc::Receiver<Value>>>,
 }
 
+impl Default for ChannelValue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChannelValue {
     /// Create a new unbuffered channel
     pub fn new() -> Self {
