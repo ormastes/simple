@@ -1,8 +1,14 @@
 # Bootstrap Pipeline — Rust Seed / Seed / Core / Full
 
-## Fastest Path (Release Download)
+This document contains historical bootstrap notes and older command paths.
+For the current Linux bootstrap flow in this checkout, use
+`scripts/bootstrap/bootstrap-from-scratch.sh` and
+`doc/build/bootstrap_multi_platform.md`.
 
-If a pre-built release binary exists on GitHub, skip the entire build:
+## Historical Fastest Path (Release Download)
+
+This section references older helper scripts that are not all present in this
+checkout anymore.
 
 ```bash
 # Automatic fallback chain (release → C bootstrap)

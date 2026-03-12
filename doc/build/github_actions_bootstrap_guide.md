@@ -1,15 +1,17 @@
 # Building Multi-Platform Binaries with GitHub Actions
 
-Since the Rust source code (`rust/` directory) has been removed as part of the Pure Simple implementation, local compilation is not possible. Instead, we use GitHub Actions to build bootstrap binaries for all platforms.
+This document is partially historical. Local Linux bootstrap is possible in
+this checkout via `scripts/bootstrap/bootstrap-from-scratch.sh`. CI remains the
+expected path for non-Linux release artifacts.
 
 ## Bootstrap Strategy (CI)
 
-The CI workflow (`.github/workflows/bootstrap-build.yml`) uses a fallback chain:
+The CI workflow described here reflects the historical fallback chain:
 
-1. **Try latest release binary** — downloads from GitHub releases via `download-release.sh`
+1. **Try latest release binary**
 2. **Verify** — runs `simple --version` on the downloaded binary
 3. **Build from release** — if release binary works, uses it to build a new binary (`simple build --release`)
-4. **Fall back to C bootstrap** — if release binary fails/missing, runs `bootstrap-from-scratch.sh --skip-download`
+4. **Fall back to bootstrap rebuild path**
 5. **Upload artifact** — final verified binary
 
 The job output `bootstrap-method` indicates which path was taken (`release` or `c-bootstrap`).

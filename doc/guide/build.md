@@ -154,17 +154,11 @@ Stage 3: Self-Hosted (compiled by Stage 2)
 ### Quick Bootstrap
 
 ```bash
-# Automatic: download release binary, fall back to C bootstrap
+# Verified Linux bootstrap
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 
-# Download release binary only
-scripts/bootstrap/download-release.sh --output=bin/release/simple
-
-# Force C bootstrap (skip download)
-scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --deploy
-
-# Pin to specific version
-scripts/bootstrap/bootstrap-from-scratch.sh --download-version=0.7.0 --deploy
+# Keep artifacts in a separate directory
+scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
 ```
 
 ### Bootstrap Flags
@@ -172,38 +166,31 @@ scripts/bootstrap/bootstrap-from-scratch.sh --download-version=0.7.0 --deploy
 | Flag | Description |
 |------|-------------|
 | `--deploy` | Copy result to `bin/release/simple` |
-| `--skip-download` | Skip release download, force C bootstrap |
-| `--download-version=X.Y.Z` | Pin to specific release version |
+| `--backend=X` | Override Stage 2/3 backend (`llvm-lib` by default) |
+| `--output=DIR` | Write stage outputs to a custom directory |
 | `--keep-artifacts` | Keep `build/` directory |
-| `--step=full2` | Run self-host verification |
-| `--jobs=N` | Parallel build jobs (default: 7) |
+| `--no-verify` | Compatibility flag; wrapper still verifies stage hashes |
 
-### C Backend Bootstrap (Fallback)
+### C Backend Bootstrap (Experimental)
 
-When no pre-built binary is available, the C backend emits C++20 from the compiler source and builds with CMake + Ninja + Clang:
+The C bootstrap wrapper exists for temporal bootstrap and C backend debugging:
 
 ```bash
-# Generate C++20 from compiler source
-bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
-
-# Build with CMake + Ninja
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build
-
-# Install bootstrap binary
-mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
-
-# Self-host verification
-bin/bootstrap/cpp/simple build
+scripts/bootstrap/bootstrap-c.sh
 ```
+
+Status in this checkout:
+
+- the wrapper is present
+- the generated CLI C bootstrap still fails to compile cleanly
+- the canonical Linux bootstrap path is `scripts/bootstrap/bootstrap-from-scratch.sh`
 
 ### Bootstrap Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/bootstrap/download-release.sh` | Download release binary from GitHub |
-| `scripts/bootstrap/bootstrap-from-scratch.sh` | Full bootstrap (download + C fallback) |
-| `scripts/bootstrap/bootstrap-c.sh` | C backend bootstrap only |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux bootstrap wrapper |
+| `scripts/bootstrap/bootstrap-c.sh` | Experimental C bootstrap wrapper |
 
 ---
 

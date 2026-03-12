@@ -111,17 +111,19 @@ Only needed if you want to modify the runtime:
 git clone https://github.com/simple-lang/simple.git
 cd simple
 
-# C backend bootstrap (CMake + Ninja + Clang)
-bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build
-mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
-bin/bootstrap/cpp/simple build   # Self-host verification
+# Linux bootstrap verification
+scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
 ```
 
-Or use the bootstrap script: `scripts/bootstrap/bootstrap-c.sh --verify`
+Direct commands behind the wrapper:
 
-See [doc/guide/bootstrap.md](doc/guide/bootstrap.md) for the full bootstrap guide.
+```bash
+src/compiler_rust/target/bootstrap/simple --version
+bin/release/simple build bootstrap
+sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
+```
+
+See [doc/build/bootstrap_multi_platform.md](doc/build/bootstrap_multi_platform.md) and [plan_codex_bootstrap.md](plan_codex_bootstrap.md) for the current bootstrap flow.
 
 ### Build with GPU Support
 

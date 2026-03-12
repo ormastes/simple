@@ -2,6 +2,10 @@
 
 ## Overview
 
+This document is historical design/reference material. For the current
+Linux bootstrap entrypoint, use `scripts/bootstrap/bootstrap-from-scratch.sh`
+or see `doc/build/bootstrap_multi_platform.md`.
+
 The multi-phase bootstrap pipeline builds the Simple compiler using **Pure Simple** compilation paths (C codegen → GCC/LLVM) to avoid Cranelift hang bugs during bootstrap, while keeping Cranelift available in the final product for users.
 
 ## Problem Statement
@@ -32,7 +36,9 @@ ninja -C build -j7
 mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
 ```
 
-Output: `bin/bootstrap/cpp/simple`. See `scripts/bootstrap/bootstrap-c.sh`.
+Output target: `bin/bootstrap/cpp/simple`. `scripts/bootstrap/bootstrap-c.sh`
+is present in this checkout, but the generated CLI C bootstrap path is still
+experimental and not the canonical Linux bootstrap.
 
 ## Architecture
 
@@ -157,14 +163,11 @@ build/bootstrap/simple_phase3 src/app/compile/llvm_direct.spl src/app/cli/main.s
 # Full multi-phase bootstrap (recommended)
 bin/simple build bootstrap-multiphase
 
-# Quick bootstrap without LLVM optimization
-./scripts/bootstrap/bootstrap-from-scratch.sh --no-llvm
-
 # Debug mode with artifacts kept
 ./scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts
 
-# Skip reproducibility check (faster)
-./scripts/bootstrap/bootstrap-from-scratch.sh --no-verify
+# Use a separate artifact directory
+./scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
 ```
 
 ### Programmatic API
@@ -216,8 +219,8 @@ fn main():
 
 | Flag | Effect |
 |------|--------|
-| `--no-verify` | Skip Phase2/Phase3 reproducibility check |
-| `--no-llvm` | Skip Phase4 LLVM optimization |
+| `--no-verify` | Historical flag in older wrapper variants |
+| `--no-llvm` | Historical flag in older wrapper variants |
 | `--keep-artifacts` | Keep all intermediate binaries after build |
 | `--help` | Show usage information |
 
@@ -358,8 +361,8 @@ sudo apt-get install clang llvm
 clang --version
 llc --version
 
-# Skip LLVM optimization
-./scripts/bootstrap/bootstrap-from-scratch.sh --no-llvm
+# Run the current staged wrapper
+./scripts/bootstrap/bootstrap-from-scratch.sh
 ```
 
 ### Out of Memory
@@ -378,8 +381,8 @@ sudo swapon -a
 
 # Close other applications
 
-# Use --no-llvm to reduce memory usage
-./scripts/bootstrap/bootstrap-from-scratch.sh --no-llvm
+# Use the staged wrapper and a clean output directory
+./scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap-lowmem
 ```
 
 ## Design Rationale

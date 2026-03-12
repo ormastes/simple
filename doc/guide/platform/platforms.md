@@ -220,7 +220,7 @@ pkg install cmake llvm gmake git
 
 # Clone and bootstrap
 git clone https://github.com/simple-lang/simple.git && cd simple
-./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
+./scripts/bootstrap/bootstrap-from-scratch.sh
 
 # Verify
 bin/simple --version && bin/simple test
@@ -314,4 +314,4 @@ Click "More info" then "Run anyway", or download from the official release page.
 - Target types: `src/lib/common/target.spl`
 - VM setup script: `scripts/setup_freebsd_vm.spl`
 - FreeBSD test: `scripts/test_freebsd_qemu.spl`
-- Bootstrap script: `scripts/bootstrap/bootstrap-from-scratch.sh`
+- Bootstrap script: `scripts/bootstrap/bootstrap-from-scratch.sh` (Linux path verified; FreeBSD-specific wrapper restoration still pending)

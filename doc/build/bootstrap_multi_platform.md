@@ -1,8 +1,8 @@
 # Multi-Platform Bootstrap
 
-Updated: 2026-03-10
+Updated: 2026-03-12
 
-This document tracks the executable bootstrap flow that matches the root plan in `plan_codex_bootstrap.md`.
+This document tracks the executable bootstrap flow that matches the root plan in [plan_codex_bootstrap.md](/home/ormastes/dev/pub/simple/plan_codex_bootstrap.md).
 
 ## Scope
 
@@ -27,36 +27,41 @@ The target host matrix is:
 ### Linux native
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
 ```
 
-The shell bootstrap script now uses:
+Verified on Linux x86_64 on 2026-03-12:
 
-- `src/app/cli/main.spl` for Stage 1
-- `--backend llvm-lib` for Stage 2
-- `--backend llvm-lib` for Stage 3
-- `--clean` on each stage boundary
+- exit code `0`
+- `bootstrap/simple_stage1` produced
+- `bootstrap/simple_stage2` produced
+- `bootstrap/simple_stage3` produced
+- `sha256(bootstrap/simple_stage2) == sha256(bootstrap/simple_stage3)`
+
+Wrapper behavior:
+
+- builds the Rust seed compiler if needed
+- runs `bin/release/simple build bootstrap`
+- verifies Stage 2 and Stage 3 hashes
+- optionally deploys the verified Stage 3 binary with `--deploy`
 
 Artifacts:
 
-- `build/bootstrap/stage1/simple`
-- `build/bootstrap/stage2/simple`
-- `build/bootstrap/stage3/simple`
-- `bin/release/simple`
+- `bootstrap/simple_stage1`
+- `bootstrap/simple_stage2`
+- `bootstrap/simple_stage3`
+- existing runtime/compiler entrypoint remains `bin/release/simple`
 
 ### FreeBSD via QEMU
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --deploy
+bin/release/simple build pipeline --from=seed --to=full2
 ```
 
-The QEMU wrapper:
+Current note:
 
-- starts or reuses the FreeBSD guest
-- syncs the repo into `~/simple`
-- runs the shared bootstrap script inside the guest
-- copies back `bin/release/simple`
-- copies back `build/bootstrap` into `build/freebsd/bootstrap`
+- the document history still mentions a QEMU wrapper script, but that script is not present in this checkout
+- keep FreeBSD status as prepared until the repo-side entrypoint is restored or replaced
 
 Host-side outputs:
 
@@ -67,9 +72,7 @@ Host-side outputs:
 
 ### Windows
 
-```bat
-scripts\bootstrap\bootstrap-from-scratch.bat --deploy
-```
+Use the same staged build flow once the Windows wrapper is restored.
 
 The batch bootstrap entry is prepared for both Windows lanes:
 
@@ -88,7 +91,7 @@ Required:
 - clang toolchain
 - Homebrew or equivalent LLVM installation for `llvm-lib`
 
-Expected LLVM locations already handled in scripts:
+Expected LLVM locations:
 
 - `/opt/homebrew/opt/llvm/lib`
 - `/usr/local/opt/llvm/lib`
@@ -132,15 +135,17 @@ Additional Linux and FreeBSD requirement:
 
 ### Linux
 
-- Stage 1 full CLI bootstrap is working
-- Stage 2 is still blocked in the pure-Simple frontend/runtime path
+- full 3-stage bootstrap is working in this checkout
+- Stage 2 and Stage 3 hashes match
+- remaining work is documentation cleanup and restoring non-Linux wrapper scripts if they are still desired
 
 ### FreeBSD
 
-- QEMU execution path and artifact retrieval are wired
-- validation depends on the same Stage 2 pure-Simple unblock
+- historical QEMU/bootstrap documentation exists
+- executable wrapper script is not present in this checkout
+- validation is still pending repo-side command restoration
 
 ### macOS and Windows
 
-- scripts and toolchain assumptions are prepared
-- final validation is pending after the Linux Stage 2 unblock
+- toolchain assumptions are documented
+- final validation is still pending host-specific entrypoint restoration and execution
