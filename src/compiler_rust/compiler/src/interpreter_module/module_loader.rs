@@ -342,8 +342,94 @@ pub fn load_and_merge_module(
 
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
+
+    // For __init__.spl files with bare exports: preload sibling .spl files.
+    // Many __init__.spl files use bare exports (export X, Y, Z) where the symbols
+    // come from sibling files (mod.spl, or other .spl files in the same directory).
+    // Without preloading these siblings, bare exports resolve to nothing.
+    let preloaded_env: Option<HashMap<String, Value>> = if module_path
+        .file_name()
+        .map_or(false, |f| f == "__init__.spl")
+    {
+        let has_bare_exports = module.items.iter().any(|item| {
+            matches!(item, Node::ExportUseStmt(e) if e.path.segments.is_empty())
+        });
+        if has_bare_exports {
+            let parent_dir = module_path.parent();
+            if let Some(dir) = parent_dir {
+                let mut merged_exports: HashMap<String, Value> = HashMap::new();
+                // Collect sibling .spl files (not __init__.spl itself)
+                if let Ok(entries) = fs::read_dir(dir) {
+                    let mut sibling_files: Vec<std::path::PathBuf> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.extension().map_or(false, |ext| ext == "spl")
+                                && p.file_name().map_or(false, |f| f != "__init__.spl")
+                                && p.is_file()
+                        })
+                        .collect();
+                    // Sort for deterministic load order; mod.spl first if present
+                    sibling_files.sort_by(|a, b| {
+                        let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
+                        let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
+                        match (a_is_mod, b_is_mod) {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => a.cmp(b),
+                        }
+                    });
+                    for sibling_path in &sibling_files {
+                        debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
+                        if let Ok(sib_source) = fs::read_to_string(sibling_path) {
+                            let sib_source = if sib_source.contains('\r') {
+                                sib_source.replace('\r', "")
+                            } else {
+                                sib_source
+                            };
+                            let mut sib_parser = simple_parser::Parser::new(&sib_source);
+                            if let Ok(sib_module) = sib_parser.parse() {
+                                if let Ok((_env, sib_exports, _funcs, _classes, _enums)) =
+                                    evaluate_module_exports(
+                                        &sib_module.items,
+                                        Some(sibling_path),
+                                        functions,
+                                        classes,
+                                        enums,
+                                    )
+                                {
+                                    for (k, v) in sib_exports {
+                                        merged_exports.insert(k, v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if merged_exports.is_empty() {
+                    None
+                } else {
+                    Some(merged_exports)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let (module_env, module_exports, module_functions, module_classes, module_enums) =
-        match evaluate_module_exports(&module.items, Some(&module_path), functions, classes, enums) {
+        match evaluate_module_exports_with_preloaded(
+            &module.items,
+            Some(&module_path),
+            functions,
+            classes,
+            enums,
+            preloaded_env.as_ref(),
+        ) {
             Ok(result) => result,
             Err(e) => {
                 unmark_module_loading(&module_path);

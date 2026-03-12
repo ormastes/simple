@@ -157,7 +157,9 @@ impl Lowerer {
                 } else if let Expr::String(val) = &s.value {
                     self.global_init_strings.insert(s.name.clone(), val.clone());
                 } else if let Expr::FString { parts, .. } = &s.value {
-                    if parts.len() == 1 {
+                    if parts.is_empty() {
+                        self.global_init_strings.insert(s.name.clone(), String::new());
+                    } else if parts.len() == 1 {
                         if let ast::FStringPart::Literal(val) = &parts[0] {
                             self.global_init_strings.insert(s.name.clone(), val.clone());
                         }
@@ -183,7 +185,9 @@ impl Lowerer {
                 } else if let Expr::String(val) = &c.value {
                     self.global_init_strings.insert(c.name.clone(), val.clone());
                 } else if let Expr::FString { parts, .. } = &c.value {
-                    if parts.len() == 1 {
+                    if parts.is_empty() {
+                        self.global_init_strings.insert(c.name.clone(), String::new());
+                    } else if parts.len() == 1 {
                         if let ast::FStringPart::Literal(val) = &parts[0] {
                             self.global_init_strings.insert(c.name.clone(), val.clone());
                         }
@@ -211,7 +215,9 @@ impl Lowerer {
                     } else if let Some(Expr::String(val)) = &l.value {
                         self.global_init_strings.insert(n.clone(), val.clone());
                     } else if let Some(Expr::FString { parts, .. }) = &l.value {
-                        if parts.len() == 1 {
+                        if parts.is_empty() {
+                            self.global_init_strings.insert(n.clone(), String::new());
+                        } else if parts.len() == 1 {
                             if let ast::FStringPart::Literal(val) = &parts[0] {
                                 self.global_init_strings.insert(n.clone(), val.clone());
                             }

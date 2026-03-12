@@ -1270,9 +1270,14 @@ fn mangle_mir(
 
     let mut unresolved_count: usize = 0;
 
+    // Extern fn declarations from this module (e.g., `extern fn stdin_read_char`)
+    // must never be mangled — they resolve to C/runtime symbols at link time.
+    let extern_fns = mir.extern_fn_names.clone();
+
     // Names that should never be mangled (runtime functions, builtins).
     let is_runtime_or_builtin = |name: &str| -> bool {
-        name.starts_with("rt_")
+        extern_fns.contains(name)
+            || name.starts_with("rt_")
             || name.starts_with("__simple_")
             || name.starts_with("spl_")
             || name.starts_with("__get_global_")

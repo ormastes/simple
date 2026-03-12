@@ -27,7 +27,7 @@ pub fn handle_int_methods(
         "is_even" => Value::Bool(n % 2 == 0),
         "is_odd" => Value::Bool(n % 2 != 0),
         "to_float" | "to_f64" => Value::Float(n as f64),
-        "to_string" => Value::Str(n.to_string()),
+        "to_string" | "to_text" => Value::Str(n.to_string()),
         "clamp" => {
             let min = eval_arg(
                 args,
@@ -253,7 +253,7 @@ pub fn handle_float_methods(
         "is_infinite" => Value::Bool(f.is_infinite()),
         "is_finite" => Value::Bool(f.is_finite()),
         "to_int" | "truncate" => Value::Int(f.trunc() as i64),
-        "to_string" => Value::Str(f.to_string()),
+        "to_string" | "to_text" => Value::Str(f.to_string()),
         "floor" => Value::Float(f.floor()),
         "ceil" => Value::Float(f.ceil()),
         "round" => Value::Float(f.round()),
@@ -448,7 +448,7 @@ pub fn handle_bool_methods(
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
         "to_int" => Value::Int(if b { 1 } else { 0 }),
-        "to_string" => Value::Str(b.to_string()),
+        "to_string" | "to_text" => Value::Str(b.to_string()),
         "then" => {
             // Returns Some(result) if true, None if false
             if b {

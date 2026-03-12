@@ -533,5 +533,52 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         }
     }
 
+    // Final fallback for non-stdlib imports: search lib subdirectories
+    // This handles imports like `use sdn.parser.{parse}` where the module lives
+    // under src/lib/common/sdn/parser.spl but doesn't have a `std.` prefix.
+    if !is_stdlib {
+        let search_start = project_root.as_deref().unwrap_or(base_dir);
+        let mut current = search_start.to_path_buf();
+        for _ in 0..10 {
+            for stdlib_subpath in &["src/lib", "src/std"] {
+                let stdlib_candidate = current.join(stdlib_subpath);
+                if !stdlib_candidate.exists() {
+                    continue;
+                }
+
+                // Search lib subdirectories for the original parts
+                for subdir in &[
+                    "common",
+                    "nogc_sync_mut",
+                    "nogc_async_mut",
+                    "nogc_async_immut",
+                    "gc_async_mut",
+                    "nogc_async_mut_noalloc",
+                ] {
+                    let non_std_relative: PathBuf = parts.iter().collect();
+                    let mut sub_path = stdlib_candidate.join(subdir).join(&non_std_relative);
+                    sub_path.set_extension("spl");
+                    if sub_path.exists() && sub_path.is_file() {
+                        trace!(path = ?sub_path, "Found non-stdlib import in lib subdirectory");
+                        return Ok(sub_path);
+                    }
+                    // Also try __init__.spl in subdirectory
+                    let mut sub_init = stdlib_candidate.join(subdir).join(&non_std_relative);
+                    sub_init.push("__init__.spl");
+                    if sub_init.exists() && sub_init.is_file() {
+                        trace!(path = ?sub_init, "Found non-stdlib import __init__.spl in lib subdirectory");
+                        return Ok(sub_init);
+                    }
+                }
+            }
+
+            if let Some(parent) = current.parent() {
+                current = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
     Err(crate::error::factory::cannot_resolve_module(&parts.join(".")))
 }

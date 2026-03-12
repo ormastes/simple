@@ -17,7 +17,7 @@
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
     match method {
-        "to_string" => return Ok(Value::Str(s.clone())),
+        "to_string" | "to_text" => return Ok(Value::Str(s.clone())),
         "len" | "length" => return Ok(Value::Int(s.len() as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),
@@ -319,7 +319,7 @@ if let Value::Str(ref s) = recv_val {
                 Err(_) => return Ok(Value::Int(0)),
             }
         }
-        "to_float" => {
+        "to_float" | "to_f64" | "to_f32" => {
             match s.trim().parse::<f64>() {
                 Ok(n) => return Ok(Value::Float(n)),
                 Err(_) => return Ok(Value::Float(0.0)),
@@ -332,7 +332,7 @@ if let Value::Str(ref s) = recv_val {
                 None => return Ok(Value::Nil),
             }
         }
-        "ord" | "codepoint" => {
+        "ord" | "codepoint" | "code_point" => {
             // Return the Unicode code point of the first character
             match s.chars().next() {
                 Some(c) => return Ok(Value::Int(c as i64)),
@@ -422,7 +422,7 @@ if let Value::Str(ref s) = recv_val {
         "is_digit" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
         }
-        "is_alphanumeric" => {
+        "is_alphanumeric" | "is_alnum" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric())));
         }
         "is_whitespace" => {
