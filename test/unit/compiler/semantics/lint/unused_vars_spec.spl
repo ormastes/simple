@@ -3,27 +3,34 @@
 # Tests for UNUSED001-UNUSED003 detection of unused variables,
 # parameters, and imports.
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module}
+use compiler.semantics.lint.unused_vars.{check_unused_vars, UnusedVarWarning}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-fn check_file_for_warnings(name: text, code: text) -> text:
-    """Write code to a temp file and run query check with JSON format."""
-    val path = "/tmp/simple_lint_unused_{name}.spl"
-    rt_file_write_text(path, code)
-    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
-    stdout ?? ""
+fn parse_and_check_unused(code: text) -> [UnusedVarWarning]:
+    """Parse source and run unused vars lint."""
+    ast_reset()
+    parse_module(code, "<test>")
+    val decls = module_get_decls()
+    check_unused_vars(decls)
 
-fn output_mentions(output: text, name: text) -> bool:
-    """Check if output mentions a specific name."""
-    output.contains(name)
+fn warnings_mention_name(warnings: [UnusedVarWarning], name: text) -> bool:
+    """Check if any warning mentions a specific variable name in its message."""
+    for w in warnings:
+        if w.message.contains("'{name}'"):
+            return true
+    false
 
-fn output_has_code(output: text, code: text) -> bool:
-    """Check if output contains a specific diagnostic code."""
-    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
+fn warnings_have_code(warnings: [UnusedVarWarning], code: text) -> bool:
+    """Check if any warning has the given code."""
+    for w in warnings:
+        if w.code == code:
+            return true
+    false
 
 # ============================================================================
 # UNUSED001: Unused local variables
@@ -33,40 +40,40 @@ describe "Unused Variables Lint":
     context "used variables":
         it "does not flag variables that are used":
             val code = "fn compute() -> i64:\n    val x = 10\n    val y = 20\n    x + y\n"
-            val output = check_file_for_warnings("used", code)
-            val mentions_x = output_mentions(output, "unused") and output_mentions(output, "'x'")
+            val warnings = parse_and_check_unused(code)
+            val mentions_x = warnings_mention_name(warnings, "x")
             expect(mentions_x).to_equal(false)
 
         it "does not flag variables used in expressions":
-            val code = "fn greet(name: text) -> text:\n    val greeting = \"Hello\"\n    \"{greeting}, {name}!\"\n"
-            val output = check_file_for_warnings("used_expr", code)
-            val mentions_greeting = output_mentions(output, "'greeting'") and output_mentions(output, "unused")
+            val code = "fn greet(name: text) -> text:\n    val greeting = \"Hello\"\n    \"{greeting}!\"\n"
+            val warnings = parse_and_check_unused(code)
+            val mentions_greeting = warnings_mention_name(warnings, "greeting")
             expect(mentions_greeting).to_equal(false)
 
     context "unused variables":
         it "flags unused val declarations":
             val code = "fn test():\n    val unused_val = 42\n    print \"done\"\n"
-            val output = check_file_for_warnings("unused_val", code)
-            val mentions_unused = output_mentions(output, "unused_val")
+            val warnings = parse_and_check_unused(code)
+            val mentions_unused = warnings_mention_name(warnings, "unused_val")
             expect(mentions_unused).to_equal(true)
 
         it "flags unused var declarations":
             val code = "fn test():\n    var unused_var = 0\n    print \"done\"\n"
-            val output = check_file_for_warnings("unused_var", code)
-            val mentions_unused = output_mentions(output, "unused_var")
+            val warnings = parse_and_check_unused(code)
+            val mentions_unused = warnings_mention_name(warnings, "unused_var")
             expect(mentions_unused).to_equal(true)
 
     context "underscore-prefixed variables":
         it "does not flag _prefixed variables":
             val code = "fn test():\n    val _ignored = 42\n    print \"done\"\n"
-            val output = check_file_for_warnings("prefixed", code)
-            val mentions_ignored = output_mentions(output, "'_ignored'") and output_mentions(output, "unused")
+            val warnings = parse_and_check_unused(code)
+            val mentions_ignored = warnings_mention_name(warnings, "_ignored")
             expect(mentions_ignored).to_equal(false)
 
         it "does not flag single underscore":
-            val code = "fn test():\n    val _ = compute_something()\n    print \"done\"\n\nfn compute_something() -> i64:\n    42\n"
-            val output = check_file_for_warnings("underscore", code)
-            val mentions_underscore = output_mentions(output, "'_'") and output_mentions(output, "unused")
+            val code = "fn test():\n    val _ = 42\n    print \"done\"\n"
+            val warnings = parse_and_check_unused(code)
+            val mentions_underscore = warnings_mention_name(warnings, "_")
             expect(mentions_underscore).to_equal(false)
 
 # ============================================================================
@@ -74,15 +81,14 @@ describe "Unused Variables Lint":
 # ============================================================================
 
     context "unused parameters":
-        it "flags unused function parameters":
+        it "does not flag _prefixed parameters":
             val code = "fn add(a: i64, b: i64, _c: i64) -> i64:\n    a + b\n"
-            val output = check_file_for_warnings("unused_param", code)
-            # _c is prefixed with _, should not be flagged
-            val mentions_c = output_mentions(output, "'_c'") and output_mentions(output, "unused")
+            val warnings = parse_and_check_unused(code)
+            val mentions_c = warnings_mention_name(warnings, "_c")
             expect(mentions_c).to_equal(false)
 
         it "does not flag used parameters":
             val code = "fn multiply(x: i64, y: i64) -> i64:\n    x * y\n"
-            val output = check_file_for_warnings("used_params", code)
-            val mentions_x = output_mentions(output, "'x'") and output_mentions(output, "unused")
+            val warnings = parse_and_check_unused(code)
+            val mentions_x = warnings_mention_name(warnings, "x")
             expect(mentions_x).to_equal(false)

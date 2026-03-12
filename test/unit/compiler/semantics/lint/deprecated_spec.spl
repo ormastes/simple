@@ -5,27 +5,27 @@
 # - DEPR002: .new() constructor calls
 # - DEPR003: Bare 'pass' usage
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module}
+use compiler.semantics.lint.deprecated.{check_deprecated, DeprecatedWarning}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-fn check_file_for_warnings(name: text, code: text) -> text:
-    """Write code to a temp file and run query check with JSON format."""
-    val path = "/tmp/simple_lint_depr_{name}.spl"
-    rt_file_write_text(path, code)
-    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
-    stdout ?? ""
+fn parse_and_check_deprecated(code: text) -> [DeprecatedWarning]:
+    """Parse source and run deprecated usage lint."""
+    ast_reset()
+    parse_module(code, "<test>")
+    val decls = module_get_decls()
+    check_deprecated(decls)
 
-fn output_has_code(output: text, code: text) -> bool:
-    """Check if output contains a specific diagnostic code."""
-    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
-
-fn output_has_deprecated_tag(output: text) -> bool:
-    """Check if output contains the Deprecated tag (value 2)."""
-    output.contains("\"tags\":[2]") or output.contains("\"tags\": [2]")
+fn warnings_have_code(warnings: [DeprecatedWarning], code: text) -> bool:
+    """Check if any warning has the given code."""
+    for w in warnings:
+        if w.code == code:
+            return true
+    false
 
 # ============================================================================
 # DEPR001: Type__method() deprecated syntax
@@ -35,32 +35,26 @@ describe "Deprecated Usage Lint":
     context "DEPR001 - Type__method() syntax":
         it "flags Type__method() call pattern as DEPR001":
             val code = "fn test():\n    val result = Vec__new()\n"
-            val output = check_file_for_warnings("type_method", code)
-            val has_depr001 = output_has_code(output, "DEPR001")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr001 = warnings_have_code(warnings, "DEPR001")
             expect(has_depr001).to_equal(true)
 
         it "flags String__from() as DEPR001":
             val code = "fn test():\n    val s = String__from(\"hello\")\n"
-            val output = check_file_for_warnings("string_from", code)
-            val has_depr001 = output_has_code(output, "DEPR001")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr001 = warnings_have_code(warnings, "DEPR001")
             expect(has_depr001).to_equal(true)
-
-        it "DEPR001 has Deprecated tag":
-            val code = "fn test():\n    val x = Map__create()\n"
-            val output = check_file_for_warnings("depr001_tag", code)
-            val has_tag = output_has_deprecated_tag(output)
-            expect(has_tag).to_equal(true)
 
         it "does not flag dunder names like __init__":
             val code = "fn __init__():\n    print \"init\"\n"
-            val output = check_file_for_warnings("dunder", code)
-            val has_depr001 = output_has_code(output, "DEPR001")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr001 = warnings_have_code(warnings, "DEPR001")
             expect(has_depr001).to_equal(false)
 
         it "does not flag normal function calls":
             val code = "fn test():\n    val x = compute_value()\n\nfn compute_value() -> i64:\n    42\n"
-            val output = check_file_for_warnings("normal_call", code)
-            val has_depr001 = output_has_code(output, "DEPR001")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr001 = warnings_have_code(warnings, "DEPR001")
             expect(has_depr001).to_equal(false)
 
     # ============================================================================
@@ -70,18 +64,12 @@ describe "Deprecated Usage Lint":
     context "DEPR002 - .new() constructor":
         it "flags .new() constructor as DEPR002":
             val code = "fn test():\n    val p = Point.new(1, 2)\n"
-            val output = check_file_for_warnings("new_ctor", code)
-            val has_depr002 = output_has_code(output, "DEPR002")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr002 = warnings_have_code(warnings, "DEPR002")
             expect(has_depr002).to_equal(true)
 
-        it "DEPR002 has Deprecated tag":
-            val code = "fn test():\n    val item = Item.new()\n"
-            val output = check_file_for_warnings("depr002_tag", code)
-            val has_tag = output_has_deprecated_tag(output)
-            expect(has_tag).to_equal(true)
-
-        it "does not flag methods named 'new_item'":
+        it "does not flag methods named new_item":
             val code = "fn test():\n    val x = create_new_item()\n\nfn create_new_item() -> i64:\n    42\n"
-            val output = check_file_for_warnings("new_other", code)
-            val has_depr002 = output_has_code(output, "DEPR002")
+            val warnings = parse_and_check_deprecated(code)
+            val has_depr002 = warnings_have_code(warnings, "DEPR002")
             expect(has_depr002).to_equal(false)

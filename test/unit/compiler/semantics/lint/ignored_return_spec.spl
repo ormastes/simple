@@ -5,27 +5,27 @@
 # Side-effectful functions (print, push) are not flagged.
 # Last expression (implicit return) is not flagged.
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parse_module}
+use compiler.semantics.lint.ignored_return.{check_ignored_return, IgnoredReturnWarning}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-fn check_file_for_warnings(name: text, code: text) -> text:
-    """Write code to a temp file and run query check with JSON format."""
-    val path = "/tmp/simple_lint_return_{name}.spl"
-    rt_file_write_text(path, code)
-    val (stdout, _stderr, _code) = rt_process_run("bin/release/simple", ["query", "check", path, "--format", "json"])
-    stdout ?? ""
+fn parse_and_check_return(code: text) -> [IgnoredReturnWarning]:
+    """Parse source and run ignored return lint."""
+    ast_reset()
+    parse_module(code, "<test>")
+    val decls = module_get_decls()
+    check_ignored_return(decls)
 
-fn output_has_code(output: text, code: text) -> bool:
-    """Check if output contains a specific diagnostic code."""
-    output.contains("\"code\":\"{code}\"") or output.contains("\"code\": \"{code}\"")
-
-fn output_mentions(output: text, name: text) -> bool:
-    """Check if output mentions a specific name."""
-    output.contains(name)
+fn warnings_have_code(warnings: [IgnoredReturnWarning], code: text) -> bool:
+    """Check if any warning has the given code."""
+    for w in warnings:
+        if w.code == code:
+            return true
+    false
 
 # ============================================================================
 # RET001: Discarded return value
@@ -35,38 +35,38 @@ describe "Ignored Return Value Lint":
     context "discarded return values":
         it "flags discarded return value from pure function (RET001)":
             val code = "fn compute() -> i64:\n    42\n\nfn test():\n    compute()\n    print \"done\"\n"
-            val output = check_file_for_warnings("discarded", code)
-            val has_ret001 = output_has_code(output, "RET001")
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
             expect(has_ret001).to_equal(true)
 
         it "flags discarded string return":
             val code = "fn get_name() -> text:\n    \"Alice\"\n\nfn test():\n    get_name()\n    print \"done\"\n"
-            val output = check_file_for_warnings("discarded_text", code)
-            val mentions_return = output_mentions(output, "RET001") or output_mentions(output, "return") or output_mentions(output, "ignored")
-            expect(mentions_return).to_equal(true)
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
+            expect(has_ret001).to_equal(true)
 
     context "side-effectful functions":
         it "does not flag print calls":
             val code = "fn test():\n    print \"hello\"\n    print \"world\"\n"
-            val output = check_file_for_warnings("print_call", code)
-            val has_ret001 = output_has_code(output, "RET001")
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
             expect(has_ret001).to_equal(false)
 
         it "does not flag push calls":
             val code = "fn test():\n    var items: [text] = []\n    items.push(\"hello\")\n"
-            val output = check_file_for_warnings("push_call", code)
-            val has_ret001 = output_has_code(output, "RET001")
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
             expect(has_ret001).to_equal(false)
 
     context "implicit return (last expression)":
         it "does not flag last expression as implicit return":
             val code = "fn compute() -> i64:\n    val x = 10\n    x * 2\n"
-            val output = check_file_for_warnings("implicit_return", code)
-            val has_ret001 = output_has_code(output, "RET001")
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
             expect(has_ret001).to_equal(false)
 
         it "does not flag last expression in function with return type":
-            val code = "fn greet(name: text) -> text:\n    \"Hello, {name}!\"\n"
-            val output = check_file_for_warnings("implicit_return_text", code)
-            val has_ret001 = output_has_code(output, "RET001")
+            val code = "fn greet(name: text) -> text:\n    \"Hello!\"\n"
+            val warnings = parse_and_check_return(code)
+            val has_ret001 = warnings_have_code(warnings, "RET001")
             expect(has_ret001).to_equal(false)

@@ -1,230 +1,297 @@
-#!/bin/bash
-# Minimal MCP wrapper for Simple LSP-style code intelligence tools.
-# Uses commands that work in the current checkout instead of the broken main MCP server.
+#!/usr/bin/env python3
+"""Minimal MCP wrapper for Simple LSP-style code intelligence tools.
 
-set -euo pipefail
+Supports both Content-Length framed stdio and raw JSON stdio so it can work
+with Codex-style MCP clients and Claude's local MCP health checks.
+"""
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SIMPLE_BIN="${SCRIPT_DIR}/release/simple"
-if [ ! -x "$SIMPLE_BIN" ]; then
-  SIMPLE_BIN="${SCRIPT_DIR}/release/linux-x86_64/simple"
-fi
-LSP_QUERY="${SCRIPT_DIR}/../src/app/lsp/lsp_query.spl"
+from __future__ import annotations
 
-TOOLS_JSON='[
-  {
-    "name": "lsp_definition",
-    "description": "Find where a symbol is defined in a Simple source file.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file": {"type": "string", "description": "Path to the source file"},
-        "line": {"type": "integer", "description": "0-indexed line number"},
-        "character": {"type": "integer", "description": "0-indexed character offset"}
-      },
-      "required": ["file", "line", "character"]
-    }
-  },
-  {
-    "name": "lsp_references",
-    "description": "Find symbol references in Simple source.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file": {"type": "string", "description": "Path to the source file"},
-        "line": {"type": "integer", "description": "0-indexed line number"},
-        "character": {"type": "integer", "description": "0-indexed character offset"}
-      },
-      "required": ["file", "line", "character"]
-    }
-  },
-  {
-    "name": "lsp_hover",
-    "description": "Get hover information for a symbol in Simple source.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file": {"type": "string", "description": "Path to the source file"},
-        "line": {"type": "integer", "description": "0-indexed line number"},
-        "character": {"type": "integer", "description": "0-indexed character offset"}
-      },
-      "required": ["file", "line", "character"]
-    }
-  },
-  {
-    "name": "lsp_symbols",
-    "description": "List symbols in a Simple source file.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file": {"type": "string", "description": "Path to the source file"}
-      },
-      "required": ["file"]
-    }
-  },
-  {
-    "name": "lsp_diagnostics",
-    "description": "Run lightweight diagnostics via simple lint.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file": {"type": "string", "description": "Path to the source file"}
-      },
-      "required": ["file"]
-    }
-  }
-]'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
 
-write_message() {
-  local body="$1"
-  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+SIMPLE_BIN = SCRIPT_DIR / "release" / "simple"
+if not SIMPLE_BIN.exists():
+    SIMPLE_BIN = SCRIPT_DIR / "release" / "linux-x86_64" / "simple"
+LSP_QUERY = SCRIPT_DIR.parent / "src" / "app" / "lsp" / "lsp_query.spl"
+
+TOOLS = [
+    {
+        "name": "lsp_definition",
+        "description": "Find where a symbol is defined in a Simple source file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the source file"},
+                "line": {"type": "integer", "description": "0-indexed line number"},
+                "character": {
+                    "type": "integer",
+                    "description": "0-indexed character offset",
+                },
+            },
+            "required": ["file", "line", "character"],
+        },
+    },
+    {
+        "name": "lsp_references",
+        "description": "Find symbol references in Simple source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the source file"},
+                "line": {"type": "integer", "description": "0-indexed line number"},
+                "character": {
+                    "type": "integer",
+                    "description": "0-indexed character offset",
+                },
+            },
+            "required": ["file", "line", "character"],
+        },
+    },
+    {
+        "name": "lsp_hover",
+        "description": "Get hover information for a symbol in Simple source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the source file"},
+                "line": {"type": "integer", "description": "0-indexed line number"},
+                "character": {
+                    "type": "integer",
+                    "description": "0-indexed character offset",
+                },
+            },
+            "required": ["file", "line", "character"],
+        },
+    },
+    {
+        "name": "lsp_symbols",
+        "description": "List symbols in a Simple source file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the source file"}
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "lsp_diagnostics",
+        "description": "Run lightweight diagnostics via simple lint.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the source file"}
+            },
+            "required": ["file"],
+        },
+    },
+]
+
+SERVER_INFO = {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {"tools": {"listChanged": False}},
+    "serverInfo": {
+        "name": "simple-lsp-mcp",
+        "version": "0.1.0-mvp",
+        "instructions": (
+            "Minimal Simple LSP MCP shim backed by lsp_query.spl and simple lint."
+        ),
+    },
 }
 
-read_message() {
-  local first line len body
-  IFS= read -r first || return 1
-  first="${first%$'\r'}"
-  if [[ "$first" == \{* ]]; then
-    printf '%s' "$first"
-    return 0
-  fi
-  len=""
-  line="$first"
-  while :; do
-    line="${line%$'\r'}"
-    if [[ -z "$line" ]]; then
-      break
-    fi
-    if [[ "$line" == Content-Length:* ]]; then
-      len="${line#Content-Length: }"
-      len="${len//[[:space:]]/}"
-    fi
-    IFS= read -r line || break
-  done
-  [ -n "$len" ] || return 1
-  IFS= read -r -N "$len" body || true
-  printf '%s' "$body"
-}
+transport_mode = "framed"
+buffer = bytearray()
+decoder = json.JSONDecoder()
 
-json_result() {
-  local id_json="$1"
-  local result_json="$2"
-  jq -cn --argjson id "$id_json" --argjson result "$result_json" \
-    '{"jsonrpc":"2.0","id":$id,"result":$result}'
-}
 
-json_error() {
-  local id_json="$1"
-  local code="$2"
-  local msg="$3"
-  jq -cn --argjson id "$id_json" --argjson code "$code" --arg msg "$msg" \
-    '{"jsonrpc":"2.0","id":$id,"error":{"code":$code,"message":$msg}}'
-}
+def write_message(body: dict[str, Any]) -> None:
+    payload = json.dumps(body, separators=(",", ":")).encode()
+    if transport_mode == "raw":
+        sys.stdout.write(payload.decode() + "\n")
+        sys.stdout.flush()
+        return
+    sys.stdout.buffer.write(f"Content-Length: {len(payload)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
 
-tool_text_result() {
-  local id_json="$1"
-  local text="$2"
-  local body
-  body="$(jq -cn --arg text "$text" '{"content":[{"type":"text","text":$text}]}' )"
-  json_result "$id_json" "$body"
-}
 
-run_lsp_query() {
-  local subcmd="$1"
-  local file="$2"
-  local line0="${3:-0}"
-  local char0="${4:-0}"
-  local line1=$((line0 + 1))
-  local char1=$((char0 + 1))
-  "$SIMPLE_BIN" "$LSP_QUERY" "$subcmd" "$file" "$line1" "$char1" 2>/dev/null || true
-}
+def _read_more() -> bool:
+    chunk = sys.stdin.buffer.read1(4096)
+    if not chunk:
+        return False
+    buffer.extend(chunk)
+    return True
 
-run_lsp_symbols() {
-  local file="$1"
-  "$SIMPLE_BIN" "$LSP_QUERY" symbols "$file" 2>/dev/null || true
-}
 
-run_lsp_diagnostics() {
-  local file="$1"
-  "$SIMPLE_BIN" lint "$file" 2>/dev/null || true
-}
+def _read_framed() -> dict[str, Any] | None:
+    while True:
+        header_end = buffer.find(b"\r\n\r\n")
+        if header_end == -1:
+            if not _read_more():
+                return None
+            continue
+        header = bytes(buffer[:header_end]).decode(errors="replace")
+        content_length = None
+        for line in header.split("\r\n"):
+            if line.lower().startswith("content-length:"):
+                content_length = int(line.split(":", 1)[1].strip())
+                break
+        if content_length is None:
+            return None
+        total_needed = header_end + 4 + content_length
+        while len(buffer) < total_needed:
+            if not _read_more():
+                return None
+        payload = bytes(buffer[header_end + 4 : total_needed])
+        del buffer[:total_needed]
+        return json.loads(payload.decode())
 
-handle_tool_call() {
-  local id_json="$1"
-  local req="$2"
-  local name file line char out
-  name="$(printf '%s' "$req" | jq -r '.params.name // .name // empty')"
-  case "$name" in
-    lsp_definition)
-      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
-      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
-      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
-      out="$(run_lsp_query definition "$file" "$line" "$char")"
-      tool_text_result "$id_json" "$out"
-      ;;
-    lsp_references)
-      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
-      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
-      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
-      out="$(run_lsp_query references "$file" "$line" "$char")"
-      tool_text_result "$id_json" "$out"
-      ;;
-    lsp_hover)
-      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
-      line="$(printf '%s' "$req" | jq -r '.params.arguments.line // 0')"
-      char="$(printf '%s' "$req" | jq -r '.params.arguments.character // 0')"
-      out="$(run_lsp_query hover "$file" "$line" "$char")"
-      tool_text_result "$id_json" "$out"
-      ;;
-    lsp_symbols)
-      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
-      out="$(run_lsp_symbols "$file")"
-      tool_text_result "$id_json" "$out"
-      ;;
-    lsp_diagnostics)
-      file="$(printf '%s' "$req" | jq -r '.params.arguments.file // empty')"
-      out="$(run_lsp_diagnostics "$file")"
-      tool_text_result "$id_json" "$out"
-      ;;
-    *)
-      json_error "$id_json" -32602 "Unknown tool: $name"
-      ;;
-  esac
-}
 
-while req="$(read_message)"; do
-  [ -n "$req" ] || exit 0
-  method="$(printf '%s' "$req" | jq -r '.method // empty')"
-  id_json="$(printf '%s' "$req" | jq -c '.id')"
-  response=""
-  case "$method" in
-    initialize)
-      response="$(json_result "$id_json" '{
-        "protocolVersion":"2025-06-18",
-        "capabilities":{"tools":{"listChanged":false}},
-        "serverInfo":{"name":"simple-lsp-mcp","version":"0.1.0-mvp","instructions":"Minimal Simple LSP MCP shim backed by lsp_query.spl and simple lint."}
-      }')"
-      ;;
-    initialized|notifications/initialized|notifications/cancelled|notifications/roots/list_changed)
-      response=""
-      ;;
-    shutdown)
-      response="$(json_result "$id_json" 'null')"
-      ;;
-    ping)
-      response="$(json_result "$id_json" '{}')"
-      ;;
-    tools/list)
-      response="$(json_result "$id_json" "{\"tools\":$TOOLS_JSON}")"
-      ;;
-    tools/call)
-      response="$(handle_tool_call "$id_json" "$req")"
-      ;;
-    *)
-      response="$(json_error "$id_json" -32601 "Method not found: $method")"
-      ;;
-  esac
-  if [ -n "$response" ]; then
-    write_message "$response"
-  fi
-done
+def _read_raw() -> dict[str, Any] | None:
+    while True:
+        while buffer[:1] in (b" ", b"\n", b"\r", b"\t"):
+            del buffer[:1]
+        if not buffer:
+            if not _read_more():
+                return None
+            continue
+        try:
+            text = buffer.decode()
+            obj, idx = decoder.raw_decode(text)
+            del buffer[:idx]
+            return obj
+        except json.JSONDecodeError:
+            if not _read_more():
+                return None
+
+
+def read_message() -> dict[str, Any] | None:
+    global transport_mode
+    while not buffer:
+        if not _read_more():
+            return None
+    probe = bytes(buffer[:32]).lstrip()
+    if probe.startswith(b"{"):
+        transport_mode = "raw"
+        return _read_raw()
+    transport_mode = "framed"
+    return _read_framed()
+
+
+def json_result(msg_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+def json_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def tool_text_result(msg_id: Any, text: str) -> dict[str, Any]:
+    return json_result(msg_id, {"content": [{"type": "text", "text": text}]})
+
+
+def run_command(args: list[str]) -> str:
+    env = os.environ.copy()
+    proc = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        check=False,
+    )
+    return proc.stdout.rstrip("\n")
+
+
+def run_lsp_query(subcmd: str, file: str, line0: int = 0, char0: int = 0) -> str:
+    return run_command(
+        [
+            str(SIMPLE_BIN),
+            str(LSP_QUERY),
+            subcmd,
+            file,
+            str(line0 + 1),
+            str(char0 + 1),
+        ]
+    )
+
+
+def run_lsp_symbols(file: str) -> str:
+    return run_command([str(SIMPLE_BIN), str(LSP_QUERY), "symbols", file])
+
+
+def run_lsp_diagnostics(file: str) -> str:
+    return run_command([str(SIMPLE_BIN), "lint", file])
+
+
+def handle_tool_call(msg_id: Any, req: dict[str, Any]) -> dict[str, Any]:
+    params = req.get("params", {})
+    args = params.get("arguments", {})
+    name = params.get("name") or req.get("name", "")
+
+    if name == "lsp_definition":
+        return tool_text_result(
+            msg_id,
+            run_lsp_query(
+                "definition", args.get("file", ""), int(args.get("line", 0)), int(args.get("character", 0))
+            ),
+        )
+    if name == "lsp_references":
+        return tool_text_result(
+            msg_id,
+            run_lsp_query(
+                "references", args.get("file", ""), int(args.get("line", 0)), int(args.get("character", 0))
+            ),
+        )
+    if name == "lsp_hover":
+        return tool_text_result(
+            msg_id,
+            run_lsp_query(
+                "hover", args.get("file", ""), int(args.get("line", 0)), int(args.get("character", 0))
+            ),
+        )
+    if name == "lsp_symbols":
+        return tool_text_result(msg_id, run_lsp_symbols(args.get("file", "")))
+    if name == "lsp_diagnostics":
+        return tool_text_result(msg_id, run_lsp_diagnostics(args.get("file", "")))
+    return json_error(msg_id, -32602, f"Unknown tool: {name}")
+
+
+def main() -> int:
+    while True:
+        req = read_message()
+        if req is None:
+            return 0
+        method = req.get("method", "")
+        msg_id = req.get("id")
+
+        if method == "initialize":
+            write_message(json_result(msg_id, SERVER_INFO))
+        elif method in {
+            "initialized",
+            "notifications/initialized",
+            "notifications/cancelled",
+            "notifications/roots/list_changed",
+        }:
+            continue
+        elif method == "shutdown":
+            write_message(json_result(msg_id, None))
+        elif method == "ping":
+            write_message(json_result(msg_id, {}))
+        elif method == "tools/list":
+            write_message(json_result(msg_id, {"tools": TOOLS}))
+        elif method == "tools/call":
+            write_message(handle_tool_call(msg_id, req))
+        else:
+            write_message(json_error(msg_id, -32601, f"Method not found: {method}"))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

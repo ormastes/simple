@@ -63,6 +63,70 @@ The LSP server runs as a subprocess launched by Claude Code:
 - **Command database:** 100+ TRACE32 commands with categories and documentation
 - **Function database:** 50+ PRACTICE built-in functions with signatures
 
+## Common CMM Mistakes & Gotchas
+
+The LSP server detects many of these as diagnostics.
+
+### Lexer Ambiguities
+
+| Pattern | Trap | Correct Interpretation |
+|---------|------|----------------------|
+| `&name` vs `&0xFF` | `&` is both macro ref AND bitwise AND | `&` + letter = macro; `&` + digit = AND + hex literal |
+| `*` wildcard vs multiply | `&a*&b` is multiply; `Data.LOAD.auto *` is wildcard | Trailing `*` (before `)`, `,`, EOL) = wildcard |
+| `/Word` vs `path/file` | `/` is both option flag AND path separator | After tilde/string context = path; after command = option |
+| `%val%100` vs `%LE` | `%` is both modulo AND format specifier | `%` + uppercase word = format spec; `%` + value = modulo |
+| `\` continuation vs address | `"text"+\` joins lines; `main\34` is module\line | After `+` in string context = continuation |
+
+### Statement-Level Gotchas
+
+| Mistake | What Happens | Fix |
+|---------|-------------|-----|
+| `&cmd` on its own line | Executes macro value as command (not assignment!) | Use `&cmd="value"` for assignment |
+| `ON ERROR` without action | Clears the error handler (not an error!) | Add `GOTO`/`GOSUB` if you want a handler |
+| Empty args in comma list | `cmd 1,,,4` is valid (3 empty args) | Intentional in PRACTICE — each `,` is a separator |
+| `ENTRY &x %LINE &y` | `%LINE` can appear between params | Valid syntax — reads rest of line into `&y` |
+| Missing `ENDDO` | Script runs past intended end | Always end scripts with `ENDDO` |
+| `GOTO` without target | Clears GOTO target (not an error) | Add label: `GOTO mylabel` |
+
+### Numeric Literal Traps
+
+| Literal | Value | Trap |
+|---------|-------|------|
+| `100` | Depends on radix! | Plain numbers follow current `RADIX` setting (default decimal) |
+| `100.` | Always decimal | Trailing dot forces decimal interpretation |
+| `0xFF00` | Hex | Always hex regardless of radix |
+| `0y10110` | Binary (22) | `0y` prefix for binary (not `0b`!) |
+| `0xFFXX` | Hex mask | `X` = don't-care nibble (for address matching) |
+| `10s` | 10 seconds | Time literal (also: `ms`, `us`, `ns`) |
+
+### Expression Gotchas
+
+| Mistake | Fix |
+|---------|-----|
+| Wrong operator precedence (13 levels!) | Use parentheses to be explicit |
+| Using `&&` for AND | Use `&&` (logical AND) or `&` (bitwise AND) — both valid but different |
+| Classic `:A:` `:O:` `:X:` operators | Still valid in real files — means AND/OR/XOR respectively |
+| `{D:0x1000}` looks like a block | It's a braced constant (freezes address value) |
+| Access class `D:0x1000` vs label `label:` | Colon after known access class (D, P, C, etc.) = access; after unknown word = label |
+
+### Macro Pitfalls
+
+| Mistake | What Happens | Fix |
+|---------|-------------|-----|
+| Using undefined macro | Silent empty string substitution | Check with `SYMBOL.EXIST.MACRO()` |
+| `&x` vs `&&x` | `&x` is value; `&&x` is address/reference | Use `&&` when passing by reference to subroutine |
+| Macro in string `"&name"` | Gets substituted! | Use `CONV.CHAR()` to prevent, or single quotes if supported |
+| No typed variables | All macros are text substitution | Cast explicitly: `VAR.VALUE(&x)` for numeric context |
+
+### Common Command Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| `Data.Set` without access class | Specify: `Data.Set D:0x1000 %Long 0xFF` |
+| `Break.Set` on wrong address type | Use `P:` for program addresses: `Break.Set P:main` |
+| Forgetting `WAIT` after async commands | Add `WAIT 1s` or poll with `STATE.RUN()` |
+| Path without quotes when it has spaces | Quote paths: `Data.LOAD.auto "my file.elf"` |
+
 ## More Information
 - [TRACE32 Documentation](https://www.lauterbach.com/frames.html?home.html)
 - [LSP Specification](https://microsoft.github.io/language-server-protocol/)

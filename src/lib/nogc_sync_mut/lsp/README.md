@@ -140,6 +140,76 @@ Request handlers:
 - `handle_did_open/change/close()` - Document sync
 - `publish_diagnostics()` - Send diagnostics
 
+## Common Simple Language Mistakes & Gotchas
+
+The LSP server detects many of these automatically. Warnings appear as squiggly underlines with diagnostic codes.
+
+### Critical Runtime Issues
+
+| Mistake | What Happens | Fix |
+|---------|-------------|-----|
+| Mutating outer var in closure | Changes silently lost (capture-by-value) | Return modified value instead |
+| `return` inside nested `match` | Return doesn't propagate, falls through | Extract inner match to helper function |
+| `.push()` on module-level var from function | Array change not visible at module level | Use return values or local vars |
+| Multiline `if` without parens | Parse failure or wrong behavior | Wrap: `if (a and`<br>`   b):` |
+
+### Syntax Pitfalls
+
+| Mistake | Diagnostic | Fix |
+|---------|-----------|-----|
+| `class Child(Parent)` | Error | No inheritance. Use composition, traits, or mixins |
+| `StructName.new(args)` | DEPR002 | Use `StructName(field: value)` |
+| `Type__method()` | DEPR001 | Use `Type.method()` |
+| Bare `pass` | DEPR003 | Use `pass_do_nothing` or `pass_todo` |
+| `s[:idx]` | Parse error | Use `s[0:idx]` |
+| `s[:-1]` | Parse error | Use `s[0:s.len()-1]` |
+| Chained methods `a.f().g()` | Runtime error | Use intermediate `var`: `var t = a.f(); t.g()` |
+
+### Performance Anti-patterns (COLL warnings)
+
+| Mistake | Code | Severity | Fix |
+|---------|------|----------|-----|
+| `arr = arr + [x]` in loop | COLL001 | Error | Use `.push(x)` |
+| `str = str + x` in loop | COLL006 | Error | Collect to array, `.join()` |
+| `.contains()` in loop | COLL002 | Warning | Use `Dict` for O(1) lookup |
+| `.remove(0)` queue drain | COLL003 | Warning | Reverse + `.pop()` |
+| Chained `.filter().filter()` | COLL005 | Warning | Combine predicates |
+
+### LSP Diagnostic Codes
+
+| Code | Meaning | Editor Rendering |
+|------|---------|-----------------|
+| UNUSED001-003 | Unused var/import/param | Faded (Unnecessary tag) |
+| UNREACH001-003 | Unreachable code | Faded (Unnecessary tag) |
+| DEPR001-003 | Deprecated syntax | Strikethrough (Deprecated tag) |
+| COLL001-008 | Collection anti-patterns | Warning |
+| CLOS001 | Closure modifies outer var | Warning |
+| RET001 | Discarded return value | Info |
+| BOOL001 | Multiline bool without parens | Warning |
+| MEXH001-002 | Non-exhaustive match | Warning |
+| ARG001-002 | Too many parameters (>7 warn, >12 error) | Warning/Error |
+| DTYP001 | Duplicate typed args | Warning |
+| STUB001-002 | Stub implementation | Faded (Unnecessary tag) |
+| SAFE001/003 | Unsafe operation outside `unsafe` | Error |
+| W0401-W0403 | Visibility violations | Warning |
+| W0404 | Wide public API | Warning |
+| W0406 | Star/wildcard import | Warning |
+
+### Reserved Keywords
+
+These cannot be used as variable/function names: `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `collect`, `shared`
+
+### Quick Reference
+
+- **Generics:** `Option<T>`, `List<Int>` (use `<>` not `[]`)
+- **Optional check:** `value.?` (not `value?` or `is_some()`)
+- **Null coalescing:** `value ?? default`
+- **Error handling:** `Result<T, E>` + `?` operator (no try/catch)
+- **Immutable preferred:** `val x = 1` or `x := 1` (walrus)
+- **Mutable:** `var x = 1`
+- **Method mutating self:** `me method_name()` (not `fn`)
+- **String interpolation:** `"Hello {name}"` (default), `r"raw \d+"` (no interpolation)
+
 ## Current Limitations
 
 1. **Full sync only** - Re-parses entire document on change (no incremental)
