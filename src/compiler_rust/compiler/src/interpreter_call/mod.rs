@@ -77,6 +77,24 @@ pub(crate) fn evaluate_call(
         // Priority 3: Check regular functions (user-defined) — most common case
         // Moved before BDD/mock/env to avoid 3 failed lookups on the hot path
         if let Some(func) = functions.get(name).cloned() {
+            // If the same function also exists in env as a Value::Function with captured_env,
+            // prefer the env version — it's a closure defined inside a block (e.g., `it` block)
+            // and needs access to variables from its enclosing scope.
+            if let Some(Value::Function { def, captured_env, .. }) = env.get(name) {
+                if !captured_env.is_empty() {
+                    let mut captured_env_clone = captured_env.clone();
+                    return core::exec_function_with_captured_env(
+                        &def.clone(),
+                        args,
+                        env,
+                        &mut captured_env_clone,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                }
+            }
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 

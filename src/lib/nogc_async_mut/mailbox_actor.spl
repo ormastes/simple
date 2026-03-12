@@ -11,10 +11,10 @@ enum MessagePriority:
     Normal
     Low
 
-fn MessagePriority__to_i64(p: MessagePriority) -> i64:
-    if p == MessagePriority.High: return 0
-    if p == MessagePriority.Normal: return 1
-    2
+    static fn to_i64(p: MessagePriority) -> i64:
+        if p == MessagePriority.High: return 0
+        if p == MessagePriority.Normal: return 1
+        2
 
 # --- SendResult enum ---
 
@@ -35,17 +35,17 @@ class MailboxConfig:
     priority_enabled: bool
     high_priority_reserve: Capacity
 
-fn MailboxConfig__default() -> MailboxConfig:
-    MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 100))
+    static fn with_priority() -> MailboxConfig:
+        MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: true, high_priority_reserve: Capacity(value: 100))
 
-fn MailboxConfig__bounded(cap: Capacity) -> MailboxConfig:
-    MailboxConfig(capacity: cap, off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
+    static fn unbounded() -> MailboxConfig:
+        MailboxConfig(capacity: Capacity(value: 0), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
 
-fn MailboxConfig__unbounded() -> MailboxConfig:
-    MailboxConfig(capacity: Capacity(value: 0), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
+    static fn bounded(cap: Capacity) -> MailboxConfig:
+        MailboxConfig(capacity: cap, off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
 
-fn MailboxConfig__with_priority() -> MailboxConfig:
-    MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: true, high_priority_reserve: Capacity(value: 100))
+    static fn default() -> MailboxConfig:
+        MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 100))
 
 # --- MessageRef ---
 
@@ -63,13 +63,13 @@ class MessageRef:
     fn is_stale(threshold_ms: i64) -> bool:
         self.age_ms() > threshold_ms
 
-fn MessageRef__new(msg_id: i64, sender, priority: MessagePriority, size_bytes: i64, timestamp: i64) -> MessageRef:
-    var sid = 0
-    var has_s = false
-    if sender.?:
-        sid = sender
-        has_s = true
-    MessageRef(id: MessageId(value: msg_id), sender_id: SenderId(value: sid), has_sender: has_s, priority: priority, size_bytes: ByteSize(value: size_bytes), timestamp_ms: Timestamp(value: timestamp))
+    static fn new(msg_id: i64, sender, priority: MessagePriority, size_bytes: i64, timestamp: i64) -> MessageRef:
+        var sid = 0
+        var has_s = false
+        if sender.?:
+            sid = sender
+            has_s = true
+        MessageRef(id: MessageId(value: msg_id), sender_id: SenderId(value: sid), has_sender: has_s, priority: priority, size_bytes: ByteSize(value: size_bytes), timestamp_ms: Timestamp(value: timestamp))
 
 # --- MailboxStats ---
 
@@ -95,8 +95,8 @@ class MailboxStats:
     fn fmt() -> text:
         "MailboxStats(received={self.total_received.value}, processed={self.total_processed.value})"
 
-fn MailboxStats__new() -> MailboxStats:
-    MailboxStats(current_size: Count(value: 0), total_received: Count(value: 0), total_processed: Count(value: 0), total_dropped: Count(value: 0), off_heap_bytes: ByteSize(value: 0), peak_size: Count(value: 0), high_priority_count: Count(value: 0))
+    static fn new() -> MailboxStats:
+        MailboxStats(current_size: Count(value: 0), total_received: Count(value: 0), total_processed: Count(value: 0), total_dropped: Count(value: 0), off_heap_bytes: ByteSize(value: 0), peak_size: Count(value: 0), high_priority_count: Count(value: 0))
 
 # --- Mailbox ---
 
@@ -133,7 +133,7 @@ class Mailbox:
                     self.stats.total_dropped = Count(value: self.stats.total_dropped.value + 1)
                     self.stats.total_received = Count(value: self.stats.total_received.value + 1)
                     return SEND_QUEUE_FULL
-        val msg = MessageRef__new(self.next_id, sender, priority, size_bytes, 0)
+        val msg = MessageRef.new(self.next_id, sender, priority, size_bytes, 0)
         self.next_id = self.next_id + 1
         if is_high:
             self.high_messages.push(msg)
@@ -231,19 +231,18 @@ class Mailbox:
     fn fmt() -> text:
         "Mailbox(size={self.total_size()}, closed={self.is_closed})"
 
-fn Mailbox__new(config: MailboxConfig) -> Mailbox:
-    Mailbox(
-        config: config,
-        messages: [],
-        high_messages: [],
-        next_id: 0,
-        is_closed: false,
-        stats: MailboxStats__new()
-    )
+    static fn unbounded() -> Mailbox:
+        Mailbox.new(MailboxConfig.unbounded())
 
-fn Mailbox__default() -> Mailbox:
-    Mailbox__new(MailboxConfig__default())
+    static fn default() -> Mailbox:
+        Mailbox.new(MailboxConfig.default())
 
-fn Mailbox__unbounded() -> Mailbox:
-    Mailbox__new(MailboxConfig__unbounded())
-
+    static fn new(config: MailboxConfig) -> Mailbox:
+        Mailbox(
+            config: config,
+            messages: [],
+            high_messages: [],
+            next_id: 0,
+            is_closed: false,
+            stats: MailboxStats.new()
+        )

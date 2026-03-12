@@ -704,42 +704,51 @@ impl Lowerer {
             ..
         } = &arm.pattern
         {
-            // Extract payload from enum subject, then bind to locals
-            let payload_expr = HirExpr {
-                kind: HirExprKind::BuiltinCall {
-                    name: "rt_enum_payload".to_string(),
-                    args: vec![HirExpr {
-                        kind: HirExprKind::Local(subject_idx),
-                        ty: subject_ty,
-                    }],
-                },
-                ty: TypeId::ANY,
-            };
+            // Build a map from binding name to its resolved type
+            // (computed by extract_pattern_bindings using enum variant field types)
+            let binding_type_map: std::collections::HashMap<String, TypeId> =
+                bindings.iter().cloned().collect();
 
             for (i, p) in payload_patterns.iter().enumerate() {
                 if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
                     if let Some(local_idx) = ctx.local_map.get(name) {
                         let local_idx = *local_idx;
+                        // Use the binding's resolved type (from enum variant definition)
+                        // instead of ANY, so MIR lowering can insert proper unboxing
+                        let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+
+                        // Extract payload from enum subject, then bind to locals
+                        let payload_expr = HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                }],
+                            },
+                            ty: binding_ty,
+                        };
+
                         // For single-payload enums, use payload directly
                         // For multi-payload, would need tuple indexing
                         let value = if payload_patterns.len() == 1 {
-                            payload_expr.clone()
+                            payload_expr
                         } else {
                             // Multi-field: index into tuple payload
                             HirExpr {
                                 kind: HirExprKind::Index {
-                                    receiver: Box::new(payload_expr.clone()),
+                                    receiver: Box::new(payload_expr),
                                     index: Box::new(HirExpr {
                                         kind: HirExprKind::Integer(i as i64),
                                         ty: TypeId::I64,
                                     }),
                                 },
-                                ty: TypeId::ANY,
+                                ty: binding_ty,
                             }
                         };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
-                            ty: TypeId::ANY,
+                            ty: binding_ty,
                             value: Some(value),
                         });
                     }

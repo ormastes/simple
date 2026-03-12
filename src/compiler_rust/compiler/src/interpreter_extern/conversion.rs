@@ -64,6 +64,39 @@ pub fn to_int(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Hash a text string and return as i64
+///
+/// Callable from Simple as: `rt_hash_text(s)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [text]
+///
+/// # Returns
+/// * i64 hash of the string
+pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
+    let text = match args.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("rt_hash_text expects a text argument");
+            return Err(CompileError::semantic_with_context(
+                "rt_hash_text expects text argument",
+                ctx,
+            ));
+        }
+    };
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let hash = hasher.finish() as i64;
+
+    Ok(Value::Int(hash))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

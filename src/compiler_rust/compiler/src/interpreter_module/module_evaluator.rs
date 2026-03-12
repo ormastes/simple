@@ -39,9 +39,25 @@ pub fn evaluate_module_exports(
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
 ) -> Result<ModuleExports, CompileError> {
+    evaluate_module_exports_with_preloaded(items, module_path, global_functions, global_classes, global_enums, None)
+}
+
+/// Evaluate a module's statements with an optional preloaded environment.
+///
+/// When `preloaded_env` is provided (e.g., from loading `mod.spl` for an `__init__.spl`),
+/// those values are merged into the module's environment before processing bare export
+/// statements, so that `export X, Y, Z` can find symbols defined in the preloaded module.
+pub fn evaluate_module_exports_with_preloaded(
+    items: &[Node],
+    module_path: Option<&Path>,
+    global_functions: &mut HashMap<String, FunctionDef>,
+    global_classes: &mut HashMap<String, ClassDef>,
+    global_enums: &mut Enums,
+    preloaded_env: Option<&HashMap<String, Value>>,
+) -> Result<ModuleExports, CompileError> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
-    let mut local_functions: HashMap<String, simple_parser::ast::FunctionDef> = HashMap::new();
+    let mut local_functions: HashMap<String, FunctionDef> = HashMap::new();
     let mut local_classes: HashMap<String, ClassDef> = HashMap::new();
     let mut local_enums: Enums = HashMap::new();
     let impl_methods: ImplMethods = HashMap::new();
@@ -51,6 +67,14 @@ pub fn evaluate_module_exports(
 
     // Add builtin types to module environment
     add_builtin_types(&mut env);
+
+    // If we have a preloaded environment (e.g., from mod.spl), merge it into env.
+    // This makes symbols from mod.spl available for bare exports in __init__.spl.
+    if let Some(preloaded) = preloaded_env {
+        for (name, value) in preloaded {
+            env.insert(name.clone(), value.clone());
+        }
+    }
 
     // First pass: register functions and types
     register_definitions(

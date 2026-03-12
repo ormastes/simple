@@ -28,7 +28,7 @@ use super::module_cache::{
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading, MAX_MODULE_DEPTH,
     MAX_TOTAL_MODULES,
 };
-use super::module_evaluator::evaluate_module_exports;
+use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
 
 type Enums = HashMap<String, EnumDef>;

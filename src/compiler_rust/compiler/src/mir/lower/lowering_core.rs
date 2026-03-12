@@ -265,6 +265,11 @@ pub struct MirLowerer<'a> {
     pub(super) current_file: Option<String>,
     /// Last expression value for implicit returns (non-void functions)
     pub(super) last_expr_value: Option<super::super::instructions::VReg>,
+    /// VRegs known to hold tagged RuntimeValues (from runtime function calls, BoxInt, etc.)
+    /// Used to avoid double-tagging when enum payloads flow into typed variables.
+    pub(super) tagged_vregs: std::collections::HashSet<super::super::instructions::VReg>,
+    /// Local indices known to hold tagged RuntimeValues
+    pub(super) tagged_locals: std::collections::HashSet<usize>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -286,6 +291,8 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
+            tagged_vregs: std::collections::HashSet::new(),
+            tagged_locals: std::collections::HashSet::new(),
         }
     }
 
@@ -303,6 +310,8 @@ impl<'a> MirLowerer<'a> {
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
             coverage_enabled: false,
+            tagged_vregs: std::collections::HashSet::new(),
+            tagged_locals: std::collections::HashSet::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,

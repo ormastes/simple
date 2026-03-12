@@ -4,7 +4,7 @@
 # Uses priority run queues with round-robin within each level.
 
 use mailbox.{
-    Mailbox, Mailbox__new, MailboxConfig__default,
+    Mailbox, Mailbox.new, MailboxConfig.default,
     SEND_SUCCESS, SendResult
 }
 use types.{ActorId, Reductions, Capacity, Count}
@@ -16,17 +16,17 @@ enum ActorPriority:
     Normal
     Low
 
-fn ActorPriority__to_i64(p: ActorPriority) -> i64:
-    if p == ActorPriority.Max: return 0
-    if p == ActorPriority.High: return 1
-    if p == ActorPriority.Normal: return 2
-    3
+    static fn from_i64(i: i64) -> ActorPriority:
+        if i == 0: return ActorPriority.Max
+        if i == 1: return ActorPriority.High
+        if i == 2: return ActorPriority.Normal
+        ActorPriority.Low
 
-fn ActorPriority__from_i64(i: i64) -> ActorPriority:
-    if i == 0: return ActorPriority.Max
-    if i == 1: return ActorPriority.High
-    if i == 2: return ActorPriority.Normal
-    ActorPriority.Low
+    static fn to_i64(p: ActorPriority) -> i64:
+        if p == ActorPriority.Max: return 0
+        if p == ActorPriority.High: return 1
+        if p == ActorPriority.Normal: return 2
+        3
 
 # --- ActorState enum ---
 enum ActorState:
@@ -36,19 +36,19 @@ enum ActorState:
     Suspended
     Dead
 
-fn ActorState__is_alive(state: ActorState) -> bool:
-    if state == ActorState.Dead: return false
-    true
+    static fn fmt(state: ActorState) -> text:
+        if state == ActorState.Runnable: return "runnable"
+        if state == ActorState.Running: return "running"
+        if state == ActorState.Waiting: return "waiting"
+        if state == ActorState.Suspended: return "suspended"
+        "dead"
 
-fn ActorState__can_run(state: ActorState) -> bool:
-    state == ActorState.Runnable
+    static fn can_run(state: ActorState) -> bool:
+        state == ActorState.Runnable
 
-fn ActorState__fmt(state: ActorState) -> text:
-    if state == ActorState.Runnable: return "runnable"
-    if state == ActorState.Running: return "running"
-    if state == ActorState.Waiting: return "waiting"
-    if state == ActorState.Suspended: return "suspended"
-    "dead"
+    static fn is_alive(state: ActorState) -> bool:
+        if state == ActorState.Dead: return false
+        true
 
 # --- SchedulerConfig ---
 
@@ -59,41 +59,41 @@ class SchedulerConfig:
     priority_scheduling: bool
     max_run_queue_length: Capacity
 
-fn SchedulerConfig__default() -> SchedulerConfig:
-    SchedulerConfig(
-        reductions_per_timeslice: Reductions(value: 2000),
-        scheduler_count: Count(value: 4),
-        work_stealing_enabled: true,
-        priority_scheduling: true,
-        max_run_queue_length: Capacity(value: 10000)
-    )
+    static fn high_throughput() -> SchedulerConfig:
+        SchedulerConfig(
+            reductions_per_timeslice: Reductions(value: 8000),
+            scheduler_count: Count(value: 4),
+            work_stealing_enabled: true,
+            priority_scheduling: false,
+            max_run_queue_length: Capacity(value: 50000)
+        )
 
-fn SchedulerConfig__single_threaded() -> SchedulerConfig:
-    SchedulerConfig(
-        reductions_per_timeslice: Reductions(value: 2000),
-        scheduler_count: Count(value: 1),
-        work_stealing_enabled: false,
-        priority_scheduling: true,
-        max_run_queue_length: Capacity(value: 10000)
-    )
+    static fn low_latency() -> SchedulerConfig:
+        SchedulerConfig(
+            reductions_per_timeslice: Reductions(value: 500),
+            scheduler_count: Count(value: 4),
+            work_stealing_enabled: true,
+            priority_scheduling: true,
+            max_run_queue_length: Capacity(value: 10000)
+        )
 
-fn SchedulerConfig__low_latency() -> SchedulerConfig:
-    SchedulerConfig(
-        reductions_per_timeslice: Reductions(value: 500),
-        scheduler_count: Count(value: 4),
-        work_stealing_enabled: true,
-        priority_scheduling: true,
-        max_run_queue_length: Capacity(value: 10000)
-    )
+    static fn single_threaded() -> SchedulerConfig:
+        SchedulerConfig(
+            reductions_per_timeslice: Reductions(value: 2000),
+            scheduler_count: Count(value: 1),
+            work_stealing_enabled: false,
+            priority_scheduling: true,
+            max_run_queue_length: Capacity(value: 10000)
+        )
 
-fn SchedulerConfig__high_throughput() -> SchedulerConfig:
-    SchedulerConfig(
-        reductions_per_timeslice: Reductions(value: 8000),
-        scheduler_count: Count(value: 4),
-        work_stealing_enabled: true,
-        priority_scheduling: false,
-        max_run_queue_length: Capacity(value: 50000)
-    )
+    static fn default() -> SchedulerConfig:
+        SchedulerConfig(
+            reductions_per_timeslice: Reductions(value: 2000),
+            scheduler_count: Count(value: 4),
+            work_stealing_enabled: true,
+            priority_scheduling: true,
+            max_run_queue_length: Capacity(value: 10000)
+        )
 
 # --- RunQueue ---
 
@@ -159,8 +159,8 @@ class RunQueue:
                 new_q.push(aid)
         new_q
 
-fn RunQueue__new() -> RunQueue:
-    RunQueue(max_q: [], high_q: [], normal_q: [], low_q: [])
+    static fn new() -> RunQueue:
+        RunQueue(max_q: [], high_q: [], normal_q: [], low_q: [])
 
 # --- ActorContext ---
 
@@ -236,29 +236,29 @@ class ActorContext:
         var name_str = "unnamed"
         if self.has_name:
             name_str = self.name_val
-        val state_str = ActorState__fmt(self.state)
+        val state_str = ActorState.fmt(self.state)
         "Actor(id={self.id.value}, name={name_str}, state={state_str})"
 
-fn ActorContext__with_defaults(id: i64, name, reductions: i64) -> ActorContext:
-    var name_str = ""
-    var has_n = false
-    if name.?:
-        name_str = name
-        has_n = true
-    ActorContext(
-        id: ActorId(value: id),
-        name_val: name_str,
-        has_name: has_n,
-        priority: ActorPriority.Normal,
-        state: ActorState.Runnable,
-        reductions_left: Reductions(value: reductions),
-        total_reductions: Reductions(value: 0),
-        timeslice_count: Count(value: 0),
-        links: [],
-        monitors: [],
-        monitored_by: [],
-        mailbox: Mailbox__new(MailboxConfig__default())
-    )
+    static fn with_defaults(id: i64, name, reductions: i64) -> ActorContext:
+        var name_str = ""
+        var has_n = false
+        if name.?:
+            name_str = name
+            has_n = true
+        ActorContext(
+            id: ActorId(value: id),
+            name_val: name_str,
+            has_name: has_n,
+            priority: ActorPriority.Normal,
+            state: ActorState.Runnable,
+            reductions_left: Reductions(value: reductions),
+            total_reductions: Reductions(value: 0),
+            timeslice_count: Count(value: 0),
+            links: [],
+            monitors: [],
+            monitored_by: [],
+            mailbox: Mailbox.new(MailboxConfig.default())
+        )
 
 # --- SchedulerStats ---
 
@@ -277,16 +277,16 @@ class SchedulerStats:
     fn fmt() -> text:
         "SchedulerStats(actors={self.current_actor_count.value}, switches={self.total_context_switches.value})"
 
-fn SchedulerStats__new() -> SchedulerStats:
-    SchedulerStats(
-        total_actors_created: Count(value: 0),
-        total_actors_terminated: Count(value: 0),
-        current_actor_count: Count(value: 0),
-        peak_actor_count: Count(value: 0),
-        total_context_switches: Count(value: 0),
-        total_reductions_executed: Reductions(value: 0),
-        total_timeslices: Count(value: 0)
-    )
+    static fn new() -> SchedulerStats:
+        SchedulerStats(
+            total_actors_created: Count(value: 0),
+            total_actors_terminated: Count(value: 0),
+            current_actor_count: Count(value: 0),
+            peak_actor_count: Count(value: 0),
+            total_context_switches: Count(value: 0),
+            total_reductions_executed: Reductions(value: 0),
+            total_timeslices: Count(value: 0)
+        )
 
 # --- ActorScheduler ---
 
@@ -301,7 +301,7 @@ class ActorScheduler:
     me spawn_actor(name) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
-        val ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice.value)
+        val ctx = ActorContext.with_defaults(id, name, self.config.reductions_per_timeslice.value)
         self.actors.push(ctx)
         self.run_queue.enqueue(id, ActorPriority.Normal)
         self.stats.total_actors_created = Count(value: self.stats.total_actors_created.value + 1)
@@ -313,7 +313,7 @@ class ActorScheduler:
     me spawn_with_priority(name, priority: ActorPriority) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
-        var ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice.value)
+        var ctx = ActorContext.with_defaults(id, name, self.config.reductions_per_timeslice.value)
         ctx.priority = priority
         self.actors.push(ctx)
         self.run_queue.enqueue(id, priority)
@@ -442,16 +442,15 @@ class ActorScheduler:
     fn fmt() -> text:
         "ActorScheduler(actors={self.stats.current_actor_count.value}, switches={self.stats.total_context_switches.value})"
 
-fn ActorScheduler__new(config: SchedulerConfig) -> ActorScheduler:
-    ActorScheduler(
-        config: config,
-        actors: [],
-        run_queue: RunQueue__new(),
-        next_id: 0,
-        stats: SchedulerStats__new(),
-        started: false
-    )
+    static fn default() -> ActorScheduler:
+        ActorScheduler.new(SchedulerConfig.default())
 
-fn ActorScheduler__default() -> ActorScheduler:
-    ActorScheduler__new(SchedulerConfig__default())
-
+    static fn new(config: SchedulerConfig) -> ActorScheduler:
+        ActorScheduler(
+            config: config,
+            actors: [],
+            run_queue: RunQueue.new(),
+            next_id: 0,
+            stats: SchedulerStats.new(),
+            started: false
+        )

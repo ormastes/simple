@@ -374,10 +374,11 @@ pub(crate) fn call_extern_function(
         "rt_rwlock_set" => atomic::rt_rwlock_set_fn(&evaluated),
 
         // ====================================================================
-        // Conversion Functions (2 functions)
+        // Conversion Functions (3 functions)
         // ====================================================================
         "to_string" => conversion::to_string(&evaluated),
         "to_int" => conversion::to_int(&evaluated),
+        "rt_hash_text" => conversion::rt_hash_text(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)

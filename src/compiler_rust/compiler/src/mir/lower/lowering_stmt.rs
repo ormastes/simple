@@ -27,6 +27,13 @@ impl<'a> MirLowerer<'a> {
                     // Emit unit bound check if assigning to a unit type with constraints
                     self.emit_unit_bound_check(*declared_ty, vreg)?;
 
+                    // Track tagged status: if storing a tagged VReg, mark the local as tagged
+                    if self.tagged_vregs.contains(&vreg) {
+                        self.tagged_locals.insert(local_idx);
+                    } else {
+                        self.tagged_locals.remove(&local_idx);
+                    }
+
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -256,12 +263,56 @@ impl<'a> MirLowerer<'a> {
 
                     // Local variable assignment: use address + store pattern
                     _ => {
+                        // Tagged value tracking: if storing a tagged RuntimeValue
+                        // (e.g., from rt_enum_payload) to a concrete int-typed local,
+                        // insert UnboxInt to convert tagged→raw before storing.
+                        // This prevents double-tagging when the local is later BoxInt'd.
+                        let is_tagged_val = self.tagged_vregs.contains(&val_reg);
+                        let target_is_int = matches!(
+                            target.ty,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                                | TypeId::BOOL
+                        );
+                        let target_is_float = matches!(target.ty, TypeId::F32 | TypeId::F64);
+
+                        let store_val = if is_tagged_val && target_is_int {
+                            // Unbox tagged RuntimeValue to raw integer before storing
+                            self.with_func(|func, current_block| {
+                                let unboxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::UnboxInt {
+                                    dest: unboxed,
+                                    value: val_reg,
+                                });
+                                unboxed
+                            })?
+                        } else if is_tagged_val && target_is_float {
+                            self.with_func(|func, current_block| {
+                                let unboxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::UnboxFloat {
+                                    dest: unboxed,
+                                    value: val_reg,
+                                });
+                                unboxed
+                            })?
+                        } else {
+                            val_reg
+                        };
+
                         let addr_reg = self.lower_lvalue(target)?;
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::Store {
                                 addr: addr_reg,
-                                value: val_reg,
+                                value: store_val,
                                 ty,
                             });
                         })?;

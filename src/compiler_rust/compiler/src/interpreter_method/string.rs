@@ -9,7 +9,7 @@
 // - Manipulation: reversed, sorted, take, drop, append, prepend, push, pop, clear, squeeze
 // - Slicing: split, split_lines, slice, substring, substr, replace, partition, rpartition
 // - Joining: join (join array with string as delimiter)
-// - Parsing: parse_int, parse_float, to_int, to_float
+// - Parsing: parse_int (+ parse_i32, parse_i64), parse_float, to_int, to_float
 // - Padding: pad_left, pad_right, center, zfill
 // - Type checking: is_numeric, is_alpha, is_alphanumeric, is_whitespace
 // - Character codes: ord, codepoint (returns Unicode code point of first char)
@@ -301,7 +301,7 @@ if let Value::Str(ref s) = recv_val {
                 None => Value::none(),
             });
         }
-        "parse_int" => {
+        "parse_int" | "parse_i32" | "parse_i64" => {
             match s.trim().parse::<i64>() {
                 Ok(n) => return Ok(Value::some(Value::Int(n))),
                 Err(_) => return Ok(Value::none()),

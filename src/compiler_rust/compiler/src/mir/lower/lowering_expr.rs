@@ -56,7 +56,8 @@ impl<'a> MirLowerer<'a> {
 
             HirExprKind::Local(idx) => {
                 let idx = *idx;
-                self.with_func(|func, current_block| {
+                let is_tagged_local = self.tagged_locals.contains(&idx);
+                let result = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let addr_reg = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -70,7 +71,12 @@ impl<'a> MirLowerer<'a> {
                         ty: expr_ty,
                     });
                     dest
-                })
+                })?;
+                // Propagate tagged status from local to loaded VReg
+                if is_tagged_local {
+                    self.tagged_vregs.insert(result);
+                }
+                Ok(result)
             }
 
             HirExprKind::Binary { op, left, right } => {
@@ -475,6 +481,67 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::BuiltinCall { name, args } => {
+                // Special handling for rt_enum_payload - returns tagged RuntimeValue
+                // that needs unboxing when the payload type is a native type
+                if name == "rt_enum_payload" && args.len() == 1 {
+                    let arg_reg = self.lower_expr(&args[0])?;
+                    let raw_result = self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: CallTarget::from_name("rt_enum_payload"),
+                            args: vec![arg_reg],
+                        });
+                        dest
+                    })?;
+
+                    // rt_enum_payload returns a tagged RuntimeValue.
+                    // Mark it as tagged so downstream Store/Load tracking can
+                    // insert UnboxInt when storing to a concrete int-typed local.
+                    self.tagged_vregs.insert(raw_result);
+
+                    // If the expected type is known to be a native int/float, unbox now.
+                    let needs_int_unbox = matches!(
+                        expr.ty,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                            | TypeId::BOOL
+                    );
+                    let needs_float_unbox = matches!(expr.ty, TypeId::F32 | TypeId::F64);
+
+                    if needs_int_unbox {
+                        return self.with_func(|func, current_block| {
+                            let unboxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::UnboxInt {
+                                dest: unboxed,
+                                value: raw_result,
+                            });
+                            unboxed
+                        });
+                    } else if needs_float_unbox {
+                        return self.with_func(|func, current_block| {
+                            let unboxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::UnboxFloat {
+                                dest: unboxed,
+                                value: raw_result,
+                            });
+                            unboxed
+                        });
+                    } else {
+                        // Strings, arrays, objects are already valid as RuntimeValue pointers
+                        return Ok(raw_result);
+                    }
+                }
+
                 // Special handling for join
                 if name == "join" && args.len() == 1 {
                     let actor_reg = self.lower_expr(&args[0])?;

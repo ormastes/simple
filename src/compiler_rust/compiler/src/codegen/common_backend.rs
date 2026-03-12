@@ -545,7 +545,10 @@ impl<M: Module> CodegenBackend<M> {
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
-                let size = super::types_util::type_id_size(*ty) as usize;
+                // All globals are stored/loaded as i64 RuntimeValues, so allocate
+                // at least 8 bytes regardless of the declared type (BOOL=1, I32=4, etc.)
+                // to prevent buffer overflows when GlobalStore writes a full i64.
+                let size = std::cmp::max(super::types_util::type_id_size(*ty) as usize, 8);
                 if let Some(&init_val) = global_init_values.get(name) {
                     // Initialize with compile-time constant value
                     let bytes = init_val.to_le_bytes();
