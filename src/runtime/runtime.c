@@ -918,6 +918,7 @@ const char* spl_env_get(const char* key) {
     return val ? val : "";
 }
 
+__attribute__((weak))
 const char* rt_env_get(const char* key) {
     return spl_env_get(key);
 }

@@ -385,6 +385,7 @@ void spl_env_set(const char* key, const char* value) {
     }
 }
 
+__attribute__((weak))
 bool rt_env_set(const char* key, const char* value) {
     if (!key) return false;
     int result = value ? setenv(key, value, 1) : unsetenv(key);

@@ -521,10 +521,10 @@ pub extern "C" fn sys_exit(code: i64) -> i64 {
     std::process::exit(code as i32);
 }
 
-#[no_mangle]
-pub extern "C" fn exit(code: i64) -> i64 {
-    std::process::exit(code as i32);
-}
+// NOTE: Do NOT export a raw `exit` symbol — it overrides libc's exit()
+// and causes infinite recursion with std::process::exit(). The Simple
+// `exit()` function is compiled to `app__io__cli_ops__exit` by the LLVM
+// backend, and `sys_exit` handles the FFI path.
 
 #[no_mangle]
 pub extern "C" fn sys_malloc(size: i64) -> i64 {

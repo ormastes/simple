@@ -310,5 +310,121 @@ fn check_sspec_manual_assertions(source: String, file: String) -> [EasyFix]:
         line_fixes
     )
 
+# ============================================================================
+# Rule 12: stub_impl
+# Detects function signatures followed by trivial body expressions.
+# Confidence: Likely
+# ============================================================================
+
+# Trivial return values — text patterns for single-line bodies
+val _TRIVIAL_BODIES = ["0", "\"\"", "false", "nil", "[]", "()", "true",
+                       "return 0", "return \"\"", "return false", "return nil",
+                       "return []", "return ()", "return true",
+                       "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
+
+fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    var lines: [text] = []
+    if source == get_cached_source() and get_cached_lines().len() > 0:
+        lines = get_cached_lines()
+    else:
+        lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+
+        # Pattern 1: Single-line fn with trivial body
+        if _is_fn_sig(trimmed):
+            val colon_body = _extract_inline_body(trimmed)
+            if colon_body != "" and _is_trivial(colon_body) and _has_params(trimmed):
+                var fix = EasyFix.create(
+                    id: "L:stub_impl:{line_num}",
+                    description: "function with params returns trivial '{colon_body}' — possible stub",
+                    confidence: FixConfidence.Likely
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: byte_offset,
+                    end: byte_offset + line.len(),
+                    line: line_num,
+                    column: 1,
+                    new_text: line
+                ))
+                fixes.push(fix)
+
+        # Pattern 2: Multi-line fn — header, then trivial body
+        if _is_fn_sig_header(trimmed) and _has_params(trimmed):
+            if line_num < lines.len():
+                val next_line = lines[line_num]
+                val next_trimmed = next_line.trim()
+                val next_indent = next_line.len() - next_trimmed.len()
+                if next_indent > indent and _is_trivial(next_trimmed):
+                    var is_single = true
+                    if line_num + 1 < lines.len():
+                        val after_next = lines[line_num + 1]
+                        val after_trimmed = after_next.trim()
+                        val after_indent = after_next.len() - after_trimmed.len()
+                        if after_trimmed != "" and after_indent > indent:
+                            is_single = false
+                    if is_single:
+                        var fix = EasyFix.create(
+                            id: "L:stub_impl:{line_num}",
+                            description: "function with params returns trivial '{next_trimmed}' — possible stub",
+                            confidence: FixConfidence.Likely
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file,
+                            start: byte_offset,
+                            end: byte_offset + line.len(),
+                            line: line_num,
+                            column: 1,
+                            new_text: line
+                        ))
+                        fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+fn _is_fn_sig(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")
+
+fn _is_fn_sig_header(trimmed: text) -> bool:
+    _is_fn_sig(trimmed) and trimmed.ends_with(":")
+
+fn _has_params(trimmed: text) -> bool:
+    val ps = trimmed.find("(") ?? -1
+    val pe = trimmed.find(")") ?? -1
+    if ps < 0 or pe < 0 or pe <= ps + 1:
+        return false
+    val inner = trimmed.slice(ps + 1, pe).trim()
+    inner.len() > 0
+
+fn _extract_inline_body(trimmed: text) -> text:
+    val pe = trimmed.find(")") ?? -1
+    if pe < 0:
+        return ""
+    val after = trimmed.slice(pe + 1)
+    val cp = after.find(":") ?? -1
+    if cp < 0:
+        return ""
+    val body = after.slice(cp + 1).trim()
+    body
+
+fn _is_trivial(body: text) -> bool:
+    if body.starts_with("pass_todo") or body.starts_with("pass_do_nothing") or body.starts_with("pass_dn"):
+        return false
+    for p in _TRIVIAL_BODIES:
+        if body == p:
+            return true
+    if body == "pass":
+        return true
+    false
+
 export check_print_in_test_spec, check_unnamed_duplicate_typed_args, check_resource_leak
 export check_sspec_missing_docstrings, check_sspec_manual_assertions
+export check_stub_impl_text

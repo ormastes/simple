@@ -184,7 +184,16 @@ items := [1, 2, 3]
 
 - Warning system: Emit warnings for plain `pass` in compiled mode
 - Enhanced parser: Proper lookahead for walrus in more contexts
-- Lint integration: Suggest specific pass variants instead of generic `pass`
+- ~~Lint integration: Suggest specific pass variants instead of generic `pass`~~ — **DONE** (see below)
+
+## Related: Stub Implementation Lint (STUB001/STUB002)
+
+The stub implementation lint detects functions with trivial/dummy bodies that should use `pass_todo` or `pass_do_nothing` markers instead. Functions already containing pass markers are **not** flagged.
+
+- **STUB001** (WARNING): Function has parameters but returns a trivial value without using them
+- **STUB002** (INFO): Zero-parameter function returns a type-default value (possible stub)
+
+See [`doc/guide/tooling/lint.md`](../guide/tooling/lint.md) for full details, examples, and fix instructions.
 
 ## References
 

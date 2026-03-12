@@ -1,0 +1,434 @@
+# Stub Implementation Lint
+#
+# Detects functions with trivial/dummy implementations that may be
+# unintentional stubs — bodies returning bare literals without using params.
+#
+# STUB001: Function with params returns trivial value (params unused)   WARNING
+# STUB002: Zero-param function returns default value (possible stub)    INFO
+#
+# Trivial "default" values: 0, "", false, nil, [], {}, (), Ok(nil)
+#
+# Does NOT flag:
+# - Functions already marked with pass_todo / pass_do_nothing / pass_dn
+# - extern fn declarations (no body)
+# - Single-expression constant functions returning non-default literals
+#   e.g. fn method_get() -> text: "GET"  or  fn API_KEY() -> i64: 3
+# - Functions named with _noop_ prefix (already self-documenting)
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast_expr.{
+    EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT,
+    EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX,
+    EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT,
+    EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK,
+    EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE,
+    EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_LAMBDA,
+    EXPR_STRUCT_LIT, EXPR_TUPLE, EXPR_SLICE,
+    EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST,
+    EXPR_UNIT, EXPR_INTERPOLATED_STRING,
+    EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
+    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK,
+    stmt_tag, stmt_expr, stmt_name, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, DECL_EXTERN_FN,
+    decl_tag, decl_name, decl_param_names, decl_body_stmts
+}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct StubImplWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    fn_name: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
+    """Run stub-implementation lint on module declarations.
+
+    For each function, checks whether its body is a single trivial expression
+    (a bare literal like 0, "", false, nil, [], (), or a return of one).
+    If the function has parameters that are never referenced in the body,
+    emits STUB001 (WARNING). If the function has no parameters but returns
+    a default value, emits STUB002 (INFO).
+    """
+    var warnings: [StubImplWarning] = []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        # Skip non-function and extern declarations
+        if tag != DECL_FN:
+            continue
+
+        val fn_name = decl_name[idx]
+        val params = decl_param_names[idx]
+        val body = decl_body_stmts[idx]
+
+        # Skip _noop_ prefixed functions (self-documenting stubs)
+        if fn_name.starts_with("_noop_"):
+            continue
+
+        # Skip empty bodies (no stmts at all — parsed error or abstract)
+        if body.len() == 0:
+            continue
+
+        # Check if body contains pass_todo/pass_do_nothing/pass_dn anywhere
+        if body_has_pass_marker(body):
+            continue
+
+        # Extract the single effective expression from the body
+        val trivial_expr = get_single_trivial_expr(body)
+        if trivial_expr < 0:
+            continue
+
+        # Determine what kind of trivial value it is
+        val trivial_kind = classify_trivial(trivial_expr)
+        if trivial_kind == "":
+            continue
+
+        # Now decide severity based on parameter usage
+        if params.len() > 0:
+            # Has parameters — check if any are used in body
+            if not body_references_any_param(body, params):
+                warnings.push(StubImplWarning(
+                    code: "STUB001",
+                    severity: "WARNING",
+                    message: "trivial {trivial_kind} return with {params.len()} unused param(s)",
+                    hint: "body is just '{trivial_kind}' — implement or mark with pass_todo",
+                    fn_name: fn_name
+                ))
+        else:
+            # No parameters — only flag default values, not meaningful constants
+            if is_default_value(trivial_expr):
+                warnings.push(StubImplWarning(
+                    code: "STUB002",
+                    severity: "INFO",
+                    message: "trivial default {trivial_kind} return (possible stub)",
+                    hint: "if intentional, mark with pass_do_nothing; if stub, use pass_todo",
+                    fn_name: fn_name
+                ))
+
+    warnings
+
+# ============================================================================
+# Body Analysis: Extract Single Trivial Expression
+# ============================================================================
+
+fn get_single_trivial_expr(stmts: [i64]) -> i64:
+    """If the body is a single statement containing a trivial expression,
+    return that expression index. Otherwise return -1.
+
+    Handles:
+    - Single STMT_EXPR with a bare literal (implicit return)
+    - Single STMT_EXPR with EXPR_RETURN wrapping a literal (explicit return)
+    - Single STMT_RETURN with a literal
+    """
+    if stmts.len() != 1:
+        return -1
+
+    val s = stmts[0]
+    if s < 0:
+        return -1
+
+    val tag = stmt_tag[s]
+
+    if tag == STMT_EXPR:
+        val e = stmt_expr[s]
+        if e < 0:
+            return -1
+        # Check for explicit return: EXPR_RETURN wrapping a literal
+        if expr_tag[e] == EXPR_RETURN:
+            val inner = expr_left[e]
+            if inner >= 0:
+                return inner
+            return -1
+        # Bare expression (implicit return)
+        return e
+
+    if tag == STMT_RETURN:
+        val e = stmt_expr[s]
+        if e >= 0:
+            return e
+        return -1
+
+    -1
+
+# ============================================================================
+# Trivial Expression Classification
+# ============================================================================
+
+fn classify_trivial(e: i64) -> text:
+    """Classify an expression as a trivial literal. Returns a human-readable
+    description of the trivial kind, or "" if not trivial."""
+    if e < 0:
+        return ""
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_INT_LIT:
+        return "integer ({expr_i_val[e]})"
+
+    if tag == EXPR_FLOAT_LIT:
+        return "float ({expr_s_val[e]})"
+
+    if tag == EXPR_STRING_LIT:
+        val s = expr_s_val[e]
+        if s == "":
+            return "empty string (\"\")"
+        return "string (\"{s}\")"
+
+    if tag == EXPR_BOOL_LIT:
+        if expr_i_val[e] == 0:
+            return "false"
+        return "true"
+
+    if tag == EXPR_NIL_LIT:
+        return "nil"
+
+    if tag == EXPR_ARRAY_LIT:
+        if expr_args[e].len() == 0:
+            return "empty array ([])"
+        return ""
+
+    if tag == EXPR_DICT_LIT:
+        if expr_args[e].len() == 0:
+            return "empty dict ({})"
+        return ""
+
+    if tag == EXPR_UNIT:
+        return "unit (())"
+
+    if tag == EXPR_TUPLE:
+        if expr_args[e].len() == 0:
+            return "unit (())"
+        return ""
+
+    # Ok(nil) or Ok(0) pattern — EXPR_CALL with callee "Ok" and single trivial arg
+    if tag == EXPR_CALL:
+        val callee = expr_left[e]
+        if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
+            if expr_s_val[callee] == "Ok":
+                val call_args = expr_args[e]
+                if call_args.len() == 1:
+                    val inner = call_args[0]
+                    if inner >= 0:
+                        val inner_kind = classify_trivial(inner)
+                        if inner_kind != "":
+                            return "Ok({inner_kind})"
+
+    # pass (without todo/do_nothing) — treated as trivial
+    if tag == EXPR_PASS:
+        return "pass"
+
+    ""
+
+fn is_default_value(e: i64) -> bool:
+    """Check if expression is a "zero/default value" for its type.
+    Used for STUB002 — zero-param functions returning defaults.
+
+    Default values: 0, 0.0, "", false, nil, [], {}, (), pass
+    NOT default: non-zero int, non-empty string, true (these are constants).
+    """
+    if e < 0:
+        return false
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_INT_LIT:
+        return expr_i_val[e] == 0
+
+    if tag == EXPR_FLOAT_LIT:
+        val f = expr_s_val[e]
+        return f == "0" or f == "0.0" or f == "0.00"
+
+    if tag == EXPR_STRING_LIT:
+        return expr_s_val[e] == ""
+
+    if tag == EXPR_BOOL_LIT:
+        return expr_i_val[e] == 0  # false
+
+    if tag == EXPR_NIL_LIT:
+        return true
+
+    if tag == EXPR_ARRAY_LIT:
+        return expr_args[e].len() == 0
+
+    if tag == EXPR_DICT_LIT:
+        return expr_args[e].len() == 0
+
+    if tag == EXPR_UNIT:
+        return true
+
+    if tag == EXPR_TUPLE:
+        return expr_args[e].len() == 0
+
+    if tag == EXPR_PASS:
+        return true
+
+    # Ok(nil) or Ok(default)
+    if tag == EXPR_CALL:
+        val callee = expr_left[e]
+        if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
+            if expr_s_val[callee] == "Ok":
+                val call_args = expr_args[e]
+                if call_args.len() == 1:
+                    return is_default_value(call_args[0])
+
+    false
+
+# ============================================================================
+# Pass Marker Detection
+# ============================================================================
+
+fn body_has_pass_marker(stmts: [i64]) -> bool:
+    """Check if any statement in the body contains pass_todo, pass_do_nothing,
+    or pass_dn. If so, the function is already marked and should not be flagged."""
+    for s in stmts:
+        if s < 0:
+            continue
+        if stmt_has_pass_marker(s):
+            return true
+    false
+
+fn stmt_has_pass_marker(s: i64) -> bool:
+    """Check if a statement or its children contain a pass marker."""
+    if s < 0:
+        return false
+
+    val tag = stmt_tag[s]
+
+    # Check the expression in this statement
+    val e = stmt_expr[s]
+    if e >= 0:
+        if expr_has_pass_marker(e):
+            return true
+
+    # Recurse into child statements
+    val children = stmt_body[s]
+    for child in children:
+        if stmt_has_pass_marker(child):
+            return true
+
+    false
+
+fn expr_has_pass_marker(e: i64) -> bool:
+    """Check if an expression is or contains a pass marker."""
+    if e < 0:
+        return false
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_PASS_TODO:
+        return true
+    if tag == EXPR_PASS_DO_NOTHING:
+        return true
+    if tag == EXPR_PASS_DN:
+        return true
+
+    # Recurse into sub-expressions
+    if expr_has_pass_marker(expr_left[e]):
+        return true
+    if expr_has_pass_marker(expr_right[e]):
+        return true
+
+    for arg in expr_args[e]:
+        if expr_has_pass_marker(arg):
+            return true
+
+    for child_stmt in expr_stmts[e]:
+        if stmt_has_pass_marker(child_stmt):
+            return true
+
+    false
+
+# ============================================================================
+# Parameter Usage Detection
+# ============================================================================
+
+fn body_references_any_param(stmts: [i64], params: [text]) -> bool:
+    """Check if any statement in the body references any of the given parameter names."""
+    for s in stmts:
+        if s < 0:
+            continue
+        if stmt_references_param(s, params):
+            return true
+    false
+
+fn stmt_references_param(s: i64, params: [text]) -> bool:
+    """Check if a statement references any parameter name."""
+    if s < 0:
+        return false
+
+    val tag = stmt_tag[s]
+
+    # Check expression
+    val e = stmt_expr[s]
+    if e >= 0:
+        if expr_references_param(e, params):
+            return true
+
+    # Check statement name (e.g. val x = ... where x shadows a param — still a reference)
+    # Actually, we don't count shadowing as usage.
+
+    # Recurse into child statements
+    for child in stmt_body[s]:
+        if stmt_references_param(child, params):
+            return true
+
+    false
+
+fn expr_references_param(e: i64, params: [text]) -> bool:
+    """Check if an expression references any parameter name via EXPR_IDENT."""
+    if e < 0:
+        return false
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_IDENT:
+        val name = expr_s_val[e]
+        for p in params:
+            if name == p:
+                return true
+        return false
+
+    # Recurse into sub-expressions
+    if expr_references_param(expr_left[e], params):
+        return true
+    if expr_references_param(expr_right[e], params):
+        return true
+
+    for arg in expr_args[e]:
+        if expr_references_param(arg, params):
+            return true
+
+    for child_stmt in expr_stmts[e]:
+        if stmt_references_param(child_stmt, params):
+            return true
+
+    false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export StubImplWarning
+export check_stub_impl
+export classify_trivial, is_default_value
+export body_has_pass_marker, body_references_any_param
+export get_single_trivial_expr

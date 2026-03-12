@@ -1,0 +1,470 @@
+"""
+# Stub Implementation Lint Specification
+
+**Feature IDs:** #STUB-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests the STUB001/STUB002 lint that detects functions with trivial/dummy
+implementations — bare literals like 0, "", false, nil without parameter usage.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| STUB001 | Function with params returns trivial value, params unused |
+| STUB002 | Zero-param function returns default value (possible stub) |
+| Trivial | A bare literal or default value as entire function body |
+| Default | Zero-values: 0, "", false, nil, [], {} |
+"""
+
+use compiler.core.ast.{
+    ast_reset, decl_fn, decl_extern_fn, module_add_decl, module_get_decls,
+    DECL_FN, DECL_EXTERN_FN
+}
+use compiler.core.ast_expr.{
+    expr_int_lit, expr_string_lit, expr_bool_lit, expr_nil_lit,
+    expr_array_lit, expr_unit, expr_dict_lit, expr_ident,
+    expr_return_expr, expr_call, expr_pass, expr_pass_todo,
+    expr_pass_do_nothing, expr_binary, expr_method_call
+}
+use compiler.core.ast_stmt.{
+    stmt_expr_stmt, stmt_return_stmt
+}
+use compiler.core.tokens.{TOK_PLUS}
+use compiler.semantics.lint.stub_impl.{
+    check_stub_impl, StubImplWarning,
+    classify_trivial, is_default_value,
+    body_has_pass_marker, body_references_any_param,
+    get_single_trivial_expr
+}
+
+# ============================================================================
+# Helpers: Build minimal AST for a function
+# ============================================================================
+
+fn make_fn_with_body(name: text, param_names: [text], body_expr_id: i64) -> i64:
+    """Create a function decl with a single STMT_EXPR body."""
+    val s = stmt_expr_stmt(body_expr_id, 0)
+    val param_types: [i64] = []
+    for _ in param_names:
+        param_types.push(0)
+    decl_fn(name, param_names, param_types, 0, [s], 0, [], 0)
+
+fn make_fn_with_return(name: text, param_names: [text], body_expr_id: i64) -> i64:
+    """Create a function decl with a single STMT_RETURN body."""
+    val s = stmt_return_stmt(body_expr_id, 0)
+    val param_types: [i64] = []
+    for _ in param_names:
+        param_types.push(0)
+    decl_fn(name, param_names, param_types, 0, [s], 0, [], 0)
+
+fn find_warnings_by_code(warnings: [StubImplWarning], code: text) -> [StubImplWarning]:
+    var result: [StubImplWarning] = []
+    for w in warnings:
+        if w.code == code:
+            result.push(w)
+    result
+
+# ============================================================================
+# Test Group 1: STUB001 — Functions with unused params
+# ============================================================================
+
+describe "STUB001 — Trivial return with unused params":
+    """
+    ## Unused Parameters
+
+    Detect functions that accept parameters but return a trivial literal
+    without referencing any of them.
+    """
+
+    context "when function returns bare 0 with unused params":
+        it "emits STUB001 warning":
+            ast_reset()
+            val e = expr_int_lit(0, 0)
+            val d = make_fn_with_body("gc_malloc", ["size"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_be_greater_than(0)
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+            expect(stub001[0].fn_name).to_equal("gc_malloc")
+
+    context "when function returns empty string with unused params":
+        it "emits STUB001 warning":
+            ast_reset()
+            val e = expr_string_lit("", 0)
+            val d = make_fn_with_body("load_config", ["path"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns false with unused params":
+        it "emits STUB001 warning":
+            ast_reset()
+            val e = expr_bool_lit(0, 0)
+            val d = make_fn_with_body("is_supported", ["feature"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns nil with unused params":
+        it "emits STUB001 warning":
+            ast_reset()
+            val e = expr_nil_lit(0)
+            val d = make_fn_with_body("find_item", ["name"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns empty array with unused params":
+        it "emits STUB001 warning":
+            ast_reset()
+            val e = expr_array_lit([], 0)
+            val d = make_fn_with_body("tokenize", ["src"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns non-zero literal with unused params":
+        it "emits STUB001 for any literal when params unused":
+            ast_reset()
+            val e = expr_int_lit(42, 0)
+            val d = make_fn_with_body("compute", ["x"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns non-empty string with unused params":
+        it "emits STUB001 (constant string ignoring params)":
+            ast_reset()
+            val e = expr_string_lit("GET", 0)
+            val d = make_fn_with_body("get_method", ["request"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when function returns true with unused params":
+        it "emits STUB001":
+            ast_reset()
+            val e = expr_bool_lit(1, 0)
+            val d = make_fn_with_body("supports_target", ["target"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when explicit return with unused params":
+        it "emits STUB001 for return 0":
+            ast_reset()
+            val e = expr_int_lit(0, 0)
+            val d = make_fn_with_return("process", ["data"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when Ok(nil) with unused params":
+        it "emits STUB001":
+            ast_reset()
+            val nil_e = expr_nil_lit(0)
+            val ok_callee = expr_ident("Ok", 0)
+            val ok_call = expr_call(ok_callee, [nil_e], 0)
+            val d = make_fn_with_body("run_backend", ["module"], ok_call)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+# ============================================================================
+# Test Group 2: STUB002 — Zero-param functions with default values
+# ============================================================================
+
+describe "STUB002 — Zero-param default return":
+    """
+    ## Default Value Returns
+
+    Detect zero-parameter functions that return type default values.
+    These are lower confidence — could be stubs or legitimate constants.
+    """
+
+    context "when zero-param function returns 0":
+        it "emits STUB002 info":
+            ast_reset()
+            val e = expr_int_lit(0, 0)
+            val d = make_fn_with_body("get_count", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(1)
+            expect(stub002[0].severity).to_equal("INFO")
+
+    context "when zero-param function returns empty string":
+        it "emits STUB002 info":
+            ast_reset()
+            val e = expr_string_lit("", 0)
+            val d = make_fn_with_body("get_name", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(1)
+
+    context "when zero-param function returns false":
+        it "emits STUB002 info":
+            ast_reset()
+            val e = expr_bool_lit(0, 0)
+            val d = make_fn_with_body("is_ready", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(1)
+
+    context "when zero-param function returns nil":
+        it "emits STUB002 info":
+            ast_reset()
+            val e = expr_nil_lit(0)
+            val d = make_fn_with_body("get_cache", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(1)
+
+    context "when zero-param function returns non-zero constant":
+        it "does NOT emit STUB002 (legitimate constant)":
+            ast_reset()
+            val e = expr_int_lit(42, 0)
+            val d = make_fn_with_body("max_retries", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(0)
+
+    context "when zero-param function returns non-empty string":
+        it "does NOT emit STUB002 (legitimate constant)":
+            ast_reset()
+            val e = expr_string_lit("GET", 0)
+            val d = make_fn_with_body("method_get", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(0)
+
+    context "when zero-param function returns true":
+        it "does NOT emit STUB002 (legitimate constant)":
+            ast_reset()
+            val e = expr_bool_lit(1, 0)
+            val d = make_fn_with_body("is_enabled", [], e)
+            val ws = check_stub_impl([d])
+            val stub002 = find_warnings_by_code(ws, "STUB002")
+            expect(stub002.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 3: Non-flagged cases (should NOT warn)
+# ============================================================================
+
+describe "Stub Impl Lint — No Warning Cases":
+    """
+    ## Suppressed Warnings
+
+    These cases should NOT emit any warnings.
+    """
+
+    context "when function uses its parameters":
+        it "does NOT warn":
+            ast_reset()
+            val param_ref = expr_ident("x", 0)
+            val d = make_fn_with_body("identity", ["x"], param_ref)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function has pass_todo marker":
+        it "does NOT warn":
+            ast_reset()
+            val e = expr_pass_todo("implement later", 0)
+            val d = make_fn_with_body("not_yet", ["data"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function has pass_do_nothing marker":
+        it "does NOT warn":
+            ast_reset()
+            val e = expr_pass_do_nothing("intentional", 0)
+            val d = make_fn_with_body("noop_handler", ["event"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function name starts with _noop_":
+        it "does NOT warn":
+            ast_reset()
+            val e = expr_int_lit(0, 0)
+            val d = make_fn_with_body("_noop_load", ["path"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function has multi-statement body":
+        it "does NOT warn (not a single-expression stub)":
+            ast_reset()
+            val e1 = expr_int_lit(1, 0)
+            val e2 = expr_int_lit(0, 0)
+            val s1 = stmt_expr_stmt(e1, 0)
+            val s2 = stmt_expr_stmt(e2, 0)
+            val param_types: [i64] = [0]
+            val d = decl_fn("multi_stmt", ["x"], param_types, 0, [s1, s2], 0, [], 0)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when extern fn (no body)":
+        it "does NOT warn":
+            ast_reset()
+            val d = decl_extern_fn("rt_read", ["path"], [0], 0, [], 0)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function body is complex expression":
+        it "does NOT warn for binary op":
+            ast_reset()
+            val left = expr_ident("x", 0)
+            val right = expr_int_lit(2, 0)
+            val e = expr_binary(TOK_PLUS, left, right, 0)
+            val d = make_fn_with_body("double", ["x"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function body is method call":
+        it "does NOT warn":
+            ast_reset()
+            val recv = expr_ident("items", 0)
+            val e = expr_method_call(recv, "len", [], 0)
+            val d = make_fn_with_body("count", ["items"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 4: Helper Function Unit Tests
+# ============================================================================
+
+describe "Stub Impl Lint — classify_trivial":
+    """
+    ## Expression Classification
+
+    Unit tests for the classify_trivial helper.
+    """
+
+    it "classifies int literal":
+        ast_reset()
+        val e = expr_int_lit(0, 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_contain("integer")
+
+    it "classifies empty string":
+        ast_reset()
+        val e = expr_string_lit("", 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_contain("empty string")
+
+    it "classifies non-empty string":
+        ast_reset()
+        val e = expr_string_lit("hello", 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_contain("string")
+
+    it "classifies bool false":
+        ast_reset()
+        val e = expr_bool_lit(0, 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("false")
+
+    it "classifies bool true":
+        ast_reset()
+        val e = expr_bool_lit(1, 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("true")
+
+    it "classifies nil":
+        ast_reset()
+        val e = expr_nil_lit(0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("nil")
+
+    it "classifies empty array":
+        ast_reset()
+        val e = expr_array_lit([], 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_contain("empty array")
+
+    it "rejects non-empty array":
+        ast_reset()
+        val elem = expr_int_lit(1, 0)
+        val e = expr_array_lit([elem], 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("")
+
+    it "classifies unit":
+        ast_reset()
+        val e = expr_unit(0)
+        val kind = classify_trivial(e)
+        expect(kind).to_contain("unit")
+
+    it "classifies pass":
+        ast_reset()
+        val e = expr_pass(0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("pass")
+
+    it "rejects complex expression (binary)":
+        ast_reset()
+        val left = expr_int_lit(1, 0)
+        val right = expr_int_lit(2, 0)
+        val e = expr_binary(TOK_PLUS, left, right, 0)
+        val kind = classify_trivial(e)
+        expect(kind).to_equal("")
+
+describe "Stub Impl Lint — is_default_value":
+    """
+    ## Default Value Detection
+
+    Unit tests for distinguishing zero/default values from meaningful constants.
+    """
+
+    it "0 is default":
+        ast_reset()
+        val e = expr_int_lit(0, 0)
+        expect(is_default_value(e)).to_equal(true)
+
+    it "42 is NOT default":
+        ast_reset()
+        val e = expr_int_lit(42, 0)
+        expect(is_default_value(e)).to_equal(false)
+
+    it "empty string is default":
+        ast_reset()
+        val e = expr_string_lit("", 0)
+        expect(is_default_value(e)).to_equal(true)
+
+    it "non-empty string is NOT default":
+        ast_reset()
+        val e = expr_string_lit("hello", 0)
+        expect(is_default_value(e)).to_equal(false)
+
+    it "false is default":
+        ast_reset()
+        val e = expr_bool_lit(0, 0)
+        expect(is_default_value(e)).to_equal(true)
+
+    it "true is NOT default":
+        ast_reset()
+        val e = expr_bool_lit(1, 0)
+        expect(is_default_value(e)).to_equal(false)
+
+    it "nil is default":
+        ast_reset()
+        val e = expr_nil_lit(0)
+        expect(is_default_value(e)).to_equal(true)
+
+    it "empty array is default":
+        ast_reset()
+        val e = expr_array_lit([], 0)
+        expect(is_default_value(e)).to_equal(true)
+
+    it "non-empty array is NOT default":
+        ast_reset()
+        val elem = expr_int_lit(1, 0)
+        val e = expr_array_lit([elem], 0)
+        expect(is_default_value(e)).to_equal(false)

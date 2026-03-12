@@ -421,7 +421,13 @@ impl NativeBackend for LlvmBackend {
         // This is necessary so that functions can call each other regardless of compilation order
         for func in &module.functions {
             let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
-            self.declare_function_with_linkage(&func.name, &param_types, &func.return_type, !func.blocks.is_empty())?;
+            // Resolve through import_map/use_map to get the mangled name
+            // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
+            let resolved_name = self.use_map.get(&func.name)
+                .or_else(|| self.import_map.get(&func.name))
+                .map(|s| s.as_str())
+                .unwrap_or(&func.name);
+            self.declare_function_with_linkage(resolved_name, &param_types, &func.return_type, !func.blocks.is_empty())?;
         }
 
         // Second pass: compile all function bodies

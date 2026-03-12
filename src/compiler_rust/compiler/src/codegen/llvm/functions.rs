@@ -61,14 +61,20 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(crate::error::factory::llvm_builder_not_created)?;
 
+        // Resolve through import_map/use_map to get the mangled name
+        let resolved_name = self.use_map.get(&func.name)
+            .or_else(|| self.import_map.get(&func.name))
+            .map(|s| s.as_str())
+            .unwrap_or(&func.name);
+
         // Get the function that was forward-declared in the compile() pass
         // If it doesn't exist, create it (for backwards compatibility)
-        let function = module.get_function(&func.name).unwrap_or_else(|| {
+        let function = module.get_function(resolved_name).unwrap_or_else(|| {
             let i64_type = self.context.i64_type();
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 func.params.iter().map(|_| i64_type.into()).collect();
             let fn_type = i64_type.fn_type(&param_types, false);
-            module.add_function(&func.name, fn_type, None)
+            module.add_function(resolved_name, fn_type, None)
         });
 
         // Create basic blocks for each MIR block

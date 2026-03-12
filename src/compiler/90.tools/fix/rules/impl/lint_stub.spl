@@ -1,0 +1,189 @@
+# EasyFix Rules - Stub Implementation Detection (Text-Scanning)
+#
+# Text-based heuristic for detecting stub/dummy implementations:
+#   L:stub_impl — Function with params returns bare literal (params unused)
+#
+# This is a text-scanning complement to the AST-based STUB001/STUB002 lint
+# in src/compiler/35.semantics/lint/stub_impl.spl. It catches the most
+# common patterns via regex-like line scanning.
+#
+# Patterns detected:
+#   fn name(params): 0
+#   fn name(params): ""
+#   fn name(params): false
+#   fn name(params): nil
+#   fn name(params): []
+#   fn name(params): ()
+#   fn name(params) -> Type: 0   (with return type)
+#   fn name(params):\n    0      (next-line body)
+#   fn name(params):\n    return 0
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+# Trivial return values — text patterns for single-line bodies
+val TRIVIAL_BODIES = ["0", "\"\"", "false", "nil", "[]", "()", "true",
+                      "return 0", "return \"\"", "return false", "return nil",
+                      "return []", "return ()", "return true",
+                      "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
+
+# ============================================================================
+# Rule 12: stub_impl
+# Detects function signatures followed by trivial body expressions.
+# Confidence: Likely (text heuristic — may have false positives on constants)
+# ============================================================================
+
+fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+
+        # Pattern 1: Single-line function with trivial body
+        # fn name(params): <trivial>
+        # fn name(params) -> Type: <trivial>
+        if is_fn_signature(trimmed):
+            val colon_body = extract_inline_body(trimmed)
+            if colon_body != "":
+                if is_trivial_body(colon_body):
+                    if has_params(trimmed):
+                        var fix = EasyFix.create(
+                            id: "L:stub_impl:{line_num}",
+                            description: "function with params returns trivial '{colon_body}' — possible stub",
+                            confidence: FixConfidence.Likely
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file,
+                            start: byte_offset,
+                            end: byte_offset + line.len(),
+                            line: line_num,
+                            column: 1,
+                            new_text: line
+                        ))
+                        fixes.push(fix)
+
+        # Pattern 2: Multi-line function — signature line, next line is trivial body
+        # fn name(params):
+        #     <trivial>
+        if is_fn_signature_header(trimmed) and has_params(trimmed):
+            # Check next line
+            if line_num < lines.len():
+                val next_line = lines[line_num]  # 0-indexed: line_num is already +1
+                val next_trimmed = next_line.trim()
+                val next_indent = next_line.len() - next_trimmed.len()
+                # Body must be indented more than fn signature
+                if next_indent > indent and is_trivial_body(next_trimmed):
+                    # Also check that there's no line after with same or deeper indent
+                    # (single-statement body)
+                    var is_single_stmt = true
+                    if line_num + 1 < lines.len():
+                        val after_next = lines[line_num + 1]
+                        val after_trimmed = after_next.trim()
+                        val after_indent = after_next.len() - after_trimmed.len()
+                        if after_trimmed != "" and after_indent > indent:
+                            is_single_stmt = false
+                    if is_single_stmt:
+                        var fix = EasyFix.create(
+                            id: "L:stub_impl:{line_num}",
+                            description: "function with params returns trivial '{next_trimmed}' — possible stub",
+                            confidence: FixConfidence.Likely
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file,
+                            start: byte_offset,
+                            end: byte_offset + line.len(),
+                            line: line_num,
+                            column: 1,
+                            new_text: line
+                        ))
+                        fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Pattern helpers
+# ============================================================================
+
+fn is_fn_signature(trimmed: text) -> bool:
+    """Check if line starts with fn/me/static fn declaration."""
+    if trimmed.starts_with("fn "):
+        return true
+    if trimmed.starts_with("me "):
+        return true
+    if trimmed.starts_with("static fn "):
+        return true
+    false
+
+fn is_fn_signature_header(trimmed: text) -> bool:
+    """Check if line is a function header ending with just ':'."""
+    if not is_fn_signature(trimmed):
+        return false
+    if not trimmed.ends_with(":"):
+        return false
+    # Make sure the colon is the block-start colon, not a type annotation
+    # A block-start colon follows ) or ) -> Type
+    # Simple heuristic: the last char before : is ) or a type name char
+    true
+
+fn has_params(trimmed: text) -> bool:
+    """Check if function signature has non-empty parameter list."""
+    val paren_start = trimmed.find("(")
+    val paren_end = trimmed.find(")")
+    if paren_start < 0 or paren_end < 0:
+        return false
+    if paren_end <= paren_start + 1:
+        return false  # Empty parens ()
+    # Check content between parens isn't just whitespace
+    val params_str = trimmed.slice(paren_start + 1, paren_end).trim()
+    params_str.len() > 0
+
+fn extract_inline_body(trimmed: text) -> text:
+    """Extract inline body after the last ':' in a single-line function.
+
+    For: fn name(params) -> Type: <body>
+    Returns: <body>
+
+    Returns "" if no inline body found.
+    """
+    # Must have parens (function signature)
+    val paren_end = trimmed.find(")")
+    if paren_end < 0:
+        return ""
+
+    # Find the body-start colon AFTER the closing paren
+    val after_paren = trimmed.slice(paren_end + 1)
+    val colon_pos = after_paren.find(":")
+    if colon_pos < 0:
+        return ""
+
+    val body = after_paren.slice(colon_pos + 1).trim()
+    # If body is empty, it's a multi-line function header
+    if body == "":
+        return ""
+    body
+
+fn is_trivial_body(body: text) -> bool:
+    """Check if a body string matches a known trivial pattern."""
+    for pattern in TRIVIAL_BODIES:
+        if body == pattern:
+            return true
+    # Also match pass (without todo/do_nothing)
+    if body == "pass":
+        return true
+    # Skip functions with pass_todo or pass_do_nothing (already marked)
+    if body.starts_with("pass_todo"):
+        return false
+    if body.starts_with("pass_do_nothing"):
+        return false
+    if body.starts_with("pass_dn"):
+        return false
+    false
+
+export check_stub_impl_text

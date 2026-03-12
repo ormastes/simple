@@ -746,10 +746,109 @@ fn check_all_rules(source: String, file: String) -> [EasyFix]:
     for f in fixes8:
         all_fixes.push(f)
 
+    val fixes9 = check_stub_impl_text(source, file)
+    for f in fixes9:
+        all_fixes.push(f)
+
     # Rules 7 (typo) and 9 (type coercion) are no-ops in text-scanning mode.
     # They require compiler integration (Rust side).
 
     all_fixes
+
+# ============================================================================
+# Rule 12: stub_impl (text-scanning)
+# Detects function signatures followed by trivial body expressions.
+# Confidence: Likely
+# ============================================================================
+
+val _STUB_TRIVIAL = ["0", "\"\"", "false", "nil", "[]", "()", "true",
+                     "return 0", "return \"\"", "return false", "return nil",
+                     "return []", "return ()", "return true",
+                     "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
+
+fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+
+        if _stub_is_fn(trimmed):
+            val body = _stub_inline_body(trimmed)
+            if body != "" and _stub_is_trivial(body) and _stub_has_params(trimmed):
+                var fix = EasyFix.create(
+                    id: "L:stub_impl:{line_num}",
+                    description: "function with params returns trivial '{body}' — possible stub",
+                    confidence: FixConfidence.Likely
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file, start: byte_offset, end: byte_offset + line.len(),
+                    line: line_num, column: 1, new_text: line
+                ))
+                fixes.push(fix)
+
+        if _stub_is_fn_header(trimmed) and _stub_has_params(trimmed):
+            if line_num < lines.len():
+                val nl = lines[line_num]
+                val nt = nl.trim()
+                val ni = nl.len() - nt.len()
+                if ni > indent and _stub_is_trivial(nt):
+                    var single = true
+                    if line_num + 1 < lines.len():
+                        val al = lines[line_num + 1]
+                        val at = al.trim()
+                        val ai = al.len() - at.len()
+                        if at != "" and ai > indent:
+                            single = false
+                    if single:
+                        var fix = EasyFix.create(
+                            id: "L:stub_impl:{line_num}",
+                            description: "function with params returns trivial '{nt}' — possible stub",
+                            confidence: FixConfidence.Likely
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file, start: byte_offset, end: byte_offset + line.len(),
+                            line: line_num, column: 1, new_text: line
+                        ))
+                        fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+    fixes
+
+fn _stub_is_fn(t: text) -> bool:
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _stub_is_fn_header(t: text) -> bool:
+    _stub_is_fn(t) and t.ends_with(":")
+
+fn _stub_has_params(t: text) -> bool:
+    val ps = t.find("(")
+    val pe = t.find(")")
+    if ps < 0 or pe < 0 or pe <= ps + 1:
+        return false
+    t.slice(ps + 1, pe).trim().len() > 0
+
+fn _stub_inline_body(t: text) -> text:
+    val pe = t.find(")")
+    if pe < 0:
+        return ""
+    val after = t.slice(pe + 1)
+    val cp = after.find(":")
+    if cp < 0:
+        return ""
+    after.slice(cp + 1).trim()
+
+fn _stub_is_trivial(body: text) -> bool:
+    if body.starts_with("pass_todo") or body.starts_with("pass_do_nothing") or body.starts_with("pass_dn"):
+        return false
+    for p in _STUB_TRIVIAL:
+        if body == p:
+            return true
+    body == "pass"
 
 export LineContext, for_each_line, byte_offset_of, line_start_offset, line_end_offset
 export check_print_in_test_spec, check_unnamed_duplicate_typed_args, check_resource_leak
@@ -758,4 +857,5 @@ export check_typo_suggestion, suggest_typo_fix, levenshtein
 export check_parser_contextual_keyword
 export check_type_mismatch_coercion, suggest_type_coercion_fix
 export check_deprecated_if_let
+export check_stub_impl_text
 export check_all_rules
