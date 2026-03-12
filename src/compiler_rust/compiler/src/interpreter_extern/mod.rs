@@ -531,6 +531,7 @@ pub(crate) fn call_extern_function(
         "rt_memcpy" => memory::rt_memcpy(&evaluated),
         "rt_torch_tensor" => torch::rt_torch_tensor(&evaluated),
         "rt_ps_torch_tensor" => torch::rt_ps_torch_tensor(&evaluated),
+        "rt_ps_torch_tensor_from_bits_1d" => torch::rt_ps_torch_tensor_from_bits_1d(&evaluated),
         "rt_ps_torch_tensor_from_data" => torch::rt_ps_torch_tensor_from_data(&evaluated),
         "rt_ps_torch_tensor_zeros" => torch::rt_ps_torch_tensor_zeros(&evaluated),
         "rt_torch_to_cuda" => torch::rt_torch_to_cuda(&evaluated),
@@ -539,6 +540,7 @@ pub(crate) fn call_extern_function(
         "rt_torch_clone" => torch::rt_torch_clone(&evaluated),
         "rt_torch_copy_data_to_cpu" => torch::rt_torch_copy_data_to_cpu(&evaluated),
         "f32_from_bits" => memory::f32_from_bits(&evaluated),
+        "spl_i64_is_zero" => memory::spl_i64_is_zero(&evaluated),
 
         // ====================================================================
         // RC/ARC Operations (20 functions: Rc + Arc reference counting)

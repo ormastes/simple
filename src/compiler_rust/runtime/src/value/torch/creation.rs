@@ -326,9 +326,6 @@ pub extern "C" fn rt_torch_tensor(
 
 fn runtime_array_to_f64_vec(array: RuntimeValue) -> Option<Vec<f64>> {
     let len = rt_array_len(array);
-    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
-        eprintln!("torch_creation f64 array raw=0x{:016x} len={}", array.to_raw(), len);
-    }
     if len < 0 {
         return None;
     }
@@ -336,15 +333,6 @@ fn runtime_array_to_f64_vec(array: RuntimeValue) -> Option<Vec<f64>> {
     let mut values = Vec::with_capacity(len as usize);
     for i in 0..len {
         let value = rt_array_get(array, i);
-        if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
-            eprintln!(
-                "torch_creation f64[{}] raw=0x{:016x} int={} float={}",
-                i,
-                value.to_raw(),
-                value.is_int(),
-                value.is_float()
-            );
-        }
         if value.is_float() {
             values.push(value.as_float());
         } else if value.is_int() {
@@ -358,9 +346,6 @@ fn runtime_array_to_f64_vec(array: RuntimeValue) -> Option<Vec<f64>> {
 
 fn runtime_array_to_i64_vec(array: RuntimeValue) -> Option<Vec<i64>> {
     let len = rt_array_len(array);
-    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
-        eprintln!("torch_creation i64 array raw=0x{:016x} len={}", array.to_raw(), len);
-    }
     if len < 0 {
         return None;
     }
@@ -368,15 +353,6 @@ fn runtime_array_to_i64_vec(array: RuntimeValue) -> Option<Vec<i64>> {
     let mut values = Vec::with_capacity(len as usize);
     for i in 0..len {
         let value = rt_array_get(array, i);
-        if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
-            eprintln!(
-                "torch_creation i64[{}] raw=0x{:016x} int={} float={}",
-                i,
-                value.to_raw(),
-                value.is_int(),
-                value.is_float()
-            );
-        }
         if !value.is_int() {
             return None;
         }
@@ -411,18 +387,6 @@ pub extern "C" fn rt_ps_torch_tensor(
     dtype_code: i32,
     device_code: i32,
 ) -> u64 {
-    if std::env::var_os("SIMPLE_TORCH_BRIDGE_PANIC").is_some() {
-        panic!("rt_ps_torch_tensor reached local bootstrap wrapper");
-    }
-    if std::env::var_os("SIMPLE_TORCH_BRIDGE_DEBUG").is_some() {
-        eprintln!(
-            "torch_creation tensor data=0x{:016x} dims=0x{:016x} dtype={} device={}",
-            data.to_raw(),
-            dims.to_raw(),
-            dtype_code,
-            device_code
-        );
-    }
     let Some(data_vec) = runtime_array_to_f64_vec(data) else {
         tracing::error!("rt_ps_torch_tensor: expected [f64] data array");
         return 0;
@@ -446,6 +410,22 @@ pub extern "C" fn rt_ps_torch_tensor(
 #[no_mangle]
 pub extern "C" fn rt_ps_torch_tensor_from_data(data: RuntimeValue, dims: RuntimeValue) -> u64 {
     rt_ps_torch_tensor(data, dims, 1, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ps_torch_tensor_from_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> u64 {
+    if data_bits_ptr.is_null() || data_len <= 0 {
+        return 0;
+    }
+
+    let bits = unsafe { std::slice::from_raw_parts(data_bits_ptr, data_len as usize) };
+    let mut data = Vec::with_capacity(bits.len());
+    for &word in bits {
+        data.push(f64::from_bits(word as u64));
+    }
+
+    let shape = [data_len];
+    rt_torch_tensor(data.as_ptr(), data_len, shape.as_ptr(), 1, 1, 0)
 }
 
 /// Pure-Simple ABI wrapper for zeros tensor creation.

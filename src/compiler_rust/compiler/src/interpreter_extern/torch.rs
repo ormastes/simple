@@ -184,6 +184,29 @@ pub fn rt_ps_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
 }
 
+pub fn rt_ps_torch_tensor_from_bits_1d(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_ps_torch_tensor_from_bits_1d requires 2 arguments (data_bits_ptr, data_len)",
+        ));
+    }
+
+    let ptr = args[0].as_int()?;
+    let len = args[1].as_int()?;
+    if ptr == 0 || len <= 0 {
+        return Ok(Value::Int(0));
+    }
+
+    let bits = unsafe { std::slice::from_raw_parts(ptr as *const i64, len as usize) };
+    let mut data = Vec::with_capacity(bits.len());
+    for &word in bits {
+        data.push(f64::from_bits(word as u64));
+    }
+
+    let dims = [len];
+    Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
+}
+
 pub fn rt_ps_torch_tensor_zeros(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime(

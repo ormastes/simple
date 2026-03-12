@@ -102,6 +102,16 @@ pub extern "C" fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn spl_f64_to_bits(value: f64) -> i64 {
+    value.to_bits() as i64
+}
+
+#[no_mangle]
+pub extern "C" fn spl_i64_is_zero(value: i64) -> i32 {
+    if value == 0 { 1 } else { 0 }
+}
+
 /// Fill memory with byte value. Returns dst.
 #[no_mangle]
 pub extern "C" fn rt_memset(dst: *mut u8, val: i8, n: i64) -> *mut u8 {

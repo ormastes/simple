@@ -130,6 +130,14 @@ pub fn f32_from_bits(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Float(f32::from_bits(bits) as f64))
 }
 
+pub fn spl_i64_is_zero(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("spl_i64_is_zero requires 1 argument (value)"));
+    }
+    let value = args[0].as_int()?;
+    Ok(Value::Int(if value == 0 { 1 } else { 0 }))
+}
+
 // Internal helper functions
 
 fn get_current_memory_usage() -> usize {
