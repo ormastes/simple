@@ -105,8 +105,8 @@ pub fn parse_individual_results(output: &str) -> Vec<IndividualTestResult> {
         let clean = strip_ansi_codes(line);
         let trimmed = clean.trim();
 
-        if trimmed.starts_with("✓ ") {
-            let name = trimmed[4..].to_string(); // "✓ " is 4 bytes (UTF-8)
+        if let Some(stripped) = trimmed.strip_prefix("✓ ") {
+            let name = stripped.to_string();
             results.push(IndividualTestResult {
                 name,
                 group: current_group.join(" > "),

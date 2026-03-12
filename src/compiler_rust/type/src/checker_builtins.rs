@@ -307,6 +307,7 @@ impl TypeChecker {
         self.instantiate_type(&scheme.ty, &var_map)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn instantiate_type(&self, ty: &Type, var_map: &HashMap<usize, usize>) -> Type {
         match ty {
             Type::Var(id) => {
@@ -355,6 +356,7 @@ impl TypeChecker {
         vars
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_free_vars(&self, ty: &Type, vars: &mut Vec<usize>) {
         match ty {
             Type::Var(id) => vars.push(*id),

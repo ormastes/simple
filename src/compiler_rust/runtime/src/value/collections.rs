@@ -303,6 +303,7 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 
 /// Free a heap-allocated array.
 #[no_mangle]
+#[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, ());
     unsafe {
@@ -370,6 +371,7 @@ pub extern "C" fn rt_tuple_len(tuple: RuntimeValue) -> i64 {
 
 /// Free a heap-allocated tuple.
 #[no_mangle]
+#[allow(clippy::unused_unit)]
 pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
     let ptr = as_typed_ptr!(mut tuple, HeapObjectType::Tuple, RuntimeTuple, ());
     unsafe {
@@ -1415,8 +1417,8 @@ pub extern "C" fn rt_array_take(array: RuntimeValue, n: i64) -> RuntimeValue {
         }
 
         let slice = (*arr).as_slice();
-        for i in 0..take_count as usize {
-            rt_array_push(result, slice[i]);
+        for item in slice.iter().take(take_count as usize) {
+            rt_array_push(result, *item);
         }
         result
     }
@@ -1438,8 +1440,8 @@ pub extern "C" fn rt_array_drop(array: RuntimeValue, n: i64) -> RuntimeValue {
         }
 
         let slice = (*arr).as_slice();
-        for i in skip_count..len as usize {
-            rt_array_push(result, slice[i]);
+        for item in slice.iter().take(len as usize).skip(skip_count) {
+            rt_array_push(result, *item);
         }
         result
     }
@@ -1580,12 +1582,10 @@ pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValu
         } else {
             ((end - start + step - 1) / step) as u64
         }
+    } else if start <= end {
+        0
     } else {
-        if start <= end {
-            0
-        } else {
-            ((start - end - step - 1) / (-step)) as u64
-        }
+        ((start - end - step - 1) / (-step)) as u64
     };
 
     let result = rt_array_new(count);

@@ -480,7 +480,7 @@ pub extern "C" fn sys_file_size(fd: i32) -> i64 {
 
             if result == 0 {
                 let stat = stat_buf.assume_init();
-                stat.st_size as i64
+                stat.st_size
             } else {
                 -1
             }

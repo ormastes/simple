@@ -345,6 +345,7 @@ impl McpGenerator {
             .join(", ")
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn format_type(&self, ty: &Type) -> String {
         match ty {
             Type::Simple(name) => name.clone(),

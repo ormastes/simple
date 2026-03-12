@@ -3,11 +3,11 @@
 use simple_common::target::{Target, TargetArch};
 use crate::runner::Runner;
 use crate::CompileOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Compile a source file to SMF format
 pub fn compile_file(
-    source: &PathBuf,
+    source: &Path,
     output: Option<PathBuf>,
     target: Option<Target>,
     snapshot: bool,
@@ -145,8 +145,9 @@ pub fn list_targets() -> i32 {
 }
 
 /// Compile a source file to a standalone native binary
+#[allow(clippy::too_many_arguments)]
 pub fn compile_file_native(
-    source: &PathBuf,
+    source: &Path,
     output: Option<PathBuf>,
     target: Option<Target>,
     linker: Option<simple_compiler::linker::NativeLinker>,
@@ -213,7 +214,7 @@ pub fn compile_file_native(
 }
 
 /// Compile a source file to PTX (NVIDIA GPU assembly) output
-pub fn compile_file_to_ptx(source: &PathBuf, output: Option<PathBuf>) -> i32 {
+pub fn compile_file_to_ptx(source: &Path, output: Option<PathBuf>) -> i32 {
     use simple_compiler::pipeline::CompilerPipeline;
 
     let out_path = output.unwrap_or_else(|| source.with_extension("ptx"));

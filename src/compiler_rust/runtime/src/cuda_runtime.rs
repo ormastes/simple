@@ -721,7 +721,7 @@ pub extern "C" fn rt_cuda_device_name(device: i64) -> *const c_char {
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
 pub extern "C" fn rt_cuda_device_name(_device: i64) -> *const c_char {
-    b"No CUDA\0".as_ptr() as *const c_char
+    c"No CUDA".as_ptr()
 }
 
 /// Get compute capability as major*10+minor

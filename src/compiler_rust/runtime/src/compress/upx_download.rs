@@ -120,13 +120,7 @@ fn get_upx_release_filename(version: &str) -> Result<String, String> {
 
     let arch_str = match target.arch {
         TargetArch::X86_64 => "amd64",
-        TargetArch::Aarch64 => {
-            if target.os == TargetOS::MacOS {
-                "arm64"
-            } else {
-                "arm64"
-            }
-        }
+        TargetArch::Aarch64 => "arm64",
         TargetArch::X86 => "i386",
         _ => {
             return Err(format!(
@@ -249,7 +243,7 @@ fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf, Strin
 
             Ok(path)
         }
-        None => Err(format!("UPX binary not found in archive")),
+        None => Err("UPX binary not found in archive".to_string()),
     }
 }
 

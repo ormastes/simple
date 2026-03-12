@@ -3,7 +3,7 @@
 //! Orchestrates test discovery, execution, and reporting.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use simple_compiler::{init_coverage, is_coverage_enabled};
@@ -527,7 +527,7 @@ fn determine_test_path(options: &TestOptions) -> PathBuf {
 }
 
 /// Discover and filter test files
-fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<PathBuf> {
+fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<PathBuf> {
     debug_log!(
         DebugLevel::Basic,
         "Discovery",
@@ -571,7 +571,7 @@ fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<
 }
 
 /// Shuffle tests deterministically based on seed
-fn shuffle_tests(test_files: &mut Vec<PathBuf>, seed: u64) {
+fn shuffle_tests(test_files: &mut [PathBuf], seed: u64) {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1112,7 +1112,7 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
 
     // List runs (if requested)
     if options.list_runs {
-        let status_filter = options.runs_status_filter.as_ref().map(|s| TestRunStatus::from_str(s));
+        let status_filter = options.runs_status_filter.as_ref().map(|s| TestRunStatus::parse_str(s));
 
         match list_runs(&db_path, status_filter) {
             Ok(runs) => {

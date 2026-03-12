@@ -264,12 +264,12 @@ fn test_app_type_string_conversion() {
     assert_eq!(AppType::Service.as_str(), "service");
     assert_eq!(AppType::Repl.as_str(), "repl");
 
-    assert_eq!(AppType::from_str("cli"), Some(AppType::Cli));
-    assert_eq!(AppType::from_str("tui"), Some(AppType::Tui));
-    assert_eq!(AppType::from_str("gui"), Some(AppType::Gui));
-    assert_eq!(AppType::from_str("service"), Some(AppType::Service));
-    assert_eq!(AppType::from_str("repl"), Some(AppType::Repl));
-    assert_eq!(AppType::from_str("invalid"), None);
+    assert_eq!(AppType::parse_str("cli"), Some(AppType::Cli));
+    assert_eq!(AppType::parse_str("tui"), Some(AppType::Tui));
+    assert_eq!(AppType::parse_str("gui"), Some(AppType::Gui));
+    assert_eq!(AppType::parse_str("service"), Some(AppType::Service));
+    assert_eq!(AppType::parse_str("repl"), Some(AppType::Repl));
+    assert_eq!(AppType::parse_str("invalid"), None);
 }
 
 #[test]

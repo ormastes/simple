@@ -44,6 +44,7 @@ pub enum ContractMode {
 
 impl ContractMode {
     /// Parse contract mode from string (CLI flag value)
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "off" | "none" => Some(ContractMode::Off),

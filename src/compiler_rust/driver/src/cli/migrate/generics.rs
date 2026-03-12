@@ -280,8 +280,8 @@ fn is_array_type_syntax(content: &str) -> bool {
     ];
 
     for prim in &primitives {
-        if content.starts_with(prim) {
-            let rest = &content[prim.len()..].trim_start();
+        if let Some(stripped) = content.strip_prefix(prim) {
+            let rest = stripped.trim_start();
             if rest.starts_with(']') {
                 return true;
             }

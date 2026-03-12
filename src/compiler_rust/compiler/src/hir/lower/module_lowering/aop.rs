@@ -9,6 +9,7 @@ impl Lowerer {
     /// Note: The AST parser uses a placeholder that stores the entire predicate string
     /// in the selector name field (with empty args). We detect this and return the
     /// name as-is, rather than adding extra parentheses.
+    #[allow(clippy::only_used_in_recursion)]
     pub(super) fn predicate_to_string(&self, pred: &ast::PredicateExpr) -> String {
         match &pred.kind {
             ast::PredicateKind::Selector { name, args } => {

@@ -6,8 +6,8 @@ pub(super) fn clean_doc_comment(content: &str) -> String {
         .lines()
         .map(|line| {
             let trimmed = line.trim();
-            if trimmed.starts_with('*') {
-                trimmed[1..].trim_start()
+            if let Some(stripped) = trimmed.strip_prefix('*') {
+                stripped.trim_start()
             } else {
                 trimmed
             }

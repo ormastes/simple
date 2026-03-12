@@ -324,10 +324,7 @@ pub unsafe extern "C" fn self_extract_get_ratio(file: *const c_char) -> f64 {
         Err(_) => return -1.0,
     };
 
-    match get_compression_ratio(Path::new(file_str)) {
-        Ok(ratio) => ratio,
-        Err(_) => -1.0,
-    }
+    get_compression_ratio(Path::new(file_str)).unwrap_or(-1.0)
 }
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ pub enum LayoutPhase {
 
 impl LayoutPhase {
     /// Parse layout phase from string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "startup" => Some(LayoutPhase::Startup),
@@ -122,6 +123,7 @@ pub enum LayoutAnchor {
 
 impl LayoutAnchor {
     /// Parse layout anchor from string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "event_loop" | "eventloop" | "main_loop" | "mainloop" => Some(LayoutAnchor::EventLoop),

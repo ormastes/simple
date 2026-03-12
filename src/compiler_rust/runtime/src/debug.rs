@@ -56,6 +56,12 @@ pub struct DebugState {
     files_with_breakpoints: HashSet<String>,
 }
 
+impl Default for DebugState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DebugState {
     pub fn new() -> Self {
         Self {

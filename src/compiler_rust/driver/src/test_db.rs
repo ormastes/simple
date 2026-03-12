@@ -98,7 +98,7 @@ impl std::fmt::Display for ChangeType {
 }
 
 impl ChangeType {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s {
             "no_change" => ChangeType::NoChange,
             "pass_to_fail" => ChangeType::PassToFail,
@@ -529,7 +529,7 @@ impl std::fmt::Display for TestRunStatus {
 }
 
 impl TestRunStatus {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s {
             "running" => TestRunStatus::Running,
             "completed" => TestRunStatus::Completed,
@@ -778,7 +778,7 @@ impl Record for TestRunRecord {
             end_time: row.get(2).cloned().unwrap_or_default(),
             pid: row.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
             hostname: row.get(4).cloned().unwrap_or_default(),
-            status: TestRunStatus::from_str(row.get(5).map(|s| s.as_str()).unwrap_or("running")),
+            status: TestRunStatus::parse_str(row.get(5).map(|s| s.as_str()).unwrap_or("running")),
             test_count: row.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
             passed: row.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
             failed: row.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -1423,7 +1423,7 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
             let last_change = if last_change_str.is_empty() {
                 ChangeType::NoChange
             } else {
-                ChangeType::from_str(&last_change_str)
+                ChangeType::parse_str(&last_change_str)
             };
 
             let total_runs: usize = get("total_runs").parse().unwrap_or(0);
@@ -1570,7 +1570,7 @@ fn load_volatile_data(db: &mut TestDb, runs_path: &Path) -> Result<(), String> {
             let failed: usize = sdn_row_u32(row, 3) as usize;
             let flaky_count: u32 = sdn_row_u32(row, 4);
             let last_change_str = sdn_row_string(row, 5);
-            let last_change = ChangeType::from_str(&last_change_str);
+            let last_change = ChangeType::parse_str(&last_change_str);
 
             // Find record by name_str_id matching test_id
             for record in db.records.values_mut() {
@@ -1640,7 +1640,7 @@ fn load_volatile_data(db: &mut TestDb, runs_path: &Path) -> Result<(), String> {
             let run_id = sdn_row_string(row, 2);
             db.changes.push(ChangeEvent {
                 test_id,
-                change_type: ChangeType::from_str(&change_type_str),
+                change_type: ChangeType::parse_str(&change_type_str),
                 run_id,
             });
         }
@@ -1969,7 +1969,6 @@ fn build_v3_sdn(db: &TestDb) -> String {
     // Strings table
     out.push_str("strings |id, value|\n");
     for (id, value) in db.interner.to_sdn_rows() {
-        let value = value;
         if needs_quoting(value) {
             out.push_str(&format!("    {}, \"{}\"\n", id, value.replace('"', "\\\"")));
         } else {
@@ -2120,6 +2119,7 @@ fn save_volatile_data(db_path: &Path, db: &TestDb) -> Result<(), String> {
 // ============================================================================
 
 /// Update test result in database
+#[allow(clippy::too_many_arguments)]
 pub fn update_test_result(
     db: &mut TestDb,
     test_id: &str,

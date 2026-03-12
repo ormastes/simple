@@ -26,17 +26,20 @@ impl LlvmBackend {
         let func_name = target.name();
         let i64_type = self.context.i64_type();
 
-        // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions
+        // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions.
+        // Accepts both bare names and spl_ prefixed names (safe symbol exports).
         if matches!(
             func_name,
             "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
+            | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln"
+            | "spl_print_raw" | "spl_eprint_raw" | "spl_dprint"
         ) {
             let (value_fn, ln_value_fn) = match func_name {
-                "print" | "println" => ("rt_print_value", "rt_println_value"),
-                "eprint" | "eprintln" => ("rt_eprint_value", "rt_eprintln_value"),
-                "print_raw" => ("rt_print_value", "rt_print_value"),
-                "eprint_raw" => ("rt_eprint_value", "rt_eprint_value"),
-                "dprint" => ("rt_print_value", "rt_println_value"),
+                "print" | "println" | "spl_print" | "spl_println" => ("rt_print_value", "rt_println_value"),
+                "eprint" | "eprintln" | "spl_eprint" | "spl_eprintln" => ("rt_eprint_value", "rt_eprintln_value"),
+                "print_raw" | "spl_print_raw" => ("rt_print_value", "rt_print_value"),
+                "eprint_raw" | "spl_eprint_raw" => ("rt_eprint_value", "rt_eprint_value"),
+                "dprint" | "spl_dprint" => ("rt_print_value", "rt_println_value"),
                 _ => unreachable!(),
             };
 

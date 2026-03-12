@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use super::types::{TestFileResult, DebugLevel, debug_log};
 
 /// Update feature database from test results
-pub fn update_feature_database(test_files: &[PathBuf], results: &mut Vec<TestFileResult>, total_failed: &mut usize) {
+pub fn update_feature_database(test_files: &[PathBuf], results: &mut [TestFileResult], total_failed: &mut usize) {
     debug_log!(DebugLevel::Basic, "FeatureDB", "Updating feature database");
 
     let feature_db_path = PathBuf::from("doc/feature/feature_db.sdn");

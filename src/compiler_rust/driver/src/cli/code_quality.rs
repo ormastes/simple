@@ -5,7 +5,7 @@ use simple_common::fix_applicator::FixApplicator;
 use simple_compiler::{Formatter, LintChecker, LintConfig};
 use simple_parser::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use super::commands::arg_parsing::FixFlags;
@@ -103,7 +103,7 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) ->
 }
 
 /// Lint a single file
-pub fn lint_file(path: &PathBuf, json_output: bool, fix_flags: &FixFlags) -> i32 {
+pub fn lint_file(path: &Path, json_output: bool, fix_flags: &FixFlags) -> i32 {
     if let Some((has_errors, _, _, diags, fixes, source)) = lint_file_internal(path, json_output) {
         // Apply fixes if requested
         if fix_flags.any_fix_mode() && !fixes.is_empty() {
@@ -137,19 +137,15 @@ pub fn lint_file(path: &PathBuf, json_output: bool, fix_flags: &FixFlags) -> i32
     }
 }
 
+/// Result of internal lint operation
+pub type LintResult = (bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>, Vec<EasyFix>, Option<String>);
+
 /// Internal lint function that returns diagnostic information
 /// Returns: (has_errors, error_count, warning_count, diagnostics, easy_fixes, source_text)
 pub fn lint_file_internal(
     path: &std::path::Path,
     json_output: bool,
-) -> Option<(
-    bool,
-    usize,
-    usize,
-    Vec<simple_common::diagnostic::Diagnostic>,
-    Vec<EasyFix>,
-    Option<String>,
-)> {
+) -> Option<LintResult> {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,

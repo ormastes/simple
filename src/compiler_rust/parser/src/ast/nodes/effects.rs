@@ -120,7 +120,7 @@ impl Effect {
 
 impl AutoLeanMode {
     /// Parse mode from string argument.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "full" => Some(AutoLeanMode::Full),
             "structure_only" => Some(AutoLeanMode::StructureOnly),

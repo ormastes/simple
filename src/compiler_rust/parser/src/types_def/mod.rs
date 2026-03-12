@@ -20,6 +20,12 @@ use crate::token::{Span, TokenKind};
 
 use super::Parser;
 
+/// Result type for parsing fields and methods in a type body
+type FieldsAndMethods = (Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Option<DocComment>);
+
+/// Result type for parsing a full class body with macros and mixins
+type ClassBodyResult = (Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Vec<MacroInvocation>, Vec<MixinRef>, Option<DocComment>);
+
 impl<'a> Parser<'a> {
     // === Struct ===
 
@@ -396,7 +402,7 @@ impl<'a> Parser<'a> {
     /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Option<DocComment>), ParseError> {
+    ) -> Result<FieldsAndMethods, ParseError> {
         self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
         let mut fields = Vec::new();
@@ -597,17 +603,7 @@ impl<'a> Parser<'a> {
     /// Parse fields, methods, and macro invocations in a class body
     fn parse_class_body(
         &mut self,
-    ) -> Result<
-        (
-            Vec<Field>,
-            Vec<FunctionDef>,
-            Option<InvariantBlock>,
-            Vec<MacroInvocation>,
-            Vec<MixinRef>,
-            Option<DocComment>,
-        ),
-        ParseError,
-    > {
+    ) -> Result<ClassBodyResult, ParseError> {
         self.debug_enter("parse_class_body");
         self.expect_block_start()?;
         let mut fields = Vec::new();

@@ -295,17 +295,17 @@ impl SettlementBuilder {
 
         // Function table
         let func_table_offset = current_offset;
-        let func_table_size = (func_entries.len() * std::mem::size_of::<FuncTableEntry>()) as u64;
+        let func_table_size = std::mem::size_of_val(func_entries) as u64;
         current_offset += func_table_size;
 
         // Global table
         let global_table_offset = current_offset;
-        let global_table_size = (global_entries.len() * std::mem::size_of::<GlobalTableEntry>()) as u64;
+        let global_table_size = std::mem::size_of_val(global_entries) as u64;
         current_offset += global_table_size;
 
         // Type table
         let type_table_offset = current_offset;
-        let type_table_size = (type_entries.len() * std::mem::size_of::<TypeTableEntry>()) as u64;
+        let type_table_size = std::mem::size_of_val(type_entries) as u64;
         current_offset += type_table_size;
 
         // Module table
@@ -404,7 +404,7 @@ impl SettlementBuilder {
             // Create a copy with relative offset
             let mut rel_entry = *entry;
             if rel_entry.code_ptr != 0 && rel_entry.code_ptr >= code_base {
-                rel_entry.code_ptr = rel_entry.code_ptr - code_base;
+                rel_entry.code_ptr -= code_base;
             }
             let entry_bytes = unsafe {
                 std::slice::from_raw_parts(
@@ -421,7 +421,7 @@ impl SettlementBuilder {
             // Create a copy with relative offset
             let mut rel_entry = *entry;
             if rel_entry.data_ptr != 0 && rel_entry.data_ptr >= data_base {
-                rel_entry.data_ptr = rel_entry.data_ptr - data_base;
+                rel_entry.data_ptr -= data_base;
             }
             let entry_bytes = unsafe {
                 std::slice::from_raw_parts(

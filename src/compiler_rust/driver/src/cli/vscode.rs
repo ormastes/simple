@@ -32,7 +32,7 @@ impl Default for VsCodeBuildOptions {
 }
 
 /// Build VSCode extension from Simple source
-pub fn vscode_build(source: &PathBuf, options: VsCodeBuildOptions) -> i32 {
+pub fn vscode_build(source: &Path, options: VsCodeBuildOptions) -> i32 {
     println!("Building VSCode extension from {}", source.display());
 
     // Create output directory

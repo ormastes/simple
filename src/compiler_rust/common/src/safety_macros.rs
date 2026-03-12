@@ -18,7 +18,7 @@
 ///
 /// Note: Use the functions directly (safe_add, safe_sub, safe_mul, safe_div)
 /// instead of macros for better type inference and error messages.
-
+///
 /// Safe array indexing macro
 ///
 /// # Examples

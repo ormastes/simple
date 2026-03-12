@@ -291,7 +291,7 @@ pub unsafe extern "C" fn rt_gpu_atomic_xor_u32(ptr: *mut u32, value: u32) -> u32
 
 // Thread-local shared memory allocation
 thread_local! {
-    static SHARED_MEMORY: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static SHARED_MEMORY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Allocate shared memory (work group local memory)
@@ -323,7 +323,7 @@ pub type GpuKernelFn = extern "C" fn();
 
 /// Execute a GPU kernel with 1D work configuration
 pub fn execute_kernel_1d(kernel: GpuKernelFn, global_size: u32, local_size: u32) {
-    let num_groups = (global_size + local_size - 1) / local_size;
+    let num_groups = global_size.div_ceil(local_size);
 
     for group_id in 0..num_groups {
         // Reset shared memory at the start of each work group
@@ -354,9 +354,9 @@ pub fn execute_kernel_1d(kernel: GpuKernelFn, global_size: u32, local_size: u32)
 /// Execute a GPU kernel with 3D work configuration
 pub fn execute_kernel_3d(kernel: GpuKernelFn, global_size: [u32; 3], local_size: [u32; 3]) {
     let num_groups = [
-        (global_size[0] + local_size[0] - 1) / local_size[0],
-        (global_size[1] + local_size[1] - 1) / local_size[1],
-        (global_size[2] + local_size[2] - 1) / local_size[2],
+        global_size[0].div_ceil(local_size[0]),
+        global_size[1].div_ceil(local_size[1]),
+        global_size[2].div_ceil(local_size[2]),
     ];
 
     for gz in 0..num_groups[2] {

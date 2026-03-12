@@ -2,7 +2,7 @@
 
 use crate::runner::Runner;
 use crate::watcher::watch;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Create a runner with appropriate GC configuration
 pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
@@ -16,13 +16,13 @@ pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
 }
 
 /// Run a source file (.spl) or compiled binary (.smf)
-pub fn run_file(path: &PathBuf, gc_log: bool, gc_off: bool) -> i32 {
+pub fn run_file(path: &Path, gc_log: bool, gc_off: bool) -> i32 {
     run_file_with_args(path, gc_log, gc_off, vec![])
 }
 
 /// Run a source file (.spl) with command-line arguments
-pub fn run_file_with_args(path: &PathBuf, gc_log: bool, gc_off: bool, args: Vec<String>) -> i32 {
-    let path = path.clone();
+pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<String>) -> i32 {
+    let path = path.to_path_buf();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let runner = create_runner(gc_log, gc_off);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -98,7 +98,7 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
 }
 
 /// Watch a file for changes and auto-recompile
-pub fn watch_file(path: &PathBuf) -> i32 {
+pub fn watch_file(path: &Path) -> i32 {
     println!("Watching {} for changes...", path.display());
     println!("Press Ctrl-C to stop.");
 

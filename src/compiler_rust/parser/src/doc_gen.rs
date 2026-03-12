@@ -52,17 +52,12 @@ pub struct ModuleDocs {
     pub items: Vec<DocItem>,
 }
 
+/// Grouped documentation items by kind
+type DocItemGroups<'a> = (Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>, Vec<&'a DocItem>);
+
 impl ModuleDocs {
     /// Group items by kind for documentation generation
-    fn group_items(
-        &self,
-    ) -> (
-        Vec<&DocItem>,
-        Vec<&DocItem>,
-        Vec<&DocItem>,
-        Vec<&DocItem>,
-        Vec<&DocItem>,
-    ) {
+    fn group_items(&self) -> DocItemGroups<'_> {
         let functions: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Function).collect();
         let structs: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Struct).collect();
         let classes: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Class).collect();

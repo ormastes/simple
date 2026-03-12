@@ -200,15 +200,17 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         }
     }
 
-    let mut config = NativeBuildConfig::default();
-    config.file_timeout = timeout;
-    config.verbose = verbose;
-    config.strip = strip;
-    config.num_threads = threads;
-    config.incremental = incremental;
-    config.clean = clean;
-    config.cache_dir = cache_dir;
-    config.no_mangle = no_mangle;
+    let mut config = NativeBuildConfig {
+        file_timeout: timeout,
+        verbose,
+        strip,
+        num_threads: threads,
+        incremental,
+        clean,
+        cache_dir,
+        no_mangle,
+        ..Default::default()
+    };
     if !backend.is_empty() {
         // Normalize backend aliases
         let normalized = match backend.as_str() {

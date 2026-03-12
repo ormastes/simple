@@ -33,7 +33,7 @@ pub extern "C" fn native_spawn_worker(worker_fn: u64) -> RuntimeValue {
 
             if pid < 0 {
                 // Fork failed
-                return RuntimeValue::NIL;
+                RuntimeValue::NIL
             } else if pid == 0 {
                 // Child process - execute worker function
                 let func: extern "C" fn() -> i64 = std::mem::transmute(worker_fn as *const ());
@@ -41,7 +41,7 @@ pub extern "C" fn native_spawn_worker(worker_fn: u64) -> RuntimeValue {
                 libc::exit(exit_code as i32);
             } else {
                 // Parent process - return child PID
-                return RuntimeValue::from_int(pid as i64);
+                RuntimeValue::from_int(pid as i64)
             }
         }
     }
@@ -137,13 +137,9 @@ pub extern "C" fn native_process_kill(pid: i64) -> RuntimeValue {
         use libc::{kill, pid_t, SIGTERM};
 
         unsafe {
-            let result = kill(pid as pid_t, SIGTERM);
+            let _result = kill(pid as pid_t, SIGTERM);
 
-            if result == 0 {
-                RuntimeValue::NIL // Success
-            } else {
-                RuntimeValue::NIL // Error
-            }
+            RuntimeValue::NIL
         }
     }
 

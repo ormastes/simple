@@ -316,9 +316,9 @@ fn parse_named_call(line: &str, name: &str) -> Option<String> {
     let prefix = format!("{} ", name);
     let rest = line.strip_prefix(&prefix)?;
     let rest = rest.trim();
-    if rest.starts_with('"') {
-        let end = rest[1..].find('"')?;
-        return Some(rest[1..=end].trim_matches('"').to_string());
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        return Some(stripped[..end].to_string());
     }
     None
 }
@@ -985,19 +985,20 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
 
     let mut rows = Vec::new();
     for record in db.records.values() {
-        let mut row = Vec::new();
-        row.push(SdnValue::String(record.id.clone()));
-        row.push(SdnValue::String(record.category.clone()));
-        row.push(SdnValue::String(record.name.clone()));
-        row.push(SdnValue::String(record.description.clone()));
-        row.push(SdnValue::String(record.spec.clone()));
-        row.push(SdnValue::String(mode_status(&record.modes, "interpreter")));
-        row.push(SdnValue::String(mode_status(&record.modes, "jit")));
-        row.push(SdnValue::String(mode_status(&record.modes, "smf_cranelift")));
-        row.push(SdnValue::String(mode_status(&record.modes, "smf_llvm")));
-        row.push(SdnValue::String(record.platforms.join(",")));
-        row.push(SdnValue::String(record.status.clone()));
-        row.push(SdnValue::Bool(record.valid));
+        let row = vec![
+            SdnValue::String(record.id.clone()),
+            SdnValue::String(record.category.clone()),
+            SdnValue::String(record.name.clone()),
+            SdnValue::String(record.description.clone()),
+            SdnValue::String(record.spec.clone()),
+            SdnValue::String(mode_status(&record.modes, "interpreter")),
+            SdnValue::String(mode_status(&record.modes, "jit")),
+            SdnValue::String(mode_status(&record.modes, "smf_cranelift")),
+            SdnValue::String(mode_status(&record.modes, "smf_llvm")),
+            SdnValue::String(record.platforms.join(",")),
+            SdnValue::String(record.status.clone()),
+            SdnValue::Bool(record.valid),
+        ];
         rows.push(row);
     }
 

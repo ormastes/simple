@@ -70,7 +70,7 @@ pub extern "C" fn native_fs_open(path: RuntimeValue, mode: i64) -> RuntimeValue 
         }
         3 => {
             // Append
-            std::fs::OpenOptions::new().write(true).append(true).open(&path_str)
+            std::fs::OpenOptions::new().append(true).open(&path_str)
         }
         _ => return RuntimeValue::NIL,
     };
@@ -183,13 +183,9 @@ pub extern "C" fn native_file_close(handle: i64) -> RuntimeValue {
 
         unsafe {
             let fd = handle as RawFd;
-            let result = close(fd);
+            let _result = close(fd);
 
-            if result == 0 {
-                RuntimeValue::NIL
-            } else {
-                RuntimeValue::NIL
-            }
+            RuntimeValue::NIL
         }
     }
 
@@ -211,13 +207,9 @@ pub extern "C" fn native_file_flush(handle: i64) -> RuntimeValue {
 
         unsafe {
             let fd = handle as RawFd;
-            let result = fsync(fd);
+            let _result = fsync(fd);
 
-            if result == 0 {
-                RuntimeValue::NIL
-            } else {
-                RuntimeValue::NIL
-            }
+            RuntimeValue::NIL
         }
     }
 

@@ -553,10 +553,10 @@ pub extern "C" fn sys_free(ptr: i64) -> i64 {
     0
 }
 
-// -- I/O builtins --
+// -- I/O builtins (spl_ prefixed to avoid libc/libm symbol collisions) --
 
 #[no_mangle]
-pub extern "C" fn print(val: i64) -> i64 {
+pub extern "C" fn spl_print(val: i64) -> i64 {
     if let Some(s) = stub_extract_path(val) {
         print!("{}", s);
     } else {
@@ -566,7 +566,7 @@ pub extern "C" fn print(val: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn println(val: i64) -> i64 {
+pub extern "C" fn spl_println(val: i64) -> i64 {
     if let Some(s) = stub_extract_path(val) {
         println!("{}", s);
     } else {
@@ -576,7 +576,7 @@ pub extern "C" fn println(val: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn eprint(val: i64) -> i64 {
+pub extern "C" fn spl_eprint(val: i64) -> i64 {
     if let Some(s) = stub_extract_path(val) {
         eprint!("{}", s);
     } else {
@@ -586,7 +586,7 @@ pub extern "C" fn eprint(val: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn eprintln(val: i64) -> i64 {
+pub extern "C" fn spl_eprintln(val: i64) -> i64 {
     if let Some(s) = stub_extract_path(val) {
         eprintln!("{}", s);
     } else {
@@ -596,35 +596,35 @@ pub extern "C" fn eprintln(val: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn print_raw(val: i64) -> i64 {
-    print(val)
+pub extern "C" fn spl_print_raw(val: i64) -> i64 {
+    spl_print(val)
 }
 
 #[no_mangle]
-pub extern "C" fn eprint_raw(val: i64) -> i64 {
-    eprint(val)
+pub extern "C" fn spl_eprint_raw(val: i64) -> i64 {
+    spl_eprint(val)
 }
 
 #[no_mangle]
-pub extern "C" fn dbg(val: i64) -> i64 {
+pub extern "C" fn spl_dbg(val: i64) -> i64 {
     eprintln!("[dbg] {}", val);
     val
 }
 
 #[no_mangle]
-pub extern "C" fn dprint(val: i64) -> i64 {
-    dbg(val)
+pub extern "C" fn spl_dprint(val: i64) -> i64 {
+    spl_dbg(val)
 }
 
 #[no_mangle]
-pub extern "C" fn input(_prompt: i64) -> i64 {
+pub extern "C" fn spl_input(_prompt: i64) -> i64 {
     let mut buf = String::new();
     let _ = std::io::stdin().read_line(&mut buf);
     stub_make_string(buf.trim_end())
 }
 
 #[no_mangle]
-pub extern "C" fn panic(msg: i64) -> i64 {
+pub extern "C" fn spl_panic(msg: i64) -> i64 {
     if let Some(s) = stub_extract_path(msg) {
         eprintln!("panic: {}", s);
     } else {
@@ -633,43 +633,43 @@ pub extern "C" fn panic(msg: i64) -> i64 {
     std::process::exit(1);
 }
 
-// -- Math builtins --
+// -- Math builtins (spl_ prefixed to avoid libm collisions) --
 
 #[no_mangle]
-pub extern "C" fn abs(val: i64) -> i64 {
+pub extern "C" fn spl_abs(val: i64) -> i64 {
     val.abs()
 }
 #[no_mangle]
-pub extern "C" fn min(a: i64, b: i64) -> i64 {
+pub extern "C" fn spl_min(a: i64, b: i64) -> i64 {
     std::cmp::min(a, b)
 }
 #[no_mangle]
-pub extern "C" fn max(a: i64, b: i64) -> i64 {
+pub extern "C" fn spl_max(a: i64, b: i64) -> i64 {
     std::cmp::max(a, b)
 }
 #[no_mangle]
-pub extern "C" fn pow(base: i64, exp: i64) -> i64 {
+pub extern "C" fn spl_pow(base: i64, exp: i64) -> i64 {
     (base as f64).powi(exp as i32) as i64
 }
 #[no_mangle]
-pub extern "C" fn sqrt(val: i64) -> i64 {
+pub extern "C" fn spl_sqrt(val: i64) -> i64 {
     (val as f64).sqrt() as i64
 }
 #[no_mangle]
-pub extern "C" fn ceil(val: i64) -> i64 {
+pub extern "C" fn spl_ceil(val: i64) -> i64 {
     val
 } // integers are already ceil
 #[no_mangle]
-pub extern "C" fn floor(val: i64) -> i64 {
+pub extern "C" fn spl_floor(val: i64) -> i64 {
     val
 }
 #[no_mangle]
-pub extern "C" fn to_int(val: i64) -> i64 {
+pub extern "C" fn spl_to_int(val: i64) -> i64 {
     val
 }
 
 #[no_mangle]
-pub extern "C" fn to_string(val: i64) -> i64 {
+pub extern "C" fn spl_to_string(val: i64) -> i64 {
     // Check if it's a string already
     if rt_string_len(to_rv(val)) >= 0 {
         val
@@ -677,6 +677,50 @@ pub extern "C" fn to_string(val: i64) -> i64 {
         stub_make_string(&val.to_string())
     }
 }
+
+// -- Backward-compatible aliases (old bare names → spl_ prefixed) --
+// These are kept temporarily for compatibility with older compiled objects.
+// Codegen now emits spl_ prefixed names; these can be removed once all
+// compiled objects are regenerated.
+
+#[no_mangle]
+pub extern "C" fn print(val: i64) -> i64 { spl_print(val) }
+#[no_mangle]
+pub extern "C" fn println(val: i64) -> i64 { spl_println(val) }
+#[no_mangle]
+pub extern "C" fn eprint(val: i64) -> i64 { spl_eprint(val) }
+#[no_mangle]
+pub extern "C" fn eprintln(val: i64) -> i64 { spl_eprintln(val) }
+#[no_mangle]
+pub extern "C" fn print_raw(val: i64) -> i64 { spl_print_raw(val) }
+#[no_mangle]
+pub extern "C" fn eprint_raw(val: i64) -> i64 { spl_eprint_raw(val) }
+#[no_mangle]
+pub extern "C" fn dbg(val: i64) -> i64 { spl_dbg(val) }
+#[no_mangle]
+pub extern "C" fn dprint(val: i64) -> i64 { spl_dprint(val) }
+#[no_mangle]
+pub extern "C" fn input(prompt: i64) -> i64 { spl_input(prompt) }
+#[no_mangle]
+pub extern "C" fn panic(msg: i64) -> i64 { spl_panic(msg) }
+#[no_mangle]
+pub extern "C" fn abs(val: i64) -> i64 { spl_abs(val) }
+#[no_mangle]
+pub extern "C" fn min(a: i64, b: i64) -> i64 { spl_min(a, b) }
+#[no_mangle]
+pub extern "C" fn max(a: i64, b: i64) -> i64 { spl_max(a, b) }
+#[no_mangle]
+pub extern "C" fn pow(base: i64, exp: i64) -> i64 { spl_pow(base, exp) }
+#[no_mangle]
+pub extern "C" fn sqrt(val: i64) -> i64 { spl_sqrt(val) }
+#[no_mangle]
+pub extern "C" fn ceil(val: i64) -> i64 { spl_ceil(val) }
+#[no_mangle]
+pub extern "C" fn floor(val: i64) -> i64 { spl_floor(val) }
+#[no_mangle]
+pub extern "C" fn to_int(val: i64) -> i64 { spl_to_int(val) }
+#[no_mangle]
+pub extern "C" fn to_string(val: i64) -> i64 { spl_to_string(val) }
 
 // -- Compiler backend stubs --
 

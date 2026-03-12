@@ -766,93 +766,44 @@ int main(int argc, char** argv) {
             cmd.arg(&runtime);
         }
 
-        // Libraries — platform-specific
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: pthread and dl are part of libSystem (linked automatically),
-            // unwind is built into the system. Only -lm is needed explicitly.
-            cmd.arg("-lm");
-            // Link libSystem explicitly for completeness
-            cmd.arg("-lSystem");
-            // libsimple_native_all.a always contains LLVM C++ objects
-            // (native_all/Cargo.toml hard-codes features=["llvm"]),
-            // so we always need -lc++ when it's linked.
-            if find_native_all_library().is_some() {
-                // Link against Homebrew LLVM's libc++ to avoid Apple libc++ TMO
-                // (typed memory operations) init-order crash. Homebrew's libc++
-                // doesn't enable TMO, so LLVM static constructors work correctly.
-                if let Some(llvm_lib) = find_homebrew_llvm_lib() {
-                    cmd.arg(format!("-L{}", llvm_lib));
-                    cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
-                }
-                cmd.arg("-lc++");
-            }
+        // Libraries — via PlatformLinkConfig (single source of truth per OS)
+        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+        for path in &link_config.library_search_paths {
+            cmd.arg(format!("-L{}", path));
         }
-        #[cfg(target_os = "freebsd")]
-        {
-            // FreeBSD: dlopen is in libc (no -ldl), needs -lexecinfo for backtraces,
-            // pthread and m are separate libraries.
-            // -lz provides crc32 needed by LLVM, -lzstd for LLVM compression.
-            // -L/usr/local/lib for packages installed via pkg (zstd, execinfo).
-            cmd.arg("-L/usr/local/lib");
-            for lib in &["pthread", "m", "execinfo", "z", "zstd", "util", "rt"] {
+        if is_clang_cl {
+            // clang-cl: pass .lib names directly (MSVC linker convention)
+            for lib in &link_config.libraries {
+                cmd.arg(format!("{}.lib", lib));
+            }
+        } else {
+            for lib in &link_config.libraries {
                 cmd.arg(format!("-l{}", lib));
             }
         }
-        #[cfg(target_os = "linux")]
-        for lib in &["pthread", "dl", "m", "unwind"] {
-            cmd.arg(format!("-l{}", lib));
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if is_clang_cl {
-                // clang-cl: pass .lib names directly (MSVC linker convention)
-                for lib in &["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib"] {
-                    cmd.arg(lib);
-                }
-            } else {
-                // MinGW clang/gcc: use -l flags
-                for lib in &["kernel32", "ws2_32", "bcrypt", "userenv"] {
-                    cmd.arg(format!("-l{}", lib));
-                }
+        // macOS-specific: c++ linking when native_all is present
+        // (native_all/Cargo.toml hard-codes features=["llvm"])
+        if cfg!(target_os = "macos") && find_native_all_library().is_some() {
+            if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
+                cmd.arg(format!("-L{}", llvm_lib));
+                cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
             }
+            cmd.arg("-lc++");
         }
 
-        // Generate stub object for unresolved symbols.
-        // On macOS, -undefined,dynamic_lookup defers resolution to runtime (dyld), which
-        // crashes on missing symbols.  Instead, we scan the archive for undefined symbols
-        // that have no definition, then generate weak stub functions that return 0/nil.
-        // On FreeBSD, ld-elf.so.1 eagerly resolves ALL symbols at load time, so
-        // --unresolved-symbols=ignore-all doesn't help — we must generate stubs too.
-        // On Linux we still use --unresolved-symbols=ignore-all (cheaper).
-        #[cfg(target_os = "macos")]
+        // Generate stub object for unresolved symbols + apply linker flags.
+        // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
+        #[cfg(not(target_os = "windows"))]
         {
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
-            // Still allow any remaining undefined symbols (e.g., system dylib symbols)
-            cmd.arg("-Wl,-undefined,dynamic_lookup");
         }
-        #[cfg(target_os = "freebsd")]
-        {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
-            cmd.arg(&stubs_o);
-            cmd.arg("-Wl,--allow-multiple-definition");
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
-            cmd.arg(&stubs_o);
-            // --allow-multiple-definition: picks first definition (compiled code from
-            // the archive wins over weak stubs because it's linked first).
-            // --unresolved-symbols=ignore-all: for system symbols not in our stubs.
-            cmd.arg("-Wl,--allow-multiple-definition");
-            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+        for flag in &link_config.unresolved_symbol_flags {
+            cmd.arg(flag);
         }
         #[cfg(target_os = "windows")]
         if is_clang_cl {
             cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
-        } else {
-            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
         }
 
         if self.config.strip {
@@ -973,87 +924,22 @@ fn generate_stub_object(
         }
     }
 
-    // Also scan system libraries for symbols (libc, libm, libSystem)
-    #[cfg(target_os = "macos")]
-    {
-        // Scan common system dylibs to find symbols like malloc, memset, sqrt, etc.
-        let system_libs = ["/usr/lib/libSystem.B.dylib"];
-        for lib_path in &system_libs {
-            if std::path::Path::new(lib_path).exists() {
-                if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-g")
-                    .arg("-p")
-                    .arg(lib_path)
-                    .output()
-                {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let [_addr, sym_type, name] = parts.as_slice() {
-                            if *sym_type != "U" {
-                                defined.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
+    // Scan system libraries for symbols (libc, libm, etc.) — via PlatformLinkConfig
+    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+    for lib_path in &plat_config.system_scan_libs {
+        if std::path::Path::new(lib_path).exists() {
+            let mut nm_cmd = std::process::Command::new("nm");
+            for flag in &plat_config.nm_flags {
+                nm_cmd.arg(flag);
             }
-        }
-    }
-    #[cfg(target_os = "freebsd")]
-    {
-        // Scan FreeBSD system shared libraries for defined symbols
-        let system_libs = [
-            "/lib/libc.so.7",
-            "/lib/libm.so.5",
-            "/lib/libthr.so.3",
-            "/usr/lib/libexecinfo.so.1",
-        ];
-        for lib_path in &system_libs {
-            if std::path::Path::new(lib_path).exists() {
-                if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-D")
-                    .arg("-g")
-                    .arg("-p")
-                    .arg(lib_path)
-                    .output()
-                {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let [_addr, sym_type, name] = parts.as_slice() {
-                            if *sym_type != "U" {
-                                defined.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let system_libs = [
-            "/lib/x86_64-linux-gnu/libc.so.6",
-            "/lib/x86_64-linux-gnu/libm.so.6",
-            "/lib/x86_64-linux-gnu/libpthread.so.0",
-            "/lib/x86_64-linux-gnu/libdl.so.2",
-        ];
-        for lib_path in &system_libs {
-            if std::path::Path::new(lib_path).exists() {
-                if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-D")
-                    .arg("-g")
-                    .arg("-p")
-                    .arg(lib_path)
-                    .output()
-                {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let [_addr, sym_type, name] = parts.as_slice() {
-                            if *sym_type != "U" {
-                                defined.insert(name.to_string());
-                            }
+            nm_cmd.arg(lib_path);
+            if let Ok(output) = nm_cmd.output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let [_addr, sym_type, name] = parts.as_slice() {
+                        if *sym_type != "U" {
+                            defined.insert(name.to_string());
                         }
                     }
                 }
@@ -1094,60 +980,28 @@ fn generate_stub_object(
         needs_stub.len()
     );
 
-    // Generate pure assembly stubs. This avoids all C keyword/builtin conflicts.
-    // Each stub is a global symbol that returns 0/nil.
-    // On macOS: weak_definition (Mach-O), on FreeBSD: strong .globl (ELF) with
-    // --allow-multiple-definition so runtime definitions take precedence.
+    // Generate pure assembly stubs via PlatformLinkConfig + asm_helpers.
+    // Each stub returns tagged nil (3). Strategy is per-OS (Weak/WeakDefinition/Strong).
     let mut asm_code = String::with_capacity(needs_stub.len() * 100);
     asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
-    // ARM64: return tagged nil (3) — Simple uses tag bits, 0 is not a valid nil.
-    #[cfg(target_arch = "aarch64")]
-    #[allow(unused)]
-    let (ret_nil, jmp_prefix) = ("mov x0, #3\n  ret", "b");
-    // x86_64: return tagged nil (3)
-    #[cfg(target_arch = "x86_64")]
-    #[allow(unused)]
-    let (ret_nil, jmp_prefix) = ("movq $3, %rax\n  retq", "jmp");
+    let host_target = simple_common::target::Target::host();
+    let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
+    let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
 
     for sym in &needs_stub {
-        // Skip symbols with characters not valid in assembly labels.
-        // macOS: alphanumerics, _, $ (Mach-O)
-        // Linux/FreeBSD/ELF: also allows dots (Simple uses dots in symbol names like Arch.from_u8)
-        #[cfg(target_os = "macos")]
-        let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-        let valid = !sym.is_empty()
-            && sym
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$');
-        if !valid {
+        if !plat_config.is_valid_asm_label(sym) {
             continue;
         }
 
-        // __builtin_* symbols → trampoline to real function
-        #[cfg(target_os = "macos")]
-        if sym.starts_with("___builtin_") {
+        // __builtin_* symbols → trampoline to real function (macOS only)
+        if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
             let real_fn = format!("_{}", &sym["___builtin_".len()..]);
-            asm_code.push_str(&format!(
-                ".weak_definition {0}\n.globl {0}\n{0}:\n  {1} {2}\n\n",
-                sym, jmp_prefix, real_fn
-            ));
+            asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
             continue;
         }
 
-        // Regular stub
-        #[cfg(target_os = "macos")]
-        asm_code.push_str(&format!(
-            ".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n",
-            sym, ret_nil
-        ));
-        // FreeBSD ELF: strong .globl stubs (--allow-multiple-definition lets runtime win)
-        #[cfg(target_os = "freebsd")]
-        asm_code.push_str(&format!(".globl {0}\n{0}:\n  {1}\n\n", sym, ret_nil));
-        // Linux ELF: weak stubs (real definitions take precedence at link time)
-        #[cfg(target_os = "linux")]
-        asm_code.push_str(&format!(".weak {0}\n{0}:\n  {1}\n\n", sym, ret_nil));
+        asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
     }
 
     let stub_s = temp_dir.join("_stubs.s");
@@ -2966,95 +2820,18 @@ fn find_runtime_library() -> Option<PathBuf> {
     None
 }
 
-/// Find a C compiler.
+/// Find a C compiler — delegates to `simple_common::platform::cc_detect`.
 fn find_c_compiler() -> String {
-    if let Ok(cc) = std::env::var("CC") {
-        return cc;
-    }
-
-    // On Windows, prefer clang-cl (MSVC-compatible) over clang/gcc
-    #[cfg(target_os = "windows")]
-    {
-        for cc in &["clang-cl", "clang", "gcc"] {
-            if let Ok(out) = std::process::Command::new(cc).arg("--version").output() {
-                if out.status.success() {
-                    return cc.to_string();
-                }
-            }
-        }
-        return "clang".to_string();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(out) = std::process::Command::new("clang").arg("--version").output() {
-            if out.status.success() {
-                return "clang".to_string();
-            }
-        }
-        "gcc".to_string()
-    }
+    simple_common::platform::cc_detect::find_c_compiler()
 }
 
-/// Find an archive tool (ar, llvm-ar, or lib.exe on Windows).
+/// Find an archive tool — delegates to `simple_common::platform::cc_detect`.
 fn find_archive_tool() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        // Prefer llvm-ar (supports ar syntax), then ar (MinGW), then lib.exe (MSVC)
-        for tool in &["llvm-ar", "ar"] {
-            if let Ok(out) = std::process::Command::new(tool).arg("--version").output() {
-                if out.status.success() {
-                    return tool.to_string();
-                }
-            }
-        }
-        // lib.exe: check via `where` since lib /? returns nonzero
-        if let Ok(out) = std::process::Command::new("where").arg("lib").output() {
-            if out.status.success() {
-                return "lib".to_string();
-            }
-        }
-        "ar".to_string()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        "ar".to_string()
-    }
-}
-
-/// Find Homebrew LLVM lib directory for linking against its libc++.
-/// Returns the lib path (e.g., "/opt/homebrew/opt/llvm@18/lib") if found.
-#[cfg(target_os = "macos")]
-fn find_homebrew_llvm_lib() -> Option<String> {
-    let candidates = [
-        "/opt/homebrew/opt/llvm@18/lib",
-        "/opt/homebrew/opt/llvm/lib",
-        "/usr/local/opt/llvm@18/lib",
-        "/usr/local/opt/llvm/lib",
-    ];
-    for path in &candidates {
-        let libc_path = format!("{}/libc++.dylib", path);
-        if std::path::Path::new(&libc_path).exists() {
-            return Some(path.to_string());
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-fn find_homebrew_llvm_lib() -> Option<String> {
-    None
+    simple_common::platform::cc_detect::find_archive_tool()
 }
 
 fn find_cxx_compiler() -> String {
-    if let Ok(cxx) = std::env::var("CXX") {
-        return cxx;
-    }
-    if std::process::Command::new("clang++").arg("--version").output().is_ok() {
-        return "clang++".to_string();
-    }
-    "g++".to_string()
+    simple_common::platform::cc_detect::find_cxx_compiler()
 }
 
 #[cfg(test)]

@@ -172,8 +172,7 @@ unsafe fn parse_socket_addr(addr_ptr: i64, addr_len: i64) -> Result<SocketAddr, 
 fn addr_to_string_ptr(addr: &SocketAddr) -> i64 {
     let s = addr.to_string();
     let boxed = s.into_boxed_str();
-    let ptr = Box::into_raw(boxed) as *const str as *const u8 as i64;
-    ptr
+    Box::into_raw(boxed) as *const str as *const u8 as i64
 }
 
 /// Free a string previously allocated by `addr_to_string_ptr`.

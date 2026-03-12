@@ -28,7 +28,7 @@ impl Default for ElectronBuildOptions {
 }
 
 /// Build Electron app from Simple source
-pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
+pub fn electron_build(source: &Path, options: ElectronBuildOptions) -> i32 {
     println!("Building Electron app from {}", source.display());
 
     // Create output directory

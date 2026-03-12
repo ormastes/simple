@@ -3,9 +3,12 @@
 //! Provides cross-platform wrappers over std::fs, std::process, std::env
 //! for use by the compiler binary itself (not for compiled programs).
 
+pub mod asm_helpers;
+pub mod cc_detect;
 pub mod dir;
 pub mod env;
 pub mod fs;
+pub mod link_config;
 pub mod path;
 pub mod process;
 pub mod sysroot;

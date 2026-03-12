@@ -71,7 +71,7 @@ impl ReprType {
     }
 
     /// Parse from string like "u8", "i12", "f32"
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         if s.is_empty() {
             return None;
         }
@@ -85,8 +85,10 @@ impl ReprType {
         }
     }
 
-    /// Convert to string like "u8", "i12", "f32"
-    pub fn to_string(&self) -> String {
+}
+
+impl std::fmt::Display for ReprType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let prefix = if self.is_float {
             "f"
         } else if self.signed {
@@ -94,7 +96,7 @@ impl ReprType {
         } else {
             "u"
         };
-        format!("{}{}", prefix, self.bits)
+        write!(f, "{}{}", prefix, self.bits)
     }
 }
 

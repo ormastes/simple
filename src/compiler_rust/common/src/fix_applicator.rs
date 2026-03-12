@@ -120,9 +120,10 @@ impl FixApplicator {
     /// Apply fixes in-place to files on disk.
     pub fn apply_to_disk(fixes: &[EasyFix], sources: &SourceRegistry, dry_run: bool) -> Result<FixReport, FixError> {
         let new_contents = Self::apply(fixes, sources)?;
-        let mut report = FixReport::default();
-
-        report.applied = fixes.len();
+        let mut report = FixReport {
+            applied: fixes.len(),
+            ..Default::default()
+        };
 
         for (file, content) in &new_contents {
             report.modified_files.push(file.clone());
@@ -142,12 +143,11 @@ impl FixApplicator {
     pub fn filter_by_confidence(fixes: &[EasyFix], min_confidence: FixConfidence) -> Vec<&EasyFix> {
         fixes
             .iter()
-            .filter(|f| match (min_confidence, f.confidence) {
-                (FixConfidence::Safe, FixConfidence::Safe) => true,
-                (FixConfidence::Likely, FixConfidence::Safe | FixConfidence::Likely) => true,
-                (FixConfidence::Uncertain, _) => true,
-                _ => false,
-            })
+            .filter(|f| matches!((min_confidence, f.confidence),
+                (FixConfidence::Safe, FixConfidence::Safe) |
+                (FixConfidence::Likely, FixConfidence::Safe | FixConfidence::Likely) |
+                (FixConfidence::Uncertain, _)
+            ))
             .collect()
     }
 

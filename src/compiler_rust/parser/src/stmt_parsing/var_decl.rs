@@ -947,7 +947,7 @@ impl Parser<'_> {
         match &self.current.kind {
             TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();
-                if let Some(repr) = ReprType::from_str(&s) {
+                if let Some(repr) = ReprType::parse_str(&s) {
                     self.advance();
                     Ok(repr)
                 } else {
@@ -1190,9 +1190,7 @@ impl Parser<'_> {
         use crate::ast::{DocComment, ExternClassDef, ExternMethodDef, ExternMethodKind};
 
         // Accept both `extern class` and `extern struct`
-        if self.check(&TokenKind::Class) {
-            self.advance();
-        } else if self.check(&TokenKind::Struct) {
+        if self.check(&TokenKind::Class) || self.check(&TokenKind::Struct) {
             self.advance();
         } else {
             self.expect(&TokenKind::Class)?; // will error with expected message

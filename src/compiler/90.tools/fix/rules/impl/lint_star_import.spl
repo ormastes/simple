@@ -1,0 +1,73 @@
+# EasyFix Rules - Star Import Detection (Text-Scanning)
+#
+# Text-based detection for wildcard imports:
+#   W0406: use module.* — prefer explicit named imports
+#
+# Skips __init__.spl and mod.spl files (re-export facades).
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+# ============================================================================
+# Rule: star_import (W0406)
+# Detects `use X.*` lines in regular source files.
+# Confidence: Certain (syntactic match)
+# ============================================================================
+
+fn check_star_import_text(source: text, file: text) -> [EasyFix]:
+    # Skip re-export facade modules
+    if file.ends_with("__init__.spl"):
+        return []
+    if file.ends_with("mod.spl"):
+        return []
+
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Match: use <path>.*  or  use <path>.* (with trailing comment)
+        if trimmed.starts_with("use ") and trimmed.contains(".*"):
+            val mod_path = extract_star_module(trimmed)
+            if mod_path != "":
+                var fix = EasyFix.create(
+                    id: "W0406:{line_num}",
+                    description: "wildcard import 'use {mod_path}.*' — prefer explicit named imports",
+                    confidence: FixConfidence.Certain
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: byte_offset,
+                    end: byte_offset + line.len(),
+                    line: line_num,
+                    column: 1,
+                    new_text: line
+                ))
+                fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn extract_star_module(trimmed: text) -> text:
+    """Extract module path from 'use path.*' line. Returns "" if not a star import."""
+    # Strip 'use ' prefix
+    var rest = trimmed.slice(4).trim()
+    # Strip 'lazy ' modifier if present
+    if rest.starts_with("lazy "):
+        rest = rest.slice(5).trim()
+    # Find .* suffix
+    val star_pos = rest.find(".*")
+    if star_pos < 0:
+        return ""
+    rest.slice(0, star_pos)
+
+export check_star_import_text

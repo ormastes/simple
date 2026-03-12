@@ -22,7 +22,7 @@ use crate::signature::{
     get_qualified_ignore_ids,
 };
 use crate::test_db::{load_test_db, save_test_db, TestDb, TestStatus};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Qualified ignore command arguments
 pub struct QualifyIgnoreArgs {
@@ -320,7 +320,7 @@ fn handle_list_signers() -> Result<(), String> {
     Ok(())
 }
 
-fn handle_status(db_path: &PathBuf) -> Result<(), String> {
+fn handle_status(db_path: &Path) -> Result<(), String> {
     let db = load_test_db(db_path)?;
 
     let qualified_count = db
@@ -368,7 +368,7 @@ fn handle_status(db_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_verify(db_path: &PathBuf) -> Result<(), String> {
+fn handle_verify(db_path: &Path) -> Result<(), String> {
     let db = load_test_db(db_path)?;
 
     if !has_qualified_ignores(&db) {
@@ -427,7 +427,7 @@ fn authenticate(args: &QualifyIgnoreArgs) -> Result<String, String> {
     }
 }
 
-fn handle_qualify_all(db_path: &PathBuf, args: &QualifyIgnoreArgs) -> Result<(), String> {
+fn handle_qualify_all(db_path: &Path, args: &QualifyIgnoreArgs) -> Result<(), String> {
     let mut db = load_test_db(db_path)?;
 
     // Find all ignored tests
@@ -489,7 +489,7 @@ fn handle_qualify_all(db_path: &PathBuf, args: &QualifyIgnoreArgs) -> Result<(),
     Ok(())
 }
 
-fn handle_qualify_specific(db_path: &PathBuf, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
+fn handle_qualify_specific(db_path: &Path, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
     let mut db = load_test_db(db_path)?;
 
     // Validate test IDs exist and are ignored
@@ -561,7 +561,7 @@ fn handle_qualify_specific(db_path: &PathBuf, test_ids: &[String], args: &Qualif
     Ok(())
 }
 
-fn handle_unqualify(db_path: &PathBuf, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
+fn handle_unqualify(db_path: &Path, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
     let mut db = load_test_db(db_path)?;
 
     // Validate test IDs exist and are qualified_ignore

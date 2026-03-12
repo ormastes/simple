@@ -15,6 +15,12 @@ pub struct ModuleLoader {
     allocator: PlatformAllocator,
 }
 
+impl Default for ModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {

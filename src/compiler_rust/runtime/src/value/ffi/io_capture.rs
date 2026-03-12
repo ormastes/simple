@@ -216,8 +216,8 @@ pub fn rt_read_stdin_char() -> Option<char> {
                 return None;
             }
             let ch = content.chars().next();
-            if ch.is_some() {
-                *content = content[ch.unwrap().len_utf8()..].to_string();
+            if let Some(c) = ch {
+                *content = content[c.len_utf8()..].to_string();
             }
             ch
         } else {

@@ -114,10 +114,10 @@ pub fn parse_readme_config(content: &str) -> ParsedReadme {
         // Shorthand: <!--doctest:lang simple-->
         if line.starts_with("<!--doctest:") && line.ends_with("-->") {
             let inner = &line[12..line.len() - 3].trim();
-            if inner.starts_with("lang ") {
-                config.lang = inner[5..].trim().to_string();
-            } else if inner.starts_with("timeout ") {
-                config.timeout = inner[8..].trim().parse().unwrap_or(5000);
+            if let Some(stripped) = inner.strip_prefix("lang ") {
+                config.lang = stripped.trim().to_string();
+            } else if let Some(stripped) = inner.strip_prefix("timeout ") {
+                config.timeout = stripped.trim().parse().unwrap_or(5000);
             } else if *inner == "disabled" {
                 config.disabled = true;
             }

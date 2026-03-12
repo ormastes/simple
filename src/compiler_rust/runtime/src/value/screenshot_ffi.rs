@@ -324,7 +324,7 @@ fn generate_screenshot_path(test_file: &str, test_name: &str, capture_type: Capt
         .replace(".spl", "");
 
     // Clean up test name
-    let safe_name = test_name.replace(' ', "_").replace('/', "_").to_lowercase();
+    let safe_name = test_name.replace([' ', '/'], "_").to_lowercase();
 
     let suffix = match capture_type {
         CaptureType::Before => "before",

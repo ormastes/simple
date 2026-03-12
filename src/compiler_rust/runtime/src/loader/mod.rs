@@ -49,6 +49,7 @@
 
 pub mod arch_validate;
 pub mod cross_test;
+#[allow(clippy::module_inception)]
 pub mod loader;
 pub mod memory;
 pub mod module;

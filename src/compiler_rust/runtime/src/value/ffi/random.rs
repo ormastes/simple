@@ -82,7 +82,7 @@ pub extern "C" fn rt_random_randint(min: i64, max: i64) -> i64 {
     if min > max {
         return min;
     }
-    let range = (max - min + 1) as i64;
+    let range = max - min + 1;
     let rand_val = rt_random_next();
     min + (rand_val % range)
 }

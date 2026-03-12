@@ -30,7 +30,7 @@ where
     };
 
     let path = Path::new(path_str);
-    let result = operation(&path);
+    let result = operation(path);
 
     rt_string_new(result.as_ptr(), result.len() as u64)
 }

@@ -460,13 +460,8 @@ impl<'a> Parser<'a> {
                         self.advance();
                     } else if self.check(&TokenKind::ShiftRight) {
                         // >> is two > tokens
-                        if depth <= 2 {
-                            depth -= 2;
-                            self.advance();
-                        } else {
-                            depth -= 2;
-                            self.advance();
-                        }
+                        depth -= 2;
+                        self.advance();
                     } else {
                         self.advance();
                     }
@@ -492,13 +487,8 @@ impl<'a> Parser<'a> {
                             depth -= 1;
                             self.advance();
                         } else if self.check(&TokenKind::ShiftRight) {
-                            if depth <= 2 {
-                                depth -= 2;
-                                self.advance();
-                            } else {
-                                depth -= 2;
-                                self.advance();
-                            }
+                            depth -= 2;
+                            self.advance();
                         } else {
                             self.advance();
                         }

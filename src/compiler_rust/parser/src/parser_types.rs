@@ -534,7 +534,7 @@ impl<'a> Parser<'a> {
             // The lexer produces Symbol("u12") for `:u12` so we need to check for Symbol
             if let TokenKind::Symbol(repr_str) = &self.current.kind {
                 let repr_str = repr_str.clone();
-                if let Some(repr) = ReprType::from_str(&repr_str) {
+                if let Some(repr) = ReprType::parse_str(&repr_str) {
                     self.advance(); // consume the symbol
 
                     // Check for where clause
@@ -571,7 +571,7 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();
-                if let Some(repr) = ReprType::from_str(&s) {
+                if let Some(repr) = ReprType::parse_str(&s) {
                     self.advance();
                     Ok(repr)
                 } else {

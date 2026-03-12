@@ -62,7 +62,7 @@ impl SlotAllocator {
     /// * `slot_size` - Size of each slot in bytes
     pub fn new(base: *mut u8, region_size: usize, slot_size: usize) -> Self {
         let total_slots = region_size / slot_size;
-        let bitmap_words = (total_slots + 63) / 64;
+        let bitmap_words = total_slots.div_ceil(64);
 
         Self {
             base,
@@ -101,7 +101,7 @@ impl SlotAllocator {
 
     /// Calculate how many slots are needed for a given size.
     pub fn slots_needed(&self, size: usize) -> usize {
-        (size + self.slot_size - 1) / self.slot_size
+        size.div_ceil(self.slot_size)
     }
 
     /// Convert a slot index to a memory address.

@@ -17,19 +17,19 @@ use crate::value::core::RuntimeValue;
 
 thread_local! {
     /// Current indentation level for nested describe blocks
-    static BDD_INDENT: RefCell<usize> = RefCell::new(0);
+    static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
     /// (passed, failed) counts for current describe block
-    static BDD_COUNTS: RefCell<(usize, usize)> = RefCell::new((0, 0));
+    static BDD_COUNTS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
     /// Whether the current it-block's expect has failed
-    static BDD_EXPECT_FAILED: RefCell<bool> = RefCell::new(false);
+    static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     /// Whether we are inside an it-block
-    static BDD_INSIDE_IT: RefCell<bool> = RefCell::new(false);
+    static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
     /// Failure message from expect
-    static BDD_FAILURE_MSG: RefCell<Option<String>> = RefCell::new(None);
+    static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Stack of describe block names (for nested output)
-    static BDD_DESCRIBE_STACK: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static BDD_DESCRIBE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Accumulated results across all describe blocks: Vec<(total, failed)>
-    static BDD_RESULTS: RefCell<Vec<(usize, usize)>> = RefCell::new(Vec::new());
+    static BDD_RESULTS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
     /// Before-each callback function pointers (stack per nesting level)
     static BDD_BEFORE_EACH: RefCell<Vec<Vec<i64>>> = RefCell::new(vec![vec![]]);
     /// After-each callback function pointers (stack per nesting level)

@@ -37,7 +37,7 @@ impl BackingType {
     }
 
     /// Parse backing type from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "u8" => Some(BackingType::U8),
             "u16" => Some(BackingType::U16),

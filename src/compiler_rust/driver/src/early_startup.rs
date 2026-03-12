@@ -31,7 +31,7 @@ pub enum AppType {
 
 impl AppType {
     /// Parse app type from string argument
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "cli" => Some(AppType::Cli),
             "tui" => Some(AppType::Tui),
@@ -128,7 +128,7 @@ where
             match arg_str.as_ref() {
                 "--app-type" => {
                     if let Some(type_arg) = args_iter.next() {
-                        if let Some(app_type) = AppType::from_str(&type_arg.as_ref().to_string_lossy()) {
+                        if let Some(app_type) = AppType::parse_str(&type_arg.as_ref().to_string_lossy()) {
                             config.app_type = app_type;
                         }
                     }
@@ -214,12 +214,12 @@ mod tests {
 
     #[test]
     fn test_app_type_parsing() {
-        assert_eq!(AppType::from_str("cli"), Some(AppType::Cli));
-        assert_eq!(AppType::from_str("tui"), Some(AppType::Tui));
-        assert_eq!(AppType::from_str("gui"), Some(AppType::Gui));
-        assert_eq!(AppType::from_str("service"), Some(AppType::Service));
-        assert_eq!(AppType::from_str("repl"), Some(AppType::Repl));
-        assert_eq!(AppType::from_str("invalid"), None);
+        assert_eq!(AppType::parse_str("cli"), Some(AppType::Cli));
+        assert_eq!(AppType::parse_str("tui"), Some(AppType::Tui));
+        assert_eq!(AppType::parse_str("gui"), Some(AppType::Gui));
+        assert_eq!(AppType::parse_str("service"), Some(AppType::Service));
+        assert_eq!(AppType::parse_str("repl"), Some(AppType::Repl));
+        assert_eq!(AppType::parse_str("invalid"), None);
     }
 
     #[test]

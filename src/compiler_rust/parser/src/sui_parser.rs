@@ -342,8 +342,8 @@ impl SuiParser {
                 }
             } else {
                 // Add any partially matched pattern chars
-                for i in 0..match_pos {
-                    result.push(pattern_chars[i]);
+                for ch in pattern_chars.iter().take(match_pos) {
+                    result.push(*ch);
                 }
                 match_pos = 0;
                 result.push(ch);

@@ -665,7 +665,7 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
 
-                // If next token is assignment, treat as variable name
+                // If next token is assignment, variable name, string literal (BDD), or paren (call)
                 if matches!(
                     &next.kind,
                     TokenKind::Assign
@@ -674,16 +674,11 @@ impl<'a> Parser<'a> {
                         | TokenKind::StarAssign
                         | TokenKind::SlashAssign
                         | TokenKind::Dot
+                        | TokenKind::LParen
+                        | TokenKind::String(_)
+                        | TokenKind::RawString(_)
+                        | TokenKind::FString(_)
                 ) {
-                    self.parse_expression_or_assignment()
-                // If next token is a string literal, treat as BDD expression (no-paren call)
-                } else if matches!(
-                    &next.kind,
-                    TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)
-                ) {
-                    self.parse_expression_or_assignment()
-                // If next token is an opening paren, treat as function call
-                } else if matches!(&next.kind, TokenKind::LParen) {
                     self.parse_expression_or_assignment()
                 } else {
                     self.parse_context()

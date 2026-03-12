@@ -148,6 +148,36 @@ Tree-private by default.
 - loader-only grammar
 - duplicating file-format structs under multiple siblings
 
+## Platform/CPU Variation Nodes
+
+### Principle
+Platform and CPU-specific code follows the same shared-tree-node pattern:
+variations are children of a common root node in L0.
+
+### Common Tree Nodes (Platform)
+
+| Common node | Path | Used by |
+|---|---|---|
+| link configuration | `common/src/platform/link_config.rs` | compiler linker, native pipeline |
+| C compiler detection | `common/src/platform/cc_detect.rs` | compiler linker, native pipeline |
+| assembly helpers | `common/src/platform/asm_helpers.rs` | stub generator, native backend |
+
+### Variation Structure
+```
+common/src/platform/
+├── link_config.rs      # PlatformLinkConfig per OS (Linux, FreeBSD, macOS, Windows)
+├── cc_detect.rs        # C/C++ compiler detection per OS
+├── asm_helpers.rs       # Ret/jump instructions per CPU arch
+├── mod.rs              # PlatformInfo + module exports
+├── sysroot.rs          # Runtime library discovery
+├── env.rs, fs.rs, ...  # Existing infrastructure
+```
+
+### Rules
+- New OS support: add variant to `PlatformLinkConfig::for_target()`
+- New CPU arch: add variant to `asm_helpers.rs`
+- Consumers (compiler/linker) never use `#[cfg(target_os)]` for link config — use `PlatformLinkConfig`
+
 ## Migration Sequence
 
 1. Extract shared tree nodes to `common`.

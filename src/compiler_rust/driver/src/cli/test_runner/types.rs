@@ -63,7 +63,7 @@ pub enum TestExecutionMode {
 
 impl TestExecutionMode {
     /// Parse from string (for CLI)
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "interpreter" | "interp" => Some(Self::Interpreter),
             "smf" | "loader" => Some(Self::Smf),

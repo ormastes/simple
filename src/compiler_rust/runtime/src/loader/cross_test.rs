@@ -74,12 +74,12 @@ impl TargetFixture {
     ///
     /// Note: SettlementHeader only contains arch, not platform.
     pub fn mock_settlement_header(&self) -> SettlementHeader {
-        let mut header = SettlementHeader::default();
-        header.magic = super::smf::settlement::SSMF_MAGIC;
-        header.version = 1;
-        header.arch = Arch::from_target_arch(self.target.arch) as u8;
-        // SettlementHeader doesn't have platform field - only arch
-        header
+        SettlementHeader {
+            magic: super::smf::settlement::SSMF_MAGIC,
+            version: 1,
+            arch: Arch::from_target_arch(self.target.arch) as u8,
+            ..Default::default()
+        }
     }
 
     /// Check if this target is the host target.

@@ -465,12 +465,12 @@ impl StartupLoader {
                     )?;
                     manager
                         .add_shared(&name, Path::new(&path))
-                        .map_err(|e| StartupError::NativeLibLoadFailed(e))?;
+                        .map_err(StartupError::NativeLibLoadFailed)?;
                 }
                 NATIVE_LIB_SYSTEM => {
                     manager
                         .add_system(&name)
-                        .map_err(|e| StartupError::NativeLibLoadFailed(e))?;
+                        .map_err(StartupError::NativeLibLoadFailed)?;
                 }
                 _ => {
                     // Static libs are embedded - data is in the settlement

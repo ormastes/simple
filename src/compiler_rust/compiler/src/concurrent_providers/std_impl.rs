@@ -608,12 +608,12 @@ impl LockProvider for StdLockProvider {
 
     fn mutex_lock(&self, mutex: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_mutex_lock_fn;
-        rt_mutex_lock_fn(&[mutex.clone()])
+        rt_mutex_lock_fn(std::slice::from_ref(mutex))
     }
 
     fn mutex_try_lock(&self, mutex: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_mutex_try_lock_fn;
-        rt_mutex_try_lock_fn(&[mutex.clone()])
+        rt_mutex_try_lock_fn(std::slice::from_ref(mutex))
     }
 
     fn mutex_unlock(&self, mutex: &Value, new_value: Value) -> Result<Value, CompileError> {
@@ -628,22 +628,22 @@ impl LockProvider for StdLockProvider {
 
     fn rwlock_read(&self, rwlock: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_rwlock_read_fn;
-        rt_rwlock_read_fn(&[rwlock.clone()])
+        rt_rwlock_read_fn(std::slice::from_ref(rwlock))
     }
 
     fn rwlock_write(&self, rwlock: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_rwlock_write_fn;
-        rt_rwlock_write_fn(&[rwlock.clone()])
+        rt_rwlock_write_fn(std::slice::from_ref(rwlock))
     }
 
     fn rwlock_try_read(&self, rwlock: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_rwlock_try_read_fn;
-        rt_rwlock_try_read_fn(&[rwlock.clone()])
+        rt_rwlock_try_read_fn(std::slice::from_ref(rwlock))
     }
 
     fn rwlock_try_write(&self, rwlock: &Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::atomic::rt_rwlock_try_write_fn;
-        rt_rwlock_try_write_fn(&[rwlock.clone()])
+        rt_rwlock_try_write_fn(std::slice::from_ref(rwlock))
     }
 
     fn rwlock_set(&self, rwlock: &Value, new_value: Value) -> Result<Value, CompileError> {

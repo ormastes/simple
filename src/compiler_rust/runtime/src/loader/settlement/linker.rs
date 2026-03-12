@@ -129,8 +129,8 @@ impl SettlementLinker {
         }
 
         self.module_exports.insert(handle, export_names);
-        self.dependencies.entry(handle).or_insert_with(Vec::new);
-        self.dependents.entry(handle).or_insert_with(Vec::new);
+        self.dependencies.entry(handle).or_default();
+        self.dependents.entry(handle).or_default();
     }
 
     /// Extract imports from a module (symbols that need external resolution).
@@ -189,13 +189,13 @@ impl SettlementLinker {
                     // Update dependency graph
                     self.dependencies
                         .entry(handle)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(export.module);
 
                     // Update reverse dependencies
                     self.dependents
                         .entry(export.module)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(handle);
                 }
             } else if !import.weak {

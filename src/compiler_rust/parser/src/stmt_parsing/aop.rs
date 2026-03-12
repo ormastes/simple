@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
                 "before" | "after_success" | "after_error" | "around" => {
                     let type_name = name.clone();
                     self.advance();
-                    AdviceType::from_str(&type_name).ok_or_else(|| {
+                    AdviceType::parse_str(&type_name).ok_or_else(|| {
                         ParseError::unexpected_token("valid advice type", type_name, self.previous.span)
                     })?
                 }
@@ -108,7 +108,7 @@ impl<'a> Parser<'a> {
                 "singleton" | "transient" | "scoped" => {
                     let scope_name = name.clone();
                     self.advance();
-                    DiScope::from_str(&scope_name)
+                    DiScope::parse_str(&scope_name)
                 }
                 _ => None,
             }

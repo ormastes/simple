@@ -303,9 +303,9 @@ fn extract_block_name(line: &str, keyword: &str) -> Option<String> {
     let prefix = format!("{} ", keyword);
     let rest = line.strip_prefix(&prefix)?;
     let rest = rest.trim();
-    if rest.starts_with('"') {
-        let end = rest[1..].find('"')?;
-        Some(rest[1..=end].to_string())
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
     } else {
         None
     }

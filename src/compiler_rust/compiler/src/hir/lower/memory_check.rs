@@ -322,6 +322,7 @@ impl Lowerer {
     /// - `self.field = ...` (field access on self)
     /// - `self[idx] = ...` (index access on self)
     /// - `self.field.subfield = ...` (nested field access starting from self)
+    #[allow(clippy::only_used_in_recursion)]
     fn is_self_mutation(&self, expr: &HirExpr) -> bool {
         match &expr.kind {
             HirExprKind::FieldAccess { receiver, .. } => {
@@ -347,6 +348,7 @@ impl Lowerer {
 
     /// Get the reference ID for an expression (for aliasing tracking)
     /// Returns Some(id) if the expression represents a trackable reference
+    #[allow(clippy::only_used_in_recursion)]
     pub(super) fn get_expr_ref_id(&self, expr: &HirExpr) -> Option<usize> {
         match &expr.kind {
             HirExprKind::Local(idx) => Some(*idx),

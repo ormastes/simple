@@ -267,9 +267,7 @@ impl NativeLibConfig {
             (false, _) => "a",
         };
 
-        let prefix = if !self.shared && target.os != TargetOS::Windows {
-            "lib"
-        } else if self.shared && target.os != TargetOS::Windows {
+        let prefix = if target.os != TargetOS::Windows {
             "lib"
         } else {
             ""

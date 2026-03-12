@@ -89,21 +89,21 @@ pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValu
     if path.is_nil() || path.0 == 0 {
         // Return None enum
         let none_disc = crate::value::objects::hash_variant_discriminant("None");
-        return rt_enum_new(0, none_disc as u32, RuntimeValue::NIL);
+        return rt_enum_new(0, none_disc, RuntimeValue::NIL);
     }
     let len = rt_string_len(path);
     let ptr = rt_string_data(path);
     if ptr.is_null() {
         let none_disc = crate::value::objects::hash_variant_discriminant("None");
-        return rt_enum_new(0, none_disc as u32, RuntimeValue::NIL);
+        return rt_enum_new(0, none_disc, RuntimeValue::NIL);
     }
     let result = rt_file_read_text(ptr, len as u64);
     if result.is_nil() {
         let none_disc = crate::value::objects::hash_variant_discriminant("None");
-        rt_enum_new(0, none_disc as u32, RuntimeValue::NIL)
+        rt_enum_new(0, none_disc, RuntimeValue::NIL)
     } else {
         let some_disc = crate::value::objects::hash_variant_discriminant("Some");
-        rt_enum_new(0, some_disc as u32, result)
+        rt_enum_new(0, some_disc, result)
     }
 }
 
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn rt_file_write_bytes(
 
     // If data_ptr is null but len is 0, write empty file
     if data_ptr.is_null() {
-        return std::fs::write(path_str, &[]).is_ok();
+        return std::fs::write(path_str, []).is_ok();
     }
 
     let data = std::slice::from_raw_parts(data_ptr, data_len as usize);

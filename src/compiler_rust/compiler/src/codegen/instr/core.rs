@@ -378,14 +378,16 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
     _dest: &Option<VReg>,
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     match func_name {
-        "print" | "println" | "eprint" | "eprintln" => {
+        "print" | "println" | "eprint" | "eprintln"
+        | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" => {
             // Determine which runtime function to use
             // Note: In Simple, 'print' adds a newline (Python 3 convention)
+            // Accepts both bare names and spl_ prefixed names (safe symbol exports).
             let (print_value_fn, print_str_fn) = match func_name {
-                "print" => ("rt_println_value", "rt_println_str"),
-                "println" => ("rt_println_value", "rt_println_str"),
-                "eprint" => ("rt_eprint_value", "rt_eprint_str"),
-                "eprintln" => ("rt_eprintln_value", "rt_eprintln_str"),
+                "print" | "spl_print" => ("rt_println_value", "rt_println_str"),
+                "println" | "spl_println" => ("rt_println_value", "rt_println_str"),
+                "eprint" | "spl_eprint" => ("rt_eprint_value", "rt_eprint_str"),
+                "eprintln" | "spl_eprintln" => ("rt_eprintln_value", "rt_eprintln_str"),
                 _ => unreachable!(),
             };
 
@@ -401,9 +403,9 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
 
                     // Use the base print_str function (not println) for space separator
                     let base_str_fn = match func_name {
-                        "print" => "rt_print_str",
-                        "println" => "rt_print_str",
-                        "eprintln" => "rt_eprint_str",
+                        "print" | "spl_print" => "rt_print_str",
+                        "println" | "spl_println" => "rt_print_str",
+                        "eprintln" | "spl_eprintln" => "rt_eprint_str",
                         _ => print_str_fn,
                     };
                     let print_str_id = ctx.runtime_funcs[base_str_fn];
@@ -415,14 +417,15 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 // For the last arg of print/println/eprintln, use the ln variant
                 let is_last = i == args.len() - 1;
                 let fn_to_use =
-                    if is_last && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
+                    if is_last && matches!(func_name, "print" | "println" | "eprintln"
+                        | "spl_print" | "spl_println" | "spl_eprintln") {
                         print_value_fn
                     } else {
                         // Use non-newline variant for intermediate args
                         match func_name {
-                            "print" => "rt_print_value",
-                            "println" => "rt_print_value",
-                            "eprintln" => "rt_eprint_value",
+                            "print" | "spl_print" => "rt_print_value",
+                            "println" | "spl_println" => "rt_print_value",
+                            "eprintln" | "spl_eprintln" => "rt_eprint_value",
                             _ => print_value_fn,
                         }
                     };
@@ -437,14 +440,15 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             }
 
             // Handle empty print (just prints nothing or newline)
-            if args.is_empty() && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
+            if args.is_empty() && matches!(func_name, "print" | "println" | "eprintln"
+                | "spl_print" | "spl_println" | "spl_eprintln") {
                 // Print just a newline
                 let newline_data_id = declare_named_bytes(ctx, b"\n")?;
                 let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);
                 let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
                 let newline_len = builder.ins().iconst(types::I64, 1);
 
-                let base_str_fn = if func_name == "print" || func_name == "println" {
+                let base_str_fn = if matches!(func_name, "print" | "println" | "spl_print" | "spl_println") {
                     "rt_print_str"
                 } else {
                     "rt_eprint_str"

@@ -173,7 +173,7 @@ impl PredicateExpr {
 }
 
 impl AdviceType {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "before" => Some(AdviceType::Before),
             "after_success" | "after-success" => Some(AdviceType::AfterSuccess),
@@ -194,7 +194,7 @@ impl AdviceType {
 }
 
 impl DiScope {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "singleton" => Some(DiScope::Singleton),
             "transient" => Some(DiScope::Transient),

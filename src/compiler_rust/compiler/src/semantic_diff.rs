@@ -511,6 +511,7 @@ impl SemanticDiffer {
         self.format_type(old) == self.format_type(new)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn format_type(&self, ty: &Type) -> String {
         match ty {
             Type::Simple(name) => name.clone(),

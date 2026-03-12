@@ -19,7 +19,7 @@ pub struct Response {
 
 impl Response {
     /// Create a new response builder
-    pub fn new() -> ResponseBuilder {
+    pub fn builder() -> ResponseBuilder {
         ResponseBuilder::new()
     }
 
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_redirect() {
-        let response = Response::new().redirect("/new-location").build();
+        let response = Response::builder().redirect("/new-location").build();
 
         assert_eq!(response.status, StatusCode::Found);
         assert_eq!(response.headers.get("Location").unwrap(), "/new-location");
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_permanent_redirect() {
-        let response = Response::new().redirect_permanent("/moved").build();
+        let response = Response::builder().redirect_permanent("/moved").build();
 
         assert_eq!(response.status, StatusCode::MovedPermanently);
         assert_eq!(response.headers.get("Location").unwrap(), "/moved");

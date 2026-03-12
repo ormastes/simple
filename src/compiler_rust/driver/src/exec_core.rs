@@ -33,12 +33,12 @@ pub enum ExecutionMode {
 
 impl ExecutionMode {
     /// Parse from string (CLI flag or env var).
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s {
             "interpret" | "interpreter" => ExecutionMode::Interpret,
             "cranelift" => ExecutionMode::CraneliftJit,
             "llvm" => ExecutionMode::LlvmJit,
-            "jit" | "auto" | _ => ExecutionMode::Jit,
+            _ => ExecutionMode::Jit,
         }
     }
 
@@ -67,11 +67,12 @@ impl ExecCore {
     }
 
     /// Create with a GC runtime and custom symbol provider
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn with_gc_and_provider(gc: GcRuntime, provider: Arc<dyn RuntimeSymbolProvider>) -> Self {
         let gc = Arc::new(gc);
         // Check SIMPLE_EXECUTION_MODE env var for default mode
         let mode = std::env::var("SIMPLE_EXECUTION_MODE")
-            .map(|s| ExecutionMode::from_str(&s))
+            .map(|s| ExecutionMode::parse_str(&s))
             .unwrap_or(ExecutionMode::Jit); // JIT default (Stage 2+)
         Self {
             loader: SmfLoader::new(),

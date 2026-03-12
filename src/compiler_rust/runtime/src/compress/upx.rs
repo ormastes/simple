@@ -297,10 +297,7 @@ pub unsafe extern "C" fn upx_get_ratio(file: *const c_char) -> f64 {
         Err(_) => return -1.0,
     };
 
-    match get_compression_ratio(file_str) {
-        Ok(ratio) => ratio,
-        Err(_) => -1.0,
-    }
+    get_compression_ratio(file_str).unwrap_or(-1.0)
 }
 
 /// FFI: Check if UPX is available

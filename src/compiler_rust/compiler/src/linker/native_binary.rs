@@ -38,47 +38,15 @@ use super::layout::{LayoutOptimizer, LayoutSegment};
 use super::native::NativeLinker;
 
 /// Get the architecture-appropriate `ret` instruction for inline asm stubs.
+/// Delegates to `simple_common::platform::asm_helpers`.
 fn asm_ret_instruction(target: &Target) -> &'static str {
-    match target.arch {
-        TargetArch::X86_64 | TargetArch::X86 => "ret",
-        TargetArch::Aarch64 => "ret", // uses x30 (link register)
-        TargetArch::Arm => "bx lr",
-        TargetArch::Riscv64 | TargetArch::Riscv32 => "ret", // pseudo for jalr x0, ra, 0
-        _ => "ret",                                         // fallback
-    }
+    simple_common::platform::asm_helpers::asm_ret_instruction(target)
 }
 
 /// Detect the C compiler for the target platform.
-///
-/// On Windows, defaults to `cl.exe`. Respects the `CC` environment variable.
+/// Delegates to `simple_common::platform::cc_detect`.
 fn detect_c_compiler(target: &Target) -> String {
-    if let Ok(cc) = std::env::var("CC") {
-        return cc;
-    }
-    match target.os {
-        TargetOS::Windows => {
-            // When running on Windows, prefer MinGW gcc over MSVC cl.exe
-            // for bootstrap compatibility. When cross-compiling from
-            // non-Windows, default to cl.exe (MSVC toolchain).
-            if cfg!(target_os = "windows") && which_exists("gcc") {
-                "gcc".to_string()
-            } else if cfg!(target_os = "windows") && which_exists("cc") {
-                "cc".to_string()
-            } else {
-                "cl.exe".to_string()
-            }
-        }
-        _ => "cc".to_string(),
-    }
-}
-
-fn which_exists(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+    simple_common::platform::cc_detect::detect_c_compiler_for_target(target)
 }
 
 /// Build arguments for compiling a C file to an object file.
@@ -221,39 +189,9 @@ impl NativeBinaryOptions {
     }
 
     /// Get default libraries for a specific target OS.
+    /// Delegates to `simple_common::platform::link_config`.
     pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
-        use simple_common::target::TargetOS;
-        match target.os {
-            TargetOS::Linux => vec![
-                "c".into(),
-                "pthread".into(),
-                "dl".into(),
-                "m".into(),
-                "gcc_s".into(),          // Unwinding support
-                "lzma".into(),           // Needed by xz2 (dependency chain)
-                "simple_runtime".into(), // Runtime FFI functions
-            ],
-            TargetOS::MacOS => vec![
-                "System".into(), // Provides libc, pthread, dl, m on macOS
-                "simple_runtime".into(),
-            ],
-            TargetOS::Windows => vec![
-                "c".into(),
-                "msvcrt".into(),
-                "kernel32".into(),
-                "ws2_32".into(),
-                "advapi32".into(),
-                "simple_runtime".into(),
-            ],
-            TargetOS::FreeBSD => vec![
-                "c".into(),
-                "pthread".into(),
-                "m".into(),
-                "execinfo".into(),
-                "simple_runtime".into(),
-            ],
-            _ => vec!["c".into()],
-        }
+        simple_common::platform::link_config::default_libraries_for_target(target)
     }
 
     /// Detect library paths for a specific target.

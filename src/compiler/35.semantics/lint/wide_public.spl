@@ -1,0 +1,133 @@
+# Wide Public Lint
+#
+# Detects modules that export an excessive number of public symbols.
+# Large public surfaces are harder to maintain, document, and version.
+#
+# W0404: Module exports more than threshold symbols                  WARNING
+#
+# Default threshold: 30 symbols (configurable via _with_threshold variant)
+#
+# Counts:
+# - Each name in DECL_EXPORT declarations
+# - Each declaration with is_pub flag set
+# (de-duplicated: a name that appears in both is counted once)
+#
+# Does NOT flag:
+# - Re-export modules (__init__.spl, mod.spl) when using file-aware check
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast.{
+    DECL_EXPORT, DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_ENUM, DECL_CLASS,
+    DECL_VAL, DECL_VAR, DECL_LAZY_VAL,
+    decl_tag, decl_name, decl_imports, decl_is_pub
+}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val DEFAULT_PUBLIC_THRESHOLD: i64 = 30
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct WidePublicWarning:
+    code: text
+    severity: text
+    message: text
+    export_count: i64
+    threshold: i64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} ({self.export_count} symbols, threshold {self.threshold})"
+
+# ============================================================================
+# Main Entry Points
+# ============================================================================
+
+fn check_wide_public(decl_indices: [i64]) -> [WidePublicWarning]:
+    """Run wide-public lint with the default threshold."""
+    check_wide_public_with_threshold(decl_indices, DEFAULT_PUBLIC_THRESHOLD)
+
+fn check_wide_public_with_threshold(decl_indices: [i64], threshold: i64) -> [WidePublicWarning]:
+    """Run wide-public lint on module declarations.
+
+    Counts the total number of publicly exported symbols from:
+    - DECL_EXPORT entries (each name in the export list)
+    - Declarations with the pub flag set
+
+    If the total exceeds the threshold, emits W0404.
+    """
+    var exported_names: [text] = []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        if tag == DECL_EXPORT:
+            # Each DECL_EXPORT has a list of exported names
+            val names = decl_imports[idx]
+            for n in names:
+                # Strip alias if present (name:alias format)
+                val base = strip_alias(n)
+                if not list_contains(exported_names, base):
+                    exported_names.push(base)
+            continue
+
+        # Check pub-annotated declarations
+        if decl_is_pub[idx] == 1:
+            val dname = decl_name[idx]
+            if dname != "":
+                if not list_contains(exported_names, dname):
+                    exported_names.push(dname)
+
+    val count = exported_names.len()
+    if count > threshold:
+        return [WidePublicWarning(
+            code: "W0404",
+            severity: "WARNING",
+            message: "module exports too many public symbols",
+            export_count: count,
+            threshold: threshold
+        )]
+
+    []
+
+fn check_wide_public_file(decl_indices: [i64], file_path: text) -> [WidePublicWarning]:
+    """Run wide-public lint with file-based filtering.
+
+    Skips the check entirely for __init__.spl and mod.spl files,
+    which are facade re-export modules where large export surfaces are expected.
+    """
+    if file_path.ends_with("__init__.spl"):
+        return []
+    if file_path.ends_with("mod.spl"):
+        return []
+    check_wide_public(decl_indices)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn strip_alias(name: text) -> text:
+    """Strip alias suffix from export name. 'foo:bar' -> 'foo'."""
+    for i in 0..name.len():
+        if name.char_at(i) == ":":
+            return name.slice(0, i)
+    name
+
+fn list_contains(lst: [text], item: text) -> bool:
+    """Check if a text list contains an item."""
+    for v in lst:
+        if v == item:
+            return true
+    false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DEFAULT_PUBLIC_THRESHOLD
+export WidePublicWarning
+export check_wide_public, check_wide_public_with_threshold, check_wide_public_file

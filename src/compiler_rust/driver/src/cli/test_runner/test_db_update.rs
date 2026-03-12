@@ -344,9 +344,8 @@ fn convert_result_to_db(result: &TestFileResult) -> (TestStatus, Option<TestFail
         (TestStatus::Ignored, None)
     } else if result.passed > 0 {
         (TestStatus::Passed, None)
-    } else if result.skipped > 0 {
-        (TestStatus::Skipped, None)
     } else {
+        // Either skipped > 0 or no tests at all
         (TestStatus::Skipped, None)
     }
 }

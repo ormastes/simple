@@ -371,6 +371,7 @@ fn eval_const_condition(
 }
 
 /// Evaluate a const integer expression
+#[allow(clippy::only_used_in_recursion)]
 fn eval_const_int_expr(expr: &Expr, const_bindings: &HashMap<String, String>, env: &Env) -> Result<i64, CompileError> {
     match expr {
         Expr::Integer(i) => Ok(*i),

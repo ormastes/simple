@@ -4,6 +4,7 @@ pub mod bytecode;
 pub mod common_backend;
 mod cranelift;
 pub mod cranelift_emitter;
+#[allow(clippy::missing_safety_doc)]
 pub mod cranelift_ffi;
 pub mod dispatch;
 pub mod emitter_trait;

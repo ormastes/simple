@@ -287,7 +287,7 @@ pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64) -> bool {
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(false, |p| unsafe { (*p).discriminant as i64 == expected })
+        .is_some_and(|p| unsafe { (*p).discriminant as i64 == expected })
 }
 
 /// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.
@@ -305,9 +305,8 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
-    let result = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload });
-    result
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
 }
 
 /// Check if a value is None/nil.
@@ -317,7 +316,7 @@ pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     // Check for raw nil (value == 0 or TAG_SPECIAL with NIL)
-    if value.0 == 0 || value.0 == super::tags::TAG_SPECIAL as u64 {
+    if value.0 == 0 || value.0 == super::tags::TAG_SPECIAL {
         return true;
     }
     if value.is_nil() {

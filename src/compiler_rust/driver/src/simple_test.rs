@@ -368,9 +368,9 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
 /// Expected output formats:
 /// - Success: `✓ TestName > Context > It description (2ms)`
 /// - Failure: `✗ TestName > Context > It description (5ms)`
-///            `  Expected: value1`
-///            `  Got: value2`
-///            `  at file.spl:45`
+///   `  Expected: value1`
+///   `  Got: value2`
+///   `  at file.spl:45`
 /// - Summary: `Tests: 10 passed, 2 failed, 12 total`
 fn parse_test_output(
     file_name: &str,

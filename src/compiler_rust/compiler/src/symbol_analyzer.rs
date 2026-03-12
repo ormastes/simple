@@ -300,6 +300,7 @@ impl SymbolUsageAnalyzer {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_type_usage(&self, ty: &Type, usage: &mut SymbolUsage) {
         match ty {
             Type::Simple(name) => {

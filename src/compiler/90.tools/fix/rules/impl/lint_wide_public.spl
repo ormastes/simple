@@ -1,0 +1,79 @@
+# EasyFix Rules - Wide Public Export Detection (Text-Scanning)
+#
+# Text-based detection for modules with too many exports:
+#   W0404: Module exports more than 30 public symbols
+#
+# Skips __init__.spl and mod.spl files (re-export facades).
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+val WIDE_PUBLIC_THRESHOLD: i64 = 30
+
+# ============================================================================
+# Rule: wide_public (W0404)
+# Counts export lines and exported names per file.
+# Confidence: Likely (heuristic — counts comma-separated names on export lines)
+# ============================================================================
+
+fn check_wide_public_text(source: text, file: text) -> [EasyFix]:
+    # Skip re-export facade modules
+    if file.ends_with("__init__.spl"):
+        return []
+    if file.ends_with("mod.spl"):
+        return []
+
+    var exported_names: [text] = []
+    val lines = source.split("\n")
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Count names on export lines: export a, b, c
+        if trimmed.starts_with("export "):
+            val names_str = trimmed.slice(7).trim()
+            # Strip trailing comment
+            var clean = names_str
+            val hash_pos = clean.find(" #")
+            if hash_pos >= 0:
+                clean = clean.slice(0, hash_pos)
+            # Skip re-export patterns (export X.* or export X from Y)
+            if clean.contains(".*"):
+                continue
+            if clean.contains(" from "):
+                continue
+            val parts = clean.split(",")
+            for part in parts:
+                val name = part.trim()
+                if name.len() > 0:
+                    if not list_has(exported_names, name):
+                        exported_names.push(name)
+
+    val count = exported_names.len()
+    if count > WIDE_PUBLIC_THRESHOLD:
+        var fix = EasyFix.create(
+            id: "W0404:1",
+            description: "module exports {count} public symbols (threshold: {WIDE_PUBLIC_THRESHOLD}) — consider splitting",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+            new_text: ""
+        ))
+        return [fix]
+
+    []
+
+fn list_has(lst: [text], item: text) -> bool:
+    for v in lst:
+        if v == item:
+            return true
+    false
+
+export check_wide_public_text

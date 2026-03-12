@@ -58,6 +58,12 @@ pub struct AsyncScheduler {
     results: Vec<(u64, RuntimeValue)>,
 }
 
+impl Default for AsyncScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsyncScheduler {
     /// Create a new empty scheduler.
     pub fn new() -> Self {

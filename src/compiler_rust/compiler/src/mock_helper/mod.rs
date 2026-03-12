@@ -1,6 +1,7 @@
 pub mod api_scanner;
 pub mod coverage;
 pub mod coverage_extended;
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod ffi;
 pub mod fluent;
 pub mod mock_policy;

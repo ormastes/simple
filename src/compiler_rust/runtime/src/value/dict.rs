@@ -60,6 +60,7 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
 
 /// Free a heap-allocated dictionary.
 #[no_mangle]
+#[allow(clippy::unused_unit)]
 pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
     let ptr = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, ());
     unsafe {

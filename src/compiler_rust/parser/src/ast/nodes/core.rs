@@ -623,11 +623,13 @@ pub enum Expr {
     Try(Box<Expr>),
 
     /// Existence check operator: expr.? - returns bool indicating if value is present
+    ///
     /// Returns true if:
     /// - Option/Result: is Some/Ok
     /// - Collections (List, Set, Dict): is non-empty
     /// - String: is non-empty
     /// - Numbers, Bool: always true (they are values)
+    ///
     /// Returns false if:
     /// - Option: is None
     /// - Result: is Err

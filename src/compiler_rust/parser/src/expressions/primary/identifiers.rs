@@ -208,7 +208,6 @@ impl<'a> Parser<'a> {
                         } else if self.check(&TokenKind::ShiftRight) {
                             // >> counts as two > closings
                             if depth <= 2 {
-                                depth = 0;
                                 self.advance(); // consume '>>'
                                 break;
                             }
