@@ -202,16 +202,50 @@ The container recovery is considered successful when all of the following hold:
 - `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`
   reports TRACE32 status as `ready`
 
-## Current Result On This Host
+## Current Result (2026-03-12)
 
-The plan is implemented in-repo, but not yet fully validated end-to-end here.
+### Working: t32mciserver (TCP headless)
 
-Observed local behavior before the container path:
+The `t32mciserver` binary (65KB, TCP-based MCI server) works correctly:
 
-- host `xvfb-run` still left `t32rem ... PING` failing with
-  `error initializing TRACE32`
-- `t32marm` did not stay alive long enough to expose the Remote API
+```bash
+config/t32/trace32_x11_container.shs build   # Build image
+config/t32/trace32_x11_container.shs up-d    # Start t32mciserver in background
+config/t32/trace32_x11_container.shs ping    # PING OK: t32mciserver responding on localhost:20000 (TCP)
+config/t32/trace32_x11_container.shs down    # Stop
+```
 
-That means the X11 cleanup alone was not enough on the host. The next useful
-validation is the new containerized launch path, because it separates X11
-runtime issues from the remaining TRACE32 install/probe issues.
+The container entrypoint now starts `t32mciserver port=20000 lib=hostmci.so`
+instead of `t32marm`, bypassing all X11/Xt issues entirely.
+
+### Semihost Output via AREA
+
+The T32 MCP server's `t32_setup_headless` tool enables semihosting by default:
+
+```
+SCREEN.OFF → AREA.Create MCP_OUT → AREA.Select MCP_OUT → SYStem.Option SemiHost ON → ON ERROR GOSUB
+```
+
+Target semihost output (ARM BKPT #0xAB / RISC-V EBREAK) routes to the AREA
+buffer. Read with `t32_area_read(area_name: "MCP_OUT", clear: "true")`.
+
+Disable semihost with `t32_setup_headless(semihost: "false")`.
+
+### Remote Interpreter Library Tests (22/22 pass)
+
+| Context | Tests |
+|---------|-------|
+| allocator (BumpAllocator) | 1 |
+| collections (FixedArray, FixedMap, FixedSet) | 3 |
+| async (NoallocScheduler, TimerFuture) | 2 |
+| semihost shortened print (RISC-V QEMU) | 2 |
+| ARM semihost (opcodes, extensions, formats, QEMU) | 5 |
+| ARM Cortex-M vector table | 3 |
+| ARM NVIC (VectorTable, ExceptionVector, registers) | 3 |
+| semihost transport (strategies, capabilities, config) | 3 |
+
+### Not Working: t32marm (GUI binary)
+
+The 2013-era `t32marm` binary's NETASSIST (UDP) listener is non-functional.
+Strace confirms zero UDP sockets created. A TRACE32 update (2020+) would be
+required for full GUI-based remote debugging.

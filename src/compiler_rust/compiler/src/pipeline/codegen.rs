@@ -790,6 +790,10 @@ fn select_backend(target: &Target) -> Result<BackendKind, CompileError> {
 mod tests {
     use super::*;
     use simple_parser::Parser;
+    #[cfg(feature = "cuda")]
+    use std::ffi::CString;
+    #[cfg(feature = "cuda")]
+    use tempfile::NamedTempFile;
 
     #[test]
     fn backend_env_defaults_to_target_selection() {
@@ -850,5 +854,57 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
         assert!(ptx.contains("mov.s64 %rd32, 3;"), "expected void gpu_store_f64 to materialize nil:\n{ptx}");
         assert!(!ptx.contains("%rd28;"), "unexpected undefined-register artifact remains in PTX:\n{ptx}");
         assert!(!ptx.contains("call.uni (%rd0), gpu_thread_id_x;"), "gpu_thread_id_x should not remain as a call target:\n{ptx}");
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn compiler_generated_ptx_can_load_and_launch_noop_kernel() {
+        let Ok(device_count) = simple_runtime::cuda_runtime::get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "@gpu_kernel\nfn noop():\n    pass_dn\n",
+        )
+        .expect("write temp source");
+        let output_file = NamedTempFile::new().expect("temp ptx");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        pipeline
+            .compile_file_to_ptx(source_file.path(), output_file.path())
+            .expect("compile PTX");
+
+        let ptx = std::fs::read_to_string(output_file.path()).expect("read PTX output");
+        assert!(ptx.contains(".visible .entry noop("), "expected noop entry PTX:\n{ptx}");
+
+        let ptx_cstr = CString::new(ptx).expect("ptx cstring");
+        let kernel_name = CString::new("noop").expect("kernel name");
+
+        let module = simple_runtime::cuda_runtime::rt_cuda_module_load_data(ptx_cstr.as_ptr());
+        assert!(module > 0, "expected generated PTX module to load, got {module}");
+
+        let launch = simple_runtime::cuda_runtime::rt_cuda_launch_kernel(
+            module,
+            kernel_name.as_ptr(),
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+        );
+        assert_eq!(launch, 0, "expected generated noop kernel to launch, got {launch}");
+
+        let sync = simple_runtime::cuda_runtime::rt_cuda_sync();
+        assert_eq!(sync, 0, "expected sync after generated noop kernel to succeed, got {sync}");
+
+        let unload = simple_runtime::cuda_runtime::rt_cuda_module_unload(module);
+        assert_eq!(unload, 0, "expected generated PTX module to unload, got {unload}");
     }
 }
