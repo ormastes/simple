@@ -411,7 +411,7 @@ Original PRACTICE enhanced to PRACTICE-II. Core command set established.
 **Base:** Extend `src/lib/common/parser/` (generic Parser class ~1,500 lines)
 
 ```
-examples/10_tooling/cmm_lsp/
+examples/10_tooling/trace32_tools/cmm_lsp/
 ├── mod.spl                    # Entry point, CLI
 ├── cmm_lexer.spl              # CMM-specific tokenizer
 ├── cmm_tokens.spl             # Token types for CMM

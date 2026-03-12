@@ -229,7 +229,7 @@ Communication with TRACE32 uses `t32rem` (Remote API CLI). The MCP servers manag
 
 ### Canonical locations (submodule)
 
-All T32 tools now live in the [`trace32_tools`](https://github.com/ormastes/trace32_tools) submodule at `examples/10_tooling/trace32_tools/`. Symlinks at the original paths preserve import compatibility:
+All T32 tools now live in the [`trace32_tools`](https://github.com/ormastes/trace32_tools) submodule at `examples/10_tooling/trace32_tools/`. Prefer the submodule paths in docs and scripts; symlinks at the original paths exist only for import compatibility:
 
 - `src/app/mcp_t32/` → `trace32_tools/t32_mcp/`
 - `src/app/t32_cli/` → `trace32_tools/t32_cli/`

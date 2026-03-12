@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-11
 **Source:** Parsing 2,969 CMM files from `/opt/t32/demo/` with the Simple-based CMM parser
-**Parser:** `examples/10_tooling/cmm_lsp/` (20 files, ~7,120 lines)
+**Parser:** `examples/10_tooling/trace32_tools/cmm_lsp/` (20 files, ~7,120 lines)
 **Result:** 90% parse rate on 50-file sample (up from 42% before fixes)
 
 ---

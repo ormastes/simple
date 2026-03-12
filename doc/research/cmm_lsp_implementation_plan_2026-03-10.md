@@ -1,7 +1,7 @@
 # CMM Language Server Protocol — Implementation Plan
 
 **Date:** 2026-03-10
-**Location:** `examples/10_tooling/cmm_lsp/`
+**Location:** `examples/10_tooling/trace32_tools/cmm_lsp/`
 **Grammar Research:** `doc/research/cmm_grammar_research_2026-03-10.md`
 
 ---
@@ -38,7 +38,7 @@ Simple's generic parser provides:
 ### Directory Structure
 
 ```
-examples/10_tooling/cmm_lsp/
+examples/10_tooling/trace32_tools/cmm_lsp/
 ├── mod.spl                    # Entry point: CLI + LSP stdio launcher
 │
 ├── # ---- Lexer Layer ----

@@ -10,8 +10,8 @@ Suite of TRACE32 debugging tools written in Simple, providing CLI, MCP, LSP, and
 |------|-------------|-------------|
 | **T32 CLI** | Command-line interface for TRACE32 sessions | `src/app/t32_cli/mod.spl` |
 | **MCP T32 LSP/DAP** | MCP server: 26 tools for session, window, CMM LSP, DAP | `src/app/mcp_t32/main.spl` |
-| **MCP CMM CLI** | MCP server: 8 tools for GUI-to-CLI conversion | `examples/10_tooling/cmm_lsp/mod.spl` |
-| **CMM LSP** | Language server for PRACTICE/CMM scripts | `examples/10_tooling/cmm_lsp/lsp_server.spl` |
+| **MCP CMM CLI** | MCP server: 8 tools for GUI-to-CLI conversion | `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl` |
+| **CMM LSP** | Language server for PRACTICE/CMM scripts | `examples/10_tooling/trace32_tools/cmm_lsp/lsp_server.spl` |
 | **DAP Adapters** | Debug Adapter Protocol for TRACE32 and GDB bridge | `src/lib/nogc_sync_mut/dap/adapter/` |
 
 ---
