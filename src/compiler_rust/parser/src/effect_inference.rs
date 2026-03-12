@@ -193,10 +193,10 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
         Expr::FieldAccess { receiver, .. } => has_suspension_in_expr(receiver),
 
         // Array/list
-        Expr::Array(elements) => elements.iter().any(|e| has_suspension_in_expr(e)),
+        Expr::Array(elements) => elements.iter().any(has_suspension_in_expr),
 
         // Tuple
-        Expr::Tuple(elements) => elements.iter().any(|e| has_suspension_in_expr(e)),
+        Expr::Tuple(elements) => elements.iter().any(has_suspension_in_expr),
 
         // Lambda - don't traverse into it (has its own effect)
         Expr::Lambda { .. } => false,

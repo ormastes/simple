@@ -172,7 +172,7 @@ impl JjStateManager {
 
         // Get the most recent success snapshot
         let output = Command::new("jj")
-            .args(&[
+            .args([
                 "log",
                 "--limit",
                 "10",
@@ -209,7 +209,7 @@ impl JjStateManager {
     /// Create a JJ snapshot with the given message
     fn create_snapshot(&self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         let output = Command::new("jj")
-            .args(&["describe", "-m", message])
+            .args(["describe", "-m", message])
             .current_dir(&self.repo_path)
             .output()?;
 
@@ -220,7 +220,7 @@ impl JjStateManager {
 
         // Create a new working copy for the next change
         let output = Command::new("jj")
-            .args(&["new"])
+            .args(["new"])
             .current_dir(&self.repo_path)
             .output()?;
 

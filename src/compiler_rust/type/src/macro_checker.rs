@@ -288,7 +288,7 @@ impl TypeChecker {
                 let mut out = String::new();
                 for part in parts {
                     match part {
-                        simple_parser::ast::FStringPart::Literal(text) => out.push_str(&text),
+                        simple_parser::ast::FStringPart::Literal(text) => out.push_str(text),
                         simple_parser::ast::FStringPart::Expr(_) => return None,
                     }
                 }
@@ -466,7 +466,7 @@ impl TypeChecker {
                 let mut out = String::new();
                 for part in parts {
                     match part {
-                        simple_parser::ast::FStringPart::Literal(s) => out.push_str(&s),
+                        simple_parser::ast::FStringPart::Literal(s) => out.push_str(s),
                         simple_parser::ast::FStringPart::Expr(_) => return None,
                     }
                 }

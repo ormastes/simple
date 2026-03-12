@@ -270,8 +270,7 @@ pub(crate) fn find_symbol_offset_in_object(object_code: &[u8], symbol_name: &str
         for sym in obj.symbols() {
             if let Ok(name) = sym.name() {
                 // On Windows/COFF, symbols may have a leading underscore
-                let matches = name == symbol_name
-                    || name.strip_prefix('_') == Some(symbol_name);
+                let matches = name == symbol_name || name.strip_prefix('_') == Some(symbol_name);
                 if matches {
                     // For COFF, the symbol value is the offset within the section
                     return Some(sym.address());
@@ -287,11 +286,7 @@ pub(crate) fn find_symbol_offset_in_object(object_code: &[u8], symbol_name: &str
 /// Uses the `object` crate's relocation iterator to handle relocations portably.
 /// For COFF objects on Windows, handles IMAGE_REL_AMD64_REL32 including `.refptr.*`
 /// reference pointers (Windows equivalent of GOT entries).
-fn apply_object_relocations<'a>(
-    code: &mut Vec<u8>,
-    obj: &object::File<'a>,
-    text_section: &object::Section<'a, 'a>,
-) {
+fn apply_object_relocations<'a>(code: &mut Vec<u8>, obj: &object::File<'a>, text_section: &object::Section<'a, 'a>) {
     use object::RelocationKind;
 
     let original_code_len = code.len();
@@ -321,9 +316,7 @@ fn apply_object_relocations<'a>(
         // The code references `.refptr.rt_foo` which is an 8-byte pointer in .rdata
         // that holds the address of `rt_foo`. We inline the pointer at the end of
         // the code buffer and patch the displacement.
-        let runtime_name = clean_name
-            .strip_prefix(".refptr.")
-            .unwrap_or(clean_name);
+        let runtime_name = clean_name.strip_prefix(".refptr.").unwrap_or(clean_name);
 
         match reloc.kind() {
             RelocationKind::Relative => {

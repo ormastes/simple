@@ -287,8 +287,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // @extern is a codegen directive, not a runtime decorator
                         // @deprecated is handled at compile time via HIR lowering
                         if let Expr::Identifier(name) = &decorator.name {
-                            if name == "extern" || name == "deprecated"
-                                || name == "gpu_kernel" || name == "gpu_device"
+                            if name == "extern"
+                                || name == "deprecated"
+                                || name == "gpu_kernel"
+                                || name == "gpu_device"
                                 || name == "gpu_shared"
                             {
                                 continue;

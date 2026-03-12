@@ -69,7 +69,7 @@ impl ModPath {
 
     /// Check if this path starts with "crate".
     pub fn is_absolute(&self) -> bool {
-        self.segments.first().map_or(false, |s| s.name() == "crate")
+        self.segments.first().is_some_and(|s| s.name() == "crate")
     }
 
     /// Get the path without the leading "crate" segment.
@@ -155,7 +155,7 @@ impl FileSystem {
                 let path = entry.path();
                 if path.is_dir() {
                     Self::scan_directory(&path, fs)?;
-                } else if path.extension().map_or(false, |e| e == "spl") {
+                } else if path.extension().is_some_and(|e| e == "spl") {
                     fs.add_file(path);
                 }
             }
@@ -231,7 +231,7 @@ pub fn well_formed(fs: &FileSystem, _root: &Path) -> bool {
     // We check this by looking at all .spl files and ensuring no foo.spl
     // coexists with foo/__init__.spl
     for file_path in &fs.files {
-        if file_path.file_name().map_or(false, |n| n == "__init__.spl") {
+        if file_path.file_name().is_some_and(|n| n == "__init__.spl") {
             // This is a directory module; check if sibling file exists
             if let Some(parent) = file_path.parent() {
                 let mut file_version = parent.to_path_buf();
@@ -240,7 +240,7 @@ pub fn well_formed(fs: &FileSystem, _root: &Path) -> bool {
                     return false;
                 }
             }
-        } else if file_path.extension().map_or(false, |e| e == "spl") {
+        } else if file_path.extension().is_some_and(|e| e == "spl") {
             // This is a file module; check if directory version exists
             let stem = file_path.with_extension("");
             let dir_version = stem.join("__init__.spl");

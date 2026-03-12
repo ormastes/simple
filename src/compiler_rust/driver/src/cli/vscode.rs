@@ -264,7 +264,7 @@ fn run_wasm_opt(wasm_path: &Path) -> Result<(), String> {
 
 fn generate_package_json(options: &VsCodeBuildOptions) -> String {
     let activation_events = if !options.extension_name.is_empty() {
-        format!(r#""onLanguage:simple""#)
+        r#""onLanguage:simple""#.to_string()
     } else {
         r#""\*""#.to_string()
     };

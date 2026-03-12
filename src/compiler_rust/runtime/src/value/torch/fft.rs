@@ -187,7 +187,9 @@ pub extern "C" fn rt_torch_fftn(tensor_handle: u64, dims_ptr: *const i64, ndim: 
         };
 
         let dims_vec: Vec<i64> = dims.to_vec();
-        let result = tensor.0.fft_fftn(Option::<&[i64]>::None, Some(dims_vec.as_slice()), fft_norm_str(norm));
+        let result = tensor
+            .0
+            .fft_fftn(Option::<&[i64]>::None, Some(dims_vec.as_slice()), fft_norm_str(norm));
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(

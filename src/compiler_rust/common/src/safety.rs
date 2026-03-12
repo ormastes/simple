@@ -48,7 +48,7 @@ where
 {
     let a_str = a.to_string();
     let b_str = b.to_string();
-    a.checked_add(b).ok_or_else(|| ArithmeticError::Overflow {
+    a.checked_add(b).ok_or(ArithmeticError::Overflow {
         op: "+",
         a: a_str,
         b: b_str,
@@ -62,7 +62,7 @@ where
 {
     let a_str = a.to_string();
     let b_str = b.to_string();
-    a.checked_sub(b).ok_or_else(|| ArithmeticError::Underflow {
+    a.checked_sub(b).ok_or(ArithmeticError::Underflow {
         op: "-",
         a: a_str,
         b: b_str,
@@ -76,7 +76,7 @@ where
 {
     let a_str = a.to_string();
     let b_str = b.to_string();
-    a.checked_mul(b).ok_or_else(|| ArithmeticError::Overflow {
+    a.checked_mul(b).ok_or(ArithmeticError::Overflow {
         op: "*",
         a: a_str,
         b: b_str,
@@ -95,7 +95,7 @@ where
     }
     let a_str = a.to_string();
     let b_str = b.to_string();
-    a.checked_div(b).ok_or_else(|| ArithmeticError::Overflow {
+    a.checked_div(b).ok_or(ArithmeticError::Overflow {
         op: "/",
         a: a_str,
         b: b_str,
@@ -273,7 +273,7 @@ impl std::error::Error for IndexError {}
 
 /// Safe array indexing with bounds checking
 pub fn safe_index<T>(slice: &[T], index: usize) -> Result<&T, IndexError> {
-    slice.get(index).ok_or_else(|| IndexError::OutOfBounds {
+    slice.get(index).ok_or(IndexError::OutOfBounds {
         index,
         len: slice.len(),
     })
@@ -284,7 +284,7 @@ pub fn safe_index_mut<T>(slice: &mut [T], index: usize) -> Result<&mut T, IndexE
     let len = slice.len();
     slice
         .get_mut(index)
-        .ok_or_else(|| IndexError::OutOfBounds { index, len })
+        .ok_or(IndexError::OutOfBounds { index, len })
 }
 
 /// Safe indexing with negative index support (Python-style)

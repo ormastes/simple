@@ -235,9 +235,9 @@ impl NativeLinker {
                 // Apple ld may exit non-zero with -v but still print version to stderr
                 #[cfg(target_os = "macos")]
                 if matches!(self, Self::Ld) {
-                    return String::from_utf8(o.stderr).ok().and_then(|s| {
-                        s.lines().next().map(|l| l.to_string())
-                    });
+                    return String::from_utf8(o.stderr)
+                        .ok()
+                        .and_then(|s| s.lines().next().map(|l| l.to_string()));
                 }
                 None
             }

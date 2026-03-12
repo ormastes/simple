@@ -27,7 +27,10 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
 
         // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions
-        if matches!(func_name, "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint") {
+        if matches!(
+            func_name,
+            "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
+        ) {
             let (value_fn, ln_value_fn) = match func_name {
                 "print" | "println" => ("rt_print_value", "rt_println_value"),
                 "eprint" | "eprintln" => ("rt_eprint_value", "rt_eprintln_value"),
@@ -67,28 +70,35 @@ impl LlvmBackend {
             let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
             // Call rt_len(text) to get the end index
             let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-            let len_func = module.get_function("rt_len").unwrap_or_else(|| {
-                module.add_function("rt_len", len_fn_type, None)
-            });
+            let len_func = module
+                .get_function("rt_len")
+                .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
             let len_call = builder
                 .build_call(len_func, &[text_casted.into()], "text_len")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-            let end_val = len_call.try_as_basic_value().left()
+            let end_val = len_call
+                .try_as_basic_value()
+                .left()
                 .unwrap_or_else(|| i64_type.const_int(0, false).into());
             let step_val = i64_type.const_int(1, false);
             // Call rt_slice(text, start, end, step) — 4 args
-            let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()], false);
-            let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
-                module.add_function("rt_slice", slice_fn_type, None)
-            });
+            let slice_fn_type = i64_type.fn_type(
+                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                false,
+            );
+            let slice_func = module
+                .get_function("rt_slice")
+                .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
             let slice_args = &[text_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
             let declared_params = slice_func.get_type().get_param_types().len();
             let slice_call = if declared_params != 4 {
                 let fn_ptr = slice_func.as_global_value().as_pointer_value();
-                builder.build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
+                builder
+                    .build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
             } else {
-                builder.build_call(slice_func, slice_args, "substr")
+                builder
+                    .build_call(slice_func, slice_args, "substr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
             };
             if let Some(d) = dest {
@@ -145,9 +155,9 @@ impl LlvmBackend {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 arg_vals.iter().map(|_| i64_type.into()).collect();
             let fn_type = i64_type.fn_type(&param_types, false);
-            let rt_func = module.get_function(rt_fn_name).unwrap_or_else(|| {
-                module.add_function(rt_fn_name, fn_type, None)
-            });
+            let rt_func = module
+                .get_function(rt_fn_name)
+                .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
             let call_site = builder
                 .build_call(rt_func, &arg_vals, "rt_redirect")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt redirect call", &e))?;
@@ -175,13 +185,16 @@ impl LlvmBackend {
         };
 
         // Resolve through use_map/import_map before declaring (matches Cranelift behavior)
-        let resolved_name = self.use_map.get(func_name)
+        let resolved_name = self
+            .use_map
+            .get(func_name)
             .or_else(|| self.import_map.get(func_name))
             .map(|s| s.as_str())
             .unwrap_or(func_name);
 
         // Get or declare the called function (with suffix matching safety net)
-        let called_func = module.get_function(resolved_name)
+        let called_func = module
+            .get_function(resolved_name)
             .or_else(|| module.get_function(func_name))
             .or_else(|| {
                 // Suffix matching: scan module for functions ending with ".{func_name}"
@@ -191,9 +204,10 @@ impl LlvmBackend {
                 while let Some(f) = func_opt {
                     let name = f.get_name().to_string_lossy();
                     if name.ends_with(&suffix) {
-                        if best.as_ref().map_or(true, |b| {
-                            name.len() < b.get_name().to_bytes().len()
-                        }) {
+                        if best
+                            .as_ref()
+                            .map_or(true, |b| name.len() < b.get_name().to_bytes().len())
+                        {
                             best = Some(f);
                         }
                     }
@@ -205,7 +219,9 @@ impl LlvmBackend {
                 // Split at underscores right-to-left: "tokens_push" → try ".push"
                 for (i, _) in func_name.match_indices('_').rev() {
                     let method = &func_name[i + 1..];
-                    if method.is_empty() { continue; }
+                    if method.is_empty() {
+                        continue;
+                    }
                     let suffix = format!(".{}", method);
                     let prefix_part = func_name[..i].to_lowercase();
                     let mut func_opt = module.get_first_function();
@@ -217,8 +233,7 @@ impl LlvmBackend {
                                 let bname = b.get_name().to_string_lossy();
                                 let has_prefix = name.to_lowercase().contains(&prefix_part);
                                 let best_has = bname.to_lowercase().contains(&prefix_part);
-                                (has_prefix && !best_has)
-                                    || (has_prefix == best_has && name.len() < bname.len())
+                                (has_prefix && !best_has) || (has_prefix == best_has && name.len() < bname.len())
                             });
                             if dominated {
                                 best = Some(f);
@@ -226,7 +241,9 @@ impl LlvmBackend {
                         }
                         func_opt = f.get_next_function();
                     }
-                    if best.is_some() { return best; }
+                    if best.is_some() {
+                        return best;
+                    }
                 }
                 None
             })
@@ -262,13 +279,19 @@ impl LlvmBackend {
                 for (i, val) in raw_arg_vals.iter().enumerate() {
                     if text_indices.contains(&i) {
                         // Expand text RuntimeValue to (ptr, len)
-                        let ptr_call = builder.build_call(rt_string_data, &[(*val).into()], "str_ptr")
+                        let ptr_call = builder
+                            .build_call(rt_string_data, &[(*val).into()], "str_ptr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
-                        let ptr_val = ptr_call.try_as_basic_value().left()
+                        let ptr_val = ptr_call
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
-                        let len_call = builder.build_call(rt_string_len, &[(*val).into()], "str_len")
+                        let len_call = builder
+                            .build_call(rt_string_len, &[(*val).into()], "str_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
-                        let len_val = len_call.try_as_basic_value().left()
+                        let len_val = len_call
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         expanded.push(ptr_val.into());
                         expanded.push(len_val.into());
@@ -332,11 +355,9 @@ impl LlvmBackend {
         // Coerce callee to pointer: i64 values are inttoptr'd (Simple's tagged-value ABI)
         let closure_ptr = match callee_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
-            inkwell::values::BasicValueEnum::IntValue(iv) => {
-                builder
-                    .build_int_to_ptr(iv, i8_ptr_type, "callee_ptr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
-            }
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_int_to_ptr(iv, i8_ptr_type, "callee_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
             _ => {
                 // Fallback: insert default dest value and return
                 if let Some(d) = dest {

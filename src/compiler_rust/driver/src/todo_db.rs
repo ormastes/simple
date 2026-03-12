@@ -76,7 +76,7 @@ impl Record for TodoRecord {
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         Ok(TodoRecord {
-            id: row.get(0).cloned().unwrap_or_default(),
+            id: row.first().cloned().unwrap_or_default(),
             keyword: row.get(1).cloned().unwrap_or_else(|| "TODO".to_string()),
             area: row.get(2).cloned().unwrap_or_default(),
             priority: row.get(3).cloned().unwrap_or_else(|| "P2".to_string()),
@@ -323,7 +323,7 @@ fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
 pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
     let _lock =
-        FileLock::acquire(path, 2).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let fields = vec![
         "id".to_string(),

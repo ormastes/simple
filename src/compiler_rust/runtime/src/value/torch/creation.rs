@@ -387,12 +387,7 @@ pub extern "C" fn rt_torch_tensor_from_data(
 /// passes `[f64]` and `[i64]` as RuntimeValue array handles rather than raw
 /// pointer/length pairs.
 #[no_mangle]
-pub extern "C" fn rt_ps_torch_tensor(
-    data: RuntimeValue,
-    dims: RuntimeValue,
-    dtype_code: i32,
-    device_code: i32,
-) -> u64 {
+pub extern "C" fn rt_ps_torch_tensor(data: RuntimeValue, dims: RuntimeValue, dtype_code: i32, device_code: i32) -> u64 {
     let Some(data_vec) = runtime_array_to_f64_vec(data) else {
         tracing::error!("rt_ps_torch_tensor: expected [f64] data array");
         return 0;

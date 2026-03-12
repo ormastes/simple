@@ -261,8 +261,8 @@ impl<'a> Parser<'a> {
             }
 
             // Detect missing comma in loop
-            if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBracket) {
-                if matches!(
+            if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBracket)
+                && matches!(
                     self.current.kind,
                     TokenKind::Identifier { .. }
                         | TokenKind::Integer(_)
@@ -287,7 +287,6 @@ impl<'a> Parser<'a> {
                         parse_context: None,
                     });
                 }
-            }
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(Expr::Array(elements))
@@ -422,8 +421,8 @@ impl<'a> Parser<'a> {
                 pairs.push((k, v));
 
                 // Detect missing comma after this entry
-                if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace) {
-                    if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
+                if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace)
+                    && matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
                         return Err(ParseError::ContextualSyntaxError {
                             context: "dict literal".to_string(),
                             message: "expected comma between dict entries".to_string(),
@@ -433,7 +432,6 @@ impl<'a> Parser<'a> {
                             parse_context: None,
                         });
                     }
-                }
             }
         }
         self.expect(&TokenKind::RBrace)?;

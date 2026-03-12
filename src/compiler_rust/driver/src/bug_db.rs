@@ -122,6 +122,12 @@ pub struct BugResolution {
     pub fixed_date: String,
 }
 
+impl Default for BugDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BugDb {
     pub fn new() -> Self {
         BugDb {
@@ -602,7 +608,7 @@ pub fn generate_bug_report(db: &BugDb, output_dir: &Path) -> Result<(), String> 
     // Recently fixed bugs section (last 10)
     if fixed > 0 {
         md.push_str("---\n\n");
-        md.push_str(&format!("## ✅ Recently Fixed Bugs (showing up to 10)\n\n"));
+        md.push_str("## ✅ Recently Fixed Bugs (showing up to 10)\n\n");
 
         let mut fixed_bugs: Vec<&BugRecord> = db
             .valid_records()
@@ -661,7 +667,7 @@ fn generate_bug_section(md: &mut String, bug: &BugRecord) {
     for test_id in &bug.reproducible_by {
         md.push_str(&format!("- `{}`\n", test_id));
     }
-    md.push_str("\n");
+    md.push('\n');
 
     // Reproduction steps
     if !bug.reproduction_steps.is_empty() {
@@ -695,7 +701,7 @@ fn generate_bug_section(md: &mut String, bug: &BugRecord) {
                     md.push_str(&format!("  - `{}`\n", file));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
     }
 
@@ -709,7 +715,7 @@ fn generate_bug_section(md: &mut String, bug: &BugRecord) {
                 md.push_str(&format!("- `{}`\n", test_id));
             }
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Assignee

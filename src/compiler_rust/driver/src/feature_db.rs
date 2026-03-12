@@ -142,7 +142,7 @@ impl Record for FeatureRecord {
         }
 
         Ok(FeatureRecord {
-            id: row.get(0).cloned().unwrap_or_default(),
+            id: row.first().cloned().unwrap_or_default(),
             category: row.get(1).cloned().unwrap_or_default(),
             name: row.get(2).cloned().unwrap_or_default(),
             description: row.get(3).cloned().unwrap_or_default(),
@@ -506,7 +506,7 @@ fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord], last_id
             let key = parts[..=idx].join(".");
             categories
                 .entry(key)
-                .or_insert_with(CategoryCounts::default)
+                .or_default()
                 .add(record);
         }
     }
@@ -559,7 +559,7 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
                 let link = category_link(&sub);
                 md.push_str(&format!("- [{}]({})\n", sub, link));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Features\n\n");
@@ -692,7 +692,7 @@ fn generate_pending_features(output_dir: &Path, records: &[&FeatureRecord]) -> R
                     record.id, record.name, record.description, spec_link
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -718,7 +718,7 @@ fn generate_pending_features(output_dir: &Path, records: &[&FeatureRecord]) -> R
                     record.id, record.name, record.description, spec_link
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -970,7 +970,7 @@ fn slugify(value: &str) -> String {
 pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
     let _lock =
-        FileLock::acquire(path, 2).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        FileLock::acquire(path, 2).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let mut fields = vec![
         "id".to_string(),

@@ -214,10 +214,7 @@ impl<'a> MirLowerer<'a> {
                             let index_reg = self.with_func(|func, current_block| {
                                 let dest = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::ConstInt {
-                                    dest,
-                                    value: i as i64,
-                                });
+                                block.instructions.push(MirInst::ConstInt { dest, value: i as i64 });
                                 dest
                             })?;
                             // Extract tuple element via rt_tuple_get

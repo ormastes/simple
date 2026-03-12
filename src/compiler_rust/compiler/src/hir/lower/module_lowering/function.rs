@@ -298,9 +298,7 @@ impl Lowerer {
         let mut attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
         for dec in &f.decorators {
             if let ast::Expr::Identifier(name) = &dec.name {
-                if ast::Effect::from_decorator_name(name).is_none()
-                    && !attributes.contains(name)
-                {
+                if ast::Effect::from_decorator_name(name).is_none() && !attributes.contains(name) {
                     attributes.push(name.clone());
                 }
             }

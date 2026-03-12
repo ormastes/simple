@@ -313,7 +313,11 @@ pub fn load_and_merge_module(
     let source = match fs::read_to_string(&module_path) {
         Ok(s) => {
             // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
-            if s.contains('\r') { s.replace('\r', "") } else { s }
+            if s.contains('\r') {
+                s.replace('\r', "")
+            } else {
+                s
+            }
         }
         Err(e) => {
             unmark_module_loading(&module_path);

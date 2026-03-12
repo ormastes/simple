@@ -297,7 +297,7 @@ pub fn format_examples_as_markdown(headers: &[String], rows: &[Vec<String>]) -> 
     result.push_str(" |\n");
 
     // Separator row
-    result.push_str("|");
+    result.push('|');
     for _ in headers {
         result.push_str(" --- |");
     }
@@ -365,7 +365,7 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
                 name: f.name.clone(),
                 doc,
                 signature: format_function_signature(f),
-                visibility: f.visibility.clone(),
+                visibility: f.visibility,
             })
         }
         Node::Struct(s) => {
@@ -375,7 +375,7 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
                 name: s.name.clone(),
                 doc,
                 signature: format_struct_signature(s),
-                visibility: s.visibility.clone(),
+                visibility: s.visibility,
             })
         }
         Node::Class(c) => {
@@ -385,7 +385,7 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
                 name: c.name.clone(),
                 doc,
                 signature: format_class_signature(c),
-                visibility: c.visibility.clone(),
+                visibility: c.visibility,
             })
         }
         Node::Enum(e) => {
@@ -395,7 +395,7 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
                 name: e.name.clone(),
                 doc,
                 signature: format_enum_signature(e),
-                visibility: e.visibility.clone(),
+                visibility: e.visibility,
             })
         }
         Node::Trait(t) => {
@@ -405,7 +405,7 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
                 name: t.name.clone(),
                 doc,
                 signature: format_trait_signature(t),
-                visibility: t.visibility.clone(),
+                visibility: t.visibility,
             })
         }
         _ => None,

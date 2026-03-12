@@ -922,19 +922,12 @@ pub enum Pattern {
 // Module level
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub struct Module {
     pub name: Option<String>,
     pub items: Vec<Node>,
 }
 
-impl Default for Module {
-    fn default() -> Self {
-        Self {
-            name: None,
-            items: Vec::new(),
-        }
-    }
-}
 
 /// An argument to a macro invocation
 #[derive(Debug, Clone, PartialEq)]

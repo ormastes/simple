@@ -281,9 +281,10 @@ pub(crate) fn evaluate_call(
             // This handles calls like Result.Ok(42), Option.Some(x), etc.
 
             // Try local enums first, then GLOBAL_ENUMS fallback
-            let enum_def_opt = enums.get(module_name).cloned().or_else(|| {
-                GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned())
-            });
+            let enum_def_opt = enums
+                .get(module_name)
+                .cloned()
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()));
             if let Some(enum_def) = enum_def_opt {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
                     let payload = if args.is_empty() {
@@ -407,9 +408,10 @@ pub(crate) fn evaluate_call(
             let method_name = &segments[1];
 
             // Check if it's an enum variant constructor (local enums + GLOBAL_ENUMS fallback)
-            let path_enum_def = enums.get(type_name).cloned().or_else(|| {
-                GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name).cloned())
-            });
+            let path_enum_def = enums
+                .get(type_name)
+                .cloned()
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name).cloned()));
             if let Some(enum_def) = path_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| &v.name == method_name) {
                     let payload = if args.is_empty() {
@@ -617,9 +619,10 @@ pub(crate) fn evaluate_call(
             }
 
             // Try as enum variant constructor (for user-defined enums + GLOBAL_ENUMS fallback)
-            let tail_enum_def = enums.get(type_name.as_str()).cloned().or_else(|| {
-                GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned())
-            });
+            let tail_enum_def = enums
+                .get(type_name.as_str())
+                .cloned()
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
             if let Some(enum_def) = tail_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| v.name == *method_name) {
                     let payload = if args.is_empty() {

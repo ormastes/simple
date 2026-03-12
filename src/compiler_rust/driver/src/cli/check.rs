@@ -16,6 +16,7 @@ use std::fs;
 
 /// Check options
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct CheckOptions {
     /// Output JSON format for tooling
     pub json: bool,
@@ -25,15 +26,6 @@ pub struct CheckOptions {
     pub quiet: bool,
 }
 
-impl Default for CheckOptions {
-    fn default() -> Self {
-        Self {
-            json: false,
-            verbose: false,
-            quiet: false,
-        }
-    }
-}
 
 /// Check result for a single file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,11 +79,10 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     let mut has_errors = false;
 
     for file in files {
-        if !options.quiet {
-            if options.verbose {
+        if !options.quiet
+            && options.verbose {
                 println!("Checking {}...", file.display());
             }
-        }
 
         let result = check_file(file);
 

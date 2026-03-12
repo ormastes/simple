@@ -109,7 +109,7 @@ impl TypeChecker {
                 let mixin_ref = mixin_refs.iter().find(|r| &r.name == mixin_name);
 
                 if let Some(mixin_info) = self.mixins.get(mixin_name).cloned() {
-                    if let Some(ref mr) = mixin_ref {
+                    if let Some(mr) = mixin_ref {
                         if !mr.type_args.is_empty() {
                             let type_args: Vec<Type> = mr
                                 .type_args

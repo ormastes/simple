@@ -204,7 +204,7 @@ impl FunctionDef {
     /// Check if this function has a termination measure (decreases clause).
     /// Termination measures are used for Lean verification but not checked at runtime.
     pub fn has_decreases(&self) -> bool {
-        self.contract.as_ref().map_or(false, |c| c.has_decreases())
+        self.contract.as_ref().is_some_and(|c| c.has_decreases())
     }
 }
 

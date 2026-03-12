@@ -37,8 +37,7 @@ impl JJConnector {
             .output()?;
 
         if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }

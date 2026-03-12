@@ -43,7 +43,7 @@ impl Record for TaskRecord {
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         Ok(TaskRecord {
-            id: row.get(0).cloned().unwrap_or_default(),
+            id: row.first().cloned().unwrap_or_default(),
             category: row.get(1).cloned().unwrap_or_default(),
             name: row.get(2).cloned().unwrap_or_default(),
             description: row.get(3).cloned().unwrap_or_default(),
@@ -129,7 +129,7 @@ fn parse_task_db(doc: &SdnDocument) -> Result<TaskDb, String> {
 pub fn save_task_db(path: &Path, db: &TaskDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
     let _lock =
-        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        FileLock::acquire(path, 10).map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
     let fields = vec![
         "id".to_string(),

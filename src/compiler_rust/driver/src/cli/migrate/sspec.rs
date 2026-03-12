@@ -179,7 +179,7 @@ fn convert_print_line(line: &str) -> Option<String> {
     }
 
     // Extract the content from print('...')
-    let start = line.find(&['\'', '"'])?;
+    let start = line.find(['\'', '"'])?;
     let quote_char = line.chars().nth(start)?;
     let rest = &line[start + 1..];
     let end = rest.find(quote_char)?;
@@ -212,7 +212,7 @@ fn convert_print_line(line: &str) -> Option<String> {
 /// Extract text from print statement and convert to SSpec syntax
 fn extract_and_convert(line: &str, keyword: &str, indent: usize) -> Option<String> {
     // Find the content between quotes
-    let start = line.find(&['\'', '"'])?;
+    let start = line.find(['\'', '"'])?;
     let quote_char = line.chars().nth(start)?;
     let rest = &line[start + 1..];
     let end = rest.find(quote_char)?;
@@ -221,7 +221,7 @@ fn extract_and_convert(line: &str, keyword: &str, indent: usize) -> Option<Strin
     // Remove leading spaces and keyword
     let mut text = content.trim_start();
     if text.starts_with(keyword) {
-        text = &text[keyword.len()..].trim_start();
+        text = text[keyword.len()..].trim_start();
     }
 
     // Remove trailing colon if present
@@ -246,11 +246,10 @@ fn is_manual_tracking_line(line: &str) -> bool {
     }
 
     // Check for variable declarations/assignments
-    if line.contains("passed") || line.contains("failed") {
-        if line.contains("= 0") || line.contains("+ 1") {
+    if (line.contains("passed") || line.contains("failed"))
+        && (line.contains("= 0") || line.contains("+ 1")) {
             return true;
         }
-    }
 
     false
 }

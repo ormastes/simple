@@ -161,8 +161,8 @@ pub extern "C" fn rt_object_free(object: RuntimeValue) {
         return;
     };
     unsafe {
-        let size = std::mem::size_of::<RuntimeObject>()
-            + (*ptr).field_count as usize * std::mem::size_of::<RuntimeValue>();
+        let size =
+            std::mem::size_of::<RuntimeObject>() + (*ptr).field_count as usize * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
@@ -236,8 +236,8 @@ pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
         return;
     };
     unsafe {
-        let size = std::mem::size_of::<RuntimeClosure>()
-            + (*ptr).capture_count as usize * std::mem::size_of::<RuntimeValue>();
+        let size =
+            std::mem::size_of::<RuntimeClosure>() + (*ptr).capture_count as usize * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         std::alloc::dealloc(ptr as *mut u8, layout);
     }

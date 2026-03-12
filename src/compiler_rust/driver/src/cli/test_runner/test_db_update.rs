@@ -22,16 +22,12 @@ fn load_test_db_with_timeout(db_path: &Path, timeout: Duration) -> Result<test_d
 
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!(
-                "SDN parser timed out after {}s on {}",
-                timeout.as_secs(),
-                db_path.display()
-            ))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err("SDN parse thread panicked".to_string())
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "SDN parser timed out after {}s on {}",
+            timeout.as_secs(),
+            db_path.display()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("SDN parse thread panicked".to_string()),
     }
 }
 

@@ -14,11 +14,13 @@ use std::sync::Arc;
 ///
 /// Determines how runtime symbols are resolved at execution time.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub enum RuntimeLoadMode {
     /// Static linking (compiled into binary).
     ///
     /// Zero runtime lookup cost - all symbols are resolved at compile time.
     /// This is the default for release builds.
+    #[default]
     Static,
 
     /// Dynamic loading from the default system path.
@@ -42,11 +44,6 @@ pub enum RuntimeLoadMode {
     Chained(Vec<RuntimeLoadMode>),
 }
 
-impl Default for RuntimeLoadMode {
-    fn default() -> Self {
-        Self::Static
-    }
-}
 
 impl RuntimeLoadMode {
     /// Get the default mode based on the build profile.
@@ -96,7 +93,7 @@ impl RuntimeLoadMode {
 /// across threads and used by the JIT compiler, interpreter, etc.
 pub fn create_runtime_provider(mode: RuntimeLoadMode) -> Result<Arc<dyn RuntimeSymbolProvider>, DynLoadError> {
     match mode {
-        RuntimeLoadMode::Static => Ok(Arc::new(StaticSymbolProvider::default())),
+        RuntimeLoadMode::Static => Ok(Arc::new(StaticSymbolProvider)),
 
         RuntimeLoadMode::Dynamic => Ok(Arc::new(DynamicSymbolProvider::load_default()?)),
 
@@ -138,7 +135,7 @@ pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
             "warning: failed to initialize runtime provider {:?}: {}; falling back to static",
             mode, err
         );
-        Arc::new(StaticSymbolProvider::default())
+        Arc::new(StaticSymbolProvider)
     })
 }
 
@@ -146,7 +143,7 @@ pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
 ///
 /// Always succeeds and has zero runtime lookup cost.
 pub fn static_provider() -> Arc<dyn RuntimeSymbolProvider> {
-    Arc::new(StaticSymbolProvider::default())
+    Arc::new(StaticSymbolProvider)
 }
 
 #[cfg(test)]

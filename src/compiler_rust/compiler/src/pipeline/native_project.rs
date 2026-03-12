@@ -220,17 +220,13 @@ impl NativeProjectBuilder {
 
         if use_incremental {
             // Canonicalize entry early so we can force-recompile the entry file
-            let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+            let canon_entry_for_cache: Option<PathBuf> =
+                self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
             for (i, (path, source)) in file_sources.iter().enumerate() {
                 // Always recompile the entry file (its main→spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
                 if !is_entry {
-                    let hash = object_cache_key(
-                        source,
-                        is_entry,
-                        &self.config.backend,
-                        self.config.no_mangle,
-                    );
+                    let hash = object_cache_key(source, is_entry, &self.config.backend, self.config.no_mangle);
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
                         // Cache hit: copy to temp dir
@@ -340,7 +336,7 @@ impl NativeProjectBuilder {
             for (path, msg) in &failures {
                 eprintln!("  - {} => {}", path.display(), msg);
             }
-            eprintln!(""); // spacer
+            eprintln!(); // spacer
         }
 
         if self.config.verbose {
@@ -364,12 +360,7 @@ impl NativeProjectBuilder {
             for (idx, obj_path) in &freshly_compiled {
                 if let Some((path, source)) = file_sources.get(*idx) {
                     let is_entry = is_entry_file(path, &canonical_entry);
-                    let hash = object_cache_key(
-                        source,
-                        is_entry,
-                        &self.config.backend,
-                        self.config.no_mangle,
-                    );
+                    let hash = object_cache_key(source, is_entry, &self.config.backend, self.config.no_mangle);
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _ = std::fs::copy(obj_path, cached_o);
                 }
@@ -429,7 +420,14 @@ impl NativeProjectBuilder {
                 collect_spl_files_recursive(dir, &mut files);
             }
         }
+        if let Some(entry_file) = &self.entry_file {
+            let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.clone());
+            if !files.iter().any(|path| same_file_path(path, &canonical_entry)) {
+                files.push(canonical_entry);
+            }
+        }
         files.sort();
+        files.dedup_by(|a, b| same_file_path(a, b));
         files
     }
 
@@ -674,7 +672,8 @@ int main(int argc, char** argv) {
                     if i > 0 {
                         lib_cmd.arg(&archive_path);
                     }
-                    lib_cmd.args(chunk)
+                    lib_cmd
+                        .args(chunk)
                         .status()
                         .map_err(|e| format!("lib batch {i}: {e}"))?
                 } else {
@@ -734,7 +733,9 @@ int main(int argc, char** argv) {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
-                cmd.arg("-Wl,--whole-archive").arg(&archive_path).arg("-Wl,--no-whole-archive");
+                cmd.arg("-Wl,--whole-archive")
+                    .arg(&archive_path)
+                    .arg("-Wl,--no-whole-archive");
             }
             #[cfg(target_os = "windows")]
             {
@@ -742,7 +743,9 @@ int main(int argc, char** argv) {
                     // clang-cl: pass MSVC linker flags via -Xlinker
                     cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
                 } else {
-                    cmd.arg("-Wl,--whole-archive").arg(&archive_path).arg("-Wl,--no-whole-archive");
+                    cmd.arg("-Wl,--whole-archive")
+                        .arg(&archive_path)
+                        .arg("-Wl,--no-whole-archive");
                 }
             }
         } else {
@@ -788,7 +791,7 @@ int main(int argc, char** argv) {
             // -lz provides crc32 needed by LLVM, -lzstd for LLVM compression.
             // -L/usr/local/lib for packages installed via pkg (zstd, execinfo).
             cmd.arg("-L/usr/local/lib");
-            for lib in &["pthread", "m", "execinfo", "z", "zstd", "util"] {
+            for lib in &["pthread", "m", "execinfo", "z", "zstd", "util", "rt"] {
                 cmd.arg(format!("-l{}", lib));
             }
         }
@@ -886,7 +889,11 @@ int main(int argc, char** argv) {
 /// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
 #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
-fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], main_o: &std::path::Path) -> Result<PathBuf, String> {
+fn generate_stub_object(
+    temp_dir: &std::path::Path,
+    object_paths: &[PathBuf],
+    main_o: &std::path::Path,
+) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
     // Collect all defined and undefined symbols from the objects.
@@ -905,8 +912,8 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
 
     for path in &scan_paths {
         let output = std::process::Command::new("nm")
-            .arg("-g")  // external (global) symbols only
-            .arg("-p")  // don't sort (faster)
+            .arg("-g") // external (global) symbols only
+            .arg("-p") // don't sort (faster)
             .arg(path)
             .output()
             .map_err(|e| format!("nm: {e}"))?;
@@ -930,7 +937,9 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
     // Also scan the runtime library for defined symbols
     if let Some(native_all) = find_native_all_library() {
         let output = std::process::Command::new("nm")
-            .arg("-g").arg("-p").arg(&native_all)
+            .arg("-g")
+            .arg("-p")
+            .arg(&native_all)
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -944,7 +953,9 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         }
     } else if let Some(runtime) = find_runtime_library() {
         let output = std::process::Command::new("nm")
-            .arg("-g").arg("-p").arg(&runtime)
+            .arg("-g")
+            .arg("-p")
+            .arg(&runtime)
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -962,13 +973,13 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
     #[cfg(target_os = "macos")]
     {
         // Scan common system dylibs to find symbols like malloc, memset, sqrt, etc.
-        let system_libs = [
-            "/usr/lib/libSystem.B.dylib",
-        ];
+        let system_libs = ["/usr/lib/libSystem.B.dylib"];
         for lib_path in &system_libs {
             if std::path::Path::new(lib_path).exists() {
                 if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-g").arg("-p").arg(lib_path)
+                    .arg("-g")
+                    .arg("-p")
+                    .arg(lib_path)
                     .output()
                 {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -996,7 +1007,10 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         for lib_path in &system_libs {
             if std::path::Path::new(lib_path).exists() {
                 if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-D").arg("-g").arg("-p").arg(lib_path)
+                    .arg("-D")
+                    .arg("-g")
+                    .arg("-p")
+                    .arg(lib_path)
                     .output()
                 {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1023,7 +1037,10 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         for lib_path in &system_libs {
             if std::path::Path::new(lib_path).exists() {
                 if let Ok(output) = std::process::Command::new("nm")
-                    .arg("-D").arg("-g").arg("-p").arg(lib_path)
+                    .arg("-D")
+                    .arg("-g")
+                    .arg("-p")
+                    .arg(lib_path)
                     .output()
                 {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1056,15 +1073,22 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
         let status = std::process::Command::new("clang")
-            .arg("-c").arg("-o").arg(&stub_o).arg(&stub_c)
-            .status().map_err(|e| format!("compile stubs: {e}"))?;
+            .arg("-c")
+            .arg("-o")
+            .arg(&stub_o)
+            .arg(&stub_c)
+            .status()
+            .map_err(|e| format!("compile stubs: {e}"))?;
         if !status.success() {
             return Err("failed to compile empty stubs".to_string());
         }
         return Ok(stub_o);
     }
 
-    eprintln!("Generating {} stub functions for unresolved symbols...", needs_stub.len());
+    eprintln!(
+        "Generating {} stub functions for unresolved symbols...",
+        needs_stub.len()
+    );
 
     // Generate pure assembly stubs. This avoids all C keyword/builtin conflicts.
     // Each stub is a global symbol that returns 0/nil.
@@ -1089,7 +1113,10 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         #[cfg(target_os = "macos")]
         let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
         #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-        let valid = !sym.is_empty() && sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$');
+        let valid = !sym.is_empty()
+            && sym
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$');
         if !valid {
             continue;
         }
@@ -1113,16 +1140,10 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
         ));
         // FreeBSD ELF: strong .globl stubs (--allow-multiple-definition lets runtime win)
         #[cfg(target_os = "freebsd")]
-        asm_code.push_str(&format!(
-            ".globl {0}\n{0}:\n  {1}\n\n",
-            sym, ret_nil
-        ));
+        asm_code.push_str(&format!(".globl {0}\n{0}:\n  {1}\n\n", sym, ret_nil));
         // Linux ELF: weak stubs (real definitions take precedence at link time)
         #[cfg(target_os = "linux")]
-        asm_code.push_str(&format!(
-            ".weak {0}\n{0}:\n  {1}\n\n",
-            sym, ret_nil
-        ));
+        asm_code.push_str(&format!(".weak {0}\n{0}:\n  {1}\n\n", sym, ret_nil));
     }
 
     let stub_s = temp_dir.join("_stubs.s");
@@ -1131,7 +1152,8 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
     let stub_o = temp_dir.join("_stubs.o");
     let output = std::process::Command::new("clang")
         .arg("-c")
-        .arg("-o").arg(&stub_o)
+        .arg("-o")
+        .arg(&stub_o)
         .arg(&stub_s)
         .output()
         .map_err(|e| format!("assemble stubs: {e}"))?;
@@ -1150,7 +1172,8 @@ fn generate_stub_object(temp_dir: &std::path::Path, object_paths: &[PathBuf], ma
 fn is_system_symbol(sym: &str) -> bool {
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
-    matches!(name,
+    matches!(
+        name,
         // Memory
         "malloc" | "calloc" | "realloc" | "free" | "posix_memalign" | "aligned_alloc" |
         "memcpy" | "memmove" | "memset" | "memcmp" | "memchr" |
@@ -1276,13 +1299,17 @@ fn resolve_name_variants(
     // E.g., `castnumericresult_Int` → try `CastNumericResult.Int` in import_map
     for (i, _) in name.match_indices('_').rev() {
         let variant = &name[i + 1..];
-        if variant.is_empty() { continue; }
+        if variant.is_empty() {
+            continue;
+        }
         // Variant part must start with uppercase (enum variant convention)
         if !variant.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
             continue;
         }
         let prefix_raw = &name[..i];
-        if prefix_raw.is_empty() { continue; }
+        if prefix_raw.is_empty() {
+            continue;
+        }
         // Try to find import_map keys matching `*.{variant}` where the key prefix
         // matches the raw prefix case-insensitively
         for (key, resolved) in import_map.iter().chain(use_map.iter()) {
@@ -1321,10 +1348,7 @@ fn build_suffix_index(
     for mangled_list in all_mangled.values() {
         for mangled in mangled_list {
             if let Some(suffix) = suffix_of(mangled) {
-                index
-                    .entry(suffix.to_string())
-                    .or_default()
-                    .push(mangled.clone());
+                index.entry(suffix.to_string()).or_default().push(mangled.clone());
                 // Also index the sub-suffix after '.' within the suffix,
                 // but ONLY when the sub-suffix starts with uppercase (enum variant convention).
                 // E.g., "CastNumericResult.Int" → also index "Int" → mangled.
@@ -1332,10 +1356,7 @@ fn build_suffix_index(
                 if let Some(dot_pos) = suffix.rfind('.') {
                     let sub_suffix = &suffix[dot_pos + 1..];
                     if !sub_suffix.is_empty() && sub_suffix.starts_with(|c: char| c.is_ascii_uppercase()) {
-                        index
-                            .entry(sub_suffix.to_string())
-                            .or_default()
-                            .push(mangled.clone());
+                        index.entry(sub_suffix.to_string()).or_default().push(mangled.clone());
                     }
                 }
             }
@@ -1349,10 +1370,7 @@ fn build_suffix_index(
 /// Splits `name` at underscores from right to left, trying each suffix
 /// (e.g., "tokens_push" → try "push"). Returns the best matching fully-qualified name.
 /// Only resolves when there is a single candidate or a confident prefix-based match.
-fn resolve_by_suffix(
-    name: &str,
-    suffix_index: &std::collections::HashMap<String, Vec<String>>,
-) -> Option<String> {
+fn resolve_by_suffix(name: &str, suffix_index: &std::collections::HashMap<String, Vec<String>>) -> Option<String> {
     // First: try the whole name as a suffix (e.g., "push" directly)
     if let Some(candidates) = suffix_index.get(name) {
         if candidates.len() == 1 {
@@ -1552,8 +1570,7 @@ fn mangle_mir(
     // Build local suffix index from this module's known names (low ambiguity).
     // The global suffix_index from all_mangled is used as a fallback for names
     // not found in the local index.
-    let mut local_suffix_index: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut local_suffix_index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for resolved in local_mangled
         .values()
         .chain(use_map.values())
@@ -1631,15 +1648,18 @@ fn mangle_mir(
             .chain(local_mangled.values())
             .cloned()
             .collect();
-        let extras: Vec<String> = set.iter().filter_map(|v| {
-            if v.contains('.') {
-                Some(v.replace('.', "_dot_"))
-            } else if v.contains("_dot_") {
-                Some(v.replace("_dot_", "."))
-            } else {
-                None
-            }
-        }).collect();
+        let extras: Vec<String> = set
+            .iter()
+            .filter_map(|v| {
+                if v.contains('.') {
+                    Some(v.replace('.', "_dot_"))
+                } else if v.contains("_dot_") {
+                    Some(v.replace("_dot_", "."))
+                } else {
+                    None
+                }
+            })
+            .collect();
         set.extend(extras);
         set
     };
@@ -1684,7 +1704,8 @@ fn mangle_mir(
                             let type_part = name.split('.').next().unwrap_or("");
                             // First try looking up the full dotted name as a suffix key
                             // (handles "Type.method" keys in the suffix index)
-                            let candidates = local_suffix_index.get(&name)
+                            let candidates = local_suffix_index
+                                .get(&name)
                                 .or_else(|| suffix_index.get(&name))
                                 .or_else(|| local_suffix_index.get(method))
                                 .or_else(|| suffix_index.get(method));
@@ -1693,7 +1714,11 @@ fn mangle_mir(
                                     .iter()
                                     .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
                                     .or_else(|| {
-                                        if candidates.len() == 1 { candidates.first() } else { None }
+                                        if candidates.len() == 1 {
+                                            candidates.first()
+                                        } else {
+                                            None
+                                        }
                                     });
                                 if let Some(b) = best {
                                     *target = target.with_name(b.clone());
@@ -1705,8 +1730,10 @@ fn mangle_mir(
                                         *target = target.with_name(resolved);
                                     } else {
                                         unresolved_count += 1;
-                                        eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
-                                                  name, func.name, prefix);
+                                        eprintln!(
+                                            "warning: unresolved call `{}` in function `{}` (module: {})",
+                                            name, func.name, prefix
+                                        );
                                     }
                                 }
                             } else {
@@ -1716,8 +1743,10 @@ fn mangle_mir(
                                     *target = target.with_name(resolved);
                                 } else {
                                     unresolved_count += 1;
-                                    eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
-                                              name, func.name, prefix);
+                                    eprintln!(
+                                        "warning: unresolved call `{}` in function `{}` (module: {})",
+                                        name, func.name, prefix
+                                    );
                                 }
                             }
                         } else if let Some(resolved) = resolve_by_suffix(&name, &local_suffix_index)
@@ -1726,8 +1755,10 @@ fn mangle_mir(
                             *target = target.with_name(resolved);
                         } else {
                             unresolved_count += 1;
-                            eprintln!("warning: unresolved call `{}` in function `{}` (module: {})",
-                                      name, func.name, prefix);
+                            eprintln!(
+                                "warning: unresolved call `{}` in function `{}` (module: {})",
+                                name, func.name, prefix
+                            );
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
@@ -1780,7 +1811,8 @@ fn mangle_mir(
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {
                             *func_name = mangled.clone();
-                        } else if let Some(resolved) = use_map.get(func_name.as_str())
+                        } else if let Some(resolved) = use_map
+                            .get(func_name.as_str())
                             .or_else(|| import_map.get(func_name.as_str()))
                         {
                             *func_name = resolved.clone();
@@ -1791,14 +1823,17 @@ fn mangle_mir(
                             let method = func_name.rsplit('.').next().unwrap_or(func_name);
                             let type_part = func_name.split('.').next().unwrap_or("");
                             let type_part_lower = type_part.to_lowercase();
-                            let candidates = local_suffix_index.get(method)
-                                .or_else(|| suffix_index.get(method));
+                            let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
                             if let Some(candidates) = candidates {
                                 let best = candidates
                                     .iter()
                                     .find(|c| c.to_lowercase().contains(&type_part_lower))
                                     .or_else(|| {
-                                        if candidates.len() == 1 { candidates.first() } else { None }
+                                        if candidates.len() == 1 {
+                                            candidates.first()
+                                        } else {
+                                            None
+                                        }
                                     });
                                 if let Some(b) = best {
                                     *func_name = b.clone();
@@ -1853,9 +1888,7 @@ fn compile_file_to_object(
 
         // Strip `?` suffix from nullable types (Type? → Type)
         // Only strip when ? is followed by non-identifier chars (whitespace, punctuation, EOL)
-        for pat in [
-            "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;",
-        ] {
+        for pat in ["? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;"] {
             while s.contains(pat) {
                 s = s.replace(pat, &pat[1..]);
             }
@@ -1887,8 +1920,12 @@ fn compile_file_to_object(
             let mut in_comment = false;
             while i < bytes.len() {
                 // Track string/comment state
-                if !in_single_quote && !in_comment && i + 2 < bytes.len()
-                    && bytes[i] == b'"' && bytes[i+1] == b'"' && bytes[i+2] == b'"'
+                if !in_single_quote
+                    && !in_comment
+                    && i + 2 < bytes.len()
+                    && bytes[i] == b'"'
+                    && bytes[i + 1] == b'"'
+                    && bytes[i + 2] == b'"'
                 {
                     in_triple_quote = !in_triple_quote;
                     result.push('"');
@@ -1911,7 +1948,7 @@ fn compile_file_to_object(
                 if in_single_quote {
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
                         result.push(bytes[i] as char);
-                        result.push(bytes[i+1] as char);
+                        result.push(bytes[i + 1] as char);
                         i += 2;
                         continue;
                     }
@@ -1949,10 +1986,10 @@ fn compile_file_to_object(
                 result.push(bytes[i] as char);
                 result.push(' ');
                 let fn_start = i + 2; // position of 'f' in 'fn('
-                // Find matching ')' with balanced parens
+                                      // Find matching ')' with balanced parens
                 let mut depth = 0i32;
                 let mut j = fn_start + 2; // skip 'fn'
-                // j now points at '('
+                                          // j now points at '('
                 depth += 1;
                 j += 1;
                 while j < bytes.len() && depth > 0 {
@@ -1965,7 +2002,7 @@ fn compile_file_to_object(
                 }
                 // j is now past the matching ')'
                 // Check for optional ` -> RetType`
-                if j + 4 <= bytes.len() && &s[j..j+4] == " -> " {
+                if j + 4 <= bytes.len() && &s[j..j + 4] == " -> " {
                     j += 4;
                     // Skip return type: handle balanced <>, (), []
                     let mut type_depth = 0i32;
@@ -1979,7 +2016,9 @@ fn compile_file_to_object(
                             } else {
                                 break;
                             }
-                        } else if type_depth == 0 && (c == b',' || c == b':' || c == b'\n' || c == b'\r' || c == b'#' || c == b' ') {
+                        } else if type_depth == 0
+                            && (c == b',' || c == b':' || c == b'\n' || c == b'\r' || c == b'#' || c == b' ')
+                        {
                             break;
                         }
                         j += 1;
@@ -2138,11 +2177,21 @@ fn compile_file_to_object(
             if !no_mangle {
                 let prefix = module_prefix_from_path(file_path, source_root);
                 let global_suffix_index = build_suffix_index(all_mangled.as_ref());
-                let unresolved = mangle_mir(&mut mir, &prefix, is_entry, import_map.as_ref(), ambiguous_names.as_ref(), &use_map, &global_suffix_index);
+                let unresolved = mangle_mir(
+                    &mut mir,
+                    &prefix,
+                    is_entry,
+                    import_map.as_ref(),
+                    ambiguous_names.as_ref(),
+                    &use_map,
+                    &global_suffix_index,
+                );
                 if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
                     return Err(format!(
                         "{}: {} unresolved call(s) in module `{}` — fix imports or add to runtime",
-                        file_path.display(), unresolved, module_prefix_from_path(file_path, source_root)
+                        file_path.display(),
+                        unresolved,
+                        module_prefix_from_path(file_path, source_root)
                     ));
                 }
             } else {
@@ -2302,6 +2351,12 @@ fn is_entry_file(file_path: &Path, canonical_entry: &Option<PathBuf>) -> bool {
     }
 }
 
+fn same_file_path(a: &Path, b: &Path) -> bool {
+    let canon_a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let canon_b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    canon_a == canon_b
+}
+
 /// Compute a content hash for a source string (same algorithm as SourceInfo).
 fn content_hash(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -2388,10 +2443,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                                 let raw = format!("{}.{}", c.name, m.name);
                                 // include both raw method name and fully qualified with class for convenience
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
-                                raw_to_mangled
-                                    .entry(m.name.clone())
-                                    .or_default()
-                                    .push(mangled.clone());
+                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -2411,14 +2463,8 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                         for m in &ec.methods {
                             let raw = format!("{}.{}", ec.name, m.name);
                             let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ec.name, m.name));
-                            raw_to_mangled
-                                .entry(raw.clone())
-                                .or_default()
-                                .push(mangled.clone());
-                            raw_to_mangled
-                                .entry(m.name.clone())
-                                .or_default()
-                                .push(mangled);
+                            raw_to_mangled.entry(raw.clone()).or_default().push(mangled.clone());
+                            raw_to_mangled.entry(m.name.clone()).or_default().push(mangled);
                         }
                     }
                     // Module-level variables (val/const/static) need to be in the
@@ -2443,10 +2489,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", s.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
-                                raw_to_mangled
-                                    .entry(m.name.clone())
-                                    .or_default()
-                                    .push(mangled.clone());
+                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -2457,10 +2500,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name));
-                                raw_to_mangled
-                                    .entry(m.name.clone())
-                                    .or_default()
-                                    .push(mangled.clone());
+                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -2477,10 +2517,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", t.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
-                                raw_to_mangled
-                                    .entry(m.name.clone())
-                                    .or_default()
-                                    .push(mangled.clone());
+                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -2497,10 +2534,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                                 if !m.body.statements.is_empty() {
                                     let raw = format!("{}.{}", type_name, m.name);
                                     let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
-                                    raw_to_mangled
-                                        .entry(m.name.clone())
-                                        .or_default()
-                                        .push(mangled.clone());
+                                    raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                     raw_to_mangled.entry(raw).or_default().push(mangled);
                                 }
                             }
@@ -2512,10 +2546,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", ext.target_type, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
-                                raw_to_mangled
-                                    .entry(m.name.clone())
-                                    .or_default()
-                                    .push(mangled.clone());
+                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
@@ -2613,14 +2644,12 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
     // Critical compiler driver symbols used during self-host bootstrap.
     // Keep explicit aliases so method calls resolve even if parser indexing
     // misses the source file in a partial/compatibility parse.
-    let driver_compile =
-        sanitize_mangled("compiler__driver__driver__CompilerDriver.compile".to_string());
+    let driver_compile = sanitize_mangled("compiler__driver__driver__CompilerDriver.compile".to_string());
     map.entry("CompilerDriver.compile".to_string())
         .or_insert_with(|| driver_compile.clone());
 
-    let compile_result_get_errors = sanitize_mangled(
-        "compiler__driver__driver_types__CompileResult.get_errors".to_string(),
-    );
+    let compile_result_get_errors =
+        sanitize_mangled("compiler__driver__driver_types__CompileResult.get_errors".to_string());
     map.entry("CompileResult.get_errors".to_string())
         .or_insert_with(|| compile_result_get_errors.clone());
     map.entry("get_errors".to_string())
@@ -3020,11 +3049,7 @@ fn find_cxx_compiler() -> String {
     if let Ok(cxx) = std::env::var("CXX") {
         return cxx;
     }
-    if std::process::Command::new("clang++")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
+    if std::process::Command::new("clang++").arg("--version").output().is_ok() {
         return "clang++".to_string();
     }
     "g++".to_string()
@@ -3119,5 +3144,29 @@ mod tests {
         );
         assert!(config.incremental, "incremental should default to true");
         assert!(!config.clean, "clean should default to false");
+    }
+
+    #[test]
+    fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        let src_dir = project_root.join("src");
+        let tools_dir = project_root.join("examples/tool");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&tools_dir).unwrap();
+
+        let lib_file = src_dir.join("lib.spl");
+        let entry_file = tools_dir.join("main.spl");
+        std::fs::write(&lib_file, "fn helper(): pass").unwrap();
+        std::fs::write(&entry_file, "fn main(): pass").unwrap();
+
+        let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+            .source_dir(src_dir)
+            .entry_file(entry_file.clone());
+
+        let files = builder.discover_files();
+        assert!(files.iter().any(|path| same_file_path(path, &lib_file)));
+        assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+        assert_eq!(files.len(), 2);
     }
 }

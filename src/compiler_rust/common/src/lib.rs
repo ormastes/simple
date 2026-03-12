@@ -21,6 +21,8 @@ pub use runtime_symbols::{
     runtime_symbols_for_baremetal,
 };
 
+pub mod smf;
+
 /// Common interface for dynamically loaded modules.
 pub trait DynModule {
     /// Lookup a function symbol by name.

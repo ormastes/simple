@@ -357,7 +357,7 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
 
         if dir != current_dir {
             if !current_dir.is_empty() {
-                md.push_str("\n");
+                md.push('\n');
             }
             md.push_str(&format!("## {}\n\n", dir));
             current_dir = dir;
@@ -376,7 +376,7 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
             md.push_str(&format!("\n```\nError: {}\n```\n", err));
         }
 
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Add summary

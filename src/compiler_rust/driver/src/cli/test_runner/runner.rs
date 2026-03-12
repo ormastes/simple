@@ -277,7 +277,13 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         }
 
         // Run doctests (using cached discovery — no re-walk)
-        run_all_doctests(&doctest_cache, &mut results, &mut total_passed, &mut total_failed, quiet);
+        run_all_doctests(
+            &doctest_cache,
+            &mut results,
+            &mut total_passed,
+            &mut total_failed,
+            quiet,
+        );
     }
 
     let start = Instant::now();
@@ -606,14 +612,13 @@ fn execute_test_files(
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
-    if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped) {
-        if !quiet {
+    if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped)
+        && !quiet {
             eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
             eprintln!("   Tip: Limit scope with path argument, e.g.:");
             eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
             eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
         }
-    }
 
     for (idx, path) in test_files.iter().enumerate() {
         if !quiet && !options.list && !options.list_ignored {
@@ -683,7 +688,7 @@ fn execute_test_files(
         }
 
         let failed = result.failed > 0 || result.error.is_some();
-        let memory_abort = result.error.as_ref().map_or(false, |e| e.contains("MEMORY LIMIT"));
+        let memory_abort = result.error.as_ref().is_some_and(|e| e.contains("MEMORY LIMIT"));
         results.push(result);
 
         // Always abort on memory limit — continuing would just OOM the system.
@@ -951,7 +956,7 @@ fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: boo
     // Extract feature info from each file
     let mut features: Vec<SkipFeatureInfo> = test_files
         .iter()
-        .filter_map(|path| extract_skip_feature_info(path))
+        .filter_map(extract_skip_feature_info)
         .collect();
 
     // Filter to planned-only if requested

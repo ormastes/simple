@@ -773,7 +773,7 @@ impl Record for TestRunRecord {
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         Ok(TestRunRecord {
-            run_id: row.get(0).cloned().unwrap_or_default(),
+            run_id: row.first().cloned().unwrap_or_default(),
             start_time: row.get(1).cloned().unwrap_or_default(),
             end_time: row.get(2).cloned().unwrap_or_default(),
             pid: row.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -986,6 +986,12 @@ fn runs_file_path(db_path: &Path) -> std::path::PathBuf {
 // ============================================================================
 // TestDb Implementation
 // ============================================================================
+
+impl Default for TestDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TestDb {
     pub fn new() -> Self {
@@ -1307,7 +1313,7 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
     }) = dict.get("strings")
     {
         for row in rows {
-            let id = match row.get(0) {
+            let id = match row.first() {
                 Some(SdnValue::Int(n)) => *n as u32,
                 Some(SdnValue::String(s)) => s.parse::<u32>().unwrap_or(0),
                 _ => continue,
@@ -1622,7 +1628,7 @@ fn load_volatile_data(db: &mut TestDb, runs_path: &Path) -> Result<(), String> {
                 duration_ms,
                 outlier,
             };
-            db.timing_runs.entry(test_id).or_insert_with(Vec::new).push(entry);
+            db.timing_runs.entry(test_id).or_default().push(entry);
         }
     }
 
@@ -1964,7 +1970,7 @@ fn build_v3_sdn(db: &TestDb) -> String {
     out.push_str("strings |id, value|\n");
     for (id, value) in db.interner.to_sdn_rows() {
         let value = value;
-        if needs_quoting(&value) {
+        if needs_quoting(value) {
             out.push_str(&format!("    {}, \"{}\"\n", id, value.replace('"', "\\\"")));
         } else {
             out.push_str(&format!("    {}, {}\n", id, value));
@@ -2298,7 +2304,7 @@ pub fn update_test_result(
         db.timing_summaries.insert(name_id, summary);
 
         // Update timing runs (cap at 10)
-        let runs = db.timing_runs.entry(name_id).or_insert_with(Vec::new);
+        let runs = db.timing_runs.entry(name_id).or_default();
         runs.insert(
             0,
             TimingRunEntry {
@@ -2517,7 +2523,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 test_name, change.change_type, change.run_id
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Failed tests
@@ -2545,7 +2551,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
             if let Some(ref failure) = test.failure {
                 md.push_str("**Error:**\n```\n");
                 md.push_str(&failure.error_message);
-                md.push_str("\n");
+                md.push('\n');
                 if let Some(ref location) = failure.location {
                     md.push_str(&format!("Location: {}\n", location));
                 }
@@ -2615,7 +2621,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 test.test_name, test.timing.last_run_time, test.timing.baseline_median, change_pct
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     let mut high_variance: Vec<(&TestRecord, f64)> = db
@@ -2633,7 +2639,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     high_variance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     if !high_variance.is_empty() {
-        md.push_str(&format!("### High Variance Tests (CV% > 50%)\n\n"));
+        md.push_str("### High Variance Tests (CV% > 50%)\n\n");
         md.push_str("Tests with unstable timing:\n\n");
         md.push_str("| Test | Mean | Std Dev | CV% | Recommendation |\n");
         md.push_str("|------|------|---------|-----|----------------|\n");
@@ -2649,7 +2655,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 test.test_name, test.timing.baseline_mean, test.timing.baseline_std_dev, cv_pct, recommendation
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     let mut fastest: Vec<(&TestRecord, f64)> = db
@@ -2673,7 +2679,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         for (test, time) in fastest.iter().take(10) {
             md.push_str(&format!("| {} | {:.1}ms |\n", test.test_name, time));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     let mut slowest: Vec<(&TestRecord, f64)> = db
@@ -2697,7 +2703,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         for (test, time) in slowest.iter().take(10) {
             md.push_str(&format!("| {} | {:.1}ms |\n", test.test_name, time));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Action Items
@@ -2719,12 +2725,12 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 let short_msg = failure.error_message.lines().next().unwrap_or("Unknown error");
                 md.push_str(short_msg);
             }
-            md.push_str("\n");
+            md.push('\n');
             if !test.related_bugs.is_empty() {
                 md.push_str(&format!("   - Related bugs: {}\n", test.related_bugs.join(", ")));
             }
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     if !regressions.is_empty() {
@@ -2736,7 +2742,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         for (test, change_pct) in regressions.iter().take(5) {
             md.push_str(&format!("- {} ({:+.1}%)\n", test.test_name, change_pct));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     let flaky_tests: Vec<&TestRecord> = db
@@ -2757,7 +2763,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 test.test_name, test.execution_history.failure_rate_pct
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Qualified Ignored
@@ -2790,7 +2796,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 test.test_name, qualified_by, reason, date
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     let output_path = output_dir.join("test_result.md");

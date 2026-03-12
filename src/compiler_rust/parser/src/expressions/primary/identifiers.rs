@@ -234,7 +234,7 @@ impl<'a> Parser<'a> {
         // Disambiguate from dict literals by checking if `{ identifier :` pattern follows
         } else if self.check(&TokenKind::LBrace)
             && !self.no_brace_postfix
-            && (name.chars().next().map_or(false, |c| c.is_uppercase()) || self.peek_is_struct_init())
+            && (name.chars().next().is_some_and(|c| c.is_uppercase()) || self.peek_is_struct_init())
         {
             self.advance(); // consume '{'
                             // Skip newlines after opening brace

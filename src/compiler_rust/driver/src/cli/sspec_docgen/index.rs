@@ -77,7 +77,7 @@ pub fn generate_index_page(
                 feature.doc_lines
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Write to file

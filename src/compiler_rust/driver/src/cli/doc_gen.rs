@@ -293,7 +293,7 @@ fn parse_spec_to_markdown(content: &str, title: &str) -> String {
     // Append any remaining doc content
     if !doc_lines.is_empty() {
         md.push_str(&doc_lines.join("\n"));
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md
@@ -684,11 +684,9 @@ pub fn run_bug_update(args: &[String]) -> i32 {
             eprintln!("error: {}", e);
             return 1;
         }
-    } else {
-        if let Err(e) = update_bug_status(&mut db, bug_id, status) {
-            eprintln!("error: {}", e);
-            return 1;
-        }
+    } else if let Err(e) = update_bug_status(&mut db, bug_id, status) {
+        eprintln!("error: {}", e);
+        return 1;
     }
 
     // Save database

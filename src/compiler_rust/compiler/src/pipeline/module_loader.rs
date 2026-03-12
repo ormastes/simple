@@ -167,9 +167,7 @@ fn strip_optionals(mut s: String) -> String {
     s = s.replace(".?,", " != nil,");
 
     // Step 3: Strip remaining `?` (type suffixes like `Type?`)
-    for pat in [
-        "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;",
-    ] {
+    for pat in ["? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;"] {
         while s.contains(pat) {
             s = s.replace(pat, &pat[1..]); // drop leading '?'
         }

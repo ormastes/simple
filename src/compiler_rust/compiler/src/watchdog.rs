@@ -48,12 +48,7 @@ fn read_rss_bytes() -> u64 {
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
+        .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok())
         .map(|kb| kb * 1024)
         .unwrap_or(0)
 }

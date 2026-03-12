@@ -310,7 +310,7 @@ impl TypeChecker {
                     };
 
                     // If there's a type annotation, check for ConstKeySet validation
-                    if let Some(ref ast_ty) = type_annotation {
+                    if let Some(ast_ty) = type_annotation {
                         let expected_ty = self.ast_type_to_type(ast_ty);
                         // Validate dict keys against ConstKeySet if applicable
                         self.validate_dict_const_keys(expr, &expected_ty)?;
@@ -323,7 +323,7 @@ impl TypeChecker {
                             if let Some(ref src_name) = source_type_name {
                                 let implements = self.trait_impls
                                     .get(trait_name)
-                                    .map_or(false, |r| r.specific_impls.contains(src_name) || r.blanket_impl);
+                                    .is_some_and(|r| r.specific_impls.contains(src_name) || r.blanket_impl);
                                 if !implements {
                                     return Err(TypeError::Other(format!(
                                         "type `{}` does not implement trait `{}` (required for dyn coercion)",

@@ -108,10 +108,10 @@ impl PreAllocatedResources {
     pub fn is_ready(&self) -> bool {
         match self.app_type {
             AppType::Cli => self.cli.is_ready(),
-            AppType::Tui => self.tui.as_ref().map_or(false, |t| t.is_ready()),
-            AppType::Gui => self.gui.as_ref().map_or(false, |g| g.is_ready()),
-            AppType::Service => self.service.as_ref().map_or(false, |s| s.is_ready()),
-            AppType::Repl => self.repl.as_ref().map_or(false, |r| r.is_ready()),
+            AppType::Tui => self.tui.as_ref().is_some_and(|t| t.is_ready()),
+            AppType::Gui => self.gui.as_ref().is_some_and(|g| g.is_ready()),
+            AppType::Service => self.service.as_ref().is_some_and(|s| s.is_ready()),
+            AppType::Repl => self.repl.as_ref().is_some_and(|r| r.is_ready()),
         }
     }
 }
@@ -211,7 +211,7 @@ impl GuiResources {
 
     /// Check if GUI resources are ready
     pub fn is_ready(&self) -> bool {
-        self.gpu_init_handle.as_ref().map_or(false, |h| h.is_ready())
+        self.gpu_init_handle.as_ref().is_some_and(|h| h.is_ready())
     }
 
     /// Check if window is created (may not have GPU context yet)

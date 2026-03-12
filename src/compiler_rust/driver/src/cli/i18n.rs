@@ -25,7 +25,7 @@ pub fn run_i18n(args: &[String]) -> i32 {
                 .iter()
                 .skip(2)
                 .find(|a| !a.starts_with('-'))
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("src"));
 
             // Find output directory
@@ -52,7 +52,7 @@ pub fn run_i18n(args: &[String]) -> i32 {
                 .iter()
                 .skip(3)
                 .find(|a| !a.starts_with('-') && !a.starts_with("--"))
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("src"));
 
             // Find output directory

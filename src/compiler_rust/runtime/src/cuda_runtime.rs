@@ -675,7 +675,6 @@ pub extern "C" fn rt_cuda_available() -> i64 {
     }
 }
 
-
 // =============================================================================
 // Additional FFI Functions - Device, Context, Memory, Module, Launch
 // =============================================================================
@@ -690,14 +689,18 @@ pub extern "C" fn rt_cuda_device_get(device_id: i64) -> i64 {
     unsafe {
         let mut handle: CUdevice = 0;
         let err = cuDeviceGet(&mut handle, device_id as c_int);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         handle as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_device_get(_device_id: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_device_get(_device_id: i64) -> i64 {
+    -3
+}
 
 /// Get CUDA device name
 #[no_mangle]
@@ -736,7 +739,9 @@ pub extern "C" fn rt_cuda_device_compute_capability(device: i64) -> i64 {
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_device_compute_capability(_device: i64) -> i64 { 0 }
+pub extern "C" fn rt_cuda_device_compute_capability(_device: i64) -> i64 {
+    0
+}
 
 /// Create CUDA context for device
 #[no_mangle]
@@ -745,14 +750,18 @@ pub extern "C" fn rt_cuda_ctx_create(device: i64) -> i64 {
     unsafe {
         let mut ctx: CUcontext = ptr::null_mut();
         let err = cuCtxCreate_v2(&mut ctx, 0, device as CUdevice);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         ctx as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_ctx_create(_device: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_ctx_create(_device: i64) -> i64 {
+    -3
+}
 
 /// Destroy CUDA context
 #[no_mangle]
@@ -760,14 +769,18 @@ pub extern "C" fn rt_cuda_ctx_create(_device: i64) -> i64 { -3 }
 pub extern "C" fn rt_cuda_ctx_destroy(ctx: i64) -> i64 {
     unsafe {
         let err = cuCtxDestroy_v2(ctx as CUcontext);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_ctx_destroy(_ctx: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_ctx_destroy(_ctx: i64) -> i64 {
+    -3
+}
 
 /// Synchronize current CUDA context
 #[no_mangle]
@@ -778,14 +791,18 @@ pub extern "C" fn rt_cuda_ctx_synchronize() -> i64 {
     }
     unsafe {
         let err = cuCtxSynchronize();
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_ctx_synchronize() -> i64 { -3 }
+pub extern "C" fn rt_cuda_ctx_synchronize() -> i64 {
+    -3
+}
 
 /// Allocate device memory
 #[no_mangle]
@@ -797,14 +814,18 @@ pub extern "C" fn rt_cuda_mem_alloc(size: i64) -> i64 {
     unsafe {
         let mut dptr: CUdeviceptr = 0;
         let err = cuMemAlloc_v2(&mut dptr, size as usize);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         dptr as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_mem_alloc(_size: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_mem_alloc(_size: i64) -> i64 {
+    -3
+}
 
 /// Free device memory
 #[no_mangle]
@@ -815,14 +836,18 @@ pub extern "C" fn rt_cuda_mem_free(ptr: i64) -> i64 {
     }
     unsafe {
         let err = cuMemFree_v2(ptr as CUdeviceptr);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_mem_free(_ptr: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_mem_free(_ptr: i64) -> i64 {
+    -3
+}
 
 /// Copy host to device
 #[no_mangle]
@@ -833,14 +858,18 @@ pub extern "C" fn rt_cuda_memcpy_htod(dst: i64, src: i64, size: i64) -> i64 {
     }
     unsafe {
         let err = cuMemcpyHtoD_v2(dst as CUdeviceptr, src as *const c_void, size as usize);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_memcpy_htod(_dst: i64, _src: i64, _size: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_memcpy_htod(_dst: i64, _src: i64, _size: i64) -> i64 {
+    -3
+}
 
 /// Copy device to host
 #[no_mangle]
@@ -851,14 +880,18 @@ pub extern "C" fn rt_cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64 {
     }
     unsafe {
         let err = cuMemcpyDtoH_v2(dst as *mut c_void, src as CUdeviceptr, size as usize);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_memcpy_dtoh(_dst: i64, _src: i64, _size: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_memcpy_dtoh(_dst: i64, _src: i64, _size: i64) -> i64 {
+    -3
+}
 
 /// Copy device to device
 #[no_mangle]
@@ -869,14 +902,18 @@ pub extern "C" fn rt_cuda_memcpy_dtod(dst: i64, src: i64, size: i64) -> i64 {
     }
     unsafe {
         let err = cuMemcpyDtoD_v2(dst as CUdeviceptr, src as CUdeviceptr, size as usize);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_memcpy_dtod(_dst: i64, _src: i64, _size: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_memcpy_dtod(_dst: i64, _src: i64, _size: i64) -> i64 {
+    -3
+}
 
 /// Memset device memory
 #[no_mangle]
@@ -887,54 +924,70 @@ pub extern "C" fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64 {
     }
     unsafe {
         let err = cuMemsetD8_v2(ptr as CUdeviceptr, value as u8, size as usize);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_memset(_ptr: i64, _value: i64, _size: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_memset(_ptr: i64, _value: i64, _size: i64) -> i64 {
+    -3
+}
 
 /// Load CUDA module from file
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_load(path: *const c_char) -> i64 {
-    if path.is_null() { return -1; }
+    if path.is_null() {
+        return -1;
+    }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
         let mut module: CUmodule = ptr::null_mut();
         let err = cuModuleLoad(&mut module, path);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         module as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_module_load(_path: *const c_char) -> i64 { -3 }
+pub extern "C" fn rt_cuda_module_load(_path: *const c_char) -> i64 {
+    -3
+}
 
 /// Load CUDA module from PTX string
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_load_data(ptx: *const c_char) -> i64 {
-    if ptx.is_null() { return -1; }
+    if ptx.is_null() {
+        return -1;
+    }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
         let mut module: CUmodule = ptr::null_mut();
         let err = cuModuleLoadData(&mut module, ptx as *const c_void);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         module as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_module_load_data(_ptx: *const c_char) -> i64 { -3 }
+pub extern "C" fn rt_cuda_module_load_data(_ptx: *const c_char) -> i64 {
+    -3
+}
 
 /// Unload CUDA module
 #[no_mangle]
@@ -945,31 +998,41 @@ pub extern "C" fn rt_cuda_module_unload(module: i64) -> i64 {
     }
     unsafe {
         let err = cuModuleUnload(module as CUmodule);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_module_unload(_module: i64) -> i64 { -3 }
+pub extern "C" fn rt_cuda_module_unload(_module: i64) -> i64 {
+    -3
+}
 
 /// Get kernel function from module
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_get_function(module: i64, func_name: *const c_char) -> i64 {
-    if func_name.is_null() { return -1; }
+    if func_name.is_null() {
+        return -1;
+    }
     unsafe {
         let mut func: CUfunction = ptr::null_mut();
         let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         func as i64
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_module_get_function(_module: i64, _func_name: *const c_char) -> i64 { -3 }
+pub extern "C" fn rt_cuda_module_get_function(_module: i64, _func_name: *const c_char) -> i64 {
+    -3
+}
 
 /// Launch CUDA kernel (module handle + function name)
 #[no_mangle]
@@ -977,11 +1040,17 @@ pub extern "C" fn rt_cuda_module_get_function(_module: i64, _func_name: *const c
 pub extern "C" fn rt_cuda_launch_kernel(
     module: i64,
     func_name: *const c_char,
-    grid_x: i64, grid_y: i64, grid_z: i64,
-    block_x: i64, block_y: i64, block_z: i64,
+    grid_x: i64,
+    grid_y: i64,
+    grid_z: i64,
+    block_x: i64,
+    block_y: i64,
+    block_z: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name.is_null() { return -1; }
+    if func_name.is_null() {
+        return -1;
+    }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
@@ -989,18 +1058,26 @@ pub extern "C" fn rt_cuda_launch_kernel(
         // Get function from module
         let mut func: CUfunction = ptr::null_mut();
         let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name);
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
 
         let err = cuLaunchKernel(
             func,
-            grid_x as c_uint, grid_y as c_uint, grid_z as c_uint,
-            block_x as c_uint, block_y as c_uint, block_z as c_uint,
-            0, // shared memory bytes
+            grid_x as c_uint,
+            grid_y as c_uint,
+            grid_z as c_uint,
+            block_x as c_uint,
+            block_y as c_uint,
+            block_z as c_uint,
+            0,               // shared memory bytes
             ptr::null_mut(), // default stream
             args_ptr as *mut *mut c_void,
             ptr::null_mut(),
         );
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
@@ -1010,10 +1087,16 @@ pub extern "C" fn rt_cuda_launch_kernel(
 pub extern "C" fn rt_cuda_launch_kernel(
     _module: i64,
     _func_name: *const c_char,
-    _grid_x: i64, _grid_y: i64, _grid_z: i64,
-    _block_x: i64, _block_y: i64, _block_z: i64,
+    _grid_x: i64,
+    _grid_y: i64,
+    _grid_z: i64,
+    _block_x: i64,
+    _block_y: i64,
+    _block_z: i64,
     _args_ptr: i64,
-) -> i64 { -3 }
+) -> i64 {
+    -3
+}
 
 /// Synchronize device
 #[no_mangle]
@@ -1024,14 +1107,18 @@ pub extern "C" fn rt_cuda_sync() -> i64 {
     }
     unsafe {
         let err = cuCtxSynchronize();
-        if err != 0 { return -(err as i64); }
+        if err != 0 {
+            return -(err as i64);
+        }
         0
     }
 }
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_sync() -> i64 { -3 }
+pub extern "C" fn rt_cuda_sync() -> i64 {
+    -3
+}
 
 /// Get error string for CUDA error code
 #[no_mangle]
@@ -1055,7 +1142,6 @@ pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
     cstr.into_raw() // Leaked intentionally for FFI
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,10 +1164,7 @@ mod tests {
     fn test_cuda_ffi_stubs_report_not_initialized() {
         let ptx = CString::new(".version 7.0\n.target sm_50\n.address_size 64\n").unwrap();
         assert_eq!(rt_cuda_module_load_data(ptx.as_ptr()), -3);
-        assert_eq!(
-            rt_cuda_launch_kernel(0, ptx.as_ptr(), 1, 1, 1, 1, 1, 1, 0),
-            -3
-        );
+        assert_eq!(rt_cuda_launch_kernel(0, ptx.as_ptr(), 1, 1, 1, 1, 1, 1, 0), -3);
         assert_eq!(rt_cuda_sync(), -3);
     }
 

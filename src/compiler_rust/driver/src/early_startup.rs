@@ -15,8 +15,10 @@ use std::path::PathBuf;
 
 /// Application type detected from arguments or binary metadata
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AppType {
     /// Command-line tool (minimal resources)
+    #[default]
     Cli,
     /// Terminal UI application (terminal mode, buffers)
     Tui,
@@ -28,11 +30,6 @@ pub enum AppType {
     Repl,
 }
 
-impl Default for AppType {
-    fn default() -> Self {
-        AppType::Cli
-    }
-}
 
 impl AppType {
     /// Parse app type from string argument

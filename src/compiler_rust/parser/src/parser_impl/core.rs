@@ -154,7 +154,7 @@ impl<'a> Parser<'a> {
             let hint = ErrorHint {
                 level,
                 message: format!("Common mistake detected: {}", mistake.suggestion()),
-                span: parser.current.span.clone(),
+                span: parser.current.span,
                 suggestion: Some(mistake.suggestion()),
                 help: Some(mistake.message()),
             };
@@ -380,7 +380,9 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
             }
-            return Ok(Node::Pass(crate::ast::PassStmt { span: self.current.span })); // treat as no-op
+            return Ok(Node::Pass(crate::ast::PassStmt {
+                span: self.current.span,
+            })); // treat as no-op
         }
 
         // `me` starts a mutable method declaration (me method_name(...):)
@@ -479,7 +481,7 @@ impl<'a> Parser<'a> {
 
                 // Check if next token is an uppercase identifier (class alias pattern)
                 if let TokenKind::Identifier { name, .. } = &next.kind {
-                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         // PascalCase identifier after 'alias' - treat as class alias
                         self.parse_class_alias()
                     } else {
@@ -499,7 +501,7 @@ impl<'a> Parser<'a> {
 
                 // Check if next token is an uppercase identifier (type alias pattern)
                 if let TokenKind::Identifier { name, .. } = &next.kind {
-                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         // PascalCase identifier after 'type' - treat as type alias
                         self.parse_type_alias()
                     } else {
@@ -529,7 +531,7 @@ impl<'a> Parser<'a> {
                 // bitfield Name...: -> bitfield definition
                 // bitfield as identifier (import path, variable) -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().is_some_and(|c| c.is_uppercase()))
                 {
                     self.parse_bitfield()
                 } else {
@@ -540,7 +542,7 @@ impl<'a> Parser<'a> {
                 // newtype Name = ... -> newtype definition
                 // newtype as identifier -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().is_some_and(|c| c.is_uppercase()))
                 {
                     self.parse_newtype()
                 } else {
@@ -551,7 +553,7 @@ impl<'a> Parser<'a> {
                 // extend TypeName: -> extension block
                 // extend as identifier (method call, import, etc.) -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().is_some_and(|c| c.is_uppercase()))
                 {
                     self.parse_extend()
                 } else {

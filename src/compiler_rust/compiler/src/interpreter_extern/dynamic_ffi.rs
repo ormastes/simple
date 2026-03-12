@@ -41,14 +41,13 @@ struct DynamicRuntime {
     symbols: HashMap<String, usize>,
 }
 
-static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> =
-    std::sync::LazyLock::new(|| {
-        Mutex::new(DynamicRuntime {
-            handle: 0,
-            attempted: false,
-            symbols: HashMap::new(),
-        })
-    });
+static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> = std::sync::LazyLock::new(|| {
+    Mutex::new(DynamicRuntime {
+        handle: 0,
+        attempted: false,
+        symbols: HashMap::new(),
+    })
+});
 
 /// Known satellite library prefixes.
 ///
@@ -158,10 +157,7 @@ fn derive_satellite_prefix(name: &str) -> Option<&'static str> {
     if prefix.len() < 2 {
         return None;
     }
-    SATELLITE_PREFIXES
-        .iter()
-        .find(|&&p| p == prefix)
-        .copied()
+    SATELLITE_PREFIXES.iter().find(|&&p| p == prefix).copied()
 }
 
 /// Get the platform-specific satellite library name for a given prefix.
@@ -219,7 +215,11 @@ fn load_satellite_library(prefix: &str) -> usize {
     for profile in &["debug", "release", "bootstrap"] {
         let cargo_path = format!("target/{}/{}", profile, lib_name);
         if let Some(handle) = try_dlopen(&cargo_path) {
-            tracing::debug!("Loaded satellite library '{}' from cargo target: {}", prefix, cargo_path);
+            tracing::debug!(
+                "Loaded satellite library '{}' from cargo target: {}",
+                prefix,
+                cargo_path
+            );
             return handle;
         }
     }
@@ -245,11 +245,7 @@ fn load_satellite_library(prefix: &str) -> usize {
 ///
 /// Returns `Some(Ok(Value))` if the function was found and called,
 /// `Some(Err(...))` on call failure, or `None` if not found.
-fn try_call_satellite(
-    prefix: &str,
-    name: &str,
-    evaluated_args: &[Value],
-) -> Option<Result<Value, CompileError>> {
+fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
     let mut satellites = match SATELLITE_LIBRARIES.lock() {
         Ok(s) => s,
         Err(_) => return None,
@@ -381,7 +377,13 @@ fn value_to_i64(val: &Value) -> i64 {
     match val {
         Value::Int(n) => *n,
         Value::Float(f) => f.to_bits() as i64,
-        Value::Bool(b) => if *b { 1 } else { 0 },
+        Value::Bool(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
         Value::Nil => 0,
         Value::Str(s) => {
             // Create a null-terminated C string and leak it for the FFI call.
@@ -411,11 +413,7 @@ fn i64_to_value(v: i64) -> Value {
 ///
 /// This is the shared call path used by both the main runtime dispatch and
 /// satellite library dispatch.
-fn call_fptr(
-    fptr: usize,
-    name: &str,
-    evaluated_args: &[Value],
-) -> Option<Result<Value, CompileError>> {
+fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
     // Marshal arguments to i64
     let args: Vec<i64> = evaluated_args.iter().map(|v| value_to_i64(v)).collect();
     let nargs = args.len();
@@ -451,22 +449,16 @@ fn call_fptr(
                 f(args[0], args[1], args[2], args[3], args[4])
             }
             6 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                 f(args[0], args[1], args[2], args[3], args[4], args[5])
             }
             7 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                 f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
             }
             8 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                    std::mem::transmute(fptr);
-                f(
-                    args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-                    args[7],
-                )
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
             }
             _ => {
                 return Some(Err(CompileError::runtime(format!(

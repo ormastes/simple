@@ -334,7 +334,7 @@ impl SuiParser {
         let pattern_chars: Vec<char> = pattern.chars().collect();
         let mut match_pos = 0;
 
-        while let Some(ch) = chars.next() {
+        for ch in chars.by_ref() {
             if ch == pattern_chars[match_pos] {
                 match_pos += 1;
                 if match_pos == pattern_chars.len() {

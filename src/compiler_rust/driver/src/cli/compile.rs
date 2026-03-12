@@ -39,7 +39,11 @@ pub fn compile_file(
         let source_content = match std::fs::read_to_string(source) {
             Ok(content) => {
                 // Normalize CRLF → LF for cross-platform compatibility
-                if content.contains('\r') { content.replace('\r', "") } else { content }
+                if content.contains('\r') {
+                    content.replace('\r', "")
+                } else {
+                    content
+                }
             }
             Err(e) => {
                 eprintln!("error: cannot read {}: {}", source.display(), e);

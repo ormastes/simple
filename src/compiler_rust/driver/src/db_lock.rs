@@ -65,7 +65,7 @@ impl FileLock {
                     // Check for stale lock (older than 60s = likely crashed process)
                     if let Ok(metadata) = fs::metadata(&lock_path) {
                         if let Ok(modified) = metadata.modified() {
-                            if modified.elapsed().map_or(false, |age| age > Duration::from_secs(60)) {
+                            if modified.elapsed().is_ok_and(|age| age > Duration::from_secs(60)) {
                                 let _ = fs::remove_file(&lock_path);
                                 continue; // Retry immediately after removing stale lock
                             }

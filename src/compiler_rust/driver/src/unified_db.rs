@@ -343,7 +343,7 @@ impl<T: Record> Database<T> {
     pub fn save(&self) -> Result<(), io::Error> {
         // Acquire lock
         let _lock =
-            FileLock::acquire(&self.path, 2).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+            FileLock::acquire(&self.path, 2).map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
         // Load existing file to preserve other tables
         let mut existing_dict = indexmap::IndexMap::new();
@@ -366,7 +366,7 @@ impl<T: Record> Database<T> {
             let row: Vec<simple_sdn::SdnValue> = record
                 .to_sdn_row()
                 .into_iter()
-                .map(|s| simple_sdn::SdnValue::String(s))
+                .map(simple_sdn::SdnValue::String)
                 .collect();
             rows.push(row);
         }

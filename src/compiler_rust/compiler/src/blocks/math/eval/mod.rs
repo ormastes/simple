@@ -168,9 +168,7 @@ fn value_to_math_value(value: &Value) -> Option<MathValue> {
                         }
                     }
                 }
-                return Some(MathValue::Tensor(
-                    Tensor::new(data, vec![arr.len(), inner_len]).ok()?,
-                ));
+                return Some(MathValue::Tensor(Tensor::new(data, vec![arr.len(), inner_len]).ok()?));
             }
             None
         }

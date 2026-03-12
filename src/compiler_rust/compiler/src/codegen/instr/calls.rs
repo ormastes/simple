@@ -573,8 +573,10 @@ pub fn compile_call<M: Module>(
             }
             Err(e) => {
                 // Declaration conflict (e.g., incompatible signature already declared).
-                eprintln!("[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): {}",
-                    func_name, resolved_name, e);
+                eprintln!(
+                    "[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): {}",
+                    func_name, resolved_name, e
+                );
                 // Fall back to returning tagged nil for the dest.
                 if let Some(d) = dest {
                     let nil = builder.ins().iconst(types::I64, 3);

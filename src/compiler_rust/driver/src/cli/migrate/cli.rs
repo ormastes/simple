@@ -23,7 +23,7 @@ pub fn run_migrate(args: &[String]) -> i32 {
                 .iter()
                 .skip(2)
                 .find(|a| !a.starts_with('-'))
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
 
             generics::migrate_generics(&path, dry_run)
@@ -37,7 +37,7 @@ pub fn run_migrate(args: &[String]) -> i32 {
                 .iter()
                 .skip(2)
                 .find(|a| !a.starts_with('-'))
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
 
             print::migrate_print_syntax(&path, dry_run)
@@ -51,7 +51,7 @@ pub fn run_migrate(args: &[String]) -> i32 {
                 .iter()
                 .skip(2)
                 .find(|a| !a.starts_with('-'))
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
 
             sspec::migrate_sspec_docstrings(&path, dry_run)

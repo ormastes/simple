@@ -6,7 +6,6 @@ use inkwell::builder::Builder;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
 
-
 impl LlvmBackend {
     // ============================================================================
     // Collection Instructions
@@ -215,10 +214,10 @@ impl LlvmBackend {
 
         // Call rt_index_set(collection, index, value) runtime function
         let rt_func = module.get_function("rt_index_set").unwrap_or_else(|| {
-            let fn_type = self.context.void_type().fn_type(
-                &[i64_type.into(), i64_type.into(), i64_type.into()],
-                false,
-            );
+            let fn_type = self
+                .context
+                .void_type()
+                .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
             module.add_function("rt_index_set", fn_type, None)
         });
         builder

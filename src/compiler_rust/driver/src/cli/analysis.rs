@@ -42,7 +42,7 @@ pub fn run_query(args: &[String]) -> i32 {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |e| e == "spl") {
+                    if path.is_file() && path.extension().is_some_and(|e| e == "spl") {
                         files.push(path);
                     } else if path.is_dir() {
                         walk_dir(&path, files);
@@ -84,7 +84,7 @@ pub fn run_query(args: &[String]) -> i32 {
                 // Apply filters
                 if let Some(tool_filter) = generated_by_tool {
                     // Check if tool matches
-                    let matches_tool = metadata.map_or(false, |args| {
+                    let matches_tool = metadata.is_some_and(|args| {
                         args.iter().any(|arg| {
                             if arg.name.as_deref() != Some("tool") {
                                 return false;
@@ -111,7 +111,7 @@ pub fn run_query(args: &[String]) -> i32 {
 
                 if show_unverified {
                     // Check if verified flag is false or missing
-                    let is_verified = metadata.map_or(false, |args| {
+                    let is_verified = metadata.is_some_and(|args| {
                         args.iter().any(|arg| {
                             arg.name.as_deref() == Some("verified")
                                 && matches!(&arg.value, simple_parser::Expr::Bool(true))
@@ -173,7 +173,7 @@ pub fn run_info(args: &[String]) -> i32 {
         if let Ok(entries) = fs::read_dir(&search_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && path.extension().map_or(false, |e| e == "spl") {
+                if path.is_file() && path.extension().is_some_and(|e| e == "spl") {
                     spl_files.push(path);
                 }
             }

@@ -1380,10 +1380,14 @@ fn gpu_lowerer_setup() -> MirLowerer<'static> {
     lowerer
 }
 
-fn gpu_result_is_materialized_nil(func: &crate::mir::function::MirFunction, result: crate::mir::instructions::VReg) -> bool {
-    func.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
-        matches!(i, MirInst::ConstInt { dest, value } if *dest == result && *value == 3)
-    })
+fn gpu_result_is_materialized_nil(
+    func: &crate::mir::function::MirFunction,
+    result: crate::mir::instructions::VReg,
+) -> bool {
+    func.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::ConstInt { dest, value } if *dest == result && *value == 3))
 }
 
 #[test]

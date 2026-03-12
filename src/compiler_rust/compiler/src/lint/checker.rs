@@ -321,6 +321,14 @@ impl LintChecker {
         "Lib",
         "inject",
         "sys_inject",
+        // Baremetal / low-level decorators
+        "naked",
+        "noreturn",
+        "interrupt",
+        "entry",
+        "align",
+        // GPU decorators
+        "gpu_intrinsic",
     ];
 
     /// Known attribute names (whitelist)

@@ -169,7 +169,9 @@ pub fn create_isa_and_flags(
     let triple: Triple = if settings.target.is_host() {
         Triple::host()
     } else {
-        settings.target.triple_str()
+        settings
+            .target
+            .triple_str()
             .parse()
             .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
     };
@@ -514,7 +516,9 @@ impl<M: Module> CodegenBackend<M> {
             if !is_local {
                 // Imported global: resolve the correct mangled name from the defining module
                 // via use_map (per-module imports) or import_map (global unique names).
-                let resolved_name = self.use_map.get(name.as_str())
+                let resolved_name = self
+                    .use_map
+                    .get(name.as_str())
                     .or_else(|| self.import_map.get(name.as_str()))
                     .map(|s| self.sanitize_symbol(s))
                     .unwrap_or_else(|| self.mangle_name(name));
@@ -532,7 +536,12 @@ impl<M: Module> CodegenBackend<M> {
                 let local_symbol = self.mangle_name(name);
                 let data_id = self
                     .module
-                    .declare_data(&local_symbol, cranelift_module::Linkage::Preemptible, *is_mutable, false)
+                    .declare_data(
+                        &local_symbol,
+                        cranelift_module::Linkage::Preemptible,
+                        *is_mutable,
+                        false,
+                    )
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
@@ -632,7 +641,12 @@ impl<M: Module> CodegenBackend<M> {
         // globals that correspond to function references and initialize their
         // BSS slots with the function address (instead of zero).
         self.declare_functions(&functions)?;
-        self.declare_globals(&mir.globals, &mir.extern_fn_names, &mir.global_init_values, &mir.local_globals)?;
+        self.declare_globals(
+            &mir.globals,
+            &mir.extern_fn_names,
+            &mir.global_init_values,
+            &mir.local_globals,
+        )?;
 
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs

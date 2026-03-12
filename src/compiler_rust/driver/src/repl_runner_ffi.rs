@@ -12,10 +12,10 @@ use std::cell::RefCell;
 
 thread_local! {
     /// Thread-local runner for REPL execution
-    static REPL_RUNNER: RefCell<Option<Runner>> = RefCell::new(None);
+    static REPL_RUNNER: RefCell<Option<Runner>> = const { RefCell::new(None) };
 
     /// Thread-local prelude accumulator
-    static REPL_PRELUDE: RefCell<String> = RefCell::new(String::new());
+    static REPL_PRELUDE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Register the driver's REPL runner implementations with the compiler.
@@ -109,7 +109,7 @@ fn driver_repl_runner_execute(
         }
         Err(e) => {
             // Error
-            let error_msg = format!("{}", e);
+            let error_msg = e.to_string();
             write_error(result_buffer, result_capacity, &error_msg);
             1
         }

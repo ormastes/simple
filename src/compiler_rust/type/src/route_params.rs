@@ -147,9 +147,7 @@ impl RouteParams {
         }
 
         for (pattern_seg, path_seg) in pattern_segments.iter().zip(path_segments.iter()) {
-            if pattern_seg.starts_with(':') {
-                let param_name = &pattern_seg[1..];
-
+            if let Some(param_name) = pattern_seg.strip_prefix(':') {
                 // Check for duplicate parameters
                 if params.path_params.contains_key(param_name) {
                     return Err(RouteParamError::DuplicateParameter(param_name.to_string()));

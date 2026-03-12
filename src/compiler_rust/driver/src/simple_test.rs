@@ -235,7 +235,7 @@ pub fn discover_tests(test_root: &Path) -> Vec<SimpleTestFile> {
         let path = entry.path();
 
         // Only consider .spl files
-        if path.extension().map_or(true, |ext| ext != "spl") {
+        if path.extension().is_none_or(|ext| ext != "spl") {
             continue;
         }
 

@@ -28,13 +28,19 @@ impl LlvmBackend {
                 // Ensure both operands have the same bit width
                 let i64_type = self.context.i64_type();
                 let l = if l.get_type().get_bit_width() < 64 {
-                    builder.build_int_z_extend(l, i64_type, "zext_l")
+                    builder
+                        .build_int_z_extend(l, i64_type, "zext_l")
                         .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
-                } else { l };
+                } else {
+                    l
+                };
                 let r = if r.get_type().get_bit_width() < 64 {
-                    builder.build_int_z_extend(r, i64_type, "zext_r")
+                    builder
+                        .build_int_z_extend(r, i64_type, "zext_r")
                         .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
-                } else { r };
+                } else {
+                    r
+                };
 
                 let result = match op {
                     BinOp::Add => builder
@@ -58,7 +64,9 @@ impl LlvmBackend {
                         let call_site = builder
                             .build_call(rt_func, &[l.into(), r.into()], "eq")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
-                        call_site.try_as_basic_value().left()
+                        call_site
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value()
                     }
@@ -71,7 +79,9 @@ impl LlvmBackend {
                         let call_site = builder
                             .build_call(rt_func, &[l.into(), r.into()], "neq")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
-                        call_site.try_as_basic_value().left()
+                        call_site
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value()
                     }
@@ -79,28 +89,32 @@ impl LlvmBackend {
                         let cmp = builder
                             .build_int_compare(IntPredicate::SLT, l, r, "lt")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        builder.build_int_z_extend(cmp, i64_type, "lt_i64")
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "lt_i64")
                             .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
                     }
                     BinOp::LtEq => {
                         let cmp = builder
                             .build_int_compare(IntPredicate::SLE, l, r, "le")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        builder.build_int_z_extend(cmp, i64_type, "le_i64")
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "le_i64")
                             .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
                     }
                     BinOp::Gt => {
                         let cmp = builder
                             .build_int_compare(IntPredicate::SGT, l, r, "gt")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        builder.build_int_z_extend(cmp, i64_type, "gt_i64")
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "gt_i64")
                             .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
                     }
                     BinOp::GtEq => {
                         let cmp = builder
                             .build_int_compare(IntPredicate::SGE, l, r, "ge")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        builder.build_int_z_extend(cmp, i64_type, "ge_i64")
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "ge_i64")
                             .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
                     }
                     BinOp::Mod => builder
@@ -192,23 +206,35 @@ impl LlvmBackend {
                 let result = match op {
                     BinOp::Eq => {
                         let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
-                            let fn_type = self.context.i64_type().fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
+                            let fn_type = self
+                                .context
+                                .i64_type()
+                                .fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
                             module.add_function("rt_native_eq", fn_type, None)
                         });
-                        let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
+                        let call_site = builder
+                            .build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
-                        call_site.try_as_basic_value().left()
+                        call_site
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
                             .into_int_value()
                     }
                     BinOp::NotEq => {
                         let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
-                            let fn_type = self.context.i64_type().fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
+                            let fn_type = self
+                                .context
+                                .i64_type()
+                                .fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
                             module.add_function("rt_native_neq", fn_type, None)
                         });
-                        let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
+                        let call_site = builder
+                            .build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
-                        call_site.try_as_basic_value().left()
+                        call_site
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
                             .into_int_value()
                     }
@@ -246,9 +272,12 @@ impl LlvmBackend {
                         let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                         module.add_function("rt_native_eq", fn_type, None)
                     });
-                    let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
+                    let call_site = builder
+                        .build_call(rt_func, &[l_int.into(), r_int.into()], "eq")
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
-                    let eq_val = call_site.try_as_basic_value().left()
+                    let eq_val = call_site
+                        .try_as_basic_value()
+                        .left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         .into_int_value();
                     return Ok(eq_val.into());
@@ -258,9 +287,12 @@ impl LlvmBackend {
                         let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                         module.add_function("rt_native_neq", fn_type, None)
                     });
-                    let call_site = builder.build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
+                    let call_site = builder
+                        .build_call(rt_func, &[l_int.into(), r_int.into()], "neq")
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
-                    let neq_val = call_site.try_as_basic_value().left()
+                    let neq_val = call_site
+                        .try_as_basic_value()
+                        .left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         .into_int_value();
                     return Ok(neq_val.into());
@@ -321,10 +353,7 @@ impl LlvmBackend {
             inkwell::values::BasicValueEnum::FloatValue(v) => builder
                 .build_float_to_signed_int(v, int_type, name)
                 .map_err(|e| crate::error::factory::llvm_build_failed("build_float_to_signed_int", &e)),
-            _ => Err(CompileError::semantic(format!(
-                "Cannot coerce {:?} to integer",
-                val
-            ))),
+            _ => Err(CompileError::semantic(format!("Cannot coerce {:?} to integer", val))),
         }
     }
 
@@ -391,11 +420,7 @@ impl LlvmBackend {
                 if let Some(val) = vreg_map.get(vreg) {
                     // Coerce return value to i64 (function return type)
                     let i64_type = self.context.i64_type();
-                    let coerced = self.coerce_value_to_type(
-                        *val,
-                        Some(i64_type.into()),
-                        builder,
-                    )?;
+                    let coerced = self.coerce_value_to_type(*val, Some(i64_type.into()), builder)?;
                     builder
                         .build_return(Some(&coerced))
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
@@ -455,12 +480,16 @@ impl LlvmBackend {
                     inkwell::values::BasicValueEnum::PointerValue(pv) => {
                         let null = pv.get_type().const_null();
                         builder
-                            .build_int_compare(inkwell::IntPredicate::NE,
-                                builder.build_ptr_to_int(*pv, self.context.i64_type(), "ptoi")
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                builder
+                                    .build_ptr_to_int(*pv, self.context.i64_type(), "ptoi")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?,
-                                builder.build_ptr_to_int(null, self.context.i64_type(), "nulltoi")
+                                builder
+                                    .build_ptr_to_int(null, self.context.i64_type(), "nulltoi")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?,
-                                "tobool")
+                                "tobool",
+                            )
                             .map_err(|e| crate::error::factory::llvm_build_failed("int_compare", &e))?
                     }
                     _ => {
@@ -592,9 +621,7 @@ impl LlvmBackend {
                 Ok(cast.into())
             }
             // float → int (bitcast to preserve tagged-value ABI bit patterns)
-            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it))
-                if it.get_bit_width() == 64 =>
-            {
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it)) if it.get_bit_width() == 64 => {
                 let cast = builder
                     .build_bit_cast(fv, it, "f2i")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_f2i", &e))?;
@@ -608,9 +635,7 @@ impl LlvmBackend {
                 Ok(cast.into())
             }
             // int → float (bitcast to preserve tagged-value ABI bit patterns)
-            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft))
-                if iv.get_type().get_bit_width() == 64 =>
-            {
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft)) if iv.get_type().get_bit_width() == 64 => {
                 let cast = builder
                     .build_bit_cast(iv, ft, "i2f")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_i2f", &e))?;

@@ -470,8 +470,8 @@ impl ConsoleVerify {
         let matching_calls: Vec<_> = calls
             .iter()
             .filter(|call| {
-                let method_match = self.method_filter.as_ref().map_or(true, |m| &call.method == m);
-                let args_match = self.args_filter.as_ref().map_or(true, |a| &call.args == a);
+                let method_match = self.method_filter.as_ref().is_none_or(|m| &call.method == m);
+                let args_match = self.args_filter.as_ref().is_none_or(|a| &call.args == a);
                 method_match && args_match
             })
             .collect();
@@ -507,7 +507,7 @@ impl DomVerify {
     pub fn has_text(&self, expected_text: &str) -> bool {
         if let Some(ref id) = self.element_id {
             if let Some(elem) = self.elements.lock().unwrap().get(id) {
-                return elem.text_content.as_ref().map_or(false, |t| t == expected_text);
+                return elem.text_content.as_ref().is_some_and(|t| t == expected_text);
             }
         }
         false

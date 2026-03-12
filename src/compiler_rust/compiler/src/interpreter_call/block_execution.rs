@@ -487,7 +487,8 @@ pub(super) fn exec_block_closure(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy()
+                            {
                                 continue;
                             }
                         }
@@ -1015,7 +1016,8 @@ fn exec_block_closure_mut(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                            if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy()
+                            {
                                 continue;
                             }
                         }

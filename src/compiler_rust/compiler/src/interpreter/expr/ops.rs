@@ -164,7 +164,12 @@ pub(super) fn eval_op_expr(
                     // Creates a lambda that chains the two functions
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                    let is_func = |v: &Value| matches!(v, Value::Function { .. } | Value::Lambda { .. } | Value::NativeFunction(_));
+                    let is_func = |v: &Value| {
+                        matches!(
+                            v,
+                            Value::Function { .. } | Value::Lambda { .. } | Value::NativeFunction(_)
+                        )
+                    };
                     if is_func(&left_val) && is_func(&right_val) {
                         // Build AST body: __compose_g(__compose_f(__c0))
                         let param_ident = Expr::Identifier("__c0".to_string());
@@ -204,17 +209,28 @@ pub(super) fn eval_op_expr(
                                 Value::Function { def, captured_env, .. } => {
                                     let mut env_clone = captured_env.clone();
                                     return Ok(Some(super::super::exec_function_with_values(
-                                        &def, &all_args, &mut env_clone, functions, classes, enums, impl_methods,
+                                        &def,
+                                        &all_args,
+                                        &mut env_clone,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
                                     )?));
                                 }
-                                Value::Lambda { params, body, env: lambda_env } => {
+                                Value::Lambda {
+                                    params,
+                                    body,
+                                    env: lambda_env,
+                                } => {
                                     let mut local_env = lambda_env.clone();
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
                                             local_env.insert(param_name.clone(), arg.clone());
                                         }
                                     }
-                                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+                                    let result =
+                                        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                                     return Ok(Some(result));
                                 }
                                 _ => {
@@ -223,14 +239,23 @@ pub(super) fn eval_op_expr(
                                         if let Some(func_def) = functions.get(name).cloned() {
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
-                                                &func_def, &all_args, &mut env_clone, functions, classes, enums, impl_methods,
+                                                &func_def,
+                                                &all_args,
+                                                &mut env_clone,
+                                                functions,
+                                                classes,
+                                                enums,
+                                                impl_methods,
                                             )?));
                                         }
                                     }
                                     let ctx = ErrorContext::new()
                                         .with_code(codes::TYPE_MISMATCH)
                                         .with_help("pipe forward |> requires a callable on the right side");
-                                    return Err(CompileError::semantic_with_context("pipe forward: callee is not a function", ctx));
+                                    return Err(CompileError::semantic_with_context(
+                                        "pipe forward: callee is not a function",
+                                        ctx,
+                                    ));
                                 }
                             }
                         }
@@ -241,15 +266,26 @@ pub(super) fn eval_op_expr(
                                 Value::Function { def, captured_env, .. } => {
                                     let mut env_clone = captured_env.clone();
                                     return Ok(Some(super::super::exec_function_with_values(
-                                        &def, &[left_val], &mut env_clone, functions, classes, enums, impl_methods,
+                                        &def,
+                                        &[left_val],
+                                        &mut env_clone,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
                                     )?));
                                 }
-                                Value::Lambda { params, body, env: lambda_env } => {
+                                Value::Lambda {
+                                    params,
+                                    body,
+                                    env: lambda_env,
+                                } => {
                                     let mut local_env = lambda_env.clone();
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
                                     }
-                                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+                                    let result =
+                                        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                                     return Ok(Some(result));
                                 }
                                 _ => {
@@ -258,7 +294,13 @@ pub(super) fn eval_op_expr(
                                         if let Some(func_def) = functions.get(name).cloned() {
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
-                                                &func_def, &[left_val], &mut env_clone, functions, classes, enums, impl_methods,
+                                                &func_def,
+                                                &[left_val],
+                                                &mut env_clone,
+                                                functions,
+                                                classes,
+                                                enums,
+                                                impl_methods,
                                             )?));
                                         }
                                     }
@@ -266,7 +308,8 @@ pub(super) fn eval_op_expr(
                                         .with_code(codes::TYPE_MISMATCH)
                                         .with_help("pipe forward operator |> requires a function on the right side");
                                     return Err(CompileError::semantic_with_context(
-                                        format!("cannot pipe to non-function: {}", right_val.type_name()), ctx,
+                                        format!("cannot pipe to non-function: {}", right_val.type_name()),
+                                        ctx,
                                     ));
                                 }
                             }
@@ -514,7 +557,10 @@ pub(super) fn eval_op_expr(
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
-                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                        Err(CompileError::semantic_with_context(
+                            "type mismatch: comparing string with integer".to_string(),
+                            ctx,
+                        ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
@@ -525,7 +571,10 @@ pub(super) fn eval_op_expr(
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
-                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                        Err(CompileError::semantic_with_context(
+                            "type mismatch: comparing string with integer".to_string(),
+                            ctx,
+                        ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
@@ -536,7 +585,10 @@ pub(super) fn eval_op_expr(
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
-                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                        Err(CompileError::semantic_with_context(
+                            "type mismatch: comparing string with integer".to_string(),
+                            ctx,
+                        ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
@@ -547,7 +599,10 @@ pub(super) fn eval_op_expr(
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help(format!("cannot compare string with integer {n} — use .ord() to get the character code, or compare with a string literal instead"));
-                        Err(CompileError::semantic_with_context("type mismatch: comparing string with integer".to_string(), ctx))
+                        Err(CompileError::semantic_with_context(
+                            "type mismatch: comparing string with integer".to_string(),
+                            ctx,
+                        ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),

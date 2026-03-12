@@ -43,7 +43,7 @@ impl<'a> Parser<'a> {
     /// resolves the type from the module.
     fn is_type_path(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Identifier(name) => name.chars().next().map_or(false, |c| c.is_uppercase()),
+            Expr::Identifier(name) => name.chars().next().is_some_and(|c| c.is_uppercase()),
             // Don't convert field accesses to paths - let the interpreter handle module.Type.method()
             _ => false,
         }
@@ -143,7 +143,7 @@ impl<'a> Parser<'a> {
                                 // Convert Symbol(name) back to Identifier so parse_expression can handle it
                                 // This allows binary operators like `arr[0:n - 1]` to work
                                 let name = name.clone();
-                                let span = self.current.span.clone();
+                                let span = self.current.span;
                                 self.advance(); // consume the Symbol token
 
                                 // Create an identifier token and set it as current
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
                             };
                         } else if self.check(&TokenKind::LBrace)
                             && !self.no_brace_postfix
-                            && field.chars().next().map_or(false, |c| c.is_uppercase())
+                            && field.chars().next().is_some_and(|c| c.is_uppercase())
                         {
                             // Qualified struct initialization: module.StructName { ... }
                             // Convert receiver.field to qualified name

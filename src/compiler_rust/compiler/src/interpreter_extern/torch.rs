@@ -88,12 +88,7 @@ fn extract_i64_array(arg: &Value, func_name: &str) -> Result<Vec<i64>, CompileEr
 }
 
 #[cfg(feature = "pytorch")]
-fn torch_tensor_impl(
-    data: &[f64],
-    dims: &[i64],
-    dtype_code: i32,
-    device_code: i32,
-) -> u64 {
+fn torch_tensor_impl(data: &[f64], dims: &[i64], dtype_code: i32, device_code: i32) -> u64 {
     simple_runtime::value::rt_torch_tensor(
         data.as_ptr(),
         data.len() as i64,
@@ -105,19 +100,13 @@ fn torch_tensor_impl(
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_tensor_impl(
-    data: &[f64],
-    dims: &[i64],
-    dtype_code: i32,
-    device_code: i32,
-) -> u64 {
+fn torch_tensor_impl(data: &[f64], dims: &[i64], dtype_code: i32, device_code: i32) -> u64 {
     unsafe {
         let fptr = match lookup_torch_symbol("rt_torch_tensor") {
             Some(fptr) => fptr,
             None => return 0,
         };
-        let func: extern "C" fn(*const f64, i64, *const i64, i32, i32, i32) -> u64 =
-            std::mem::transmute(fptr);
+        let func: extern "C" fn(*const f64, i64, *const i64, i32, i32, i32) -> u64 = std::mem::transmute(fptr);
         func(
             data.as_ptr(),
             data.len() as i64,
@@ -225,7 +214,9 @@ pub fn rt_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
     let dims = extract_i64_array(&args[1], "rt_torch_tensor")?;
     let dtype_code = args[2].as_int()? as i32;
     let device_code = args[3].as_int()? as i32;
-    Ok(Value::Int(torch_tensor_impl(&data, &dims, dtype_code, device_code) as i64))
+    Ok(Value::Int(
+        torch_tensor_impl(&data, &dims, dtype_code, device_code) as i64
+    ))
 }
 
 pub fn rt_ps_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
@@ -246,9 +237,7 @@ pub fn rt_torch_to_cuda(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_torch_to_cpu(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_torch_to_cpu requires 1 argument (handle)",
-        ));
+        return Err(CompileError::runtime("rt_torch_to_cpu requires 1 argument (handle)"));
     }
 
     let handle = args[0].as_int()? as u64;
@@ -257,9 +246,7 @@ pub fn rt_torch_to_cpu(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_torch_free(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_torch_free requires 1 argument (handle)",
-        ));
+        return Err(CompileError::runtime("rt_torch_free requires 1 argument (handle)"));
     }
 
     let handle = args[0].as_int()? as u64;
@@ -268,9 +255,7 @@ pub fn rt_torch_free(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_torch_clone(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_torch_clone requires 1 argument (handle)",
-        ));
+        return Err(CompileError::runtime("rt_torch_clone requires 1 argument (handle)"));
     }
 
     let handle = args[0].as_int()? as u64;
@@ -287,9 +272,7 @@ pub fn rt_torch_copy_data_to_cpu(args: &[Value]) -> Result<Value, CompileError> 
     let handle = args[0].as_int()? as u64;
     let buffer_ptr = args[1].as_int()?;
     let buffer_size = args[2].as_int()?;
-    Ok(Value::Int(
-        torch_copy_data_to_cpu_impl(handle, buffer_ptr, buffer_size),
-    ))
+    Ok(Value::Int(torch_copy_data_to_cpu_impl(handle, buffer_ptr, buffer_size)))
 }
 
 pub fn rt_ps_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileError> {

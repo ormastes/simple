@@ -423,11 +423,18 @@ impl NativeBackend for LlvmBackend {
             let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
             // Resolve through import_map/use_map to get the mangled name
             // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
-            let resolved_name = self.use_map.get(&func.name)
+            let resolved_name = self
+                .use_map
+                .get(&func.name)
                 .or_else(|| self.import_map.get(&func.name))
                 .map(|s| s.as_str())
                 .unwrap_or(&func.name);
-            self.declare_function_with_linkage(resolved_name, &param_types, &func.return_type, !func.blocks.is_empty())?;
+            self.declare_function_with_linkage(
+                resolved_name,
+                &param_types,
+                &func.return_type,
+                !func.blocks.is_empty(),
+            )?;
         }
 
         // Second pass: compile all function bodies

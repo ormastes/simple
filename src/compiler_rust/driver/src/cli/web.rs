@@ -187,7 +187,7 @@ pub fn web_serve(source: &PathBuf, build_options: WebBuildOptions, serve_options
         match stream {
             Ok(mut stream) => {
                 let mut buffer = [0; 1024];
-                if let Ok(_) = stream.read(&mut buffer) {
+                if stream.read(&mut buffer).is_ok() {
                     let request = String::from_utf8_lossy(&buffer);
 
                     // Parse request line
@@ -224,8 +224,7 @@ fn serve_file(stream: &mut std::net::TcpStream, base_dir: &Path, path: &str) {
         base_dir
             .join("index.html")
             .metadata()
-            .ok()
-            .and_then(|_| Some(base_dir.join("index.html")))
+            .ok().map(|_| base_dir.join("index.html"))
             .or_else(|| {
                 // Find first .html file
                 fs::read_dir(base_dir)

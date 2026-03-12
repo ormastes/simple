@@ -62,7 +62,7 @@ fn contains_suspension_node(node: &Node) -> bool {
         Node::If(if_stmt) => {
             contains_suspension_expr(&if_stmt.condition)
                 || contains_suspension(&if_stmt.then_block)
-                || if_stmt.else_block.as_ref().map_or(false, |b| contains_suspension(b))
+                || if_stmt.else_block.as_ref().is_some_and(contains_suspension)
         }
         Node::While(stmt) => contains_suspension_expr(&stmt.condition) || contains_suspension(&stmt.body),
         Node::For(stmt) => contains_suspension(&stmt.body),
@@ -70,7 +70,7 @@ fn contains_suspension_node(node: &Node) -> bool {
             contains_suspension_expr(&match_stmt.subject)
                 || match_stmt.arms.iter().any(|arm| contains_suspension(&arm.body))
         }
-        Node::Return(stmt) => stmt.value.as_ref().map_or(false, |v| contains_suspension_expr(v)),
+        Node::Return(stmt) => stmt.value.as_ref().is_some_and(contains_suspension_expr),
         _ => false,
     }
 }
@@ -147,7 +147,7 @@ fn calls_async_function_node(node: &Node, env: &EffectEnv) -> bool {
                 || if_stmt
                     .else_block
                     .as_ref()
-                    .map_or(false, |b| calls_async_function(b, env))
+                    .is_some_and(|b| calls_async_function(b, env))
         }
         Node::While(stmt) => calls_async_function_expr(&stmt.condition, env) || calls_async_function(&stmt.body, env),
         Node::For(stmt) => calls_async_function(&stmt.body, env),
@@ -155,7 +155,7 @@ fn calls_async_function_node(node: &Node, env: &EffectEnv) -> bool {
             calls_async_function_expr(&match_stmt.subject, env)
                 || match_stmt.arms.iter().any(|arm| calls_async_function(&arm.body, env))
         }
-        Node::Return(stmt) => stmt.value.as_ref().map_or(false, |v| calls_async_function_expr(v, env)),
+        Node::Return(stmt) => stmt.value.as_ref().is_some_and(|v| calls_async_function_expr(v, env)),
         _ => false,
     }
 }
@@ -362,14 +362,13 @@ pub fn validate_suspension_context(func: &FunctionDef, env: &EffectEnv) -> Resul
     let effect = infer_function_effect(func, env);
 
     // If function is sync, check that it doesn't use suspension operators
-    if effect == Effect::Sync {
-        if contains_suspension(&func.body) {
+    if effect == Effect::Sync
+        && contains_suspension(&func.body) {
             return Err(format!(
                 "Sync function '{}' cannot use suspension operators (~=, if~, while~, for~)",
                 func.name
             ));
         }
-    }
 
     Ok(())
 }

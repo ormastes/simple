@@ -42,7 +42,10 @@ impl<'a> Parser<'a> {
                 return Ok(Type::Function { params, ret });
             } else {
                 // Bare `fn` type without parens — treat as generic callable
-                return Ok(Type::Function { params: vec![], ret: None });
+                return Ok(Type::Function {
+                    params: vec![],
+                    ret: None,
+                });
             }
         }
 
@@ -439,7 +442,7 @@ impl<'a> Parser<'a> {
             if using_angle_brackets && self.check(&TokenKind::ShiftRight) {
                 // Split >> into two > tokens
                 // Replace current >> with > and push second > to pending
-                let shift_span = self.current.span.clone();
+                let shift_span = self.current.span;
 
                 use crate::token::{Span, Token};
 

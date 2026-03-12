@@ -72,7 +72,7 @@ impl<'a> Parser<'a> {
                 let hint = ErrorHint {
                     level,
                     message: format!("Common mistake detected: {}", mistake.suggestion()),
-                    span: self.current.span.clone(),
+                    span: self.current.span,
                     suggestion: Some(mistake.suggestion()),
                     help: Some(mistake.message()),
                 };
@@ -452,7 +452,9 @@ impl<'a> Parser<'a> {
         let first_token = self.current.clone();
 
         // Check if this token could start a type expression
-        let result = match &first_token.kind {
+        
+
+        match &first_token.kind {
             // If it's an identifier, we need to check what follows
             // to distinguish types from function calls/expressions
             TokenKind::Identifier { .. } => {
@@ -517,9 +519,7 @@ impl<'a> Parser<'a> {
                 self.previous = saved_previous;
                 false
             }
-        };
-
-        result
+        }
     }
 
     /// Parse array with spread operators: [*a, 1, *b]
@@ -1363,7 +1363,13 @@ impl<'a> Parser<'a> {
                     None
                 };
 
-                params.push(GenericParam::Type { name, bounds, default, type_candidates, is_candidate_mode });
+                params.push(GenericParam::Type {
+                    name,
+                    bounds,
+                    default,
+                    type_candidates,
+                    is_candidate_mode,
+                });
             }
 
             // Check for end of generic parameters or comma before next parameter
@@ -1390,7 +1396,7 @@ impl<'a> Parser<'a> {
                 // The second > belongs to outer context
                 use crate::token::{Span, Token};
 
-                let shift_span = self.current.span.clone();
+                let shift_span = self.current.span;
 
                 // Create first > token (replaces current >>)
                 let first_gt = Token::new(

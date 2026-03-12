@@ -449,7 +449,7 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         if let Some(next_token) = next {
             // Check if next token looks like a type (capitalized identifier)
             if let TokenKind::Identifier { name, .. } = &next_token.kind {
-                if name.chars().next().map_or(false, |c: char| c.is_uppercase()) {
+                if name.chars().next().is_some_and(|c: char| c.is_uppercase()) {
                     return Some(CommonMistake::WrongBrackets);
                 }
             }
@@ -556,7 +556,7 @@ impl ErrorHint {
 
         // Show source line with caret
         if let Some(line) = source.lines().nth(self.span.line - 1) {
-            output.push_str(&format!("   |\n"));
+            output.push_str("   |\n");
             output.push_str(&format!("{:3} | {}\n", self.span.line, line));
             output.push_str(&format!("   | {}^\n", " ".repeat(self.span.column - 1)));
         }

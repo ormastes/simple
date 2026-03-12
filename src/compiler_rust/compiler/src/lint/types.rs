@@ -617,7 +617,8 @@ Warns when an unknown decorator (@name) is used that is not in the known whiteli
 
 Known decorators: @async, @pure, @io, @net, @fs, @unsafe, @verify, @trusted, @ghost,
 @auto_lean, @bounds, @extern, @simd, @inline, @test, @property_test, @snapshot_test,
-@deprecated, @generated_by, @Lib, @inject, @sys_inject
+@deprecated, @generated_by, @Lib, @inject, @sys_inject, @naked, @noreturn, @interrupt,
+@entry, @align, @gpu_intrinsic
 
 === How to suppress ===
 

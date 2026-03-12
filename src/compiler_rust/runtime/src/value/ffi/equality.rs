@@ -256,7 +256,11 @@ pub extern "C" fn rt_native_eq(a: i64, b: i64) -> i64 {
 /// Inequality comparison safe for native codegen values.
 #[no_mangle]
 pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
-    if rt_native_eq(a, b) == 1 { 0 } else { 1 }
+    if rt_native_eq(a, b) == 1 {
+        0
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]

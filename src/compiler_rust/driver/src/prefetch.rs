@@ -133,8 +133,7 @@ fn wait_for_child(pid: libc::pid_t) -> io::Result<()> {
                 if libc::WIFEXITED(status) {
                     return Ok(());
                 } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
+                    return Err(io::Error::other(
                         "prefetch child did not exit normally",
                     ));
                 }

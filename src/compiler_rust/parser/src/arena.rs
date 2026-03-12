@@ -296,7 +296,7 @@ impl Default for AstArena {
 // Thread-local AST arena for use during parsing.
 // Each thread gets its own arena to avoid synchronization overhead.
 thread_local! {
-    static THREAD_ARENA: RefCell<Option<AstArena>> = RefCell::new(None);
+    static THREAD_ARENA: RefCell<Option<AstArena>> = const { RefCell::new(None) };
 }
 
 /// Initialize the thread-local arena.

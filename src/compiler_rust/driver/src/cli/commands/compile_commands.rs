@@ -25,7 +25,8 @@ pub fn handle_compile(args: &[String]) -> i32 {
     let snapshot = args.iter().any(|a| a == "--snapshot");
 
     // Parse backend
-    let backend = args.iter()
+    let backend = args
+        .iter()
         .find(|a| a.starts_with("--backend="))
         .and_then(|a| a.strip_prefix("--backend="))
         .map(|s| s.to_string());

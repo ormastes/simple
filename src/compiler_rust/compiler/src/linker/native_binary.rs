@@ -306,10 +306,7 @@ impl NativeBinaryOptions {
             TargetOS::MacOS => {
                 // On modern macOS, system libraries are TBD stubs inside the SDK.
                 // Detect SDK path via xcrun for reliable library resolution.
-                if let Ok(output) = std::process::Command::new("xcrun")
-                    .args(["--show-sdk-path"])
-                    .output()
-                {
+                if let Ok(output) = std::process::Command::new("xcrun").args(["--show-sdk-path"]).output() {
                     if output.status.success() {
                         let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         let sdk_lib = PathBuf::from(&sdk).join("usr/lib");
@@ -394,8 +391,7 @@ impl NativeBinaryOptions {
     /// On Windows, checks for both `libsimple_runtime.a` (MinGW) and
     /// `simple_runtime.lib` (MSVC) since either toolchain may be in use.
     fn runtime_lib_exists(dir: &Path) -> bool {
-        dir.join("libsimple_runtime.a").exists()
-            || dir.join("simple_runtime.lib").exists()
+        dir.join("libsimple_runtime.a").exists() || dir.join("simple_runtime.lib").exists()
     }
 
     /// Find the Simple runtime library path.
@@ -493,8 +489,7 @@ impl NativeBinaryOptions {
 
     /// Check if a directory contains the Simple compiler library.
     fn compiler_lib_exists(dir: &Path) -> bool {
-        dir.join("libsimple_compiler.a").exists()
-            || dir.join("simple_compiler.lib").exists()
+        dir.join("libsimple_compiler.a").exists() || dir.join("simple_compiler.lib").exists()
     }
 
     /// Find the Simple compiler static library path (libsimple_compiler.a).
@@ -675,10 +670,7 @@ int main(int argc, char** argv) {
             if status.success() {
                 bootstrap_stubs.push(stub_o);
             } else {
-                eprintln!(
-                    "warning: failed to build main shim with {} (status {})",
-                    cc, status
-                );
+                eprintln!("warning: failed to build main shim with {} (status {})", cc, status);
             }
         }
 
@@ -693,7 +685,11 @@ int main(int argc, char** argv) {
             // FreeBSD's strict ld-elf.so.1 resolver). --allow-multiple-definition
             // ensures the runtime library's definitions take precedence.
             let weak_attr = if use_strong { "" } else { "__attribute__((weak)) " };
-            let weak_vis = if use_strong { "" } else { "__attribute__((weak, visibility(\"default\"))) " };
+            let weak_vis = if use_strong {
+                ""
+            } else {
+                "__attribute__((weak, visibility(\"default\"))) "
+            };
             let asm_section = if matches!(self.options.target.os, TargetOS::FreeBSD) {
                 // FreeBSD: strong .globl stubs for dotted symbols
                 format!(
@@ -1030,19 +1026,22 @@ static inline int64_t _rt_now_nanos(void) {{
                         if is_data && valid_ident {
                             code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                         } else if valid_ident {
-                            code.push_str(&format!(
-                                "{1}int64_t {0}(void) {{ return 0; }}\n",
-                                sym, attr
-                            ));
+                            code.push_str(&format!("{1}int64_t {0}(void) {{ return 0; }}\n", sym, attr));
                         } else if matches!(self.options.target.os, TargetOS::FreeBSD) {
                             // FreeBSD: use strong .globl asm stubs for non-identifier symbols
                             let clean = sym.replace('\"', "");
-                            code.push_str(&format!("__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                            code.push_str(&format!(
+                                "__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n",
+                                clean, ret_insn
+                            ));
                         } else if !use_strong {
                             // Weak asm stubs for Linux/macOS (not needed on Windows)
                             let clean = sym.replace('\"', "");
                             #[cfg(target_os = "macos")]
-                            code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                            code.push_str(&format!(
+                                "__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n",
+                                clean, ret_insn
+                            ));
                             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                             code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
                             #[cfg(target_os = "windows")]
@@ -1505,19 +1504,22 @@ static inline int64_t _rt_now_nanos(void) {{
                     if is_data && valid_ident {
                         code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                     } else if valid_ident {
-                        code.push_str(&format!(
-                            "{1}int64_t {0}(void) {{ return 0; }}\n",
-                            sym, attr
-                        ));
+                        code.push_str(&format!("{1}int64_t {0}(void) {{ return 0; }}\n", sym, attr));
                     } else if matches!(self.options.target.os, TargetOS::FreeBSD) {
                         // FreeBSD: use strong .globl asm stubs for non-identifier symbols
                         let clean = sym.replace('\"', "");
-                        code.push_str(&format!("__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                        code.push_str(&format!(
+                            "__asm__(\".globl {0}\\n{0}:\\n  {1}\\n\");\n",
+                            clean, ret_insn
+                        ));
                     } else if !use_strong {
                         // Weak asm stubs for Linux/macOS (not needed on Windows)
                         let clean = sym.replace('\"', "");
                         #[cfg(target_os = "macos")]
-                        code.push_str(&format!("__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n", clean, ret_insn));
+                        code.push_str(&format!(
+                            "__asm__(\".weak_definition _{0}\\n_{0}:\\n  {1}\\n\");\n",
+                            clean, ret_insn
+                        ));
                         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                         code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n", clean, ret_insn));
                         #[cfg(target_os = "windows")]

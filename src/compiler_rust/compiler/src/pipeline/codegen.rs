@@ -110,13 +110,16 @@ fn generate_ptx(module: &mir::MirModule) -> String {
 
     // Check if any function is a kernel
     let has_kernels = module.functions.iter().any(|f| {
-        f.attributes.iter().any(|a| a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel")
+        f.attributes
+            .iter()
+            .any(|a| a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel")
     });
 
     for func in &module.functions {
-        let is_kernel = func.attributes.iter().any(|a| {
-            a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel"
-        });
+        let is_kernel = func
+            .attributes
+            .iter()
+            .any(|a| a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel");
         // Skip host-only functions (non-kernel functions that aren't called from kernels)
         // For now, emit all functions if there are no kernels, or only kernel + device functions
         if has_kernels && !is_kernel && func.name == "main" {
@@ -131,9 +134,10 @@ fn generate_ptx(module: &mir::MirModule) -> String {
 
 /// Emit a single MIR function as PTX.
 fn emit_ptx_function(out: &mut String, func: &MirFunction) {
-    let is_kernel = func.attributes.iter().any(|a| {
-        a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel"
-    });
+    let is_kernel = func
+        .attributes
+        .iter()
+        .any(|a| a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel");
 
     // Function header
     if is_kernel {
@@ -150,16 +154,22 @@ fn emit_ptx_function(out: &mut String, func: &MirFunction) {
     out.push_str(")\n{\n");
 
     // Count total VRegs used to size register declarations
-    let max_vreg = func.blocks.iter()
+    let max_vreg = func
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .filter_map(|inst| match inst {
-            MirInst::ConstInt { dest, .. } | MirInst::ConstFloat { dest, .. }
-            | MirInst::ConstBool { dest, .. } | MirInst::Copy { dest, .. }
-            | MirInst::Cast { dest, .. } | MirInst::LocalAddr { dest, .. }
+            MirInst::ConstInt { dest, .. }
+            | MirInst::ConstFloat { dest, .. }
+            | MirInst::ConstBool { dest, .. }
+            | MirInst::Copy { dest, .. }
+            | MirInst::Cast { dest, .. }
+            | MirInst::LocalAddr { dest, .. }
             | MirInst::ConstString { dest, .. } => Some(dest.0),
             MirInst::BinOp { dest, .. } => Some(dest.0),
-            MirInst::GpuGlobalId { dest, .. } | MirInst::GpuLocalId { dest, .. }
-            | MirInst::GpuGroupId { dest, .. } => Some(dest.0),
+            MirInst::GpuGlobalId { dest, .. } | MirInst::GpuLocalId { dest, .. } | MirInst::GpuGroupId { dest, .. } => {
+                Some(dest.0)
+            }
             MirInst::GpuLoadF64 { dest, .. } | MirInst::GpuLoadI64 { dest, .. } => Some(dest.0),
             MirInst::Load { dest, .. } | MirInst::TupleLit { dest, .. } => Some(dest.0),
             _ => None,
@@ -319,74 +329,108 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
         }
 
         // ---- Copy ----
-        MirInst::Copy { dest, src } => {
-            match reg_info.get_type(src.0) {
-                PtxVRegType::F64 => {
-                    out.push_str(&format!("    mov.f64 %fd{}, %fd{};\n", dest.0, src.0));
-                    reg_info.set_type(dest.0, PtxVRegType::F64);
-                }
-                PtxVRegType::Pred => {
-                    out.push_str(&format!("    mov.pred %p{}, %p{};\n", dest.0, src.0));
-                    reg_info.set_type(dest.0, PtxVRegType::Pred);
-                }
-                PtxVRegType::I64 => {
-                    out.push_str(&format!("    mov.s64 %rd{}, %rd{};\n", dest.0, src.0));
-                }
+        MirInst::Copy { dest, src } => match reg_info.get_type(src.0) {
+            PtxVRegType::F64 => {
+                out.push_str(&format!("    mov.f64 %fd{}, %fd{};\n", dest.0, src.0));
+                reg_info.set_type(dest.0, PtxVRegType::F64);
             }
-        }
+            PtxVRegType::Pred => {
+                out.push_str(&format!("    mov.pred %p{}, %p{};\n", dest.0, src.0));
+                reg_info.set_type(dest.0, PtxVRegType::Pred);
+            }
+            PtxVRegType::I64 => {
+                out.push_str(&format!("    mov.s64 %rd{}, %rd{};\n", dest.0, src.0));
+            }
+        },
 
         // ---- Binary operations ----
         MirInst::BinOp { dest, op, left, right } => {
-            let is_float = reg_info.get_type(left.0) == PtxVRegType::F64
-                || reg_info.get_type(right.0) == PtxVRegType::F64;
+            let is_float =
+                reg_info.get_type(left.0) == PtxVRegType::F64 || reg_info.get_type(right.0) == PtxVRegType::F64;
 
             match op {
                 // Comparison ops: emit setp instruction, result in predicate register
                 BinOp::Lt => {
                     if is_float {
-                        out.push_str(&format!("    setp.lt.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.lt.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.lt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.lt.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::LtEq => {
                     if is_float {
-                        out.push_str(&format!("    setp.le.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.le.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.le.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.le.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::Gt => {
                     if is_float {
-                        out.push_str(&format!("    setp.gt.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.gt.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.gt.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.gt.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::GtEq => {
                     if is_float {
-                        out.push_str(&format!("    setp.ge.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.ge.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.ge.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.ge.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::Eq => {
                     if is_float {
-                        out.push_str(&format!("    setp.eq.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.eq.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.eq.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.eq.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
                 BinOp::NotEq => {
                     if is_float {
-                        out.push_str(&format!("    setp.ne.f64 %p{}, %fd{}, %fd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.ne.f64 %p{}, %fd{}, %fd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     } else {
-                        out.push_str(&format!("    setp.ne.s64 %p{}, %rd{}, %rd{};\n", dest.0, left.0, right.0));
+                        out.push_str(&format!(
+                            "    setp.ne.s64 %p{}, %rd{}, %rd{};\n",
+                            dest.0, left.0, right.0
+                        ));
                     }
                     reg_info.set_type(dest.0, PtxVRegType::Pred);
                 }
@@ -442,19 +486,17 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
         }
 
         // ---- Unary operations ----
-        MirInst::UnaryOp { dest, op, operand } => {
-            match op {
-                UnaryOp::Neg => {
-                    out.push_str(&format!("    neg.s64 %rd{}, %rd{};\n", dest.0, operand.0));
-                }
-                UnaryOp::Not => {
-                    out.push_str(&format!("    not.pred %p{}, %p{};\n", dest.0, operand.0));
-                }
-                other => {
-                    out.push_str(&format!("    // unsupported unary: {:?}\n", other));
-                }
+        MirInst::UnaryOp { dest, op, operand } => match op {
+            UnaryOp::Neg => {
+                out.push_str(&format!("    neg.s64 %rd{}, %rd{};\n", dest.0, operand.0));
             }
-        }
+            UnaryOp::Not => {
+                out.push_str(&format!("    not.pred %p{}, %p{};\n", dest.0, operand.0));
+            }
+            other => {
+                out.push_str(&format!("    // unsupported unary: {:?}\n", other));
+            }
+        },
 
         // ---- Cast ----
         MirInst::Cast { dest, source, .. } => {
@@ -472,7 +514,9 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             if !args.is_empty() {
                 out.push_str(", (");
                 for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { out.push_str(", "); }
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
                     out.push_str(&format!("%rd{}", arg.0));
                 }
                 out.push(')');
@@ -548,7 +592,10 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
             out.push_str(&format!("    cvt.s64.u32 %rd{}, %r{};\n", t_ntid, t_ntid));
             out.push_str(&format!("    mov.u32 %r{}, {};\n", t_ctaid, ctaid));
             out.push_str(&format!("    cvt.s64.u32 %rd{}, %r{};\n", t_ctaid, t_ctaid));
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, %rd{}, %rd{};\n", d, t_ctaid, t_ntid, t_tid));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, %rd{}, %rd{};\n",
+                d, t_ctaid, t_ntid, t_tid
+            ));
         }
         MirInst::GpuLocalId { dest, dim } => {
             let reg = match dim {
@@ -629,23 +676,35 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
         // ---- GPU typed memory access ----
         MirInst::GpuLoadF64 { dest, ptr, index } => {
             let addr_tmp = reg_info.next_temp();
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n",
+                addr_tmp, index.0, ptr.0
+            ));
             out.push_str(&format!("    ld.global.f64 %fd{}, [%rd{}];\n", dest.0, addr_tmp));
             reg_info.set_type(dest.0, PtxVRegType::F64);
         }
         MirInst::GpuStoreF64 { ptr, index, value } => {
             let addr_tmp = reg_info.next_temp();
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n",
+                addr_tmp, index.0, ptr.0
+            ));
             out.push_str(&format!("    st.global.f64 [%rd{}], %fd{};\n", addr_tmp, value.0));
         }
         MirInst::GpuLoadI64 { dest, ptr, index } => {
             let addr_tmp = reg_info.next_temp();
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n",
+                addr_tmp, index.0, ptr.0
+            ));
             out.push_str(&format!("    ld.global.s64 %rd{}, [%rd{}];\n", dest.0, addr_tmp));
         }
         MirInst::GpuStoreI64 { ptr, index, value } => {
             let addr_tmp = reg_info.next_temp();
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", addr_tmp, index.0, ptr.0));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n",
+                addr_tmp, index.0, ptr.0
+            ));
             out.push_str(&format!("    st.global.s64 [%rd{}], %rd{};\n", addr_tmp, value.0));
         }
 
@@ -694,7 +753,10 @@ fn emit_ptx_instruction(out: &mut String, inst: &MirInst, reg_info: &mut PtxRegI
         MirInst::GetElementPtr { dest, base, index } => {
             // Assume 8-byte elements (s64)
             // GEP from a global base produces a global address
-            out.push_str(&format!("    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n", dest.0, index.0, base.0));
+            out.push_str(&format!(
+                "    mad.lo.s64 %rd{}, %rd{}, 8, %rd{};\n",
+                dest.0, index.0, base.0
+            ));
             // Propagate memory space: if base is local, result is local; otherwise global
             // Use usize::MAX as sentinel offset — GEP-derived addresses won't match
             // specific local offsets for type propagation, falling back to s64
@@ -731,7 +793,11 @@ fn emit_ptx_terminator(out: &mut String, term: &Terminator, is_kernel: bool, _bl
         Terminator::Jump(target) => {
             out.push_str(&format!("    bra BB{};\n", target.0));
         }
-        Terminator::Branch { cond, then_block, else_block } => {
+        Terminator::Branch {
+            cond,
+            then_block,
+            else_block,
+        } => {
             out.push_str(&format!("    @%p{} bra BB{};\n", cond.0, then_block.0));
             out.push_str(&format!("    bra BB{};\n", else_block.0));
         }
@@ -850,10 +916,22 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
         let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
         let ptx = generate_ptx(&mir_module);
 
-        assert!(ptx.contains("mov.u32 %r510, %tid.x;"), "expected gpu_thread_id_x alias to lower to %tid.x:\n{ptx}");
-        assert!(ptx.contains("mov.s64 %rd32, 3;"), "expected void gpu_store_f64 to materialize nil:\n{ptx}");
-        assert!(!ptx.contains("%rd28;"), "unexpected undefined-register artifact remains in PTX:\n{ptx}");
-        assert!(!ptx.contains("call.uni (%rd0), gpu_thread_id_x;"), "gpu_thread_id_x should not remain as a call target:\n{ptx}");
+        assert!(
+            ptx.contains("mov.u32 %r510, %tid.x;"),
+            "expected gpu_thread_id_x alias to lower to %tid.x:\n{ptx}"
+        );
+        assert!(
+            ptx.contains("mov.s64 %rd32, 3;"),
+            "expected void gpu_store_f64 to materialize nil:\n{ptx}"
+        );
+        assert!(
+            !ptx.contains("%rd28;"),
+            "unexpected undefined-register artifact remains in PTX:\n{ptx}"
+        );
+        assert!(
+            !ptx.contains("call.uni (%rd0), gpu_thread_id_x;"),
+            "gpu_thread_id_x should not remain as a call target:\n{ptx}"
+        );
     }
 
     #[test]
@@ -867,11 +945,7 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
         }
 
         let source_file = NamedTempFile::new().expect("temp source");
-        std::fs::write(
-            source_file.path(),
-            "@gpu_kernel\nfn noop():\n    pass_dn\n",
-        )
-        .expect("write temp source");
+        std::fs::write(source_file.path(), "@gpu_kernel\nfn noop():\n    pass_dn\n").expect("write temp source");
         let output_file = NamedTempFile::new().expect("temp ptx");
 
         let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
@@ -888,21 +962,15 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
         let module = simple_runtime::cuda_runtime::rt_cuda_module_load_data(ptx_cstr.as_ptr());
         assert!(module > 0, "expected generated PTX module to load, got {module}");
 
-        let launch = simple_runtime::cuda_runtime::rt_cuda_launch_kernel(
-            module,
-            kernel_name.as_ptr(),
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-        );
+        let launch =
+            simple_runtime::cuda_runtime::rt_cuda_launch_kernel(module, kernel_name.as_ptr(), 1, 1, 1, 1, 1, 1, 0);
         assert_eq!(launch, 0, "expected generated noop kernel to launch, got {launch}");
 
         let sync = simple_runtime::cuda_runtime::rt_cuda_sync();
-        assert_eq!(sync, 0, "expected sync after generated noop kernel to succeed, got {sync}");
+        assert_eq!(
+            sync, 0,
+            "expected sync after generated noop kernel to succeed, got {sync}"
+        );
 
         let unload = simple_runtime::cuda_runtime::rt_cuda_module_unload(module);
         assert_eq!(unload, 0, "expected generated PTX module to unload, got {unload}");

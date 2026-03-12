@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::mir::MirModule;
 
-// Re-export SMF types from loader (single source of truth)
-pub use simple_runtime::loader::smf::{
+// Re-export SMF types from common (single source of truth)
+pub use simple_common::smf::{
     RelocationType, SectionType, SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
     SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
@@ -192,13 +192,16 @@ impl SmfWriter {
 
     /// Write SMF file to a writer
     pub fn write<W: Write>(&mut self, writer: &mut W) -> SmfWriteResult<()> {
-        use simple_runtime::loader::smf::{hash_name, Arch, Platform, SmfHeader as LoaderHeader, SmfSection as LoaderSection};
-        use simple_runtime::loader::smf::symbol_flags;
+        use simple_common::smf::{
+            hash_name, symbol_flags, Arch, Platform, SmfHeader as LoaderHeader, SmfRelocation as LoaderRelocation,
+            SmfSection as LoaderSection, SmfSymbol as LoaderSymbol,
+        };
 
         let symbol_names: Vec<String> = self.symbols.iter().map(|symbol| symbol.name.clone()).collect();
         let name_offsets: Vec<u32> = symbol_names.iter().map(|name| self.add_string(name)).collect();
 
-        let mut loader_sections: Vec<LoaderSection> = Vec::with_capacity(self.sections.len() + usize::from(!self.relocations.is_empty()));
+        let mut loader_sections: Vec<LoaderSection> =
+            Vec::with_capacity(self.sections.len() + usize::from(!self.relocations.is_empty()));
         let mut section_payloads: Vec<Vec<u8>> = self.sections.iter().map(|section| section.data.clone()).collect();
 
         for section in &self.sections {
@@ -218,9 +221,9 @@ impl SmfWriter {
         }
 
         if !self.relocations.is_empty() {
-            let mut rela_data = Vec::with_capacity(self.relocations.len() * std::mem::size_of::<simple_runtime::loader::smf::SmfRelocation>());
+            let mut rela_data = Vec::with_capacity(self.relocations.len() * std::mem::size_of::<LoaderRelocation>());
             for reloc in &self.relocations {
-                let loader_reloc = simple_runtime::loader::smf::SmfRelocation {
+                let loader_reloc = LoaderRelocation {
                     offset: reloc.offset,
                     symbol_index: reloc.symbol_index,
                     reloc_type: reloc.reloc_type,
@@ -228,8 +231,8 @@ impl SmfWriter {
                 };
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
-                        &loader_reloc as *const simple_runtime::loader::smf::SmfRelocation as *const u8,
-                        std::mem::size_of::<simple_runtime::loader::smf::SmfRelocation>(),
+                        &loader_reloc as *const LoaderRelocation as *const u8,
+                        std::mem::size_of::<LoaderRelocation>(),
                     )
                 };
                 rela_data.extend_from_slice(bytes);
@@ -263,7 +266,7 @@ impl SmfWriter {
 
         let symbol_table_offset = current_offset;
         let string_table_offset =
-            symbol_table_offset + (self.symbols.len() as u64 * std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>() as u64);
+            symbol_table_offset + (self.symbols.len() as u64 * std::mem::size_of::<LoaderSymbol>() as u64);
 
         let entry_point = self
             .symbols
@@ -308,7 +311,10 @@ impl SmfWriter {
         };
 
         let header_bytes = unsafe {
-            std::slice::from_raw_parts(&header as *const LoaderHeader as *const u8, std::mem::size_of::<LoaderHeader>())
+            std::slice::from_raw_parts(
+                &header as *const LoaderHeader as *const u8,
+                std::mem::size_of::<LoaderHeader>(),
+            )
         };
         writer.write_all(header_bytes)?;
 
@@ -345,7 +351,7 @@ impl SmfWriter {
             if symbol.layout_pinned {
                 flags |= symbol_flags::LAYOUT_PINNED;
             }
-            let loader_symbol = simple_runtime::loader::smf::SmfSymbol {
+            let loader_symbol = LoaderSymbol {
                 name_offset: *name_offset,
                 name_hash: hash_name(&symbol.name),
                 sym_type: symbol.sym_type,
@@ -362,8 +368,8 @@ impl SmfWriter {
             };
             let symbol_bytes = unsafe {
                 std::slice::from_raw_parts(
-                    &loader_symbol as *const simple_runtime::loader::smf::SmfSymbol as *const u8,
-                    std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>(),
+                    &loader_symbol as *const LoaderSymbol as *const u8,
+                    std::mem::size_of::<LoaderSymbol>(),
                 )
             };
             writer.write_all(symbol_bytes)?;
@@ -373,7 +379,7 @@ impl SmfWriter {
         debug_assert_eq!(
             string_table_offset + self.string_table.len() as u64,
             symbol_table_offset
-                + (self.symbols.len() as u64 * std::mem::size_of::<simple_runtime::loader::smf::SmfSymbol>() as u64)
+                + (self.symbols.len() as u64 * std::mem::size_of::<LoaderSymbol>() as u64)
                 + self.string_table.len() as u64
         );
         Ok(())

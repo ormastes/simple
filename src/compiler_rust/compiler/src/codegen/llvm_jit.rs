@@ -72,7 +72,8 @@ impl LlvmJitCompiler {
         compile_functions_into_module(&backend, &mir.functions)?;
 
         // Take the module from the backend to create the JIT execution engine
-        let module = backend.take_module()
+        let module = backend
+            .take_module()
             .ok_or_else(|| "LLVM JIT: failed to take module from backend".to_string())?;
 
         // Create JIT execution engine from the compiled module
@@ -136,10 +137,7 @@ impl LlvmJitCompiler {
 ///
 /// This is a simplified compilation path. For full feature support,
 /// functions are compiled through the LlvmBackend's emitter pipeline.
-fn compile_functions_into_module(
-    backend: &LlvmBackend,
-    functions: &[MirFunction],
-) -> Result<(), String> {
+fn compile_functions_into_module(backend: &LlvmBackend, functions: &[MirFunction]) -> Result<(), String> {
     for func in functions {
         if !func.blocks.is_empty() {
             backend

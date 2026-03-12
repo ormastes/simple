@@ -260,8 +260,8 @@ pub fn rt_alloc(args: &[Value]) -> Result<Value, CompileError> {
     if size == 0 {
         return Ok(Value::Int(0));
     }
-    let layout = std::alloc::Layout::from_size_align(size, 8)
-        .map_err(|_| CompileError::runtime("rt_alloc: invalid size"))?;
+    let layout =
+        std::alloc::Layout::from_size_align(size, 8).map_err(|_| CompileError::runtime("rt_alloc: invalid size"))?;
     unsafe {
         let ptr = std::alloc::alloc_zeroed(layout);
         if ptr.is_null() {
@@ -293,7 +293,9 @@ pub fn rt_free(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_ptr_write_i64(addr: i64, offset: i64, value: i64)`
 pub fn rt_ptr_write_i64(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Err(CompileError::runtime("rt_ptr_write_i64 requires 3 arguments (addr, offset, value)"));
+        return Err(CompileError::runtime(
+            "rt_ptr_write_i64 requires 3 arguments (addr, offset, value)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     let offset = args[1].as_int()?;
@@ -310,7 +312,9 @@ pub fn rt_ptr_write_i64(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_ptr_read_i64(addr: i64, offset: i64) -> i64`
 pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::runtime("rt_ptr_read_i64 requires 2 arguments (addr, offset)"));
+        return Err(CompileError::runtime(
+            "rt_ptr_read_i64 requires 2 arguments (addr, offset)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     let offset = args[1].as_int()?;
@@ -325,7 +329,9 @@ pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_ptr_read_i32(addr: i64, offset: i64) -> i32`
 pub fn rt_ptr_read_i32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::runtime("rt_ptr_read_i32 requires 2 arguments (addr, offset)"));
+        return Err(CompileError::runtime(
+            "rt_ptr_read_i32 requires 2 arguments (addr, offset)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     let offset = args[1].as_int()?;
@@ -340,7 +346,9 @@ pub fn rt_ptr_read_i32(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_ptr_write_i32(addr: i64, offset: i64, value: i64)`
 pub fn rt_ptr_write_i32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Err(CompileError::runtime("rt_ptr_write_i32 requires 3 arguments (addr, offset, value)"));
+        return Err(CompileError::runtime(
+            "rt_ptr_write_i32 requires 3 arguments (addr, offset, value)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     let offset = args[1].as_int()?;
@@ -357,7 +365,9 @@ pub fn rt_ptr_write_i32(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_ptr_write_u8(addr: i64, offset: i64, value: i64)`
 pub fn rt_ptr_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Err(CompileError::runtime("rt_ptr_write_u8 requires 3 arguments (addr, offset, value)"));
+        return Err(CompileError::runtime(
+            "rt_ptr_write_u8 requires 3 arguments (addr, offset, value)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     let offset = args[1].as_int()?;

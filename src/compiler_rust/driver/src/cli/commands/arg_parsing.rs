@@ -32,7 +32,7 @@ impl FixFlags {
         let mut flags = Self::default();
         let mut iter = args.iter().peekable();
 
-        while let Some(arg) = iter.next() {
+        for arg in iter {
             match arg.as_str() {
                 "--fix" => flags.fix = true,
                 "--fix-all" => flags.fix_all = true,

@@ -153,7 +153,7 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
         if let Ok(entries) = fs::read_dir(&location) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "tmp") {
+                if path.extension().is_some_and(|ext| ext == "tmp") {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -166,7 +166,7 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
             .filter(|e| e.file_type().is_file())
             .for_each(|entry| {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "tmp") {
+                if path.extension().is_some_and(|ext| ext == "tmp") {
                     let _ = fs::remove_file(path);
                 }
             });

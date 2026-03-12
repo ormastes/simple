@@ -39,8 +39,14 @@ impl LlvmBackend {
         // Debug: dump MIR for specific functions when SIMPLE_DUMP_IR env var is set
         if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
             eprintln!("=== MIR for {} ===", func.name);
-            eprintln!("  params: {:?}", func.params.iter().map(|p| (&p.name, &p.ty)).collect::<Vec<_>>());
-            eprintln!("  locals: {:?}", func.locals.iter().map(|l| (&l.name, &l.ty)).collect::<Vec<_>>());
+            eprintln!(
+                "  params: {:?}",
+                func.params.iter().map(|p| (&p.name, &p.ty)).collect::<Vec<_>>()
+            );
+            eprintln!(
+                "  locals: {:?}",
+                func.locals.iter().map(|l| (&l.name, &l.ty)).collect::<Vec<_>>()
+            );
             for block in &func.blocks {
                 eprintln!("  block {}:", block.id.0);
                 for inst in &block.instructions {
@@ -62,7 +68,9 @@ impl LlvmBackend {
             .ok_or_else(crate::error::factory::llvm_builder_not_created)?;
 
         // Resolve through import_map/use_map to get the mangled name
-        let resolved_name = self.use_map.get(&func.name)
+        let resolved_name = self
+            .use_map
+            .get(&func.name)
             .or_else(|| self.import_map.get(&func.name))
             .map(|s| s.as_str())
             .unwrap_or(&func.name);
@@ -110,8 +118,12 @@ impl LlvmBackend {
                 }
             }
             match &block.terminator {
-                crate::mir::Terminator::Return(Some(v)) => { all_vregs.insert(*v); }
-                crate::mir::Terminator::Branch { cond, .. } => { all_vregs.insert(*cond); }
+                crate::mir::Terminator::Return(Some(v)) => {
+                    all_vregs.insert(*v);
+                }
+                crate::mir::Terminator::Branch { cond, .. } => {
+                    all_vregs.insert(*cond);
+                }
                 _ => {}
             }
         }
@@ -208,10 +220,14 @@ impl LlvmBackend {
                 }
                 match &block.terminator {
                     crate::mir::Terminator::Return(Some(v)) => {
-                        if !block_defs.contains(v) { live_in.insert(*v); }
+                        if !block_defs.contains(v) {
+                            live_in.insert(*v);
+                        }
                     }
                     crate::mir::Terminator::Branch { cond, .. } => {
-                        if !block_defs.contains(cond) { live_in.insert(*cond); }
+                        if !block_defs.contains(cond) {
+                            live_in.insert(*cond);
+                        }
                     }
                     _ => {}
                 }
@@ -246,21 +262,20 @@ impl LlvmBackend {
                                 if iv.get_type().get_bit_width() == 64 {
                                     val
                                 } else {
-                                    builder.build_int_z_extend(iv, i64_type, "vext")
+                                    builder
+                                        .build_int_z_extend(iv, i64_type, "vext")
                                         .map(|v| v.into())
                                         .unwrap_or(val)
                                 }
                             }
-                            inkwell::values::BasicValueEnum::PointerValue(pv) => {
-                                builder.build_ptr_to_int(pv, i64_type, "vp2i")
-                                    .map(|v| v.into())
-                                    .unwrap_or(val)
-                            }
-                            inkwell::values::BasicValueEnum::FloatValue(fv) => {
-                                builder.build_float_to_signed_int(fv, i64_type, "vf2i")
-                                    .map(|v| v.into())
-                                    .unwrap_or(val)
-                            }
+                            inkwell::values::BasicValueEnum::PointerValue(pv) => builder
+                                .build_ptr_to_int(pv, i64_type, "vp2i")
+                                .map(|v| v.into())
+                                .unwrap_or(val),
+                            inkwell::values::BasicValueEnum::FloatValue(fv) => builder
+                                .build_float_to_signed_int(fv, i64_type, "vf2i")
+                                .map(|v| v.into())
+                                .unwrap_or(val),
                             _ => val,
                         };
                         let _ = builder.build_store(alloca, i64_val);
@@ -274,7 +289,10 @@ impl LlvmBackend {
 
         // Debug: dump LLVM IR to file for specific functions
         if std::env::var("SIMPLE_DUMP_IR").is_ok() && func.name.contains("native_build") {
-            let ir_path = format!("/tmp/llvm_ir_{}.ll", func.name.replace(|c: char| !c.is_alphanumeric(), "_"));
+            let ir_path = format!(
+                "/tmp/llvm_ir_{}.ll",
+                func.name.replace(|c: char| !c.is_alphanumeric(), "_")
+            );
             if let Err(e) = module.print_to_file(&ir_path) {
                 eprintln!("Warning: could not dump LLVM IR to {}: {}", ir_path, e);
             } else {
@@ -537,14 +555,11 @@ impl LlvmBackend {
             }
 
             // GPU memory load/store (not used in LLVM AOT path — stub)
-            MirInst::GpuLoadF64 { dest, .. }
-            | MirInst::GpuLoadI64 { dest, .. } => {
+            MirInst::GpuLoadF64 { dest, .. } | MirInst::GpuLoadI64 { dest, .. } => {
                 let default_val = self.context.i64_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
-            MirInst::GpuStoreF64 { .. }
-            | MirInst::GpuStoreI64 { .. } => {
-            }
+            MirInst::GpuStoreF64 { .. } | MirInst::GpuStoreI64 { .. } => {}
 
             // =====================================================================
             // Unsupported instruction categories
@@ -580,10 +595,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
             // SIMD store instructions (no dest vreg)
-            MirInst::VecStore { .. }
-            | MirInst::VecScatter { .. }
-            | MirInst::VecMaskedStore { .. } => {
-            }
+            MirInst::VecStore { .. } | MirInst::VecScatter { .. } | MirInst::VecMaskedStore { .. } => {}
 
             // Pointer instructions (not yet implemented — insert default dest values)
             MirInst::PointerNew { dest, .. }
@@ -609,29 +621,44 @@ impl LlvmBackend {
                     crate::mir::MirPattern::Literal(lit) => match lit {
                         crate::mir::MirLiteral::Int(n) => {
                             let lit_val = i64_type.const_int(*n as u64, false);
-                            let cmp = builder.build_int_compare(
-                                inkwell::IntPredicate::EQ, subject_val.into_int_value(),
-                                lit_val, "pat_int_eq"
-                            ).map_err(|e| format!("pattern icmp: {e}"))?;
-                            builder.build_int_z_extend(cmp, i64_type, "pat_ext")
+                            let cmp = builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    subject_val.into_int_value(),
+                                    lit_val,
+                                    "pat_int_eq",
+                                )
+                                .map_err(|e| format!("pattern icmp: {e}"))?;
+                            builder
+                                .build_int_z_extend(cmp, i64_type, "pat_ext")
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                         crate::mir::MirLiteral::Bool(b) => {
                             let lit_val = i64_type.const_int(if *b { 1 } else { 0 }, false);
-                            let cmp = builder.build_int_compare(
-                                inkwell::IntPredicate::EQ, subject_val.into_int_value(),
-                                lit_val, "pat_bool_eq"
-                            ).map_err(|e| format!("pattern icmp: {e}"))?;
-                            builder.build_int_z_extend(cmp, i64_type, "pat_ext")
+                            let cmp = builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    subject_val.into_int_value(),
+                                    lit_val,
+                                    "pat_bool_eq",
+                                )
+                                .map_err(|e| format!("pattern icmp: {e}"))?;
+                            builder
+                                .build_int_z_extend(cmp, i64_type, "pat_ext")
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                         crate::mir::MirLiteral::Nil => {
                             let nil_val = i64_type.const_int(3, false); // TAG_SPECIAL | NIL
-                            let cmp = builder.build_int_compare(
-                                inkwell::IntPredicate::EQ, subject_val.into_int_value(),
-                                nil_val, "pat_nil_eq"
-                            ).map_err(|e| format!("pattern icmp: {e}"))?;
-                            builder.build_int_z_extend(cmp, i64_type, "pat_ext")
+                            let cmp = builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    subject_val.into_int_value(),
+                                    nil_val,
+                                    "pat_nil_eq",
+                                )
+                                .map_err(|e| format!("pattern icmp: {e}"))?;
+                            builder
+                                .build_int_z_extend(cmp, i64_type, "pat_ext")
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                         crate::mir::MirLiteral::String(s) => {
@@ -641,12 +668,15 @@ impl LlvmBackend {
                             let global = module.add_global(global_val.get_type(), None, "pat_str_const");
                             global.set_initializer(&global_val);
                             global.set_constant(true);
-                            let str_ptr = builder.build_pointer_cast(
-                                global.as_pointer_value(),
-                                self.context.ptr_type(inkwell::AddressSpace::default()),
-                                "str_ptr"
-                            ).map_err(|e| format!("pattern str ptr: {e}"))?;
-                            let str_ptr_int = builder.build_ptr_to_int(str_ptr, i64_type, "str_ptr_int")
+                            let str_ptr = builder
+                                .build_pointer_cast(
+                                    global.as_pointer_value(),
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    "str_ptr",
+                                )
+                                .map_err(|e| format!("pattern str ptr: {e}"))?;
+                            let str_ptr_int = builder
+                                .build_ptr_to_int(str_ptr, i64_type, "str_ptr_int")
                                 .map_err(|e| format!("pattern ptrtoint: {e}"))?;
                             let str_len = i64_type.const_int(bytes.len() as u64, false);
                             // rt_string_new(ptr, len) -> RuntimeValue
@@ -654,29 +684,38 @@ impl LlvmBackend {
                                 let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                                 module.add_function("rt_string_new", fn_type, None)
                             });
-                            let lit_str = builder.build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
+                            let lit_str = builder
+                                .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| format!("pattern string_new: {e}"))?
-                                .try_as_basic_value().left()
+                                .try_as_basic_value()
+                                .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             // rt_string_eq(a, b) -> i64
                             let rt_string_eq = module.get_function("rt_string_eq").unwrap_or_else(|| {
                                 let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                                 module.add_function("rt_string_eq", fn_type, None)
                             });
-                            builder.build_call(rt_string_eq, &[subject_val.into(), lit_str.into()], "pat_str_eq")
+                            builder
+                                .build_call(rt_string_eq, &[subject_val.into(), lit_str.into()], "pat_str_eq")
                                 .map_err(|e| format!("pattern string_eq: {e}"))?
-                                .try_as_basic_value().left()
+                                .try_as_basic_value()
+                                .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                                 .into_int_value()
                         }
                         crate::mir::MirLiteral::Float(f) => {
                             let lit_bits = f.to_bits() as u64;
                             let lit_val = i64_type.const_int(lit_bits, false);
-                            let cmp = builder.build_int_compare(
-                                inkwell::IntPredicate::EQ, subject_val.into_int_value(),
-                                lit_val, "pat_float_eq"
-                            ).map_err(|e| format!("pattern icmp: {e}"))?;
-                            builder.build_int_z_extend(cmp, i64_type, "pat_ext")
+                            let cmp = builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    subject_val.into_int_value(),
+                                    lit_val,
+                                    "pat_float_eq",
+                                )
+                                .map_err(|e| format!("pattern icmp: {e}"))?;
+                            builder
+                                .build_int_z_extend(cmp, i64_type, "pat_ext")
                                 .map_err(|e| format!("pattern zext: {e}"))?
                         }
                     },
@@ -686,9 +725,11 @@ impl LlvmBackend {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_enum_discriminant", fn_type, None)
                         });
-                        let disc = builder.build_call(rt_enum_disc, &[subject_val.into()], "disc")
+                        let disc = builder
+                            .build_call(rt_enum_disc, &[subject_val.into()], "disc")
                             .map_err(|e| format!("pattern disc: {e}"))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value()
+                            .left()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
                         let expected = {
@@ -699,10 +740,11 @@ impl LlvmBackend {
                             (hasher.finish() & 0xFFFFFFFF) as u64
                         };
                         let expected_val = i64_type.const_int(expected, false);
-                        let cmp = builder.build_int_compare(
-                            inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq"
-                        ).map_err(|e| format!("pattern var icmp: {e}"))?;
-                        builder.build_int_z_extend(cmp, i64_type, "pat_ext")
+                        let cmp = builder
+                            .build_int_compare(inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq")
+                            .map_err(|e| format!("pattern var icmp: {e}"))?;
+                        builder
+                            .build_int_z_extend(cmp, i64_type, "pat_ext")
                             .map_err(|e| format!("pattern zext: {e}"))?
                     }
                     _ => {
@@ -728,9 +770,11 @@ impl LlvmBackend {
                                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                                     module.add_function("rt_enum_payload", fn_type, None)
                                 });
-                                current = builder.build_call(rt_enum_payload, &[current.into()], "payload")
+                                current = builder
+                                    .build_call(rt_enum_payload, &[current.into()], "payload")
                                     .map_err(|e| format!("pattern bind payload: {e}"))?
-                                    .try_as_basic_value().left()
+                                    .try_as_basic_value()
+                                    .left()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::TupleIndex(idx) => {
@@ -739,9 +783,11 @@ impl LlvmBackend {
                                     module.add_function("rt_tuple_get", fn_type, None)
                                 });
                                 let idx_val = i64_type.const_int(*idx as u64, false);
-                                current = builder.build_call(rt_tuple_get, &[current.into(), idx_val.into()], "tuple_el")
+                                current = builder
+                                    .build_call(rt_tuple_get, &[current.into(), idx_val.into()], "tuple_el")
                                     .map_err(|e| format!("pattern bind tuple: {e}"))?
-                                    .try_as_basic_value().left()
+                                    .try_as_basic_value()
+                                    .left()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::FieldName(_) => {
@@ -758,29 +804,37 @@ impl LlvmBackend {
             // Enum instructions
             MirInst::EnumDiscriminant { dest, value } => {
                 let i64_t = self.context.i64_type();
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 let rt_fn = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i64_t.into()], false);
                     module.add_function("rt_enum_discriminant", fn_type, None)
                 });
-                let result = builder.build_call(rt_fn, &[val.into()], "disc")
+                let result = builder
+                    .build_call(rt_fn, &[val.into()], "disc")
                     .map_err(|e| CompileError::Semantic(format!("enum disc call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
             MirInst::EnumPayload { dest, value } => {
                 let i64_t = self.context.i64_type();
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i64_t.into()], false);
                     module.add_function("rt_enum_payload", fn_type, None)
                 });
-                let result = builder.build_call(rt_fn, &[val.into()], "payload")
+                let result = builder
+                    .build_call(rt_fn, &[val.into()], "payload")
                     .map_err(|e| CompileError::Semantic(format!("enum payload call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -803,13 +857,24 @@ impl LlvmBackend {
                 let disc_val = i32_t.const_int(disc as u64, false);
                 // NIL = 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
                 let nil_val = i64_t.const_int(3, false);
-                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), nil_val.into()], "enum_unit")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[enum_id_val.into(), disc_val.into(), nil_val.into()],
+                        "enum_unit",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("enum unit call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
-            MirInst::EnumWith { dest, variant_name, payload, .. } => {
+            MirInst::EnumWith {
+                dest,
+                variant_name,
+                payload,
+                ..
+            } => {
                 let i64_t = self.context.i64_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
@@ -825,44 +890,64 @@ impl LlvmBackend {
                 });
                 let enum_id_val = i32_t.const_int(0, false);
                 let disc_val = i32_t.const_int(disc as u64, false);
-                let payload_val = vreg_map.get(payload).copied()
+                let payload_val = vreg_map
+                    .get(payload)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(3, false).into());
-                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), payload_val.into()], "enum_with")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[enum_id_val.into(), disc_val.into(), payload_val.into()],
+                        "enum_with",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("enum with call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
             // Union instructions — use same enum runtime functions
             MirInst::UnionDiscriminant { dest, value } => {
                 let i64_t = self.context.i64_type();
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 let rt_fn = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i64_t.into()], false);
                     module.add_function("rt_enum_discriminant", fn_type, None)
                 });
-                let result = builder.build_call(rt_fn, &[val.into()], "union_disc")
+                let result = builder
+                    .build_call(rt_fn, &[val.into()], "union_disc")
                     .map_err(|e| CompileError::Semantic(format!("union disc call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
             MirInst::UnionPayload { dest, value, .. } => {
                 let i64_t = self.context.i64_type();
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i64_t.into()], false);
                     module.add_function("rt_enum_payload", fn_type, None)
                 });
-                let result = builder.build_call(rt_fn, &[val.into()], "union_payload")
+                let result = builder
+                    .build_call(rt_fn, &[val.into()], "union_payload")
                     .map_err(|e| CompileError::Semantic(format!("union payload call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
-            MirInst::UnionWrap { dest, value, type_index } => {
+            MirInst::UnionWrap {
+                dest,
+                value,
+                type_index,
+            } => {
                 let i64_t = self.context.i64_type();
                 let i32_t = self.context.i32_type();
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
@@ -871,11 +956,15 @@ impl LlvmBackend {
                 });
                 let enum_id_val = i32_t.const_int(*type_index as u64, false);
                 let disc_val = i32_t.const_int(0, false);
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(3, false).into());
-                let result = builder.build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), val.into()], "union_wrap")
+                let result = builder
+                    .build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), val.into()], "union_wrap")
                     .map_err(|e| CompileError::Semantic(format!("union wrap call: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -892,10 +981,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
             // Async instructions without dest vreg
-            MirInst::ActorSend { .. }
-            | MirInst::ActorReply { .. }
-            | MirInst::Yield { .. } => {
-            }
+            MirInst::ActorSend { .. } | MirInst::ActorReply { .. } | MirInst::Yield { .. } => {}
 
             // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
@@ -913,9 +999,19 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
-                let result = builder.build_call(rt_fn, &[i32_t.const_int(1, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "opt_some")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[
+                            i32_t.const_int(1, false).into(),
+                            i32_t.const_int(disc as u64, false).into(),
+                            val.into(),
+                        ],
+                        "opt_some",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("option some: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -934,9 +1030,19 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let nil_val = i64_t.const_int(3, false); // NIL = 3
-                let result = builder.build_call(rt_fn, &[i32_t.const_int(1, false).into(), i32_t.const_int(disc as u64, false).into(), nil_val.into()], "opt_none")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[
+                            i32_t.const_int(1, false).into(),
+                            i32_t.const_int(disc as u64, false).into(),
+                            nil_val.into(),
+                        ],
+                        "opt_none",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("option none: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -955,9 +1061,19 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
-                let result = builder.build_call(rt_fn, &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "res_ok")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[
+                            i32_t.const_int(0, false).into(),
+                            i32_t.const_int(disc as u64, false).into(),
+                            val.into(),
+                        ],
+                        "res_ok",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("result ok: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -976,31 +1092,49 @@ impl LlvmBackend {
                     module.add_function("rt_enum_new", fn_type, None)
                 });
                 let val = self.get_vreg(value, vreg_map)?;
-                let result = builder.build_call(rt_fn, &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()], "res_err")
+                let result = builder
+                    .build_call(
+                        rt_fn,
+                        &[
+                            i32_t.const_int(0, false).into(),
+                            i32_t.const_int(disc as u64, false).into(),
+                            val.into(),
+                        ],
+                        "res_err",
+                    )
                     .map_err(|e| CompileError::Semantic(format!("result err: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
-            MirInst::TryUnwrap { dest, value, error_block: _, error_dest: _ } => {
+            MirInst::TryUnwrap {
+                dest,
+                value,
+                error_block: _,
+                error_dest: _,
+            } => {
                 let i64_t = self.context.i64_type();
                 // Extract payload from Result/Option enum
-                let val = vreg_map.get(value).copied()
+                let val = vreg_map
+                    .get(value)
+                    .copied()
                     .unwrap_or_else(|| i64_t.const_int(3, false).into());
                 let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i64_t.into()], false);
                     module.add_function("rt_enum_payload", fn_type, None)
                 });
-                let result = builder.build_call(rt_fn, &[val.into()], "try_unwrap")
+                let result = builder
+                    .build_call(rt_fn, &[val.into()], "try_unwrap")
                     .map_err(|e| CompileError::Semantic(format!("try unwrap: {e}")))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
 
             // Contract instructions (not yet implemented)
-            MirInst::ContractCheck { .. } => {
-            }
+            MirInst::ContractCheck { .. } => {}
             MirInst::ContractOldCapture { dest, .. } => {
                 let default_val = self.context.i64_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
@@ -1012,31 +1146,26 @@ impl LlvmBackend {
             }
 
             // Unit type instructions (not yet implemented)
-            MirInst::UnitBoundCheck { .. } => {
-            }
-            MirInst::UnitWiden { dest, .. }
-            | MirInst::UnitNarrow { dest, .. }
-            | MirInst::UnitSaturate { dest, .. } => {
+            MirInst::UnitBoundCheck { .. } => {}
+            MirInst::UnitWiden { dest, .. } | MirInst::UnitNarrow { dest, .. } | MirInst::UnitSaturate { dest, .. } => {
                 let default_val = self.context.i64_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
 
             // Parallel iterator instructions (not yet implemented)
-            MirInst::ParMap { dest, .. }
-            | MirInst::ParReduce { dest, .. }
-            | MirInst::ParFilter { dest, .. } => {
+            MirInst::ParMap { dest, .. } | MirInst::ParReduce { dest, .. } | MirInst::ParFilter { dest, .. } => {
                 let default_val = self.context.i64_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
-            MirInst::ParForEach { .. } => {
-            }
+            MirInst::ParForEach { .. } => {}
 
             // Boxing instructions — tag/untag values per RuntimeValue encoding
             // TAG_INT = 0b000, from_int(i) = i << 3, as_int() = val >> 3
             MirInst::BoxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;
                 let i64_type = self.context.i64_type();
-                let int_val = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
+                let int_val = self
+                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
                 let shifted = builder
                     .build_left_shift(int_val, i64_type.const_int(3, false), "box_int")
@@ -1046,7 +1175,8 @@ impl LlvmBackend {
             MirInst::UnboxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;
                 let i64_type = self.context.i64_type();
-                let int_val = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
+                let int_val = self
+                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
                 let shifted = builder
                     .build_right_shift(int_val, i64_type.const_int(3, false), true, "unbox_int")
@@ -1061,18 +1191,22 @@ impl LlvmBackend {
                 let tag_float = i64_type.const_int(2, false);
                 // Convert float to bits (i64)
                 let bits = if val.is_float_value() {
-                    builder.build_bit_cast(val.into_float_value(), i64_type, "f2i")
+                    builder
+                        .build_bit_cast(val.into_float_value(), i64_type, "f2i")
                         .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
                         .into_int_value()
                 } else {
                     self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
                         .into_int_value()
                 };
-                let shifted = builder.build_right_shift(bits, three, false, "ushr")
+                let shifted = builder
+                    .build_right_shift(bits, three, false, "ushr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-                let payload = builder.build_left_shift(shifted, three, "shl")
+                let payload = builder
+                    .build_left_shift(shifted, three, "shl")
                     .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-                let boxed = builder.build_or(payload, tag_float, "box_float")
+                let boxed = builder
+                    .build_or(payload, tag_float, "box_float")
                     .map_err(|e| crate::error::factory::llvm_build_failed("or", &e))?;
                 vreg_map.insert(*dest, boxed.into());
             }
@@ -1082,13 +1216,17 @@ impl LlvmBackend {
                 let i64_type = self.context.i64_type();
                 let f64_type = self.context.f64_type();
                 let three = i64_type.const_int(3, false);
-                let int_val = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
+                let int_val = self
+                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
-                let shifted = builder.build_right_shift(int_val, three, false, "ushr")
+                let shifted = builder
+                    .build_right_shift(int_val, three, false, "ushr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-                let bits = builder.build_left_shift(shifted, three, "shl")
+                let bits = builder
+                    .build_left_shift(shifted, three, "shl")
                     .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-                let unboxed = builder.build_bit_cast(bits, f64_type, "i2f")
+                let unboxed = builder
+                    .build_bit_cast(bits, f64_type, "i2f")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?;
                 vreg_map.insert(*dest, unboxed.into());
             }
@@ -1120,13 +1258,17 @@ impl LlvmBackend {
                 let empty_call = builder
                     .build_call(string_new, &[zero.into(), zero.into()], "empty_str")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
-                let mut result = empty_call.try_as_basic_value().left()
+                let mut result = empty_call
+                    .try_as_basic_value()
+                    .left()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 for part in parts {
                     let part_str = match part {
                         FStringPart::Literal(s) => {
-                            if s.is_empty() { continue; }
+                            if s.is_empty() {
+                                continue;
+                            }
                             let str_val = self.context.const_string(s.as_bytes(), false);
                             let global = module.add_global(str_val.get_type(), None, "fstr");
                             global.set_initializer(&str_val);
@@ -1141,7 +1283,8 @@ impl LlvmBackend {
                             let call = builder
                                 .build_call(string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
-                            call.try_as_basic_value().left()
+                            call.try_as_basic_value()
+                                .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                         FStringPart::Expr(vreg) => {
@@ -1150,7 +1293,8 @@ impl LlvmBackend {
                             let call = builder
                                 .build_call(value_to_string, &[coerced.into()], "expr_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_to_string", &e))?;
-                            call.try_as_basic_value().left()
+                            call.try_as_basic_value()
+                                .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                     };
@@ -1158,7 +1302,9 @@ impl LlvmBackend {
                     let concat_call = builder
                         .build_call(string_concat, &[result.into(), part_str.into()], "concat")
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_concat", &e))?;
-                    result = concat_call.try_as_basic_value().left()
+                    result = concat_call
+                        .try_as_basic_value()
+                        .left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                 }
 
@@ -1166,7 +1312,9 @@ impl LlvmBackend {
             }
 
             // MethodCallVirtual — vtable-based dispatch; in tagged-value ABI just call receiver as function pointer
-            MirInst::MethodCallVirtual { dest, receiver, args, .. } => {
+            MirInst::MethodCallVirtual {
+                dest, receiver, args, ..
+            } => {
                 let i64_type = self.context.i64_type();
                 let mut all_args = vec![*receiver];
                 all_args.extend_from_slice(args);
@@ -1182,7 +1330,12 @@ impl LlvmBackend {
                 }
             }
             // Method call instructions — compiled as regular function calls
-            MirInst::MethodCallStatic { dest, receiver, func_name, args } => {
+            MirInst::MethodCallStatic {
+                dest,
+                receiver,
+                func_name,
+                args,
+            } => {
                 let i64_type = self.context.i64_type();
 
                 // Extract plain method name from qualified name (e.g., "text.len" -> "len")
@@ -1195,28 +1348,35 @@ impl LlvmBackend {
                     let start_val = self.get_vreg(&args[0], vreg_map)?;
                     let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
                     let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    let len_func = module.get_function("rt_len").unwrap_or_else(|| {
-                        module.add_function("rt_len", len_fn_type, None)
-                    });
+                    let len_func = module
+                        .get_function("rt_len")
+                        .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
                     let len_call = builder
                         .build_call(len_func, &[recv_casted.into()], "text_len")
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-                    let end_val = len_call.try_as_basic_value().left()
+                    let end_val = len_call
+                        .try_as_basic_value()
+                        .left()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                     let step_val = i64_type.const_int(1, false);
                     // rt_slice(collection, start, end, step) takes 4 args
-                    let slice_fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()], false);
-                    let slice_func = module.get_function("rt_slice").unwrap_or_else(|| {
-                        module.add_function("rt_slice", slice_fn_type, None)
-                    });
+                    let slice_fn_type = i64_type.fn_type(
+                        &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                        false,
+                    );
+                    let slice_func = module
+                        .get_function("rt_slice")
+                        .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
                     let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
                     let declared_params = slice_func.get_type().get_param_types().len();
                     let slice_call = if declared_params != 4 {
                         let fn_ptr = slice_func.as_global_value().as_pointer_value();
-                        builder.build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
+                        builder
+                            .build_indirect_call(slice_fn_type, fn_ptr, slice_args, "substr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
                     } else {
-                        builder.build_call(slice_func, slice_args, "substr")
+                        builder
+                            .build_call(slice_func, slice_args, "substr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
                     };
                     if let Some(d) = dest {
@@ -1288,16 +1448,18 @@ impl LlvmBackend {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args_vregs.iter().map(|_| i64_type.into()).collect();
                     let fn_type = i64_type.fn_type(&param_types, false);
-                    let rt_func = module.get_function(rt_name).unwrap_or_else(|| {
-                        module.add_function(rt_name, fn_type, None)
-                    });
+                    let rt_func = module
+                        .get_function(rt_name)
+                        .unwrap_or_else(|| module.add_function(rt_name, fn_type, None));
                     let declared_params = rt_func.get_type().get_param_types().len();
                     let call_site = if declared_params != all_args_vregs.len() {
                         let fn_ptr = rt_func.as_global_value().as_pointer_value();
-                        builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "rtcall")
+                        builder
+                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "rtcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt method call", &e))?
                     } else {
-                        builder.build_call(rt_func, &arg_vals, "rtcall")
+                        builder
+                            .build_call(rt_func, &arg_vals, "rtcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt method call", &e))?
                     };
                     // For in-place mutating methods, return receiver
@@ -1316,10 +1478,13 @@ impl LlvmBackend {
                     // Fall back: resolve via import_map/use_map, then exact name, then suffix match
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
-                    let resolved = self.use_map.get(func_name)
+                    let resolved = self
+                        .use_map
+                        .get(func_name)
                         .or_else(|| self.import_map.get(func_name))
                         .map(|s| s.as_str());
-                    let called_func = resolved.and_then(|n| module.get_function(n))
+                    let called_func = resolved
+                        .and_then(|n| module.get_function(n))
                         .or_else(|| module.get_function(func_name))
                         .or_else(|| {
                             let suffix = format!(".{}", func_name);
@@ -1328,7 +1493,10 @@ impl LlvmBackend {
                             while let Some(f) = func_opt {
                                 let name = f.get_name().to_string_lossy().to_string();
                                 if name.ends_with(&suffix) {
-                                    if best.as_ref().map_or(true, |b| name.len() < b.get_name().to_bytes().len()) {
+                                    if best
+                                        .as_ref()
+                                        .map_or(true, |b| name.len() < b.get_name().to_bytes().len())
+                                    {
                                         best = Some(f);
                                     }
                                 }
@@ -1350,10 +1518,12 @@ impl LlvmBackend {
                                 all_args.iter().map(|_| i64_type.into()).collect();
                             let fn_type = i64_type.fn_type(&param_types, false);
                             let fn_ptr = func.as_global_value().as_pointer_value();
-                            builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall")
+                            builder
+                                .build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                         } else {
-                            builder.build_call(func, &arg_vals, "mcall")
+                            builder
+                                .build_call(func, &arg_vals, "mcall")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                         };
                         if let Some(d) = dest {
@@ -1368,7 +1538,8 @@ impl LlvmBackend {
                         let name_bytes = func_name.as_bytes();
                         let name_const = self.context.const_string(name_bytes, false);
                         let name_global = module.add_global(
-                            name_const.get_type(), None,
+                            name_const.get_type(),
+                            None,
                             &format!("notfound_name_{}", func_name.replace('.', "_")),
                         );
                         name_global.set_initializer(&name_const);
@@ -1395,7 +1566,14 @@ impl LlvmBackend {
                     }
                 }
             }
-            MirInst::BuiltinMethod { dest, receiver, receiver_type, method, args, .. } => {
+            MirInst::BuiltinMethod {
+                dest,
+                receiver,
+                receiver_type,
+                method,
+                args,
+                ..
+            } => {
                 // Map builtin method calls to runtime functions (matching Cranelift backend)
                 let i64_type = self.context.i64_type();
                 let receiver_val = self.get_vreg(receiver, vreg_map)?;
@@ -1413,7 +1591,9 @@ impl LlvmBackend {
                     ("String" | "string", "concat") => Some("rt_string_concat"),
                     ("String" | "string", "starts_with") => Some("rt_string_starts_with"),
                     ("String" | "string", "ends_with") => Some("rt_string_ends_with"),
-                    ("String" | "string", "contains") | ("Array" | "array", "contains") | ("Dict" | "dict", "contains") => Some("rt_contains"),
+                    ("String" | "string", "contains")
+                    | ("Array" | "array", "contains")
+                    | ("Dict" | "dict", "contains") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_string_substring"),
                     ("String" | "string", "split") => Some("rt_string_split"),
                     ("String" | "string", "trim") => Some("rt_string_trim"),
@@ -1457,9 +1637,9 @@ impl LlvmBackend {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         arg_vals.iter().map(|_| i64_type.into()).collect();
                     let fn_type = i64_type.fn_type(&param_types, false);
-                    let rt_func = module.get_function(rt_fn_name).unwrap_or_else(|| {
-                        module.add_function(rt_fn_name, fn_type, None)
-                    });
+                    let rt_func = module
+                        .get_function(rt_fn_name)
+                        .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
                     let call_site = builder
                         .build_call(rt_func, &arg_vals, "bcall")
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
@@ -1482,7 +1662,8 @@ impl LlvmBackend {
                             let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                             arg_vals.push(casted.into());
                         }
-                        let call_site = builder.build_call(func, &arg_vals, "bcall")
+                        let call_site = builder
+                            .build_call(func, &arg_vals, "bcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                         if let Some(d) = dest {
                             if let Some(ret_val) = call_site.try_as_basic_value().left() {
@@ -1494,12 +1675,20 @@ impl LlvmBackend {
                     } else {
                         // Method not found — return nil
                         if let Some(d) = dest {
-                            vreg_map.insert(*d, i64_type.const_int(3, false).into()); // tagged nil
+                            vreg_map.insert(*d, i64_type.const_int(3, false).into());
+                            // tagged nil
                         }
                     }
                 }
             }
-            MirInst::ExternMethodCall { dest, receiver, class_name, method_name, args, .. } => {
+            MirInst::ExternMethodCall {
+                dest,
+                receiver,
+                class_name,
+                method_name,
+                args,
+                ..
+            } => {
                 // Compile as ClassName.method_name(receiver?, args...)
                 let i64_type = self.context.i64_type();
                 let full_name = format!("{}.{}", class_name, method_name);
@@ -1509,11 +1698,16 @@ impl LlvmBackend {
                 }
                 all_args.extend_from_slice(args);
                 // Resolve via import_map/use_map first
-                let resolved_full = self.use_map.get(full_name.as_str())
+                let resolved_full = self
+                    .use_map
+                    .get(full_name.as_str())
                     .or_else(|| self.import_map.get(full_name.as_str()));
-                let resolved_method = self.use_map.get(method_name.as_str())
+                let resolved_method = self
+                    .use_map
+                    .get(method_name.as_str())
                     .or_else(|| self.import_map.get(method_name.as_str()));
-                let func = resolved_full.and_then(|n| module.get_function(n))
+                let func = resolved_full
+                    .and_then(|n| module.get_function(n))
                     .or_else(|| module.get_function(&full_name))
                     .or_else(|| resolved_method.and_then(|n| module.get_function(n)))
                     .or_else(|| module.get_function(method_name));
@@ -1530,10 +1724,12 @@ impl LlvmBackend {
                             all_args.iter().map(|_| i64_type.into()).collect();
                         let fn_type = i64_type.fn_type(&param_types, false);
                         let fn_ptr = func.as_global_value().as_pointer_value();
-                        builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "ecall")
+                        builder
+                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "ecall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
                     } else {
-                        builder.build_call(func, &arg_vals, "ecall")
+                        builder
+                            .build_call(func, &arg_vals, "ecall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
                     };
                     if let Some(d) = dest {
@@ -1548,8 +1744,13 @@ impl LlvmBackend {
                     let name_bytes = full_name.as_bytes();
                     let name_const = self.context.const_string(name_bytes, false);
                     let name_global = module.add_global(
-                        name_const.get_type(), None,
-                        &format!("notfound_extern_{}_{}", class_name.replace('.', "_"), method_name.replace('.', "_")),
+                        name_const.get_type(),
+                        None,
+                        &format!(
+                            "notfound_extern_{}_{}",
+                            class_name.replace('.', "_"),
+                            method_name.replace('.', "_")
+                        ),
                     );
                     name_global.set_initializer(&name_const);
                     name_global.set_constant(true);
@@ -1603,8 +1804,7 @@ impl LlvmBackend {
                 let _ = builder.build_store(global.as_pointer_value(), coerced);
             }
             // Advanced memory instructions (not yet implemented — insert default dest values)
-            MirInst::GetElementPtr { dest, .. }
-            | MirInst::NeighborLoad { dest, .. } => {
+            MirInst::GetElementPtr { dest, .. } | MirInst::NeighborLoad { dest, .. } => {
                 let default_val = self.context.i64_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
@@ -1614,8 +1814,7 @@ impl LlvmBackend {
                     vreg_map.insert(*d, default_val.into());
                 }
             }
-            MirInst::GlobalStore { .. } => {
-            }
+            MirInst::GlobalStore { .. } => {}
         }
 
         Ok(())

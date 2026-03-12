@@ -44,7 +44,7 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
             let anchor = id.replace('.', "-");
             md.push_str(&format!("- <a id=\"feature-{}\"></a>{}\n", anchor, id));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md.push_str("---\n\n");
@@ -52,10 +52,10 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
     // Add all documentation blocks
     for (idx, doc_block) in sspec_doc.doc_blocks.iter().enumerate() {
         if idx > 0 {
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str(&doc_block.content);
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Write to file

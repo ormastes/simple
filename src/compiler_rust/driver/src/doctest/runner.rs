@@ -95,7 +95,7 @@ pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
         }
         // Add trailing newline for control flow statements that may have print side effects
         // (if, while, for, match blocks)
-        let first_word = snippet.trim_start().split_whitespace().next().unwrap_or("");
+        let first_word = snippet.split_whitespace().next().unwrap_or("");
         if matches!(first_word, "if" | "while" | "for" | "match") {
             src.push_str("print \"\\n\"\n");
         }

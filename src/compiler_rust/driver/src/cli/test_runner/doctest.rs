@@ -27,12 +27,7 @@ pub fn run_cached_doctests(cache: &DoctestCache, quiet: bool) -> Vec<TestFileRes
 }
 
 /// Run a set of examples, group by source file, and append results.
-fn run_and_collect(
-    examples: &[DoctestExample],
-    label: &str,
-    quiet: bool,
-    results: &mut Vec<TestFileResult>,
-) {
+fn run_and_collect(examples: &[DoctestExample], label: &str, quiet: bool, results: &mut Vec<TestFileResult>) {
     let start = Instant::now();
     let doctest_results = run_examples(examples);
     let duration_ms = start.elapsed().as_millis() as u64;

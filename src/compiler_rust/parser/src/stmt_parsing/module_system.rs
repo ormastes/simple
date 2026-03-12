@@ -630,7 +630,7 @@ impl<'a> Parser<'a> {
             let module_path = self.parse_module_path()?;
 
             // Create export use statement with group import
-            let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
+            let targets: Vec<ImportTarget> = items.into_iter().map(ImportTarget::Single).collect();
 
             Ok(Node::ExportUseStmt(ExportUseStmt {
                 span: Span::new(
@@ -721,12 +721,11 @@ impl<'a> Parser<'a> {
                             };
                             targets.push(target);
                             self.skip_newlines();
-                            if !self.check(&TokenKind::RBrace) {
-                                if self.check(&TokenKind::Comma) {
+                            if !self.check(&TokenKind::RBrace)
+                                && self.check(&TokenKind::Comma) {
                                     self.advance();
                                     self.skip_newlines();
                                 }
-                            }
                         }
                         self.expect(&TokenKind::RBrace)?;
                         return Ok(Node::ExportUseStmt(ExportUseStmt {
@@ -857,7 +856,7 @@ impl<'a> Parser<'a> {
                 let module_path = self.parse_module_path()?;
 
                 // Create export use statement with group import
-                let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
+                let targets: Vec<ImportTarget> = items.into_iter().map(ImportTarget::Single).collect();
 
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(
@@ -873,7 +872,7 @@ impl<'a> Parser<'a> {
                 // Style 3: bare export (export X, Y, Z)
                 // Create export use statement with empty path
                 // This marks the symbols for export without importing them
-                let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
+                let targets: Vec<ImportTarget> = items.into_iter().map(ImportTarget::Single).collect();
 
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(

@@ -306,8 +306,7 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, ());
     unsafe {
-        let size = std::mem::size_of::<RuntimeArray>()
-            + (*ptr).capacity as usize * std::mem::size_of::<RuntimeValue>();
+        let size = std::mem::size_of::<RuntimeArray>() + (*ptr).capacity as usize * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
@@ -374,8 +373,7 @@ pub extern "C" fn rt_tuple_len(tuple: RuntimeValue) -> i64 {
 pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
     let ptr = as_typed_ptr!(mut tuple, HeapObjectType::Tuple, RuntimeTuple, ());
     unsafe {
-        let size = std::mem::size_of::<RuntimeTuple>()
-            + (*ptr).len as usize * std::mem::size_of::<RuntimeValue>();
+        let size = std::mem::size_of::<RuntimeTuple>() + (*ptr).len as usize * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         std::alloc::dealloc(ptr as *mut u8, layout);
     }

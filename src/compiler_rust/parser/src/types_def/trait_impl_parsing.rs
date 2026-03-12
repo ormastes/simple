@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
         if self.check(&TokenKind::Colon) {
             // Peek ahead: if the token after : is an identifier, it's super trait syntax
             // Otherwise, the : starts the trait body
-            let colon_span = self.current.span.clone();
+            let colon_span = self.current.span;
             self.advance(); // consume ':' to peek at next token
 
             if matches!(self.current.kind, TokenKind::Identifier { .. }) {

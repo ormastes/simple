@@ -162,11 +162,11 @@ impl<'a> Parser<'a> {
                     }
                 } else if matches!(next.kind, TokenKind::Identifier { .. }) {
                     // fn followed by identifier = function definition (not allowed in expression position)
-                    return Err(ParseError::unexpected_token(
+                    Err(ParseError::unexpected_token(
                         "expression",
                         "fn (function definitions are not expressions - use fn(): for lambdas)",
                         self.current.span,
-                    ));
+                    ))
                 } else {
                     // fn used as variable name: {"fn": fn}, fn.call(), etc.
                     self.parse_primary_identifier()
@@ -278,9 +278,7 @@ impl<'a> Parser<'a> {
                     // Not an FFI call pattern - let it fall through to default error
                     Err(ParseError::unexpected_token(
                         "expression",
-                        format!(
-                            "@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)"
-                        ),
+                        "@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)".to_string(),
                         self.current.span,
                     ))
                 }

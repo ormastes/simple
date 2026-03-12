@@ -189,13 +189,18 @@ pub fn compile_instruction<M: Module>(
                     .ins()
                     .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
                 ctx.vreg_values.insert(*dest, val);
-            } else if let Some(resolved) = ctx.use_map.get(global_name.as_str())
+            } else if let Some(resolved) = ctx
+                .use_map
+                .get(global_name.as_str())
                 .or_else(|| ctx.import_map.get(global_name.as_str()))
             {
                 // Cross-module global: resolve via import/use maps and declare on-the-fly.
                 // Replace dots with _dot_ for macOS symbol name compatibility.
                 let symbol = resolved.replace('.', "_dot_");
-                match ctx.module.declare_data(&symbol, cranelift_module::Linkage::Import, true, false) {
+                match ctx
+                    .module
+                    .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
+                {
                     Ok(data_id) => {
                         let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
                         let global_addr = builder.ins().global_value(types::I64, global_ref);
@@ -226,12 +231,17 @@ pub fn compile_instruction<M: Module>(
                     .get(value)
                     .ok_or_else(|| format!("GlobalStore: vreg {:?} not found", value))?;
                 builder.ins().store(MemFlags::new(), *val, global_addr, 0);
-            } else if let Some(resolved) = ctx.use_map.get(global_name.as_str())
+            } else if let Some(resolved) = ctx
+                .use_map
+                .get(global_name.as_str())
                 .or_else(|| ctx.import_map.get(global_name.as_str()))
             {
                 // Cross-module global store: resolve via import/use maps
                 let symbol = resolved.replace('.', "_dot_");
-                if let Ok(data_id) = ctx.module.declare_data(&symbol, cranelift_module::Linkage::Import, true, false) {
+                if let Ok(data_id) = ctx
+                    .module
+                    .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
+                {
                     let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
                     let global_addr = builder.ins().global_value(types::I64, global_ref);
                     let val = ctx

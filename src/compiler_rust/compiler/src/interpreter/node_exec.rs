@@ -784,7 +784,9 @@ fn exec_assignment(
                         }
                     }
                     // __setitem__ dispatch for Object types (e.g., GpuBuffer, List)
-                    Value::Object { ref class, ref fields, .. } => {
+                    Value::Object {
+                        ref class, ref fields, ..
+                    } => {
                         let setitem_method = classes
                             .get(class.as_str())
                             .and_then(|cd| cd.methods.iter().find(|m| m.name == "__setitem__").cloned())
@@ -809,9 +811,9 @@ fn exec_assignment(
                             // For mutable methods (me), the object may have been updated in env
                             container.clone()
                         } else {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INVALID_ASSIGNMENT)
-                                .with_help("index assignment requires an array, dict, tuple, or object with __setitem__");
+                            let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                                "index assignment requires an array, dict, tuple, or object with __setitem__",
+                            );
                             return Err(CompileError::semantic_with_context(
                                 format!(
                                     "invalid assignment: cannot index assign value of type {}",

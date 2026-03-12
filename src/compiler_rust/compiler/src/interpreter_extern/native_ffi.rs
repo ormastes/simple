@@ -145,7 +145,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(feature = "llvm")]
     if let Some(prev) = previous_backend {
         if let Some(val) = prev {
-            let _ = env::set_var("SIMPLE_BACKEND", val);
+            env::set_var("SIMPLE_BACKEND", val);
         } else {
             env::remove_var("SIMPLE_BACKEND");
         }

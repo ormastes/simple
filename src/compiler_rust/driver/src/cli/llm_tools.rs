@@ -44,7 +44,7 @@ pub fn run_context(args: &[String]) -> i32 {
     };
 
     // Build API surface from module
-    let api_surface = ApiSurface::from_nodes(&path.display().to_string(), &module.items);
+    let api_surface = ApiSurface::from_nodes(path.display().to_string(), &module.items);
 
     // Extract context pack
     let target_name = target.unwrap_or("main");
@@ -231,13 +231,13 @@ pub fn run_mcp(args: &[String]) -> i32 {
         let results = tools.search(&nodes.items, query, true);
         if results.is_empty() {
             eprintln!("No symbols found matching '{}'", query);
-            return 1;
+            1
         } else {
             println!("Found {} symbol(s):", results.len());
             for result in results {
                 println!("  {}", result);
             }
-            return 0;
+            0
         }
     } else if let Some(symbol) = expand_symbol {
         // Expand mode
@@ -321,7 +321,7 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
                 let ret_str = func
                     .return_type
                     .as_ref()
-                    .map(|t| type_to_string(t))
+                    .map(type_to_string)
                     .unwrap_or_else(|| "()".to_string());
 
                 constraints.push(TypeConstraint {
@@ -355,7 +355,7 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
 
                 // Collect trait bounds from where clause
                 for bound in &func.where_clause {
-                    let bounds_str: Vec<String> = bound.bounds.iter().map(|b| type_to_string(b)).collect();
+                    let bounds_str: Vec<String> = bound.bounds.iter().map(type_to_string).collect();
                     constraints.push(TypeConstraint {
                         kind: ConstraintKind::TraitBound,
                         name: format!("{}::{}", func.name, bound.type_param),
@@ -393,7 +393,7 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
                     let ret_str = method
                         .return_type
                         .as_ref()
-                        .map(|t| type_to_string(t))
+                        .map(type_to_string)
                         .unwrap_or_else(|| "()".to_string());
 
                     constraints.push(TypeConstraint {
@@ -414,7 +414,7 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
                     let ret_str = method
                         .return_type
                         .as_ref()
-                        .map(|t| type_to_string(t))
+                        .map(type_to_string)
                         .unwrap_or_else(|| "()".to_string());
 
                     constraints.push(TypeConstraint {
@@ -445,7 +445,7 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
                     let ret_str = method
                         .return_type
                         .as_ref()
-                        .map(|t| type_to_string(t))
+                        .map(type_to_string)
                         .unwrap_or_else(|| "()".to_string());
 
                     constraints.push(TypeConstraint {
@@ -469,7 +469,7 @@ fn pattern_to_string(pat: &simple_parser::ast::Pattern) -> String {
     match pat {
         Pattern::Identifier(name) => name.clone(),
         Pattern::Tuple(patterns) => {
-            let inner: Vec<String> = patterns.iter().map(|p| pattern_to_string(p)).collect();
+            let inner: Vec<String> = patterns.iter().map(pattern_to_string).collect();
             format!("({})", inner.join(", "))
         }
         Pattern::Wildcard => "_".to_string(),
@@ -483,11 +483,11 @@ fn type_to_string(ty: &simple_parser::ast::Type) -> String {
     match ty {
         Type::Simple(name) => name.clone(),
         Type::Generic { name, args } => {
-            let args_str: Vec<String> = args.iter().map(|a| type_to_string(a)).collect();
+            let args_str: Vec<String> = args.iter().map(type_to_string).collect();
             format!("{}<{}>", name, args_str.join(", "))
         }
         Type::Tuple(types) => {
-            let types_str: Vec<String> = types.iter().map(|t| type_to_string(t)).collect();
+            let types_str: Vec<String> = types.iter().map(type_to_string).collect();
             format!("({})", types_str.join(", "))
         }
         Type::Array { element, size } => {
@@ -498,7 +498,7 @@ fn type_to_string(ty: &simple_parser::ast::Type) -> String {
             }
         }
         Type::Function { params, ret } => {
-            let params_str: Vec<String> = params.iter().map(|p| type_to_string(p)).collect();
+            let params_str: Vec<String> = params.iter().map(type_to_string).collect();
             let ret_str = ret
                 .as_ref()
                 .map(|r| type_to_string(r))
