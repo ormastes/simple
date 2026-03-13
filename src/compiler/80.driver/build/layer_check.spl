@@ -1,0 +1,224 @@
+# Layer Check - Build-Time Layer Dependency Enforcement
+#
+# Scans `use compiler.*` imports in the compiler source tree and validates
+# that dependencies respect the numbered layer ordering (NN.name/).
+# Lower-numbered layers must not import from higher-numbered layers.
+#
+# Wire into orchestrate_build() for build-time enforcement,
+# or invoke standalone via `simple check-layers`.
+#
+# Uses check_numbered_layer_dep() from layer_checker.spl.
+
+use compiler.mdsoc.layer_checker.{check_numbered_layer_dep}
+use compiler.mdsoc.checker_types.layer_violation.{LayerViolation}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+# Result of a layer check run
+struct LayerCheckResult:
+    violations: [LayerViolation]
+    files_scanned: i64
+    imports_checked: i64
+
+    fn has_violations() -> bool:
+        self.violations.len() > 0
+
+    fn summary() -> text:
+        if self.violations.len() == 0:
+            "Layer check passed: {self.files_scanned} files, {self.imports_checked} imports checked, 0 violations"
+        else:
+            "Layer check FAILED: {self.files_scanned} files, {self.imports_checked} imports checked, {self.violations.len()} violations"
+
+# Extract the layer directory from a compiler module path.
+# E.g., "src/compiler/10.frontend/core/lexer.spl" -> "10.frontend"
+# Returns empty string if the path is not in a numbered compiler layer.
+fn _extract_layer_dir(path: text) -> text:
+    # Find "compiler/" prefix
+    val compiler_prefix = "src/compiler/"
+    if not path.starts_with(compiler_prefix):
+        return ""
+    val rest = path.substring(compiler_prefix.len())
+    # Get the first path segment (e.g., "10.frontend")
+    var slash_pos = -1
+    var i = 0
+    for ch in rest:
+        if ch == "/":
+            slash_pos = i
+            break
+        i = i + 1
+    if slash_pos < 0:
+        return ""
+    rest.substring(0, slash_pos)
+
+# Extract the layer directory from a `use compiler.XXX` import path.
+# E.g., "compiler.frontend.core.lexer" -> resolve to the directory.
+# We map the first segment after "compiler." to the actual numbered dir.
+fn _resolve_import_to_layer_dir(import_path: text, layer_dirs: [text]) -> text:
+    # import_path is like "compiler.frontend.core.lexer"
+    if not import_path.starts_with("compiler."):
+        return ""
+    val rest = import_path.substring(9)  # after "compiler."
+    # First segment is the layer alias (e.g., "frontend")
+    var dot_pos = rest.len()
+    var i = 0
+    for ch in rest:
+        if ch == ".":
+            dot_pos = i
+            break
+        i = i + 1
+    val first_seg = rest.substring(0, dot_pos)
+
+    # Match against known numbered dirs: "10.frontend" matches "frontend"
+    for dir_name in layer_dirs:
+        # Extract the part after the dot in NN.name
+        var dir_dot_pos = -1
+        var j = 0
+        for ch in dir_name:
+            if ch == ".":
+                dir_dot_pos = j
+                break
+            j = j + 1
+        if dir_dot_pos > 0:
+            val dir_suffix = dir_name.substring(dir_dot_pos + 1)
+            if dir_suffix == first_seg:
+                return dir_name
+    ""
+
+# Scan a single .spl file for `use compiler.*` imports.
+# Returns list of (from_layer_dir, to_layer_dir) pairs.
+fn _scan_file_imports(path: text, content: text, layer_dirs: [text]) -> ([text], [text]):
+    val from_dir = _extract_layer_dir(path)
+    if from_dir == "":
+        return ([], [])
+
+    var from_dirs: [text] = []
+    var to_dirs: [text] = []
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with("use compiler."):
+            continue
+
+        # Extract the import path: "use compiler.xxx.yyy" or "use compiler.xxx.yyy.{Z}"
+        var import_text = trimmed.substring(4)  # after "use "
+        # Remove trailing .{...} or .(...)
+        var brace_pos = import_text.len()
+        var k = 0
+        for ch in import_text:
+            if ch == "{" or ch == "(":
+                brace_pos = k
+                break
+            k = k + 1
+        if brace_pos < import_text.len():
+            # Find the last dot before the brace
+            var last_dot = -1
+            var m = 0
+            for ch in import_text:
+                if m >= brace_pos:
+                    break
+                if ch == ".":
+                    last_dot = m
+                m = m + 1
+            if last_dot > 0:
+                import_text = import_text.substring(0, last_dot)
+
+        # Remove trailing .* glob
+        if import_text.ends_with(".*"):
+            import_text = import_text.substring(0, import_text.len() - 2)
+
+        val to_dir = _resolve_import_to_layer_dir(import_text, layer_dirs)
+        if to_dir != "" and to_dir != from_dir:
+            from_dirs = from_dirs.push(from_dir)
+            to_dirs = to_dirs.push(to_dir)
+
+    (from_dirs, to_dirs)
+
+# Recursively collect .spl files from a directory
+fn _collect_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    for entry in entries:
+        val child_path = "{dir}/{entry}"
+        if entry.ends_with(".spl"):
+            result = result.push(child_path)
+        elif not entry.contains("."):
+            # Subdirectory (no extension)
+            val sub_files = _collect_spl_files(child_path)
+            for f in sub_files:
+                result = result.push(f)
+    result
+
+# Get the list of numbered layer directories under src/compiler/
+fn _get_layer_dirs() -> [text]:
+    val entries = rt_dir_list("src/compiler") ?? []
+    var layer_dirs: [text] = []
+    for entry in entries:
+        # Check if it matches NN.name pattern (starts with digits, has a dot)
+        var has_dot = false
+        var starts_digit = false
+        if entry.len() > 0:
+            val first_ch = entry.substring(0, 1)
+            starts_digit = first_ch >= "0" and first_ch <= "9"
+        for ch in entry:
+            if ch == ".":
+                has_dot = true
+        if has_dot and starts_digit:
+            layer_dirs = layer_dirs.push(entry)
+    layer_dirs
+
+# Run the layer dependency check on the compiler source tree.
+fn run_layer_check(strict: bool) -> LayerCheckResult:
+    val layer_dirs = _get_layer_dirs()
+    var violations: [LayerViolation] = []
+    var files_scanned: i64 = 0
+    var imports_checked: i64 = 0
+
+    # Scan each numbered layer directory
+    for dir_name in layer_dirs:
+        val dir_path = "src/compiler/{dir_name}"
+        val spl_files = _collect_spl_files(dir_path)
+        for file_path in spl_files:
+            files_scanned = files_scanned + 1
+            val content = rt_file_read_text(file_path) ?? ""
+            if content == "":
+                continue
+
+            val (from_dirs, to_dirs) = _scan_file_imports(file_path, content, layer_dirs)
+            var idx = 0
+            while idx < from_dirs.len():
+                imports_checked = imports_checked + 1
+                val violation = check_numbered_layer_dep(from_dirs[idx], to_dirs[idx])
+                if violation.?:
+                    val v = violation ?? LayerViolation.new("", "", "", "", "", "")
+                    # Enrich with file path info
+                    val enriched = LayerViolation.new(
+                        file_path, to_dirs[idx],
+                        v.from_layer, v.to_layer,
+                        v.message, file_path
+                    )
+                    violations = violations.push(enriched)
+                idx = idx + 1
+
+    LayerCheckResult(
+        violations: violations,
+        files_scanned: files_scanned,
+        imports_checked: imports_checked
+    )
+
+# Print layer check results to stdout
+fn print_layer_check_result(result: LayerCheckResult, strict: bool):
+    if result.has_violations():
+        print "[LAYER] {result.summary()}"
+        print ""
+        for v in result.violations:
+            print "  VIOLATION: {v.from_module}"
+            print "    imports: {v.to_module}"
+            print "    {v.message}"
+            print ""
+        if strict:
+            print "Layer check failed (--strict-layers enabled)"
+    else:
+        print "[LAYER] {result.summary()}"

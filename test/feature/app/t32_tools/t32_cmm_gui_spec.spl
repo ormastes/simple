@@ -1,14 +1,15 @@
-# T32 CMM GUI Pattern spec — tests that GUI CMM patterns are recognized
-# Tests inline pattern detection logic for DIALOG, WinPOS, WinPAGE,
-# TOOLBAR, AREA, FramePOS, SCREEN patterns found in fixture CMM files
+# T32 CMM GUI Pattern spec — tests that GUI CMM patterns are detected
+# in ALL local CMM fixture files. Reads each .cmm file at runtime,
+# scans every line, and verifies the expected GUI patterns are found.
+
+extern fn rt_file_read_text(path: text) -> text
 
 # --- Inlined pattern detectors ---
 
-fn ws_trim(s: text) -> text:
-    s.trim()
-
 fn cmm_is_gui_pattern(line: text) -> bool:
-    val trimmed = ws_trim(line)
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with(";"):
+        return false
     val upper = trimmed.to_upper()
     if upper.starts_with("DIALOG"):
         return true
@@ -51,7 +52,7 @@ fn cmm_is_gui_pattern(line: text) -> bool:
     false
 
 fn cmm_classify_pattern(line: text) -> text:
-    val trimmed = ws_trim(line)
+    val trimmed = line.trim()
     val upper = trimmed.to_upper()
     if upper.starts_with("DIALOG.OK"):
         return "dialog_ok"
@@ -81,6 +82,8 @@ fn cmm_classify_pattern(line: text) -> text:
         return "statusbar"
     if upper.starts_with("FRAMEPOS"):
         return "framepos"
+    if upper.starts_with("SCREEN.ALWAYS"):
+        return "screen_always"
     if upper.starts_with("SCREEN.ON"):
         return "screen_on"
     if upper.starts_with("SCREEN.OFF"):
@@ -95,6 +98,8 @@ fn cmm_classify_pattern(line: text) -> text:
         return "area_clear"
     if upper.starts_with("AREA.VIEW"):
         return "area_view"
+    if upper.starts_with("AREA.RESET"):
+        return "area_reset"
     if upper.starts_with("HEADER"):
         return "header"
     if upper.starts_with("POS "):
@@ -109,157 +114,217 @@ fn cmm_classify_pattern(line: text) -> text:
         return "line_separator"
     if upper.starts_with("CLOSE"):
         return "close_handler"
+    if upper.starts_with("MENU.REPROGRAM"):
+        return "menu_reprogram"
     if upper.starts_with("MENU.RP"):
         return "menu_rp"
     if upper.starts_with("PRINTER.FILE"):
         return "printer_file"
     "unknown"
 
+# Scan a CMM file and return list of classified GUI patterns found
+fn scan_cmm_gui(path: text) -> [text]:
+    val content = rt_file_read_text(path) ?? ""
+    var patterns: [text] = []
+    if content == "":
+        return patterns
+    val lines = content.split("\n")
+    for line in lines:
+        if cmm_is_gui_pattern(line):
+            val cls = cmm_classify_pattern(line)
+            # Deduplicate: only add if not already seen
+            var seen = false
+            for p in patterns:
+                if p == cls:
+                    seen = true
+            if not seen:
+                patterns.push(cls)
+    patterns
+
+fn has_pattern(patterns: [text], target: text) -> bool:
+    for p in patterns:
+        if p == target:
+            return true
+    false
+
+val FIXTURE_BASE = "examples/10_tooling/trace32_tools/test_fixtures"
+
 # --- Tests ---
 
-describe "T32 CMM GUI Patterns":
+describe "T32 CMM GUI Patterns — live fixture scan":
 
-    context "DIALOG blocks (spreadtrum_main.cmm)":
-        it "detects DIALOG block":
-            expect(cmm_is_gui_pattern("DIALOG")).to_equal(true)
-            expect(cmm_classify_pattern("DIALOG")).to_equal("dialog_block")
+    context "rcar3_window.cmm (WinPOS/WinPAGE/FramePOS/TOOLBAR)":
+        it "finds all window layout patterns":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/rcar3_window.cmm")
+            expect(has_pattern(patterns, "winpage_reset")).to_equal(true)
+            expect(has_pattern(patterns, "winclear")).to_equal(true)
+            expect(has_pattern(patterns, "framepos")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
+            expect(has_pattern(patterns, "wintabs")).to_equal(true)
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "statusbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpage_create")).to_equal(true)
+            expect(has_pattern(patterns, "winpage_select")).to_equal(true)
 
-        it "detects HEADER inside dialog":
-            expect(cmm_is_gui_pattern("  HEADER \"Spreadtrum Debug Configuration\"")).to_equal(true)
-            expect(cmm_classify_pattern("HEADER \"Spreadtrum Debug Configuration\"")).to_equal("header")
+    context "spreadtrum_main.cmm (DIALOG block + controls)":
+        it "finds dialog block with all controls":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/spreadtrum_main.cmm")
+            expect(has_pattern(patterns, "dialog_ok")).to_equal(true)
+            expect(has_pattern(patterns, "dialog_block")).to_equal(true)
+            expect(has_pattern(patterns, "header")).to_equal(true)
+            expect(has_pattern(patterns, "pos")).to_equal(true)
+            expect(has_pattern(patterns, "text_label")).to_equal(true)
+            expect(has_pattern(patterns, "defbutton")).to_equal(true)
+            expect(has_pattern(patterns, "button")).to_equal(true)
+            expect(has_pattern(patterns, "close_handler")).to_equal(true)
+            expect(has_pattern(patterns, "dialog_string")).to_equal(true)
+            expect(has_pattern(patterns, "dialog_end")).to_equal(true)
 
-        it "detects POS directive":
-            expect(cmm_is_gui_pattern("  POS 1. 1. 30.")).to_equal(true)
-            expect(cmm_classify_pattern("POS 1. 1. 30.")).to_equal("pos")
+    context "bl602_wifi.cmm (DIALOG + LINE separator)":
+        it "finds dialog with line separator":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/bl602_wifi.cmm")
+            expect(has_pattern(patterns, "dialog_block")).to_equal(true)
+            expect(has_pattern(patterns, "header")).to_equal(true)
+            expect(has_pattern(patterns, "defbutton")).to_equal(true)
+            expect(has_pattern(patterns, "button")).to_equal(true)
+            expect(has_pattern(patterns, "line_separator")).to_equal(true)
+            expect(has_pattern(patterns, "close_handler")).to_equal(true)
 
-        it "detects TEXT label":
-            expect(cmm_is_gui_pattern("  TEXT \"Project Selection\"")).to_equal(true)
-            expect(cmm_classify_pattern("TEXT \"Project Selection\"")).to_equal("text_label")
+    context "imx6sx_qspi.cmm (AREA commands)":
+        it "finds all AREA operations":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/imx6sx_qspi.cmm")
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+            expect(has_pattern(patterns, "area_select")).to_equal(true)
+            expect(has_pattern(patterns, "area_view")).to_equal(true)
+            expect(has_pattern(patterns, "area_clear")).to_equal(true)
 
-        it "detects BUTTON":
-            expect(cmm_is_gui_pattern("  BUTTON \"Cancel\" \"DIALOG.END\"")).to_equal(true)
-            expect(cmm_classify_pattern("BUTTON \"Cancel\" \"DIALOG.END\"")).to_equal("button")
+    context "ch32v307_kernel.cmm (AREA + MENU.ReProgram + AREA.RESet)":
+        it "finds AREA with dimensions and AREA.RESet":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/ch32v307_kernel.cmm")
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+            expect(has_pattern(patterns, "area_view")).to_equal(true)
+            expect(has_pattern(patterns, "area_select")).to_equal(true)
+            expect(has_pattern(patterns, "area_reset")).to_equal(true)
+            expect(has_pattern(patterns, "menu_reprogram")).to_equal(true)
 
-        it "detects DEFBUTTON":
-            expect(cmm_is_gui_pattern("  DEFBUTTON \"Start Debug\" \"GOTO start_debug\"")).to_equal(true)
-            expect(cmm_classify_pattern("DEFBUTTON \"Start Debug\" \"GOTO start_debug\"")).to_equal("defbutton")
+    context "sifive_e31_debug.cmm (SCREEN.ALways + WinPOS)":
+        it "finds SCREEN.ALways and window positions":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/sifive_e31_debug.cmm")
+            expect(has_pattern(patterns, "screen_always")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
 
-        it "detects LINE separator":
-            expect(cmm_is_gui_pattern("  LINE \"Advanced\"")).to_equal(true)
-            expect(cmm_classify_pattern("LINE \"Advanced\"")).to_equal("line_separator")
+    context "qnx_beagle.cmm (SCREEN.ALways + MENU.ReProgram)":
+        it "finds SCREEN and MENU patterns":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/qnx_beagle.cmm")
+            expect(has_pattern(patterns, "screen_always")).to_equal(true)
+            expect(has_pattern(patterns, "menu_reprogram")).to_equal(true)
 
-        it "detects CLOSE handler":
-            expect(cmm_is_gui_pattern("  CLOSE \"GOTO cleanup\"")).to_equal(true)
-            expect(cmm_classify_pattern("CLOSE \"GOTO cleanup\"")).to_equal("close_handler")
+    context "linux_vm.cmm (MENU.ReProgram)":
+        it "finds MENU pattern":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/linux_vm.cmm")
+            expect(has_pattern(patterns, "menu_reprogram")).to_equal(true)
 
-    context "DIALOG message boxes":
-        it "detects DIALOG.OK":
-            expect(cmm_classify_pattern("DIALOG.OK \"TRACE32 version too old.\"")).to_equal("dialog_ok")
+    context "stm32h7_flash.cmm (DIALOG.YESNO + TOOLBAR + WinPOS)":
+        it "finds DIALOG.YESNO and layout":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_flash.cmm")
+            expect(has_pattern(patterns, "dialog_yesno")).to_equal(true)
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
 
-        it "detects DIALOG.YESNO":
-            expect(cmm_classify_pattern("DIALOG.YESNO \"Continue?\"")).to_equal("dialog_yesno")
+    context "stm32wb_ble.cmm (DIALOG.YESNO + TOOLBAR + WinPOS)":
+        it "finds BLE dialog and window layout":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_ble.cmm")
+            expect(has_pattern(patterns, "dialog_yesno")).to_equal(true)
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
 
-        it "detects DIALOG.END":
-            expect(cmm_classify_pattern("DIALOG.END")).to_equal("dialog_end")
+    context "stm32wb_dual_core.cmm (SCREEN.ALways + TOOLBAR + STATUSBAR + multi-WinPOS)":
+        it "finds multi-core debug layout":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_dual_core.cmm")
+            expect(has_pattern(patterns, "screen_always")).to_equal(true)
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "statusbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
 
-        it "detects DIALOG.STRing()":
+    context "stm32h7_swd_debug.cmm (TOOLBAR + STATUSBAR + WinPOS)":
+        it "finds SWD debug layout":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_swd_debug.cmm")
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "statusbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
+
+    context "stm32h7_peripheral.cmm (TOOLBAR + STATUSBAR + WinPOS)":
+        it "finds peripheral viewer layout":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_peripheral.cmm")
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "statusbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
+
+    context "stm32wb_flash_otp.cmm (double DIALOG.YESNO + TOOLBAR + WinPOS)":
+        it "finds OTP flash patterns":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_flash_otp.cmm")
+            expect(has_pattern(patterns, "dialog_yesno")).to_equal(true)
+            expect(has_pattern(patterns, "toolbar")).to_equal(true)
+            expect(has_pattern(patterns, "winpos")).to_equal(true)
+
+    context "esp32c3_flash.cmm (DIALOG.YESNO)":
+        it "finds flash erase dialog":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/esp32c3_flash.cmm")
+            expect(has_pattern(patterns, "dialog_yesno")).to_equal(true)
+
+    context "s32k_flash.cmm (DIALOG.YESNO)":
+        it "finds device secure dialog":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/s32k_flash.cmm")
+            expect(has_pattern(patterns, "dialog_yesno")).to_equal(true)
+
+    context "polarfire_program.cmm (DIALOG.OK)":
+        it "finds design file dialog":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/polarfire_program.cmm")
+            expect(has_pattern(patterns, "dialog_ok")).to_equal(true)
+
+    context "expected_cli conversions have SCREEN.OFF + AREA setup":
+        it "expected_cli/web/rcar3_window.cmm has SCREEN.OFF":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/web/rcar3_window.cmm")
+            expect(has_pattern(patterns, "screen_off")).to_equal(true)
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+            expect(has_pattern(patterns, "area_select")).to_equal(true)
+
+        it "expected_cli/web/spreadtrum_main.cmm has SCREEN.OFF":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/web/spreadtrum_main.cmm")
+            expect(has_pattern(patterns, "screen_off")).to_equal(true)
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+
+        it "expected_cli/riscv/bl602_wifi.cmm has SCREEN.OFF":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/riscv/bl602_wifi.cmm")
+            expect(has_pattern(patterns, "screen_off")).to_equal(true)
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+
+        it "expected_cli/stm32/stm32wb_dual_core.cmm has SCREEN.OFF":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/stm32/stm32wb_dual_core.cmm")
+            expect(has_pattern(patterns, "screen_off")).to_equal(true)
+            expect(has_pattern(patterns, "area_create")).to_equal(true)
+
+    context "non-GUI fixtures have no GUI patterns":
+        it "fe310_blinky.cmm has no GUI":
+            val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/fe310_blinky.cmm")
+            expect(patterns.len()).to_equal(0)
+
+    context "classifier coverage — all known types":
+        it "classifies SCREEN.ALways":
+            expect(cmm_classify_pattern("SCREEN.ALways")).to_equal("screen_always")
+
+        it "classifies AREA.RESet":
+            expect(cmm_classify_pattern("AREA.RESet")).to_equal("area_reset")
+
+        it "classifies MENU.ReProgram":
+            expect(cmm_classify_pattern("MENU.ReProgram ~~/demo/arm/kernel/qnx/qnx.men")).to_equal("menu_reprogram")
+
+        it "classifies DIALOG.STRing":
             expect(cmm_classify_pattern("DIALOG.STRing(project.name)")).to_equal("dialog_string")
 
-    context "WinPOS (rcar3_window.cmm)":
-        it "detects WinPOS with float parameters":
-            expect(cmm_is_gui_pattern("WinPOS 0. 0. 80. 10. 0. 0. W000")).to_equal(true)
-            expect(cmm_classify_pattern("WinPOS 0. 0. 80. 10. 0. 0. W000")).to_equal("winpos")
-
-        it "detects simple WinPOS":
-            expect(cmm_classify_pattern("WinPOS 0. 0. 80. 25.")).to_equal("winpos")
-
-    context "WinPAGE (rcar3_window.cmm)":
-        it "detects WinPAGE.Create":
-            expect(cmm_classify_pattern("WinPAGE.Create P001")).to_equal("winpage_create")
-
-        it "detects WinPAGE.select":
-            expect(cmm_classify_pattern("WinPAGE.select P001")).to_equal("winpage_select")
-
-        it "detects WinPAGE.RESet":
-            expect(cmm_classify_pattern("WinPAGE.RESet")).to_equal("winpage_reset")
-
-    context "Window management":
-        it "detects WinCLEAR":
-            expect(cmm_classify_pattern("WinCLEAR")).to_equal("winclear")
-
-        it "detects WinTABS":
-            expect(cmm_is_gui_pattern("WinTABS 10. 20. 30.")).to_equal(true)
-            expect(cmm_classify_pattern("WinTABS 10. 20. 30.")).to_equal("wintabs")
-
-    context "TOOLBAR and STATUSBAR":
-        it "detects TOOLBAR ON":
-            expect(cmm_classify_pattern("TOOLBAR ON")).to_equal("toolbar")
-
-        it "detects TOOLBAR OFF":
-            expect(cmm_classify_pattern("TOOLBAR OFF")).to_equal("toolbar")
-
-        it "detects STATUSBAR ON":
-            expect(cmm_classify_pattern("STATUSBAR ON")).to_equal("statusbar")
-
-    context "FramePOS":
-        it "detects FramePOS with coordinates":
-            expect(cmm_is_gui_pattern("FramePOS 0. 0. 80. 50.")).to_equal(true)
-            expect(cmm_classify_pattern("FramePOS 0. 0. 80. 50.")).to_equal("framepos")
-
-    context "SCREEN commands":
-        it "detects SCREEN.ON":
-            expect(cmm_classify_pattern("SCREEN.ON")).to_equal("screen_on")
-
-        it "detects SCREEN.OFF":
-            expect(cmm_classify_pattern("SCREEN.OFF")).to_equal("screen_off")
-
-        it "detects SCREEN.WAIT":
-            expect(cmm_classify_pattern("SCREEN.WAIT")).to_equal("screen_wait")
-
-    context "AREA commands":
-        it "detects AREA.Create":
-            expect(cmm_classify_pattern("AREA.Create MCP_OUT")).to_equal("area_create")
-
-        it "detects AREA.Select":
-            expect(cmm_classify_pattern("AREA.Select MCP_OUT")).to_equal("area_select")
-
-        it "detects AREA.CLEAR":
-            expect(cmm_classify_pattern("AREA.CLEAR")).to_equal("area_clear")
-
-        it "detects AREA.view":
-            expect(cmm_classify_pattern("AREA.view")).to_equal("area_view")
-
-    context "Other GUI commands":
-        it "detects menu.rp":
-            expect(cmm_classify_pattern("menu.rp")).to_equal("menu_rp")
-
-        it "detects PRinTer.FILE":
-            expect(cmm_classify_pattern("PRinTer.FILE /tmp/output.txt")).to_equal("printer_file")
-
-    context "Non-GUI patterns":
-        it "does not match SYStem.Up":
+        it "does not classify non-GUI as GUI":
             expect(cmm_is_gui_pattern("SYStem.Up")).to_equal(false)
-
-        it "does not match Break.Set":
             expect(cmm_is_gui_pattern("Break.Set main")).to_equal(false)
-
-        it "does not match Data.dump":
-            expect(cmm_is_gui_pattern("Data.dump")).to_equal(false)
-
-        it "does not match EVAL":
-            expect(cmm_is_gui_pattern("EVAL Register(PC)")).to_equal(false)
-
-    context "DIALOG block from bl602_wifi.cmm":
-        it "detects all GUI lines in dialog block":
-            val dialog_lines = [
-                "DIALOG",
-                "  HEADER \"BL602 WiFi Configuration\"",
-                "  POS 1. 1. 40.",
-                "  TEXT \"Select WiFi Mode:\"",
-                "  DEFBUTTON \"Station\" \"GOSUB setup_sta_mode\"",
-                "  BUTTON \"AP Mode\" \"GOSUB setup_ap_mode\"",
-                "  LINE \"Advanced\"",
-                "  CLOSE \"GOTO dialog_closed\""
-            ]
-            for line in dialog_lines:
-                expect(cmm_is_gui_pattern(line)).to_equal(true)
+            expect(cmm_is_gui_pattern("Data.dump D:0x0")).to_equal(false)
+            expect(cmm_is_gui_pattern("; comment line")).to_equal(false)
+            expect(cmm_is_gui_pattern("")).to_equal(false)

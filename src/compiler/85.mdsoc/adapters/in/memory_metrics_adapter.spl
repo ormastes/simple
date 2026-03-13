@@ -1,0 +1,109 @@
+# In-Memory Metrics Adapter
+#
+# Implements MetricsPort using in-memory storage.
+# Used for --metrics flag and profiler integration.
+#
+# Phase 6: Metrics Port
+
+use compiler.mdsoc.feature.metrics.metrics_port.{MetricsPort}
+
+# Module-level storage (workaround for nested closure limitation)
+# Parallel arrays for name -> value mapping
+var _mm_counter_names: [text] = []
+var _mm_counter_values: [i64] = []
+var _mm_gauge_names: [text] = []
+var _mm_gauge_values: [i64] = []
+var _mm_timing_names: [text] = []
+var _mm_timing_values: [i64] = []
+
+fn _mm_reset():
+    _mm_counter_names = []
+    _mm_counter_values = []
+    _mm_gauge_names = []
+    _mm_gauge_values = []
+    _mm_timing_names = []
+    _mm_timing_values = []
+
+fn _mm_find_index(names: [text], key: text) -> i64:
+    var i = 0
+    while i < names.len():
+        if names[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn _mm_record_counter(name: text, value: i64):
+    val idx = _mm_find_index(_mm_counter_names, name)
+    if idx >= 0:
+        _mm_counter_values[idx] = _mm_counter_values[idx] + value
+    else:
+        _mm_counter_names = _mm_counter_names.push(name)
+        _mm_counter_values = _mm_counter_values.push(value)
+
+fn _mm_record_gauge(name: text, value: i64):
+    val idx = _mm_find_index(_mm_gauge_names, name)
+    if idx >= 0:
+        _mm_gauge_values[idx] = value
+    else:
+        _mm_gauge_names = _mm_gauge_names.push(name)
+        _mm_gauge_values = _mm_gauge_values.push(value)
+
+fn _mm_record_timing(name: text, value: i64):
+    val idx = _mm_find_index(_mm_timing_names, name)
+    if idx >= 0:
+        _mm_timing_values[idx] = value
+    else:
+        _mm_timing_names = _mm_timing_names.push(name)
+        _mm_timing_values = _mm_timing_values.push(value)
+
+fn _mm_get_counter(name: text) -> i64:
+    val idx = _mm_find_index(_mm_counter_names, name)
+    if idx >= 0: _mm_counter_values[idx] else: 0
+
+fn _mm_get_gauge(name: text) -> i64:
+    val idx = _mm_find_index(_mm_gauge_names, name)
+    if idx >= 0: _mm_gauge_values[idx] else: 0
+
+fn _mm_get_timing(name: text) -> i64:
+    val idx = _mm_find_index(_mm_timing_names, name)
+    if idx >= 0: _mm_timing_values[idx] else: 0
+
+fn create_memory_metrics_adapter() -> MetricsPort:
+    """Create an in-memory metrics adapter.
+
+    Stores all metrics in module-level arrays.
+    Call _mm_reset() to clear between runs.
+    """
+    _mm_reset()
+    MetricsPort(
+        name: "memory-metrics",
+        record_counter_fn: _mm_record_counter,
+        record_gauge_fn: _mm_record_gauge,
+        record_timing_fn: _mm_record_timing,
+        get_counter_fn: _mm_get_counter,
+        get_gauge_fn: _mm_get_gauge,
+        get_timing_fn: _mm_get_timing
+    )
+
+fn metrics_print_summary():
+    """Print all collected metrics to stdout."""
+    if _mm_counter_names.len() > 0:
+        print "== Counters =="
+        var i = 0
+        while i < _mm_counter_names.len():
+            print "  {_mm_counter_names[i]}: {_mm_counter_values[i]}"
+            i = i + 1
+
+    if _mm_gauge_names.len() > 0:
+        print "== Gauges =="
+        var i = 0
+        while i < _mm_gauge_names.len():
+            print "  {_mm_gauge_names[i]}: {_mm_gauge_values[i]}"
+            i = i + 1
+
+    if _mm_timing_names.len() > 0:
+        print "== Timing (ms) =="
+        var i = 0
+        while i < _mm_timing_names.len():
+            print "  {_mm_timing_names[i]}: {_mm_timing_values[i]}ms"
+            i = i + 1

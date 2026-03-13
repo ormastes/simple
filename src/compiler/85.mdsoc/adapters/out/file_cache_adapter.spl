@@ -1,0 +1,63 @@
+# File Cache Adapter (Production)
+#
+# Implements CachePort using disk-based caching.
+# Wraps existing cache_validator.spl logic.
+#
+# Phase 5: Cache Port Unification
+
+use compiler.mdsoc.feature.cache.cache_port.{CachePort, CacheCheckStatus, CacheStats}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+# Module-level stats counters (workaround for nested closure limitation)
+var _fc_hits: i64 = 0
+var _fc_misses: i64 = 0
+var _fc_stores: i64 = 0
+var _fc_invalidations: i64 = 0
+
+fn _fc_reset():
+    _fc_hits = 0
+    _fc_misses = 0
+    _fc_stores = 0
+    _fc_invalidations = 0
+
+fn _fc_check(key: text, hash: text) -> CacheCheckStatus:
+    val cache_path = ".build/cache/{key}.hash"
+    val stored_hash = rt_file_read_text(cache_path) ?? ""
+    if stored_hash == "" or stored_hash != hash:
+        _fc_misses = _fc_misses + 1
+        return CacheCheckStatus(is_fresh: false, reason: "hash-mismatch")
+    _fc_hits = _fc_hits + 1
+    CacheCheckStatus(is_fresh: true, reason: "fresh")
+
+fn _fc_store(key: text, hash: text, data: text):
+    val cache_path = ".build/cache/{key}.hash"
+    rt_file_write_text(cache_path, hash)
+    _fc_stores = _fc_stores + 1
+
+fn _fc_invalidate(key: text):
+    _fc_invalidations = _fc_invalidations + 1
+
+fn _fc_stats() -> CacheStats:
+    CacheStats(
+        hits: _fc_hits,
+        misses: _fc_misses,
+        stores: _fc_stores,
+        invalidations: _fc_invalidations
+    )
+
+fn create_file_cache_adapter() -> CachePort:
+    """Create a file-system backed cache adapter.
+
+    Stores hash values in .build/cache/ directory.
+    """
+    _fc_reset()
+    CachePort(
+        name: "file-cache",
+        check_fn: _fc_check,
+        store_fn: _fc_store,
+        invalidate_fn: _fc_invalidate,
+        get_stats_fn: _fc_stats
+    )

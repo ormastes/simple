@@ -44,6 +44,8 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn compiler__driver__driver__CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult
 
 # Lightweight logging helpers (module-level free functions for simplicity)
+# Phase 3: These stubs will be replaced with logger_port calls in
+# CompilerDriver methods. Kept for backward compatibility with free functions.
 fn log_debug(msg: text):
     ()
 fn log_trace(msg: text):
@@ -54,6 +56,14 @@ fn log_warn(msg: text):
     print "[WARN] {msg}"
 fn log_error(msg: text):
     print "[ERROR] {msg}"
+
+extern fn rt_time_ms() -> i64
+
+# Phase 2: Module-level source reader — defaults to rt_file_read_text,
+# overridden by CompilerDriver.load_sources_impl() to use module_storage port.
+fn _default_read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+var _active_read_source: fn(text) -> text = _default_read_source
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -98,7 +108,8 @@ fn _driver_collect_sources(p: text) -> [SourceFile]:
             return result
         if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
             return result
-        val content = rt_file_read_text(p) ?? ""
+        # Phase 2: Use module_storage port (via module-level reader)
+        val content = _active_read_source(p)
         if content != "":
             var mod_path = p
             if mod_path.starts_with("src/"):
@@ -251,11 +262,16 @@ class CompilerDriver:
             return CompileResult.ParseError(self.ctx.errors)
 
         # Phase 2: Parse all sources
-        log_debug("phase 2: parsing...")
+        self.ctx.logger_port.debug_fn("phase 2: parsing...")
+        val _t2_start = rt_time_ms()
         if not self.parse_all_impl():
-            log_error("phase 2 FAILED")
+            self.ctx.logger_port.error_fn("phase 2 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
-        log_debug("phase 2 done")
+        val _t2_elapsed = rt_time_ms() - _t2_start
+        self.ctx.metrics_port.record_timing_fn("parse_ms", _t2_elapsed)
+        # Phase 1: Fire event — parse complete
+        self.ctx.event_port.on_parse_complete_fn(self.ctx.modules.keys().len())
+        self.ctx.logger_port.debug_fn("phase 2 done ({_t2_elapsed}ms)")
 
         # Evict raw source text (no longer needed after parsing)
         if self.ctx.options.low_memory:
@@ -263,18 +279,22 @@ class CompilerDriver:
             self.ctx.evict_sources()
 
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
-        log_trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        self.ctx.logger_port.debug_fn("phase 3: HIR lowering + type check...")
+        val _t3_start = rt_time_ms()
         val analyze_ok = self.lower_and_check_impl()
-        log_trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        val _t3_elapsed = rt_time_ms() - _t3_start
+        self.ctx.metrics_port.record_timing_fn("hir_lower_ms", _t3_elapsed)
         if not analyze_ok:
-            log_error("phase 3 FAILED")
+            self.ctx.logger_port.error_fn("phase 3 FAILED")
             # Determine error type from first error
             if self.ctx.errors.len() > 0:
                 val first_error = self.ctx.errors[0]
                 if first_error.contains("Method resolution"):
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
-        log_debug("phase 3 done")
+        # Phase 1: Fire event — HIR complete
+        self.ctx.event_port.on_hir_complete_fn(self.ctx.hir_modules.keys().len())
+        self.ctx.logger_port.debug_fn("phase 3 done ({_t3_elapsed}ms)")
 
         # Evict AST modules (no longer needed after HIR lowering)
         if self.ctx.options.low_memory:
@@ -282,15 +302,18 @@ class CompilerDriver:
             self.ctx.evict_ast()
 
         # Phase 4: Monomorphization (specialize generic functions)
-        log_debug("phase 4: monomorphization...")
+        self.ctx.logger_port.debug_fn("phase 4: monomorphization...")
+        val _t4_start = rt_time_ms()
         val mono_ok = self.monomorphize_impl()
+        val _t4_elapsed = rt_time_ms() - _t4_start
+        self.ctx.metrics_port.record_timing_fn("mono_ms", _t4_elapsed)
         if not mono_ok:
-            log_error("phase 4 FAILED")
+            self.ctx.logger_port.error_fn("phase 4 FAILED")
             return CompileResult.TypeError(self.ctx.errors)
-        log_debug("phase 4 done")
+        self.ctx.logger_port.debug_fn("phase 4 done ({_t4_elapsed}ms)")
 
         # Phase 5: Mode-specific processing
-        log_debug("phase 5: mode-specific processing...")
+        self.ctx.logger_port.debug_fn("phase 5: mode-specific processing...")
         match self.ctx.options.mode:
             case CompileMode.Check:
                 log_debug("check mode")
@@ -327,6 +350,9 @@ class CompilerDriver:
         result.status == CACHE_FRESH
 
     me load_sources_impl() -> bool:
+        # Phase 2: Wire module_storage port as the active source reader
+        _active_read_source = self.ctx.module_storage.read_source_fn
+
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
@@ -594,6 +620,8 @@ class CompilerDriver:
                     return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
             src_idx = src_idx + 1
 
+        # Phase 1: Fire event — backend complete (interpret mode)
+        self.ctx.event_port.on_backend_complete_fn(has_result)
         if has_result:
             return CompileResult.Success(last_result)
         CompileResult.Success(BackendResult.Unit)
@@ -722,6 +750,7 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
+        val _mir_start = rt_time_ms()
         var lowering = MirLowering(
             builder: MirBuilder(
                 module: MirModule(
@@ -755,6 +784,10 @@ class CompilerDriver:
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = mir_module
 
+        val _mir_elapsed = rt_time_ms() - _mir_start
+        self.ctx.metrics_port.record_timing_fn("mir_lower_ms", _mir_elapsed)
+        # Phase 1: Fire event — MIR complete
+        self.ctx.event_port.on_mir_complete_fn(self.ctx.mir_modules.keys().len())
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------

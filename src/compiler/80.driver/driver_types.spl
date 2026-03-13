@@ -25,7 +25,12 @@ use compiler.backend.backend.sdn.{SdnBackendImpl}
 use compiler.common.di.{DiContainer}
 use compiler.tools.aop.{AopWeaver, LogAspect}
 use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
-use compiler.common.compiler_services.{CompilerServices, create_default_services}
+use compiler.common.compiler_services.{CompilerServices, create_default_services, LoggerPort}
+use compiler.mdsoc.feature.events.ports.{CompilationEventPort, create_noop_event_port}
+use compiler.mdsoc.feature.module_loading.app.module_storage_port.{ModuleStoragePort}
+use compiler.mdsoc.adapters.out.file_module_storage.{create_file_module_storage}
+use compiler.mdsoc.feature.cache.cache_port.{CachePort, create_noop_cache_port}
+use compiler.mdsoc.feature.metrics.metrics_port.{MetricsPort, create_noop_metrics_port}
 
 # FFI declarations used by SourceFile.load and CompileContext
 extern fn rt_file_read_text(path: text) -> text
@@ -242,6 +247,13 @@ class CompileContext:
     extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
     aop: AopWeaver
     logger: BootLogger
+    # --- MDSOC typed ports (Phase 1-6) ---
+    event_port: CompilationEventPort    # Phase 1: pipeline event observer
+    module_storage: ModuleStoragePort   # Phase 2: swappable source reading
+    logger_port: LoggerPort             # Phase 3: structured logging port
+    services: CompilerServices          # Phase 4: full pipeline port container
+    cache_port: CachePort               # Phase 5: unified caching
+    metrics_port: MetricsPort           # Phase 6: zero-cost metrics
     sources: [SourceFile]
     modules: Dict<text, Module>
     hir_modules: Dict<text, HirModule>
@@ -313,6 +325,27 @@ class CompileContext:
         if options.verbose:
             aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
 
+        # Setup MDSOC typed ports
+        val event_port = create_noop_event_port()
+        val module_storage = create_file_module_storage()
+
+        # Logger port: wire warn/error by default, debug/info only in verbose mode
+        fn _lp_debug(msg: text): ()
+        fn _lp_info(msg: text): ()
+        fn _lp_warn(msg: text): print "[WARN] {msg}"
+        fn _lp_error(msg: text): print "[ERROR] {msg}"
+        val logger_port = LoggerPort(
+            name: "boot-log",
+            debug_fn: _lp_debug,
+            info_fn: _lp_info,
+            warn_fn: _lp_warn,
+            error_fn: _lp_error
+        )
+
+        val services = create_default_services()
+        val cache_port = create_noop_cache_port()
+        val metrics_port = create_noop_metrics_port()
+
         CompileContext(
             options: options,
             config: config,
@@ -320,6 +353,12 @@ class CompileContext:
             extensions: extensions,
             aop: aop,
             logger: logger,
+            event_port: event_port,
+            module_storage: module_storage,
+            logger_port: logger_port,
+            services: services,
+            cache_port: cache_port,
+            metrics_port: metrics_port,
             sources: [],
             modules: {},
             hir_modules: {},

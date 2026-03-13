@@ -1,50 +1,71 @@
 # Profiler Adapter
 #
 # Implements CompilationEventPort for compilation performance profiling.
-# Tracks stage entry/exit and produces timing summaries.
+# Tracks stage entry/exit times and produces timing summaries.
+#
+# Phase 1: Extended with wall-clock timing via rt_time_ms().
 
 use compiler.mdsoc.feature.events.ports.{CompilationEventPort}
+
+extern fn rt_time_ms() -> i64
 
 var _prof_stage_count: i64 = 0
 var _prof_last_stage: text = ""
 
-fn _prof_on_lex(count: i64):
+# Timing tracking (parallel arrays)
+var _prof_stage_names: [text] = []
+var _prof_stage_times: [i64] = []
+var _prof_stage_counts: [i64] = []
+var _prof_start_time: i64 = 0
+
+fn _prof_record_stage(name: text, item_count: i64):
     _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "lex"
+    _prof_last_stage = name
+    val now = rt_time_ms()
+    val elapsed = if _prof_start_time > 0: now - _prof_start_time else: 0
+    _prof_stage_names = _prof_stage_names.push(name)
+    _prof_stage_times = _prof_stage_times.push(elapsed)
+    _prof_stage_counts = _prof_stage_counts.push(item_count)
+    _prof_start_time = now
+
+fn _prof_on_lex(count: i64):
+    _prof_record_stage("lex", count)
 
 fn _prof_on_parse(count: i64):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "parse"
+    _prof_record_stage("parse", count)
 
 fn _prof_on_desugar(count: i64):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "desugar"
+    _prof_record_stage("desugar", count)
 
 fn _prof_on_type_check(errors: i64, syms: i64):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "type_check"
+    _prof_record_stage("type_check", syms)
 
 fn _prof_on_hir(count: i64):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "hir"
+    _prof_record_stage("hir", count)
 
 fn _prof_on_mir(count: i64):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "mir"
+    _prof_record_stage("mir", count)
 
 fn _prof_on_backend(ok: bool):
-    _prof_stage_count = _prof_stage_count + 1
-    _prof_last_stage = "backend"
+    val count = if ok: 1 else: 0
+    _prof_record_stage("backend", count)
 
 fn profiler_reset():
     _prof_stage_count = 0
     _prof_last_stage = ""
+    _prof_stage_names = []
+    _prof_stage_times = []
+    _prof_stage_counts = []
+    _prof_start_time = 0
 
 fn create_profiler_adapter() -> CompilationEventPort:
-    """Create profiler event adapter.
+    """Create profiler event adapter with timing.
 
-    Tracks how many pipeline stages completed and which was last.
+    Tracks pipeline stage completion times and item counts.
+    Call profiler_print_summary() after compilation to see results.
     """
+    profiler_reset()
+    _prof_start_time = rt_time_ms()
     CompilationEventPort(
         name: "profiler",
         on_lex_complete_fn: _prof_on_lex,
@@ -59,3 +80,22 @@ fn create_profiler_adapter() -> CompilationEventPort:
 fn prof_get_stage_count() -> i64: _prof_stage_count
 fn prof_get_last_stage() -> text: _prof_last_stage
 
+fn profiler_print_summary():
+    """Print timing summary for all profiled stages."""
+    if _prof_stage_names.len() == 0:
+        print "No profiling data collected."
+        return
+    print ""
+    print "== Compilation Profile =="
+    var total_ms: i64 = 0
+    var i = 0
+    while i < _prof_stage_names.len():
+        val name = _prof_stage_names[i]
+        val time_ms = _prof_stage_times[i]
+        val count = _prof_stage_counts[i]
+        total_ms = total_ms + time_ms
+        print "  {name}: {time_ms}ms ({count} items)"
+        i = i + 1
+    print "  ─────────────────────"
+    print "  total: {total_ms}ms ({_prof_stage_count} stages)"
+    print ""

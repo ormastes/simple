@@ -1,0 +1,131 @@
+# NOTE: These tests validate the build-time layer dependency enforcement.
+# Run with: bin/simple test test/unit/compiler/mdsoc/layer_ci_spec.spl
+#
+# Tests for: src/compiler/80.driver/build/layer_check.spl
+# The layer check scans compiler source imports and validates that dependencies
+# respect the numbered layer ordering.
+
+use compiler.driver.build.layer_check.{
+    run_layer_check, LayerCheckResult,
+    _extract_layer_dir, _resolve_import_to_layer_dir, _scan_file_imports
+}
+
+# ============================================================================
+# _extract_layer_dir
+# ============================================================================
+
+describe "_extract_layer_dir":
+    it "extracts layer dir from compiler source path":
+        val result = _extract_layer_dir("src/compiler/10.frontend/core/lexer.spl")
+        expect(result).to_equal("10.frontend")
+
+    it "extracts layer dir from nested path":
+        val result = _extract_layer_dir("src/compiler/85.mdsoc/adapters/in/profiler.spl")
+        expect(result).to_equal("85.mdsoc")
+
+    it "returns empty for non-compiler paths":
+        val result = _extract_layer_dir("src/app/cli/main.spl")
+        expect(result).to_equal("")
+
+    it "returns empty for path without numbered dir":
+        val result = _extract_layer_dir("src/compiler/common/config.spl")
+        expect(result).to_equal("")
+
+    it "extracts single-digit layer":
+        val result = _extract_layer_dir("src/compiler/0.core/types.spl")
+        expect(result).to_equal("0.core")
+
+# ============================================================================
+# _resolve_import_to_layer_dir
+# ============================================================================
+
+describe "_resolve_import_to_layer_dir":
+    it "resolves frontend import to numbered dir":
+        val dirs = ["00.common", "10.frontend", "20.hir", "50.mir", "80.driver"]
+        val result = _resolve_import_to_layer_dir("compiler.frontend.core.lexer", dirs)
+        expect(result).to_equal("10.frontend")
+
+    it "resolves hir import":
+        val dirs = ["00.common", "10.frontend", "20.hir", "50.mir"]
+        val result = _resolve_import_to_layer_dir("compiler.hir.hir_types", dirs)
+        expect(result).to_equal("20.hir")
+
+    it "returns empty for non-compiler import":
+        val dirs = ["10.frontend", "20.hir"]
+        val result = _resolve_import_to_layer_dir("std.text.utils", dirs)
+        expect(result).to_equal("")
+
+    it "returns empty for unknown layer":
+        val dirs = ["10.frontend", "20.hir"]
+        val result = _resolve_import_to_layer_dir("compiler.unknown.module", dirs)
+        expect(result).to_equal("")
+
+# ============================================================================
+# _scan_file_imports
+# ============================================================================
+
+describe "_scan_file_imports":
+    it "finds cross-layer imports":
+        val content = "use compiler.frontend.core.lexer.*\nuse compiler.hir.hir.*\n"
+        val dirs = ["00.common", "10.frontend", "20.hir", "80.driver"]
+        val path = "src/compiler/80.driver/driver.spl"
+        val (froms, tos) = _scan_file_imports(path, content, dirs)
+        expect(froms.len()).to_be_greater_than(0)
+
+    it "ignores same-layer imports":
+        val content = "use compiler.driver.driver_types.*\n"
+        val dirs = ["00.common", "10.frontend", "80.driver"]
+        val path = "src/compiler/80.driver/driver.spl"
+        val (froms, tos) = _scan_file_imports(path, content, dirs)
+        expect(froms.len()).to_equal(0)
+
+    it "ignores non-compiler imports":
+        val content = "use std.text.utils.*\nuse app.io.mod.*\n"
+        val dirs = ["10.frontend", "80.driver"]
+        val path = "src/compiler/80.driver/driver.spl"
+        val (froms, tos) = _scan_file_imports(path, content, dirs)
+        expect(froms.len()).to_equal(0)
+
+    it "handles empty content":
+        val dirs = ["10.frontend", "80.driver"]
+        val path = "src/compiler/80.driver/driver.spl"
+        val (froms, tos) = _scan_file_imports(path, "", dirs)
+        expect(froms.len()).to_equal(0)
+
+    it "handles non-compiler path":
+        val content = "use compiler.frontend.core.lexer.*\n"
+        val dirs = ["10.frontend", "80.driver"]
+        val path = "src/app/cli/main.spl"
+        val (froms, tos) = _scan_file_imports(path, content, dirs)
+        expect(froms.len()).to_equal(0)
+
+# ============================================================================
+# LayerCheckResult
+# ============================================================================
+
+describe "LayerCheckResult":
+    it "reports no violations when clean":
+        val result = LayerCheckResult(violations: [], files_scanned: 10, imports_checked: 50)
+        expect(result.has_violations()).to_equal(false)
+        expect(result.summary()).to_contain("0 violations")
+
+    it "reports violations when present":
+        use compiler.mdsoc.checker_types.layer_violation.{LayerViolation}
+        val v = LayerViolation.new("a.spl", "b.spl", "layer 10", "layer 80", "violation", "a.spl:1")
+        val result = LayerCheckResult(violations: [v], files_scanned: 5, imports_checked: 20)
+        expect(result.has_violations()).to_equal(true)
+        expect(result.summary()).to_contain("FAILED")
+        expect(result.summary()).to_contain("1 violations")
+
+# ============================================================================
+# Integration: run_layer_check
+# ============================================================================
+
+describe "run_layer_check integration":
+    it "runs without crashing":
+        val result = run_layer_check(false)
+        expect(result.files_scanned).to_be_greater_than(0)
+
+    it "scans multiple files":
+        val result = run_layer_check(false)
+        expect(result.imports_checked).to_be_greater_than(0)
