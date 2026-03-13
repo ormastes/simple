@@ -22,7 +22,8 @@ use test_runner_files.{discover_test_files, discover_test_files_fast, print_disc
 use test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use test_manifest_scanner.{manifest_full_scan}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, run_test_file_composite}
-use test_runner_output.{print_result, print_summary}
+use test_runner_output.{print_result, print_summary, print_result_compact, print_summary_compact}
+use std.cli_output.{progress_start, progress_update, progress_finish, progress_erase, log_open, log_line, log_close, log_show}
 use test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container & coverage
@@ -182,6 +183,12 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var completed_files: [text] = []
     var tests_run = 0
 
+    # Initialize progress and logging
+    val log_path = log_open("test")
+    val total_files = files.len()
+    if not updated_options.verbose:
+        progress_start(total_files, "Starting tests...")
+
     for file_path in files:
         if options.self_protect:
             val (violated, reason) = system_exceeds_threshold(options.cpu_threshold, options.mem_threshold)
@@ -195,11 +202,25 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         # Run test
         val rss_before = current_rss_kb_main()
         val result = run_single_test(file_path, options)
-        print_result(result, options.format)
+
+        # Always log the result
+        val log_msg = _format_result_for_log(result)
+        log_line(log_path, log_msg)
+
+        if options.verbose:
+            print_result(result, options.format)
+        else:
+            progress_update(tests_run + 1, file_path)
+            if result.failed > 0 or result.timed_out:
+                progress_erase()
+                print_result_compact(result)
+
         val rss_after = current_rss_kb_main()
         val rss_delta = rss_after - rss_before
         if rss_delta != 0:
-            print "  [MEMDIFF] {file_path}: {rss_delta} kB (rss={rss_after})"
+            log_line(log_path, "  [MEMDIFF] {file_path}: {rss_delta} kB (rss={rss_after})")
+            if options.verbose:
+                print "  [MEMDIFF] {file_path}: {rss_delta} kB (rss={rss_after})"
 
         total_passed = total_passed + result.passed
         total_failed = total_failed + result.failed
@@ -213,12 +234,17 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         tests_run = tests_run + 1
 
         if tests_run % 50 == 0:
-            print "  [MEMCHK] after {tests_run} tests: rss={rss_after} kB"
+            log_line(log_path, "  [MEMCHK] after {tests_run} tests: rss={rss_after} kB")
+            if options.verbose:
+                print "  [MEMCHK] after {tests_run} tests: rss={rss_after} kB"
 
         if options.fail_fast and (result.failed > 0 or result.timed_out):
             print ""
             print "Stopping early (--fail-fast)"
             break
+
+    # Finalize log
+    log_close(log_path, "test")
 
     # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
     # if options.resume and checkpoint_exists():
@@ -234,6 +260,25 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_duration_ms: total_duration_ms,
         total_setup_ms: 0
     )
+
+fn _format_result_for_log(result: TestFileResult) -> text:
+    if result.timed_out:
+        return "  TOUT  {result.path} ({result.duration_ms}ms) Error: {result.error}"
+    if result.is_ok():
+        var msg = "  PASS  {result.path} ({result.passed} passed"
+        if result.skipped > 0:
+            msg = msg + ", {result.skipped} skipped"
+        if result.pending > 0:
+            msg = msg + ", {result.pending} pending"
+        msg = msg + ", {result.duration_ms}ms)"
+        return msg
+    var msg = "  FAIL  {result.path} ({result.passed} passed, {result.failed} failed"
+    if result.skipped > 0:
+        msg = msg + ", {result.skipped} skipped"
+    msg = msg + ", {result.duration_ms}ms)"
+    if result.error != "":
+        msg = msg + "\n        Error: {result.error}"
+    msg
 
 fn run_tests_parallel_mode(
     files: [text],
@@ -371,6 +416,11 @@ fn main() -> i64:
     val options = parse_test_args(args)
     report_free_mem("AFTER_PARSE_ARGS")
 
+    # Handle --show-log: print last log and exit
+    if options.show_log:
+        log_show("test")
+        return 0
+
     # Set recursion guard so child processes use Rust runner
     env_set("SIMPLE_TEST_RUNNER_RUST", "1")
 
@@ -395,15 +445,24 @@ fn main() -> i64:
 
     # Run spec tests (default path) with self-protection enabled in run_tests()
     if run_spec:
-        print "Simple Test Runner v0.8.1"
-        print ""
+        if not options.verbose:
+            pass_do_nothing
+        else:
+            print "Simple Test Runner v0.8.1"
+            print ""
 
         val run_start = time_now_unix_micros()
         val result = run_tests(options)
         val run_end = time_now_unix_micros()
 
         report_free_mem("AFTER_RUN_{result.files.len()}_files")
-        print_summary(result, options.format)
+
+        if options.verbose:
+            print_summary(result, options.format)
+        else:
+            val elapsed_ms = (run_end - run_start) / 1000
+            progress_finish("")
+            print_summary_compact(result, elapsed_ms)
 
         if result.is_ok():
             return 0

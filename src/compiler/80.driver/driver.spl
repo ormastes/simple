@@ -653,6 +653,9 @@ class CompilerDriver:
         # Process async functions (generate state machines for await/yield)
         val _async_state_machines = self.process_async()
 
+        # AOP weaving pass (insert advice calls into MIR before optimization)
+        self.weave_mir_all()
+
         # Optimize MIR (speed optimization for JIT)
         self.optimize_mir(optimizationconfig_speed())
 
@@ -708,6 +711,9 @@ class CompilerDriver:
 
         # Process async functions (generate state machines for await/yield)
         val async_state_machines = self.process_async()
+
+        # AOP weaving pass (insert advice calls into MIR before optimization)
+        self.weave_mir_all()
 
         # Optimize MIR (use optimization level from options)
         val opt_config = self.get_optimization_config()
@@ -836,6 +842,42 @@ class CompilerDriver:
 
         log_debug("generated {state_machines.keys().len()} async state machines")
         state_machines
+
+    # --------------------------------------------------------------------------
+    # AOP Weaving
+    # --------------------------------------------------------------------------
+
+    me weave_mir_all():
+        """Apply AOP weaving to all MIR functions if weaving is enabled."""
+        if not self.ctx.aop.config.enabled:
+            return
+        log_debug("weaving AOP advice into {self.ctx.mir_modules.keys().len()} MIR modules")
+        var total_woven = 0
+        for mod_name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[mod_name]
+            for func_name in mir_module.functions.keys():
+                val func = mir_module.functions[func_name]
+                # Build MIR block info for join point detection
+                var block_infos: [MirBlockInfo] = []
+                for block in func.blocks:
+                    var inst_infos: [InstructionInfo] = []
+                    var inst_idx = 0
+                    for inst in block.instructions:
+                        inst_infos = inst_infos.push(InstructionInfo(
+                            index: inst_idx,
+                            kind_tag: "instruction"
+                        ))
+                        inst_idx = inst_idx + 1
+                    block_infos = block_infos.push(MirBlockInfo(
+                        id: block.id,
+                        instruction_kinds: inst_infos
+                    ))
+                val result = self.ctx.aop.weave_mir_function(
+                    func.name, mod_name, [], [], block_infos
+                )
+                total_woven = total_woven + result.advices_inserted
+        if total_woven > 0:
+            log_info("AOP: woven {total_woven} advice calls")
 
     # --------------------------------------------------------------------------
     # MIR Optimization

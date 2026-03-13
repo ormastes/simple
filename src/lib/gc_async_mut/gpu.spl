@@ -9,6 +9,8 @@
 #
 # Provides safe GPU memory management with automatic error checking.
 
+use std.types.{DeviceId, KernelHandle, ThreadCount}
+
 # Canonical CUDA runtime ABI.
 # Keep this layer thin so async/gc-facing APIs share the same real backend
 # instead of interpreter-era success stubs.
@@ -119,16 +121,16 @@ struct GpuError:
 
 struct GpuDevice:
     """Handle to a GPU device."""
-    id: i64
+    id: DeviceId
     handle: i64
 
     static fn default() -> Result<GpuDevice, GpuError>:
         """Get the default GPU device (device 0)."""
-        GpuDevice.get(0)
+        GpuDevice.get(DeviceId(value: 0))
 
-    static fn get(device_id: i64) -> Result<GpuDevice, GpuError>:
+    static fn get(device_id: DeviceId) -> Result<GpuDevice, GpuError>:
         """Get a GPU device by ID."""
-        val handle = cuda_device_get(device_id)
+        val handle = cuda_device_get(device_id.value)
         if handle < 0:
             return Err(GpuError.from_code(handle))
         Ok(GpuDevice(id: device_id, handle: handle))
@@ -212,25 +214,25 @@ class GpuPtr:
 
 struct GpuModule:
     """Handle to a loaded GPU module (compiled PTX)."""
-    handle: i64
+    handle: KernelHandle
 
     static fn load_ptx(ptx_code: text) -> Result<GpuModule, GpuError>:
         """Load a GPU module from PTX source string."""
         val handle = cuda_module_load_data(ptx_code)
         if handle < 0:
             return Err(GpuError.from_code(handle))
-        Ok(GpuModule(handle: handle))
+        Ok(GpuModule(handle: KernelHandle(value: handle)))
 
     static fn load_file(path: text) -> Result<GpuModule, GpuError>:
         """Load a GPU module from a file path."""
         val handle = cuda_module_load(path)
         if handle < 0:
             return Err(GpuError.from_code(handle))
-        Ok(GpuModule(handle: handle))
+        Ok(GpuModule(handle: KernelHandle(value: handle)))
 
     fn unload() -> Result<(), GpuError>:
         """Unload this GPU module."""
-        val result = cuda_module_unload(self.handle)
+        val result = cuda_module_unload(self.handle.value)
         if result < 0:
             return Err(GpuError.from_code(result))
         Ok(())
@@ -241,36 +243,36 @@ struct GpuModule:
 
 struct GpuLaunchConfig:
     """Configuration for launching a GPU kernel."""
-    grid_x: i64
-    grid_y: i64
-    grid_z: i64
-    block_x: i64
-    block_y: i64
-    block_z: i64
+    grid_x: ThreadCount
+    grid_y: ThreadCount
+    grid_z: ThreadCount
+    block_x: ThreadCount
+    block_y: ThreadCount
+    block_z: ThreadCount
 
-    static fn simple(num_blocks: i64, threads_per_block: i64) -> GpuLaunchConfig:
+    static fn simple(num_blocks: ThreadCount, threads_per_block: ThreadCount) -> GpuLaunchConfig:
         """Create a 1D launch configuration."""
         GpuLaunchConfig(
             grid_x: num_blocks,
-            grid_y: 1,
-            grid_z: 1,
+            grid_y: ThreadCount(value: 1),
+            grid_z: ThreadCount(value: 1),
             block_x: threads_per_block,
-            block_y: 1,
-            block_z: 1
+            block_y: ThreadCount(value: 1),
+            block_z: ThreadCount(value: 1)
         )
 
-    static fn grid_2d(grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> GpuLaunchConfig:
+    static fn grid_2d(grid_x: ThreadCount, grid_y: ThreadCount, block_x: ThreadCount, block_y: ThreadCount) -> GpuLaunchConfig:
         """Create a 2D launch configuration."""
         GpuLaunchConfig(
             grid_x: grid_x,
             grid_y: grid_y,
-            grid_z: 1,
+            grid_z: ThreadCount(value: 1),
             block_x: block_x,
             block_y: block_y,
-            block_z: 1
+            block_z: ThreadCount(value: 1)
         )
 
-    static fn grid_3d(grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> GpuLaunchConfig:
+    static fn grid_3d(grid_x: ThreadCount, grid_y: ThreadCount, grid_z: ThreadCount, block_x: ThreadCount, block_y: ThreadCount, block_z: ThreadCount) -> GpuLaunchConfig:
         """Create a 3D launch configuration."""
         GpuLaunchConfig(
             grid_x: grid_x,
@@ -283,7 +285,7 @@ struct GpuLaunchConfig:
 
     fn total_threads() -> i64:
         """Get total number of threads."""
-        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+        self.grid_x.value * self.grid_y.value * self.grid_z.value * self.block_x.value * self.block_y.value * self.block_z.value
 
 # ============================================================================
 # Top-Level API Functions
@@ -336,14 +338,14 @@ fn gpu_memset(gpu_ptr: GpuPtr, value: i64, size: i64) -> Result<(), GpuError>:
 fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
     """Launch a GPU kernel with the given configuration."""
     val result = cuda_launch_kernel(
-        module.handle,
+        module.handle.value,
         func_name,
-        config.grid_x,
-        config.grid_y,
-        config.grid_z,
-        config.block_x,
-        config.block_y,
-        config.block_z,
+        config.grid_x.value,
+        config.grid_y.value,
+        config.grid_z.value,
+        config.block_x.value,
+        config.block_y.value,
+        config.block_z.value,
         args_ptr
     )
     if result < 0:
@@ -362,23 +364,23 @@ fn gpu_sync() -> Result<(), GpuError>:
 # Device Info Wrappers
 # ============================================================================
 
-fn gpu_device_name(device_id: i64) -> text:
+fn gpu_device_name(device_id: DeviceId) -> text:
     """Get GPU device name by ID."""
-    cuda_device_name(cuda_device_get(device_id))
+    cuda_device_name(cuda_device_get(device_id.value))
 
-fn gpu_device_compute_capability(device_id: i64) -> (i64, i64):
+fn gpu_device_compute_capability(device_id: DeviceId) -> (i64, i64):
     """Get compute capability as (major, minor) tuple."""
-    val cap = cuda_device_compute_capability(cuda_device_get(device_id))
+    val cap = cuda_device_compute_capability(cuda_device_get(device_id.value))
     (cap / 10, cap % 10)
 
-fn gpu_device_total_memory(device_id: i64) -> i64:
+fn gpu_device_total_memory(device_id: DeviceId) -> i64:
     """Get total device memory in bytes.
     Note: Returns 0 until memory query FFI is added."""
     0
 
-fn gpu_set_device(device_id: i64) -> Result<(), GpuError>:
+fn gpu_set_device(device_id: DeviceId) -> Result<(), GpuError>:
     """Set the active GPU device (creates context)."""
-    val handle = cuda_ctx_create(cuda_device_get(device_id))
+    val handle = cuda_ctx_create(cuda_device_get(device_id.value))
     if handle < 0:
         return Err(GpuError.from_code(handle))
     Ok(())

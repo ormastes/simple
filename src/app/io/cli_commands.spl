@@ -9,6 +9,8 @@ use compiler.driver.driver_types.{CompileResult}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use std.tooling.easy_fix.{FixConfidence}
+use std.cli_output.{log_open, log_line, log_close, log_show, format_duration, print_log_hint, print_warning_now}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -59,12 +61,25 @@ fn cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64:
 fn cli_run_lint(args: [text]) -> i64:
     # Parse flags from args
     var files: [text] = []
+    var verbose = false
+    var strict = false
+    var show_log = false
     for arg in args:
         if arg == "lint":
             # Skip the command name itself
             val _ = 0
+        elif arg == "--show-log":
+            show_log = true
+        elif arg == "--strict":
+            strict = true
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
         elif not arg.starts_with("-"):
             files.push(arg)
+
+    if show_log:
+        log_show("lint")
+        return 0
 
     if files.len() == 0:
         print "Usage: simple lint <file.spl> [file2.spl ...]"
@@ -74,13 +89,21 @@ fn cli_run_lint(args: [text]) -> i64:
         print "  - Collection performance anti-patterns (COLL001-COLL008)"
         print "  - Duplicate typed arguments (DTYP001)"
         print "  - Bare primitive types in public APIs"
+        print ""
+        print "Flags:"
+        print "  -v, --verbose   Show per-file results"
+        print "  --strict        Treat warnings as errors"
+        print "  --show-log      Print latest lint log"
         return 1
 
+    val lint_log = log_open("lint")
+    val lint_start = current_time_ms()
     var exit_code = 0
-    var total_warnings = 0
+    var total_errors = 0
     for file_path in files:
         if not rt_file_exists(file_path):
             _cli_eprint("Error: File not found: {file_path}")
+            log_line(lint_log, "Error: File not found: {file_path}")
             exit_code = 1
             continue
 
@@ -88,18 +111,37 @@ fn cli_run_lint(args: [text]) -> i64:
         val result = check_file(file_path)
         match result:
             case CompileResult.Success(msg):
-                print "lint: {file_path} OK"
+                log_line(lint_log, "lint: {file_path} OK")
+                if verbose:
+                    print "lint: {file_path} OK"
             case _:
+                log_line(lint_log, "lint: {file_path} has issues")
                 _cli_eprint("lint: {file_path} has issues")
                 exit_code = 1
-                total_warnings = total_warnings + 1
+                total_errors = total_errors + 1
 
-    if total_warnings > 0:
+    val lint_end = current_time_ms()
+    val lint_elapsed = lint_end - lint_start
+    log_close(lint_log, "lint")
+
+    if verbose:
+        # Verbose output
+        if total_errors > 0:
+            print ""
+            print "Lint found issues in {total_errors} file(s)"
+        elif exit_code == 0:
+            print ""
+            print "Lint passed: all files clean"
+    else:
+        # Compact output
+        val file_count = files.len()
         print ""
-        print "Lint found issues in {total_warnings} file(s)"
-    elif exit_code == 0:
-        print ""
-        print "Lint passed: all files clean"
+        if exit_code == 0:
+            print "Lint: {file_count} files, 0 errors in {format_duration(lint_elapsed)}"
+        else:
+            print "Lint: {file_count} files, {total_errors} errors in {format_duration(lint_elapsed)}"
+            print_log_hint("lint")
+
     exit_code
 
 fn cli_run_fmt(args: [text]) -> i64:

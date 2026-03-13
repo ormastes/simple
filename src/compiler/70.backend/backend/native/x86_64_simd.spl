@@ -21,6 +21,7 @@ use compiler.backend.native.mach_inst.{X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3, X
 use compiler.backend.native.mach_inst.{X86_XMM8, X86_XMM9, X86_XMM10, X86_XMM11, X86_XMM12, X86_XMM13, X86_XMM14, X86_XMM15}
 use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_YMM4, X86_YMM5, X86_YMM6, X86_YMM7}
 use compiler.backend.native.mach_inst.{X86_YMM8, X86_YMM9, X86_YMM10, X86_YMM11, X86_YMM12, X86_YMM13, X86_YMM14, X86_YMM15}
+use std.types.{RegisterId, Opcode}
 
 # ============================================================================
 # VEX Prefix Encoding
@@ -35,10 +36,10 @@ struct VexPrefix:
     pp: i64              # Opcode prefix: 0=none, 1=0x66, 2=0xF3, 3=0xF2
     mmmmm: i64           # Opcode map select: 1=0F, 2=0F38, 3=0F3A
     w: bool              # REX.W equivalent
-    vvvv: i64            # Source register (inverted)
+    vvvv: RegisterId     # Source register (inverted)
     rxb: i64             # REX.R, REX.X, REX.B (inverted)
 
-fn vex_2byte(vvvv: i64, l: bool, pp: i64) -> [i64]:
+fn vex_2byte(vvvv: RegisterId, l: bool, pp: i64) -> [i64]:
     """
     Encode 2-byte VEX prefix (for simple 128-bit operations).
     Format: C5 <vex_byte>
@@ -50,7 +51,7 @@ fn vex_2byte(vvvv: i64, l: bool, pp: i64) -> [i64]:
     vex_byte = vex_byte + 128  # R=1 (no extension)
 
     # vvvv (inverted source register) - bits 6-3
-    val vvvv_inv = 15 - (vvvv % 16)
+    val vvvv_inv = 15 - (vvvv.value % 16)
     vex_byte = vex_byte + (vvvv_inv * 8)
 
     # L bit (vector length) - bit 2
@@ -62,7 +63,7 @@ fn vex_2byte(vvvv: i64, l: bool, pp: i64) -> [i64]:
 
     [0xC5, vex_byte]
 
-fn vex_3byte(rxb: i64, mmmmm: i64, w: bool, vvvv: i64, l: bool, pp: i64) -> [i64]:
+fn vex_3byte(rxb: i64, mmmmm: i64, w: bool, vvvv: RegisterId, l: bool, pp: i64) -> [i64]:
     """
     Encode 3-byte VEX prefix (for AVX2 256-bit operations).
     Format: C4 <byte1> <byte2>
@@ -87,7 +88,7 @@ fn vex_3byte(rxb: i64, mmmmm: i64, w: bool, vvvv: i64, l: bool, pp: i64) -> [i64
         byte2 = byte2 + 128
 
     # vvvv (inverted source register) - bits 6-3
-    val vvvv_inv = 15 - (vvvv % 16)
+    val vvvv_inv = 15 - (vvvv.value % 16)
     byte2 = byte2 + (vvvv_inv * 8)
 
     # L bit (vector length) - bit 2
@@ -99,7 +100,7 @@ fn vex_3byte(rxb: i64, mmmmm: i64, w: bool, vvvv: i64, l: bool, pp: i64) -> [i64
 
     [0xC4, byte1, byte2]
 
-fn vex_avx2_256(vvvv: i64, pp: i64, opcode: i64) -> [i64]:
+fn vex_avx2_256(vvvv: RegisterId, pp: i64, opcode: Opcode) -> [i64]:
     """
     Create VEX prefix for 256-bit AVX2 instruction.
     Most common case: 3-byte VEX with L=1, mmmmm=1 (0F opcode map).
@@ -112,33 +113,33 @@ fn vex_avx2_256(vvvv: i64, pp: i64, opcode: i64) -> [i64]:
         true,   # l: 256-bit
         pp      # opcode prefix
     )
-    prefix = prefix + [opcode]
+    prefix = prefix + [opcode.value]
     prefix
 
-fn vex_avx_128(vvvv: i64, pp: i64, opcode: i64) -> [i64]:
+fn vex_avx_128(vvvv: RegisterId, pp: i64, opcode: Opcode) -> [i64]:
     """
     Create VEX prefix for 128-bit AVX instruction.
     Uses 2-byte VEX when possible (no REX bits needed).
     """
     var prefix = vex_2byte(vvvv, false, pp)
-    prefix = prefix + [opcode]
+    prefix = prefix + [opcode.value]
     prefix
 
 # ============================================================================
 # Register Encoding
 # ============================================================================
 
-fn ymm_to_index(ymm_id: i64) -> i64:
+fn ymm_to_index(ymm_id: RegisterId) -> i64:
     """Convert YMM register ID to index (0-15)."""
-    if ymm_id >= 32 and ymm_id <= 47:
-        ymm_id - 32
+    if ymm_id.value >= 32 and ymm_id.value <= 47:
+        ymm_id.value - 32
     else:
         0
 
-fn xmm_to_index(xmm_id: i64) -> i64:
+fn xmm_to_index(xmm_id: RegisterId) -> i64:
     """Convert XMM register ID to index (0-15)."""
-    if xmm_id >= 16 and xmm_id <= 31:
-        xmm_id - 16
+    if xmm_id.value >= 16 and xmm_id.value <= 31:
+        xmm_id.value - 16
     else:
         0
 
@@ -154,7 +155,7 @@ fn modrm_reg_reg_simd(dest: i64, src: i64) -> i64:
 # AVX2 f32x8 (256-bit) Instructions
 # ============================================================================
 
-fn encode_vaddps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vaddps_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VADDPS ymm, ymm, ymm (256-bit float add).
     VEX.256.0F.WIG 58 /r
@@ -164,7 +165,7 @@ fn encode_vaddps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=0 (no prefix), mmmmm=1 (0F), L=1 (256-bit)
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 0)
 
     # Opcode: 0x58 (ADDPS)
     bytes = bytes + [0x58]
@@ -174,7 +175,7 @@ fn encode_vaddps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
 
     bytes
 
-fn encode_vsubps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vsubps_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VSUBPS ymm, ymm, ymm (256-bit float subtract).
     VEX.256.0F.WIG 5C /r
@@ -183,12 +184,12 @@ fn encode_vsubps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 0)
     bytes = bytes + [0x5C]  # SUBPS opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vmulps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vmulps_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VMULPS ymm, ymm, ymm (256-bit float multiply).
     VEX.256.0F.WIG 59 /r
@@ -197,12 +198,12 @@ fn encode_vmulps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 0)
     bytes = bytes + [0x59]  # MULPS opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vdivps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vdivps_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VDIVPS ymm, ymm, ymm (256-bit float divide).
     VEX.256.0F.WIG 5E /r
@@ -211,12 +212,12 @@ fn encode_vdivps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 0)
     bytes = bytes + [0x5E]  # DIVPS opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vfmadd213ps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vfmadd213ps_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VFMADD213PS ymm, ymm, ymm (fused multiply-add: dest = dest * src1 + src2).
     VEX.256.66.0F38.W0 A8 /r
@@ -226,7 +227,7 @@ fn encode_vfmadd213ps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), L=1 (256-bit)
-    var bytes = vex_3byte(0, 2, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 2, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0xA8]  # VFMADD213PS opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
@@ -235,7 +236,7 @@ fn encode_vfmadd213ps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
 # AVX2 f64x4 (256-bit) Instructions
 # ============================================================================
 
-fn encode_vaddpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vaddpd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VADDPD ymm, ymm, ymm (256-bit double add).
     VEX.256.66.0F.WIG 58 /r
@@ -245,12 +246,12 @@ fn encode_vaddpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=1 (0x66 prefix), mmmmm=1 (0F), L=1 (256-bit)
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0x58]  # ADDPD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vsubpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vsubpd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VSUBPD ymm, ymm, ymm (256-bit double subtract).
     VEX.256.66.0F.WIG 5C /r
@@ -259,12 +260,12 @@ fn encode_vsubpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0x5C]  # SUBPD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vmulpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vmulpd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VMULPD ymm, ymm, ymm (256-bit double multiply).
     VEX.256.66.0F.WIG 59 /r
@@ -273,12 +274,12 @@ fn encode_vmulpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0x59]  # MULPD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vdivpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vdivpd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VDIVPD ymm, ymm, ymm (256-bit double divide).
     VEX.256.66.0F.WIG 5E /r
@@ -287,12 +288,12 @@ fn encode_vdivpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0x5E]  # DIVPD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vfmadd213pd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vfmadd213pd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VFMADD213PD ymm, ymm, ymm (fused multiply-add double).
     VEX.256.66.0F38.W1 A8 /r
@@ -302,7 +303,7 @@ fn encode_vfmadd213pd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), W=1, L=1 (256-bit)
-    var bytes = vex_3byte(0, 2, true, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 2, true, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0xA8]  # VFMADD213PD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
@@ -311,7 +312,7 @@ fn encode_vfmadd213pd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
 # AVX2 i32x8 (256-bit) Integer Instructions
 # ============================================================================
 
-fn encode_vpaddd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vpaddd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VPADDD ymm, ymm, ymm (256-bit int32 add).
     VEX.256.66.0F.WIG FE /r
@@ -321,12 +322,12 @@ fn encode_vpaddd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=1 (0x66), mmmmm=1 (0F), L=1 (256-bit)
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0xFE]  # PADDD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vpsubd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vpsubd_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VPSUBD ymm, ymm, ymm (256-bit int32 subtract).
     VEX.256.66.0F.WIG FA /r
@@ -335,12 +336,12 @@ fn encode_vpsubd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src1_idx = ymm_to_index(src1)
     val src2_idx = ymm_to_index(src2)
 
-    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0xFA]  # PSUBD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
 
-fn encode_vpmulld_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+fn encode_vpmulld_ymm(dest: RegisterId, src1: RegisterId, src2: RegisterId) -> [i64]:
     """
     Encode VPMULLD ymm, ymm, ymm (256-bit int32 multiply).
     VEX.256.66.0F38.WIG 40 /r
@@ -350,7 +351,7 @@ fn encode_vpmulld_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
     val src2_idx = ymm_to_index(src2)
 
     # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), L=1 (256-bit)
-    var bytes = vex_3byte(0, 2, false, src1_idx, true, 1)
+    var bytes = vex_3byte(0, 2, false, RegisterId(value: src1_idx), true, 1)
     bytes = bytes + [0x40]  # PMULLD opcode
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
     bytes
@@ -359,7 +360,7 @@ fn encode_vpmulld_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
 # SSE f32x4 (128-bit) Instructions
 # ============================================================================
 
-fn encode_addps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_addps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode ADDPS xmm, xmm (128-bit float add).
     Legacy SSE: 0F 58 /r
@@ -371,7 +372,7 @@ fn encode_addps_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_subps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_subps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode SUBPS xmm, xmm (128-bit float subtract).
     Legacy SSE: 0F 5C /r
@@ -383,7 +384,7 @@ fn encode_subps_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_mulps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_mulps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode MULPS xmm, xmm (128-bit float multiply).
     Legacy SSE: 0F 59 /r
@@ -395,7 +396,7 @@ fn encode_mulps_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_divps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_divps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode DIVPS xmm, xmm (128-bit float divide).
     Legacy SSE: 0F 5E /r
@@ -411,7 +412,7 @@ fn encode_divps_xmm(dest: i64, src: i64) -> [i64]:
 # SSE i32x4 (128-bit) Integer Instructions
 # ============================================================================
 
-fn encode_paddd_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_paddd_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode PADDD xmm, xmm (128-bit int32 add).
     SSE2: 66 0F FE /r
@@ -423,7 +424,7 @@ fn encode_paddd_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_psubd_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_psubd_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode PSUBD xmm, xmm (128-bit int32 subtract).
     SSE2: 66 0F FA /r
@@ -435,7 +436,7 @@ fn encode_psubd_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_pmulld_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_pmulld_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode PMULLD xmm, xmm (128-bit int32 multiply).
     SSE4.1: 66 0F 38 40 /r
@@ -451,7 +452,7 @@ fn encode_pmulld_xmm(dest: i64, src: i64) -> [i64]:
 # Horizontal Operations (SSE3/AVX)
 # ============================================================================
 
-fn encode_haddps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_haddps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode HADDPS xmm, xmm (horizontal add).
     SSE3: F2 0F 7C /r
@@ -463,7 +464,7 @@ fn encode_haddps_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_maxps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_maxps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode MAXPS xmm, xmm (max of packed singles).
     SSE: 0F 5F /r
@@ -475,7 +476,7 @@ fn encode_maxps_xmm(dest: i64, src: i64) -> [i64]:
     bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
     bytes
 
-fn encode_minps_xmm(dest: i64, src: i64) -> [i64]:
+fn encode_minps_xmm(dest: RegisterId, src: RegisterId) -> [i64]:
     """
     Encode MINPS xmm, xmm (min of packed singles).
     SSE: 0F 5D /r
@@ -491,7 +492,7 @@ fn encode_minps_xmm(dest: i64, src: i64) -> [i64]:
 # Load/Store Instructions
 # ============================================================================
 
-fn encode_vmovaps_load_ymm(dest: i64, base: i64, offset: i64) -> [i64]:
+fn encode_vmovaps_load_ymm(dest: RegisterId, base: RegisterId, offset: i64) -> [i64]:
     """
     Encode VMOVAPS ymm, m256 (load 256-bit aligned).
     VEX.256.0F.WIG 28 /r
@@ -499,12 +500,12 @@ fn encode_vmovaps_load_ymm(dest: i64, base: i64, offset: i64) -> [i64]:
     val dest_idx = ymm_to_index(dest)
 
     # VEX prefix: pp=0, mmmmm=1 (0F), L=1 (256-bit)
-    var bytes = vex_3byte(0, 1, false, 0, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: 0), true, 0)
     bytes = bytes + [0x28]  # MOVAPS opcode
 
     # ModR/M with memory addressing (simplified: direct offset from base)
     # For full implementation, need proper SIB byte encoding
-    bytes = bytes + [modrm_simd(2, dest_idx, base % 8)]
+    bytes = bytes + [modrm_simd(2, dest_idx, base.value % 8)]
 
     # Displacement (offset as i32)
     bytes = bytes + [offset % 256]
@@ -514,7 +515,7 @@ fn encode_vmovaps_load_ymm(dest: i64, base: i64, offset: i64) -> [i64]:
 
     bytes
 
-fn encode_vmovaps_store_ymm(dest_base: i64, dest_offset: i64, src: i64) -> [i64]:
+fn encode_vmovaps_store_ymm(dest_base: RegisterId, dest_offset: i64, src: RegisterId) -> [i64]:
     """
     Encode VMOVAPS m256, ymm (store 256-bit aligned).
     VEX.256.0F.WIG 29 /r
@@ -522,11 +523,11 @@ fn encode_vmovaps_store_ymm(dest_base: i64, dest_offset: i64, src: i64) -> [i64]
     val src_idx = ymm_to_index(src)
 
     # VEX prefix: pp=0, mmmmm=1 (0F), L=1 (256-bit)
-    var bytes = vex_3byte(0, 1, false, 0, true, 0)
+    var bytes = vex_3byte(0, 1, false, RegisterId(value: 0), true, 0)
     bytes = bytes + [0x29]  # MOVAPS store opcode
 
     # ModR/M with memory addressing
-    bytes = bytes + [modrm_simd(2, src_idx, dest_base % 8)]
+    bytes = bytes + [modrm_simd(2, src_idx, dest_base.value % 8)]
 
     # Displacement
     bytes = bytes + [dest_offset % 256]

@@ -1,0 +1,65 @@
+# CLI Progress Display
+#
+# Writes [N/total] progress counter to stderr with \r overwrite.
+# Detects dumb terminals and falls back to newline-per-update.
+
+use std.nogc_sync_mut.io.pipe.{Stderr, Stdout}
+use app.io.time_ops.{current_time_ms}
+
+extern fn rt_env_get(key: text) -> text
+
+# ANSI erase-line sequence
+val ERASE_LINE: text = "\u{001b}[2K"
+
+# Module-level state for progress tracking
+var _last_update_ms: i64 = 0
+var _total: i64 = 0
+var _is_tty: bool = true
+
+fn _check_tty():
+    val term = rt_env_get("TERM")
+    if term == nil or term == "" or term == "dumb":
+        _is_tty = false
+    else:
+        _is_tty = true
+
+fn progress_start(total: i64, label: text):
+    _total = total
+    _last_update_ms = 0
+    _check_tty()
+    val msg = "[0/{_total}] {label}"
+    if _is_tty:
+        var stderr = Stderr()
+        stderr.write_text("\r{msg}")
+    else:
+        var stderr = Stderr()
+        stderr.write_text("{msg}\n")
+
+fn progress_update(current: i64, item: text):
+    val now = current_time_ms()
+    val elapsed = now - _last_update_ms
+    # Only update display if >=1000ms elapsed or this is the last item
+    if elapsed < 1000 and current != _total:
+        return
+    _last_update_ms = now
+    val msg = "[{current}/{_total}] {item}"
+    if _is_tty:
+        var stderr = Stderr()
+        stderr.write_text("\r{ERASE_LINE}{msg}")
+    else:
+        var stderr = Stderr()
+        stderr.write_text("{msg}\n")
+
+fn progress_finish(summary: text):
+    if _is_tty:
+        # Clear the progress line first
+        var stderr = Stderr()
+        stderr.write_text("\r{ERASE_LINE}")
+    # Print final summary to stdout
+    var stdout = Stdout()
+    stdout.write_text("{summary}\n")
+
+fn progress_erase():
+    if _is_tty:
+        var stderr = Stderr()
+        stderr.write_text("\r{ERASE_LINE}\r")

@@ -19,56 +19,57 @@ use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X
 use compiler.backend.native.encode_common.{encode_module_with}
 use compiler.backend.native.elf_writer.{ByteBuffer, new_byte_buffer, buf_len, buf_write_u8, buf_write_u32_le, buf_write_u64_le, buf_write_bytes}
 use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value, get_label_id, get_sym_name}
+use std.types.{RegisterId, Opcode}
 
 # ============================================================================
 # Encoding Helpers
 # ============================================================================
 
-fn reg_low3(reg_id: i64) -> i64:
-    reg_id % 8
+fn reg_low3(rid: RegisterId) -> i64:
+    rid.value % 8
 
-fn reg_needs_rex_b(reg_id: i64) -> bool:
-    reg_id >= 8
+fn reg_needs_rex_b(rid: RegisterId) -> bool:
+    rid.value >= 8
 
 fn rex_w() -> i64:
     0x48
 
-fn rex_wr(reg: i64) -> i64:
+fn rex_wr(reg: RegisterId) -> i64:
     var rx = 0x48
-    if reg >= 8:
+    if reg.value >= 8:
         rx = rx + 4  # REX.R
     rx
 
-fn rex_wrb(reg: i64, rm: i64) -> i64:
+fn rex_wrb(reg: RegisterId, rm: RegisterId) -> i64:
     var rx = 0x48  # REX.W
-    if reg >= 8:
+    if reg.value >= 8:
         rx = rx + 4  # REX.R
-    if rm >= 8:
+    if rm.value >= 8:
         rx = rx + 1  # REX.B
     rx
 
-fn rex_wb(rm: i64) -> i64:
+fn rex_wb(rm: RegisterId) -> i64:
     var rx = 0x48  # REX.W
-    if rm >= 8:
+    if rm.value >= 8:
         rx = rx + 1  # REX.B
     rx
 
-fn modrm(md: i64, reg: i64, rm: i64) -> i64:
+fn modrm(md: i64, reg: RegisterId, rm: RegisterId) -> i64:
     ((md % 4) * 64) + ((reg_low3(reg)) * 8) + reg_low3(rm)
 
-fn modrm_direct(reg: i64, rm: i64) -> i64:
+fn modrm_direct(reg: RegisterId, rm: RegisterId) -> i64:
     modrm(3, reg, rm)
 
-fn modrm_indirect(reg: i64, rm: i64) -> i64:
+fn modrm_indirect(reg: RegisterId, rm: RegisterId) -> i64:
     modrm(0, reg, rm)
 
-fn modrm_disp8(reg: i64, rm: i64) -> i64:
+fn modrm_disp8(reg: RegisterId, rm: RegisterId) -> i64:
     modrm(1, reg, rm)
 
-fn modrm_disp32(reg: i64, rm: i64) -> i64:
+fn modrm_disp32(reg: RegisterId, rm: RegisterId) -> i64:
     modrm(2, reg, rm)
 
-fn sib_byte(scale: i64, index: i64, base: i64) -> i64:
+fn sib_byte(scale: i64, index: RegisterId, base: RegisterId) -> i64:
     ((scale % 4) * 64) + ((reg_low3(index)) * 8) + reg_low3(base)
 
 # Convert signed i64 to bytes
@@ -187,14 +188,14 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         code.push(0x05)
 
     elif inst.opcode == X86_OP_MOV_REG_REG:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x89)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_MOV_REG_IMM:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         val imm = get_imm_value(inst.operands[1])
         # REX.W + B8+rd + imm64
         code.push(rex_wb(dst))
@@ -202,53 +203,53 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         code = emit_i64_bytes(code, imm)
 
     elif inst.opcode == X86_OP_MOV_REG_IMM32:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         val imm = get_imm_value(inst.operands[1])
-        if dst >= 8:
+        if dst.value >= 8:
             code.push(0x41)
         code.push(0xb8 + reg_low3(dst))
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_MOV_REG_MEM:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val base = get_mem_base_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val base = RegisterId(value: get_mem_base_id(inst.operands[1]))
         val offset = get_mem_offset(inst.operands[1])
         code.push(rex_wrb(dst, base))
         code.push(0x8b)
         code = encode_mem_operand(code, dst, base, offset)
 
     elif inst.opcode == X86_OP_MOV_MEM_REG:
-        val base = get_mem_base_id(inst.operands[0])
+        val base = RegisterId(value: get_mem_base_id(inst.operands[0]))
         val offset = get_mem_offset(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, base))
         code.push(0x89)
         code = encode_mem_operand(code, src, base, offset)
 
     elif inst.opcode == X86_OP_ADD:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x01)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_ADD_IMM:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         val imm = get_imm_value(inst.operands[1])
         code.push(rex_wb(dst))
         code.push(0x81)
-        code.push(modrm_direct(0, dst))
+        code.push(modrm_direct(RegisterId(value: 0), dst))
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_SUB:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x29)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_SUB_IMM:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         val imm = get_imm_value(inst.operands[1])
         if imm == 0:
             # No-op for sub rsp, 0
@@ -256,140 +257,140 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         else:
             code.push(rex_wb(dst))
             code.push(0x81)
-            code.push(modrm_direct(5, dst))  # /5 = sub
+            code.push(modrm_direct(RegisterId(value: 5), dst))  # /5 = sub
             code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_IMUL:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(dst, src))
         code.push(0x0f)
         code.push(0xaf)
         code.push(modrm_direct(dst, src))
 
     elif inst.opcode == X86_OP_IDIV:
-        val src = get_phys_reg_id(inst.operands[0])
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         code.push(rex_wb(src))
         code.push(0xf7)
-        code.push(modrm_direct(7, src))  # /7 = idiv
+        code.push(modrm_direct(RegisterId(value: 7), src))  # /7 = idiv
 
     elif inst.opcode == X86_OP_AND:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x21)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_OR:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x09)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_XOR:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(src, dst))
         code.push(0x31)
         code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_SHL:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         # SHL r/m64, cl (D3 /4)
         code.push(rex_wb(dst))
         code.push(0xd3)
-        code.push(modrm_direct(4, dst))
+        code.push(modrm_direct(RegisterId(value: 4), dst))
 
     elif inst.opcode == X86_OP_SAR:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         code.push(rex_wb(dst))
         code.push(0xd3)
-        code.push(modrm_direct(7, dst))
+        code.push(modrm_direct(RegisterId(value: 7), dst))
 
     elif inst.opcode == X86_OP_SHR:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         code.push(rex_wb(dst))
         code.push(0xd3)
-        code.push(modrm_direct(5, dst))
+        code.push(modrm_direct(RegisterId(value: 5), dst))
 
     elif inst.opcode == X86_OP_NEG:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         code.push(rex_wb(dst))
         code.push(0xf7)
-        code.push(modrm_direct(3, dst))
+        code.push(modrm_direct(RegisterId(value: 3), dst))
 
     elif inst.opcode == X86_OP_NOT:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         code.push(rex_wb(dst))
         code.push(0xf7)
-        code.push(modrm_direct(2, dst))
+        code.push(modrm_direct(RegisterId(value: 2), dst))
 
     elif inst.opcode == X86_OP_CMP:
-        val left = get_phys_reg_id(inst.operands[0])
-        val right = get_phys_reg_id(inst.operands[1])
+        val left = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val right = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(right, left))
         code.push(0x39)
         code.push(modrm_direct(right, left))
 
     elif inst.opcode == X86_OP_CMP_IMM:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         val imm = get_imm_value(inst.operands[1])
         code.push(rex_wb(dst))
         code.push(0x81)
-        code.push(modrm_direct(7, dst))  # /7 = cmp
+        code.push(modrm_direct(RegisterId(value: 7), dst))  # /7 = cmp
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_TEST:
-        val left = get_phys_reg_id(inst.operands[0])
-        val right = get_phys_reg_id(inst.operands[1])
+        val left = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val right = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         code.push(rex_wrb(right, left))
         code.push(0x85)
         code.push(modrm_direct(right, left))
 
     elif inst.opcode == X86_OP_SETE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x94, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x94), dst)
 
     elif inst.opcode == X86_OP_SETNE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x95, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x95), dst)
 
     elif inst.opcode == X86_OP_SETL:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x9c, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x9c), dst)
 
     elif inst.opcode == X86_OP_SETLE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x9e, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x9e), dst)
 
     elif inst.opcode == X86_OP_SETG:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x9f, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x9f), dst)
 
     elif inst.opcode == X86_OP_SETGE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x9d, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x9d), dst)
 
     elif inst.opcode == X86_OP_SETB:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x92, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x92), dst)
 
     elif inst.opcode == X86_OP_SETBE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x96, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x96), dst)
 
     elif inst.opcode == X86_OP_SETA:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x97, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x97), dst)
 
     elif inst.opcode == X86_OP_SETAE:
-        val dst = get_phys_reg_id(inst.operands[0])
-        code = encode_setcc(code, 0x93, dst)
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        code = encode_setcc(code, Opcode(value: 0x93), dst)
 
     elif inst.opcode == X86_OP_MOVZX:
-        val dst = get_phys_reg_id(inst.operands[0])
-        val src = get_phys_reg_id(inst.operands[1])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[1]))
         # movzx r64, r8 -> REX.W + 0F B6 /r
         code.push(rex_wrb(dst, src))
         code.push(0x0f)
@@ -397,14 +398,14 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         code.push(modrm_direct(dst, src))
 
     elif inst.opcode == X86_OP_LEA:
-        val dst = get_phys_reg_id(inst.operands[0])
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         # Check if second operand is a symbol or memory
         match inst.operands[1].kind:
             case Sym(name):
                 # LEA with RIP-relative addressing for symbol
                 code.push(rex_wr(dst))
                 code.push(0x8d)
-                code.push(modrm(0, dst, 5))  # [rip+disp32]
+                code.push(modrm(0, dst, RegisterId(value: 5)))  # [rip+disp32]
                 # Record relocation
                 val reloc = EncodedReloc(
                     offset: code_len(code),
@@ -415,7 +416,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 relocs.push(reloc)
                 code = emit_i32(code, 0)  # Placeholder
             case Mem(base, offset):
-                val base_id = reg_id(base)
+                val base_id = RegisterId(value: reg_id(base))
                 code.push(rex_wrb(dst, base_id))
                 code.push(0x8d)
                 code = encode_mem_operand(code, dst, base_id, offset)
@@ -423,14 +424,14 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 code.push(0x90)  # NOP fallback
 
     elif inst.opcode == X86_OP_PUSH:
-        val src = get_phys_reg_id(inst.operands[0])
-        if src >= 8:
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        if src.value >= 8:
             code.push(0x41)  # REX.B
         code.push(0x50 + reg_low3(src))
 
     elif inst.opcode == X86_OP_POP:
-        val dst = get_phys_reg_id(inst.operands[0])
-        if dst >= 8:
+        val dst = RegisterId(value: get_phys_reg_id(inst.operands[0]))
+        if dst.value >= 8:
             code.push(0x41)  # REX.B
         code.push(0x58 + reg_low3(dst))
 
@@ -497,11 +498,11 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 code.push(0x90)
 
     elif inst.opcode == X86_OP_CALL_INDIRECT:
-        val src = get_phys_reg_id(inst.operands[0])
+        val src = RegisterId(value: get_phys_reg_id(inst.operands[0]))
         # call *reg: FF /2
         code.push(rex_wb(src))
         code.push(0xff)
-        code.push(modrm_direct(2, src))
+        code.push(modrm_direct(RegisterId(value: 2), src))
 
     else:
         # Unknown opcode - emit NOP
@@ -513,7 +514,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
 # Memory Operand Encoding Helper
 # ============================================================================
 
-fn encode_mem_operand(code: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
+fn encode_mem_operand(code: [i64], reg: RegisterId, base: RegisterId, offset: i64) -> [i64]:
     var result = code
     val base_low = reg_low3(base)
 
@@ -521,14 +522,14 @@ fn encode_mem_operand(code: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
         # RSP/R12 needs SIB byte
         if offset == 0:
             result.push(modrm_indirect(reg, base))
-            result.push(sib_byte(0, 4, base))  # SIB: no index, RSP base
+            result.push(sib_byte(0, RegisterId(value: 4), base))  # SIB: no index, RSP base
         elif fits_in_i8(offset):
             result.push(modrm_disp8(reg, base))
-            result.push(sib_byte(0, 4, base))
+            result.push(sib_byte(0, RegisterId(value: 4), base))
             result.push(i32_byte0(offset))
         else:
             result.push(modrm_disp32(reg, base))
-            result.push(sib_byte(0, 4, base))
+            result.push(sib_byte(0, RegisterId(value: 4), base))
             result = emit_i32(result, offset)
     elif base_low == 5:
         if offset == 0:
@@ -551,16 +552,16 @@ fn encode_mem_operand(code: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
 # SetCC Encoding Helper
 # ============================================================================
 
-fn encode_setcc(code: [i64], cc_opcode: i64, dst: i64) -> [i64]:
+fn encode_setcc(code: [i64], cc_opcode: Opcode, dst: RegisterId) -> [i64]:
     var result = code
     # setCC uses 8-bit register, need REX if dst >= 4 (spl, bpl, sil, dil)
-    if dst >= 8:
+    if dst.value >= 8:
         result.push(0x41)  # REX.B
-    elif dst >= 4:
+    elif dst.value >= 4:
         result.push(0x40)  # REX (for spl etc.)
     result.push(0x0f)
-    result.push(cc_opcode)
-    result.push(modrm_direct(0, dst))
+    result.push(cc_opcode.value)
+    result.push(modrm_direct(RegisterId(value: 0), dst))
     result
 
 # ============================================================================
