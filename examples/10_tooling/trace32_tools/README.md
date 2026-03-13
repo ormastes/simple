@@ -23,20 +23,20 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 | `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data for marketplace-based installs from a repo checkout |
 | `t32-cli` | Linux, Windows | Interactive TRACE32 CLI shell |
 
-As of March 12, 2026:
-- the latest published T32 release is `t32-v1.1.0`
-- the repo source has moved to `1.1.1`, but that release is not published yet
-- the published Linux MCP binaries did not complete a Claude MCP handshake in local testing
+As of March 13, 2026:
+- the latest intended T32 release is `t32-v0.1.2`
+- the repo source is aligned to `0.1.2`
+- release binaries should be verified with the smoke tests and a local MCP handshake after publish
 
 Use the published binaries for experimentation, but prefer the source-backed
-`bin/release/simple .../main.spl` commands below until `t32-v1.1.1` is
+`bin/release/simple .../main.spl` commands below until `t32-v0.1.2` is
 published and re-verified.
 
 ### Manual download
 
 ```bash
 # Download specific binary
-VERSION="1.1.0"
+VERSION="0.1.2"
 curl -fsSL -o t32-mcp-server \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/t32-mcp-server-linux-x86_64"
 chmod +x t32-mcp-server
@@ -44,7 +44,7 @@ chmod +x t32-mcp-server
 
 ```bash
 # Download Claude Code plugin bundle data
-VERSION="1.1.1"
+VERSION="0.1.2"
 curl -fsSL -O \
   "https://github.com/ormastes/simple/releases/download/t32-v${VERSION}/cmm-lsp-claude-plugin-${VERSION}.tar.gz"
 tar -xzf "cmm-lsp-claude-plugin-${VERSION}.tar.gz"
@@ -55,9 +55,9 @@ assumes a source checkout with:
 - `bin/release/simple`
 - `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl`
 
-As of March 12, 2026:
+As of March 13, 2026:
 - that tarball is configured in repo and release workflow source
-- it is not present in the latest published `t32-v1.1.0` release
+- it is expected in `t32-v0.1.2`
 - current Claude Code CLI builds expect marketplace-based plugin installs, not `claude plugin install --dir`
 
 ### Build from source
@@ -121,10 +121,8 @@ Project `.mcp.json` is also valid:
 ```
 
 > If a future standalone binary is in PATH, you can use `t32-mcp-server` and
-> `t32-lsp-mcp-server` directly. In local testing on March 12, 2026, the
-> published `t32-v1.1.0` Linux binaries did not handshake successfully with
-> Claude Code, while the source-backed `bin/release/simple .../main.spl`
-> commands did.
+> `t32-lsp-mcp-server` directly. Re-verify the published `t32-v0.1.2` Linux
+> binaries with a local MCP handshake before relying on them in Claude Code.
 
 ### Claude Desktop
 
