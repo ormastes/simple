@@ -20,19 +20,17 @@ use compiler.driver.driver_types.{CompileResult}
 use app.compile.native.{compile_native}
 use std.log.{info, debug, error}
 use compiler.driver.build.layer_check.{run_layer_check, print_layer_check_result}
-use std.cli_output.{log_open, log_line, log_close, log_show, format_duration, print_log_hint}
+use std.cli_output.{log_open, log_line, log_close, log_show, format_duration, print_log_hint, buffer_start, buffer_capture, buffer_flush, buffer_discard}
 
 extern fn rt_env_set(name: text, value: text) -> bool
 
 # Run FFI generator to create Rust workspace
 fn run_ffi_generator(verbose: bool) -> bool:
-    if verbose:
-        print "Running FFI generator..."
+    buffer_capture("Running FFI generator...")
 
     # Check if ffi_gen workspace already exists and is up to date
     if file_exists("build/rust/ffi_gen/src/lib.rs"):
-        if verbose:
-            print "FFI workspace exists, checking if regeneration needed..."
+        buffer_capture("FFI workspace exists, checking if regeneration needed...")
         # Check if spec files are newer than generated output
         # If no spec files changed, skip regeneration
         val spec_files = dir_walk("src/app/ffi_gen/specs")
@@ -45,8 +43,7 @@ fn run_ffi_generator(verbose: bool) -> bool:
                     needs_regen = true
                     break
         if not needs_regen:
-            if verbose:
-                print "FFI workspace up to date, skipping regeneration"
+            buffer_capture("FFI workspace up to date, skipping regeneration")
             return
 
     # Run the FFI generator in-process via interpret_file
@@ -57,10 +54,10 @@ fn run_ffi_generator(verbose: bool) -> bool:
 
     match result:
         case CompileResult.Success(_):
-            if verbose:
-                print "FFI generation complete"
+            buffer_capture("FFI generation complete")
             true
         case _:
+            buffer_flush()
             print "FFI generation failed"
             print "  Hint: FFI generation is required before building"
             false
@@ -93,20 +90,20 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
 
     val build_log = log_open("build")
     val build_start_ms = current_time_ms()
-    log_line(build_log, "Building with profile: {profile_to_string(config.profile)}")
-    log_line(build_log, "Workspace root: {config.workspace_root}")
+    buffer_start(build_log)
+    buffer_capture("Building with profile: {profile_to_string(config.profile)}")
+    buffer_capture("Workspace root: {config.workspace_root}")
 
     # Check documentation warnings if requested
     if config.warn_docs:
         val doc_exit = run_doc_warnings(config.verbose)
-        if doc_exit != 0 and config.verbose:
-            info("build", "Documentation warnings found (build continues)")
+        if doc_exit != 0:
+            buffer_capture("Documentation warnings found (build continues)")
 
     # Phase 0: Layer dependency enforcement (warnings-only by default)
     val layer_result = run_layer_check(false)
     if layer_result.has_violations():
-        print_layer_check_result(layer_result, false)
-        info("build", "Layer violations found (build continues, use --strict-layers to fail)")
+        buffer_capture("Layer violations found (build continues, use --strict-layers to fail)")
 
     # Native compilation via C backend -> clang++ -> mold
     debug("build", "Starting native compilation pipeline")
@@ -136,14 +133,12 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
         )
 
     # Run compile pipeline in-process
-    debug("build", "Compiling {source_file} -> {output_path} (in-process)")
-    info("build", "Compiling {source_file} -> {output_path}")
-    log_line(build_log, "Compiling {source_file} -> {output_path}")
+    buffer_capture("Compiling {source_file} -> {output_path}")
 
     var exit_code = 0
     if is_release:
         # Release: native compilation via subprocess (avoids interpreter import chain issues)
-        info("build", "Using native compilation (release)")
+        buffer_capture("Using native compilation (release)")
         val compile_args = [
             "compile", source_file, "--native", "-o", output_path, "--verbose"
         ]
@@ -151,28 +146,24 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
         val (stdout, stderr, compile_exit) = process_run("bin/release/simple", compile_args)
         if stdout.?:
-            log_line(build_log, stdout)
-            if config.verbose:
-                print stdout
+            buffer_capture(stdout)
         if stderr.?:
-            log_line(build_log, stderr)
-            if config.verbose:
-                print stderr
+            buffer_capture(stderr)
         exit_code = compile_exit
     else:
         # Debug: C backend (fast compilation)
         exit_code = compile_native(source_file, output_path, config.verbose, "", false, "")
 
     if exit_code != 0:
-        error("build", "Compilation failed (exit code {exit_code})")
-        log_line(build_log, "Compilation failed (exit code {exit_code})")
+        buffer_capture("Compilation failed (exit code {exit_code})")
         val build_end_ms = current_time_ms()
         val build_elapsed = build_end_ms - build_start_ms
         log_close(build_log, "build")
 
-        if not config.verbose:
-            print "Build failed in {format_duration(build_elapsed)}"
-            print_log_hint("build")
+        # Failure: flush all buffered output so user sees context
+        buffer_flush()
+        print "Build failed in {format_duration(build_elapsed)}"
+        print_log_hint("build")
 
         return BuildResult(
             success: false,
@@ -184,13 +175,12 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
 
     # For release builds, copy to final location
     if is_release and output_path != final_path:
-        debug("build", "Copying {output_path} -> {final_path}")
+        buffer_capture("Copying {output_path} -> {final_path}")
         val (_, cp_err, cp_exit) = process_run("cp", [output_path, final_path])
         if cp_exit != 0:
-            error("build", "Failed to copy to {final_path}: {cp_err}")
+            buffer_capture("Failed to copy to {final_path}: {cp_err}")
 
-    info("build", "Build complete: {final_path}")
-    log_line(build_log, "Build complete: {final_path}")
+    buffer_capture("Build complete: {final_path}")
     val build_end_ms = current_time_ms()
     val build_elapsed = build_end_ms - build_start_ms
     log_close(build_log, "build")
@@ -204,10 +194,12 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
     )
 
     if not config.verbose:
-        # Compact: one-line summary
+        # Compact: discard buffer, one-line summary
+        buffer_discard()
         print "Build successful in {format_duration(build_elapsed)}"
     else:
-        # Verbose: full result
+        # Verbose: flush all buffered output
+        buffer_flush()
         print_build_result(result)
 
     result

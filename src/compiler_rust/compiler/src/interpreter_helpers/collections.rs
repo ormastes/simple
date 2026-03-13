@@ -274,11 +274,23 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             Ok(items)
         }
         _ => {
+            let type_name = val.type_name();
+            let hint = if type_name == "bool" {
+                "iteration requires array, tuple, dict, string, or range types. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+            } else if type_name == "i64" {
+                "iteration requires array, tuple, dict, string, or range types. \
+Hint: in interpreter mode, `self.field` access can corrupt the field type to i64. \
+Use an intermediate variable: `val ref = self.field; for item in ref`"
+            } else {
+                "iteration requires array, tuple, dict, string, or range types"
+            };
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
-                .with_help("iteration requires array, tuple, dict, string, or range types");
+                .with_help(hint);
             Err(CompileError::semantic_with_context(
-                "cannot iterate over this type".to_string(),
+                format!("cannot iterate over value of type {}", type_name),
                 ctx,
             ))
         }

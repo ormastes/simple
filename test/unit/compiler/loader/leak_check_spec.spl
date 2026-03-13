@@ -52,21 +52,24 @@ fn arr_set_i64(arr: [i64], idx: i64, val_: i64) -> [i64]:
 
 var mock_mapped_symbols: [text] = []
 var mock_freed_symbols: [text] = []
+var mock_mapped_count: i64 = 0
 
 fn mock_exec_map_symbol(owner: text, symbol: text):
     mock_mapped_symbols = mock_mapped_symbols + [symbol]
+    mock_mapped_count = mock_mapped_count + 1
 
 fn mock_exec_unmap_symbol(symbol: text):
     val idx = mock_mapped_symbols.index_of(symbol)
     if idx >= 0:
         mock_mapped_symbols = arr_remove_text(mock_mapped_symbols, idx)
+        mock_mapped_count = mock_mapped_count - 1
     mock_freed_symbols = mock_freed_symbols + [symbol]
 
 fn mock_exec_unmap_owner(owner: text):
     0  # Owner-level unmap; symbols tracked separately
 
 fn mock_exec_mapped_count() -> i64:
-    mock_mapped_symbols.len()
+    mock_mapped_count
 
 fn mock_exec_was_freed(symbol: text) -> bool:
     mock_freed_symbols.index_of(symbol) >= 0
@@ -74,6 +77,7 @@ fn mock_exec_was_freed(symbol: text) -> bool:
 fn mock_exec_reset():
     mock_mapped_symbols = []
     mock_freed_symbols = []
+    mock_mapped_count = 0
 
 # ============================================================================
 # Mock SMF ref counter (replaces SmfCacheManager)
@@ -83,43 +87,62 @@ fn mock_exec_reset():
 var mock_smf_paths: [text] = []
 var mock_smf_counts: [i64] = []
 var mock_smf_evicted: [text] = []
+var mock_smf_active: i64 = 0
+
+fn _i64_at(arr: [i64], idx: i64) -> i64:
+    var j = 0
+    for v in arr:
+        if j == idx:
+            return v
+        j = j + 1
+    0
 
 fn mock_smf_inc(path: text):
     val idx = mock_smf_paths.index_of(path)
     if idx >= 0:
-        mock_smf_counts = arr_set_i64(mock_smf_counts, idx, mock_smf_counts[idx] + 1)
+        val cur = _i64_at(mock_smf_counts, idx)
+        mock_smf_counts = arr_set_i64(mock_smf_counts, idx, cur + 1)
     else:
         mock_smf_paths = mock_smf_paths + [path]
         mock_smf_counts = mock_smf_counts + [1]
+        mock_smf_active = mock_smf_active + 1
 
 fn mock_smf_dec(path: text):
     val idx = mock_smf_paths.index_of(path)
     if idx >= 0:
-        val new_count = mock_smf_counts[idx] - 1
+        val cur = _i64_at(mock_smf_counts, idx)
+        val new_count = cur - 1
         if new_count <= 0:
             mock_smf_evicted = mock_smf_evicted + [path]
             mock_smf_paths = arr_remove_text(mock_smf_paths, idx)
             mock_smf_counts = arr_remove_i64(mock_smf_counts, idx)
+            mock_smf_active = mock_smf_active - 1
         else:
             mock_smf_counts = arr_set_i64(mock_smf_counts, idx, new_count)
 
 fn mock_smf_get_count(path: text) -> i64:
     val idx = mock_smf_paths.index_of(path)
-    if idx >= 0:
-        mock_smf_counts[idx]
-    else:
-        0
+    if idx < 0:
+        return 0
+    var j = 0
+    val counts = mock_smf_counts
+    for c in counts:
+        if j == idx:
+            return c
+        j = j + 1
+    0
 
 fn mock_smf_was_evicted(path: text) -> bool:
     mock_smf_evicted.index_of(path) >= 0
 
 fn mock_smf_active_count() -> i64:
-    mock_smf_paths.len()
+    mock_smf_active
 
 fn mock_smf_reset():
     mock_smf_paths = []
     mock_smf_counts = []
     mock_smf_evicted = []
+    mock_smf_active = 0
 
 # ============================================================================
 # Mock Ownership Registry
@@ -136,15 +159,17 @@ var mock_registry_paths: [text] = []
 var mock_registry_owned: [MockOwnedResources] = []
 var mock_jit_origin_syms: [text] = []
 var mock_jit_origin_mods: [text] = []
+var mock_registry_count: i64 = 0
 
 fn registry_set_owned_at(idx: i64, owned: MockOwnedResources):
     var new_owned: [MockOwnedResources] = []
     var i = 0
-    while i < mock_registry_owned.len():
+    val old_owned = mock_registry_owned
+    for item in old_owned:
         if i == idx:
             new_owned = new_owned + [owned]
         else:
-            new_owned = new_owned + [mock_registry_owned[i]]
+            new_owned = new_owned + [item]
         i = i + 1
     mock_registry_owned = new_owned
 
@@ -156,22 +181,48 @@ fn mock_registry_register(path: text):
         jit_symbols: [],
         smf_paths: []
     )]
+    mock_registry_count = mock_registry_count + 1
 
 fn mock_registry_is_tracked(path: text) -> bool:
     mock_registry_paths.index_of(path) >= 0
 
 fn mock_registry_module_count() -> i64:
-    mock_registry_paths.len()
+    mock_registry_count
+
+fn _get_owned_at(idx: i64) -> MockOwnedResources:
+    var j = 0
+    val owned_list = mock_registry_owned
+    for item in owned_list:
+        if j == idx:
+            return item
+        j = j + 1
+    MockOwnedResources(module_path: "", exec_symbols: [], jit_symbols: [], smf_paths: [])
+
+fn _owned_module_path(o: MockOwnedResources) -> text:
+    o.module_path
+
+fn _owned_exec_symbols(o: MockOwnedResources) -> [text]:
+    o.exec_symbols
+
+fn _owned_jit_symbols(o: MockOwnedResources) -> [text]:
+    o.jit_symbols
+
+fn _owned_smf_paths(o: MockOwnedResources) -> [text]:
+    o.smf_paths
 
 fn mock_registry_add_exec_symbol(path: text, symbol: text):
     val idx = mock_registry_paths.index_of(path)
     if idx >= 0:
-        val old = mock_registry_owned[idx]
+        val old = _get_owned_at(idx)
+        val mp = _owned_module_path(old)
+        val es = _owned_exec_symbols(old)
+        val js = _owned_jit_symbols(old)
+        val sp = _owned_smf_paths(old)
         val updated = MockOwnedResources(
-            module_path: old.module_path,
-            exec_symbols: old.exec_symbols + [symbol],
-            jit_symbols: old.jit_symbols,
-            smf_paths: old.smf_paths
+            module_path: mp,
+            exec_symbols: es + [symbol],
+            jit_symbols: js,
+            smf_paths: sp
         )
         registry_set_owned_at(idx, updated)
         mock_exec_map_symbol(path, symbol)
@@ -179,12 +230,16 @@ fn mock_registry_add_exec_symbol(path: text, symbol: text):
 fn mock_registry_add_jit_symbol(path: text, jit_sym: text):
     val idx = mock_registry_paths.index_of(path)
     if idx >= 0:
-        val old = mock_registry_owned[idx]
+        val old = _get_owned_at(idx)
+        val mp = _owned_module_path(old)
+        val es = _owned_exec_symbols(old)
+        val js = _owned_jit_symbols(old)
+        val sp = _owned_smf_paths(old)
         val updated = MockOwnedResources(
-            module_path: old.module_path,
-            exec_symbols: old.exec_symbols,
-            jit_symbols: old.jit_symbols + [jit_sym],
-            smf_paths: old.smf_paths
+            module_path: mp,
+            exec_symbols: es,
+            jit_symbols: js + [jit_sym],
+            smf_paths: sp
         )
         registry_set_owned_at(idx, updated)
         mock_jit_origin_syms = mock_jit_origin_syms + [jit_sym]
@@ -193,12 +248,16 @@ fn mock_registry_add_jit_symbol(path: text, jit_sym: text):
 fn mock_registry_add_smf(path: text, smf_path: text):
     val idx = mock_registry_paths.index_of(path)
     if idx >= 0:
-        val old = mock_registry_owned[idx]
+        val old = _get_owned_at(idx)
+        val mp = _owned_module_path(old)
+        val es = _owned_exec_symbols(old)
+        val js = _owned_jit_symbols(old)
+        val sp = _owned_smf_paths(old)
         val updated = MockOwnedResources(
-            module_path: old.module_path,
-            exec_symbols: old.exec_symbols,
-            jit_symbols: old.jit_symbols,
-            smf_paths: old.smf_paths + [smf_path]
+            module_path: mp,
+            exec_symbols: es,
+            jit_symbols: js,
+            smf_paths: sp + [smf_path]
         )
         registry_set_owned_at(idx, updated)
         mock_smf_inc(smf_path)
@@ -207,52 +266,55 @@ fn mock_registry_unload(path: text):
     val idx = mock_registry_paths.index_of(path)
     if idx < 0:
         return
-    val owned = mock_registry_owned[idx]
-    # Free JIT symbols
-    var ji_idx = 0
-    while ji_idx < owned.jit_symbols.len():
-        val jit_sym = owned.jit_symbols[ji_idx]
+    val owned = _get_owned_at(idx)
+    # Free JIT symbols — use for-in to avoid struct field indexing corruption
+    val jit_syms = _owned_jit_symbols(owned)
+    for jit_sym in jit_syms:
         mock_exec_unmap_symbol(jit_sym)
         val ji = mock_jit_origin_syms.index_of(jit_sym)
         if ji >= 0:
             mock_jit_origin_syms = arr_remove_text(mock_jit_origin_syms, ji)
             mock_jit_origin_mods = arr_remove_text(mock_jit_origin_mods, ji)
-        ji_idx = ji_idx + 1
     # Unmap exec symbols
-    var ei_idx = 0
-    while ei_idx < owned.exec_symbols.len():
-        mock_exec_unmap_symbol(owned.exec_symbols[ei_idx])
-        ei_idx = ei_idx + 1
+    val exec_syms = _owned_exec_symbols(owned)
+    for esym in exec_syms:
+        mock_exec_unmap_symbol(esym)
     # Decrement SMF ref counts
-    var si_idx = 0
-    while si_idx < owned.smf_paths.len():
-        mock_smf_dec(owned.smf_paths[si_idx])
-        si_idx = si_idx + 1
+    val smf_ps = _owned_smf_paths(owned)
+    for sp in smf_ps:
+        mock_smf_dec(sp)
     # Remove from registry
     mock_registry_paths = arr_remove_text(mock_registry_paths, idx)
     mock_registry_owned = arr_remove_owned(mock_registry_owned, idx)
+    mock_registry_count = mock_registry_count - 1
 
 fn arr_remove_owned(arr: [MockOwnedResources], idx: i64) -> [MockOwnedResources]:
     var result: [MockOwnedResources] = []
     var i = 0
-    while i < arr.len():
+    for item in arr:
         if i != idx:
-            result = result + [arr[i]]
+            result = result + [item]
         i = i + 1
     result
 
 fn mock_registry_get_jit_origin(jit_sym: text) -> text:
     val idx = mock_jit_origin_syms.index_of(jit_sym)
-    if idx >= 0:
-        mock_jit_origin_mods[idx]
-    else:
-        ""
+    if idx < 0:
+        return ""
+    var j = 0
+    val mods = mock_jit_origin_mods
+    for m in mods:
+        if j == idx:
+            return m
+        j = j + 1
+    ""
 
 fn mock_registry_reset():
     mock_registry_paths = []
     mock_registry_owned = []
     mock_jit_origin_syms = []
     mock_jit_origin_mods = []
+    mock_registry_count = 0
     mock_exec_reset()
     mock_smf_reset()
 

@@ -87,16 +87,20 @@ impl TaskProgress:
 
     fn to_dict() -> Dict<text, Any>:
         var d: Dict<text, Any> = {"__init__": 0}
-        d.set("current", self.current)
-        match self.total:
+        val cur = self.current
+        d.set("current", cur)
+        val tot = self.total
+        match tot:
             case Some(t):
                 d.set("total", t)
             case nil: pass
-        match self.message:
+        val msg = self.message
+        match msg:
             case Some(m):
                 d.set("message", m)
             case nil: pass
-        match self.percentage:
+        val pct = self.percentage
+        match pct:
             case Some(p):
                 d.set("percentage", p)
             case nil: pass
@@ -151,9 +155,13 @@ impl Task:
 
     fn to_dict() -> Dict<text, Any>:
         var d: Dict<text, Any> = {"__init__": 0}
-        d.set("id", self.id)
-        d.set("operation", self.operation)
-        d.set("status", match self.status:
+        val tid = self.id
+        val top = self.operation
+        val tst = self.status
+        val tpr = self.priority
+        d.set("id", tid)
+        d.set("operation", top)
+        d.set("status", match tst:
             case TaskStatus.Pending: "pending"
             case TaskStatus.Running: "running"
             case TaskStatus.Completed: "completed"
@@ -161,7 +169,7 @@ impl Task:
             case TaskStatus.Cancelled: "cancelled"
             case TaskStatus.TimedOut: "timed_out"
         )
-        d.set("priority", match self.priority:
+        d.set("priority", match tpr:
             case TaskPriority.Low: "low"
             case TaskPriority.Normal: "normal"
             case TaskPriority.High: "high"
@@ -180,83 +188,100 @@ impl TaskManager:
         val task_id = "task_{self.next_id}"
         self.next_id = self.next_id + 1
         val task = Task(id: task_id, operation: operation, status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
-        self.tasks.set(task_id, task)
+        var ts = self.tasks
+        ts.set(task_id, task)
+        self.tasks = ts
         task_id
 
     me create_task_with_options(operation: text, priority: TaskPriority, timeout: i64?) -> text:
         val task_id = "task_{self.next_id}"
         self.next_id = self.next_id + 1
         val task = Task(id: task_id, operation: operation, status: TaskStatus.Pending, priority: priority, timeout_ms: timeout, started_at: nil, completed_at: nil, progress: nil, error: nil)
-        self.tasks.set(task_id, task)
+        var ts = self.tasks
+        ts.set(task_id, task)
+        self.tasks = ts
         task_id
 
     fn get_task(task_id: text) -> Task?:
-        if self.tasks.contains_key(task_id):
-            Some(self.tasks.get(task_id))
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            Some(ts.get(task_id))
         else:
             nil
 
     me start_task(task_id: text) -> Result<bool, McpError>:
         if self.running_count >= self.max_concurrent_tasks:
             return Err(McpError(category: ErrorCategory.RateLimit, msg: "Max concurrent tasks reached"))
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             task.status = TaskStatus.Running
             task.started_at = Some("now")
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             self.running_count = self.running_count + 1
             Ok(true)
         else:
             Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me update_progress(task_id: text, current: i64, total: i64) -> Result<bool, McpError>:
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             val pct = (current * 100) / total
             task.progress = Some(TaskProgress(current: current, total: Some(total), message: nil, percentage: Some(pct.to_f64())))
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             Ok(true)
         else:
             Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me update_progress_with_message(task_id: text, current: i64, total: i64, msg: text) -> Result<bool, McpError>:
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             val pct = (current * 100) / total
             task.progress = Some(TaskProgress(current: current, total: Some(total), message: Some(msg), percentage: Some(pct.to_f64())))
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             Ok(true)
         else:
             Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me complete_task(task_id: text, result_msg: text) -> Result<bool, McpError>:
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             task.status = TaskStatus.Completed
             task.completed_at = Some("now")
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             self.running_count = self.running_count - 1
             Ok(true)
         else:
             Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me fail_task(task_id: text, err: TaskError) -> Result<bool, McpError>:
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             task.status = TaskStatus.Failed
             task.error = Some(err)
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             self.running_count = self.running_count - 1
             Ok(true)
         else:
             Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me cancel_task(task_id: text) -> Result<bool, McpError>:
-        if self.tasks.contains_key(task_id):
-            var task = self.tasks.get(task_id)
+        var ts = self.tasks
+        if ts.contains_key(task_id):
+            var task = ts.get(task_id)
             val was_running = task.is_running()
             task.status = TaskStatus.Cancelled
-            self.tasks.set(task_id, task)
+            ts.set(task_id, task)
+            self.tasks = ts
             if was_running:
                 self.running_count = self.running_count - 1
             Ok(true)
@@ -265,26 +290,36 @@ impl TaskManager:
 
     fn list_tasks() -> [Task]:
         var result: [Task] = []
-        for key in self.tasks.keys():
-            result.push(self.tasks.get(key))
+        var ts = self.tasks
+        for key in ts.keys():
+            if key == "__init__":
+                continue
+            result.push(ts.get(key))
         result
 
     fn list_tasks_by_status(status: TaskStatus) -> [Task]:
         var result: [Task] = []
-        for key in self.tasks.keys():
-            val task = self.tasks.get(key)
+        var ts = self.tasks
+        for key in ts.keys():
+            if key == "__init__":
+                continue
+            val task = ts.get(key)
             if task.status.to_string() == status.to_string():
                 result.push(task)
         result
 
     me cleanup_completed(max_age_ms: i64):
         var to_remove: [text] = []
-        for key in self.tasks.keys():
-            val task = self.tasks.get(key)
+        var ts = self.tasks
+        for key in ts.keys():
+            if key == "__init__":
+                continue
+            val task = ts.get(key)
             if task.is_complete():
                 to_remove.push(key)
         for key in to_remove:
-            self.tasks.remove(key)
+            ts.remove(key)
+        self.tasks = ts
 
 # ============================================================================
 # Tests

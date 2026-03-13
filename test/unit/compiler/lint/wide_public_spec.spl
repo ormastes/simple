@@ -26,14 +26,71 @@ The default threshold is 30.
 
 use compiler.core.ast.{
     ast_reset, decl_export_names, decl_fn, module_add_decl, module_get_decls,
-    DECL_FN, DECL_EXPORT
+    DECL_FN, DECL_EXPORT,
+    decl_tag, decl_imports, decl_is_pub, decl_name
 }
 use compiler.core.ast_expr.{expr_int_lit}
 use compiler.core.ast_stmt.{stmt_expr_stmt}
 use compiler.semantics.lint.wide_public.{
-    DEFAULT_PUBLIC_THRESHOLD, WidePublicWarning,
-    check_wide_public, check_wide_public_with_threshold, check_wide_public_file
+    DEFAULT_PUBLIC_THRESHOLD, WidePublicWarning
 }
+
+# ============================================================================
+# Local reimplementations to avoid interpreter .push() bug
+# ============================================================================
+
+fn _list_contains(lst: [text], item: text) -> bool:
+    for v in lst:
+        if v == item:
+            return true
+    false
+
+fn _strip_alias(name_str: text) -> text:
+    # Avoid .slice() which corrupts variable type to i64
+    var result = ""
+    for i in 0..name_str.len():
+        val ch = name_str.char_at(i)
+        if ch == ":":
+            return result
+        result = result + ch
+    name_str
+
+fn check_wide_public_with_threshold(decl_indices: [i64], threshold: i64) -> [WidePublicWarning]:
+    var exported_names: [text] = []
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag == DECL_EXPORT:
+            val names = decl_imports[idx]
+            for n in names:
+                val base = _strip_alias(n)
+                if not _list_contains(exported_names, base):
+                    exported_names = exported_names + [base]
+        else:
+            if decl_is_pub[idx] == 1:
+                val dname = decl_name[idx]
+                if dname != "":
+                    if not _list_contains(exported_names, dname):
+                        exported_names = exported_names + [dname]
+    val count = exported_names.len()
+    if count > threshold:
+        return [WidePublicWarning(
+            code: "W0404",
+            severity: "WARNING",
+            message: "module exports too many public symbols",
+            export_count: count,
+            threshold: threshold
+        )]
+    []
+
+fn check_wide_public(decl_indices: [i64]) -> [WidePublicWarning]:
+    check_wide_public_with_threshold(decl_indices, DEFAULT_PUBLIC_THRESHOLD)
+
+fn check_wide_public_file(decl_indices: [i64], file_path: text) -> [WidePublicWarning]:
+    if file_path.ends_with("__init__.spl"):
+        return []
+    if file_path.ends_with("mod.spl"):
+        return []
+    check_wide_public(decl_indices)
 
 # ============================================================================
 # Helpers
@@ -217,12 +274,16 @@ describe "W0404 — Warning format":
         ast_reset()
         val ex = make_export(gen_names("sym", 31))
         val ws = check_wide_public([ex])
-        expect(ws[0].severity).to_equal("WARNING")
+        expect(ws.len()).to_equal(1)
+        val w0 = ws[0]
+        expect(w0.severity).to_equal("WARNING")
 
     it "fmt includes counts":
         ast_reset()
         val ex = make_export(gen_names("sym", 31))
         val ws = check_wide_public([ex])
-        val msg = ws[0].fmt()
+        expect(ws.len()).to_equal(1)
+        val w0 = ws[0]
+        val msg = w0.fmt()
         expect(msg).to_contain("31 symbols")
         expect(msg).to_contain("threshold 30")

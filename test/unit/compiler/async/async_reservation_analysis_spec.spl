@@ -12,52 +12,154 @@
 # NOTE: Uses local reimplementations of core functions to work around
 # interpreter indexed-array-access corruption bugs.
 
-# Import types only; reimplement functions locally to avoid indexed access bugs
-use compiler.desugar.reservation_analysis.{
-    ResourceLeaf,
-    TaskReservation,
-    ReservationDemand,
-    ReservationDiagnostic,
-    ReservationVerifyResult
-}
+# Local struct definitions to avoid interpreter corruption on imported struct
+# array fields (imported struct constructors corrupt [text]/[i64] fields to i64).
+
+struct ResourceLeaf:
+    path: text
+    unit_name: text
+    cap: i64
+
+struct TaskReservation:
+    task_name: text
+    reserve_paths: [text]
+    reserve_counts: [i64]
+    instances: i64
+
+struct ReservationDemand:
+    resource_path: text
+    total_demand: i64
+    cap: i64
+    overflow: bool
+    contributor_names: [text]
+    contributor_amounts: [i64]
+
+struct ReservationDiagnostic:
+    level: text
+    message: text
+    resource_path: text
+    actual_demand: i64
+    capacity: i64
+
+struct ReservationVerifyResult:
+    diagnostics: [ReservationDiagnostic]
+    has_errors: bool
+    demands: [ReservationDemand]
+    total_checks: i64
+    passed_checks: i64
 
 # ================================================================
 # Local reimplementations (avoid for-i-in-range + arr[i] pattern)
 # ================================================================
 
-fn get_task_reserve(task: TaskReservation, path: text) -> i64:
+fn _count_at(counts: [i64], idx: i64) -> i64:
+    var j = 0
+    for c in counts:
+        if j == idx:
+            return c
+        j = j + 1
+    0
+
+fn _text_at(arr: [text], idx: i64) -> text:
+    var j = 0
+    for item in arr:
+        if j == idx:
+            return item
+        j = j + 1
+    ""
+
+fn _get_paths(task: TaskReservation) -> [text]:
+    task.reserve_paths
+
+fn _get_counts(task: TaskReservation) -> [i64]:
+    task.reserve_counts
+
+fn _get_instances(task: TaskReservation) -> i64:
+    task.instances
+
+fn _get_task_name(task: TaskReservation) -> text:
+    task.task_name
+
+fn _find_path_index(paths: [text], path: text) -> i64:
     var i = 0
-    val paths = task.reserve_paths
-    val counts = task.reserve_counts
     for p in paths:
         if p == path:
-            # Get count at same index
-            var j = 0
-            for c in counts:
-                if j == i:
-                    return c
-                j = j + 1
+            return i
         i = i + 1
-    0
+    -1
+
+fn get_task_reserve(task: TaskReservation, path: text) -> i64:
+    val paths = _get_paths(task)
+    val idx = _find_path_index(paths, path)
+    if idx < 0:
+        return 0
+    val counts = _get_counts(task)
+    _count_at(counts, idx)
+
+fn _get_leaf_path(leaf: ResourceLeaf) -> text:
+    leaf.path
+
+fn _get_leaf_cap(leaf: ResourceLeaf) -> i64:
+    leaf.cap
+
+# Demand struct getters (avoid multi-field access corruption)
+fn _demand_overflow(d: ReservationDemand) -> bool:
+    d.overflow
+
+fn _demand_resource_path(d: ReservationDemand) -> text:
+    d.resource_path
+
+fn _demand_total(d: ReservationDemand) -> i64:
+    d.total_demand
+
+fn _demand_cap(d: ReservationDemand) -> i64:
+    d.cap
+
+# Result struct getters
+fn _result_has_errors(r: ReservationVerifyResult) -> bool:
+    r.has_errors
+
+fn _result_passed(r: ReservationVerifyResult) -> i64:
+    r.passed_checks
+
+fn _result_total(r: ReservationVerifyResult) -> i64:
+    r.total_checks
+
+fn _result_demands(r: ReservationVerifyResult) -> [ReservationDemand]:
+    r.demands
+
+fn _result_diagnostics(r: ReservationVerifyResult) -> [ReservationDiagnostic]:
+    r.diagnostics
+
+# Diagnostic struct getters
+fn _diag_level(d: ReservationDiagnostic) -> text:
+    d.level
+
+fn _diag_message(d: ReservationDiagnostic) -> text:
+    d.message
 
 fn compute_demand(leaf: ResourceLeaf, tasks: [TaskReservation]) -> ReservationDemand:
     var total = 0
     var names: [text] = []
     var amounts: [i64] = []
+    val leaf_path = _get_leaf_path(leaf)
+    val leaf_cap = _get_leaf_cap(leaf)
 
     for task in tasks:
-        val reserve = get_task_reserve(task, leaf.path)
+        val reserve = get_task_reserve(task, leaf_path)
         if reserve > 0:
-            val contribution = reserve * task.instances
+            val inst = _get_instances(task)
+            val contribution = reserve * inst
             total = total + contribution
-            names = names + [task.task_name]
+            val tname = _get_task_name(task)
+            names = names + [tname]
             amounts = amounts + [contribution]
 
     ReservationDemand(
-        resource_path: leaf.path,
+        resource_path: leaf_path,
         total_demand: total,
-        cap: leaf.cap,
-        overflow: total > leaf.cap,
+        cap: leaf_cap,
+        overflow: total > leaf_cap,
         contributor_names: names,
         contributor_amounts: amounts
     )
@@ -75,52 +177,78 @@ fn verify_reservations(
         val demand = compute_demand(leaf, tasks)
         demands = demands + [demand]
 
-        if demand.overflow:
+        val is_overflow = _demand_overflow(demand)
+        if is_overflow:
+            val d_rp = _demand_resource_path(demand)
+            val d_td = _demand_total(demand)
+            val d_cap = _demand_cap(demand)
+            val l_path = _get_leaf_path(leaf)
+            val l_cap = _get_leaf_cap(leaf)
             val diag = ReservationDiagnostic(
                 level: "error",
-                message: "reservation overflow on '{leaf.path}': demand={demand.total_demand} > cap={leaf.cap}",
-                resource_path: leaf.path,
-                actual_demand: demand.total_demand,
-                capacity: leaf.cap
+                message: "reservation overflow on '{d_rp}': demand={d_td} > cap={d_cap}",
+                resource_path: l_path,
+                actual_demand: d_td,
+                capacity: l_cap
             )
             diagnostics = diagnostics + [diag]
             has_errors = true
         else:
             passed = passed + 1
 
+    val num_leaves = leaves.len()
     ReservationVerifyResult(
         diagnostics: diagnostics,
         has_errors: has_errors,
         demands: demands,
-        total_checks: leaves.len(),
+        total_checks: num_leaves,
         passed_checks: passed
     )
 
 fn format_demand(demand: ReservationDemand) -> text:
-    val status = if demand.overflow: "OVERFLOW" else: "OK"
-    "  {demand.resource_path}: {demand.total_demand}/{demand.cap} [{status}]"
+    val is_overflow = _demand_overflow(demand)
+    val status = if is_overflow: "OVERFLOW" else: "OK"
+    val rp = _demand_resource_path(demand)
+    val td = _demand_total(demand)
+    val dc = _demand_cap(demand)
+    "  {rp}: {td}/{dc} [{status}]"
 
-fn format_reservation_result(result: ReservationVerifyResult) -> text:
+fn _join_lines(lines: [text]) -> text:
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = result + "\n"
+        result = result + line
+        first = false
+    result
+
+fn format_reservation_result(res: ReservationVerifyResult) -> text:
     var lines: [text] = []
-    val status_str = if result.has_errors: "FAIL" else: "pass"
-    lines = lines + ["Reservation Verification: {status_str} ({result.passed_checks}/{result.total_checks} resources OK)"]
+    val has_err = _result_has_errors(res)
+    val status_str = if has_err: "FAIL" else: "pass"
+    val pc = _result_passed(res)
+    val tc = _result_total(res)
+    lines = lines + ["Reservation Verification: {status_str} ({pc}/{tc} resources OK)"]
 
-    val dems = result.demands
+    val dems = _result_demands(res)
     if dems.len() == 0:
         lines = lines + ["  No resources to check."]
-        return lines.join("\n")
+        return _join_lines(lines)
 
     lines = lines + ["  Resource demands:"]
     for demand in dems:
         lines = lines + [format_demand(demand)]
 
-    val diags = result.diagnostics
+    val diags = _result_diagnostics(res)
     if diags.len() > 0:
         lines = lines + ["  Diagnostics:"]
         for diag in diags:
-            lines = lines + ["    [{diag.level}] {diag.message}"]
+            val dl = _diag_level(diag)
+            val dm = _diag_message(diag)
+            lines = lines + ["    [{dl}] {dm}"]
 
-    lines.join("\n")
+    _join_lines(lines)
 
 # ================================================================
 # Helper to get demand at index from result
@@ -427,14 +555,19 @@ describe "Data structure construction":
 
     it "creates TaskReservation correctly":
         val task = make_reservation("uart_rx", ["pool_a", "pool_b"], [2, 3], 4)
-        expect(task.task_name).to_equal("uart_rx")
-        val paths = task.reserve_paths
-        val counts = task.reserve_counts
+        val tname = _get_task_name(task)
+        expect(tname).to_equal("uart_rx")
+        val paths = _get_paths(task)
         expect(paths.len()).to_equal(2)
+        val counts = _get_counts(task)
         expect(counts.len()).to_equal(2)
-        expect(task.instances).to_equal(4)
-        expect(paths[0]).to_equal("pool_a")
-        expect(counts[1]).to_equal(3)
+        val inst = _get_instances(task)
+        expect(inst).to_equal(4)
+        # Use safe indexed access via helper
+        val p0 = _text_at(paths, 0)
+        expect(p0).to_equal("pool_a")
+        val c1 = _count_at(counts, 1)
+        expect(c1).to_equal(3)
 
     it "creates ReservationDemand via compute_demand":
         val leaf = make_leaf("pool", "Unit", 10)

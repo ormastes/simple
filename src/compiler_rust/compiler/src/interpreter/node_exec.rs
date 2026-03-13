@@ -811,26 +811,48 @@ fn exec_assignment(
                             // For mutable methods (me), the object may have been updated in env
                             container.clone()
                         } else {
-                            let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                                "index assignment requires an array, dict, tuple, or object with __setitem__",
-                            );
+                            let type_name = container.type_name();
+                            let hint = if type_name == "bool" {
+                                "index assignment requires an array, dict, tuple, or object with __setitem__. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+                            } else if type_name == "i64" {
+                                "index assignment requires an array, dict, tuple, or object with __setitem__. \
+Hint: in interpreter mode, `self.field` access can corrupt the variable type to i64. \
+Use an intermediate variable: `val ref = self.field; ref[i] = value`"
+                            } else {
+                                "index assignment requires an array, dict, tuple, or object with __setitem__"
+                            };
+                            let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(hint);
                             return Err(CompileError::semantic_with_context(
                                 format!(
                                     "invalid assignment: cannot index assign value of type {}",
-                                    container.type_name()
+                                    type_name
                                 ),
                                 ctx,
                             ));
                         }
                     }
                     _ => {
+                        let type_name = container.type_name();
+                        let hint = if type_name == "bool" {
+                            "index assignment requires an array, dict, tuple, or object with __setitem__. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+                        } else if type_name == "i64" {
+                            "index assignment requires an array, dict, tuple, or object with __setitem__. \
+Hint: in interpreter mode, `self.field` access can corrupt the variable type to i64. \
+Use an intermediate variable: `val ref = self.field; ref[i] = value`"
+                        } else {
+                            "index assignment requires an array, dict, tuple, or object with __setitem__"
+                        };
                         let ctx = ErrorContext::new()
                             .with_code(codes::INVALID_ASSIGNMENT)
-                            .with_help("index assignment requires an array, dict, tuple, or object with __setitem__");
+                            .with_help(hint);
                         return Err(CompileError::semantic_with_context(
                             format!(
                                 "invalid assignment: cannot index assign value of type {}",
-                                container.type_name()
+                                type_name
                             ),
                             ctx,
                         ));
@@ -909,14 +931,26 @@ fn exec_assignment(
                                         }
                                     }
                                     _ => {
+                                        let type_name = container.type_name();
+                                        let hint = if type_name == "bool" {
+                                            "index assignment requires an array, dict, or tuple. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+                                        } else if type_name == "i64" {
+                                            "index assignment requires an array, dict, or tuple. \
+Hint: in interpreter mode, `self.field` access can corrupt the field type to i64. \
+Use an intermediate variable: `val ref = self.field; ref[i] = value`"
+                                        } else {
+                                            "index assignment requires an array, dict, or tuple"
+                                        };
                                         let ctx = ErrorContext::new()
                                             .with_code(codes::INVALID_ASSIGNMENT)
-                                            .with_help("index assignment requires an array, dict, or tuple");
+                                            .with_help(hint);
                                         return Err(CompileError::semantic_with_context(
                                             format!(
                                                 "invalid assignment: cannot index assign to field `{}` of type {}",
                                                 field_name,
-                                                container.type_name()
+                                                type_name
                                             ),
                                             ctx,
                                         ));
@@ -997,14 +1031,26 @@ fn exec_assignment(
                                         Value::Dict(dict)
                                     }
                                     _ => {
+                                        let type_name = container.type_name();
+                                        let hint = if type_name == "bool" {
+                                            "nested index assignment requires an array or dict. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+                                        } else if type_name == "i64" {
+                                            "nested index assignment requires an array or dict. \
+Hint: in interpreter mode, `self.field` access can corrupt the field type to i64. \
+Use an intermediate variable: `val ref = self.field; ref[i] = value`"
+                                        } else {
+                                            "nested index assignment requires an array or dict"
+                                        };
                                         let ctx = ErrorContext::new()
                                             .with_code(codes::INVALID_ASSIGNMENT)
-                                            .with_help("nested index assignment requires an array or dict");
+                                            .with_help(hint);
                                         return Err(CompileError::semantic_with_context(
                                             format!(
                                                 "invalid assignment: cannot index assign to field `{}` of type {}",
                                                 field_name,
-                                                container.type_name()
+                                                type_name
                                             ),
                                             ctx,
                                         ));

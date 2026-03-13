@@ -180,6 +180,67 @@ class TemplateInstantiator:
         keys.len()
 
 # ============================================================================
+# Helper: Test CompilationContext Implementation
+# ============================================================================
+
+# Use parallel arrays for template registry to avoid empty dict {} -> bool bug
+var test_template_names: [text] = []
+var test_template_values: [Any] = []
+
+fn test_templates_reset():
+    test_template_names = []
+    test_template_values = []
+
+fn test_templates_add(name: text, tmpl: Any):
+    test_template_names = test_template_names + [name]
+    test_template_values = test_template_values + [tmpl]
+
+fn test_templates_find(name: text) -> i64:
+    var i = 0
+    for n in test_template_names:
+        if n == name:
+            return i
+        i = i + 1
+    -1
+
+fn test_templates_get(name: text) -> Any:
+    val idx = test_templates_find(name)
+    if idx >= 0:
+        var j = 0
+        for v in test_template_values:
+            if j == idx:
+                return v
+            j = j + 1
+    nil
+
+fn test_load_template(name):
+    val idx = test_templates_find(name)
+    if idx >= 0:
+        Ok(test_templates_get(name))
+    else:
+        Err("Template not found: {name}")
+
+fn test_compile_template(tmpl, type_args):
+    var args_str = ""
+    var first = true
+    for t in type_args:
+        if not first:
+            args_str = args_str + ","
+        args_str = args_str + t.to_string()
+        first = false
+    val mangled = if args_str.is_empty(): tmpl.name else: "{tmpl.name}${args_str}"
+    Ok(CompiledUnit(name: mangled, code: [], symbols: {"__init__": 0}, entry_point: nil, relocations: []))
+
+fn make_instantiator_from(template_names: [text]):
+    test_templates_reset()
+    for name in template_names:
+        val tmpl = GenericTemplate(name: name, type_params: [], ast_data: nil)
+        test_templates_add(name, tmpl)
+    val load_fn = \name: test_load_template(name)
+    val compile_fn = \tmpl, type_args: test_compile_template(tmpl, type_args)
+    TemplateInstantiator(load_fn: load_fn, compile_fn: compile_fn, in_progress_keys: [], cache_keys: [], cache_values: [])
+
+# ============================================================================
 # Test Group 1: InstantiationMode Enum
 # ============================================================================
 
@@ -380,65 +441,3 @@ describe "TemplateInstantiator":
             expect inst.cache_size() == 2
             expect inst.is_cached("Box", [ConcreteType(name: "Int")])
             expect inst.is_cached("Box", [ConcreteType(name: "String")])
-
-
-# ============================================================================
-# Helper: Test CompilationContext Implementation
-# ============================================================================
-
-# Use parallel arrays for template registry to avoid empty dict {} -> bool bug
-var test_template_names: [text] = []
-var test_template_values: [Any] = []
-
-fn test_templates_reset():
-    test_template_names = []
-    test_template_values = []
-
-fn test_templates_add(name: text, tmpl: Any):
-    test_template_names = test_template_names + [name]
-    test_template_values = test_template_values + [tmpl]
-
-fn test_templates_find(name: text) -> i64:
-    var i = 0
-    for n in test_template_names:
-        if n == name:
-            return i
-        i = i + 1
-    -1
-
-fn test_templates_get(name: text) -> Any:
-    val idx = test_templates_find(name)
-    if idx >= 0:
-        var j = 0
-        for v in test_template_values:
-            if j == idx:
-                return v
-            j = j + 1
-    nil
-
-fn test_load_template(name):
-    val idx = test_templates_find(name)
-    if idx >= 0:
-        Ok(test_templates_get(name))
-    else:
-        Err("Template not found: {name}")
-
-fn test_compile_template(tmpl, type_args):
-    var args_str = ""
-    var first = true
-    for t in type_args:
-        if not first:
-            args_str = args_str + ","
-        args_str = args_str + t.to_string()
-        first = false
-    val mangled = if args_str.is_empty(): tmpl.name else: "{tmpl.name}${args_str}"
-    Ok(CompiledUnit(name: mangled, code: [], symbols: {"__init__": 0}, entry_point: nil, relocations: []))
-
-fn make_instantiator_from(template_names: [text]):
-    test_templates_reset()
-    for name in template_names:
-        val tmpl = GenericTemplate(name: name, type_params: [], ast_data: nil)
-        test_templates_add(name, tmpl)
-    val load_fn = \name: test_load_template(name)
-    val compile_fn = \tmpl, type_args: test_compile_template(tmpl, type_args)
-    TemplateInstantiator(load_fn: load_fn, compile_fn: compile_fn, in_progress_keys: [], cache_keys: [], cache_values: [])

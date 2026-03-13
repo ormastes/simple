@@ -156,10 +156,11 @@ class TaskScheduler:
         nil
 
     fn verify_execution_order(expected: [i32]) -> bool:
-        if self.executed_order.len() != expected.len():
+        var eo = self.executed_order
+        if eo.len() != expected.len():
             return false
         for i in 0..expected.len():
-            if self.executed_order[i] != expected[i]:
+            if eo[i] != expected[i]:
                 return false
         true
 
@@ -243,7 +244,8 @@ class RetryPolicy:
         delay
 
     me record_attempt(success: bool, error: Option<text>):
-        val attempt_num = self.attempts.len() as i32 + 1
+        var attempts_ref = self.attempts
+        val attempt_num = attempts_ref.len() as i32 + 1
         val delay = self.calculate_delay(attempt_num)
         val attempt = RetryAttempt(
             attempt_number: attempt_num,
@@ -251,31 +253,35 @@ class RetryPolicy:
             success: success,
             error: error
         )
-        var attempts = self.attempts
-        attempts = attempts + [attempt]
-        self.attempts = attempts
+        attempts_ref = attempts_ref + [attempt]
+        self.attempts = attempts_ref
 
     fn should_retry() -> bool:
-        if self.attempts.len() == 0:
+        var attempts_ref = self.attempts
+        if attempts_ref.len() == 0:
             return true
-        if self.attempts.len() as i32 >= self.max_attempts:
+        if attempts_ref.len() as i32 >= self.max_attempts:
             return false
-        val last = self.attempts[self.attempts.len() - 1]
+        val last = attempts_ref[attempts_ref.len() - 1]
         not last.success
 
     fn get_attempt_count() -> i32:
-        self.attempts.len() as i32
+        var attempts_ref = self.attempts
+        attempts_ref.len() as i32
 
     fn get_total_delay() -> i32:
         var total = 0
-        for attempt in self.attempts:
+        var attempts_ref = self.attempts
+        for attempt in attempts_ref:
             total = total + attempt.delay_ms
         total
 
     fn was_successful() -> bool:
-        if self.attempts.len() == 0:
+        var attempts_ref = self.attempts
+        if attempts_ref.len() == 0:
             return false
-        self.attempts[self.attempts.len() - 1].success
+        val last = attempts_ref[attempts_ref.len() - 1]
+        last.success
 
     me reset():
         self.attempts = []
@@ -304,28 +310,31 @@ class RateLimiter:
         self.current_time = self.current_time + ms
         val window_start = self.current_time - self.window_ms
         var new_requests: [i32] = []
-        for req_time in self.requests:
+        var reqs = self.requests
+        for req_time in reqs:
             if req_time >= window_start:
                 new_requests = new_requests + [req_time]
         self.requests = new_requests
 
     fn can_proceed() -> bool:
-        (self.requests.len() as i32) < self.max_requests
+        var reqs = self.requests
+        (reqs.len() as i32) < self.max_requests
 
     me try_acquire() -> bool:
         if not self.can_proceed():
             return false
-        var requests = self.requests
-        requests = requests + [self.current_time]
-        self.requests = requests
+        var reqs = self.requests
+        reqs = reqs + [self.current_time]
+        self.requests = reqs
         true
 
     fn get_wait_time() -> i32:
         if self.can_proceed():
             return 0
-        if self.requests.len() == 0:
+        var reqs = self.requests
+        if reqs.len() == 0:
             return 0
-        val oldest = self.requests[0]
+        val oldest = reqs[0]
         val wait = (oldest + self.window_ms) - self.current_time
         if wait > 0:
             wait
@@ -333,7 +342,8 @@ class RateLimiter:
             0
 
     fn get_remaining_requests() -> i32:
-        self.max_requests - (self.requests.len() as i32)
+        var reqs = self.requests
+        self.max_requests - (reqs.len() as i32)
 
     me reset():
         self.requests = []
@@ -530,7 +540,8 @@ class ConcurrencyController:
 
     me complete(name: text):
         var new_active: [text] = []
-        for task in self.active_tasks:
+        var at_ref = self.active_tasks
+        for task in at_ref:
             if task != name:
                 new_active = new_active + [task]
         self.active_tasks = new_active
@@ -539,11 +550,12 @@ class ConcurrencyController:
         completed_tasks = completed_tasks + [name]
         self.completed_tasks = completed_tasks
         # Inline try_start_waiting
-        if self.waiting_queue.len() > 0 and self.can_start():
-            val next = self.waiting_queue[0]
+        var wq = self.waiting_queue
+        if wq.len() > 0 and self.can_start():
+            val next = wq[0]
             var new_queue: [text] = []
-            for i in 1..self.waiting_queue.len():
-                new_queue = new_queue + [self.waiting_queue[i]]
+            for i in 1..wq.len():
+                new_queue = new_queue + [wq[i]]
             self.waiting_queue = new_queue
             self.active_count = self.active_count + 1
             var active_tasks2 = self.active_tasks

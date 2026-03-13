@@ -12,7 +12,9 @@ use compiler.shb.shb_types.{
     SHB_FLAG_MUTABLE, SHB_FLAG_COMPTIME
 }
 use compiler.shb.shb_hash.{shb_source_hash, shb_interface_hash}
+use compiler.shb.shb_writer.{shb_write}
 use compiler.core.frontend.{core_frontend_parse_reset}
+use compiler.core.types.{type_tag_name}
 
 use compiler.ast.{
     decl_count, decl_get_tag, decl_get_name, decl_get_is_pub,
@@ -23,13 +25,51 @@ use compiler.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_ENUM,
     DECL_CLASS, DECL_USE, DECL_EXPORT, DECL_IMPL
 }
-use compiler.visibility.{effective_visibility}
+use compiler.common.visibility.{effective_visibility}
+
+fn shb_type_name_from_tag(type_tag: i64) -> text:
+    if type_tag <= 0:
+        return ""
+    type_tag_name(type_tag)
+
+struct ShbExtractResult:
+    ok: bool
+    iface: ShbModuleInterface
+    error: text
+
+fn shb_extract_result_ok(interface: ShbModuleInterface) -> ShbExtractResult:
+    ShbExtractResult(ok: true, iface: interface, error: "")
+
+fn shb_extract_result_err(message: text) -> ShbExtractResult:
+    ShbExtractResult(
+        ok: false,
+        iface: shb_module_interface_new(0, 0),
+        error: message
+    )
+
+struct ShbPersistResult:
+    ok: bool
+    source_hash: i64
+    interface_hash: i64
+    error: text
+
+fn shb_persist_result_ok(source_hash: i64, interface_hash: i64) -> ShbPersistResult:
+    ShbPersistResult(ok: true, source_hash: source_hash, interface_hash: interface_hash, error: "")
+
+fn shb_persist_result_err(message: text) -> ShbPersistResult:
+    ShbPersistResult(ok: false, source_hash: 0, interface_hash: 0, error: message)
 
 # --- Main extraction function ---
 
 fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
     val src_hash = shb_source_hash(source)
-    var iface = shb_module_interface_new(src_hash, 0)
+    var functions: [ShbFnEntry] = []
+    var structs: [ShbStructEntry] = []
+    var classes: [ShbClassEntry] = []
+    var enums: [ShbEnumEntry] = []
+    var traits: [ShbTraitEntry] = []
+    var reexports: [ShbReexportEntry] = []
+    var dependencies: [ShbDependencyEntry] = []
 
     # Walk all declarations in the arena
     val total = decl_count()
@@ -44,25 +84,48 @@ fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
 
         if tag == DECL_FN:
             if visible:
-                iface.functions.push(extract_fn(i))
+                functions.push(extract_fn(i))
         else if tag == DECL_EXTERN_FN:
             if visible:
-                iface.functions.push(extract_fn(i))
+                functions.push(extract_fn(i))
         else if tag == DECL_STRUCT:
             if visible:
-                iface.structs.push(extract_struct(i))
+                structs.push(extract_struct(i))
         else if tag == DECL_CLASS:
             if visible:
-                iface.classes.push(extract_class(i))
+                classes.push(extract_class(i))
         else if tag == DECL_ENUM:
             if visible:
-                iface.enums.push(extract_enum(i))
+                enums.push(extract_enum(i))
         else if tag == DECL_EXPORT:
-            extract_reexports(i, iface)
+            val extracted_reexports = extract_reexports(i)
+            var eri = 0
+            while eri < extracted_reexports.len():
+                reexports.push(extracted_reexports[eri])
+                eri = eri + 1
         else if tag == DECL_USE:
-            extract_dependency(i, iface)
+            val dep = extract_dependency(i)
+            if dep.?:
+                var found = false
+                var di = 0
+                while di < dependencies.len():
+                    if dependencies[di].module_path == dep.module_path:
+                        found = true
+                    di = di + 1
+                if found == false:
+                    dependencies.push(dep)
         i = i + 1
 
+    traits = shb_extract_traits()
+
+    var iface = shb_module_interface_new(src_hash, 0)
+    iface.functions = functions
+    iface.structs = structs
+    iface.classes = classes
+    iface.enums = enums
+    iface.traits = traits
+    iface.reexports = reexports
+    iface.dependencies = dependencies
     # Add primitive type layouts
     iface.type_layouts = shb_primitive_layouts()
 
@@ -72,10 +135,18 @@ fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
 
     iface
 
-fn parse_and_extract_shb(source: text, filename: text) -> Result<ShbModuleInterface, text>:
+fn parse_and_extract_shb(source: text, filename: text) -> ShbExtractResult:
     if not core_frontend_parse_reset(source, filename):
-        return Err("failed to parse source for SHB extraction: {filename}")
-    Ok(shb_extract(source, filename))
+        return shb_extract_result_err("failed to parse source for SHB extraction: {filename}")
+    shb_extract_result_ok(shb_extract(source, filename))
+
+fn parse_extract_write_shb(source: text, filename: text, shb_path: text) -> ShbPersistResult:
+    if not core_frontend_parse_reset(source, filename):
+        return shb_persist_result_err("failed to parse source for SHB extraction: {filename}")
+    val iface = shb_extract(source, filename)
+    if not shb_write(iface, shb_path):
+        return shb_persist_result_err("failed to write SHB: {shb_path}")
+    shb_persist_result_ok(iface.header.source_hash, iface.header.interface_hash)
 
 # --- Individual extractors ---
 
@@ -83,7 +154,7 @@ fn extract_fn(decl_idx: i64) -> ShbFnEntry:
     val name = decl_get_name(decl_idx)
     val param_names = decl_get_param_names(decl_idx)
     val param_types = decl_get_param_types(decl_idx)
-    val ret_type = decl_get_ret_type(decl_idx) ?? ""
+    val ret_type = shb_type_name_from_tag(decl_get_ret_type(decl_idx))
     val is_async = decl_get_is_async(decl_idx)
     val is_comptime = decl_get_is_comptime(decl_idx)
 
@@ -92,7 +163,7 @@ fn extract_fn(decl_idx: i64) -> ShbFnEntry:
     while pi < param_names.len():
         var ptype = ""
         if pi < param_types.len():
-            ptype = param_types[pi] ?? ""
+            ptype = shb_type_name_from_tag(param_types[pi])
         params.push(ShbParam(name: param_names[pi], type_name: ptype))
         pi = pi + 1
 
@@ -119,7 +190,7 @@ fn extract_struct(decl_idx: i64) -> ShbStructEntry:
     while fi < field_names.len():
         var ftype = ""
         if fi < field_types.len():
-            ftype = field_types[fi] ?? ""
+            ftype = shb_type_name_from_tag(field_types[fi])
         fields.push(ShbFieldEntry(
             name: field_names[fi],
             type_name: ftype,
@@ -139,7 +210,7 @@ fn extract_class(decl_idx: i64) -> ShbClassEntry:
     while fi < field_names.len():
         var ftype = ""
         if fi < field_types.len():
-            ftype = field_types[fi] ?? ""
+            ftype = shb_type_name_from_tag(field_types[fi])
         fields.push(ShbFieldEntry(
             name: field_names[fi],
             type_name: ftype,
@@ -168,36 +239,33 @@ fn extract_enum(decl_idx: i64) -> ShbEnumEntry:
 
     ShbEnumEntry(name: name, variants: variants, flags: SHB_FLAG_PUB)
 
-fn extract_reexports(decl_idx: i64, iface: ShbModuleInterface):
+fn extract_reexports(decl_idx: i64) -> [ShbReexportEntry]:
     val exports = decl_get_imports(decl_idx)
+    var reexports: [ShbReexportEntry] = []
     var ei = 0
     while ei < exports.len():
         val sym = exports[ei]
         val mod_path = decl_get_name(decl_idx)
-        iface.reexports.push(ShbReexportEntry(
+        reexports.push(ShbReexportEntry(
             symbol_name: sym,
             source_module: mod_path
         ))
         ei = ei + 1
+    reexports
 
-fn extract_dependency(decl_idx: i64, iface: ShbModuleInterface):
+fn extract_dependency(decl_idx: i64) -> ShbDependencyEntry?:
     val mod_path = decl_get_name(decl_idx)
     if mod_path != "":
-        var found = false
-        var di = 0
-        while di < iface.dependencies.len():
-            if iface.dependencies[di].module_path == mod_path:
-                found = true
-            di = di + 1
-        if found == false:
-            iface.dependencies.push(ShbDependencyEntry(
-                module_path: mod_path,
-                interface_hash: 0
-            ))
+        return ShbDependencyEntry(
+            module_path: mod_path,
+            interface_hash: 0
+        )
+    nil
 
 # --- Trait extraction from impl blocks ---
 
-fn shb_extract_traits(iface: ShbModuleInterface):
+fn shb_extract_traits() -> [ShbTraitEntry]:
+    var traits: [ShbTraitEntry] = []
     val total = decl_count()
     var i = 0
     while i < total:
@@ -207,9 +275,10 @@ fn shb_extract_traits(iface: ShbModuleInterface):
             val is_pub = decl_get_is_pub(i)
             if is_pub:
                 var methods: [text] = []
-                iface.traits.push(ShbTraitEntry(
+                traits.push(ShbTraitEntry(
                     name: name,
                     methods: methods,
                     flags: SHB_FLAG_PUB
                 ))
         i = i + 1
+    traits

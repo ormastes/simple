@@ -23,16 +23,14 @@ use compiler.driver.watcher.watcher_types.{
 }
 use compiler.driver.watcher.watcher_lock.{is_watcher_running}
 use compiler.shb.shb_cache.{ShbCacheManager, ShbCacheConfig}
-use compiler.shb.shb_types.{ShbModuleInterface}
-use compiler.shb.shb_extractor.{parse_and_extract_shb}
-use compiler.shb.shb_writer.{shb_write}
+use compiler.shb.shb_extractor.{parse_extract_write_shb}
 use std.daemon_sdk.client.{daemon_submit_and_wait, daemon_ensure_running}
 use std.daemon_sdk.types.{DaemonResponse}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_hash_text(s: text) -> i64
-extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
@@ -94,38 +92,55 @@ fn request_smf(source_path: text, options_hash: i64, config: WatcherConfig) -> R
 # Get-or-Generate (with inline fallback)
 # ============================================================================
 
-fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> Result<ShbModuleInterface, text>:
+struct ShbLoadResult:
+    ok: bool
+    shb_path: text
+    source_hash: i64
+    interface_hash: i64
+    error: text
+
+fn shb_load_result_ok(shb_path: text, source_hash: i64, interface_hash: i64) -> ShbLoadResult:
+    ShbLoadResult(
+        ok: true,
+        shb_path: shb_path,
+        source_hash: source_hash,
+        interface_hash: interface_hash,
+        error: ""
+    )
+
+fn shb_load_result_err(message: text) -> ShbLoadResult:
+    ShbLoadResult(ok: false, shb_path: "", source_hash: 0, interface_hash: 0, error: message)
+
+fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> ShbLoadResult:
     val check = check_shb_freshness(source_path, config.shb_dir)
     if check.status == CACHE_FRESH:
         use compiler.shb.shb_reader.{ShbReader}
         val shb_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
         val reader = ShbReader.open(shb_path)
         if reader.is_valid():
-            return Ok(reader.read_full_interface())
+            return shb_load_result_ok(shb_path, reader.source_hash(), reader.interface_hash())
 
     if is_watcher_running(config.lock_path):
         val result = request_shb(source_path, config)
         if result.is_ok():
             use compiler.shb.shb_reader.{ShbReader}
-            val reader = ShbReader.open(result.unwrap())
+            val shb_path = result.unwrap()
+            val reader = ShbReader.open(shb_path)
             if reader.is_valid():
-                return Ok(reader.read_full_interface())
+                return shb_load_result_ok(shb_path, reader.source_hash(), reader.interface_hash())
 
     # Inline generation fallback
     val source = rt_file_read_text(source_path) ?? ""
     if source == "":
-        return Err("failed to read source for SHB generation: {source_path}")
+        return shb_load_result_err("failed to read source for SHB generation: {source_path}")
 
-    val extract_result = parse_and_extract_shb(source, source_path)
-    if extract_result.is_err():
-        return Err(extract_result.unwrap_err())
-    val iface = extract_result.unwrap()
-
-    rt_mkdir_p(config.shb_dir)
+    rt_dir_create_all(config.shb_dir)
     val shb_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
-    shb_write(iface, shb_path)
+    val persist_result = parse_extract_write_shb(source, source_path, shb_path)
+    if not persist_result.ok:
+        return shb_load_result_err(persist_result.error)
 
-    Ok(iface)
+    shb_load_result_ok(shb_path, persist_result.source_hash, persist_result.interface_hash)
 
 fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool) -> Result<text, text>:
     use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}

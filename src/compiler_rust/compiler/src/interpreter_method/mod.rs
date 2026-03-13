@@ -1021,13 +1021,24 @@ pub(crate) fn evaluate_method_call(
         ));
     }
 
+    let type_name = recv_val.type_name();
+
     let hint = match method {
         "to_f64" | "to_f32" | "to_float" => {
             Some("use implicit conversion (e.g., `float_val / int_val` auto-converts) or explicit cast: `val as f64`")
         }
         "to_i64" | "to_i32" | "to_int" => Some("use explicit cast: `val as i64` or `val as i32`"),
         "to_str" | "to_string" | "toString" => Some("use `str(val)` function or f-string: `f\"{val}\"`"),
-        _ => None,
+        _ => {
+            // Add type-corruption hints for known interpreter bugs
+            if type_name == "bool" {
+                Some("Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool` instead of the annotated dict type. Use a seeded dict like `{\"__init__\": 0}` instead")
+            } else if type_name == "i64" {
+                Some("Hint: in interpreter mode, `self.field.method()` or `for i in range(); arr[i]` can corrupt the variable type to i64. Use an intermediate variable: `val ref = self.field; ref.method()`")
+            } else {
+                None
+            }
+        }
     };
 
     // DEBUG: Add receiver value info directly to error message to help diagnose type issues
@@ -1038,27 +1049,18 @@ pub(crate) fn evaluate_method_call(
 
     if let Some(hint_text) = hint {
         ctx = ctx.with_help(hint_text);
-        Err(CompileError::semantic_with_context(
-            format!(
-                "method `{}` not found on type `{}`{}",
-                method,
-                recv_val.type_name(),
-                receiver_debug
-            ),
-            ctx,
-        ))
     } else {
         ctx = ctx.with_help("check that the method is defined for this type");
-        Err(CompileError::semantic_with_context(
-            format!(
-                "method `{}` not found on type `{}`{}",
-                method,
-                recv_val.type_name(),
-                receiver_debug
-            ),
-            ctx,
-        ))
     }
+    Err(CompileError::semantic_with_context(
+        format!(
+            "method `{}` not found on type `{}`{}",
+            method,
+            type_name,
+            receiver_debug
+        ),
+        ctx,
+    ))
 }
 
 /// Evaluate a method call and return both the result and the potentially modified self.

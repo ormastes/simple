@@ -32,9 +32,16 @@ impl Value {
             Value::Nil => Ok(0),
             other => {
                 let actual_type = self.type_name();
+                let hint = if actual_type == "array" {
+                    format!("expected integer type, got {}. \
+Hint: in interpreter mode, class constructors with array fields can trigger \
+spurious conversion errors. Use intermediate variables for array field access", actual_type)
+                } else {
+                    format!("expected integer type, got {}", actual_type)
+                };
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
-                    .with_help(format!("expected integer type, got {}", actual_type));
+                    .with_help(hint);
                 Err(CompileError::semantic_with_context(
                     format!("type mismatch: cannot convert {} to int", actual_type),
                     ctx,

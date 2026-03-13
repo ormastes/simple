@@ -570,11 +570,23 @@ pub(super) fn eval_collection_expr(
                     }
                 }
                 _ => {
+                    let type_name = recv_val.type_name();
+                    let hint = if type_name == "bool" {
+                        "index access is only supported on arrays, tuples, dicts, and strings. \
+Hint: in interpreter mode, empty dict literal `{}` is inferred as `bool`. \
+Use a seeded dict like `{\"__init__\": 0}` instead"
+                    } else if type_name == "i64" {
+                        "index access is only supported on arrays, tuples, dicts, and strings. \
+Hint: in interpreter mode, `self.field.method()` or `for i in range(); arr[i]` can corrupt \
+the variable type to i64. Use an intermediate variable: `val ref = self.field; ref[i]`"
+                    } else {
+                        "index access is only supported on arrays, tuples, dicts, and strings"
+                    };
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)
-                        .with_help("index access is only supported on arrays, tuples, dicts, and strings");
+                        .with_help(hint);
                     Err(CompileError::semantic_with_context(
-                        format!("invalid operation: cannot index value of type {}", recv_val.type_name()),
+                        format!("invalid operation: cannot index value of type {}", type_name),
                         ctx,
                     ))
                 }

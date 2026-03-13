@@ -1,14 +1,17 @@
 use compiler.driver.cache.cache_types.{CACHE_FRESH}
-use compiler.driver.watcher.{
-    WatcherConfig, watcher_config_default,
-    get_or_generate_shb, check_shb_freshness
-}
+use compiler.driver.watcher.watcher_types.{WatcherConfig, watcher_config_default}
+use compiler.driver.watcher.watcher_client.{get_or_generate_shb, check_shb_freshness}
+use compiler.shb.shb_extractor.{parse_and_extract_shb, parse_extract_write_shb}
 use compiler.shb.shb_cache.{
     ShbCacheManager, ShbCacheConfig, ShbChangeEvent,
     compile_changed_to_shb,
     SHB_CACHE_NEW, SHB_CACHE_BODY_ONLY, SHB_CACHE_INTERFACE
 }
 use compiler.shb.shb_reader.{ShbReader}
+use compiler.shb.shb_writer.{
+    shb_write, shb_debug_string_table_size, shb_debug_function_section_size,
+    shb_debug_full_binary_size
+}
 
 extern fn sys_get_args() -> [text]
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -81,9 +84,9 @@ fn probe_inline_generation_roundtrip() -> text:
         return "failed to write source"
 
     val result = get_or_generate_shb(source_path, cfg)
-    if result.is_err():
+    if not result.ok:
         shb_test_cleanup(tmpdir)
-        return "get_or_generate_shb failed: {result.unwrap_err()}"
+        return "get_or_generate_shb failed: {result.error}"
 
     if not rt_file_exists(shb_path):
         shb_test_cleanup(tmpdir)
@@ -94,12 +97,11 @@ fn probe_inline_generation_roundtrip() -> text:
         shb_test_cleanup(tmpdir)
         return "generated shb invalid"
 
-    val iface = result.unwrap()
-    val from_disk = reader.read_full_interface()
     val ok = (
-        iface.functions.len() == 1 and
-        from_disk.functions.len() == 1 and
-        from_disk.functions[0].name == "answer"
+        result.shb_path == shb_path and
+        result.interface_hash != 0 and
+        reader.function_count() == 1 and
+        reader.has_function_named("answer")
     )
 
     shb_test_cleanup(tmpdir)
@@ -107,6 +109,73 @@ fn probe_inline_generation_roundtrip() -> text:
         "ok"
     else:
         "unexpected interface contents"
+
+fn probe_extract_only() -> text:
+    val tmpdir = shb_test_tmpdir()
+    val source_path = shb_test_source_path(tmpdir)
+    val source = shb_test_source_v1()
+
+    val result = parse_and_extract_shb(source, source_path)
+    shb_test_cleanup(tmpdir)
+
+    if not result.ok:
+        return "extract failed: {result.error}"
+    val iface = result.iface
+    if iface.header.interface_hash != 0:
+        "ok"
+    else:
+        "extract bad interface hash={iface.header.interface_hash}"
+
+fn probe_write_only() -> text:
+    val tmpdir = shb_test_tmpdir()
+    val cfg = shb_test_config(tmpdir)
+    val source_path = shb_test_source_path(tmpdir)
+    val shb_path = shb_test_shb_path(cfg, source_path)
+    val source = shb_test_source_v1()
+
+    val result = parse_extract_write_shb(source, source_path, shb_path)
+    if not result.ok:
+        shb_test_cleanup(tmpdir)
+        return "extract failed: {result.error}"
+    rt_dir_create_all(cfg.shb_dir)
+    val exists = rt_file_exists(shb_path)
+    shb_test_cleanup(tmpdir)
+
+    if result.interface_hash != 0 and exists:
+        "ok"
+    else:
+        "write failed"
+
+fn probe_writer_debug(stage: text) -> text:
+    val tmpdir = shb_test_tmpdir()
+    val source_path = shb_test_source_path(tmpdir)
+    val source = shb_test_source_v1()
+
+    val result = parse_and_extract_shb(source, source_path)
+    shb_test_cleanup(tmpdir)
+    if not result.ok:
+        return "extract failed: {result.error}"
+    val iface = result.iface
+
+    if stage == "strtab":
+        val size = shb_debug_string_table_size(iface)
+        if size > 0:
+            return "ok"
+        return "strtab size={size}"
+
+    if stage == "fnsec":
+        val size = shb_debug_function_section_size(iface)
+        if size > 0:
+            return "ok"
+        return "fnsec size={size}"
+
+    if stage == "fullbin":
+        val size = shb_debug_full_binary_size(iface)
+        if size > 0:
+            return "ok"
+        return "fullbin size={size}"
+
+    "unknown writer debug stage: {stage}"
 
 fn probe_freshness_after_generation() -> text:
     val tmpdir = shb_test_tmpdir()
@@ -118,9 +187,9 @@ fn probe_freshness_after_generation() -> text:
         return "failed to write source"
 
     val result = get_or_generate_shb(source_path, cfg)
-    if result.is_err():
+    if not result.ok:
         shb_test_cleanup(tmpdir)
-        return "generation failed: {result.unwrap_err()}"
+        return "generation failed: {result.error}"
 
     val freshness = check_shb_freshness(source_path, cfg.shb_dir)
     shb_test_cleanup(tmpdir)
@@ -161,7 +230,7 @@ fn probe_watcher_batch_generation() -> text:
     val reader = ShbReader.open(shb_path)
     shb_test_cleanup(tmpdir)
 
-    if reader.is_valid() and reader.read_full_interface().functions.len() == 1:
+    if reader.is_valid() and reader.function_count() == 1 and reader.has_function_named("answer"):
         "ok"
     else:
         "watcher batch shb invalid"
@@ -209,11 +278,16 @@ fn probe_cache_manager_body_vs_interface() -> text:
 fn main() -> i64:
     val args = sys_get_args()
     if args.len() < 2:
-        print "usage: shb_wiring_probe.spl <inline|freshness|batch|body_vs_interface>"
+        print "usage: shb_wiring_probe.spl <extract|write|inline|freshness|batch|body_vs_interface|writer_strtab|writer_fnsec|writer_fullbin>"
         return 1
 
     val command = args[1]
     val result = match command:
+        case "extract": probe_extract_only()
+        case "write": probe_write_only()
+        case "writer_strtab": probe_writer_debug("strtab")
+        case "writer_fnsec": probe_writer_debug("fnsec")
+        case "writer_fullbin": probe_writer_debug("fullbin")
         case "inline": probe_inline_generation_roundtrip()
         case "freshness": probe_freshness_after_generation()
         case "batch": probe_watcher_batch_generation()

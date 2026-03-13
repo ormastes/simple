@@ -45,10 +45,13 @@ struct DebugLogEntry:
     params_text: text
     message: text
 
-# Module-level state
-# NOTE: use untyped [] instead of typed [DebugLogEntry] / [i64]
-# and use concat (var = var + [item]) instead of .push()
-var g_log_entries = []
+# Module-level state — seed arrays with typed values to establish type
+val _seed_entry = DebugLogEntry(
+    entry_id: 0, group_id: 0, parent_group_id: 0, depth: 0,
+    entry_type: "", package_path: "", class_name: "", function_name: "",
+    line_number: 0, timestamp_ms: 0, duration_ms: 0, params_text: "", message: ""
+)
+var g_log_entries = [_seed_entry]
 var g_log_depth = 0
 var g_log_next_entry_id = 1
 var g_log_next_group_id = 1
@@ -56,13 +59,18 @@ var g_log_enabled = false
 var g_log_filter_pattern = "*"
 var g_log_max_entries = 10000
 var g_log_trim_count = 1000
-var g_log_group_stack = []
+var g_log_group_stack = [0]
+# Clear seeds after type is established
+g_log_entries = [_seed_entry]
+g_log_entries = []
+g_log_group_stack = [0]
+g_log_group_stack = []
 
 # Filter matching: supports "*" wildcard, "prefix*", "*suffix", and exact match
 fn _matches_filter(fn_name: text, module_path: text) -> bool:
-    if g_log_filter_pattern == "*":
-        return true
     val pattern = g_log_filter_pattern
+    if pattern == "*":
+        return true
     if pattern.ends_with("*"):
         val prefix = pattern[0:pattern.len() - 1]
         val match_fn = fn_name.starts_with(prefix)
@@ -77,19 +85,24 @@ fn _matches_filter(fn_name: text, module_path: text) -> bool:
 
 # Trim oldest entries when exceeding max
 fn _maybe_trim():
-    if g_log_entries.len() > g_log_max_entries:
-        var trimmed = []
+    var entries = g_log_entries
+    val max_e = g_log_max_entries
+    if entries.len() > max_e:
+        var trimmed = [_seed_entry]
+        trimmed = []
         val skip_count = g_log_trim_count
-        for i in range(skip_count, g_log_entries.len()):
-            trimmed = trimmed + [g_log_entries[i]]
+        for i in range(skip_count, entries.len()):
+            trimmed = trimmed + [entries[i]]
         g_log_entries = trimmed
 
 # Remove last element from group stack
 fn _group_stack_pop():
-    if g_log_group_stack.len() > 0:
-        var new_stack = []
-        for i in range(0, g_log_group_stack.len() - 1):
-            new_stack = new_stack + [g_log_group_stack[i]]
+    var stack = g_log_group_stack
+    if stack.len() > 0:
+        var new_stack = [0]
+        new_stack = []
+        for i in range(0, stack.len() - 1):
+            new_stack = new_stack + [stack[i]]
         g_log_group_stack = new_stack
 
 fn debug_log_enter(fn_name: text, module_path: text, class_name: text, line_num: i64, params_text: text) -> i64:
@@ -102,14 +115,18 @@ fn debug_log_enter(fn_name: text, module_path: text, class_name: text, line_num:
     g_log_next_group_id = g_log_next_group_id + 1
 
     var parent_gid = 0
-    if g_log_group_stack.len() > 0:
-        parent_gid = g_log_group_stack[g_log_group_stack.len() - 1]
+    var stack = g_log_group_stack
+    if stack.len() > 0:
+        parent_gid = stack[stack.len() - 1]
+
+    val cur_depth = g_log_depth
+    val eid = g_log_next_entry_id
 
     val entry = DebugLogEntry(
-        entry_id: g_log_next_entry_id,
+        entry_id: eid,
         group_id: group_id,
         parent_group_id: parent_gid,
-        depth: g_log_depth,
+        depth: cur_depth,
         entry_type: "enter",
         package_path: module_path,
         class_name: class_name,
@@ -121,10 +138,13 @@ fn debug_log_enter(fn_name: text, module_path: text, class_name: text, line_num:
         message: ""
     )
 
-    g_log_next_entry_id = g_log_next_entry_id + 1
-    g_log_entries = g_log_entries + [entry]
-    g_log_group_stack = g_log_group_stack + [group_id]
-    g_log_depth = g_log_depth + 1
+    g_log_next_entry_id = eid + 1
+    var entries = g_log_entries
+    entries = entries + [entry]
+    g_log_entries = entries
+    stack = stack + [group_id]
+    g_log_group_stack = stack
+    g_log_depth = cur_depth + 1
 
     _maybe_trim()
 
@@ -136,20 +156,24 @@ fn debug_log_exit(fn_name: text, module_path: text, group_id: i64, start_time_ms
     if group_id < 0:
         return
 
-    if g_log_depth > 0:
-        g_log_depth = g_log_depth - 1
+    var cur_depth = g_log_depth
+    if cur_depth > 0:
+        cur_depth = cur_depth - 1
+    g_log_depth = cur_depth
 
     var parent_gid = 0
-    if g_log_group_stack.len() > 1:
-        parent_gid = g_log_group_stack[g_log_group_stack.len() - 2]
+    var stack = g_log_group_stack
+    if stack.len() > 1:
+        parent_gid = stack[stack.len() - 2]
 
     _group_stack_pop()
 
+    val eid = g_log_next_entry_id
     val entry = DebugLogEntry(
-        entry_id: g_log_next_entry_id,
+        entry_id: eid,
         group_id: group_id,
         parent_group_id: parent_gid,
-        depth: g_log_depth,
+        depth: cur_depth,
         entry_type: "exit",
         package_path: module_path,
         class_name: "",
@@ -161,8 +185,10 @@ fn debug_log_exit(fn_name: text, module_path: text, group_id: i64, start_time_ms
         message: ""
     )
 
-    g_log_next_entry_id = g_log_next_entry_id + 1
-    g_log_entries = g_log_entries + [entry]
+    g_log_next_entry_id = eid + 1
+    var entries = g_log_entries
+    entries = entries + [entry]
+    g_log_entries = entries
 
     _maybe_trim()
 
@@ -177,10 +203,12 @@ fn debug_log_disable():
     g_log_enabled = false
 
 fn debug_log_clear():
+    g_log_entries = [_seed_entry]
     g_log_entries = []
     g_log_depth = 0
     g_log_next_entry_id = 1
     g_log_next_group_id = 1
+    g_log_group_stack = [0]
     g_log_group_stack = []
 
 fn debug_log_set_max_entries(max_count: i64):
@@ -191,14 +219,19 @@ fn debug_log_get_entries():
     g_log_entries
 
 fn debug_log_get_entries_since(since_id: i64):
-    var result = []
-    for entry in g_log_entries:
-        if entry.entry_id > since_id:
+    var result = [_seed_entry]
+    result = []
+    var entries = g_log_entries
+    for entry in entries:
+        val eid = entry.entry_id
+        if eid > since_id:
             result = result + [entry]
     result
 
 fn debug_log_get_status() -> (bool, text, i64, i64):
-    (g_log_enabled, g_log_filter_pattern, g_log_entries.len(), g_log_depth)
+    var entries = g_log_entries
+    val elen = entries.len()
+    (g_log_enabled, g_log_filter_pattern, elen, g_log_depth)
 
 fn debug_log_is_enabled() -> bool:
     g_log_enabled
@@ -273,7 +306,8 @@ describe "AOP Debug Logger":
             debug_log_disable()
             val gid = debug_log_enter("my_func", "mod", "", 1, "")
             expect(gid).to_equal(-1)
-            expect(debug_log_get_entries().len()).to_equal(0)
+            val skip_entries = debug_log_get_entries()
+            expect(skip_entries.len()).to_equal(0)
 
     context "depth tracking":
         it "tracks nested call depth":
@@ -331,7 +365,8 @@ describe "AOP Debug Logger":
             val g2 = debug_log_enter("eval_expr", "mod", "", 2, "")
             expect(g1).to_be_greater_than(0)
             expect(g2).to_equal(-1)
-            expect(debug_log_get_entries().len()).to_equal(1)
+            val filt_entries = debug_log_get_entries()
+            expect(filt_entries.len()).to_equal(1)
             debug_log_disable()
 
         it "filters by module path":
@@ -359,12 +394,14 @@ describe "AOP Debug Logger":
             val g1 = debug_log_enter("a", "mod", "", 1, "")
             debug_log_exit("a", "mod", g1, 0)
             val entries_before = debug_log_get_entries()
-            val last_id = entries_before[entries_before.len() - 1].entry_id
+            val last_entry = entries_before[entries_before.len() - 1]
+            val last_id = last_entry.entry_id
             val g2 = debug_log_enter("b", "mod", "", 2, "")
             debug_log_exit("b", "mod", g2, 0)
             val new_entries = debug_log_get_entries_since(last_id)
             expect(new_entries.len()).to_equal(2)
-            expect(new_entries[0].function_name).to_equal("b")
+            val first_new = new_entries[0]
+            expect(first_new.function_name).to_equal("b")
             debug_log_disable()
 
     context "ring buffer":
@@ -376,7 +413,6 @@ describe "AOP Debug Logger":
             for i in range(0, 25):
                 debug_log_enter("func", "mod", "", i, "")
             val entries = debug_log_get_entries()
-            # Should have trimmed: 25 > 20, so oldest entries removed
             expect(entries.len()).to_be_less_than(26)
             # Reset max for other tests
             debug_log_set_max_entries(10000)

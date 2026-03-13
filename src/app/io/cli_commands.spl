@@ -9,7 +9,7 @@ use compiler.driver.driver_types.{CompileResult}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use std.tooling.easy_fix.{FixConfidence}
-use std.cli_output.{log_open, log_line, log_close, log_show, format_duration, print_log_hint, print_warning_now}
+use std.cli_output.{log_open, log_line, log_close, log_show, format_duration, print_log_hint, print_warning_now, progress_start, progress_update, progress_finish, progress_erase, buffer_start, buffer_capture, buffer_flush, buffer_discard}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -98,12 +98,22 @@ fn cli_run_lint(args: [text]) -> i64:
 
     val lint_log = log_open("lint")
     val lint_start = current_time_ms()
+    buffer_start(lint_log)
     var exit_code = 0
     var total_errors = 0
+    val file_count = files.len()
+
+    if not verbose:
+        progress_start(file_count, "Linting...")
+
+    var i = 0
     for file_path in files:
+        i = i + 1
+        if not verbose:
+            progress_update(i, file_path)
+
         if not rt_file_exists(file_path):
-            _cli_eprint("Error: File not found: {file_path}")
-            log_line(lint_log, "Error: File not found: {file_path}")
+            buffer_capture("Error: File not found: {file_path}")
             exit_code = 1
             continue
 
@@ -111,18 +121,24 @@ fn cli_run_lint(args: [text]) -> i64:
         val result = check_file(file_path)
         match result:
             case CompileResult.Success(msg):
-                log_line(lint_log, "lint: {file_path} OK")
-                if verbose:
-                    print "lint: {file_path} OK"
+                buffer_capture("lint: {file_path} OK")
             case _:
-                log_line(lint_log, "lint: {file_path} has issues")
-                _cli_eprint("lint: {file_path} has issues")
+                buffer_capture("lint: {file_path} has issues")
                 exit_code = 1
                 total_errors = total_errors + 1
+
+    if not verbose:
+        progress_finish("")
 
     val lint_end = current_time_ms()
     val lint_elapsed = lint_end - lint_start
     log_close(lint_log, "lint")
+
+    if exit_code != 0:
+        # Failure: flush buffered output so user sees which files had issues
+        buffer_flush()
+    else:
+        buffer_discard()
 
     if verbose:
         # Verbose output
@@ -134,8 +150,6 @@ fn cli_run_lint(args: [text]) -> i64:
             print "Lint passed: all files clean"
     else:
         # Compact output
-        val file_count = files.len()
-        print ""
         if exit_code == 0:
             print "Lint: {file_count} files, 0 errors in {format_duration(lint_elapsed)}"
         else:

@@ -35,6 +35,9 @@ fn typeoutlinekind_Atomic(inner: TypeOutline) -> TypeOutlineKind:
 fn typeoutlinekind_Isolated(inner: TypeOutline) -> TypeOutlineKind:
         TypeOutlineKind.Isolated(inner)
 
+fn typeoutlinekind_Pointer(inner: TypeOutline, mutable: bool) -> TypeOutlineKind:
+        TypeOutlineKind.Pointer(inner, mutable)
+
 fn merge_spans(a: Span, b: Span) -> Span:
         val start = if a.start < b.start: a.start else: b.start
         val end_ = if a.end > b.end: a.end else: b.end
@@ -81,6 +84,8 @@ fn treesitter_parse_primary_type(self: TreeSitter) -> TypeOutline:
                 self.parse_array_type()
             case KwFn:
                 self.parse_function_type()
+            case Star:
+                self.parse_pointer_type()
             case Ampersand:
                 self.parse_reference_type()
             case At:
@@ -172,6 +177,34 @@ fn treesitter_parse_function_type(self: TreeSitter) -> TypeOutline:
 
         TypeOutline(
             kind: typeoutlinekind_Function(params, ret),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_pointer_type(self: TreeSitter) -> TypeOutline:
+        """Parse pointer type *T, *const T, or *mut T."""
+        val start = self.current.span
+        self.advance()  # Consume '*'
+
+        var mutable = false
+        # Handle *const T — 'const' is a keyword token (KwConst)
+        if self.check(TokenKind.KwConst):
+            self.advance()
+            mutable = false
+        # Handle *mut T — 'mut' is an identifier, not a keyword
+        elif self.check(TokenKind.Ident):
+            if self.current.text == "mut":
+                self.advance()
+                mutable = true
+            elif self.current.text == "const":
+                self.advance()
+                mutable = false
+        # Plain *T defaults to const (mutable=false)
+
+        val inner = self.parse_type_outline()
+
+        TypeOutline(
+            kind: typeoutlinekind_Pointer(inner, mutable),
             span: merge_spans(start, self.previous.span)
         )
 

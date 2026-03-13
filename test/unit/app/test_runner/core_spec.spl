@@ -399,37 +399,46 @@ class ProtocolMessage:
 
 fn ProtocolMessage_test_pass(test_id: i32, duration_ms: i32, magic: i32, version: i32, msg_type: i32) -> ProtocolMessage:
     var payload: [i32] = []
-    for b in encode_u32(test_id):
+    val id_bytes = encode_u32(test_id)
+    for b in id_bytes:
         payload.push(b)
-    for b in encode_u32(duration_ms):
+    val dur_bytes = encode_u32(duration_ms)
+    for b in dur_bytes:
         payload.push(b)
     ProtocolMessage(msg_type: msg_type, payload: payload)
 
 fn ProtocolMessage_complete(total: i32, passed: i32, failed: i32, skipped: i32, msg_type: i32) -> ProtocolMessage:
     var payload: [i32] = []
-    for b in encode_u32(total):
+    val total_bytes = encode_u32(total)
+    for b in total_bytes:
         payload.push(b)
-    for b in encode_u32(passed):
+    val passed_bytes = encode_u32(passed)
+    for b in passed_bytes:
         payload.push(b)
-    for b in encode_u32(failed):
+    val failed_bytes = encode_u32(failed)
+    for b in failed_bytes:
         payload.push(b)
-    for b in encode_u32(skipped):
+    val skipped_bytes = encode_u32(skipped)
+    for b in skipped_bytes:
         payload.push(b)
     ProtocolMessage(msg_type: msg_type, payload: payload)
 
 impl ProtocolMessage:
     fn payload_len() -> i32:
-        self.payload.len() as i32
+        val p = self.payload
+        p.len() as i32
 
     fn encode(magic: i32, version: i32) -> [i32]:
         var bytes: [i32] = []
-        bytes.push(magic)
-        bytes.push(version)
-        bytes.push(self.msg_type)
-        for b in encode_u16(self.payload_len()):
-            bytes.push(b)
-        for b in self.payload:
-            bytes.push(b)
+        bytes = bytes + [magic]
+        bytes = bytes + [version]
+        bytes = bytes + [self.msg_type]
+        val len_bytes = encode_u16(self.payload_len())
+        for b in len_bytes:
+            bytes = bytes + [b]
+        val payload_ref = self.payload
+        for b in payload_ref:
+            bytes = bytes + [b]
         bytes
 
 class ParsedMessage:
@@ -453,37 +462,47 @@ fn ProtocolParser_create() -> ProtocolParser:
 impl ProtocolParser:
     me feed(data: [i32], magic: i32, version: i32):
         for b in data:
-            self.buffer.push(b)
+            var buf_copy = self.buffer
+            buf_copy = buf_copy + [b]
+            self.buffer = buf_copy
         self.process_buffer(magic, version)
 
     me process_buffer(magic: i32, version: i32):
-        while self.buffer.len() >= 5:
-            if self.buffer[0] != magic:
+        var buf_ref = self.buffer
+        while buf_ref.len() >= 5:
+            if buf_ref[0] != magic:
                 self.buffer.remove(0)
+                buf_ref = self.buffer
                 continue
-            if self.buffer[1] != version:
+            if buf_ref[1] != version:
                 self.buffer.remove(0)
+                buf_ref = self.buffer
                 continue
-            val msg_type = self.buffer[2]
-            val payload_len = decode_u16(self.buffer[3], self.buffer[4])
+            val msg_type = buf_ref[2]
+            val payload_len = decode_u16(buf_ref[3], buf_ref[4])
             val total_len = 5 + payload_len
-            if self.buffer.len() < total_len as i64:
+            if buf_ref.len() < total_len as i64:
                 return
             var payload: [i32] = []
             for i in 5..total_len:
-                payload.push(self.buffer[i])
+                payload = payload + [buf_ref[i]]
             for _ in 0..total_len:
                 self.buffer.remove(0)
-            self.messages.push(ParsedMessage_create(msg_type, payload))
+            buf_ref = self.buffer
+            var msgs_copy = self.messages
+            msgs_copy = msgs_copy + [ParsedMessage_create(msg_type, payload)]
+            self.messages = msgs_copy
 
     fn has_messages() -> bool:
-        self.messages.len() > 0
+        val msgs_ref = self.messages
+        msgs_ref.len() > 0
 
     me pop_message() -> ParsedMessage:
-        if self.messages.len() == 0:
+        val msgs_ref = self.messages
+        if msgs_ref.len() == 0:
             ParsedMessage_invalid()
         else:
-            val msg = self.messages[0]
+            val msg = msgs_ref[0]
             self.messages.remove(0)
             msg
 
@@ -575,19 +594,24 @@ fn StringInternTable_empty() -> StringInternTable:
 
 impl StringInternTable:
     fn has_entries() -> bool:
-        self.entries.len() > 0
+        val e = self.entries
+        e.len() > 0
 
     fn get(handle: i32) -> text:
-        for entry in self.entries:
+        val e = self.entries
+        for entry in e:
             if entry.handle == handle:
                 return entry.value
         "#{handle}"
 
     me intern(value: text) -> i32:
-        for entry in self.entries:
+        val e = self.entries
+        for entry in e:
             if entry.value == value:
                 return entry.handle
         val handle = self.next_handle
         self.next_handle = self.next_handle + 1
-        self.entries.push(StringInternEntry_create(handle, value))
+        var entries_copy = self.entries
+        entries_copy = entries_copy + [StringInternEntry_create(handle, value)]
+        self.entries = entries_copy
         handle

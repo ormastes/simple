@@ -28,6 +28,7 @@ use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE}
 use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
 use compiler.core.tokens.{TOK_KW_BITFIELD}
+use compiler.core.tokens.{TOK_KW_PUB}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
@@ -38,6 +39,7 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
+use compiler.core.ast.{decl_is_pub}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd}
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
@@ -198,6 +200,47 @@ fn has_seen_name(names: [text], target: text) -> bool:
         if nm == target:
             return true
     false
+
+fn parse_pub_decl() -> i64:
+    parser_advance()
+
+    var decl_id = -1
+    if par_kind_get() == TOK_KW_ASYNC:
+        parser_advance()
+        if par_kind_get() == TOK_KW_FN:
+            decl_id = parse_fn_decl(1)
+        else:
+            parser_error("expected 'fn' after 'pub async'")
+            return -1
+    elif par_kind_get() == TOK_KW_FN:
+        decl_id = parse_fn_decl(0)
+    elif par_kind_get() == TOK_KW_EXTERN:
+        parser_advance()
+        decl_id = parse_extern_fn_decl()
+    elif par_kind_get() == TOK_KW_STRUCT:
+        decl_id = parse_struct_decl()
+    elif par_kind_get() == TOK_KW_ENUM:
+        decl_id = parse_enum_decl()
+    elif par_kind_get() == TOK_KW_CLASS:
+        decl_id = parse_struct_decl()
+    elif par_kind_get() == TOK_KW_IMPL:
+        decl_id = parse_impl_decl()
+    elif par_kind_get() == TOK_KW_VAL:
+        decl_id = parse_val_decl()
+    elif par_kind_get() == TOK_KW_LAZY:
+        parser_advance()
+        decl_id = parse_lazy_val_decl()
+    elif par_kind_get() == TOK_KW_VAR:
+        decl_id = parse_var_decl()
+    elif par_kind_get() == TOK_KW_USE:
+        decl_id = parse_use_decl()
+    else:
+        parser_error("expected declaration after 'pub'")
+        return -1
+
+    if decl_id >= 0:
+        decl_is_pub[decl_id] = 1
+    decl_id
 
 # ===== Function Declarations =====
 
@@ -526,6 +569,10 @@ fn parse_module_body():
         if par_kind_get() == TOK_DEDENT:
             # Stray dedent at module level -- skip it
             parser_advance()
+        elif par_kind_get() == TOK_KW_PUB:
+            val d = parse_pub_decl()
+            if d >= 0:
+                module_add_decl(d)
         elif par_kind_get() == TOK_KW_ASYNC:
             # Async function: async fn name()
             parser_advance()
@@ -872,4 +919,3 @@ fn parse_bitfield_decl() -> i64:
         parser_error("bitfield '" + bf_name + "' uses " + int_to_str(used_bits) + " bits but backing type allows only " + int_to_str(backing_bits))
 
     decl_struct_def(bf_name, field_names, field_types, field_defaults, 0)
-

@@ -4,10 +4,8 @@
 # drives the frontend parser and extractor directly.
 
 use compiler.driver.cache.cache_types.{CACHE_FRESH}
-use compiler.driver.watcher.{
-    WatcherConfig, watcher_config_default,
-    get_or_generate_shb, check_shb_freshness
-}
+use compiler.driver.watcher.watcher_types.{WatcherConfig, watcher_config_default}
+use compiler.driver.watcher.watcher_client.{get_or_generate_shb, check_shb_freshness}
 use compiler.shb.shb_cache.{
     ShbCacheManager, ShbCacheConfig, ShbChangeEvent,
     compile_changed_to_shb,
@@ -85,9 +83,9 @@ fn test_inline_generation_roundtrip() -> text:
         return "failed to write source"
 
     val result = get_or_generate_shb(source_path, cfg)
-    if result.is_err():
+    if not result.ok:
         shb_test_cleanup(tmpdir)
-        return "get_or_generate_shb failed: {result.unwrap_err()}"
+        return "get_or_generate_shb failed: {result.error}"
 
     if not rt_file_exists(shb_path):
         shb_test_cleanup(tmpdir)
@@ -98,12 +96,11 @@ fn test_inline_generation_roundtrip() -> text:
         shb_test_cleanup(tmpdir)
         return "generated shb invalid"
 
-    val iface = result.unwrap()
-    val from_disk = reader.read_full_interface()
     val ok = (
-        iface.functions.len() == 1 and
-        from_disk.functions.len() == 1 and
-        from_disk.functions[0].name == "answer"
+        result.shb_path == shb_path and
+        result.interface_hash != 0 and
+        reader.function_count() == 1 and
+        reader.has_function_named("answer")
     )
 
     shb_test_cleanup(tmpdir)
@@ -122,9 +119,9 @@ fn test_freshness_after_generation() -> text:
         return "failed to write source"
 
     val result = get_or_generate_shb(source_path, cfg)
-    if result.is_err():
+    if not result.ok:
         shb_test_cleanup(tmpdir)
-        return "generation failed: {result.unwrap_err()}"
+        return "generation failed: {result.error}"
 
     val freshness = check_shb_freshness(source_path, cfg.shb_dir)
     shb_test_cleanup(tmpdir)
@@ -165,7 +162,7 @@ fn test_watcher_batch_generation() -> text:
     val reader = ShbReader.open(shb_path)
     shb_test_cleanup(tmpdir)
 
-    if reader.is_valid() and reader.read_full_interface().functions.len() == 1:
+    if reader.is_valid() and reader.function_count() == 1 and reader.has_function_named("answer"):
         "ok"
     else:
         "watcher batch shb invalid"

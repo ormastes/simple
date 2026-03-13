@@ -128,6 +128,111 @@ fn _parse_log_level() -> i64:
 var GLOBAL_LOG_LEVEL: i64 = -1  # -1 means not initialized
 var SCOPE_LEVELS = {}
 
+# ============================================================================
+# Log Points - Deferred Printing
+# ============================================================================
+#
+# A log point is a named checkpoint. While active, log output is buffered
+# instead of printed. Points form a stack: discarding/flushing a point
+# also removes all points above it.
+#
+# Limits:
+#   - max log points (default 16): exceeding flushes all + prints error
+#   - stale count (default 10000 lines): oversized buffer flushes all + prints error
+
+var _lp_buffer: [text] = []    # Flat buffer of all deferred lines
+var _lp_starts: [i64] = []    # Stack: buffer index where each point starts
+var _lp_names: [text] = []    # Stack: name for each point
+var _lp_ids: [i64] = []       # Stack: ID for each point
+var _lp_next_id: i64 = 1
+var _lp_max: i64 = 16
+var _lp_stale_count: i64 = 10000
+
+# Emit a line immediately or defer to buffer if log point is active
+fn _emit_or_defer(line: text):
+    if _lp_ids.len() > 0:
+        _lp_buffer.push(line)
+    else:
+        print line
+
+fn log_point_start(name: text) -> i64:
+    _lp_check_stale()
+    if _lp_ids.len() >= _lp_max:
+        _lp_flush_all_error("Max log points exceeded")
+    val id = _lp_next_id
+    _lp_next_id = _lp_next_id + 1
+    _lp_starts.push(_lp_buffer.len())
+    _lp_names.push(name)
+    _lp_ids.push(id)
+    id
+
+fn log_point_flush(id: i64):
+    val idx = _lp_find(id)
+    if idx < 0:
+        return
+    val start = _lp_starts[idx]
+    var i = start
+    while i < _lp_buffer.len():
+        print _lp_buffer[i]
+        i = i + 1
+    _lp_remove_from(idx)
+
+fn log_point_discard(id: i64):
+    val idx = _lp_find(id)
+    if idx < 0:
+        return
+    _lp_remove_from(idx)
+
+fn log_point_clear():
+    _lp_buffer = []
+    _lp_starts = []
+    _lp_names = []
+    _lp_ids = []
+
+fn log_point_set_max(max: i64):
+    _lp_max = max
+
+fn log_point_set_stale_count(count: i64):
+    _lp_stale_count = count
+
+fn log_point_has_active() -> bool:
+    _lp_ids.len() > 0
+
+fn log_print(msg: text):
+    _emit_or_defer(msg)
+
+fn _lp_find(id: i64) -> i64:
+    var i = 0
+    while i < _lp_ids.len():
+        if _lp_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _lp_remove_from(idx: i64):
+    val start = _lp_starts[idx]
+    _lp_buffer = _lp_buffer.slice(0, start)
+    _lp_starts = _lp_starts.slice(0, idx)
+    _lp_names = _lp_names.slice(0, idx)
+    _lp_ids = _lp_ids.slice(0, idx)
+
+fn _lp_check_stale():
+    if _lp_ids.len() == 0:
+        return
+    val buffered = _lp_buffer.len() - _lp_starts[0]
+    if buffered > _lp_stale_count:
+        _lp_flush_all_error("Log point stale: buffered too many lines")
+
+fn _lp_flush_all_error(reason: text):
+    print "[ERROR] [log] {reason}"
+    for line in _lp_buffer:
+        print line
+    _lp_buffer = []
+    _lp_starts = []
+    _lp_names = []
+    _lp_ids = []
+
+
 # Lazy initialization helper
 fn _ensure_initialized():
     if GLOBAL_LOG_LEVEL == -1:
@@ -215,31 +320,31 @@ fn is_enabled(level: i64, scope: text) -> bool:
 
 fn fatal(scope: text, msg: text):
     if 1 <= _parse_log_level():  # LOG_FATAL = 1; use _parse_log_level() to avoid module-var capture issue
-        print "[FATAL] [{scope}] {msg}"
+        _emit_or_defer("[FATAL] [{scope}] {msg}")
 
 fn error(scope: text, msg: text):
     if 2 <= _parse_log_level():  # LOG_ERROR = 2
-        print "[ERROR] [{scope}] {msg}"
+        _emit_or_defer("[ERROR] [{scope}] {msg}")
 
 fn warn(scope: text, msg: text):
     if 3 <= _parse_log_level():  # LOG_WARN = 3
-        print "[WARN] [{scope}] {msg}"
+        _emit_or_defer("[WARN] [{scope}] {msg}")
 
 fn info(scope: text, msg: text):
     if 4 <= _parse_log_level():  # LOG_INFO = 4
-        print "[INFO] [{scope}] {msg}"
+        _emit_or_defer("[INFO] [{scope}] {msg}")
 
 fn debug(scope: text, msg: text):
     if 5 <= _parse_log_level():  # LOG_DEBUG = 5
-        print "[DEBUG] [{scope}] {msg}"
+        _emit_or_defer("[DEBUG] [{scope}] {msg}")
 
 fn trace(scope: text, msg: text):
     if 6 <= _parse_log_level():  # LOG_TRACE = 6
-        print "[TRACE] [{scope}] {msg}"
+        _emit_or_defer("[TRACE] [{scope}] {msg}")
 
 fn verbose(scope: text, msg: text):
     if 7 <= _parse_log_level():  # LOG_VERBOSE = 7
-        print "[VERBOSE] [{scope}] {msg}"
+        _emit_or_defer("[VERBOSE] [{scope}] {msg}")
 
 # ============================================================================
 # Convenience Functions (without scope - use "default" scope)
@@ -261,7 +366,7 @@ fn log_verbose(msg: text):
 fn log(level: i64, scope: text, msg: text):
     if level <= get_level(scope):
         var prefix = level_name(level)
-        print "[{prefix.upper()}] [{scope}] {msg}"
+        _emit_or_defer("[{prefix.upper()}] [{scope}] {msg}")
 
 # ============================================================================
 # Exports
