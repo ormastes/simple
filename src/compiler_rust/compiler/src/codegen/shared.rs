@@ -19,7 +19,8 @@ use super::types_util::type_to_cranelift;
 /// On Windows, Cranelift JIT-compiled code must use WindowsFastcall to match
 /// the ABI that Rust `fn()` pointers expect. On other platforms, SystemV is used.
 pub fn platform_call_conv() -> CallConv {
-    if cfg!(target_os = "windows") {
+    let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+    if codegen_cfg.windows_calling_convention {
         CallConv::WindowsFastcall
     } else {
         CallConv::SystemV

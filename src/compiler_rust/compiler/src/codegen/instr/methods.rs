@@ -232,7 +232,8 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 .cloned();
 
             if let Some(resolved) = resolved_name {
-                let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+                let codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+                let resolved = if codegen_cfg.sanitize_dots_in_symbols && resolved.contains('.') {
                     std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
                 } else {
                     std::borrow::Cow::Borrowed(resolved.as_str())

@@ -320,15 +320,16 @@ impl NativeLinker {
         // Add libraries, forcing simple_runtime to link statically.
         // The runtime dir may contain both libsimple_runtime.a and .so;
         // the .so has weak __libc_start_main stubs that break the binary.
+        let link_cfg = simple_common::platform::link_config::PlatformLinkConfig::for_host();
         let has_static_runtime_lib = options.libraries.iter().any(|l| l.starts_with("simple_"));
         for lib in &options.libraries {
             if lib.starts_with("simple_") {
                 // Force static linking for Simple runtime libraries
-                if !matches!(self, Self::Ld) || !cfg!(target_os = "macos") {
+                if link_cfg.supports_bstatic {
                     cmd.arg("-Bstatic");
                 }
                 cmd.arg(format!("-l{}", lib));
-                if !matches!(self, Self::Ld) || !cfg!(target_os = "macos") {
+                if link_cfg.supports_bstatic {
                     cmd.arg("-Bdynamic");
                 }
             } else {

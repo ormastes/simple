@@ -88,6 +88,8 @@ pub struct PlatformLinkConfig {
     pub generate_builtin_trampolines: bool,
     /// Whether `-fPIC` should be passed to the linker driver.
     pub use_fpic: bool,
+    /// Whether the linker supports `-Bstatic`/`-Bdynamic` for static linking control.
+    pub supports_bstatic: bool,
 }
 
 impl PlatformLinkConfig {
@@ -147,6 +149,7 @@ impl PlatformLinkConfig {
             main_stub_variant: MainStubVariant::WeakAttribute,
             generate_builtin_trampolines: false,
             use_fpic: true,
+            supports_bstatic: true,
         }
     }
 
@@ -169,6 +172,7 @@ impl PlatformLinkConfig {
             main_stub_variant: MainStubVariant::WeakAttribute,
             generate_builtin_trampolines: true,
             use_fpic: true,
+            supports_bstatic: false,
         }
     }
 
@@ -196,6 +200,7 @@ impl PlatformLinkConfig {
             main_stub_variant: MainStubVariant::WeakAttribute,
             generate_builtin_trampolines: false,
             use_fpic: true,
+            supports_bstatic: true,
         }
     }
 
@@ -218,6 +223,7 @@ impl PlatformLinkConfig {
             main_stub_variant: MainStubVariant::MsvcAlternateName,
             generate_builtin_trampolines: false,
             use_fpic: false,
+            supports_bstatic: false,
         }
     }
 
@@ -241,6 +247,7 @@ impl PlatformLinkConfig {
             main_stub_variant: MainStubVariant::WeakAttribute,
             generate_builtin_trampolines: false,
             use_fpic: false,
+            supports_bstatic: true,
         }
     }
 
@@ -412,8 +419,8 @@ int main(int argc, char** argv) {
     /// Static library filename for a given name on this platform.
     ///
     /// MSVC produces `name.lib`, Unix produces `libname.a`.
-    pub fn static_lib_name(name: &str) -> (String, String) {
-        if cfg!(target_os = "windows") {
+    pub fn static_lib_name(&self, name: &str) -> (String, String) {
+        if matches!(self.main_stub_variant, MainStubVariant::MsvcAlternateName) {
             (format!("{}.lib", name), format!("lib{}.a", name))
         } else {
             (format!("lib{}.a", name), format!("{}.lib", name))
@@ -516,6 +523,8 @@ pub struct PlatformCodegenConfig {
     pub archive_threshold: usize,
     /// Strip flag for the linker.
     pub strip_flag: &'static str,
+    /// Whether this platform uses Windows calling convention (WindowsFastcall).
+    pub windows_calling_convention: bool,
 }
 
 impl PlatformCodegenConfig {
@@ -543,6 +552,7 @@ impl PlatformCodegenConfig {
             use_filelist: false,
             archive_threshold: 100,
             strip_flag: "-Wl,-s",
+            windows_calling_convention: false,
         }
     }
 
@@ -557,6 +567,7 @@ impl PlatformCodegenConfig {
             use_filelist: true,
             archive_threshold: usize::MAX, // skip archiving — ranlib issues with cranelift objects
             strip_flag: "-Wl,-dead_strip",
+            windows_calling_convention: false,
         }
     }
 
@@ -571,6 +582,7 @@ impl PlatformCodegenConfig {
             use_filelist: false,
             archive_threshold: 100,
             strip_flag: "-Wl,-s",
+            windows_calling_convention: false,
         }
     }
 
@@ -585,6 +597,7 @@ impl PlatformCodegenConfig {
             use_filelist: false,
             archive_threshold: 100,
             strip_flag: "/DEBUG:NONE",
+            windows_calling_convention: true,
         }
     }
 
