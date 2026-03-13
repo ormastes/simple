@@ -83,6 +83,7 @@ impl CheckResult:
             parts.join(", ")
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.log.{log_point_start, log_point_flush, log_point_discard, log_print}
 
 # Lint class - cargo clippy integration
 class Lint:
@@ -218,13 +219,14 @@ class Format:
 class Check:
     # Run all quality checks (lint + format + test)
     static fn run(config: CheckConfig) -> CheckResult:
+        val lp = log_point_start("check")
         var lint_result = empty_quality_result()
         var format_result = empty_quality_result()
         var test_passed = true
 
         # Run lint
         if config.run_lint:
-            print "\n=== Running Lint (clippy) ==="
+            log_print("Running Lint (clippy)...")
             var lint_config = default_lint_config()
             lint_config.auto_fix = config.auto_fix
             lint_result = Lint.run(lint_config)
@@ -240,7 +242,7 @@ class Check:
 
         # Run format
         if config.run_format:
-            print "\n=== Running Format (rustfmt) ==="
+            log_print("Running Format (rustfmt)...")
             var format_config = default_format_config()
             format_config.check_only = not config.auto_fix
             format_result = Format.run(format_config)
@@ -256,15 +258,19 @@ class Check:
 
         # Run tests via subprocess (avoids importing heavy compiler modules)
         if config.run_tests:
-            print "\n=== Running Tests ==="
+            log_print("Running Tests...")
             val (stdout, stderr, test_exit) = process_run("bin/simple", ["test"])
             if stdout.?:
-                print stdout
+                log_print(stdout)
             if stderr.?:
-                print stderr
+                log_print(stderr)
             test_passed = test_exit == 0
 
         val overall_success = lint_result.success and format_result.success and test_passed
+        if not overall_success:
+            log_point_flush(lp)
+        else:
+            log_point_discard(lp)
 
         CheckResult(
             lint: lint_result,

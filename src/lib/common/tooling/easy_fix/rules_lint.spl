@@ -26,7 +26,10 @@ fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
 
         # Detect bare print(...) inside test context
         val tr = ctx.trimmed
-        if tr.starts_with("print(") or tr.starts_with("print "):
+        val tr2 = ctx.trimmed
+        val is_print_paren = tr.starts_with("print(")
+        val is_print_space = tr2.starts_with("print ")
+        if is_print_paren or is_print_space:
             val c_indent = ctx.indent
             val c_line = ctx.line
             val start = ctx.byte_offset + c_indent
@@ -34,7 +37,7 @@ fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
 
             # Extract the argument
             var arg = ""
-            if tr.starts_with("print("):
+            if is_print_paren:
                 # Find matching closing paren
                 val inner = tr.slice(6)
                 if inner.ends_with(")"):
@@ -74,9 +77,18 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
 
         # Simple heuristic: detect fn with params like (Int, Int) without names
         val tr = ctx.trimmed
-        if (tr.starts_with("fn ") or tr.starts_with("me ") or tr.starts_with("static fn ")) and tr.contains("("):
-            val paren_start = tr.find("(") ?? -1
-            val paren_end = tr.find(")") ?? -1
+        val tr_b = ctx.trimmed
+        val tr_c = ctx.trimmed
+        val tr_d = ctx.trimmed
+        val is_fn = tr.starts_with("fn ")
+        val is_me = tr_b.starts_with("me ")
+        val is_static_fn = tr_c.starts_with("static fn ")
+        val has_paren = tr_d.contains("(")
+        if (is_fn or is_me or is_static_fn) and has_paren:
+            val tr_e = ctx.trimmed
+            val tr_f = ctx.trimmed
+            val paren_start = tr_e.find("(") ?? -1
+            val paren_end = tr_f.find(")") ?? -1
             if paren_start >= 0 and paren_end > paren_start:
                 val params_str = tr.slice(paren_start + 1, paren_end)
                 val params = params_str.split(",")
@@ -86,7 +98,10 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 var has_unnamed = false
                 for param in params:
                     val p = param.trim()
-                    if p.len() > 0 and not p.contains(":"):
+                    val p2 = param.trim()
+                    val p_has_len = p.len() > 0
+                    val p_has_colon = p2.contains(":")
+                    if p_has_len and not p_has_colon:
                         type_only_params.push(p)
                         has_unnamed = true
 
@@ -109,7 +124,10 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                         var counters = {"__init__": 0}
                         for param in params:
                             val p = param.trim()
-                            if p.len() > 0 and not p.contains(":"):
+                            val p2 = param.trim()
+                            val p_has_len = p.len() > 0
+                            val p_has_colon = p2.contains(":")
+                            if p_has_len and not p_has_colon:
                                 if not counters.contains_key(p):
                                     counters[p] = 0
                                 counters[p] = counters[p] + 1
@@ -150,15 +168,27 @@ fn check_resource_leak(source: String, file: String) -> [EasyFix]:
 
         # Detect val x = open(...) or val x = connect(...) not inside with
         val tr = ctx.trimmed
-        val is_resource_open = tr.contains("= open(") or tr.contains("= connect(") or tr.contains("= File.open(")
-        if is_resource_open and tr.starts_with("val ") and not tr.starts_with("with"):
+        val tr_b = ctx.trimmed
+        val tr_c = ctx.trimmed
+        val tr_d = ctx.trimmed
+        val tr_e = ctx.trimmed
+        val has_open = tr.contains("= open(")
+        val has_connect = tr_b.contains("= connect(")
+        val has_file_open = tr_c.contains("= File.open(")
+        val is_resource_open = has_open or has_connect or has_file_open
+        val starts_val = tr_d.starts_with("val ")
+        val starts_with_kw = tr_e.starts_with("with")
+        if is_resource_open and starts_val and not starts_with_kw:
             # Check previous lines for `with` block context (simple heuristic)
 
             # Extract variable name and expression
-            val eq_pos = tr.find("=") ?? -1
+            val tr_f = ctx.trimmed
+            val tr_g = ctx.trimmed
+            val tr_h = ctx.trimmed
+            val eq_pos = tr_f.find("=") ?? -1
             if eq_pos > 4:
-                val var_name = tr.slice(4, eq_pos).trim()
-                val expr = tr.slice(eq_pos + 1).trim()
+                val var_name = tr_g.slice(4, eq_pos).trim()
+                val expr = tr_h.slice(eq_pos + 1).trim()
 
                 val c_indent = ctx.indent
                 val c_line = ctx.line
@@ -211,22 +241,26 @@ fn check_sspec_missing_docstrings(source: String, file: String) -> [EasyFix]:
         line_num = line_num + 1
         val trimmed = line.trim()
 
+        val trimmed2 = line.trim()
         val is_describe = trimmed.starts_with("describe ")
-        val is_context = trimmed.starts_with("context ")
+        val is_context = trimmed2.starts_with("context ")
 
         if is_describe or is_context:
             val keyword = if is_describe: "describe" else: "context"
 
             # Extract the name string
             val kw_len = keyword.len()
-            val after_kw_raw = trimmed.slice(kw_len)
+            val trimmed3 = line.trim()
+            val after_kw_raw = trimmed3.slice(kw_len)
             val after_kw = after_kw_raw.trim()
+            val after_kw2 = after_kw_raw.trim()
             var block_name = after_kw
             if after_kw.starts_with("\""):
-                val after_kw_inner = after_kw.slice(1)
+                val after_kw_inner = after_kw2.slice(1)
                 val close_quote = after_kw_inner.find("\"") ?? -1
                 if close_quote >= 0:
-                    block_name = after_kw.slice(1, close_quote + 1)
+                    val after_kw3 = after_kw_raw.trim()
+                    block_name = after_kw3.slice(1, close_quote + 1)
 
             # Check if next non-empty line is a docstring (""")
             var next_idx = line_num  # 0-indexed for next line
@@ -240,7 +274,8 @@ fn check_sspec_missing_docstrings(source: String, file: String) -> [EasyFix]:
                     has_docstring = true
 
             if not has_docstring:
-                val indent = line.len() - trimmed.len()
+                val trimmed4 = line.trim()
+                val indent = line.len() - trimmed4.len()
                 val insert_pos = byte_offset + line.len() + 1  # After newline
                 val spaces = " ".repeat(indent + 4)
                 val header = if is_describe: "##" else: "###"
@@ -281,12 +316,18 @@ fn check_sspec_manual_assertions(source: String, file: String) -> [EasyFix]:
 
         # Pattern: if <cond>: fail(...) or if not <cond>: fail(...)
         val tr = ctx.trimmed
-        if tr.starts_with("if ") and tr.contains("fail("):
+        val tr2 = ctx.trimmed
+        val is_if = tr.starts_with("if ")
+        val has_fail = tr2.contains("fail(")
+        if is_if and has_fail:
             # Extract condition: between "if " and ":"
-            val colon_pos = tr.find(":") ?? -1
+            val tr3 = ctx.trimmed
+            val tr4 = ctx.trimmed
+            val tr5 = ctx.trimmed
+            val colon_pos = tr3.find(":") ?? -1
             if colon_pos > 3:
-                val condition = tr.slice(3, colon_pos).trim()
-                val after_colon = tr.slice(colon_pos + 1).trim()
+                val condition = tr4.slice(3, colon_pos).trim()
+                val after_colon = tr5.slice(colon_pos + 1).trim()
 
                 if after_colon.starts_with("fail("):
                     val c_indent = ctx.indent
@@ -397,10 +438,15 @@ fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
     fixes
 
 fn _is_fn_sig(trimmed: text) -> bool:
-    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")
+    val a = trimmed.starts_with("fn ")
+    val b = trimmed.starts_with("me ")
+    val c = trimmed.starts_with("static fn ")
+    a or b or c
 
 fn _is_fn_sig_header(trimmed: text) -> bool:
-    _is_fn_sig(trimmed) and trimmed.ends_with(":")
+    val is_sig = _is_fn_sig(trimmed)
+    val ends_colon = trimmed.ends_with(":")
+    is_sig and ends_colon
 
 fn _has_params(trimmed: text) -> bool:
     val ps = trimmed.find("(") ?? -1
@@ -422,7 +468,10 @@ fn _extract_inline_body(trimmed: text) -> text:
     body
 
 fn _is_trivial(body: text) -> bool:
-    if body.starts_with("pass_todo") or body.starts_with("pass_do_nothing") or body.starts_with("pass_dn"):
+    val a = body.starts_with("pass_todo")
+    val b = body.starts_with("pass_do_nothing")
+    val c = body.starts_with("pass_dn")
+    if a or b or c:
         return false
     for p in _TRIVIAL_BODIES:
         if body == p:
