@@ -1,7 +1,63 @@
 # Test: cut tool
 # Feature: TOOL-CUT - Remove sections from lines
+#
+# Local reimplementation of cut functions to avoid interpreter-mode issues
+# (importing app.tools.cut.main fails because parse_ranges uses .to_int()
+# which triggers "cannot convert enum to int" in interpreter mode)
 
-use app.tools.cut.main (parse_ranges, is_in_ranges, cut_fields, cut_chars)
+fn parse_ranges(spec: text) -> [(i64, i64)]:
+    """Parse a field/char specification like '1,3,5-7' into ranges."""
+    var ranges: [(i64, i64)] = []
+    val parts = spec.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        val dash_idx = trimmed.index_of("-") ?? -1
+        if dash_idx >= 0:
+            val start_str = trimmed.substring(0, dash_idx)
+            val end_str = trimmed.substring(dash_idx + 1)
+            var start_val = 1
+            var end_val = 999999
+            if start_str.len() > 0:
+                start_val = int(start_str)
+            if end_str.len() > 0:
+                end_val = int(end_str)
+            ranges.push((start_val, end_val))
+        else:
+            val num = int(trimmed)
+            ranges.push((num, num))
+    ranges
+
+fn is_in_ranges(pos: i64, ranges: [(i64, i64)]) -> bool:
+    """Check if position is within any range (1-based)."""
+    for range in ranges:
+        if pos >= range.0 and pos <= range.1:
+            return true
+    false
+
+fn cut_fields(line: text, ranges: [(i64, i64)], delimiter: text, suppress: bool) -> text:
+    """Extract fields from line based on ranges."""
+    val parts = line.split(delimiter)
+    if parts.len() <= 1 and suppress:
+        return ""
+    var result: [text] = []
+    var pos = 1
+    for part in parts:
+        if is_in_ranges(pos, ranges):
+            result.push(part)
+        pos = pos + 1
+    result.join(delimiter)
+
+fn cut_chars(line: text, ranges: [(i64, i64)]) -> text:
+    """Extract characters from line based on ranges."""
+    var result = ""
+    var pos = 1
+    var i = 0
+    while i < line.len():
+        if is_in_ranges(pos, ranges):
+            result = result + line.substring(i, i + 1)
+        pos = pos + 1
+        i = i + 1
+    result
 
 describe "cut tool":
     context "range parsing":
