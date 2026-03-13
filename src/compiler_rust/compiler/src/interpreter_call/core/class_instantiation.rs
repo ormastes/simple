@@ -206,6 +206,35 @@ pub(crate) fn instantiate_class(
     // Used when there's no `__init__` or `new` method with special attributes
     let mut positional_idx = 0;
     for arg in args {
+        // Handle spread syntax: ..base_expr in paren-based struct construction
+        // Parsed as Range { start: None, end: Some(base_expr), .. } since (..) looks like a range
+        if arg.name.is_none() {
+            if let simple_parser::ast::Expr::Range { start: None, end: Some(ref base_expr), .. } = arg.value {
+                let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
+                match &base_val {
+                    Value::Object { fields: base_fields, .. } => {
+                        for (k, v) in base_fields.as_ref() {
+                            fields.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Value::Dict(base_map) => {
+                        for (k, v) in base_map {
+                            fields.insert(k.clone(), v.clone());
+                        }
+                    }
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("struct spread (..) requires an object or dict value");
+                        return Err(CompileError::semantic_with_context(
+                            format!("type mismatch: struct spread requires object or dict, got {}", base_val.type_name()),
+                            ctx,
+                        ));
+                    }
+                }
+                continue;
+            }
+        }
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
             if !fields.contains_key(name) {
