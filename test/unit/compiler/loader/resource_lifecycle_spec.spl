@@ -9,7 +9,7 @@
 # **Design:** doc/design/resource_lifecycle_manager_design.md
 
 # ============================================================================
-# Mock LifecycleManager — parallel arrays for module tracking
+# Mock LifecycleManager -- parallel arrays for module tracking
 # ============================================================================
 
 var lm_module_paths: [text] = []
@@ -30,11 +30,20 @@ fn lm_reset():
 fn lm_on_module_load(path: text):
     lm_module_paths = lm_module_paths + [path]
 
+fn lm_find_module(path: text) -> i64:
+    var i = 0
+    for p in lm_module_paths:
+        if p == path:
+            return i
+        i = i + 1
+    -1
+
 fn lm_is_tracked(path: text) -> bool:
-    lm_module_paths.index_of(path) >= 0
+    lm_find_module(path) >= 0
 
 fn lm_tracked_module_count() -> i64:
-    lm_module_paths.len()
+    val paths = lm_module_paths
+    paths.len()
 
 fn lm_on_symbol_mapped(module_path: text, symbol: text):
     lm_module_symbols = lm_module_symbols + [module_path + ":" + symbol]
@@ -44,12 +53,29 @@ fn lm_on_jit_triggered(module_path: text, jit_sym: text):
     lm_jit_origins = lm_jit_origins + [module_path]
 
 fn lm_tracked_jit_count() -> i64:
-    lm_jit_symbols.len()
+    val syms = lm_jit_symbols
+    syms.len()
+
+fn lm_find_jit(jit_sym: text) -> i64:
+    var i = 0
+    for s in lm_jit_symbols:
+        if s == jit_sym:
+            return i
+        i = i + 1
+    -1
+
+fn lm_jit_origin_at(idx: i64) -> text:
+    var j = 0
+    for o in lm_jit_origins:
+        if j == idx:
+            return o
+        j = j + 1
+    ""
 
 fn lm_get_jit_origin(jit_sym: text) -> text:
-    val idx = lm_jit_symbols.index_of(jit_sym)
+    val idx = lm_find_jit(jit_sym)
     if idx >= 0:
-        return lm_jit_origins[idx]
+        return lm_jit_origin_at(idx)
     ""
 
 fn lm_on_metadata_loaded(module_path: text, meta_path: text):
@@ -60,66 +86,61 @@ fn lm_on_smf_accessed(module_path: text, smf_path: text):
 
 fn lm_get_symbols_for(module_path: text) -> i64:
     var count = 0
-    var i = 0
-    while i < lm_module_symbols.len():
-        if lm_module_symbols[i].starts_with(module_path + ":"):
+    val prefix = module_path + ":"
+    for entry in lm_module_symbols:
+        if entry.starts_with(prefix):
             count = count + 1
-        i = i + 1
     count
 
 fn lm_unload_module(path: text):
     # Remove module from registry
-    val idx = lm_module_paths.index_of(path)
+    val idx = lm_find_module(path)
     if idx < 0:
         return
     var new_paths: [text] = []
     var i = 0
-    while i < lm_module_paths.len():
+    for p in lm_module_paths:
         if i != idx:
-            new_paths = new_paths + [lm_module_paths[i]]
+            new_paths = new_paths + [p]
         i = i + 1
     lm_module_paths = new_paths
     # Remove symbols for this module
+    val prefix = path + ":"
     var new_symbols: [text] = []
-    i = 0
-    while i < lm_module_symbols.len():
-        if not lm_module_symbols[i].starts_with(path + ":"):
-            new_symbols = new_symbols + [lm_module_symbols[i]]
-        i = i + 1
+    for entry in lm_module_symbols:
+        if not entry.starts_with(prefix):
+            new_symbols = new_symbols + [entry]
     lm_module_symbols = new_symbols
     # Remove JIT symbols for this module
     var new_jit: [text] = []
     var new_origins: [text] = []
     i = 0
-    while i < lm_jit_symbols.len():
-        if lm_jit_origins[i] != path:
-            new_jit = new_jit + [lm_jit_symbols[i]]
-            new_origins = new_origins + [lm_jit_origins[i]]
+    for jit_sym in lm_jit_symbols:
+        val origin = lm_jit_origin_at(i)
+        if origin != path:
+            new_jit = new_jit + [jit_sym]
+            new_origins = new_origins + [origin]
         i = i + 1
     lm_jit_symbols = new_jit
     lm_jit_origins = new_origins
     # Remove SMF refs for this module
     var new_smf: [text] = []
-    i = 0
-    while i < lm_smf_refs.len():
-        if not lm_smf_refs[i].starts_with(path + ":"):
-            new_smf = new_smf + [lm_smf_refs[i]]
-        i = i + 1
+    for entry in lm_smf_refs:
+        if not entry.starts_with(prefix):
+            new_smf = new_smf + [entry]
     lm_smf_refs = new_smf
     # Remove metadata for this module
     var new_meta: [text] = []
-    i = 0
-    while i < lm_metadata_paths.len():
-        if not lm_metadata_paths[i].starts_with(path + ":"):
-            new_meta = new_meta + [lm_metadata_paths[i]]
-        i = i + 1
+    for entry in lm_metadata_paths:
+        if not entry.starts_with(prefix):
+            new_meta = new_meta + [entry]
     lm_metadata_paths = new_meta
 
 fn lm_destroy():
     lm_reset()
 
 # ============================================================================
-# Mock SmfCacheManager — ref-counted cache
+# Mock SmfCacheManager -- ref-counted cache
 # ============================================================================
 
 var smf_paths: [text] = []
@@ -129,62 +150,79 @@ fn smf_reset():
     smf_paths = []
     smf_counts = []
 
+fn smf_find(path: text) -> i64:
+    var i = 0
+    for p in smf_paths:
+        if p == path:
+            return i
+        i = i + 1
+    -1
+
+fn smf_count_at(idx: i64) -> i64:
+    var j = 0
+    for c in smf_counts:
+        if j == idx:
+            return c
+        j = j + 1
+    0
+
 fn smf_inc(path: text):
-    val idx = smf_paths.index_of(path)
+    val idx = smf_find(path)
     if idx >= 0:
-        fn set_i64(arr: [i64], at: i64, val_: i64) -> [i64]:
-            var result: [i64] = []
-            var i = 0
-            while i < arr.len():
-                if i == at:
-                    result = result + [val_]
-                else:
-                    result = result + [arr[i]]
-                i = i + 1
-            result
-        smf_counts = set_i64(smf_counts, idx, smf_counts[idx] + 1)
+        var result: [i64] = []
+        var i = 0
+        for c in smf_counts:
+            if i == idx:
+                result = result + [c + 1]
+            else:
+                result = result + [c]
+            i = i + 1
+        smf_counts = result
     else:
         smf_paths = smf_paths + [path]
         smf_counts = smf_counts + [1]
 
 fn smf_dec(path: text):
-    val idx = smf_paths.index_of(path)
+    val idx = smf_find(path)
     if idx < 0:
         return
-    val new_count = smf_counts[idx] - 1
+    val new_count = smf_count_at(idx) - 1
     if new_count <= 0:
         # Evict
         var new_paths: [text] = []
         var new_counts: [i64] = []
         var i = 0
-        while i < smf_paths.len():
+        for p in smf_paths:
             if i != idx:
-                new_paths = new_paths + [smf_paths[i]]
-                new_counts = new_counts + [smf_counts[i]]
+                new_paths = new_paths + [p]
+            i = i + 1
+        i = 0
+        for c in smf_counts:
+            if i != idx:
+                new_counts = new_counts + [c]
             i = i + 1
         smf_paths = new_paths
         smf_counts = new_counts
     else:
-        fn set_i64_2(arr: [i64], at: i64, val_: i64) -> [i64]:
-            var result: [i64] = []
-            var i = 0
-            while i < arr.len():
-                if i == at:
-                    result = result + [val_]
-                else:
-                    result = result + [arr[i]]
-                i = i + 1
-            result
-        smf_counts = set_i64_2(smf_counts, idx, new_count)
+        var result: [i64] = []
+        var i = 0
+        for c in smf_counts:
+            if i == idx:
+                result = result + [new_count]
+            else:
+                result = result + [c]
+            i = i + 1
+        smf_counts = result
 
 fn smf_get_ref_count(path: text) -> i64:
-    val idx = smf_paths.index_of(path)
+    val idx = smf_find(path)
     if idx >= 0:
-        return smf_counts[idx]
+        return smf_count_at(idx)
     0
 
 fn smf_tracked_count() -> i64:
-    smf_paths.len()
+    val paths = smf_paths
+    paths.len()
 
 fn smf_force_clear():
     smf_paths = []

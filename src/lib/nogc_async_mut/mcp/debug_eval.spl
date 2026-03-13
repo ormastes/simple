@@ -236,25 +236,28 @@ fn eval_primary(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
         return EvalResult(value: "e:unexpected end of expression", new_pos: pos)
     if tok == "(":
         val inner = eval_expr(tokens, pos + 1, vars_list)
-        if inner.value.starts_with("e:"): return inner
+        val inner_v = inner.value
+        if inner_v.starts_with("e:"): return inner
         var np = inner.new_pos
         if eval_peek(tokens, np) == ")": np = np + 1
-        return EvalResult(value: inner.value, new_pos: np)
+        return EvalResult(value: inner_v, new_pos: np)
     if tok == "-":
         val operand = eval_primary(tokens, pos + 1, vars_list)
-        if operand.value.starts_with("e:"): return operand
-        if operand.value.starts_with("i:"):
-            val nv = -(eval_get_value(operand.value).to_int())
+        val op_v = operand.value
+        if op_v.starts_with("e:"): return operand
+        if op_v.starts_with("i:"):
+            val nv = -(eval_get_value(op_v).to_int())
             return EvalResult(value: "i:" + nv.to_string(), new_pos: operand.new_pos)
-        return EvalResult(value: "e:cannot negate " + eval_get_type(operand.value), new_pos: operand.new_pos)
+        return EvalResult(value: "e:cannot negate " + eval_get_type(op_v), new_pos: operand.new_pos)
     if tok == "not":
         val operand = eval_expr(tokens, pos + 1, vars_list)
-        if operand.value.starts_with("e:"): return operand
-        if operand.value == "b:true":
+        val op_v = operand.value
+        if op_v.starts_with("e:"): return operand
+        if op_v == "b:true":
             return EvalResult(value: "b:false", new_pos: operand.new_pos)
-        if operand.value == "b:false":
+        if op_v == "b:false":
             return EvalResult(value: "b:true", new_pos: operand.new_pos)
-        return EvalResult(value: "e:cannot apply 'not' to " + eval_get_type(operand.value), new_pos: operand.new_pos)
+        return EvalResult(value: "e:cannot apply 'not' to " + eval_get_type(op_v), new_pos: operand.new_pos)
     # Number literal
     val first_ch = tok[0]
     val is_num = first_ch >= '0' and first_ch <= '9'
@@ -273,76 +276,89 @@ fn eval_primary(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
     if tok == "type":
         if eval_peek(tokens, pos + 1) == "(":
             val arg = eval_expr(tokens, pos + 2, vars_list)
+            val arg_v = arg.value
             var np = arg.new_pos
             if eval_peek(tokens, np) == ")": np = np + 1
-            return EvalResult(value: "s:" + eval_get_type(arg.value), new_pos: np)
+            return EvalResult(value: "s:" + eval_get_type(arg_v), new_pos: np)
     # Built-in: len(expr)
     if tok == "len":
         if eval_peek(tokens, pos + 1) == "(":
             val arg = eval_expr(tokens, pos + 2, vars_list)
+            val arg_v = arg.value
             var np = arg.new_pos
             if eval_peek(tokens, np) == ")": np = np + 1
-            if arg.value.starts_with("s:"):
-                val sv = eval_get_value(arg.value)
+            if arg_v.starts_with("s:"):
+                val sv = eval_get_value(arg_v)
                 return EvalResult(value: "i:" + sv.len().to_string(), new_pos: np)
             return EvalResult(value: "e:len() requires string argument", new_pos: np)
     # Built-in: str(expr)
     if tok == "str":
         if eval_peek(tokens, pos + 1) == "(":
             val arg = eval_expr(tokens, pos + 2, vars_list)
+            val arg_v = arg.value
             var np = arg.new_pos
             if eval_peek(tokens, np) == ")": np = np + 1
-            return EvalResult(value: "s:" + eval_get_value(arg.value), new_pos: np)
+            return EvalResult(value: "s:" + eval_get_value(arg_v), new_pos: np)
     # Variable lookup
     EvalResult(value: eval_lookup(tok, vars_list), new_pos: pos + 1)
 
 fn eval_mul(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
     var left = eval_primary(tokens, pos, vars_list)
-    if left.value.starts_with("e:"): return left
+    var left_v = left.value
+    if left_v.starts_with("e:"): return left
     for _i in range(0, 50):
         val op = eval_peek(tokens, left.new_pos)
         if op == "*" or op == "/" or op == "%":
             val right = eval_primary(tokens, left.new_pos + 1, vars_list)
-            if right.value.starts_with("e:"): return right
-            val rv = eval_arith(left.value, op, right.value)
+            val right_v = right.value
+            if right_v.starts_with("e:"): return right
+            val rv = eval_arith(left_v, op, right_v)
             left = EvalResult(value: rv, new_pos: right.new_pos)
-            if left.value.starts_with("e:"): return left
+            left_v = left.value
+            if left_v.starts_with("e:"): return left
         else:
             return left
     left
 
 fn eval_add(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
     var left = eval_mul(tokens, pos, vars_list)
-    if left.value.starts_with("e:"): return left
+    var left_v = left.value
+    if left_v.starts_with("e:"): return left
     for _i in range(0, 50):
         val op = eval_peek(tokens, left.new_pos)
         if op == "+" or op == "-":
             val right = eval_mul(tokens, left.new_pos + 1, vars_list)
-            if right.value.starts_with("e:"): return right
-            val rv = eval_arith(left.value, op, right.value)
+            val right_v = right.value
+            if right_v.starts_with("e:"): return right
+            val rv = eval_arith(left_v, op, right_v)
             left = EvalResult(value: rv, new_pos: right.new_pos)
-            if left.value.starts_with("e:"): return left
+            left_v = left.value
+            if left_v.starts_with("e:"): return left
         else:
             return left
     left
 
 fn eval_expr(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
     var left = eval_add(tokens, pos, vars_list)
-    if left.value.starts_with("e:"): return left
+    val left_v = left.value
+    if left_v.starts_with("e:"): return left
     val op = eval_peek(tokens, left.new_pos)
     if op == "==" or op == "!=" or op == "<" or op == ">":
         val right = eval_add(tokens, left.new_pos + 1, vars_list)
-        if right.value.starts_with("e:"): return right
-        return EvalResult(value: eval_compare(left.value, op, right.value), new_pos: right.new_pos)
+        val right_v = right.value
+        if right_v.starts_with("e:"): return right
+        return EvalResult(value: eval_compare(left_v, op, right_v), new_pos: right.new_pos)
     if op == "<=" or op == ">=":
         val right = eval_add(tokens, left.new_pos + 1, vars_list)
-        if right.value.starts_with("e:"): return right
-        return EvalResult(value: eval_compare(left.value, op, right.value), new_pos: right.new_pos)
+        val right_v = right.value
+        if right_v.starts_with("e:"): return right
+        return EvalResult(value: eval_compare(left_v, op, right_v), new_pos: right.new_pos)
     if op == "and":
         val right = eval_expr(tokens, left.new_pos + 1, vars_list)
-        if right.value.starts_with("e:"): return right
-        val lb = left.value == "b:true"
-        val rb = right.value == "b:true"
+        val right_v = right.value
+        if right_v.starts_with("e:"): return right
+        val lb = left_v == "b:true"
+        val rb = right_v == "b:true"
         val both = lb and rb
         var bv = "b:false"
         if both:
@@ -350,9 +366,10 @@ fn eval_expr(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
         return EvalResult(value: bv, new_pos: right.new_pos)
     if op == "or":
         val right = eval_expr(tokens, left.new_pos + 1, vars_list)
-        if right.value.starts_with("e:"): return right
-        val lb = left.value == "b:true"
-        val rb = right.value == "b:true"
+        val right_v = right.value
+        if right_v.starts_with("e:"): return right
+        val lb = left_v == "b:true"
+        val rb = right_v == "b:true"
         val either = lb or rb
         var bv = "b:false"
         if either:

@@ -24,42 +24,107 @@ struct NarrowingFact:
 struct NarrowingScope:
     facts: [NarrowingFact]
 
-class NarrowingContext:
-    scopes: [NarrowingScope]
+# Use parallel arrays instead of class with array fields to avoid interpreter corruption
+var ctx_scope_levels: [i64] = []        # scope level for each fact
+var ctx_fact_sym_ids: [i64] = []
+var ctx_fact_orig_types: [text] = []
+var ctx_fact_narrowed_types: [text] = []
+var ctx_fact_conditions: [NarrowingConditionKind] = []
+var ctx_current_scope: i64 = 0
 
-    static fn new() -> NarrowingContext:
-        NarrowingContext(scopes: [NarrowingScope(facts: [])])
+fn ctx_reset():
+    ctx_scope_levels = []
+    ctx_fact_sym_ids = []
+    ctx_fact_orig_types = []
+    ctx_fact_narrowed_types = []
+    ctx_fact_conditions = []
+    ctx_current_scope = 0
 
-    me push_scope():
-        self.scopes = self.scopes.push(NarrowingScope(facts: []))
+fn ctx_push_scope():
+    ctx_current_scope = ctx_current_scope + 1
 
-    me pop_scope():
-        if self.scopes.len() > 1:
-            self.scopes = self.scopes[0:self.scopes.len() - 1]
-
-    me add_fact(fact: NarrowingFact):
-        val idx = self.scopes.len() - 1
-        var scope = self.scopes[idx]
-        scope.facts = scope.facts.push(fact)
-        self.scopes[idx] = scope
-
-    fn lookup(sym_id: i64) -> text?:
-        var i = self.scopes.len() - 1
-        while i >= 0:
-            val scope = self.scopes[i]
-            var j = 0
-            while j < scope.facts.len():
-                if scope.facts[j].symbol_id == sym_id:
-                    return Some(scope.facts[j].narrowed_type)
-                j = j + 1
-            i = i - 1
-        nil
-
-    me add_facts(facts: [NarrowingFact]):
+fn ctx_pop_scope():
+    if ctx_current_scope > 0:
+        # Remove all facts at current scope level
+        var new_levels: [i64] = []
+        var new_syms: [i64] = []
+        var new_origs: [text] = []
+        var new_narrows: [text] = []
+        var new_conds: [NarrowingConditionKind] = []
         var i = 0
-        while i < facts.len():
-            self.add_fact(facts[i])
+        for level in ctx_scope_levels:
+            if level != ctx_current_scope:
+                new_levels = new_levels + [level]
+                val sym = ctx_get_sym_at(i)
+                new_syms = new_syms + [sym]
+                val orig = ctx_get_orig_at(i)
+                new_origs = new_origs + [orig]
+                val nar = ctx_get_narrow_at(i)
+                new_narrows = new_narrows + [nar]
+                val cond = ctx_get_cond_at(i)
+                new_conds = new_conds + [cond]
             i = i + 1
+        ctx_scope_levels = new_levels
+        ctx_fact_sym_ids = new_syms
+        ctx_fact_orig_types = new_origs
+        ctx_fact_narrowed_types = new_narrows
+        ctx_fact_conditions = new_conds
+        ctx_current_scope = ctx_current_scope - 1
+
+fn ctx_get_sym_at(idx: i64) -> i64:
+    var j = 0
+    for s in ctx_fact_sym_ids:
+        if j == idx:
+            return s
+        j = j + 1
+    0
+
+fn ctx_get_orig_at(idx: i64) -> text:
+    var j = 0
+    for o in ctx_fact_orig_types:
+        if j == idx:
+            return o
+        j = j + 1
+    ""
+
+fn ctx_get_narrow_at(idx: i64) -> text:
+    var j = 0
+    for n in ctx_fact_narrowed_types:
+        if j == idx:
+            return n
+        j = j + 1
+    ""
+
+fn ctx_get_cond_at(idx: i64) -> NarrowingConditionKind:
+    var j = 0
+    for c in ctx_fact_conditions:
+        if j == idx:
+            return c
+        j = j + 1
+    NarrowingConditionKind.NilCheckPos
+
+fn ctx_add_fact(fact: NarrowingFact):
+    ctx_scope_levels = ctx_scope_levels + [ctx_current_scope]
+    ctx_fact_sym_ids = ctx_fact_sym_ids + [fact.symbol_id]
+    ctx_fact_orig_types = ctx_fact_orig_types + [fact.original_type]
+    ctx_fact_narrowed_types = ctx_fact_narrowed_types + [fact.narrowed_type]
+    ctx_fact_conditions = ctx_fact_conditions + [fact.condition]
+
+fn ctx_lookup(sym_id: i64) -> text?:
+    # Search from end to beginning (innermost scope first)
+    val total = ctx_scope_levels
+    var i = total.len() - 1
+    while i >= 0:
+        val sid = ctx_get_sym_at(i)
+        if sid == sym_id:
+            val nar = ctx_get_narrow_at(i)
+            return Some(nar)
+        i = i - 1
+    nil
+
+fn ctx_add_facts(facts: [NarrowingFact]):
+    for fact in facts:
+        ctx_add_fact(fact)
 
 # ============================================================================
 # Condition Analysis (simplified for testing)
@@ -117,20 +182,19 @@ fn analyze_truthiness(sym_id: i64, original_type: text) -> [NarrowingFact]:
 
 fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
     var result: [NarrowingFact] = []
-    var i = 0
-    while i < facts.len():
-        val fact = facts[i]
+    for fact in facts:
         match fact.condition:
             case NilCheckPos:
                 # x != nil -> else: x is nil -> no useful narrowing
                 pass
             case NilCheckNeg:
                 # x == nil -> else: x != nil -> narrow to inner
-                if fact.original_type.ends_with("?"):
-                    val inner = fact.original_type[0:fact.original_type.len() - 1]
+                val orig = fact.original_type
+                if orig.ends_with("?"):
+                    val inner = orig[0:orig.len() - 1]
                     result = result.push(NarrowingFact(
                         symbol_id: fact.symbol_id,
-                        original_type: fact.original_type,
+                        original_type: orig,
                         narrowed_type: inner,
                         condition: NarrowingConditionKind.NilCheckPos
                     ))
@@ -150,7 +214,6 @@ fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
                 pass
             case _:
                 pass
-        i = i + 1
     result
 
 # ============================================================================
@@ -164,13 +227,17 @@ enum StmtKind:
     ExprStmt
     EmptyStmt
 
-struct SimpleBlock:
-    stmts: [StmtKind]
-
-fn definitely_terminates(block: SimpleBlock) -> bool:
-    if block.stmts.is_empty():
+fn definitely_terminates(stmts: [StmtKind]) -> bool:
+    val count = stmts.len()
+    if count == 0:
         return false
-    val last = block.stmts[block.stmts.len() - 1]
+    # Get the last statement
+    var idx = 0
+    var last = StmtKind.EmptyStmt
+    for s in stmts:
+        if idx == count - 1:
+            last = s
+        idx = idx + 1
     match last:
         case ReturnStmt: true
         case BreakStmt: true
@@ -183,65 +250,65 @@ fn definitely_terminates(block: SimpleBlock) -> bool:
 
 describe "NarrowingContext basic operations":
     it "pushes scope, adds fact, and looks it up":
-        var ctx = NarrowingContext.new()
-        ctx.push_scope()
+        ctx_reset()
+        ctx_push_scope()
         val fact = NarrowingFact(
             symbol_id: 1,
             original_type: "i64?",
             narrowed_type: "i64",
             condition: NarrowingConditionKind.NilCheckPos
         )
-        ctx.add_fact(fact)
-        val result = ctx.lookup(1)
+        ctx_add_fact(fact)
+        val result = ctx_lookup(1)
         expect(result.?).to_equal(true)
         expect(result.unwrap()).to_equal("i64")
 
     it "facts do not leak across scope boundaries":
-        var ctx = NarrowingContext.new()
-        ctx.push_scope()
+        ctx_reset()
+        ctx_push_scope()
         val fact = NarrowingFact(
             symbol_id: 2,
             original_type: "text?",
             narrowed_type: "text",
             condition: NarrowingConditionKind.ExistsCheck
         )
-        ctx.add_fact(fact)
-        expect(ctx.lookup(2).?).to_equal(true)
-        ctx.pop_scope()
-        val after_pop = ctx.lookup(2)
+        ctx_add_fact(fact)
+        expect(ctx_lookup(2).?).to_equal(true)
+        ctx_pop_scope()
+        val after_pop = ctx_lookup(2)
         expect(after_pop.?).to_equal(false)
 
     it "innermost scope takes priority":
-        var ctx = NarrowingContext.new()
+        ctx_reset()
         val outer_fact = NarrowingFact(
             symbol_id: 3,
             original_type: "i64?",
             narrowed_type: "i64",
             condition: NarrowingConditionKind.Truthiness
         )
-        ctx.add_fact(outer_fact)
-        ctx.push_scope()
+        ctx_add_fact(outer_fact)
+        ctx_push_scope()
         val inner_fact = NarrowingFact(
             symbol_id: 3,
             original_type: "i64?",
             narrowed_type: "text",
             condition: NarrowingConditionKind.NilCheckPos
         )
-        ctx.add_fact(inner_fact)
-        val result = ctx.lookup(3)
+        ctx_add_fact(inner_fact)
+        val result = ctx_lookup(3)
         expect(result.?).to_equal(true)
         expect(result.unwrap()).to_equal("text")
 
     it "add_facts adds multiple facts at once":
-        var ctx = NarrowingContext.new()
+        ctx_reset()
         val facts = [
             NarrowingFact(symbol_id: 10, original_type: "i64?", narrowed_type: "i64", condition: NarrowingConditionKind.NilCheckPos),
             NarrowingFact(symbol_id: 11, original_type: "text?", narrowed_type: "text", condition: NarrowingConditionKind.ExistsCheck)
         ]
-        ctx.add_facts(facts)
-        expect(ctx.lookup(10).?).to_equal(true)
-        expect(ctx.lookup(11).?).to_equal(true)
-        expect(ctx.lookup(99).?).to_equal(false)
+        ctx_add_facts(facts)
+        expect(ctx_lookup(10).?).to_equal(true)
+        expect(ctx_lookup(11).?).to_equal(true)
+        expect(ctx_lookup(99).?).to_equal(false)
 
 # ============================================================================
 # Test Group 2: Condition analysis - nil checks
@@ -358,24 +425,24 @@ describe "Fact negation":
 
 describe "Definite termination":
     it "block ending in Return definitely terminates":
-        val block = SimpleBlock(stmts: [StmtKind.ExprStmt, StmtKind.ReturnStmt])
-        expect(definitely_terminates(block)).to_equal(true)
+        val stmts = [StmtKind.ExprStmt, StmtKind.ReturnStmt]
+        expect(definitely_terminates(stmts)).to_equal(true)
 
     it "empty block does not definitely terminate":
-        val block = SimpleBlock(stmts: [])
-        expect(definitely_terminates(block)).to_equal(false)
+        val stmts: [StmtKind] = []
+        expect(definitely_terminates(stmts)).to_equal(false)
 
     it "block ending in regular expression does not terminate":
-        val block = SimpleBlock(stmts: [StmtKind.ExprStmt])
-        expect(definitely_terminates(block)).to_equal(false)
+        val stmts = [StmtKind.ExprStmt]
+        expect(definitely_terminates(stmts)).to_equal(false)
 
     it "block ending in Break definitely terminates":
-        val block = SimpleBlock(stmts: [StmtKind.BreakStmt])
-        expect(definitely_terminates(block)).to_equal(true)
+        val stmts = [StmtKind.BreakStmt]
+        expect(definitely_terminates(stmts)).to_equal(true)
 
     it "block ending in Continue definitely terminates":
-        val block = SimpleBlock(stmts: [StmtKind.ContinueStmt])
-        expect(definitely_terminates(block)).to_equal(true)
+        val stmts = [StmtKind.ContinueStmt]
+        expect(definitely_terminates(stmts)).to_equal(true)
 
 # ============================================================================
 # Test Group 7: Integration - narrowing + negation + scope
@@ -384,38 +451,38 @@ describe "Definite termination":
 describe "Narrowing integration":
     it "simulates if-else narrowing flow":
         # Simulate: if x != nil: <then> else: <else>
-        var ctx = NarrowingContext.new()
+        ctx_reset()
         val then_facts = analyze_nil_check(50, "i64?", false)
 
         # Then branch
-        ctx.push_scope()
-        ctx.add_facts(then_facts)
-        expect(ctx.lookup(50).unwrap()).to_equal("i64")
-        ctx.pop_scope()
+        ctx_push_scope()
+        ctx_add_facts(then_facts)
+        expect(ctx_lookup(50).unwrap()).to_equal("i64")
+        ctx_pop_scope()
 
         # Else branch uses negated facts
         val else_facts = negate_facts(then_facts)
-        ctx.push_scope()
-        ctx.add_facts(else_facts)
+        ctx_push_scope()
+        ctx_add_facts(else_facts)
         # NilCheckPos negated -> no fact in else
-        expect(ctx.lookup(50).?).to_equal(false)
-        ctx.pop_scope()
+        expect(ctx_lookup(50).?).to_equal(false)
+        ctx_pop_scope()
 
     it "simulates early-return narrowing promotion":
         # Simulate: if x == nil: return
         # After early return, x is narrowed in remaining code
-        var ctx = NarrowingContext.new()
+        ctx_reset()
         val guard_facts = analyze_nil_check(60, "text?", true)
 
         # Then branch (return) -> terminates
-        ctx.push_scope()
-        ctx.add_facts(guard_facts)
-        ctx.pop_scope()
+        ctx_push_scope()
+        ctx_add_facts(guard_facts)
+        ctx_pop_scope()
 
         # Promote negated facts to parent scope (early return promotion)
         val promoted = negate_facts(guard_facts)
-        ctx.add_facts(promoted)
+        ctx_add_facts(promoted)
 
         # Now x is narrowed in the remaining code
-        expect(ctx.lookup(60).?).to_equal(true)
-        expect(ctx.lookup(60).unwrap()).to_equal("text")
+        expect(ctx_lookup(60).?).to_equal(true)
+        expect(ctx_lookup(60).unwrap()).to_equal("text")
