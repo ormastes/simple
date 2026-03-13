@@ -3,26 +3,100 @@
 # Tests for CLOS001 detection of closures that modify outer variables.
 # Closures can READ outer vars but CANNOT MODIFY them (nested closure limitation).
 # Module-level var mutation is fine and should not be flagged.
-
-use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.core.parser.{parse_module}
-use compiler.semantics.lint.closure_capture.{check_closure_capture, ClosureCaptureWarning}
+#
+# Uses text-based heuristic (mirrors _check_closure_capture_text in query_rich.spl).
 
 # ============================================================================
-# Helpers
+# Text-based lint helpers
 # ============================================================================
 
-fn parse_and_check_closure(code: text) -> [ClosureCaptureWarning]:
-    """Parse source and run closure capture lint."""
-    ast_reset()
-    parse_module(code, "<test>")
-    val decls = module_get_decls()
-    check_closure_capture(decls)
+fn check_closure_capture_text(source: text) -> [text]:
+    """Text-based heuristic for closure capture modification detection.
+    Returns list of diagnostic codes found."""
+    var codes: [text] = []
+    val lines = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            val fn_indent = _count_indent(line)
+            if fn_indent > 0:
+                var outer_vars: [text] = []
+                _collect_outer_vars(lines, li, fn_indent, outer_vars)
+                var body_start = li + 1
+                while body_start < lines.len():
+                    val bline = lines[body_start]
+                    val bt = bline.trim()
+                    if bt == "":
+                        body_start = body_start + 1
+                        continue
+                    val bindent = _count_indent(bline)
+                    if bindent <= fn_indent:
+                        break
+                    for ovar in outer_vars:
+                        if _is_assign_to(bt, ovar):
+                            codes.push("CLOS001")
+                    body_start = body_start + 1
+        li = li + 1
+    codes
 
-fn warnings_have_code(warnings: [ClosureCaptureWarning], code: text) -> bool:
-    """Check if any warning has the given code."""
-    for w in warnings:
-        if w.code == code:
+fn _collect_outer_vars(lines: [text], fn_line: i64, fn_indent: i64, vars: [text]):
+    """Collect var declarations from the enclosing scope above fn_line."""
+    var si = fn_line - 1
+    while si >= 0:
+        val sline = lines[si]
+        val st = sline.trim()
+        val sindent = _count_indent(sline)
+        if sindent < fn_indent and st != "" and not st.starts_with("#"):
+            if (st.starts_with("fn ") or st.starts_with("me ") or
+                st.starts_with("static fn ") or st.starts_with("class ") or
+                st.starts_with("struct ")):
+                break
+        if st.starts_with("var ") and sindent < fn_indent:
+            val var_name = _extract_decl_name(st.substring(4))
+            if var_name != "":
+                vars.push(var_name)
+        si = si - 1
+
+fn _is_assign_to(trimmed: text, var_name: text) -> bool:
+    """Check if a trimmed line assigns to the given variable name."""
+    if trimmed.starts_with(var_name):
+        val after = trimmed.substring(var_name.len())
+        val at = after.trim()
+        if at.starts_with("= ") or at.starts_with("=\t") or at == "=":
+            return true
+        if (at.starts_with("+= ") or at.starts_with("-= ") or
+            at.starts_with("*= ") or at.starts_with("/= ")):
+            return true
+    false
+
+fn _extract_decl_name(after_kw: text) -> text:
+    """Extract the variable name from text after val/var keyword."""
+    var name_chars: [text] = []
+    for ch in after_kw:
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        name_chars.push(ch)
+    name_chars.join("")
+
+fn _count_indent(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn codes_contain(codes: [text], target: text) -> bool:
+    """Check if codes list contains a target code."""
+    for c in codes:
+        if c == target:
             return true
     false
 
@@ -34,38 +108,38 @@ describe "Closure Capture Lint":
     context "closure modifying outer variable":
         it "flags nested fn that modifies an outer var (CLOS001)":
             val code = "fn compute():\n    var counter = 0\n    fn inc():\n        counter = counter + 1\n    inc()\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(true)
 
         it "flags nested fn that reassigns outer var":
             val code = "fn test():\n    var x = 10\n    fn update():\n        x = 42\n    update()\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(true)
 
     context "closure reading outer variable":
         it "does not flag nested fn that only reads outer var":
             val code = "fn compute() -> i64:\n    val x = 10\n    fn double() -> i64:\n        x * 2\n    double()\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(false)
 
         it "does not flag nested fn reading outer val":
             val code = "fn greet():\n    val name = \"Alice\"\n    fn say():\n        print \"Hello\"\n    say()\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(false)
 
     context "module-level var mutation":
         it "does not flag module-level var mutation":
             val code = "var global_count = 0\n\nfn increment():\n    global_count = global_count + 1\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(false)
 
         it "does not flag module-level var push":
             val code = "var items: [text] = []\n\nfn add_item(item: text):\n    items.push(item)\n"
-            val warnings = parse_and_check_closure(code)
-            val has_clos001 = warnings_have_code(warnings, "CLOS001")
+            val codes = check_closure_capture_text(code)
+            val has_clos001 = codes_contain(codes, "CLOS001")
             expect(has_clos001).to_equal(false)

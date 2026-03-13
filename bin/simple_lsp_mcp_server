@@ -1,25 +1,21 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -S
 """Minimal MCP wrapper for Simple LSP-style code intelligence tools.
 
 Supports both Content-Length framed stdio and raw JSON stdio so it can work
 with Codex-style MCP clients and Claude's local MCP health checks.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import subprocess
 import sys
-from pathlib import Path
-from typing import Any
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-SIMPLE_BIN = SCRIPT_DIR / "release" / "simple"
-if not SIMPLE_BIN.exists():
-    SIMPLE_BIN = SCRIPT_DIR / "release" / "linux-x86_64" / "simple"
-LSP_QUERY = SCRIPT_DIR.parent / "src" / "app" / "lsp" / "lsp_query.spl"
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+SIMPLE_BIN = os.path.join(SCRIPT_DIR, "release", "simple")
+if not os.path.exists(SIMPLE_BIN):
+    SIMPLE_BIN = os.path.join(SCRIPT_DIR, "release", "linux-x86_64", "simple")
+LSP_QUERY = os.path.join(os.path.dirname(SCRIPT_DIR), "src", "app", "lsp", "lsp_query.spl")
 
 TOOLS = [
     {
@@ -111,7 +107,7 @@ buffer = bytearray()
 decoder = json.JSONDecoder()
 
 
-def write_message(body: dict[str, Any]) -> None:
+def write_message(body):
     payload = json.dumps(body, separators=(",", ":")).encode()
     if transport_mode == "raw":
         sys.stdout.write(payload.decode() + "\n")
@@ -130,7 +126,7 @@ def _read_more() -> bool:
     return True
 
 
-def _read_framed() -> dict[str, Any] | None:
+def _read_framed():
     while True:
         header_end = buffer.find(b"\r\n\r\n")
         if header_end == -1:
@@ -154,7 +150,7 @@ def _read_framed() -> dict[str, Any] | None:
         return json.loads(payload.decode())
 
 
-def _read_raw() -> dict[str, Any] | None:
+def _read_raw():
     while True:
         while buffer[:1] in (b" ", b"\n", b"\r", b"\t"):
             del buffer[:1]
@@ -172,7 +168,7 @@ def _read_raw() -> dict[str, Any] | None:
                 return None
 
 
-def read_message() -> dict[str, Any] | None:
+def read_message():
     global transport_mode
     while not buffer:
         if not _read_more():
@@ -185,19 +181,19 @@ def read_message() -> dict[str, Any] | None:
     return _read_framed()
 
 
-def json_result(msg_id: Any, result: Any) -> dict[str, Any]:
+def json_result(msg_id, result):
     return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
 
-def json_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
+def json_error(msg_id, code, message):
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-def tool_text_result(msg_id: Any, text: str) -> dict[str, Any]:
+def tool_text_result(msg_id, text):
     return json_result(msg_id, {"content": [{"type": "text", "text": text}]})
 
 
-def run_command(args: list[str]) -> str:
+def run_command(args):
     env = os.environ.copy()
     proc = subprocess.run(
         args,
@@ -210,11 +206,11 @@ def run_command(args: list[str]) -> str:
     return proc.stdout.rstrip("\n")
 
 
-def run_lsp_query(subcmd: str, file: str, line0: int = 0, char0: int = 0) -> str:
+def run_lsp_query(subcmd, file, line0=0, char0=0):
     return run_command(
         [
-            str(SIMPLE_BIN),
-            str(LSP_QUERY),
+            SIMPLE_BIN,
+            LSP_QUERY,
             subcmd,
             file,
             str(line0 + 1),
@@ -223,15 +219,15 @@ def run_lsp_query(subcmd: str, file: str, line0: int = 0, char0: int = 0) -> str
     )
 
 
-def run_lsp_symbols(file: str) -> str:
-    return run_command([str(SIMPLE_BIN), str(LSP_QUERY), "symbols", file])
+def run_lsp_symbols(file):
+    return run_command([SIMPLE_BIN, LSP_QUERY, "symbols", file])
 
 
-def run_lsp_diagnostics(file: str) -> str:
-    return run_command([str(SIMPLE_BIN), "lint", file])
+def run_lsp_diagnostics(file):
+    return run_command([SIMPLE_BIN, "lint", file])
 
 
-def handle_tool_call(msg_id: Any, req: dict[str, Any]) -> dict[str, Any]:
+def handle_tool_call(msg_id, req):
     params = req.get("params", {})
     args = params.get("arguments", {})
     name = params.get("name") or req.get("name", "")
@@ -264,7 +260,7 @@ def handle_tool_call(msg_id: Any, req: dict[str, Any]) -> dict[str, Any]:
     return json_error(msg_id, -32602, f"Unknown tool: {name}")
 
 
-def main() -> int:
+def main():
     while True:
         req = read_message()
         if req is None:

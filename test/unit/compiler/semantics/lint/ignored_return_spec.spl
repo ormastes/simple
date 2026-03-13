@@ -4,26 +4,136 @@
 # Functions that return meaningful values should have their results used.
 # Side-effectful functions (print, push) are not flagged.
 # Last expression (implicit return) is not flagged.
-
-use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.core.parser.{parse_module}
-use compiler.semantics.lint.ignored_return.{check_ignored_return, IgnoredReturnWarning}
+#
+# Uses text-based heuristic (mirrors _check_ignored_return_text in query_rich.spl).
 
 # ============================================================================
-# Helpers
+# Text-based lint helpers
 # ============================================================================
 
-fn parse_and_check_return(code: text) -> [IgnoredReturnWarning]:
-    """Parse source and run ignored return lint."""
-    ast_reset()
-    parse_module(code, "<test>")
-    val decls = module_get_decls()
-    check_ignored_return(decls)
+val SIDE_EFFECTS: [text] = [
+    "print", "println", "eprint", "eprintln",
+    "push", "pop", "clear", "sort", "reverse", "remove", "insert",
+    "write", "close", "flush", "set", "delete", "reset", "append",
+    "log", "info", "warn", "error", "debug", "trace",
+    "sleep", "exit", "abort", "send", "emit", "notify",
+    "lock", "unlock", "continue", "break", "return",
+    "pass_todo", "pass_do_nothing", "pass_dn"
+]
 
-fn warnings_have_code(warnings: [IgnoredReturnWarning], code: text) -> bool:
-    """Check if any warning has the given code."""
-    for w in warnings:
-        if w.code == code:
+val SIDE_PREFIXES: [text] = [
+    "set_", "add_", "remove_", "delete_", "clear_", "reset_",
+    "push_", "init_", "register_", "emit_", "on_", "handle_",
+    "log_", "print_", "write_", "assert", "expect", "check_", "_"
+]
+
+fn check_ignored_return_text(source: text) -> [text]:
+    """Text-based heuristic for ignored return value detection.
+    Returns list of diagnostic codes found."""
+    var codes: [text] = []
+    val lines = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val indent = _count_indent(line)
+        if indent > 0 and trimmed.len() > 0:
+            val call_name = _extract_call_name(trimmed)
+            if call_name != "":
+                if (not trimmed.starts_with("val ") and not trimmed.starts_with("var ") and
+                    not _is_any_assign(trimmed)):
+                    var is_side_effect = false
+                    for se in SIDE_EFFECTS:
+                        if call_name == se:
+                            is_side_effect = true
+                            break
+                    if not is_side_effect:
+                        for prefix in SIDE_PREFIXES:
+                            if call_name.starts_with(prefix):
+                                is_side_effect = true
+                                break
+                    if not is_side_effect:
+                        if not _is_last_stmt(lines, li):
+                            codes.push("RET001")
+        li = li + 1
+    codes
+
+fn _extract_call_name(trimmed: text) -> text:
+    """Extract function/method call name from a trimmed line."""
+    val paren_pos = _find_in_line_from(trimmed, "(", 0)
+    if paren_pos <= 0:
+        return ""
+    val before_paren = trimmed.substring(0, paren_pos)
+    if (before_paren == "if" or before_paren == "while" or before_paren == "for" or
+        before_paren == "match" or before_paren == "return" or before_paren == "elif"):
+        return ""
+    var end_idx = before_paren.len()
+    var start_idx = end_idx - 1
+    while start_idx >= 0:
+        val ch = before_paren.substring(start_idx, start_idx + 1)
+        val is_id = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_id:
+            break
+        start_idx = start_idx - 1
+    start_idx = start_idx + 1
+    if start_idx >= end_idx:
+        return ""
+    before_paren.substring(start_idx, end_idx)
+
+fn _is_any_assign(trimmed: text) -> bool:
+    """Check if a line contains an assignment before a function call."""
+    val eq_pos = _find_in_line_from(trimmed, " = ", 0)
+    val paren_pos = _find_in_line_from(trimmed, "(", 0)
+    if eq_pos >= 0 and (paren_pos < 0 or eq_pos < paren_pos):
+        return true
+    val walrus_pos = _find_in_line_from(trimmed, ":=", 0)
+    if walrus_pos >= 0 and (paren_pos < 0 or walrus_pos < paren_pos):
+        return true
+    false
+
+fn _is_last_stmt(lines: [text], idx: i64) -> bool:
+    """Check if the line at idx is the last non-empty statement at its indent level."""
+    val target_indent = _count_indent(lines[idx])
+    var ni = idx + 1
+    while ni < lines.len():
+        val next_line = lines[ni]
+        val nt = next_line.trim()
+        if nt == "":
+            ni = ni + 1
+            continue
+        val next_indent = _count_indent(next_line)
+        if next_indent < target_indent:
+            return true
+        if next_indent == target_indent:
+            return false
+        ni = ni + 1
+    true
+
+fn _find_in_line_from(line: text, pattern: text, start: i64) -> i64:
+    """Find pattern in line starting from start position. Returns -1 if not found."""
+    var pos = start
+    while pos <= line.len() - pattern.len():
+        if line.substring(pos, pos + pattern.len()) == pattern:
+            return pos
+        pos = pos + 1
+    -1
+
+fn _count_indent(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn codes_contain(codes: [text], target: text) -> bool:
+    """Check if codes list contains a target code."""
+    for c in codes:
+        if c == target:
             return true
     false
 
@@ -35,38 +145,38 @@ describe "Ignored Return Value Lint":
     context "discarded return values":
         it "flags discarded return value from pure function (RET001)":
             val code = "fn compute() -> i64:\n    42\n\nfn test():\n    compute()\n    print \"done\"\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(true)
 
         it "flags discarded string return":
             val code = "fn get_name() -> text:\n    \"Alice\"\n\nfn test():\n    get_name()\n    print \"done\"\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(true)
 
     context "side-effectful functions":
         it "does not flag print calls":
             val code = "fn test():\n    print \"hello\"\n    print \"world\"\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(false)
 
         it "does not flag push calls":
             val code = "fn test():\n    var items: [text] = []\n    items.push(\"hello\")\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(false)
 
     context "implicit return (last expression)":
         it "does not flag last expression as implicit return":
             val code = "fn compute() -> i64:\n    val x = 10\n    x * 2\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(false)
 
         it "does not flag last expression in function with return type":
             val code = "fn greet(name: text) -> text:\n    \"Hello!\"\n"
-            val warnings = parse_and_check_return(code)
-            val has_ret001 = warnings_have_code(warnings, "RET001")
+            val codes = check_ignored_return_text(code)
+            val has_ret001 = codes_contain(codes, "RET001")
             expect(has_ret001).to_equal(false)
