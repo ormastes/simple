@@ -480,16 +480,25 @@ pub(super) fn eval_collection_expr(
                     Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
                 }
                 Value::Str(s) => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("string indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index string with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    // For symbol/string keys, try parsing as integer first;
+                    // if that fails, treat as dict-style key access and return nil
+                    let raw_idx = match &idx_val {
+                        Value::Symbol(sym) => {
+                            match sym.parse::<i64>() {
+                                Ok(i) => i,
+                                Err(_) => return Ok(Some(Value::Nil)),
+                            }
+                        }
+                        _ => idx_val.as_int().map_err(|_| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_INDEX_TYPE)
+                                .with_help("string indices must be integers");
+                            CompileError::semantic_with_context(
+                                format!("cannot index string with type `{}`", idx_val.type_name()),
+                                ctx,
+                            )
+                        })?,
+                    };
                     // Fast path: if string is ASCII-only, use byte indexing O(1)
                     // instead of chars().nth() which is O(n)
                     if s.is_ascii() {

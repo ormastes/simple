@@ -484,6 +484,36 @@ pub(crate) fn evaluate_method_call(
             // String methods are included from a separate file
             include!("string.rs");
         }
+        Value::Symbol(sym) => {
+            // Symbols support basic string-like methods (len, to_string, etc.)
+            match method {
+                "len" | "length" => return Ok(Value::Int(sym.len() as i64)),
+                "to_string" | "to_text" => return Ok(Value::Str(sym.clone())),
+                "is_empty" => return Ok(Value::Bool(sym.is_empty())),
+                "contains" => {
+                    let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+                    if let Value::Str(n) = &needle {
+                        return Ok(Value::Bool(sym.contains(n.as_str())));
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                "starts_with" => {
+                    let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+                    if let Value::Str(p) = &prefix {
+                        return Ok(Value::Bool(sym.starts_with(p.as_str())));
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                "ends_with" => {
+                    let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+                    if let Value::Str(s) = &suffix {
+                        return Ok(Value::Bool(sym.ends_with(s.as_str())));
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                _ => {} // Fall through to default error handling
+            }
+        }
         Value::Enum {
             enum_name,
             variant,
@@ -1140,11 +1170,13 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
     let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
 
-    // Always propagate potential mutations for FieldAccess receivers.
-    // Custom `me` methods (e.g., push_scope, add_symbol) mutate the receiver
-    // but were previously missed because they weren't in a hardcoded list.
-    // For non-mutating methods (e.g., .len()), the result type differs from the
-    // receiver type, so reassigning back is harmless — it's a no-op in practice
-    // because the FieldAccess handler only updates if updated_field.is_some().
-    Ok((result.clone(), Some(result)))
+    // Only propagate as updated self when the result type matches the receiver type.
+    // Mutating methods (e.g., push on Array) return the same type as the receiver.
+    // Non-mutating methods (e.g., .len() on Array returns Int, .contains_key() on
+    // Dict returns Bool) return a DIFFERENT type and must NOT overwrite the receiver.
+    if std::mem::discriminant(&recv_val) == std::mem::discriminant(&result) {
+        Ok((result.clone(), Some(result)))
+    } else {
+        Ok((result, None))
+    }
 }

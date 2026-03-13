@@ -6,8 +6,23 @@
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
+
+fn _check_binary_runnable() -> bool:
+    if not rt_file_exists("bin/release/simple"):
+        return false
+    val (stdout, stderr, code) = rt_process_run("file", ["bin/release/simple"])
+    if stdout == "" or stdout == nil:
+        return false
+    if stdout.contains("ELF") and not stdout.contains("Mach-O"):
+        val (uname_out, _, _) = rt_process_run("uname", [])
+        if uname_out.trim() == "Darwin":
+            return false
+    true
+
+val _can_run = _check_binary_runnable()
 
 fn send_kernel_messages(msgs: text) -> text:
     val tmp = "/tmp/jupyter_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
@@ -18,11 +33,17 @@ fn send_kernel_messages(msgs: text) -> text:
 
 describe "Jupyter Kernel State":
     it "should execute code and produce output":
+        if not _can_run:
+            print "SKIP: bin/release/simple not runnable on this platform"
+            return
         val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"e1\",\"session\":\"s1\",\"content\":{\"code\":\"print 42\"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s1\",\"session\":\"s1\",\"content\":{}}\n"
         val output = send_kernel_messages(msgs)
         expect(output).to_contain("execute_reply")
 
     it "should handle execute errors gracefully":
+        if not _can_run:
+            print "SKIP: bin/release/simple not runnable on this platform"
+            return
         val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"e2\",\"session\":\"s1\",\"content\":{\"code\":\"this is invalid\"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s2\",\"session\":\"s1\",\"content\":{}}\n"
         val output = send_kernel_messages(msgs)
         expect(output).to_contain("execute_reply")

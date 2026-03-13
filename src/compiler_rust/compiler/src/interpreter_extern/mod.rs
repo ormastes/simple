@@ -209,6 +209,8 @@ pub(crate) fn call_extern_function(
         "rt_stdout_flush" => io::stdout_flush(&[]),
         "stderr_write" => io::stderr_write(&evaluated),
         "stderr_flush" => io::stderr_flush(&evaluated),
+        "rt_stderr_write" => io::stderr_write(&evaluated),
+        "rt_stderr_flush" => io::stderr_flush(&[]),
 
         // ====================================================================
         // Math Operations (7 integer + 18 float FFI + 5 special = 30 functions)
@@ -385,6 +387,10 @@ pub(crate) fn call_extern_function(
         "to_string" => conversion::to_string(&evaluated),
         "to_int" => conversion::to_int(&evaluated),
         "rt_hash_text" => conversion::rt_hash_text(&evaluated),
+
+        // Text/bytes conversion (2 functions)
+        "rt_text_to_bytes" => conversion::rt_text_to_bytes(&evaluated),
+        "rt_bytes_to_text" => conversion::rt_bytes_to_text(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)

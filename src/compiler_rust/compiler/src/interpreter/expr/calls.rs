@@ -107,10 +107,16 @@ pub(super) fn eval_call_expr(
                             // Clean up temporary variable
                             env.remove(&temp_var);
 
-                            // If the field was updated by a mutating method, update it in the outer object
-                            if let Some(new_field_val) = updated_field {
-                                Arc::make_mut(&mut fields).insert(field.clone(), new_field_val);
-                                env.insert(var_name.clone(), Value::Object { class, fields });
+                            // If the field was updated by a mutating method, update it in the outer object.
+                            // Guard: only write back when the updated value has the same type
+                            // discriminant as the original field. Non-mutating methods like
+                            // .len() (returns Int) or .contains_key() (returns Bool) must NOT
+                            // overwrite the original field value.
+                            if let Some(ref new_field_val) = updated_field {
+                                if std::mem::discriminant(&field_val) == std::mem::discriminant(new_field_val) {
+                                    Arc::make_mut(&mut fields).insert(field.clone(), new_field_val.clone());
+                                    env.insert(var_name.clone(), Value::Object { class, fields });
+                                }
                             }
 
                             return Ok(Some(result));

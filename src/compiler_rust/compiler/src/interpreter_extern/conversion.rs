@@ -97,6 +97,66 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(hash))
 }
 
+/// Convert text to a byte array (UTF-8 bytes)
+///
+/// Callable from Simple as: `rt_text_to_bytes(s)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [text]
+///
+/// # Returns
+/// * Array of u8 byte values (as Value::Int)
+pub fn rt_text_to_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let text = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        Some(other) => other.to_display_string(),
+        None => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_text_to_bytes expects exactly 1 argument");
+            return Err(CompileError::semantic_with_context(
+                "rt_text_to_bytes expects 1 argument",
+                ctx,
+            ));
+        }
+    };
+    let bytes: Vec<Value> = text.as_bytes().iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(Value::Array(std::sync::Arc::new(bytes)))
+}
+
+/// Convert a byte array to text (UTF-8)
+///
+/// Callable from Simple as: `rt_bytes_to_text(data)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [[u8]]
+///
+/// # Returns
+/// * Text string from the byte values
+pub fn rt_bytes_to_text(args: &[Value]) -> Result<Value, CompileError> {
+    let arr = match args.first() {
+        Some(Value::Array(a)) => a.clone(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("rt_bytes_to_text expects a byte array argument");
+            return Err(CompileError::semantic_with_context(
+                "rt_bytes_to_text expects a byte array argument",
+                ctx,
+            ));
+        }
+    };
+    let bytes: Vec<u8> = arr
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => *i as u8,
+            _ => 0u8,
+        })
+        .collect();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(Value::Str(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

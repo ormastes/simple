@@ -810,7 +810,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
-                    return val.as_int().map(|v| v as i32);
+                    // Gracefully handle non-integer return values (Enum, Object, Dict, etc.)
+                    // by defaulting to exit code 0
+                    return Ok(val.as_int().unwrap_or(0) as i32);
                 }
                 // Sync module-level variables to MODULE_GLOBALS for function/method access
                 // Both mutable (var) and immutable (val) need to be accessible
@@ -838,13 +840,17 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
-                    return val.as_int().map(|v| v as i32);
+                    // Gracefully handle non-integer return values (Enum, Object, Dict, etc.)
+                    // by defaulting to exit code 0
+                    return Ok(val.as_int().unwrap_or(0) as i32);
                 }
             }
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
                     let val = evaluate_expr(expr, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?;
-                    return val.as_int().map(|v| v as i32);
+                    // Gracefully handle non-integer return values (Enum, Object, Dict, etc.)
+                    // by defaulting to exit code 0
+                    return Ok(val.as_int().unwrap_or(0) as i32);
                 }
                 return Ok(0);
             }
@@ -1262,10 +1268,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         // Await the result if it's a Promise (async function)
         let result = await_value(result)?;
         // If main returns unit/tuple (void), treat it as exit code 0
+        // Dict, Enum, Object, Array, etc. also default to 0 since they aren't exit codes
         return match &result {
             Value::Tuple(t) if t.is_empty() => Ok(0),
             Value::Nil => Ok(0),
-            _ => result.as_int().map(|v| v as i32),
+            Value::Int(i) => Ok(*i as i32),
+            Value::Bool(b) => Ok(if *b { 0 } else { 1 }),
+            _ => Ok(0),
         };
     }
 
@@ -1273,6 +1282,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     let main_val = env.get("main").cloned().unwrap_or(Value::Int(0));
     // Await the value if it's a Promise (async expression result)
     let main_val = await_value(main_val)?;
-    let main_val = main_val.as_int()? as i32;
+    // Gracefully handle non-integer return values (Dict, Enum, etc.) by defaulting to 0
+    let main_val = match &main_val {
+        Value::Int(i) => *i as i32,
+        Value::Bool(b) => if *b { 0 } else { 1 },
+        Value::Nil => 0,
+        _ => 0,
+    };
     Ok(main_val)
 }
