@@ -55,6 +55,10 @@ jobs:
         if: matrix.pkg != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
 
+      - name: Ensure cross-compilation target is installed
+        if: matrix.rust-target != ''
+        run: rustup target add ${{ matrix.rust-target }}
+
       - name: Get rustc nightly date
         id: rustc-date
         run: |
@@ -239,7 +243,6 @@ jobs:
 
       - name: Build Stage 2 (MinGW cross-compile)
         if: matrix.target == 'mingw'
-        continue-on-error: true
         run: |
           SEED="seed-download/simple"
           chmod +x "$SEED"
@@ -247,59 +250,31 @@ jobs:
           "$SEED" --version
 
           mkdir -p bin
-          echo "Attempting Stage 2 cross-compile for Windows MinGW..."
+          echo "Building Stage 2 cross-compile for Windows MinGW..."
 
-          # Cross-native-build may not be fully supported yet
           RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
             "$SEED" native-build \
             --source-dir src \
             --entry src/app/cli/bootstrap_main.spl \
             --output bin/simple_stage2.exe \
             --target x86_64-pc-windows-gnu \
-            2>&1 || true
+            2>&1
 
-          if [ -f bin/simple_stage2.exe ]; then
-            echo "Stage 2 MinGW binary built:"
-            file bin/simple_stage2.exe
-            ls -lh bin/simple_stage2.exe
-          else
-            echo "Cross-compile Stage 2 not produced (expected — still maturing)"
-            echo "Falling back to seed-only for Windows"
+          if [ ! -f bin/simple_stage2.exe ]; then
+            echo "::error::Stage 2 MinGW binary not produced"
+            exit 1
           fi
 
-      - name: Check Stage 2 result (MinGW)
-        if: matrix.target == 'mingw'
-        id: mingw-stage2
-        run: |
-          if [ -f bin/simple_stage2.exe ]; then
-            echo "produced=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "produced=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Stage 2 MinGW binary built:"
+          file bin/simple_stage2.exe
+          ls -lh bin/simple_stage2.exe
 
       - name: Upload Stage 2 (MinGW)
-        if: matrix.target == 'mingw' && steps.mingw-stage2.outputs.produced == 'true'
+        if: matrix.target == 'mingw'
         uses: actions/upload-artifact@v4
         with:
           name: binary-windows-mingw-x86_64-${{ github.sha }}
           path: bin/simple_stage2.exe
-          retention-days: 14
-
-      # Upload seed as fallback if Stage 2 wasn't produced
-      - name: Download MinGW seed (fallback)
-        if: matrix.target == 'mingw' && steps.mingw-stage2.outputs.produced == 'false'
-        uses: actions/download-artifact@v4
-        with:
-          name: seed-mingw-x86_64-${{ github.sha }}
-          path: seed-mingw-download
-
-      - name: Upload MinGW seed as fallback
-        if: matrix.target == 'mingw' && steps.mingw-stage2.outputs.produced == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-windows-mingw-x86_64-${{ github.sha }}
-          path: seed-mingw-download/simple.exe
-          if-no-files-found: warn
           retention-days: 14
 
   # ── Job 3: Smoke tests ───────────────────────────────────────────────
