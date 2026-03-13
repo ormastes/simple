@@ -52,14 +52,23 @@ fn parse_csv(text_content: text) -> [[text]]:
             result = result + [parse_csv_line_quoted(line)]
     result
 
+fn arr_first_row(rows: [[text]]) -> [text]:
+    for row in rows:
+        return row
+    []
+
 fn parse_csv_with_headers(text_content: text) -> Option<CsvData>:
     val rows = parse_csv(text_content)
     if rows.len() == 0: return nil
 
-    val headers = rows[0]
+    val headers = arr_first_row(rows)
     var data_rows: [[text]] = []
-    for i in 1..rows.len():
-        data_rows = data_rows + [rows[i]]
+    var skip_first = true
+    for row in rows:
+        if skip_first:
+            skip_first = false
+        else:
+            data_rows = data_rows + [row]
 
     Some(CsvData(headers: headers, rows: data_rows))
 
@@ -82,7 +91,7 @@ fn format_csv(rows: [[text]]) -> text:
 
 fn is_rectangular_csv(rows: [[text]]) -> bool:
     if rows.len() == 0: return true
-    val expected_len = rows[0].len()
+    val expected_len = arr_first_row(rows).len()
     for row in rows:
         if row.len() != expected_len:
             return false
@@ -90,7 +99,7 @@ fn is_rectangular_csv(rows: [[text]]) -> bool:
 
 fn get_column_count(rows: [[text]]) -> i64:
     if rows.len() == 0: return 0
-    rows[0].len()
+    arr_first_row(rows).len()
 
 fn get_row_count(rows: [[text]]) -> i64:
     rows.len()
@@ -98,34 +107,51 @@ fn get_row_count(rows: [[text]]) -> i64:
 fn get_column(rows: [[text]], idx: i64) -> [text]:
     var result: [text] = []
     for row in rows:
-        if idx < row.len():
-            result = result + [row[idx]]
+        var j = 0
+        for cell in row:
+            if j == idx:
+                result = result + [cell]
+            j = j + 1
     result
 
+fn find_header_idx(headers: [text], name: text) -> i64:
+    var idx = 0
+    for h in headers:
+        if h == name:
+            return idx
+        idx = idx + 1
+    -1
+
 fn get_column_by_name(data: CsvData, name: text) -> Option<[text]>:
-    var idx = -1
-    for i in 0..data.headers.len():
-        if data.headers[i] == name:
-            idx = i
+    val hdrs = data.headers
+    val idx = find_header_idx(hdrs, name)
     if idx < 0: return nil
 
     var result: [text] = []
     for row in data.rows:
-        if idx < row.len():
-            result = result + [row[idx]]
+        var j = 0
+        for cell in row:
+            if j == idx:
+                result = result + [cell]
+            j = j + 1
     Some(result)
 
 fn transpose_csv(rows: [[text]]) -> [[text]]:
     if rows.len() == 0: return []
-    val num_cols = rows[0].len()
+    val num_cols = arr_first_row(rows).len()
     var result: [[text]] = []
 
-    for col in 0..num_cols:
+    var col = 0
+    while col < num_cols:
         var new_row: [text] = []
         for row in rows:
-            if col < row.len():
-                new_row = new_row + [row[col]]
+            var j = 0
+            for cell in row:
+                if j == col:
+                    new_row = new_row + [cell]
+                j = j + 1
         result = result + [new_row]
+        col = col + 1
 
     result
 
@@ -155,29 +181,16 @@ fn max_field_length(rows: [[text]]) -> i64:
 fn format_csv_table(rows: [[text]]) -> text:
     if rows.len() == 0: return ""
 
-    # Calculate column widths
-    val num_cols = get_column_count(rows)
-    var widths: [i64] = []
-    for i in 0..num_cols:
-        widths = widths + [0]
-
-    for row in rows:
-        for i in 0..row.len():
-            if row[i].len() > widths[i]:
-                widths = widths[..i] + [row[i].len()] + widths[i+1..]
-
     var result = ""
     for row in rows:
         result = result + "|"
-        for i in 0..row.len():
-            val cell = if i < row.len(): row[i] else: ""
+        for cell in row:
             result = result + " " + cell + " |"
         result = result + "\n"
 
     result
 
 fn format_csv_table_with_headers(data: CsvData) -> text:
-    var all_rows = [data.headers] + data.rows
     var result = format_csv_table([data.headers])
 
     # Add separator
@@ -188,6 +201,12 @@ fn format_csv_table_with_headers(data: CsvData) -> text:
 
     result = result + format_csv_table(data.rows)
     result
+
+# Helper to get first cell of first row from a row array
+fn first_cell_of(row: [text]) -> text:
+    for cell in row:
+        return cell
+    ""
 
 # =====================================
 # BDD Tests
@@ -229,10 +248,13 @@ describe "CSV Utilities":
             val text_content = "Name,Age,City\nAlice,30,NYC\nBob,25,LA"
             match parse_csv_with_headers(text_content):
                 case Some(data):
-                    expect data.headers.len() == 3
-                    expect data.headers[0] == "Name"
-                    expect data.rows.len() == 2
-                    expect data.rows[0][0] == "Alice"
+                    val hdrs = data.headers
+                    expect hdrs.len() == 3
+                    expect hdrs[0] == "Name"
+                    val data_rows = data.rows
+                    expect data_rows.len() == 2
+                    val first_row = arr_first_row(data_rows)
+                    expect first_cell_of(first_row) == "Alice"
                 case nil:
                     expect false
 
@@ -345,9 +367,11 @@ describe "CSV Utilities":
                     ["Charlie", "35"]
                 ]
             )
-            val filtered = filter_rows(data, \row: row[0].starts_with("A"))
-            expect filtered.rows.len() == 1
-            expect filtered.rows[0][0] == "Alice"
+            val filtered = filter_rows(data, \row: first_cell_of(row).starts_with("A"))
+            val filtered_rows = filtered.rows
+            expect filtered_rows.len() == 1
+            val first_row = arr_first_row(filtered_rows)
+            expect first_cell_of(first_row) == "Alice"
 
     describe "CSV Statistics":
         it "counts non-empty cells":
