@@ -783,7 +783,8 @@ int main(int argc, char** argv) {
         }
 
         // Libraries — via PlatformLinkConfig (single source of truth per OS)
-        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+        // Use compiler-aware config so MinGW gets GNU-style flags, MSVC gets MSVC-style flags
+        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&cc);
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
@@ -813,6 +814,13 @@ int main(int argc, char** argv) {
         // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
         #[cfg(not(target_os = "windows"))]
         {
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            cmd.arg(&stubs_o);
+        }
+        #[cfg(target_os = "windows")]
+        if !is_clang_cl {
+            // MinGW: generate stub object (same as Unix) to satisfy unresolved Simple symbols.
+            // MSVC/clang-cl uses /FORCE:UNRESOLVED instead.
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
         }
@@ -861,7 +869,7 @@ int main(int argc, char** argv) {
 /// Scans the given object files / archive for undefined symbols that have no definition,
 /// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
 fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
@@ -943,7 +951,7 @@ fn generate_stub_object(
     }
 
     // Scan system libraries for symbols (libc, libm, etc.) — via PlatformLinkConfig
-    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&find_c_compiler());
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
             let mut nm_cmd = std::process::Command::new("nm");
@@ -980,13 +988,14 @@ fn generate_stub_object(
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let status = std::process::Command::new("clang")
-            .arg("-c")
-            .arg("-o")
-            .arg(&stub_o)
-            .arg(&stub_c)
-            .status()
-            .map_err(|e| format!("compile stubs: {e}"))?;
+        let empty_cc = find_c_compiler();
+        let mut empty_cmd = std::process::Command::new(&empty_cc);
+        empty_cmd.arg("-c").arg("-o").arg(&stub_o).arg(&stub_c);
+        #[cfg(target_os = "windows")]
+        if empty_cc.contains("clang") && !simple_common::platform::cc_detect::is_msvc_target(&empty_cc) {
+            empty_cmd.arg("--target=x86_64-pc-windows-gnu");
+        }
+        let status = empty_cmd.status().map_err(|e| format!("compile stubs: {e}"))?;
         if !status.success() {
             return Err("failed to compile empty stubs".to_string());
         }
@@ -1003,46 +1012,95 @@ fn generate_stub_object(
         }
     }
 
-    // Generate pure assembly stubs via PlatformLinkConfig + asm_helpers.
-    // Each stub returns tagged nil (3). Strategy is per-OS (Weak/WeakDefinition/Strong).
-    let mut asm_code = String::with_capacity(needs_stub.len() * 100);
-    asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
+    let stub_o = temp_dir.join("_stubs.o");
 
-    let host_target = simple_common::target::Target::host();
-    let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
-    let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
-    let stub_codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
+    // On Windows, generate C stubs instead of assembly to avoid assembler
+    // compatibility issues (clang defaults to MSVC target, doesn't support .weak).
+    #[cfg(target_os = "windows")]
+    {
+        let mut c_code = String::with_capacity(needs_stub.len() * 120);
+        c_code.push_str("/* Auto-generated strong stubs for bootstrap linking.\n");
+        c_code.push_str("   --allow-multiple-definition lets real defs override these. */\n");
+        c_code.push_str("typedef long long int64_t;\n\n");
 
-    for sym in &needs_stub {
-        if !plat_config.is_valid_asm_label(sym) {
-            continue;
+        for (i, sym) in needs_stub.iter().enumerate() {
+            // C __asm__ labels handle any characters (periods, dollars, etc.)
+            // so no is_valid_asm_label filter needed unlike raw assembly stubs.
+            // Strong definitions because MinGW weak externals don't resolve
+            // .refptr relocations. --allow-multiple-definition handles duplicates.
+            c_code.push_str(&format!(
+                "int64_t __stub_{0}(void) __asm__(\"{1}\");\n\
+                 int64_t __stub_{0}(void) {{ return 3; }}\n",
+                i, sym
+            ));
         }
 
-        // __builtin_* symbols → trampoline to real function (platforms with C underscore prefix)
-        if stub_codegen_cfg.c_symbol_underscore_prefix && sym.starts_with("___builtin_") {
-            let real_fn = format!("_{}", &sym["___builtin_".len()..]);
-            asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
-            continue;
-        }
+        let stub_c = temp_dir.join("_stubs.c");
+        std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
 
-        asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
+        // Use gcc (MinGW) if available; fall back to clang with GNU target.
+        let stub_cc = if simple_common::platform::cc_detect::command_exists("gcc") {
+            "gcc".to_string()
+        } else {
+            "clang".to_string()
+        };
+        let mut cmd = std::process::Command::new(&stub_cc);
+        cmd.arg("-c").arg("-o").arg(&stub_o).arg(&stub_c);
+        if stub_cc.contains("clang") {
+            cmd.arg("--target=x86_64-pc-windows-gnu");
+        }
+        let output = cmd.output().map_err(|e| format!("compile stubs: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("failed to compile stub functions:\nstderr: {}\nstdout: {}", stderr, stdout));
+        }
     }
 
-    let stub_s = temp_dir.join("_stubs.s");
-    std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
+    // On Unix, generate assembly stubs via PlatformLinkConfig + asm_helpers.
+    // Each stub returns tagged nil (3). Strategy is per-OS (Weak/WeakDefinition/Strong).
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut asm_code = String::with_capacity(needs_stub.len() * 100);
+        asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
-    let stub_o = temp_dir.join("_stubs.o");
-    let output = std::process::Command::new("clang")
-        .arg("-c")
-        .arg("-o")
-        .arg(&stub_o)
-        .arg(&stub_s)
-        .output()
-        .map_err(|e| format!("assemble stubs: {e}"))?;
+        let host_target = simple_common::target::Target::host();
+        let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
+        let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
+        let stub_codegen_cfg = simple_common::platform::link_config::PlatformCodegenConfig::for_host();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("failed to assemble stub functions: {}", stderr));
+        for sym in &needs_stub {
+            if !plat_config.is_valid_asm_label(sym) {
+                continue;
+            }
+
+            // __builtin_* symbols → trampoline to real function (platforms with C underscore prefix)
+            if stub_codegen_cfg.c_symbol_underscore_prefix && sym.starts_with("___builtin_") {
+                let real_fn = format!("_{}", &sym["___builtin_".len()..]);
+                asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
+                continue;
+            }
+
+            asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
+        }
+
+        let stub_s = temp_dir.join("_stubs.s");
+        std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
+
+        let output = std::process::Command::new("clang")
+            .arg("-c")
+            .arg("-o")
+            .arg(&stub_o)
+            .arg(&stub_s)
+            .output()
+            .map_err(|e| format!("assemble stubs: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("failed to assemble stub functions:\nstderr: {}\nstdout: {}", stderr, stdout));
+        }
     }
 
     Ok(stub_o)
@@ -1050,10 +1108,33 @@ fn generate_stub_object(
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
 fn is_system_symbol(sym: &str) -> bool {
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
+
+    // On Windows, POSIX-only functions don't exist in system libraries and need stubs.
+    #[cfg(target_os = "windows")]
+    if matches!(
+        name,
+        "mmap" | "munmap" | "mprotect" | "sysconf" | "pipe" | "dup" | "dup2" |
+        "fcntl" | "ioctl" | "select" | "poll" |
+        "fork" | "execve" | "execvp" | "waitpid" | "kill" | "getpid" | "getppid" |
+        "signal" | "sigaction" | "sigemptyset" | "sigfillset" | "sigaddset" |
+        "pthread_create" | "pthread_join" | "pthread_detach" | "pthread_self" |
+        "pthread_mutex_init" | "pthread_mutex_lock" | "pthread_mutex_unlock" |
+        "pthread_mutex_destroy" | "pthread_rwlock_init" | "pthread_rwlock_destroy" |
+        "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock" | "pthread_rwlock_unlock" |
+        "pthread_cond_init" | "pthread_cond_wait" | "pthread_cond_signal" |
+        "pthread_cond_broadcast" | "pthread_cond_destroy" |
+        "dlopen" | "dlclose" | "dlsym" | "dlerror" |
+        "posix_memalign" | "realpath" | "readlink" | "symlink" |
+        "clock_gettime" | "gettimeofday" | "nanosleep" | "usleep" |
+        "setenv" | "unsetenv" | "fileno" | "fdopen" | "getline" | "getdelim"
+    ) {
+        return false;
+    }
+
     matches!(
         name,
         // Memory
@@ -3365,21 +3446,37 @@ fn find_native_all_library() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates: Vec<&str> = vec![
+    let mut candidates: Vec<&str> = vec![];
+
+    // On Windows, prefer GNU-targeted lib when MinGW compiler is detected,
+    // to avoid MSVC/MinGW ABI mismatch (e.g. __GSHandlerCheck undefined).
+    #[cfg(target_os = "windows")]
+    {
+        let cc = find_cxx_compiler();
+        let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
+        if !is_msvc {
+            // MinGW: prefer GNU-targeted .a files
+            candidates.extend_from_slice(&[
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/bootstrap/libsimple_native_all.a",
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/release/libsimple_native_all.a",
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/debug/libsimple_native_all.a",
+            ]);
+        } else {
+            // MSVC: prefer .lib files
+            candidates.extend_from_slice(&[
+                "src/compiler_rust/target/bootstrap/simple_native_all.lib",
+                "src/compiler_rust/target/release/simple_native_all.lib",
+                "src/compiler_rust/target/debug/simple_native_all.lib",
+            ]);
+        }
+    }
+
+    // Generic fallback paths (Unix, or if platform-specific paths not found)
+    candidates.extend_from_slice(&[
         "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
         "src/compiler_rust/target/release/libsimple_native_all.a",
         "src/compiler_rust/target/debug/libsimple_native_all.a",
-    ];
-
-    // Windows MSVC produces .lib instead of lib*.a
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
-            "src/compiler_rust/target/release/simple_native_all.lib",
-            "src/compiler_rust/target/debug/simple_native_all.lib",
-        ]);
-    }
+    ]);
 
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
@@ -3410,31 +3507,43 @@ fn find_native_all_library() -> Option<PathBuf> {
 
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
-    // Check common locations
-    let mut candidates: Vec<&str> = vec![
-        // Bootstrap profile (smallest optimized build, used for seed compiler)
-        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
-        // Release layout (optimized)
-        "src/compiler_rust/target/release/libsimple_runtime.a",
-        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        // Debug layout (fallback, may be very large)
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-    ];
+    let mut candidates: Vec<&str> = vec![];
 
-    // Windows MSVC produces .lib instead of lib*.a
+    // On Windows, prefer ABI-matched library
     #[cfg(target_os = "windows")]
     {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
-            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
-            "src/compiler_rust/target/release/simple_runtime.lib",
-            "src/compiler_rust/target/release/deps/simple_runtime.lib",
-            "src/compiler_rust/target/debug/simple_runtime.lib",
-            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
-        ]);
+        let cc = find_cxx_compiler();
+        let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
+        if !is_msvc {
+            // MinGW: prefer GNU-targeted .a files
+            candidates.extend_from_slice(&[
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/bootstrap/libsimple_runtime.a",
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/bootstrap/deps/libsimple_runtime.a",
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/release/libsimple_runtime.a",
+                "src/compiler_rust/target/x86_64-pc-windows-gnu/release/deps/libsimple_runtime.a",
+            ]);
+        } else {
+            // MSVC: prefer .lib files
+            candidates.extend_from_slice(&[
+                "src/compiler_rust/target/bootstrap/simple_runtime.lib",
+                "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
+                "src/compiler_rust/target/release/simple_runtime.lib",
+                "src/compiler_rust/target/release/deps/simple_runtime.lib",
+                "src/compiler_rust/target/debug/simple_runtime.lib",
+                "src/compiler_rust/target/debug/deps/simple_runtime.lib",
+            ]);
+        }
     }
+
+    // Generic fallback paths
+    candidates.extend_from_slice(&[
+        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
+        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/release/libsimple_runtime.a",
+        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
+    ]);
 
     // System-installed (Unix only)
     #[cfg(not(target_os = "windows"))]
