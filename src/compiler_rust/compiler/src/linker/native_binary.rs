@@ -1033,9 +1033,13 @@ static inline int64_t _rt_now_nanos(void) {{
          -> LinkerResult<()> {
             let mut builder = LinkerBuilder::new().target(self.options.target);
 
-            if crt_files.len() >= 2 {
-                builder = builder.object(&crt_files[0]);
-                builder = builder.object(&crt_files[1]);
+            // CRT prologue: Scrt1.o/crt1.o, crti.o, crtbeginS.o (first 2-3 files)
+            // CRT epilogue: crtendS.o, crtn.o (last 1-2 files)
+            // Split: prologue is everything before the last 2 files (or last 1 if <= 3)
+            let crt_epilogue_count = if crt_files.len() >= 4 { 2 } else if crt_files.len() >= 3 { 1 } else { 0 };
+            let crt_prologue_end = crt_files.len().saturating_sub(crt_epilogue_count);
+            for crt in &crt_files[..crt_prologue_end] {
+                builder = builder.object(crt);
             }
 
             builder = builder.object(&obj_path);
@@ -1172,8 +1176,9 @@ static inline int64_t _rt_now_nanos(void) {{
                 }
             }
 
-            if crt_files.len() >= 3 {
-                builder = builder.object(&crt_files[2]); // crtn.o
+            // CRT epilogue: crtendS.o + crtn.o (last 1-2 files)
+            for crt in &crt_files[crt_prologue_end..] {
+                builder = builder.object(crt);
             }
 
             builder.link()
@@ -1539,6 +1544,50 @@ static inline int64_t _rt_now_nanos(void) {{
                     _ => vec!["/usr/lib"],
                 };
 
+                // GCC lib dirs for crtbeginS.o / crtendS.o
+                let gcc_dirs: Vec<&str> = match self.options.target.arch {
+                    TargetArch::X86_64 => vec![
+                        "/usr/lib/gcc/x86_64-linux-gnu/14",
+                        "/usr/lib/gcc/x86_64-linux-gnu/13",
+                        "/usr/lib/gcc/x86_64-linux-gnu/12",
+                        "/usr/lib/gcc/x86_64-linux-gnu/11",
+                    ],
+                    TargetArch::Aarch64 => vec![
+                        "/usr/lib/gcc/aarch64-linux-gnu/14",
+                        "/usr/lib/gcc/aarch64-linux-gnu/13",
+                        "/usr/lib/gcc/aarch64-linux-gnu/12",
+                        "/usr/lib/gcc/aarch64-linux-gnu/11",
+                    ],
+                    TargetArch::Riscv64 => vec![
+                        "/usr/lib/gcc/riscv64-linux-gnu/14",
+                        "/usr/lib/gcc/riscv64-linux-gnu/13",
+                        "/usr/lib/gcc/riscv64-linux-gnu/12",
+                    ],
+                    _ => vec![],
+                };
+
+                // Find crtbeginS.o / crtendS.o (or crtbegin.o / crtend.o)
+                let mut crtbegin: Option<PathBuf> = None;
+                let mut crtend: Option<PathBuf> = None;
+                for gcc_dir in &gcc_dirs {
+                    let dir_path = PathBuf::from(gcc_dir);
+                    let begin = if self.options.pie || self.options.shared {
+                        dir_path.join("crtbeginS.o")
+                    } else {
+                        dir_path.join("crtbegin.o")
+                    };
+                    let end = if self.options.pie || self.options.shared {
+                        dir_path.join("crtendS.o")
+                    } else {
+                        dir_path.join("crtend.o")
+                    };
+                    if begin.exists() && end.exists() {
+                        crtbegin = Some(begin);
+                        crtend = Some(end);
+                        break;
+                    }
+                }
+
                 for dir in candidates {
                     let dir_path = PathBuf::from(dir);
                     let crt1 = if self.options.pie && !self.options.shared {
@@ -1550,8 +1599,17 @@ static inline int64_t _rt_now_nanos(void) {{
                     let crtn = dir_path.join("crtn.o");
 
                     if crt1.exists() && crti.exists() && crtn.exists() {
-                        crt_files.push(crti);
+                        // Standard Linux CRT order:
+                        // Scrt1.o crti.o crtbeginS.o [objects] crtendS.o crtn.o
                         crt_files.push(crt1);
+                        crt_files.push(crti);
+                        if let Some(ref begin) = crtbegin {
+                            crt_files.push(begin.clone());
+                        }
+                        // crtend and crtn go at the end (indices 3,4 or 2,3)
+                        if let Some(ref end) = crtend {
+                            crt_files.push(end.clone());
+                        }
                         crt_files.push(crtn);
                         break;
                     }
@@ -1569,8 +1627,8 @@ static inline int64_t _rt_now_nanos(void) {{
                 let crtn = dir_path.join("crtn.o");
 
                 if crt1.exists() && crti.exists() && crtn.exists() {
-                    crt_files.push(crti);
                     crt_files.push(crt1);
+                    crt_files.push(crti);
                     crt_files.push(crtn);
                 }
             }
