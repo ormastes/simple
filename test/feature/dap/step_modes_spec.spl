@@ -34,14 +34,19 @@
 # use std.ffi.debug. { ... }
 
 # Local stubs for debug functions
+# NOTE: Uses array-based breakpoint storage due to interpreter bug INTERP-DICT-001
 var _debug_active = false
 var _current_file = ""
 var _current_line = 0
-var _breakpoints: Dict<text, i64> = {}
+var _breakpoints = [""]
+var _bp_count = 0
 var _step_mode = 0
 var _step_start_depth = 0
 var _stack_depth = 0
 var _stack_frames = []
+
+fn _bp_key(file: text, line: i64) -> text:
+    "{file}:{line}"
 
 fn debug_set_active(active: bool):
     _debug_active = active
@@ -67,8 +72,19 @@ fn debug_pop_frame():
     if _stack_frames.len() > 0:
         _stack_frames = _stack_frames[0.._stack_frames.len() - 1]
 fn debug_add_breakpoint(file: text, line: i64, id: i64):
-    val key = "{file}:{line}"
-    _breakpoints[key] = id
+    val key = _bp_key(file, line)
+    var new_bps = []
+    var new_count = 0
+    var i = 0
+    for bp in _breakpoints:
+        if i < _bp_count and bp != key:
+            new_bps = new_bps + [bp]
+            new_count = new_count + 1
+        i = i + 1
+    new_bps = new_bps + [key]
+    new_count = new_count + 1
+    _breakpoints = new_bps
+    _bp_count = new_count
 fn debug_should_break() -> bool:
     if not _debug_active:
         return false
@@ -78,14 +94,20 @@ fn debug_should_break() -> bool:
         return _stack_depth <= _step_start_depth
     if _step_mode == 3:
         return _stack_depth < _step_start_depth
-    val key = "{_current_file}:{_current_line}"
-    _breakpoints.contains_key(key) and _breakpoints[key] != nil
+    val key = _bp_key(_current_file, _current_line)
+    var i = 0
+    for bp in _breakpoints:
+        if i < _bp_count and bp == key:
+            return true
+        i = i + 1
+    false
 
 fn reset_state():
     _debug_active = false
     _current_file = ""
     _current_line = 0
-    _breakpoints = {}
+    _breakpoints = [""]
+    _bp_count = 0
     _step_mode = 0
     _step_start_depth = 0
     _stack_depth = 0

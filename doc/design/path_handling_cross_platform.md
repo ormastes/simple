@@ -1,14 +1,17 @@
 # Path Handling Cross-Platform Design
 
 **Date:** 2026-03-13
-**Status:** Implemented (Phase 1-2, 4-5 done; Phase 3 remaining)
-**Purpose:** Consolidate path construction onto platform-aware utilities, eliminating raw `"/"` concatenation across 25+ files for correct Windows and double-slash behavior.
+**Status:** Implemented (Phase 1-2, 4-6 done; Phase 3 remaining)
+**Purpose:** Consolidate path construction onto platform-aware utilities, eliminating raw `"/"` concatenation across 25+ files for correct Windows and double-slash behavior. Uses compile-time @cfg platform selection.
 **Related:**
 - `src/lib/nogc_sync_mut/path.spl` — pure-function path utilities
 - `src/lib/nogc_sync_mut/fs/path.spl` — OOP `Path` class
 - `src/lib/nogc_sync_mut/ffi/io.spl` — FFI `rt_path_join()`
 - `src/lib/nogc_sync_mut/platform.spl` — `dir_sep()`, `is_windows()`
+- `src/lib/nogc_sync_mut/path_platform/` — compile-time platform config modules (NEW)
+- `src/compiler/10.frontend/core/cfg_platform.spl` — `@cfg` eval with toolchain support
 - `src/compiler/70.backend/linker/msvc.spl` — MSVC linker integration
+- `test/unit/lib/nogc_sync_mut/path_cross_platform_spec.spl` — 75 cross-platform tests
 - `test/feature/platform/windows_spec.spl` — Windows platform tests (currently skipped)
 
 ---
@@ -21,7 +24,7 @@ The codebase already ships good path utilities:
 
 | Utility | Location | Platform-Aware |
 |---------|----------|----------------|
-| `path_join()` | `src/lib/nogc_sync_mut/path.spl` | No (hardcodes `/`) |
+| `path_join()` | `src/lib/nogc_sync_mut/path.spl` | Yes (both `/` and `\`) |
 | `Path.join()` | `src/lib/nogc_sync_mut/fs/path.spl` | Yes (uses `dir_sep()`) |
 | `rt_path_join()` | `src/lib/nogc_sync_mut/ffi/io.spl` | Yes (C runtime) |
 

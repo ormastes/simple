@@ -48,29 +48,42 @@ fn int_add_source(path: text, hash: i64):
         src_paths = src_paths + [path]
         src_hashes = src_hashes + [hash]
 
-fn int_compile_shb(source_path: text) -> i64:
+fn int_get_src_hash(idx: i64) -> i64:
+    val hashes: [i64] = src_hashes
+    hashes[idx]
+
+fn int_append_compile_log(source_path: text):
     compile_log = compile_log + [source_path]
-    val src_idx = int_find_src(source_path)
-    var src_hash: i64 = 0
-    if src_idx >= 0:
-        src_hash = src_hashes[src_idx]
-    val iface_hash = src_hash * 7 + 13
-    var tmp = source_path.replace("/", "_")
-    val shb_key = tmp.replace(".spl", ".shb")
+
+fn int_store_shb(shb_key: text, iface_hash: i64):
     val shb_idx = int_find_shb(shb_key)
     if shb_idx >= 0:
         shb_hashes[shb_idx] = iface_hash
     else:
         shb_paths = shb_paths + [shb_key]
         shb_hashes = shb_hashes + [iface_hash]
+
+fn int_compile_shb(source_path: text) -> i64:
+    int_append_compile_log(source_path)
+    val src_idx = int_find_src(source_path)
+    var src_hash: i64 = 0
+    if src_idx >= 0:
+        src_hash = int_get_src_hash(src_idx)
+    val iface_hash = src_hash * 7 + 13
+    var tmp = source_path.replace("/", "_")
+    val shb_key = tmp.replace(".spl", ".shb")
+    int_store_shb(shb_key, iface_hash)
     iface_hash
 
 fn int_check_freshness(source_path: text) -> i64:
+    # Check src first to avoid type pollution from int_find_shb
+    val src_found = int_find_src(source_path)
     var tmp = source_path.replace("/", "_")
     val shb_key = tmp.replace(".spl", ".shb")
-    if int_find_shb(shb_key) < 0:
+    val shb_found = int_find_shb(shb_key)
+    if shb_found < 0:
         return 3  # MISSING
-    if int_find_src(source_path) < 0:
+    if src_found < 0:
         return -1  # ERROR
     0  # FRESH
 
@@ -94,9 +107,10 @@ describe "Watcher SHB Integration":
             int_reset()
             int_add_source("src/main.spl", 12345)
             int_compile_shb("src/main.spl")
-            expect(int_compile_log_len()).to_equal(1)
             val status = int_check_freshness("src/main.spl")
             expect(status).to_equal(0)
+            # Check compile log after all array-reading operations complete
+            expect(int_compile_log_len()).to_equal(1)
 
     describe "stale SHB detection":
         slow_it "detects missing SHB":

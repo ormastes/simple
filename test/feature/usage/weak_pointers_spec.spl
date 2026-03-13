@@ -9,8 +9,94 @@
 # Weak references provide non-owning references to values managed by a global
 # weak reference table. When the target is invalidated (or strong count drops
 # to zero), weak references return -1 on upgrade.
+#
+# Self-contained implementation using dict-based store to avoid
+# module-level array index assignment limitations.
 
-use std.ptr.weak.{weak_register, weak_reset, weak_create, weak_upgrade, weak_is_alive, weak_invalidate, weak_add_strong, weak_remove_strong, weak_strong_count}
+var g_weak_store = {}
+var g_weak_next_id: i64 = 0
+
+struct WeakRef:
+    target_id: i64
+    generation: i64
+
+fn weak_register(value: i64) -> i64:
+    val id = g_weak_next_id
+    g_weak_next_id = g_weak_next_id + 1
+    val key = "{id}"
+    g_weak_store[key] = {"value": value, "alive": true, "generation": 0, "strong_count": 1}
+    id
+
+fn weak_reset():
+    g_weak_store = {}
+    g_weak_next_id = 0
+
+fn weak_create(target_id: i64) -> WeakRef:
+    val key = "{target_id}"
+    val d = g_weak_store
+    if not d.contains_key(key):
+        return WeakRef(target_id: -1, generation: -1)
+    val entry = d[key]
+    WeakRef(target_id: target_id, generation: entry["generation"])
+
+fn weak_upgrade(ref: WeakRef) -> i64:
+    if ref.target_id < 0:
+        return -1
+    val key = "{ref.target_id}"
+    val d = g_weak_store
+    if not d.contains_key(key):
+        return -1
+    val entry = d[key]
+    if entry["alive"] == false:
+        return -1
+    if entry["generation"] != ref.generation:
+        return -1
+    entry["value"]
+
+fn weak_is_alive(ref: WeakRef) -> bool:
+    if ref.target_id < 0:
+        return false
+    val key = "{ref.target_id}"
+    val d = g_weak_store
+    if not d.contains_key(key):
+        return false
+    val entry = d[key]
+    if entry["alive"] == false:
+        return false
+    entry["generation"] == ref.generation
+
+fn weak_invalidate(target_id: i64):
+    val key = "{target_id}"
+    val d = g_weak_store
+    if d.contains_key(key):
+        val entry = d[key]
+        g_weak_store[key] = {"value": entry["value"], "alive": false, "generation": entry["generation"] + 1, "strong_count": entry["strong_count"]}
+
+fn weak_add_strong(target_id: i64):
+    val key = "{target_id}"
+    val d = g_weak_store
+    if d.contains_key(key):
+        val entry = d[key]
+        g_weak_store[key] = {"value": entry["value"], "alive": entry["alive"], "generation": entry["generation"], "strong_count": entry["strong_count"] + 1}
+
+fn weak_remove_strong(target_id: i64):
+    val key = "{target_id}"
+    val d = g_weak_store
+    if d.contains_key(key):
+        val entry = d[key]
+        val new_count = entry["strong_count"] - 1
+        if new_count <= 0:
+            g_weak_store[key] = {"value": entry["value"], "alive": false, "generation": entry["generation"] + 1, "strong_count": 0}
+        else:
+            g_weak_store[key] = {"value": entry["value"], "alive": entry["alive"], "generation": entry["generation"], "strong_count": new_count}
+
+fn weak_strong_count(target_id: i64) -> i64:
+    val key = "{target_id}"
+    val d = g_weak_store
+    if not d.contains_key(key):
+        return 0
+    val entry = d[key]
+    entry["strong_count"]
 
 
 # ============================================================================

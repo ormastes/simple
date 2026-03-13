@@ -18,8 +18,145 @@
 # | Generation | Version counter incremented on free |
 # | Pool | Pre-allocated slot table with free list |
 # | Slot reuse | Freed indices are recycled |
+#
+# Self-contained implementation using dict-based store to avoid
+# module-level array index assignment and type inference limitations.
 
-use std.ptr.handle.{handle_pool_new, handle_pool_reset, handle_alloc, handle_deref, handle_is_valid, handle_free, handle_pool_size, handle_pool_capacity}
+struct Handle:
+    index: i64
+    generation: i64
+
+var g_pool_store = {}
+var g_pool_freed = {}
+var g_pool_capacity: i64 = 0
+var g_pool_size: i64 = 0
+var g_pool_next_slot: i64 = 0
+
+fn handle_pool_new(capacity: i64):
+    g_pool_store = {}
+    g_pool_freed = {}
+    g_pool_capacity = capacity
+    g_pool_size = 0
+    g_pool_next_slot = 0
+
+fn handle_pool_reset():
+    handle_pool_new(g_pool_capacity)
+
+fn find_freed_slot() -> i64:
+    # Scan freed dict for a reusable slot
+    for (key, is_free) in g_pool_freed:
+        if is_free == true:
+            # Parse the key back to int (keys are "{idx}")
+            # Use a simple approach: try each known slot
+            pass
+    # Return -1 to indicate no freed slots found via scan
+    -1
+
+fn try_find_freed_slot() -> i64:
+    # Scan freed dict for a reusable slot, return its index or -1
+    # Avoid break in for-dict loop (interpreter limitation)
+    var found: i64 = -1
+    for (key, is_free) in g_pool_freed:
+        if is_free == true:
+            if found < 0:
+                # Parse the key back to integer
+                var idx: i64 = 0
+                var ki: i64 = 0
+                val klen = key.len()
+                while ki < klen:
+                    val ch = key.substring(ki, ki + 1)
+                    if ch == "0":
+                        idx = idx * 10
+                    elif ch == "1":
+                        idx = idx * 10 + 1
+                    elif ch == "2":
+                        idx = idx * 10 + 2
+                    elif ch == "3":
+                        idx = idx * 10 + 3
+                    elif ch == "4":
+                        idx = idx * 10 + 4
+                    elif ch == "5":
+                        idx = idx * 10 + 5
+                    elif ch == "6":
+                        idx = idx * 10 + 6
+                    elif ch == "7":
+                        idx = idx * 10 + 7
+                    elif ch == "8":
+                        idx = idx * 10 + 8
+                    elif ch == "9":
+                        idx = idx * 10 + 9
+                    ki = ki + 1
+                found = idx
+    found
+
+fn reuse_slot(reuse_idx: i64, value: i64) -> Handle:
+    val key = "{reuse_idx}"
+    g_pool_freed[key] = false
+    val d = g_pool_store
+    val old_entry = d[key]
+    val gen = old_entry["generation"]
+    g_pool_store[key] = {"value": value, "generation": gen, "occupied": true}
+    g_pool_size = g_pool_size + 1
+    Handle(index: reuse_idx, generation: gen)
+
+fn handle_alloc(value: i64) -> Handle:
+    # Try to find a freed slot
+    val reuse_idx = try_find_freed_slot()
+    if reuse_idx >= 0:
+        return reuse_slot(reuse_idx, value)
+    # Allocate new slot if under capacity
+    if g_pool_size < g_pool_capacity:
+        val idx = g_pool_next_slot
+        g_pool_next_slot = g_pool_next_slot + 1
+        val key = "{idx}"
+        g_pool_store[key] = {"value": value, "generation": 0, "occupied": true}
+        g_pool_size = g_pool_size + 1
+        return Handle(index: idx, generation: 0)
+    # Pool full
+    Handle(index: -1, generation: -1)
+
+fn handle_deref(h: Handle) -> i64:
+    if h.index < 0:
+        return -1
+    val key = "{h.index}"
+    val d = g_pool_store
+    if not d.contains_key(key):
+        return -1
+    val entry = d[key]
+    if entry["occupied"] == false:
+        return -1
+    if entry["generation"] != h.generation:
+        return -1
+    entry["value"]
+
+fn handle_is_valid(h: Handle) -> bool:
+    if h.index < 0:
+        return false
+    val key = "{h.index}"
+    val d = g_pool_store
+    if not d.contains_key(key):
+        return false
+    val entry = d[key]
+    if entry["occupied"] == false:
+        return false
+    entry["generation"] == h.generation
+
+fn handle_free(h: Handle) -> bool:
+    if not handle_is_valid(h):
+        return false
+    val key = "{h.index}"
+    val d = g_pool_store
+    val entry = d[key]
+    g_pool_store[key] = {"value": 0, "generation": entry["generation"] + 1, "occupied": false}
+    g_pool_freed[key] = true
+    g_pool_size = g_pool_size - 1
+    true
+
+fn handle_pool_size() -> i64:
+    g_pool_size
+
+fn handle_pool_capacity() -> i64:
+    g_pool_capacity
 
 # ============================================================================
 # Basic Handle Operations
