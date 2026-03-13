@@ -185,7 +185,13 @@ impl<'a> Parser<'a> {
 
             while !self.check(&TokenKind::RBrace) {
                 // Use expect_path_segment to allow keywords like 'to', 'context' as import names
-                let name = self.expect_path_segment()?;
+                let mut name = self.expect_path_segment()?;
+                // Support dotted names in import groups: {Mailbox.new, Config.default}
+                while self.check(&TokenKind::Dot) {
+                    self.advance(); // consume '.'
+                    let sub = self.expect_path_segment()?;
+                    name = format!("{}.{}", name, sub);
+                }
                 let target = if self.check(&TokenKind::As) {
                     self.advance();
                     let alias = self.expect_path_segment()?;
@@ -195,8 +201,16 @@ impl<'a> Parser<'a> {
                 };
                 targets.push(target);
 
+                // Skip newlines between items
+                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                    self.advance();
+                }
                 if !self.check(&TokenKind::RBrace) {
                     self.expect(&TokenKind::Comma)?;
+                    // Skip newlines after comma
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                        self.advance();
+                    }
                 }
             }
             self.expect(&TokenKind::RBrace)?;
@@ -816,6 +830,7 @@ impl<'a> Parser<'a> {
             }
 
             // Not a module path - parse as identifier list
+            // Support dotted names: export SymbolId, SymbolId.invalid, SymbolInterner
             let mut items = vec![first_item];
 
             let mut export_indent_depth = 0;
@@ -834,7 +849,14 @@ impl<'a> Parser<'a> {
                 if self.check(&TokenKind::Dedent) || self.is_at_end() || self.check(&TokenKind::From) {
                     break;
                 }
-                items.push(self.expect_path_segment()?);
+                let mut item = self.expect_path_segment()?;
+                // Support dotted names like SymbolId.invalid, FaultConfig.defaults
+                while self.check(&TokenKind::Dot) {
+                    self.advance(); // consume '.'
+                    let sub = self.expect_path_segment()?;
+                    item = format!("{}.{}", item, sub);
+                }
+                items.push(item);
             }
             // Consume matching dedents
             for _ in 0..export_indent_depth {
