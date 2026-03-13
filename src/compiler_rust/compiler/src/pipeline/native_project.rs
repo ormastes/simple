@@ -548,55 +548,12 @@ impl NativeProjectBuilder {
     /// proper static constructor/destructor ordering.
     fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        // Use platform-appropriate weak symbol declarations:
-        // - GCC/Clang (Linux, macOS, FreeBSD, MinGW): __attribute__((weak))
-        // - MSVC/clang-cl: no weak symbols, use linker /FORCE:UNRESOLVED instead
         let cxx = find_cxx_compiler();
         let is_clang_cl = cxx.contains("clang-cl");
 
-        let stub_code = if is_clang_cl {
-            // MSVC ABI: declare as regular extern, linker resolves
-            r#"
-extern "C" {
-    int spl_main(void);
-    void rt_set_args(int argc, char** argv);
-    void __simple_runtime_init(void);
-    void __simple_runtime_shutdown(void);
-}
-#pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
-#pragma comment(linker, "/ALTERNATENAME:rt_set_args=_rt_set_args_stub")
-#pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
-#pragma comment(linker, "/ALTERNATENAME:__simple_runtime_shutdown=___simple_runtime_shutdown_stub")
-extern "C" int _spl_main_stub(void) { return 0; }
-extern "C" void _rt_set_args_stub(int, char**) {}
-extern "C" void ___simple_runtime_init_stub(void) {}
-extern "C" void ___simple_runtime_shutdown_stub(void) {}
-int main(int argc, char** argv) {
-    __simple_runtime_init();
-    rt_set_args(argc, argv);
-    int r = spl_main();
-    __simple_runtime_shutdown();
-    return r;
-}
-"#
-        } else {
-            // GCC/Clang: use __attribute__((weak)) for all platforms
-            r#"
-extern "C" {
-    int __attribute__((weak)) spl_main(void);
-    void __attribute__((weak)) rt_set_args(int argc, char** argv);
-    void __attribute__((weak)) __simple_runtime_init(void);
-    void __attribute__((weak)) __simple_runtime_shutdown(void);
-}
-int main(int argc, char** argv) {
-    if (__simple_runtime_init) __simple_runtime_init();
-    if (rt_set_args) rt_set_args(argc, argv);
-    int r = spl_main ? spl_main() : 0;
-    if (__simple_runtime_shutdown) __simple_runtime_shutdown();
-    return r;
-}
-"#
-        };
+        // Stub variant (weak attribute vs MSVC ALTERNATENAME) selected by PlatformLinkConfig
+        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&cxx);
+        let stub_code = link_config.main_stub_code();
 
         std::fs::write(&main_cpp, stub_code)
             .map_err(|e| format!("write main stub: {e}"))?;
@@ -651,21 +608,25 @@ int main(int argc, char** argv) {
             find_c_compiler()
         };
         let is_clang_cl = cc.contains("clang-cl");
-        let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
+
+        // All platform-specific linker behavior comes from PlatformLinkConfig.
+        // On Windows, auto-detect MSVC vs MinGW ABI from the compiler.
+        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host_with_compiler(&cc);
+
         let mut cmd = std::process::Command::new(&cc);
-        if !is_msvc {
+        if link_config.use_fpic {
             cmd.arg("-fPIC");
         }
 
-        // macOS: Apple's new ld (ld-1230+) crashes on some Cranelift-generated Mach-O objects
-        // (missing LC_BUILD_VERSION, unusual relocation patterns). Use -ld_classic as workaround.
-        // PIE is the default on macOS so -no-pie is not needed.
-        #[cfg(target_os = "macos")]
-        cmd.arg("-Wl,-ld_classic");
+        // Platform-specific extra linker flags (e.g., macOS -ld_classic)
+        for flag in &link_config.extra_link_flags {
+            cmd.arg(flag);
+        }
 
-        // Linux/FreeBSD: disable PIE for simpler static linking.
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        cmd.arg("-no-pie");
+        // PIE control
+        if link_config.disable_pie {
+            cmd.arg("-no-pie");
+        }
 
         if is_clang_cl {
             cmd.arg(&main_o);
@@ -687,9 +648,6 @@ int main(int argc, char** argv) {
             let mut ar_ok = true;
             for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
                 let status = if is_msvc_lib {
-                    // MSVC lib.exe: lib /OUT:archive.lib [existing.lib] obj1.o obj2.o ...
-                    // lib.exe has no append mode — always recreate with /OUT: and include
-                    // the existing archive as input on subsequent batches.
                     let mut lib_cmd = std::process::Command::new(&ar_tool);
                     lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
                     if i > 0 {
@@ -714,69 +672,15 @@ int main(int argc, char** argv) {
                 }
             }
             if !ar_ok {
-                // Fallback: try libtool on macOS (also batched)
-                #[cfg(target_os = "macos")]
-                {
-                    let mut sub_archives = Vec::new();
-                    for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
-                        let sub = temp_dir.join(format!("_batch_{}.a", i));
-                        let s = std::process::Command::new("libtool")
-                            .arg("-static")
-                            .arg("-o")
-                            .arg(&sub)
-                            .args(chunk)
-                            .status()
-                            .map_err(|e| format!("libtool batch {i}: {e}"))?;
-                        if !s.success() {
-                            return Err(format!("libtool failed on batch {i}"));
-                        }
-                        sub_archives.push(sub);
-                    }
-                    let s = std::process::Command::new("libtool")
-                        .arg("-static")
-                        .arg("-o")
-                        .arg(&archive_path)
-                        .args(&sub_archives)
-                        .status()
-                        .map_err(|e| format!("libtool merge: {e}"))?;
-                    if !s.success() {
-                        return Err("libtool merge failed".to_string());
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                return Err("ar failed to create archive".to_string());
+                link_config.run_ar_fallback(
+                    temp_dir,
+                    &archive_path,
+                    object_paths,
+                    BATCH_SIZE,
+                )?;
             }
-            // Link the archive. Use -force_load/--whole-archive to include all symbols,
-            // not just referenced ones (needed for runtime dispatch tables).
-            // On macOS, also pass -no_deduplicate for faster linking with large archives.
-            #[cfg(target_os = "macos")]
-            {
-                cmd.arg("-Wl,-force_load").arg(&archive_path);
-                cmd.arg("-Wl,-no_deduplicate");
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                cmd.arg("-Wl,--whole-archive")
-                    .arg(&archive_path)
-                    .arg("-Wl,--no-whole-archive");
-            }
-            #[cfg(target_os = "windows")]
-            {
-                if is_msvc {
-                    // MSVC-compatible linker: use /WHOLEARCHIVE
-                    if is_clang_cl {
-                        cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
-                    } else {
-                        // clang targeting MSVC: use -Wl, prefix for lld-link
-                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
-                    }
-                } else {
-                    // MinGW/GNU linker
-                    cmd.arg("-Wl,--whole-archive")
-                        .arg(&archive_path)
-                        .arg("-Wl,--no-whole-archive");
-                }
-            }
+            // Link the archive with whole-archive flags (per-platform via PlatformLinkConfig)
+            link_config.add_whole_archive_args(&mut cmd, &archive_path, is_clang_cl);
         } else {
             for obj in object_paths {
                 cmd.arg(obj);
@@ -792,24 +696,20 @@ int main(int argc, char** argv) {
         }
 
         // Libraries — via PlatformLinkConfig (single source of truth per OS)
-        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
         if is_clang_cl {
-            // clang-cl: pass .lib names directly (MSVC linker convention)
             for lib in &link_config.libraries {
                 cmd.arg(format!("{}.lib", lib));
             }
         } else {
-            // clang/g++: use -l flag (works for both GNU and MSVC targets)
             for lib in &link_config.libraries {
                 cmd.arg(format!("-l{}", lib));
             }
         }
-        // macOS-specific: c++ linking when native_all is present
-        // (native_all/Cargo.toml hard-codes features=["llvm"])
-        if cfg!(target_os = "macos") && find_native_all_library().is_some() {
+        // macOS: c++ linking when native_all is present
+        if link_config.generate_builtin_trampolines && find_native_all_library().is_some() {
             if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
                 cmd.arg(format!("-L{}", llvm_lib));
                 cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
@@ -817,40 +717,18 @@ int main(int argc, char** argv) {
             cmd.arg("-lc++");
         }
 
-        // Generate stub object for unresolved symbols + apply linker flags.
-        // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
-        #[cfg(not(target_os = "windows"))]
-        {
+        // Generate stub object for unresolved symbols (not on Windows — uses /FORCE:UNRESOLVED)
+        if link_config.supports_asm_stubs {
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
         }
         for flag in &link_config.unresolved_symbol_flags {
             cmd.arg(flag);
         }
-        #[cfg(target_os = "windows")]
-        if is_msvc {
-            if is_clang_cl {
-                cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
-            } else {
-                cmd.arg("-Wl,/FORCE:UNRESOLVED");
-            }
-        }
+        link_config.add_force_unresolved_args(&mut cmd, is_clang_cl);
 
         if self.config.strip {
-            #[cfg(target_os = "macos")]
-            cmd.arg("-Wl,-S");
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cmd.arg("-Wl,-s");
-            #[cfg(target_os = "windows")]
-            if is_msvc {
-                if is_clang_cl {
-                    cmd.arg("-Xlinker").arg("/DEBUG:NONE");
-                } else {
-                    cmd.arg("-Wl,/DEBUG:NONE");
-                }
-            } else {
-                cmd.arg("-Wl,-s");
-            }
+            link_config.add_strip_args(&mut cmd, is_clang_cl);
         }
 
         if self.config.verbose {
@@ -860,7 +738,6 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
-            // Report binary size
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!("Linked: {} ({} KB) via {cc}", self.output.display(), meta.len() / 1024);
             }
@@ -875,9 +752,11 @@ int main(int argc, char** argv) {
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 ///
 /// Scans the given object files / archive for undefined symbols that have no definition,
-/// then generates a small C file with weak stub functions returning 0 for each.
+/// then generates a small assembly file with weak stub functions returning nil for each.
 /// This prevents dyld from crashing at load time on macOS.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
+///
+/// Only called when `PlatformLinkConfig::supports_asm_stubs` is true (Linux, macOS, FreeBSD,
+/// MinGW). Windows MSVC uses `/FORCE:UNRESOLVED` instead.
 fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
@@ -1029,7 +908,7 @@ fn generate_stub_object(
         }
 
         // __builtin_* symbols → trampoline to real function (macOS only)
-        if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
+        if plat_config.generate_builtin_trampolines && sym.starts_with("___builtin_") {
             let real_fn = format!("_{}", &sym["___builtin_".len()..]);
             asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
             continue;
@@ -1060,7 +939,6 @@ fn generate_stub_object(
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn is_system_symbol(sym: &str) -> bool {
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
     let name = sym.strip_prefix('_').unwrap_or(sym);
@@ -2294,7 +2172,8 @@ struct ImportMapResult {
 /// This replaces dots with `_dot_` to produce valid symbols, matching what
 /// `CommonBackend::sanitize_symbol` does during codegen.
 fn sanitize_mangled(name: String) -> String {
-    if cfg!(target_os = "macos") && name.contains('.') {
+    let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+    if link_config.dots_forbidden_in_symbols() && name.contains('.') {
         name.replace('.', "_dot_")
     } else {
         name
@@ -2755,39 +2634,24 @@ fn find_native_all_library() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
-        "src/compiler_rust/target/release/libsimple_native_all.a",
-        "src/compiler_rust/target/debug/libsimple_native_all.a",
-    ];
+    // Try both lib*.a (Unix) and *.lib (MSVC) naming conventions
+    let names = ["libsimple_native_all.a", "simple_native_all.lib"];
+    let profiles = ["bootstrap", "release", "debug"];
 
-    // Windows MSVC produces .lib instead of lib*.a
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
-            "src/compiler_rust/target/release/simple_native_all.lib",
-            "src/compiler_rust/target/debug/simple_native_all.lib",
-        ]);
-    }
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Some(path);
+    for profile in &profiles {
+        for name in &names {
+            let path = PathBuf::from(format!("src/compiler_rust/target/{}/{}", profile, name));
+            if path.exists() {
+                return Some(path);
+            }
         }
     }
 
     // Try relative to current exe
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let path = dir.join("libsimple_native_all.a");
-            if path.exists() {
-                return Some(path);
-            }
-            #[cfg(target_os = "windows")]
-            {
-                let path = dir.join("simple_native_all.lib");
+            for name in &names {
+                let path = dir.join(name);
                 if path.exists() {
                     return Some(path);
                 }
@@ -2800,53 +2664,35 @@ fn find_native_all_library() -> Option<PathBuf> {
 
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
-    // Check common locations
-    let mut candidates: Vec<&str> = vec![
-        // Bootstrap profile (smallest optimized build, used for seed compiler)
-        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
-        // Release layout (optimized)
-        "src/compiler_rust/target/release/libsimple_runtime.a",
-        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        // Debug layout (fallback, may be very large)
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-    ];
+    // Try both lib*.a (Unix) and *.lib (MSVC) naming conventions
+    let names = ["libsimple_runtime.a", "simple_runtime.lib"];
+    let profiles = ["bootstrap", "release", "debug"];
+    let subdirs = ["", "deps/"];
 
-    // Windows MSVC produces .lib instead of lib*.a
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
-            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
-            "src/compiler_rust/target/release/simple_runtime.lib",
-            "src/compiler_rust/target/release/deps/simple_runtime.lib",
-            "src/compiler_rust/target/debug/simple_runtime.lib",
-            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
-        ]);
+    for profile in &profiles {
+        for subdir in &subdirs {
+            for name in &names {
+                let path = PathBuf::from(format!(
+                    "src/compiler_rust/target/{}/{}{}", profile, subdir, name
+                ));
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
     }
 
-    // System-installed (Unix only)
-    #[cfg(not(target_os = "windows"))]
-    candidates.push("/usr/local/lib/libsimple_runtime.a");
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Some(path);
-        }
+    // System-installed (Unix convention)
+    let sys_path = PathBuf::from("/usr/local/lib/libsimple_runtime.a");
+    if sys_path.exists() {
+        return Some(sys_path);
     }
 
     // Try relative to current exe
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let path = dir.join("libsimple_runtime.a");
-            if path.exists() {
-                return Some(path);
-            }
-            #[cfg(target_os = "windows")]
-            {
-                let path = dir.join("simple_runtime.lib");
+            for name in &names {
+                let path = dir.join(name);
                 if path.exists() {
                     return Some(path);
                 }
