@@ -1,0 +1,93 @@
+use compiler.shb.shb_extractor.{shb_extract}
+use compiler.shb.shb_hash.{shb_interface_hash}
+use compiler.shb.shb_writer.{shb_write, shb_debug_string_table_size, shb_debug_function_section_size, shb_debug_full_binary_size}
+use compiler.shb.shb_reader.{ShbReader, shb_debug_file_offset64}
+use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_is_pub}
+use compiler.core.parser.{parse_module, parser_has_errors}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+fn sample_source() -> text:
+    """
+pub fn answer() -> i64:
+    41 + 1
+"""
+
+fn parse_sample() -> bool:
+    parse_module(sample_source(), "/tmp/shb_writer_min_probe.spl")
+    not parser_has_errors()
+
+fn main():
+    val args = sys_get_args()
+    val command = if args.len() > 1: args[1] else: "strtab"
+    if not parse_sample():
+        print "parse failed"
+        return
+    val iface = shb_extract(sample_source(), "/tmp/shb_writer_min_probe.spl")
+    if command == "hash":
+        print "{shb_interface_hash(iface)}"
+    else if command == "decl_count":
+        print "{decl_count()}"
+    else if command == "decl0":
+        if decl_count() == 0:
+            print "none"
+        else:
+            print "{decl_get_tag(0)}|{decl_get_name(0)}|{decl_get_is_pub(0)}"
+    else if command == "extract_count":
+        print "{iface.functions.len()}"
+    else if command == "write":
+        val path = "/tmp/shb_writer_min_probe.shb"
+        val ok = shb_write(iface, path)
+        if ok and rt_file_exists(path):
+            print "ok"
+        else:
+            print "write failed"
+    else if command == "read":
+        val path = "/tmp/shb_writer_min_probe.shb"
+        val ok = shb_write(iface, path)
+        if not ok or not rt_file_exists(path):
+            print "write failed"
+            return
+        val reader = ShbReader.open(path)
+        if reader.is_valid() and reader.function_count() == 1 and reader.has_function_named("answer"):
+            print "ok"
+        else:
+            print "read failed"
+    else if command == "read_count":
+        val path = "/tmp/shb_writer_min_probe.shb"
+        val ok = shb_write(iface, path)
+        if not ok or not rt_file_exists(path):
+            print "write failed"
+            return
+        val reader = ShbReader.open(path)
+        if reader.is_valid():
+            print "{reader.function_count()}"
+        else:
+            print "invalid"
+    else if command == "read_name":
+        val path = "/tmp/shb_writer_min_probe.shb"
+        val ok = shb_write(iface, path)
+        if not ok or not rt_file_exists(path):
+            print "write failed"
+            return
+        val reader = ShbReader.open(path)
+        if reader.is_valid():
+            print "{reader.has_function_named(\"answer\")}"
+        else:
+            print "invalid"
+    else if command == "offset64":
+        val path = "/tmp/shb_writer_min_probe.shb"
+        val ok = shb_write(iface, path)
+        if not ok or not rt_file_exists(path):
+            print "write failed"
+            return
+        print shb_debug_file_offset64(path)
+    else if command == "strtab":
+        print "{shb_debug_string_table_size(iface)}"
+    else if command == "fnsec":
+        print "{shb_debug_function_section_size(iface)}"
+    else if command == "fullbin":
+        print "{shb_debug_full_binary_size(iface)}"
+    else:
+        print "unknown command"

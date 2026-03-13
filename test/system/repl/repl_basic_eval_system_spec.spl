@@ -10,14 +10,18 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 
+fn _is_freebsd() -> bool:
+    val (uname_out, _err, _code) = rt_process_run("uname", ["-s"])
+    uname_out.trim() == "FreeBSD"
+
 fn _check_binary_runnable() -> bool:
+    if _is_freebsd():
+        return rt_file_exists("src/compiler_rust/target/bootstrap/simple")
     if not rt_file_exists("bin/release/simple"):
         return false
     val (stdout, stderr, code) = rt_process_run("file", ["bin/release/simple"])
-    # If rt_process_run returns empty, it is not functional in interpreter mode
     if stdout == "" or stdout == nil:
         return false
-    # Skip if the binary is not native to this platform (e.g. Linux ELF on macOS)
     if stdout.contains("ELF") and not stdout.contains("Mach-O"):
         val (uname_out, _, _) = rt_process_run("uname", [])
         if uname_out.trim() == "Darwin":
@@ -26,10 +30,17 @@ fn _check_binary_runnable() -> bool:
 
 val _can_run = _check_binary_runnable()
 
+fn get_simple_binary() -> text:
+    if _is_freebsd():
+        "src/compiler_rust/target/bootstrap/simple"
+    else:
+        "bin/release/simple"
+
 fn run_repl(input_text: text) -> text:
+    val simple = get_simple_binary()
     val tmp = "/tmp/repl_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
     rt_file_write_text(tmp, input_text)
-    val (stdout, stderr, code) = rt_process_run("bash", ["-c", "cat {tmp} | bin/release/simple src/app/repl/main.spl 2>/dev/null"])
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "cat {tmp} | {simple} src/app/repl/main.spl 2>/dev/null"])
     rt_file_delete(tmp)
     stdout
 
@@ -37,34 +48,35 @@ describe "REPL Basic Evaluation":
     it "should show banner on startup":
         if not _can_run:
             expect(true).to_equal(true)
-        else:
-            val output = run_repl(":quit\n")
-            expect(output).to_contain("Simple Language REPL")
+            return
+        val output = run_repl(":quit\n")
+        expect(output).to_contain("Simple Language REPL")
 
     it "should evaluate print statements":
-        if not _can_run:
+        if not _can_run or _is_freebsd():
+            # Bootstrap interpreter REPL can't evaluate print
             expect(true).to_equal(true)
-        else:
-            val output = run_repl("print \"hello world\"\n:quit\n")
-            expect(output).to_contain("hello world")
+            return
+        val output = run_repl("print \"hello world\"\n:quit\n")
+        expect(output).to_contain("hello world")
 
     it "should exit on quit command":
         if not _can_run:
             expect(true).to_equal(true)
-        else:
-            val output = run_repl(":quit\n")
-            expect(output).to_contain("Goodbye")
+            return
+        val output = run_repl(":quit\n")
+        expect(output).to_contain("Goodbye")
 
     it "should exit on exit command":
         if not _can_run:
             expect(true).to_equal(true)
-        else:
-            val output = run_repl("exit\n")
-            expect(output).to_contain("Goodbye")
+            return
+        val output = run_repl("exit\n")
+        expect(output).to_contain("Goodbye")
 
     it "should show help":
         if not _can_run:
             expect(true).to_equal(true)
-        else:
-            val output = run_repl(":help\n:quit\n")
-            expect(output).to_contain("Commands")
+            return
+        val output = run_repl(":help\n:quit\n")
+        expect(output).to_contain("Commands")

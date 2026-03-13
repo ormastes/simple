@@ -8,22 +8,20 @@ use compiler.shb.shb_types.{
     ShbClassEntry, ShbEnumEntry, ShbTraitEntry, ShbReexportEntry,
     ShbTypeLayoutEntry, ShbDependencyEntry, ShbParam, ShbFieldEntry,
     ShbMethodRef,
+    shb_primitive_layouts,
     SHB_HEADER_SIZE, SHB_SECTION_TABLE_SIZE, SHB_SECTION_COUNT,
     SHB_SECTION_FUNCTIONS, SHB_SECTION_STRUCTS, SHB_SECTION_CLASSES,
     SHB_SECTION_TYPE_LAYOUTS, SHB_SECTION_ENUMS, SHB_SECTION_TRAITS,
     SHB_SECTION_REEXPORTS, SHB_SECTION_DEPENDENCIES,
     SHB_MAGIC_0, SHB_MAGIC_1, SHB_MAGIC_2, SHB_MAGIC_3
 }
-use compiler.shb.shb_string_table.{ShbStringTable}
 
 # --- Main write function ---
 
 fn shb_write(iface: ShbModuleInterface, path: text) -> bool:
-    var strtab = ShbStringTable.create()
+    val strings = shb_collect_strings(iface)
+    val layouts = shb_primitive_layouts()
     var sections: [u8] = []
-
-    # Pre-register all strings
-    shb_register_strings(iface, strtab)
 
     # Build section data and record offsets
     var section_offsets: [i64] = []
@@ -31,42 +29,43 @@ fn shb_write(iface: ShbModuleInterface, path: text) -> bool:
 
     # Functions
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_functions(iface.functions, strtab, sections)
+    sections = shb_write_functions(iface.functions, strings, sections)
 
     # Structs
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_structs(iface.structs, strtab, sections)
+    sections = shb_write_structs(iface.structs, strings, sections)
 
     # Classes
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_classes(iface.classes, strtab, sections)
+    sections = shb_write_classes(iface.classes, strings, sections)
 
     # Type layouts
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_type_layouts(iface.type_layouts, strtab, sections)
+    sections = shb_write_type_layouts(layouts, strings, sections)
 
     # Enums
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_enums(iface.enums, strtab, sections)
+    sections = shb_write_enums(iface.enums, strings, sections)
 
     # Traits
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_traits(iface.traits, strtab, sections)
+    sections = shb_write_traits(iface.traits, strings, sections)
 
     # Reexports
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_reexports(iface.reexports, strtab, sections)
+    sections = shb_write_reexports(iface.reexports, strings, sections)
 
     # Dependencies
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_dependencies(iface.dependencies, strtab, sections)
+    sections = shb_write_dependencies(iface.dependencies, strings, sections)
 
     # String table offset
     val strtab_offset = data_base + sections.len()
-    val strtab_size = strtab.size()
+    val strtab_data = shb_build_string_data(strings)
+    val strtab_size = strtab_data.len()
 
     # Module name offset
-    val mod_name_off = strtab.get_offset("")
+    val mod_name_off = shb_string_offset(strings, "")
 
     # Build final binary
     var out: [u8] = []
@@ -101,7 +100,7 @@ fn shb_write(iface: ShbModuleInterface, path: text) -> bool:
     out = shb_push_bytes(out, sections)
 
     # --- String table ---
-    out = shb_push_bytes(out, strtab.get_data())
+    out = shb_push_bytes(out, strtab_data)
 
     # --- Atomic write: temp + rename ---
     val tmp_path = path + ".tmp"
@@ -110,40 +109,39 @@ fn shb_write(iface: ShbModuleInterface, path: text) -> bool:
     true
 
 fn shb_debug_string_table_size(iface: ShbModuleInterface) -> i64:
-    var strtab = ShbStringTable.create()
-    shb_register_strings(iface, strtab)
-    strtab.size()
+    val strings = shb_collect_strings(iface)
+    shb_build_string_data(strings).len()
 
 fn shb_debug_function_section_size(iface: ShbModuleInterface) -> i64:
-    var strtab = ShbStringTable.create()
-    shb_register_strings(iface, strtab)
-    val section = shb_write_functions(iface.functions, strtab, [])
+    val strings = shb_collect_strings(iface)
+    val section = shb_write_functions(iface.functions, strings, [])
     section.len()
 
 fn shb_debug_full_binary_size(iface: ShbModuleInterface) -> i64:
-    var strtab = ShbStringTable.create()
-    shb_register_strings(iface, strtab)
+    val strings = shb_collect_strings(iface)
+    val layouts = shb_primitive_layouts()
 
     var sections: [u8] = []
     var section_offsets: [i64] = []
     val data_base = SHB_HEADER_SIZE + SHB_SECTION_TABLE_SIZE
 
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_functions(iface.functions, strtab, sections)
+    sections = shb_write_functions(iface.functions, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_structs(iface.structs, strtab, sections)
+    sections = shb_write_structs(iface.structs, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_classes(iface.classes, strtab, sections)
+    sections = shb_write_classes(iface.classes, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_type_layouts(iface.type_layouts, strtab, sections)
+    sections = shb_write_type_layouts(layouts, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_enums(iface.enums, strtab, sections)
+    sections = shb_write_enums(iface.enums, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_traits(iface.traits, strtab, sections)
+    sections = shb_write_traits(iface.traits, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_reexports(iface.reexports, strtab, sections)
+    sections = shb_write_reexports(iface.reexports, strings, sections)
     section_offsets.push(data_base + sections.len())
-    sections = shb_write_dependencies(iface.dependencies, strtab, sections)
+    sections = shb_write_dependencies(iface.dependencies, strings, sections)
+    val strtab_data = shb_build_string_data(strings)
 
     var out: [u8] = []
     out = shb_push_u8(out, SHB_MAGIC_0)
@@ -159,9 +157,9 @@ fn shb_debug_full_binary_size(iface: ShbModuleInterface) -> i64:
     out = shb_push_i64_le(out, iface.header.write_timestamp)
     out = shb_push_u32_le(out, SHB_SECTION_COUNT)
     out = shb_push_u32_le(out, data_base + sections.len())
-    out = shb_push_u32_le(out, strtab.size())
+    out = shb_push_u32_le(out, strtab_data.len())
     out = shb_push_u32_le(out, iface.header.flags)
-    out = shb_push_i64_le(out, strtab.get_offset(""))
+    out = shb_push_i64_le(out, shb_string_offset(strings, ""))
     out = shb_push_i64_le(out, 0)
 
     var si = 0
@@ -170,22 +168,24 @@ fn shb_debug_full_binary_size(iface: ShbModuleInterface) -> i64:
         si = si + 1
 
     out = shb_push_bytes(out, sections)
-    out = shb_push_bytes(out, strtab.get_data())
+    out = shb_push_bytes(out, strtab_data)
     out.len()
 
 # --- String registration (first pass) ---
 
-fn shb_register_strings(iface: ShbModuleInterface, strtab: ShbStringTable):
+fn shb_collect_strings(iface: ShbModuleInterface) -> [text]:
+    var strings: [text] = [""]
+
     # Functions
     var fi = 0
     while fi < iface.functions.len():
         val f = iface.functions[fi]
-        strtab.add(f.name)
-        strtab.add(f.return_type)
+        strings = shb_collect_string(strings, f.name)
+        strings = shb_collect_string(strings, f.return_type)
         var pi = 0
         while pi < f.params.len():
-            strtab.add(f.params[pi].name)
-            strtab.add(f.params[pi].type_name)
+            strings = shb_collect_string(strings, f.params[pi].name)
+            strings = shb_collect_string(strings, f.params[pi].type_name)
             pi = pi + 1
         fi = fi + 1
 
@@ -193,11 +193,11 @@ fn shb_register_strings(iface: ShbModuleInterface, strtab: ShbStringTable):
     var si = 0
     while si < iface.structs.len():
         val s = iface.structs[si]
-        strtab.add(s.name)
+        strings = shb_collect_string(strings, s.name)
         var fli = 0
         while fli < s.fields.len():
-            strtab.add(s.fields[fli].name)
-            strtab.add(s.fields[fli].type_name)
+            strings = shb_collect_string(strings, s.fields[fli].name)
+            strings = shb_collect_string(strings, s.fields[fli].type_name)
             fli = fli + 1
         si = si + 1
 
@@ -205,15 +205,15 @@ fn shb_register_strings(iface: ShbModuleInterface, strtab: ShbStringTable):
     var ci = 0
     while ci < iface.classes.len():
         val c = iface.classes[ci]
-        strtab.add(c.name)
+        strings = shb_collect_string(strings, c.name)
         var fli = 0
         while fli < c.fields.len():
-            strtab.add(c.fields[fli].name)
-            strtab.add(c.fields[fli].type_name)
+            strings = shb_collect_string(strings, c.fields[fli].name)
+            strings = shb_collect_string(strings, c.fields[fli].type_name)
             fli = fli + 1
         var mi = 0
         while mi < c.methods.len():
-            strtab.add(c.methods[mi].name)
+            strings = shb_collect_string(strings, c.methods[mi].name)
             mi = mi + 1
         ci = ci + 1
 
@@ -221,10 +221,10 @@ fn shb_register_strings(iface: ShbModuleInterface, strtab: ShbStringTable):
     var ei = 0
     while ei < iface.enums.len():
         val e = iface.enums[ei]
-        strtab.add(e.name)
+        strings = shb_collect_string(strings, e.name)
         var vi = 0
         while vi < e.variants.len():
-            strtab.add(e.variants[vi])
+            strings = shb_collect_string(strings, e.variants[vi])
             vi = vi + 1
         ei = ei + 1
 
@@ -232,147 +232,149 @@ fn shb_register_strings(iface: ShbModuleInterface, strtab: ShbStringTable):
     var ti = 0
     while ti < iface.traits.len():
         val t = iface.traits[ti]
-        strtab.add(t.name)
+        strings = shb_collect_string(strings, t.name)
         var mi = 0
         while mi < t.methods.len():
-            strtab.add(t.methods[mi])
+            strings = shb_collect_string(strings, t.methods[mi])
             mi = mi + 1
         ti = ti + 1
 
     # Reexports
     var ri = 0
     while ri < iface.reexports.len():
-        strtab.add(iface.reexports[ri].symbol_name)
-        strtab.add(iface.reexports[ri].source_module)
+        strings = shb_collect_string(strings, iface.reexports[ri].symbol_name)
+        strings = shb_collect_string(strings, iface.reexports[ri].source_module)
         ri = ri + 1
 
+    val layouts = shb_primitive_layouts()
     # Type layouts
     var tli = 0
-    while tli < iface.type_layouts.len():
-        strtab.add(iface.type_layouts[tli].type_name)
+    while tli < layouts.len():
+        strings = shb_collect_string(strings, layouts[tli].type_name)
         tli = tli + 1
 
     # Dependencies
     var di = 0
     while di < iface.dependencies.len():
-        strtab.add(iface.dependencies[di].module_path)
+        strings = shb_collect_string(strings, iface.dependencies[di].module_path)
         di = di + 1
+    strings
 
 # --- Section writers ---
 
-fn shb_write_functions(fns: [ShbFnEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_functions(fns: [ShbFnEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, fns.len())
     var i = 0
     while i < fns.len():
         val f = fns[i]
-        w = shb_push_u32_le(w, strtab.get_offset(f.name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, f.name))
         w = shb_push_u16_le(w, f.params.len())
-        w = shb_push_u32_le(w, strtab.get_offset(f.return_type))
+        w = shb_push_u32_le(w, shb_string_offset(strings, f.return_type))
         w = shb_push_u16_le(w, f.flags)
         # Params
         var pi = 0
         while pi < f.params.len():
-            w = shb_push_u32_le(w, strtab.get_offset(f.params[pi].name))
-            w = shb_push_u32_le(w, strtab.get_offset(f.params[pi].type_name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, f.params[pi].name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, f.params[pi].type_name))
             pi = pi + 1
         i = i + 1
     w
 
-fn shb_write_structs(structs: [ShbStructEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_structs(structs: [ShbStructEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, structs.len())
     var i = 0
     while i < structs.len():
         val s = structs[i]
-        w = shb_push_u32_le(w, strtab.get_offset(s.name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, s.name))
         w = shb_push_u16_le(w, s.fields.len())
         w = shb_push_u16_le(w, s.flags)
         var fi = 0
         while fi < s.fields.len():
-            w = shb_push_u32_le(w, strtab.get_offset(s.fields[fi].name))
-            w = shb_push_u32_le(w, strtab.get_offset(s.fields[fi].type_name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, s.fields[fi].name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, s.fields[fi].type_name))
             w = shb_push_u32_le(w, s.fields[fi].flags)
             fi = fi + 1
         i = i + 1
     w
 
-fn shb_write_classes(classes: [ShbClassEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_classes(classes: [ShbClassEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, classes.len())
     var i = 0
     while i < classes.len():
         val c = classes[i]
-        w = shb_push_u32_le(w, strtab.get_offset(c.name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, c.name))
         w = shb_push_u16_le(w, c.fields.len())
         w = shb_push_u16_le(w, c.flags)
         var fi = 0
         while fi < c.fields.len():
-            w = shb_push_u32_le(w, strtab.get_offset(c.fields[fi].name))
-            w = shb_push_u32_le(w, strtab.get_offset(c.fields[fi].type_name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, c.fields[fi].name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, c.fields[fi].type_name))
             w = shb_push_u32_le(w, c.fields[fi].flags)
             fi = fi + 1
         w = shb_push_u16_le(w, c.methods.len())
         var mi = 0
         while mi < c.methods.len():
-            w = shb_push_u32_le(w, strtab.get_offset(c.methods[mi].name))
+            w = shb_push_u32_le(w, shb_string_offset(strings, c.methods[mi].name))
             mi = mi + 1
         i = i + 1
     w
 
-fn shb_write_enums(enums: [ShbEnumEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_enums(enums: [ShbEnumEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, enums.len())
     var i = 0
     while i < enums.len():
         val e = enums[i]
-        w = shb_push_u32_le(w, strtab.get_offset(e.name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, e.name))
         w = shb_push_u16_le(w, e.variants.len())
         w = shb_push_u16_le(w, e.flags)
         var vi = 0
         while vi < e.variants.len():
-            w = shb_push_u32_le(w, strtab.get_offset(e.variants[vi]))
+            w = shb_push_u32_le(w, shb_string_offset(strings, e.variants[vi]))
             vi = vi + 1
         i = i + 1
     w
 
-fn shb_write_traits(traits: [ShbTraitEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_traits(traits: [ShbTraitEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, traits.len())
     var i = 0
     while i < traits.len():
         val t = traits[i]
-        w = shb_push_u32_le(w, strtab.get_offset(t.name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, t.name))
         w = shb_push_u16_le(w, t.methods.len())
         w = shb_push_u16_le(w, t.flags)
         var mi = 0
         while mi < t.methods.len():
-            w = shb_push_u32_le(w, strtab.get_offset(t.methods[mi]))
+            w = shb_push_u32_le(w, shb_string_offset(strings, t.methods[mi]))
             mi = mi + 1
         i = i + 1
     w
 
-fn shb_write_reexports(reexports: [ShbReexportEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_reexports(reexports: [ShbReexportEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, reexports.len())
     var i = 0
     while i < reexports.len():
-        w = shb_push_u32_le(w, strtab.get_offset(reexports[i].symbol_name))
-        w = shb_push_u32_le(w, strtab.get_offset(reexports[i].source_module))
+        w = shb_push_u32_le(w, shb_string_offset(strings, reexports[i].symbol_name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, reexports[i].source_module))
         i = i + 1
     w
 
-fn shb_write_type_layouts(layouts: [ShbTypeLayoutEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_type_layouts(layouts: [ShbTypeLayoutEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, layouts.len())
     var i = 0
     while i < layouts.len():
         val l = layouts[i]
-        w = shb_push_u32_le(w, strtab.get_offset(l.type_name))
+        w = shb_push_u32_le(w, shb_string_offset(strings, l.type_name))
         w = shb_push_u32_le(w, l.size)
         w = shb_push_u32_le(w, l.alignment)
         w = shb_push_u32_le(w, l.flags)
         i = i + 1
     w
 
-fn shb_write_dependencies(deps: [ShbDependencyEntry], strtab: ShbStringTable, out: [u8]) -> [u8]:
+fn shb_write_dependencies(deps: [ShbDependencyEntry], strings: [text], out: [u8]) -> [u8]:
     var w = shb_push_u32_le(out, deps.len())
     var i = 0
     while i < deps.len():
-        w = shb_push_u32_le(w, strtab.get_offset(deps[i].module_path))
+        w = shb_push_u32_le(w, shb_string_offset(strings, deps[i].module_path))
         w = shb_push_i64_le(w, deps[i].interface_hash)
         i = i + 1
     w
@@ -415,6 +417,36 @@ fn shb_push_bytes(out: [u8], extra: [u8]) -> [u8]:
         bytes.push(extra[i])
         i = i + 1
     bytes
+
+fn shb_collect_string(strings: [text], s: text) -> [text]:
+    if shb_string_offset(strings, s) >= 0:
+        return strings
+    var next = strings
+    next.push(s)
+    next
+
+fn shb_string_offset(strings: [text], s: text) -> i64:
+    var offset = 0
+    var i = 0
+    while i < strings.len():
+        if strings[i] == s:
+            return offset
+        offset = offset + strings[i].len() + 1
+        i = i + 1
+    -1
+
+fn shb_build_string_data(strings: [text]) -> [u8]:
+    var out: [u8] = []
+    var si = 0
+    while si < strings.len():
+        val s = strings[si]
+        var bi = 0
+        while bi < s.len():
+            out.push(s.char_code_at(bi) as u8)
+            bi = bi + 1
+        out.push(0)
+        si = si + 1
+    out
 
 # --- FFI ---
 

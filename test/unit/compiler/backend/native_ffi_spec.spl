@@ -31,6 +31,22 @@ fn slow_it(name: text, block: fn()):
     it(name, block)
 
 # ============================================================================
+# Platform-aware binary paths (FreeBSD uses /usr/bin, Linux uses /bin)
+# ============================================================================
+
+fn find_binary(name: text) -> text:
+    """Find binary path, checking /usr/bin then /bin."""
+    val usr_path = "/usr/bin/{name}"
+    if rt_file_exists(usr_path):
+        return usr_path
+    "/bin/{name}"
+
+val BIN_ECHO = find_binary("echo")
+val BIN_TRUE = find_binary("true")
+val BIN_SLEEP = find_binary("sleep")
+val BIN_SH = find_binary("sh")
+
+# ============================================================================
 # Group 1: File Operations
 # ============================================================================
 
@@ -157,7 +173,7 @@ describe "Native FFI Compilation":
 
 describe "Native FFI Execution":
     it "returns tuple with stdout, stderr, and exit code":
-        val _result = rt_execute_native("/bin/echo", ["hello"], 5000)
+        val _result = rt_execute_native(BIN_ECHO, ["hello"], 5000)
         val stdout = _result[0]
         val code = _result[2]
         # In interpreter mode, rt_execute_native may not be fully implemented (returns 127)
@@ -173,13 +189,13 @@ describe "Native FFI Execution":
         expect(code).to_be_greater_than(0)
 
     it "respects timeout":
-        val _result = rt_execute_native("/bin/sleep", ["10"], 100)
+        val _result = rt_execute_native(BIN_SLEEP, ["10"], 100)
         val code = _result[2]
         # Accept 124 (timeout) or 127 (not implemented in interpreter mode)
         expect(code == 124 or code == 127).to_equal(true)
 
     it "passes arguments correctly":
-        val _result = rt_execute_native("/bin/echo", ["arg1", "arg2"], 5000)
+        val _result = rt_execute_native(BIN_ECHO, ["arg1", "arg2"], 5000)
         val stdout = _result[0]
         val code = _result[2]
         if code == 127:
@@ -190,7 +206,7 @@ describe "Native FFI Execution":
             expect(code).to_equal(0)
 
     it "captures stderr separately":
-        val _result = rt_execute_native("/bin/sh", ["-c", "echo error >&2"], 5000)
+        val _result = rt_execute_native(BIN_SH, ["-c", "echo error >&2"], 5000)
         val code = _result[2]
         if code == 127:
             expect(code).to_equal(127)
@@ -198,7 +214,7 @@ describe "Native FFI Execution":
             expect(code).to_equal(0)
 
     it "handles empty argument list":
-        val _result = rt_execute_native("/bin/true", [], 5000)
+        val _result = rt_execute_native(BIN_TRUE, [], 5000)
         val code = _result[2]
         if code == 127:
             expect(code).to_equal(127)
@@ -212,13 +228,13 @@ describe "Native FFI Execution":
 
 describe "Native Execution Error Handling":
     it "handles zero timeout":
-        val _result = rt_execute_native("/bin/sleep", ["10"], 0)
+        val _result = rt_execute_native(BIN_SLEEP, ["10"], 0)
         val code = _result[2]
         # Accept 124 (timeout) or 127 (not implemented in interpreter mode)
         expect(code == 124 or code == 127).to_equal(true)
 
     it "handles negative timeout":
-        val _result = rt_execute_native("/bin/true", [], -1)
+        val _result = rt_execute_native(BIN_TRUE, [], -1)
         val code = _result[2]
         expect(code == 0 or code == 124 or code == 127).to_equal(true)
 
@@ -230,7 +246,7 @@ describe "Native Execution Error Handling":
 describe "Performance Characteristics":
     slow_it "executes simple binary quickly":
         val start_us = rt_time_now_unix_micros()
-        val _result = rt_execute_native("/bin/true", [], 5000)
+        val _result = rt_execute_native(BIN_TRUE, [], 5000)
         val end_us = rt_time_now_unix_micros()
         val duration_ms = (end_us - start_us) / 1000
         val code = _result[2]
@@ -246,7 +262,7 @@ describe "Performance Characteristics":
         var all_succeeded = true
         var idx = 0
         while idx < 5:
-            val _result = rt_execute_native("/bin/echo", ["test"], 5000)
+            val _result = rt_execute_native(BIN_ECHO, ["test"], 5000)
             val code = _result[2]
             if code != 0 and code != 127:
                 all_succeeded = false

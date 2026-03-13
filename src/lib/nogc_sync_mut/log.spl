@@ -135,10 +135,6 @@ var SCOPE_LEVELS = {}
 # A log point is a named checkpoint. While active, log output is buffered
 # instead of printed. Points form a stack: discarding/flushing a point
 # also removes all points above it.
-#
-# Limits:
-#   - max log points (default 16): exceeding flushes all + prints error
-#   - stale count (default 10000 lines): oversized buffer flushes all + prints error
 
 var _lp_buffer: [text] = []    # Flat buffer of all deferred lines
 var _lp_starts: [i64] = []    # Stack: buffer index where each point starts
@@ -148,12 +144,46 @@ var _lp_next_id: i64 = 1
 var _lp_max: i64 = 16
 var _lp_stale_count: i64 = 10000
 
-# Emit a line immediately or defer to buffer if log point is active
+# --- Internal helpers (must be defined before public API) ---
+
 fn _emit_or_defer(line: text):
     if _lp_ids.len() > 0:
         _lp_buffer.push(line)
     else:
         print line
+
+fn _lp_find(id: i64) -> i64:
+    var i = 0
+    while i < _lp_ids.len():
+        if _lp_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _lp_remove_from(idx: i64):
+    val start = _lp_starts[idx]
+    _lp_buffer = _lp_buffer.slice(0, start)
+    _lp_starts = _lp_starts.slice(0, idx)
+    _lp_names = _lp_names.slice(0, idx)
+    _lp_ids = _lp_ids.slice(0, idx)
+
+fn _lp_flush_all_error(reason: text):
+    print "[ERROR] [log] {reason}"
+    for line in _lp_buffer:
+        print line
+    _lp_buffer = []
+    _lp_starts = []
+    _lp_names = []
+    _lp_ids = []
+
+fn _lp_check_stale():
+    if _lp_ids.len() == 0:
+        return
+    val buffered = _lp_buffer.len() - _lp_starts[0]
+    if buffered > _lp_stale_count:
+        _lp_flush_all_error("Log point stale: buffered too many lines")
+
+# --- Public API ---
 
 fn log_point_start(name: text) -> i64:
     _lp_check_stale()
@@ -200,37 +230,6 @@ fn log_point_has_active() -> bool:
 
 fn log_print(msg: text):
     _emit_or_defer(msg)
-
-fn _lp_find(id: i64) -> i64:
-    var i = 0
-    while i < _lp_ids.len():
-        if _lp_ids[i] == id:
-            return i
-        i = i + 1
-    -1
-
-fn _lp_remove_from(idx: i64):
-    val start = _lp_starts[idx]
-    _lp_buffer = _lp_buffer.slice(0, start)
-    _lp_starts = _lp_starts.slice(0, idx)
-    _lp_names = _lp_names.slice(0, idx)
-    _lp_ids = _lp_ids.slice(0, idx)
-
-fn _lp_check_stale():
-    if _lp_ids.len() == 0:
-        return
-    val buffered = _lp_buffer.len() - _lp_starts[0]
-    if buffered > _lp_stale_count:
-        _lp_flush_all_error("Log point stale: buffered too many lines")
-
-fn _lp_flush_all_error(reason: text):
-    print "[ERROR] [log] {reason}"
-    for line in _lp_buffer:
-        print line
-    _lp_buffer = []
-    _lp_starts = []
-    _lp_names = []
-    _lp_ids = []
 
 
 # Lazy initialization helper

@@ -1,32 +1,154 @@
 # CLI Output Buffer
 #
-# Thin wrapper around std.log log points for CLI output buffering.
-# Adds dual-write to log file on top of log point deferred printing.
+# Captures output lines silently, only flushing on failure.
+# Dual-writes to log file so full output is always preserved.
+# Implements log points directly (standalone, uses print for output).
 #
-# Usage:
-#   buffer_start("build/log/build/20260313.log")
-#   buffer_capture("Compiling...")    # deferred via log point + written to log file
-#   if failed:
-#       buffer_flush()                # prints buffered output
-#   else:
-#       buffer_discard()              # silent
-
-use std.log.{log_point_start, log_point_flush, log_point_discard, log_point_has_active, log_print}
+# Log points create checkpoints. While active, output is buffered.
+# On success: discard (quiet). On failure: flush (visible).
+# Default: no log points = immediate print (backward compatible).
+#
+# WORKAROUND: Interpreter bug where .len() on a module-level array
+# permanently corrupts the variable. We use manual length counters
+# instead. See doc/bug/bug_report_module_var_array_init.md
 
 extern fn rt_file_append(path: text, content: text)
 
-var _current_point_id: i64 = -1
+# --- Module state ---
+var _lp_buffer: [text] = []
+var _lp_starts: [i64] = []
+var _lp_names: [text] = []
+var _lp_ids: [i64] = []
+# Manual length counters (workaround: never call .len() on module arrays)
+var _lp_buf_len: i64 = 0
+var _lp_count: i64 = 0
+var _lp_next_id: i64 = 1
+var _lp_max: i64 = 16
+var _lp_stale_count: i64 = 10000
 var _log_path: text = ""
+var _current_point_id: i64 = -1
+
+# --- Log Point API ---
+
+fn log_point_start(name: text) -> i64:
+    # Stale check
+    if _lp_count > 0:
+        val first_start = _lp_starts[0]
+        val buffered = _lp_buf_len - first_start
+        if buffered > _lp_stale_count:
+            print "[ERROR] [log] Log point stale: buffered too many lines"
+            var k = 0
+            while k < _lp_buf_len:
+                print _lp_buffer[k]
+                k = k + 1
+            _lp_buffer = []
+            _lp_starts = []
+            _lp_names = []
+            _lp_ids = []
+            _lp_buf_len = 0
+            _lp_count = 0
+    # Max check
+    if _lp_count >= _lp_max:
+        print "[ERROR] [log] Max log points exceeded"
+        var k = 0
+        while k < _lp_buf_len:
+            print _lp_buffer[k]
+            k = k + 1
+        _lp_buffer = []
+        _lp_starts = []
+        _lp_names = []
+        _lp_ids = []
+        _lp_buf_len = 0
+        _lp_count = 0
+    # Start new point
+    val id = _lp_next_id
+    _lp_next_id = _lp_next_id + 1
+    _lp_starts.push(_lp_buf_len)
+    _lp_names.push(name)
+    _lp_ids.push(id)
+    _lp_count = _lp_count + 1
+    id
+
+fn log_point_flush(id: i64):
+    # Find index
+    var idx = -1
+    var i = 0
+    while i < _lp_count:
+        if _lp_ids[i] == id:
+            idx = i
+            i = _lp_count
+        else:
+            i = i + 1
+    if idx < 0:
+        return
+    # Print buffered lines from start
+    val start = _lp_starts[idx]
+    var j = start
+    while j < _lp_buf_len:
+        print _lp_buffer[j]
+        j = j + 1
+    # Remove from idx onward
+    _lp_buffer = _lp_buffer.slice(0, start)
+    _lp_starts = _lp_starts.slice(0, idx)
+    _lp_names = _lp_names.slice(0, idx)
+    _lp_ids = _lp_ids.slice(0, idx)
+    _lp_buf_len = start
+    _lp_count = idx
+
+fn log_point_discard(id: i64):
+    # Find index
+    var idx = -1
+    var i = 0
+    while i < _lp_count:
+        if _lp_ids[i] == id:
+            idx = i
+            i = _lp_count
+        else:
+            i = i + 1
+    if idx < 0:
+        return
+    val start = _lp_starts[idx]
+    _lp_buffer = _lp_buffer.slice(0, start)
+    _lp_starts = _lp_starts.slice(0, idx)
+    _lp_names = _lp_names.slice(0, idx)
+    _lp_ids = _lp_ids.slice(0, idx)
+    _lp_buf_len = start
+    _lp_count = idx
+
+fn log_point_clear():
+    _lp_buffer = []
+    _lp_starts = []
+    _lp_names = []
+    _lp_ids = []
+    _lp_buf_len = 0
+    _lp_count = 0
+
+fn log_point_set_max(max: i64):
+    _lp_max = max
+
+fn log_point_set_stale_count(count: i64):
+    _lp_stale_count = count
+
+fn log_point_has_active() -> bool:
+    _lp_count > 0
+
+fn log_print(msg: text):
+    if _lp_count > 0:
+        _lp_buffer.push(msg)
+        _lp_buf_len = _lp_buf_len + 1
+    else:
+        print msg
+
+# --- Buffer convenience API ---
 
 fn buffer_start(log_path: text):
     _log_path = log_path
     _current_point_id = log_point_start("cli_buffer")
 
 fn buffer_capture(line: text):
-    # Dual-write: defer via log point + write to log file immediately
     log_print(line)
     if _log_path != "":
-        rt_file_append(_log_path, "{line}\n")
+        rt_file_append(_log_path, line + "\n")
 
 fn buffer_flush():
     if _current_point_id < 0:
@@ -46,4 +168,4 @@ fn buffer_is_active() -> bool:
     _current_point_id >= 0
 
 fn buffer_line_count() -> i64:
-    0  # Not tracked directly; use log_point internals if needed
+    _lp_buf_len

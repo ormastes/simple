@@ -1,0 +1,245 @@
+# Module-Level Array .len() Corruption Test
+# tag: system
+#
+# BUG: When a module is imported via `use`, calling .len() on a module-level
+# array variable twice in the same function corrupts the variable (it becomes
+# i64(0)). Calling .len() once is fine. The bug does NOT manifest when the
+# file is run directly (without import).
+#
+# Workaround: Cache .len() result in a local val and reuse the cached value.
+#
+# Test strategy:
+# - Each test runs a fixture file via rt_process_run (subprocess)
+# - Fixtures import from std.cli_output._test_len (the shared module)
+# - The shared module is copied into place before tests and cleaned up after
+# - Known-bug tests are marked with [KNOWN BUG] in output
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+val SIMPLE = "bin/release/simple"
+val FIXTURES = "test/system/module_import/fixtures"
+
+# --- Helpers ---
+
+fn check_release_binary() -> bool:
+    if not rt_file_exists(SIMPLE):
+        print "SKIP: bin/release/simple not found"
+        return false
+    val (out, err, code) = rt_process_run(SIMPLE, ["--version"])
+    if code > 1:
+        print "SKIP: bin/release/simple not executable"
+        return false
+    true
+
+val can_run = check_release_binary()
+
+fn run_fixture(name: text) -> (text, text, i64):
+    val path = FIXTURES + "/" + name
+    rt_process_run(SIMPLE, [path])
+
+# ============================================================================
+# Test Group 1: Single .len() Call (Should Work)
+# ============================================================================
+
+describe "Module Array .len() Corruption":
+
+    # Module src/lib/nogc_sync_mut/cli_output/_test_len.spl is permanent (no setup needed)
+
+    context "single .len() call (baseline - should work)":
+
+        it "calls .len() once on [text] array":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_once_text.spl")
+            if code != 0:
+                print "[FAIL] len_once_text: stderr=" + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+        it "calls .len() once on [i64] array":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_once_i64.spl")
+            if code != 0:
+                print "[FAIL] len_once_i64: stderr=" + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+    # ============================================================================
+    # Test Group 2: Double .len() Call (Known Bug)
+    # ============================================================================
+
+    context "double .len() call (KNOWN BUG - corruption)":
+
+        it "calls .len() twice on [text] array":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_twice_text.spl")
+            if code != 0:
+                print "[KNOWN BUG] .len() twice on [text] crashes: " + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+        it "calls .len() twice on [i64] array":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_twice_i64.spl")
+            if code != 0:
+                print "[KNOWN BUG] .len() twice on [i64] crashes: " + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+    # ============================================================================
+    # Test Group 3: Mixed Operations
+    # ============================================================================
+
+    context "mixed operations with .len()":
+
+        it "calls .len() then .push() (KNOWN BUG - single .len() corrupts for all ops)":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_then_push.spl")
+            if code != 0:
+                print "[KNOWN BUG] .len() corrupts array for subsequent .push(): " + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+        it "calls .push() then .len()":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("push_then_len.spl")
+            if code != 0:
+                print "[KNOWN BUG] push_then_len crashes: " + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("1")
+
+    # ============================================================================
+    # Test Group 4: Cross-Function and Multi-Array
+    # ============================================================================
+
+    context "cross-function and multi-array":
+
+        it "calls .len() in two separate function invocations":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_across_functions.spl")
+            if code != 0:
+                print "[FAIL] len_across_functions: stderr=" + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+        it "calls .len() on different arrays (one per array)":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("multiple_arrays_len.spl")
+            if code != 0:
+                print "[FAIL] multiple_arrays_len: stderr=" + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+    # ============================================================================
+    # Test Group 5: Workaround
+    # ============================================================================
+
+    context "workaround - cache .len() in local var":
+
+        it "caches .len() result and reuses cached value":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_cached_workaround.spl")
+            if code != 0:
+                print "[FAIL] len_cached_workaround: stderr=" + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+    # ============================================================================
+    # Test Group 6: Direct Run (Control - No Import)
+    # ============================================================================
+
+    context "direct run without import (control test)":
+
+        it "calls .len() twice in directly-run file (KNOWN BUG - also fails without import)":
+            if not can_run:
+                return
+            # This fixture does NOT import anything - it defines its own array
+            # Finding: bug also occurs without import, contradicting initial hypothesis
+            val (stdout, stderr, code) = run_fixture("direct_run_len_twice.spl")
+            if code != 0:
+                print "[KNOWN BUG] .len() twice fails even without import: " + stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("0")
+
+    # ============================================================================
+    # Test Group 7: Diagnostic - Error Message Analysis
+    # ============================================================================
+
+    context "diagnostic - error details on corruption":
+
+        it "double .len() [text] error mentions type or corruption":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_twice_text.spl")
+            if code != 0:
+                print "[DIAG] .len() twice [text] error: " + stderr
+                # The error should mention something about types or method not found
+                # This helps diagnose whether it is a type corruption or other issue
+                var has_type_error = false
+                if stderr.contains("type"):
+                    has_type_error = true
+                if stderr.contains("method"):
+                    has_type_error = true
+                if stderr.contains("i64"):
+                    has_type_error = true
+                if stderr.contains("len"):
+                    has_type_error = true
+                print "[DIAG] Error contains type/method info: "
+                if has_type_error:
+                    print "yes"
+                if not has_type_error:
+                    print "no"
+            pass_do_nothing
+
+        it "double .len() [i64] error mentions type or corruption":
+            if not can_run:
+                return
+            val (stdout, stderr, code) = run_fixture("len_twice_i64.spl")
+            if code != 0:
+                print "[DIAG] .len() twice [i64] error: " + stderr
+                var has_type_error = false
+                if stderr.contains("type"):
+                    has_type_error = true
+                if stderr.contains("method"):
+                    has_type_error = true
+                if stderr.contains("i64"):
+                    has_type_error = true
+                if stderr.contains("len"):
+                    has_type_error = true
+                print "[DIAG] Error contains type/method info: "
+                if has_type_error:
+                    print "yes"
+                if not has_type_error:
+                    print "no"
+            pass_do_nothing
+
+        it "compares single vs double .len() behavior":
+            if not can_run:
+                return
+            val (stdout1, stderr1, code1) = run_fixture("len_once_text.spl")
+            val (stdout2, stderr2, code2) = run_fixture("len_twice_text.spl")
+            print "[DIAG] Single .len() exit code: "
+            print code1
+            print "[DIAG] Double .len() exit code: "
+            print code2
+            print "[DIAG] Single .len() stdout: " + stdout1.trim()
+            print "[DIAG] Double .len() stdout: " + stdout2.trim()
+            if code1 == 0:
+                print "[DIAG] Single .len() works correctly"
+            if code1 != 0:
+                print "[DIAG] Single .len() also fails (unexpected)"
+            if code2 != 0:
+                print "[DIAG] Double .len() fails (confirms bug)"
+            if code2 == 0:
+                print "[DIAG] Double .len() works (bug may be fixed!)"
+            # Single .len() should always work
+            expect(code1).to_equal(0)

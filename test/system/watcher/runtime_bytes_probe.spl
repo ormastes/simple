@@ -1,0 +1,57 @@
+extern fn sys_get_args() -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn probe_process() -> text:
+    val result = rt_process_run("/bin/sh", ["-c", "printf '65 66 67'"])
+    val stdout = result[0]
+    if stdout.len() > 0:
+        "ok"
+    else:
+        "empty"
+
+fn probe_process_index() -> text:
+    val result = rt_process_run("/bin/sh", ["-c", "printf '65 66 67'"])
+    val stdout = result[0]
+    val code = stdout.char_code_at(0)
+    "{code}"
+
+fn probe_file_roundtrip() -> text:
+    val path = "/tmp/runtime_bytes_probe.bin"
+    val wrote = rt_file_write_bytes(path, [65, 66, 67, 0])
+    if not wrote:
+        return "write_failed"
+    val bytes = rt_file_read_bytes(path) ?? []
+    if bytes.len() == 0:
+        return "read_empty"
+    "{bytes[0]},{bytes[1]},{bytes[2]}"
+
+fn probe_file_index64() -> text:
+    val path = "/tmp/runtime_bytes_probe_128.bin"
+    var data: [u8] = []
+    var i = 0
+    while i < 130:
+        data.push((i & 0xFF) as u8)
+        i = i + 1
+    val wrote = rt_file_write_bytes(path, data)
+    if not wrote:
+        return "write_failed"
+    val bytes = rt_file_read_bytes(path) ?? []
+    if bytes.len() < 65:
+        return "short"
+    "{bytes[64]}"
+
+fn main():
+    val args = sys_get_args()
+    val command = if args.len() > 1: args[1] else: "process"
+    if command == "process":
+        print probe_process()
+    else if command == "process_index":
+        print probe_process_index()
+    else if command == "file":
+        print probe_file_roundtrip()
+    else if command == "file64":
+        print probe_file_index64()
+    else:
+        print "unknown"
