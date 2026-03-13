@@ -158,7 +158,7 @@ This is the Pure Simple equivalent of the Rust doc's "common tree nodes" — but
 Current Simple architecture docs already lean this way:
 
 - `doc/architecture/overview.md` says shared contracts belong in `src/common/`
-- `doc/architecture/glossary.md` says compiler, loader, and interpreter must share one frontend contract
+- `doc/glossary.md` says compiler, loader, and interpreter must share one frontend contract
 - `src/compiler_rust/dependency_tracker/src/visibility.rs` already models visibility as ancestor-constrained
 
 This aligns with mainstream module systems. Rust uses module/tree privacy by default. Ada supports a narrower friend-like model through private child units. C# supports explicit friend-style access with `InternalsVisibleTo`.

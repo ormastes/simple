@@ -79,3 +79,4 @@ db.save()
 | `src/lib/nogc_sync_mut/database/query.spl` | QueryBuilder with filter/sort/limit |
 | `src/lib/nogc_sync_mut/database/atomic.spl` | Atomic file write with locking |
 | `CLAUDE.md` | SDN edit prohibition rule |
+

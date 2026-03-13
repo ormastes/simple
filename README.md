@@ -74,9 +74,12 @@ Download the pre-compiled release for your platform - no build required!
 - All development tools (MCP server, LSP, debugger - all in Simple)
 
 **Available platforms:**
-- Linux x86_64 / ARM64
-- macOS x86_64 / ARM64
-- Windows x86_64 / ARM64
+- Linux x86_64
+(experimental)
+- macOS ARM64
+- Windows x86_64 
+- FreeBSD x86_64
+- Baremetal riscv32 QEMU
 
 ```bash
 # Linux x86_64

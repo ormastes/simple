@@ -33,7 +33,7 @@ Located in `.claude/agents/`. Usage: `Read .claude/agents/<name>.md and use its 
 
 Invoke with `/skill-name`. Located in `.claude/skills/`. Key skills:
 
-`vcs` `test` `coding` `design` `architecture` `research` `debug` `debug-lsp` `stdlib` `todo` `doc` `deeplearning` `sffi` `database` `mcp` `release` `cuda` `t32` `rule` `worktree` `impl` `refactor` `agents`
+`vcs` `test` `coding` `design` `architecture` `research` `debug` `debug-lsp` `stdlib` `todo` `doc` `deeplearning` `sffi` `database` `mcp` `mcp-failure-analysis` `release` `cuda` `t32` `rule` `worktree` `impl` `refactor` `agents`
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 **Test Template:** `.claude/templates/sspec_template.spl`
@@ -50,7 +50,7 @@ Invoke with `/skill-name`. Located in `.claude/skills/`. Key skills:
 - Fetch: `jj git fetch && jj rebase -d main@origin`
 
 ### Language
-- **ALL code in `.spl` or `.shs`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
+- **ALL code in `.spl` or `.shs`** - No Python, no Bash (except bootstrap scripts in `scripts/bootstrap/`)
 - **Generics:** `<>` not `[]` - `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
 - **Constructors:** `Point(x: 3, y: 4)` not `.new()`
@@ -91,6 +91,10 @@ bin/simple build                    # Debug build
 bin/simple build --release          # Release build
 bin/simple test                     # All tests
 bin/simple test path/to/spec.spl   # Single file
+bin/simple test --list              # List tests
+bin/simple test --only-slow         # Slow tests
+
+# Quality
 bin/simple build lint               # Linter
 bin/simple build fmt                # Formatter
 bin/simple build check              # All checks
