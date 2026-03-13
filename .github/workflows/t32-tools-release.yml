@@ -248,16 +248,19 @@ jobs:
 
       - name: Run smoke tests
         run: |
-          chmod +x bin/*
+          mkdir -p smoke-bin
+          find bin -maxdepth 2 -type f -exec cp {} smoke-bin/ \;
+          chmod +x smoke-bin/*
 
           assert_framed_jsonrpc() {
             local binary="$1"
             local body="$2"
             local expect="$3"
             local tmp
+            shift 3
             tmp="$(mktemp)"
             printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body" \
-              | timeout 5s "$binary" > "$tmp"
+              | timeout 5s "$binary" "$@" > "$tmp"
             if ! grep -q "$expect" "$tmp"; then
               echo "::error::Protocol smoke test failed for $binary"
               echo "Expected pattern: $expect"
@@ -270,26 +273,27 @@ jobs:
           }
 
           echo "=== T32 Tools Smoke Test ==="
-          for binary in bin/*; do
+          for binary in smoke-bin/*; do
             file "$binary" | grep -q "ELF"
           done
 
           assert_framed_jsonrpc \
-            "bin/t32-mcp-server" \
+            "smoke-bin/t32-mcp-server" \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
             '"protocolVersion":"2025-06-18"'
 
           assert_framed_jsonrpc \
-            "bin/t32-lsp-mcp-server" \
+            "smoke-bin/t32-lsp-mcp-server" \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
             '"protocolVersion":"2025-06-18"'
 
           assert_framed_jsonrpc \
-            "bin/cmm-lsp" \
+            "smoke-bin/cmm-lsp" \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' \
-            '"capabilities"'
+            '"capabilities"' \
+            --lsp
 
-          timeout 5s bin/t32-cli --help > /tmp/t32-cli-help.txt
+          timeout 5s smoke-bin/t32-cli --help > /tmp/t32-cli-help.txt
           grep -q "Usage" /tmp/t32-cli-help.txt
 
       - name: Validate CMM LSP plugin bundle
