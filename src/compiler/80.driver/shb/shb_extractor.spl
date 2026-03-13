@@ -12,6 +12,7 @@ use compiler.shb.shb_types.{
     SHB_FLAG_MUTABLE, SHB_FLAG_COMPTIME
 }
 use compiler.shb.shb_hash.{shb_source_hash, shb_interface_hash}
+use compiler.shb.shb_reader.{ShbReader}
 use compiler.shb.shb_writer.{shb_write}
 use compiler.core.parser.{parse_module, parser_has_errors}
 use compiler.core.types.{type_tag_name}
@@ -147,6 +148,19 @@ fn parse_extract_write_shb(source: text, filename: text, shb_path: text) -> ShbP
     if not shb_write(iface, shb_path):
         return shb_persist_result_err("failed to write SHB: {shb_path}")
     shb_persist_result_ok(iface.header.source_hash, iface.header.interface_hash)
+
+fn external_extract_write_shb(source_path: text, shb_path: text) -> ShbPersistResult:
+    val (stdout, stderr, exit_code) = rt_process_run(
+        "bin/release/simple",
+        ["src/app/dev/shb_emit.spl", source_path, shb_path]
+    )
+    if exit_code != 0:
+        val message = if stderr != "": stderr else: stdout
+        return shb_persist_result_err("external SHB emit failed: {message}")
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return shb_persist_result_err("external SHB emit wrote invalid SHB: {shb_path}")
+    shb_persist_result_ok(reader.source_hash(), reader.interface_hash())
 
 fn shb_parse_source(source: text, filename: text) -> bool:
     parse_module(source, filename)
@@ -286,3 +300,5 @@ fn shb_extract_traits() -> [ShbTraitEntry]:
                 ))
         i = i + 1
     traits
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)

@@ -1,0 +1,136 @@
+use compiler.core.interpreter.{
+    eval_init, register_deferred_module, try_force_any_deferred_for,
+    module_get_file_path, func_table_lookup, core_interpret,
+    val_get_int, eval_get_error
+}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+
+fn lazy_test_tmpdir() -> text:
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    val dir = "/tmp/lazy_shb_{pid}_{ts}"
+    rt_dir_create_all(dir)
+    dir
+
+fn lazy_test_cleanup(dir: text):
+    if dir != "":
+        rt_process_run("/bin/sh", ["-c", "rm -rf '{dir}' >/dev/null 2>&1 || true"])
+
+fn write_lazy_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn probe_wildcard_filter() -> text:
+    val tmpdir = lazy_test_tmpdir()
+    val main_path = "{tmpdir}/main.spl"
+    val a_path = "{tmpdir}/a.spl"
+    val b_path = "{tmpdir}/b.spl"
+
+    if not write_lazy_file(main_path, "# probe\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write main"
+    if not write_lazy_file(a_path, "pub fn alpha() -> i64:\n    11\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write a"
+    if not write_lazy_file(b_path, "pub fn beta() -> i64:\n    22\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write b"
+
+    eval_init()
+    register_deferred_module("a", main_path, [])
+    register_deferred_module("b", main_path, [])
+
+    val forced = try_force_any_deferred_for("beta")
+    val a_loaded = module_get_file_path("a") != ""
+    val b_loaded = module_get_file_path("b") != ""
+    val alpha_registered = func_table_lookup("alpha") >= 0
+    val beta_registered = func_table_lookup("beta") >= 0
+    lazy_test_cleanup(tmpdir)
+
+    if forced == 1 and not a_loaded and b_loaded and not alpha_registered and beta_registered:
+        return "ok"
+    "forced={forced} a_loaded={a_loaded} b_loaded={b_loaded} alpha={alpha_registered} beta={beta_registered}"
+
+fn probe_circular_wildcard() -> text:
+    val tmpdir = lazy_test_tmpdir()
+    val main_path = "{tmpdir}/main.spl"
+    val a_path = "{tmpdir}/a.spl"
+    val b_path = "{tmpdir}/b.spl"
+    val c_path = "{tmpdir}/c.spl"
+
+    val main_source = """
+use lazy c.*
+use lazy a.*
+
+a_value()
+"""
+    val a_source = """
+use lazy b.*
+
+pub fn a_value() -> i64:
+    b_value() + 1
+"""
+    val b_source = """
+use lazy a.*
+
+pub fn b_value() -> i64:
+    41
+"""
+    val c_source = """
+pub fn c_value() -> i64:
+    99
+"""
+
+    if not write_lazy_file(main_path, main_source):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write main"
+    if not write_lazy_file(a_path, a_source):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write a"
+    if not write_lazy_file(b_path, b_source):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write b"
+    if not write_lazy_file(c_path, c_source):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write c"
+
+    val result = core_interpret(rt_file_read_text(main_path), main_path)
+    if result < 0:
+        val err = eval_get_error()
+        lazy_test_cleanup(tmpdir)
+        return "interp error: {err}"
+
+    val value = val_get_int(result)
+    val a_loaded = module_get_file_path("a") != ""
+    val b_loaded = module_get_file_path("b") != ""
+    val c_loaded = module_get_file_path("c") != ""
+    val c_registered = func_table_lookup("c_value") >= 0
+    lazy_test_cleanup(tmpdir)
+
+    if value == 42 and a_loaded and b_loaded and not c_loaded and not c_registered:
+        return "ok"
+    "value={value} a_loaded={a_loaded} b_loaded={b_loaded} c_loaded={c_loaded} c_registered={c_registered}"
+
+fn main() -> i64:
+    val args = sys_get_args()
+    if args.len() < 2:
+        print "usage: lazy_shb_probe.spl <wildcard_filter|circular_wildcard>"
+        return 1
+
+    val result = match args[1]:
+        case "wildcard_filter": probe_wildcard_filter()
+        case "circular_wildcard": probe_circular_wildcard()
+        case _: "unknown command: {args[1]}"
+
+    if result == "ok":
+        print "ok"
+        0
+    else:
+        print result
+        1

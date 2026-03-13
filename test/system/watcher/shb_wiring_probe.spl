@@ -4,6 +4,7 @@ use compiler.shb.shb_hash.{shb_source_hash}
 use compiler.shb.shb_types.{ShbModuleInterface, shb_module_interface_new, shb_primitive_layouts, ShbFnEntry, SHB_FLAG_PUB}
 use compiler.shb.shb_reader.{ShbReader}
 use compiler.shb.shb_writer.{shb_write}
+use compiler.shb.shb_cache.{ShbCacheManager, ShbCacheConfig, SHB_CACHE_NEW, SHB_CACHE_BODY_ONLY, SHB_CACHE_INTERFACE}
 
 extern fn sys_get_args() -> [text]
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -199,10 +200,95 @@ fn probe_reader_metadata() -> text:
     else:
         "metadata mismatch"
 
+fn probe_inline_generation() -> text:
+    val tmpdir = shb_test_tmpdir()
+    val cfg = shb_test_config(tmpdir)
+    val source_path = shb_test_source_path(tmpdir)
+
+    if not write_sample(source_path, shb_test_source_v1()):
+        shb_test_cleanup(tmpdir)
+        return "failed to write source"
+
+    val result = get_or_generate_shb(source_path, cfg)
+    if not result.ok:
+        shb_test_cleanup(tmpdir)
+        return result.error
+
+    val reader = ShbReader.open(result.shb_path)
+    val ok = reader.is_valid() and reader.function_count() == 1 and reader.has_function_named("answer")
+    shb_test_cleanup(tmpdir)
+
+    if ok:
+        "ok"
+    else:
+        "generated shb invalid"
+
+fn probe_batch_generation() -> text:
+    val tmpdir = shb_test_tmpdir()
+    val headers_dir = "{tmpdir}/headers"
+    val source_path = shb_test_source_path(tmpdir)
+    val cache = ShbCacheManager.create(ShbCacheConfig(cache_dir: headers_dir, enabled: true))
+
+    if not write_sample(source_path, shb_test_source_v1()):
+        shb_test_cleanup(tmpdir)
+        return "failed to write source"
+
+    val result = cache.process_file(source_path)
+    if result.status != SHB_CACHE_NEW:
+        shb_test_cleanup(tmpdir)
+        return "batch status={result.status}"
+
+    val shb_path = shb_test_shb_path(headers_dir, source_path)
+    val reader = ShbReader.open(shb_path)
+    val ok = reader.is_valid() and reader.function_count() == 1 and reader.has_function_named("answer")
+    shb_test_cleanup(tmpdir)
+
+    if ok:
+        "ok"
+    else:
+        "batch shb invalid"
+
+fn probe_body_vs_interface_generation() -> text:
+    val tmpdir = shb_test_tmpdir()
+    val headers_dir = "{tmpdir}/headers"
+    val source_path = shb_test_source_path(tmpdir)
+    val cache = ShbCacheManager.create(ShbCacheConfig(cache_dir: headers_dir, enabled: true))
+
+    if not write_sample(source_path, shb_test_source_v1()):
+        shb_test_cleanup(tmpdir)
+        return "failed to write source"
+    val first = cache.process_file(source_path)
+    if first.status != SHB_CACHE_NEW:
+        shb_test_cleanup(tmpdir)
+        return "first status={first.status}"
+
+    if not write_sample(source_path, shb_test_source_body_only()):
+        shb_test_cleanup(tmpdir)
+        return "failed to write body source"
+    val body_only = cache.process_file(source_path)
+    if body_only.status != SHB_CACHE_BODY_ONLY:
+        shb_test_cleanup(tmpdir)
+        return "body-only status={body_only.status}"
+
+    val source_v2 = """
+pub fn answer(x: i64) -> i64:
+    x
+"""
+    if not write_sample(source_path, source_v2):
+        shb_test_cleanup(tmpdir)
+        return "failed to write interface source"
+    val iface_changed = cache.process_file(source_path)
+    shb_test_cleanup(tmpdir)
+
+    if iface_changed.status == SHB_CACHE_INTERFACE:
+        "ok"
+    else:
+        "interface-change status={iface_changed.status}"
+
 fn main() -> i64:
     val args = sys_get_args()
     if args.len() < 2:
-        print "usage: shb_wiring_probe.spl <write_read|cached_get|freshness|metadata>"
+        print "usage: shb_wiring_probe.spl <write_read|cached_get|freshness|metadata|inline_generate|batch_generate|body_vs_interface>"
         return 1
 
     val command = args[1]
@@ -211,6 +297,9 @@ fn main() -> i64:
         case "cached_get": probe_cached_get_or_generate()
         case "freshness": probe_freshness_transitions()
         case "metadata": probe_reader_metadata()
+        case "inline_generate": probe_inline_generation()
+        case "batch_generate": probe_batch_generation()
+        case "body_vs_interface": probe_body_vs_interface_generation()
         case _: "unknown command: {command}"
 
     if result == "ok":

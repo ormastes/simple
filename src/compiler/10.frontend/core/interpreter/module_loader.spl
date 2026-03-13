@@ -55,26 +55,86 @@ fn get_decl_info(did: i64) -> ModuleDeclInfo:
 
 # ===== Loaded Module Tracking =====
 
-# Parallel arrays to track loaded modules (no generics at runtime)
+# Snapshot arrays retained for compatibility with existing exports/builtins.
 var loaded_module_paths: [text] = []
 var loaded_module_file_paths: [text] = []
-var loaded_module_exports: [[text]] = []
-# Dict for O(1) module loaded check
+var loaded_module_exports: [text] = []
+var _loaded_module_order: text = ""
+var _loaded_module_file_map = {}
+var _loaded_module_exports_map = {}
 var loaded_module_set = {}
 
 # ===== Deferred (Lazy) Module Tracking =====
 
-var deferred_module_names: [text] = []
-var deferred_module_files: [text] = []
-var deferred_module_imports: [[text]] = []
+var _deferred_module_order: text = ""
+var _deferred_module_file_map = {}
+var _deferred_module_imports_map = {}
 var deferred_module_set = {}
+
+fn encode_module_names(names: [text]) -> text:
+    if names.len() == 0:
+        return ""
+    names.join("\n")
+
+fn decode_module_names(encoded: text) -> [text]:
+    if encoded == "":
+        return []
+    encoded.split("\n")
+
+fn append_module_name(encoded: text, name: text) -> text:
+    if encoded == "":
+        return name
+    encoded + "\n" + name
+
+fn refresh_loaded_module_snapshots():
+    val paths = decode_module_names(_loaded_module_order)
+    var file_paths: [text] = []
+    var export_names: [text] = []
+    for path in paths:
+        file_paths.push(_loaded_module_file_map[path] ?? "")
+        export_names.push(_loaded_module_exports_map[path] ?? "")
+    loaded_module_paths = paths
+    loaded_module_file_paths = file_paths
+    loaded_module_exports = export_names
+
+fn deferred_imports_include(imported_names: [text], symbol_name: text) -> i64:
+    if imported_names.len() == 0:
+        return 1
+    for imported_name in imported_names:
+        if imported_name == symbol_name:
+            return 1
+    0
+
+fn deferred_module_may_define_symbol(module_name: text, current_file: text, imported_names: [text], symbol_name: text) -> i64:
+    if deferred_imports_include(imported_names, symbol_name) == 0:
+        return 0
+
+    val resolved_path = resolve_module_path(module_name, current_file)
+    if resolved_path == "":
+        return 1
+
+    use compiler.driver.watcher.watcher_client.{get_or_generate_shb}
+    use compiler.driver.watcher.watcher_types.{watcher_config_default}
+    use compiler.shb.shb_reader.{ShbReader}
+
+    val shb_result = get_or_generate_shb(resolved_path, watcher_config_default())
+    if not shb_result.ok:
+        return 1
+
+    val reader = ShbReader.open(shb_result.shb_path)
+    if not reader.is_valid():
+        return 1
+
+    if reader.has_symbol_named(symbol_name):
+        return 1
+    0
 
 fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
     if deferred_module_set.contains_key(name):
         return
-    deferred_module_names.push(name)
-    deferred_module_files.push(current_file)
-    deferred_module_imports.push(imported_names)
+    _deferred_module_order = append_module_name(_deferred_module_order, name)
+    _deferred_module_file_map[name] = current_file
+    _deferred_module_imports_map[name] = encode_module_names(imported_names)
     deferred_module_set[name] = true
 
 fn is_deferred_module(name: text) -> i64:
@@ -84,11 +144,11 @@ fn is_deferred_module(name: text) -> i64:
 
 fn force_deferred_module(name: text) -> i64:
     # Find the deferred module entry and load it
-    var i: i64 = 0
-    for mod_name in deferred_module_names:
+    val deferred_names = decode_module_names(_deferred_module_order)
+    for mod_name in deferred_names:
         if mod_name == name:
-            val current_file = deferred_module_files[i]
-            val imported_names = deferred_module_imports[i]
+            val current_file = _deferred_module_file_map[name] ?? ""
+            val imported_names = decode_module_names(_deferred_module_imports_map[name] ?? "")
             var load_result: i64 = 0
             if imported_names.len() == 0:
                 load_result = load_module(name, current_file)
@@ -97,32 +157,38 @@ fn force_deferred_module(name: text) -> i64:
             # Remove from deferred set (mark as loaded)
             deferred_module_set[name] = false
             return load_result
-        i = i + 1
     0
 
 fn try_force_any_deferred_for(symbol_name: text) -> i64:
     # Try each deferred module until symbol is found
-    var i: i64 = 0
-    for mod_name in deferred_module_names:
+    val deferred_names = decode_module_names(_deferred_module_order)
+    for mod_name in deferred_names:
         val still_deferred = deferred_module_set[mod_name]
         if still_deferred == true:
+            val current_file = _deferred_module_file_map[mod_name] ?? ""
+            val imported_names = decode_module_names(_deferred_module_imports_map[mod_name] ?? "")
+            val may_define = deferred_module_may_define_symbol(mod_name, current_file, imported_names, symbol_name)
+            if may_define == 0:
+                continue
             val ok = force_deferred_module(mod_name)
             if ok == 1:
                 # Check if this module provided the symbol
                 val decl_id = func_table_lookup(symbol_name)
                 if decl_id >= 0:
                     return 1
-        i = i + 1
     0
 
 fn module_loader_init():
     loaded_module_paths = []
     loaded_module_file_paths = []
     loaded_module_exports = []
+    _loaded_module_order = ""
+    _loaded_module_file_map = {}
+    _loaded_module_exports_map = {}
     loaded_module_set = {}
-    deferred_module_names = []
-    deferred_module_files = []
-    deferred_module_imports = []
+    _deferred_module_order = ""
+    _deferred_module_file_map = {}
+    _deferred_module_imports_map = {}
     deferred_module_set = {}
     irt_init()
 
@@ -132,18 +198,14 @@ fn module_is_loaded(module_path: text) -> i64:
     0
 
 fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
-    loaded_module_paths.push(module_path)
-    loaded_module_file_paths.push(file_path)
-    loaded_module_exports.push(exports)
+    _loaded_module_order = append_module_name(_loaded_module_order, module_path)
+    _loaded_module_file_map[module_path] = file_path
+    _loaded_module_exports_map[module_path] = encode_module_names(exports)
+    refresh_loaded_module_snapshots()
     loaded_module_set[module_path] = true
 
 fn module_get_file_path(module_name: text) -> text:
-    var i: i64 = 0
-    for path in loaded_module_paths:
-        if path == module_name:
-            return loaded_module_file_paths[i]
-        i = i + 1
-    ""
+    _loaded_module_file_map[module_name] ?? ""
 
 # ===== Module Path Resolution =====
 
@@ -497,4 +559,3 @@ fn interp_unload_module(module_name: text) -> i64:
     loaded_module_set[module_name] = false
 
     removed
-
