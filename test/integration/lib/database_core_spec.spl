@@ -26,276 +26,346 @@ fn file_read(path: text) -> text:
     val result = rt_file_read_text(path)
     result ?? ""
 
-# Stub: StringInterner
-class StringInterner:
-    strings: {text: i64}
-    reverse: {text: text}
-    next_id: i64
-    me intern(s: text) -> i64:
-        if self.strings.contains_key(s):
-            return self.strings[s]
-        val id = self.next_id
-        self.strings[s] = id
-        self.reverse["{id}"] = s
-        self.next_id = self.next_id + 1
-        id
-    fn get_id(s: text):
-        if self.strings.contains_key(s):
-            return Some(self.strings[s])
-        nil
-    fn lookup(id: i64):
-        val key = "{id}"
-        if self.reverse.contains_key(key):
-            return Some(self.reverse[key])
-        nil
+# Stub: StringInterner — module-level parallel state to avoid struct dict field corruption
+var si_strings: {text: i64} = {}
+var si_reverse: {text: text} = {}
+var si_next_id: i64 = 0
 
-# Stub: SdnRow
+fn si_reset():
+    si_strings = {}
+    si_reverse = {}
+    si_next_id = 0
+
+fn si_intern(s: text) -> i64:
+    val strs = si_strings
+    if strs.contains_key(s):
+        return strs[s]
+    val id = si_next_id
+    si_strings[s] = id
+    si_reverse["{id}"] = s
+    si_next_id = si_next_id + 1
+    id
+
+fn si_get_id(s: text):
+    val strs = si_strings
+    if strs.contains_key(s):
+        return Some(strs[s])
+    nil
+
+fn si_lookup(id: i64):
+    val key = "{id}"
+    val rev = si_reverse
+    if rev.contains_key(key):
+        return Some(rev[key])
+    nil
+
+fn si_get_next_id() -> i64:
+    si_next_id
+
+# Stub: SdnRow — use free functions to avoid struct dict field corruption
 class SdnRow:
     fields: {text: text}
-    me set(key: text, value: text):
-        self.fields[key] = value
-    fn get(key: text):
-        if self.fields.contains_key(key):
-            return Some(self.fields[key])
-        nil
-    fn get_i64(key: text):
-        val v = self.get(key)
-        if v.?:
-            return Some(int(v?))
-        nil
-    fn get_bool(key: text):
-        val v = self.get(key)
-        if v.?:
-            if v? == "true":
-                return Some(true)
-            if v? == "false":
-                return Some(false)
-        nil
-    fn has(key: text) -> bool:
-        self.fields.contains_key(key)
 
-# Stub: SdnTable
+fn row_set(row: SdnRow, key: text, value: text) -> SdnRow:
+    var f = row.fields
+    f[key] = value
+    SdnRow(fields: f)
+
+fn row_get(row: SdnRow, key: text):
+    val f = row.fields
+    if f.contains_key(key):
+        return Some(f[key])
+    nil
+
+fn row_get_i64(row: SdnRow, key: text):
+    val v = row_get(row, key)
+    if v.?:
+        return Some(int(v?))
+    nil
+
+fn row_get_bool(row: SdnRow, key: text):
+    val v = row_get(row, key)
+    if v.?:
+        if v? == "true":
+            return Some(true)
+        if v? == "false":
+            return Some(false)
+    nil
+
+fn row_has(row: SdnRow, key: text) -> bool:
+    val f = row.fields
+    f.contains_key(key)
+
+# Stub: SdnTable — free functions to avoid struct dict/array field corruption
 class SdnTable:
     name: text
     columns: [text]
     rows: [SdnRow]
     index: {text: i64}
-    me add_row(row: SdnRow):
-        val id_opt = row.get("id")
-        if id_opt.?:
-            val id = id_opt?
-            if self.index.contains_key(id):
-                return
-            self.index[id] = self.rows.len()
-        self.rows = self.rows + [row]
-    fn get_row(id: text):
-        if self.index.contains_key(id):
-            val idx = self.index[id]
-            return Some(self.rows[idx])
-        for row in self.rows:
-            if row.get("id").? and row.get("id")? == id:
-                return Some(row)
-        nil
-    me mark_deleted(id: text):
-        for i in 0..self.rows.len():
-            if self.rows[i].get("id").? and self.rows[i].get("id")? == id:
-                # Read, modify, write back to handle value-type SdnRow in array
-                var row = self.rows[i]
-                row.set("valid", "false")
-                self.rows[i] = row
-                return
-    fn valid_rows() -> [SdnRow]:
-        var result = []
-        for row in self.rows:
-            val valid = row.get("valid")
-            if valid.? and valid? == "true":
-                result = result + [row]
-        result
-    fn to_sdn() -> text:
-        var cols_str = self.columns.join(", ")
-        var result = "{self.name} |{cols_str}|\n"
-        for row in self.rows:
-            var values = []
-            for col in self.columns:
-                val v = row.get(col) ?? ""
-                values = values + [v]
-            result = result + "    {values.join(", ")}\n"
-        result
 
-# Stub: SdnDatabase
-class SdnDatabase:
-    path: text
-    tables: {text: SdnTable}
-    interner: StringInterner
-    modified: bool
-    me set_table(name: text, table: SdnTable):
-        self.tables[name] = table
-        self.modified = true
-    fn get_table(name: text):
-        if self.tables.contains_key(name):
-            return Some(self.tables[name])
-        nil
-    fn get_table_mut(name: text):
-        if self.tables.contains_key(name):
-            return Some(self.tables[name])
-        nil
-    me save() -> bool:
-        # Serialize all tables to SDN format and write to disk
-        var sections: [text] = []
-        for name in self.tables.keys():
-            val table = self.tables[name]
-            sections.push(table.to_sdn())
-        val content = sections.join("\n")
-        file_write(self.path, content)
+fn tbl_add_row(table: SdnTable, row: SdnRow) -> SdnTable:
+    val id_opt = row_get(row, "id")
+    var idx_map = table.index
+    val cur_rows = table.rows
+    if id_opt.?:
+        val id = id_opt?
+        if idx_map.contains_key(id):
+            return table
+        idx_map[id] = cur_rows.len()
+    val new_rows = cur_rows + [row]
+    SdnTable(name: table.name, columns: table.columns, rows: new_rows, index: idx_map)
 
-    static fn load(path: text):
-        if not file_exists(path):
-            return nil
-        val content = file_read(path)
-        if content == "":
-            return nil
-        # Parse tables from file content
-        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
-        val lines = content.split("\n")
-        var current_table_name = ""
-        var current_columns: [text] = []
-        var current_rows: [SdnRow] = []
-        var current_index: {text: i64} = {}
-        var in_table = false
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed == "":
-                if in_table and current_table_name != "":
-                    val table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
-                    db.tables[current_table_name] = table
-                    in_table = false
-                    current_table_name = ""
-                    current_columns = []
-                    current_rows = []
-                    current_index = {}
-                continue
-            # Detect table header: contains "|" and not indented
-            if trimmed.contains("|") and not line.starts_with(" "):
-                # Save previous table if any
-                if in_table and current_table_name != "":
-                    val prev_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
-                    db.tables[current_table_name] = prev_table
-                # Parse header using split("|") to avoid index_of enum bug
-                val pipe_parts = trimmed.split("|")
-                current_table_name = pipe_parts[0].trim()
-                var col_str = ""
-                if pipe_parts.len() >= 2:
-                    col_str = pipe_parts[1].trim()
-                val raw_cols = col_str.split(",")
+fn tbl_get_row(table: SdnTable, id: text):
+    val idx_map = table.index
+    val rows = table.rows
+    if idx_map.contains_key(id):
+        val idx = idx_map[id]
+        return Some(rows[idx])
+    for row in rows:
+        if row_get(row, "id").? and row_get(row, "id")? == id:
+            return Some(row)
+    nil
+
+fn tbl_mark_deleted(table: SdnTable, id: text) -> SdnTable:
+    val rows = table.rows
+    var new_rows: [SdnRow] = []
+    var i = 0
+    while i < rows.len():
+        val row = rows[i]
+        if row_get(row, "id").? and row_get(row, "id")? == id:
+            val updated = row_set(row, "valid", "false")
+            new_rows = new_rows + [updated]
+        else:
+            new_rows = new_rows + [row]
+        i = i + 1
+    SdnTable(name: table.name, columns: table.columns, rows: new_rows, index: table.index)
+
+fn tbl_valid_rows(table: SdnTable) -> [SdnRow]:
+    val rows = table.rows
+    var result: [SdnRow] = []
+    for row in rows:
+        val valid = row_get(row, "valid")
+        if valid.? and valid? == "true":
+            result = result + [row]
+    result
+
+fn tbl_to_sdn(table: SdnTable) -> text:
+    val cols = table.columns
+    var cols_str = cols.join(", ")
+    var result = "{table.name} |{cols_str}|\n"
+    val rows = table.rows
+    for row in rows:
+        var values: [text] = []
+        for col in cols:
+            val v = row_get(row, col) ?? ""
+            values = values + [v]
+        result = result + "    {values.join(", ")}\n"
+    result
+
+# Stub: SdnDatabase — module-level state to avoid struct dict field corruption
+var db_path: text = ""
+var db_table_names: [text] = []
+var db_tables: [SdnTable] = []
+var db_modified: bool = false
+
+fn db_reset():
+    db_path = ""
+    db_table_names = []
+    db_tables = []
+    db_modified = false
+
+fn db_init(path: text):
+    db_path = path
+    db_table_names = []
+    db_tables = []
+    db_modified = false
+
+fn db_find_table(name: text) -> i64:
+    val names = db_table_names
+    var i = 0
+    while i < names.len():
+        if names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+fn db_set_table(name: text, table: SdnTable):
+    val idx = db_find_table(name)
+    if idx >= 0:
+        db_tables[idx] = table
+    else:
+        db_table_names = db_table_names + [name]
+        db_tables = db_tables + [table]
+    db_modified = true
+
+fn db_get_table(name: text):
+    val idx = db_find_table(name)
+    if idx >= 0:
+        val tbls = db_tables
+        return Some(tbls[idx])
+    nil
+
+fn db_get_table_mut(name: text):
+    db_get_table(name)
+
+fn db_table_count() -> i64:
+    val names = db_table_names
+    names.len()
+
+fn db_save() -> bool:
+    val names = db_table_names
+    val tbls = db_tables
+    var sections: [text] = []
+    var i = 0
+    while i < names.len():
+        sections = sections + [tbl_to_sdn(tbls[i])]
+        i = i + 1
+    val content = sections.join("\n")
+    file_write(db_path, content)
+
+fn db_load(path: text) -> bool:
+    if not file_exists(path):
+        return false
+    val content = file_read(path)
+    if content == "":
+        return false
+    db_init(path)
+    val lines = content.split("\n")
+    var current_table_name = ""
+    var current_columns: [text] = []
+    var current_rows: [SdnRow] = []
+    var current_index: {text: i64} = {}
+    var in_table = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            if in_table and current_table_name != "":
+                val table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+                db_set_table(current_table_name, table)
+                in_table = false
+                current_table_name = ""
                 current_columns = []
-                for c in raw_cols:
-                    current_columns = current_columns + [c.trim()]
                 current_rows = []
                 current_index = {}
-                in_table = true
-            elif in_table:
-                # Parse data row
-                val values = trimmed.split(",")
-                if values.len() == current_columns.len():
-                    var row = SdnRow(fields: {})
-                    for i in 0..current_columns.len():
-                        val col = current_columns[i]
-                        val v = values[i].trim()
-                        row.set(col, v)
-                    if row.has("id"):
-                        val id_opt = row.get("id")
-                        if id_opt.?:
-                            current_index[id_opt?] = current_rows.len()
-                    current_rows = current_rows + [row]
-        # Save last table
-        if in_table and current_table_name != "":
-            val last_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
-            db.tables[current_table_name] = last_table
-        Some(db)
+            continue
+        # Detect table header: contains "|" and not indented
+        if trimmed.contains("|") and not line.starts_with(" "):
+            if in_table and current_table_name != "":
+                val prev_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+                db_set_table(current_table_name, prev_table)
+            val pipe_parts = trimmed.split("|")
+            current_table_name = pipe_parts[0].trim()
+            var col_str = ""
+            if pipe_parts.len() >= 2:
+                col_str = pipe_parts[1].trim()
+            val raw_cols = col_str.split(",")
+            current_columns = []
+            for c in raw_cols:
+                current_columns = current_columns + [c.trim()]
+            current_rows = []
+            current_index = {}
+            in_table = true
+        elif in_table:
+            val values = trimmed.split(",")
+            if values.len() == current_columns.len():
+                var row = SdnRow(fields: {})
+                for i in 0..current_columns.len():
+                    val col = current_columns[i]
+                    val v = values[i].trim()
+                    row = row_set(row, col, v)
+                if row_has(row, "id"):
+                    val id_opt = row_get(row, "id")
+                    if id_opt.?:
+                        current_index[id_opt?] = current_rows.len()
+                current_rows = current_rows + [row]
+    if in_table and current_table_name != "":
+        val last_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+        db_set_table(current_table_name, last_table)
+    true
 
 fn slow_it(name: text, block: fn()):
     it(name, block)
 
 describe "StringInterner":
     slow_it "interns same string to same ID":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id1 = interner.intern("test")
-        val id2 = interner.intern("test")
+        val id1 = si_intern("test")
+        val id2 = si_intern("test")
 
         expect(id1).to_equal(id2)
 
     slow_it "interns different strings to different IDs":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id1 = interner.intern("first")
-        val id2 = interner.intern("second")
+        val id1 = si_intern("first")
+        val id2 = si_intern("second")
 
         expect(id1 == id2).to_equal(false)
 
     slow_it "lookups strings by ID":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id = interner.intern("lookup_test")
-        val result = interner.lookup(id)
+        val id = si_intern("lookup_test")
+        val result = si_lookup(id)
 
         expect(result.?).to_equal(true)
         expect(result?).to_equal("lookup_test")
 
     slow_it "lookups IDs by string":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id = interner.intern("reverse_lookup")
-        val result = interner.get_id("reverse_lookup")
+        val id = si_intern("reverse_lookup")
+        val result = si_get_id("reverse_lookup")
 
         expect(result.?).to_equal(true)
         expect(result?).to_equal(id)
 
     slow_it "returns None for unknown ID":
-        val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val result = interner.lookup(999)
+        val result = si_lookup(999)
         expect(result.?).to_equal(false)
 
     slow_it "returns None for unknown string":
-        val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val result = interner.get_id("nonexistent")
+        val result = si_get_id("nonexistent")
         expect(result.?).to_equal(false)
 
     slow_it "handles empty strings":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id = interner.intern("")
-        val result = interner.lookup(id)
+        val id = si_intern("")
+        val result = si_lookup(id)
 
         expect(result.?).to_equal(true)
         expect(result?).to_equal("")
 
     slow_it "handles unicode strings":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        val id = interner.intern("Hello 世界 🌍")
-        val result = interner.lookup(id)
+        val id = si_intern("Hello 世界 🌍")
+        val result = si_lookup(id)
 
         expect(result.?).to_equal(true)
         val value = result ?? ""
         expect(value.contains("世界")).to_equal(true)
 
     slow_it "increments ID counter":
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        si_reset()
 
-        expect(interner.next_id).to_equal(0)
+        expect(si_get_next_id()).to_equal(0)
 
-        interner.intern("first")
-        expect(interner.next_id).to_equal(1)
+        si_intern("first")
+        expect(si_get_next_id()).to_equal(1)
 
-        interner.intern("second")
-        expect(interner.next_id).to_equal(2)
+        si_intern("second")
+        expect(si_get_next_id()).to_equal(2)
 
         # Interning same string doesn't increment
-        interner.intern("first")
-        expect(interner.next_id).to_equal(2)
+        si_intern("first")
+        expect(si_get_next_id()).to_equal(2)
 
 describe "SdnRow":
     slow_it "creates empty row":
@@ -305,50 +375,50 @@ describe "SdnRow":
     slow_it "sets and gets field values":
         var row = SdnRow(fields: {})
 
-        row.set("name", "Alice")
-        row.set("age", "30")
+        row = row_set(row, "name", "Alice")
+        row = row_set(row, "age", "30")
 
-        expect(row.get("name")?).to_equal("Alice")
-        expect(row.get("age")?).to_equal("30")
+        expect(row_get(row, "name")?).to_equal("Alice")
+        expect(row_get(row, "age")?).to_equal("30")
 
     slow_it "returns None for missing field":
         val row = SdnRow(fields: {})
-        val result = row.get("nonexistent")
+        val result = row_get(row, "nonexistent")
 
         expect(result.?).to_equal(false)
 
     slow_it "gets field as i64":
         var row = SdnRow(fields: {})
-        row.set("count", "42")
+        row = row_set(row, "count", "42")
 
-        val result = row.get_i64("count")
+        val result = row_get_i64(row, "count")
         expect(result.?).to_equal(true)
         expect(result?).to_equal(42)
 
     slow_it "gets field as bool":
         var row = SdnRow(fields: {})
-        row.set("flag", "true")
-        row.set("other", "false")
+        row = row_set(row, "flag", "true")
+        row = row_set(row, "other", "false")
 
-        expect(row.get_bool("flag")?).to_equal(true)
-        expect(row.get_bool("other")?).to_equal(false)
+        expect(row_get_bool(row, "flag")?).to_equal(true)
+        expect(row_get_bool(row, "other")?).to_equal(false)
 
     slow_it "handles large field values":
         var row = SdnRow(fields: {})
 
         val large_text = "x".repeat(10000)
-        row.set("large", large_text)
+        row = row_set(row, "large", large_text)
 
-        val result = row.get("large")?
+        val result = row_get(row, "large")?
         expect(result.len()).to_equal(10000)
 
     slow_it "overwrites existing field":
         var row = SdnRow(fields: {})
 
-        row.set("key", "old_value")
-        row.set("key", "new_value")
+        row = row_set(row, "key", "old_value")
+        row = row_set(row, "key", "new_value")
 
-        expect(row.get("key")?).to_equal("new_value")
+        expect(row_get(row, "key")?).to_equal("new_value")
 
 describe "SdnTable":
     slow_it "creates table with schema":
@@ -362,10 +432,10 @@ describe "SdnTable":
         var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {})
 
         var row = SdnRow(fields: {})
-        row.set("id", "1")
-        row.set("value", "test")
+        row = row_set(row, "id", "1")
+        row = row_set(row, "value", "test")
 
-        table.add_row(row)
+        table = tbl_add_row(table, row)
         expect(table.rows.len()).to_equal(1)
 
     slow_it "adds multiple rows":
@@ -373,9 +443,9 @@ describe "SdnTable":
 
         for i in 0..5:
             var row = SdnRow(fields: {})
-            row.set("key", "key_{i}")
-            row.set("value", "value_{i}")
-            table.add_row(row)
+            row = row_set(row, "key", "key_{i}")
+            row = row_set(row, "value", "value_{i}")
+            table = tbl_add_row(table, row)
 
         expect(table.rows.len()).to_equal(5)
 
@@ -383,19 +453,19 @@ describe "SdnTable":
         var table = SdnTable(name: "records", columns: ["id", "data"], rows: [], index: {})
 
         var row = SdnRow(fields: {})
-        row.set("id", "record_123")
-        row.set("data", "test_data")
-        table.add_row(row)
+        row = row_set(row, "id", "record_123")
+        row = row_set(row, "data", "test_data")
+        table = tbl_add_row(table, row)
 
-        val result = table.get_row("record_123")
+        val result = tbl_get_row(table, "record_123")
         expect(result.?).to_equal(true)
         val r1 = result ?? SdnRow(fields: {})
-        val data = r1.get("data") ?? ""
+        val data = row_get(r1, "data") ?? ""
         expect(data).to_equal("test_data")
 
     slow_it "returns None for missing row ID":
         val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
-        val result = table.get_row("nonexistent")
+        val result = tbl_get_row(table, "nonexistent")
 
         expect(result.?).to_equal(false)
 
@@ -403,27 +473,29 @@ describe "SdnTable":
         var table = SdnTable(name: "deletable", columns: ["id", "valid"], rows: [], index: {})
 
         var row = SdnRow(fields: {})
-        row.set("id", "del_1")
-        row.set("valid", "true")
-        table.add_row(row)
+        row = row_set(row, "id", "del_1")
+        row = row_set(row, "valid", "true")
+        table = tbl_add_row(table, row)
 
         var row2 = SdnRow(fields: {})
-        row2.set("id", "del_2")
-        row2.set("valid", "true")
-        table.add_row(row2)
+        row2 = row_set(row2, "id", "del_2")
+        row2 = row_set(row2, "valid", "true")
+        table = tbl_add_row(table, row2)
 
-        expect(table.rows.len()).to_equal(2)
+        val rows_before = table.rows
+        expect(rows_before.len()).to_equal(2)
 
         # Mark first row deleted
-        table.mark_deleted("del_1")
+        table = tbl_mark_deleted(table, "del_1")
 
         # Check the row was actually marked
-        val marked_row = table.rows[0]
-        val valid_val = marked_row.get("valid") ?? "missing"
+        val rows_after = table.rows
+        val marked_row = rows_after[0]
+        val valid_val = row_get(marked_row, "valid") ?? "missing"
         expect(valid_val).to_equal("false")
 
         # Valid rows should only return the second row
-        val valid = table.valid_rows()
+        val valid = tbl_valid_rows(table)
         expect(valid.len()).to_equal(1)
 
     slow_it "filters valid rows only":
@@ -432,92 +504,93 @@ describe "SdnTable":
         # Add some valid and invalid rows
         for i in 0..5:
             var row = SdnRow(fields: {})
-            row.set("id", "row_{i}")
+            row = row_set(row, "id", "row_{i}")
             val valid_str = if i % 2 == 0: "true" else: "false"
-            row.set("valid", valid_str)
-            table.add_row(row)
+            row = row_set(row, "valid", valid_str)
+            table = tbl_add_row(table, row)
 
-        val valid_rows = table.valid_rows()
+        val valid_rows = tbl_valid_rows(table)
         expect(valid_rows.len()).to_equal(3)  # Rows 0, 2, 4
 
     slow_it "handles empty table":
         val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
 
-        expect(table.rows.len()).to_equal(0)
-        val empty_valid = table.valid_rows()
+        val rows = table.rows
+        expect(rows.len()).to_equal(0)
+        val empty_valid = tbl_valid_rows(table)
         expect(empty_valid.len()).to_equal(0)
 
-        val result = table.get_row("any_id")
+        val result = tbl_get_row(table, "any_id")
         expect(result.?).to_equal(false)
 
 describe "SdnDatabase":
     slow_it "creates new database":
-        val db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_new_db.sdn")
 
-        expect(db.tables.len()).to_equal(0)
+        expect(db_table_count()).to_equal(0)
 
     slow_it "adds table to database":
-        var db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_add_table.sdn")
 
         val table = SdnTable(name: "test_table", columns: ["id", "value"], rows: [], index: {})
-        db.set_table("test_table", table)
+        db_set_table("test_table", table)
 
-        expect(db.tables.len()).to_equal(1)
-        expect(db.tables.contains_key("test_table")).to_equal(true)
+        expect(db_table_count()).to_equal(1)
 
     slow_it "gets table from database":
-        var db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_get_table.sdn")
 
         val table = SdnTable(name: "my_table", columns: ["col1", "col2"], rows: [], index: {})
-        db.set_table("my_table", table)
+        db_set_table("my_table", table)
 
-        val result = db.get_table("my_table")
+        val result = db_get_table("my_table")
         expect(result.?).to_equal(true)
         val tbl = result ?? SdnTable(name: "", columns: [], rows: [], index: {})
         expect(tbl.name).to_equal("my_table")
 
     slow_it "gets mutable table":
-        var db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_mut_table.sdn")
 
         val table = SdnTable(name: "mut_table", columns: ["id"], rows: [], index: {})
-        db.set_table("mut_table", table)
+        db_set_table("mut_table", table)
 
-        var table_opt = db.get_table_mut("mut_table")
+        var table_opt = db_get_table_mut("mut_table")
         expect(table_opt.?).to_equal(true)
 
         var mut_table = table_opt?
         var row = SdnRow(fields: {})
-        row.set("id", "test")
-        mut_table.add_row(row)
+        row = row_set(row, "id", "test")
+        mut_table = tbl_add_row(mut_table, row)
 
         # Must put back for changes to persist
-        db.set_table("mut_table", mut_table)
+        db_set_table("mut_table", mut_table)
 
         # Verify change persisted
-        val final_table = db.get_table("mut_table")?
+        val final_table = db_get_table("mut_table")?
         expect(final_table.rows.len()).to_equal(1)
 
     slow_it "returns None for missing table":
-        val db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_missing.sdn")
 
-        val result = db.get_table("nonexistent")
+        val result = db_get_table("nonexistent")
         expect(result.?).to_equal(false)
 
     slow_it "replaces existing table":
-        var db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_replace.sdn")
 
         # Add initial table
         val table1 = SdnTable(name: "replaceable", columns: ["old_col"], rows: [], index: {})
-        db.set_table("replaceable", table1)
+        db_set_table("replaceable", table1)
 
         # Replace with new table
         val table2 = SdnTable(name: "replaceable", columns: ["new_col"], rows: [], index: {})
-        db.set_table("replaceable", table2)
+        db_set_table("replaceable", table2)
 
         # Verify replacement
-        val result = db.get_table("replaceable")?
-        expect(result.columns.len()).to_equal(1)
-        expect(result.columns[0]).to_equal("new_col")
+        val result = db_get_table("replaceable")?
+        val cols = result.columns
+        expect(cols.len()).to_equal(1)
+        expect(cols[0]).to_equal("new_col")
 
     slow_it "saves and loads database":
         val test_path = "/tmp/test_save_load_db.sdn"
@@ -526,29 +599,28 @@ describe "SdnDatabase":
             file_delete(test_path)
 
         # Create and populate database
-        var db = SdnDatabase(path: test_path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init(test_path)
         var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {})
         var row1 = SdnRow(fields: {})
-        row1.set("id", "item_1")
-        row1.set("value", "hello")
-        table.add_row(row1)
+        row1 = row_set(row1, "id", "item_1")
+        row1 = row_set(row1, "value", "hello")
+        table = tbl_add_row(table, row1)
         var row2 = SdnRow(fields: {})
-        row2.set("id", "item_2")
-        row2.set("value", "world")
-        table.add_row(row2)
-        db.set_table("items", table)
+        row2 = row_set(row2, "id", "item_2")
+        row2 = row_set(row2, "value", "world")
+        table = tbl_add_row(table, row2)
+        db_set_table("items", table)
 
         # Save
-        val save_ok = db.save()
+        val save_ok = db_save()
         expect(save_ok).to_equal(true)
         expect(file_exists(test_path)).to_equal(true)
 
         # Load
-        val loaded_opt = SdnDatabase.load(test_path)
-        expect(loaded_opt.?).to_equal(true)
+        val loaded_ok = db_load(test_path)
+        expect(loaded_ok).to_equal(true)
 
-        val loaded = loaded_opt?
-        val loaded_table = loaded.get_table("items")
+        val loaded_table = db_get_table("items")
         expect(loaded_table.?).to_equal(true)
         val tbl = loaded_table?
         expect(tbl.rows.len()).to_equal(2)
@@ -558,74 +630,75 @@ describe "SdnDatabase":
             file_delete(test_path)
 
     slow_it "handles multiple tables":
-        var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_multi_tables.sdn")
 
         # Add multiple tables
         for i in 0..5:
             val table = SdnTable(name: "table_{i}", columns: ["col_{i}"], rows: [], index: {})
-            db.set_table("table_{i}", table)
+            db_set_table("table_{i}", table)
 
-        expect(db.tables.len()).to_equal(5)
+        expect(db_table_count()).to_equal(5)
 
         # Verify all tables accessible
         for i in 0..5:
-            val table_opt = db.get_table("table_{i}")
+            val table_opt = db_get_table("table_{i}")
             expect(table_opt.?).to_equal(true)
 
     slow_it "preserves table order":
-        var db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_table_order.sdn")
 
         val names = ["first", "second", "third"]
         for name in names:
             val table = SdnTable(name: name, columns: ["id"], rows: [], index: {})
-            db.set_table(name, table)
+            db_set_table(name, table)
 
         # Tables should be accessible in any order
-        expect(db.get_table("first").?).to_equal(true)
-        expect(db.get_table("second").?).to_equal(true)
-        expect(db.get_table("third").?).to_equal(true)
+        expect(db_get_table("first").?).to_equal(true)
+        expect(db_get_table("second").?).to_equal(true)
+        expect(db_get_table("third").?).to_equal(true)
 
 describe "Database Integration":
     slow_it "combines interner with database":
-        var db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
-        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        db_init("/tmp/test_interner_db.sdn")
+        si_reset()
 
         # Intern column names
-        val col_id = interner.intern("id")
-        val col_name = interner.intern("name")
+        val col_id = si_intern("id")
+        val col_name = si_intern("name")
 
         # Create table with interned names
         var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
 
         # Add row
         var row = SdnRow(fields: {})
-        row.set(interner.lookup(col_id)?, "user_1")
-        row.set(interner.lookup(col_name)?, "Alice")
-        table.add_row(row)
+        row = row_set(row, si_lookup(col_id)?, "user_1")
+        row = row_set(row, si_lookup(col_name)?, "Alice")
+        table = tbl_add_row(table, row)
 
-        db.set_table("users", table)
+        db_set_table("users", table)
 
         # Verify
-        val saved_table = db.get_table("users")?
+        val saved_table = db_get_table("users")?
         expect(saved_table.rows.len()).to_equal(1)
 
     slow_it "handles large number of rows efficiently":
-        var db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        db_init("/tmp/test_large_db.sdn")
         var table = SdnTable(name: "large", columns: ["id", "data"], rows: [], index: {})
 
         # Add 1000 rows
         for i in 0..1000:
             var row = SdnRow(fields: {})
-            row.set("id", "row_{i}")
-            row.set("data", "data_{i}")
-            table.add_row(row)
+            row = row_set(row, "id", "row_{i}")
+            row = row_set(row, "data", "data_{i}")
+            table = tbl_add_row(table, row)
 
-        db.set_table("large", table)
+        db_set_table("large", table)
 
         # Verify
-        val result = db.get_table("large")?
-        expect(result.rows.len()).to_equal(1000)
+        val result = db_get_table("large")?
+        val result_rows = result.rows
+        expect(result_rows.len()).to_equal(1000)
 
         # Spot check
-        val row_500 = result.get_row("row_500")?
-        expect(row_500.get("data")?).to_equal("data_500")
+        val row_500 = tbl_get_row(result, "row_500")?
+        expect(row_get(row_500, "data")?).to_equal("data_500")
