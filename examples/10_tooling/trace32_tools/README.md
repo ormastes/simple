@@ -220,6 +220,85 @@ Interactive shell for TRACE32 session management with SDN catalog support.
 
 ---
 
+## Prompt Examples
+
+Once the T32 MCP servers and CMM LSP plugin are installed, try these prompts in Claude Code:
+
+### T32 MCP (live debug sessions)
+
+```
+> "Connect to TRACE32 on localhost:20000 and show the system state"
+
+> "Set a breakpoint at main, run the target, and capture the register view"
+
+> "Read 256 bytes of memory starting at 0x20000000"
+
+> "Load my_firmware.elf onto the target and run to main"
+
+> "List all active TRACE32 sessions and their core states"
+
+> "Run this PRACTICE script: config/t32/stm32h7_gdb_start.cmm"
+
+> "Capture a screenshot of the current TRACE32 PowerView window"
+
+> "Show the local variables at the current breakpoint"
+```
+
+### T32 LSP MCP (CMM script analysis — no hardware)
+
+```
+> "Parse test_fixtures/stm32/stm32h7_gdb_setup.cmm and show the AST summary"
+
+> "Check this CMM script for errors, unused macros, and unreachable code"
+
+> "What completions are available after 'Data.LOAD.' in a CMM script?"
+
+> "Show me the documentation for the Break.Set command"
+
+> "List all symbols (labels and macros) in my CMM script"
+
+> "Validate the CLI-mode conversion of this PRACTICE script"
+```
+
+### CMM LSP Plugin (IDE features for .cmm files)
+
+```
+> "Open config/t32/stm32h7_gdb_start.cmm — hover over Break.Set to see docs"
+
+> "Go to the definition of the macro &settings in my CMM script"
+
+> "What diagnostics does the CMM LSP report for this file?"
+
+> "Auto-complete PRACTICE functions starting with 'STATE.'"
+```
+
+### Full Setup (All T32 Tools)
+
+```bash
+cd /path/to/simple
+
+# 1. T32 MCP — live debug session control (20 tools)
+claude mcp add t32-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+
+# 2. T32 LSP MCP — CMM analysis (6 tools)
+claude mcp add t32-lsp-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+
+# 3. CMM LSP plugin — IDE features for .cmm files
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install cmm-lsp@simple-local
+```
+
+**Binary full paths:**
+- T32 MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_mcp/main.spl`
+- T32 LSP MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
+- CMM LSP: `bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
+
+---
+
 ## Requirements
 
 | Tool | TRACE32 Required | Notes |

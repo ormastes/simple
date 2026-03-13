@@ -1024,6 +1024,128 @@ simple build lint
 
 ---
 
+## AI Tooling (MCP, LSP, Plugin)
+
+Simple ships with MCP servers, LSP servers, and Claude Code plugins — all written in Simple.
+
+### Install Simple MCP Server
+
+The Simple MCP server exposes 50 tools for code diagnostics, VCS, build, test, debug, and more.
+
+```bash
+# From a repo checkout — register with Claude Code
+claude mcp add simple-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/src/app/mcp/main.spl
+
+# Or use the project .mcp.json (auto-detected by Claude Code)
+sh config/mcp/install.shs
+```
+
+### Install Simple LSP Plugin
+
+The Simple language server provides completions, hover, go-to-definition, diagnostics, and semantic tokens for `.spl` / `.shs` files.
+
+```bash
+# From a repo checkout
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install simple-lsp@simple-local
+```
+
+**Binary full path:** `bin/release/simple run src/app/lsp/main.spl`
+
+### Install Both (Quick Setup)
+
+```bash
+cd /path/to/simple
+
+# 1. MCP server
+sh config/mcp/install.shs
+
+# 2. LSP plugin
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install simple-lsp@simple-local
+```
+
+### Prompt Examples
+
+Once the MCP server and LSP plugin are installed, try these prompts in Claude Code:
+
+```
+> "Run the linter on src/app/cli/main.spl and fix any warnings"
+
+> "Show me all unused variables in the compiler frontend"
+
+> "Run the unit tests for the SDN parser"
+
+> "Build the project in release mode and show the result"
+
+> "What does the function `parse_expression` in the parser do?"
+
+> "Find all TODO items in the codebase"
+
+> "Check the doc coverage for the standard library"
+
+> "Debug why test/unit/lib/common/value_spec.spl is failing"
+```
+
+---
+
+## TRACE32 Tools
+
+MCP servers, CMM language server, and CLI tools for [Lauterbach TRACE32](https://www.lauterbach.com/en/) debuggers. See [`examples/10_tooling/trace32_tools/README.md`](examples/10_tooling/trace32_tools/README.md) for full documentation.
+
+### Install T32 MCP Servers
+
+```bash
+cd /path/to/simple
+
+# T32 MCP — controls live TRACE32 debug sessions (20 tools)
+claude mcp add t32-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+
+# T32 LSP MCP — CMM script analysis, no hardware needed (6 tools)
+claude mcp add t32-lsp-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+```
+
+**Binary full paths:**
+- T32 MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_mcp/main.spl`
+- T32 LSP MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
+
+### Install CMM LSP Plugin
+
+```bash
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install cmm-lsp@simple-local
+```
+
+**Binary full path:** `bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
+
+### T32 Prompt Examples
+
+```
+> "Parse this CMM script and check for errors: config/t32/stm32h7_gdb_start.cmm"
+
+> "Connect to TRACE32 on localhost:20000 and read the CPU registers"
+
+> "Show me all labels and macros defined in my CMM script"
+
+> "Convert this GUI PRACTICE script to CLI batch mode"
+
+> "Check if my CMM script has any undefined macros or unreachable code"
+
+> "Set a breakpoint at main, run to it, and show local variables"
+
+> "What TRACE32 commands are available for memory access?"
+
+> "Auto-complete suggestions for 'Data.LOAD' in my CMM script"
+```
+
+---
+
 ## Contributing
 
 See [CLAUDE.md](CLAUDE.md) for development guidelines and [AGENTS.md](AGENTS.md) for AI agent instructions.

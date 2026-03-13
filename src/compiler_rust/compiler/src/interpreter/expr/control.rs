@@ -7,7 +7,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{
-    exec_node, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
+    exec_node, exec_block_fn, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
 };
 
 pub(super) fn eval_control_expr(
@@ -57,21 +57,9 @@ pub(super) fn eval_control_expr(
             } = branch_result
             {
                 let mut block_env = captured_env.clone();
-                let mut last_val = Value::Nil;
-                for node in &nodes {
-                    match exec_node(node, &mut block_env, functions, classes, enums, impl_methods)? {
-                        Control::Return(v) => return Ok(Some(v)),
-                        Control::Break(_) => break,
-                        Control::Continue => continue,
-                        Control::Next => {
-                            // Get the expression value if it was an expression node
-                            if let Node::Expression(expr) = node {
-                                last_val =
-                                    evaluate_expr(expr, &mut block_env, functions, classes, enums, impl_methods)?;
-                            }
-                        }
-                    }
-                }
+                let mut block = simple_parser::ast::Block::default();
+                block.statements = nodes;
+                let (flow, last_val) = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
                 // Write back mutations from block_env to the outer env.
                 // This ensures that me-method self-updates inside if-expression
                 // branches propagate correctly.
@@ -80,7 +68,10 @@ pub(super) fn eval_control_expr(
                         env.insert(key.clone(), value.clone());
                     }
                 }
-                last_val
+                match flow {
+                    Control::Return(v) => return Ok(Some(v)),
+                    _ => last_val.unwrap_or(Value::Nil),
+                }
             } else {
                 branch_result
             };
