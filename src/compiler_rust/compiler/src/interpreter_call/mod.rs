@@ -315,6 +315,10 @@ pub(crate) fn evaluate_call(
                         payload,
                     });
                 }
+                // Check for enum static methods (defined inline in the enum or via impl block)
+                if let Some(method) = enum_def.methods.iter().find(|m| &m.name == field) {
+                    return core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
+                }
             }
 
             // Try block-scoped enums (defined in test blocks)
@@ -345,6 +349,10 @@ pub(crate) fn evaluate_call(
                         variant: field.clone(),
                         payload,
                     });
+                }
+                // Check for enum static methods in block-scoped enums
+                if let Some(method) = enum_def.methods.iter().find(|m| &m.name == field) {
+                    return core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 
@@ -466,6 +474,10 @@ pub(crate) fn evaluate_call(
                         variant: method_name.clone(),
                         payload,
                     });
+                }
+                // Check for enum static methods (defined inline in the enum or via impl block)
+                if let Some(method) = enum_def.methods.iter().find(|m| m.name == *method_name) {
+                    return core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 

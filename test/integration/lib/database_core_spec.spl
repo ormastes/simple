@@ -99,7 +99,10 @@ class SdnTable:
     me mark_deleted(id: text):
         for i in 0..self.rows.len():
             if self.rows[i].get("id").? and self.rows[i].get("id")? == id:
-                self.rows[i].set("valid", "false")
+                # Read, modify, write back to handle value-type SdnRow in array
+                var row = self.rows[i]
+                row.set("valid", "false")
+                self.rows[i] = row
                 return
     fn valid_rows() -> [SdnRow]:
         var result = []
@@ -137,9 +140,78 @@ class SdnDatabase:
             return Some(self.tables[name])
         nil
     me save() -> bool:
-        true
+        # Serialize all tables to SDN format and write to disk
+        var sections: [text] = []
+        for name in self.tables.keys():
+            val table = self.tables[name]
+            sections.push(table.to_sdn())
+        val content = sections.join("\n")
+        file_write(self.path, content)
+
     static fn load(path: text):
-        nil
+        if not file_exists(path):
+            return nil
+        val content = file_read(path)
+        if content == "":
+            return nil
+        # Parse tables from file content
+        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        val lines = content.split("\n")
+        var current_table_name = ""
+        var current_columns: [text] = []
+        var current_rows: [SdnRow] = []
+        var current_index: {text: i64} = {}
+        var in_table = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                if in_table and current_table_name != "":
+                    val table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+                    db.tables[current_table_name] = table
+                    in_table = false
+                    current_table_name = ""
+                    current_columns = []
+                    current_rows = []
+                    current_index = {}
+                continue
+            # Detect table header: contains "|" and not indented
+            if trimmed.contains("|") and not line.starts_with(" "):
+                # Save previous table if any
+                if in_table and current_table_name != "":
+                    val prev_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+                    db.tables[current_table_name] = prev_table
+                # Parse header using split("|") to avoid index_of enum bug
+                val pipe_parts = trimmed.split("|")
+                current_table_name = pipe_parts[0].trim()
+                var col_str = ""
+                if pipe_parts.len() >= 2:
+                    col_str = pipe_parts[1].trim()
+                val raw_cols = col_str.split(",")
+                current_columns = []
+                for c in raw_cols:
+                    current_columns = current_columns + [c.trim()]
+                current_rows = []
+                current_index = {}
+                in_table = true
+            elif in_table:
+                # Parse data row
+                val values = trimmed.split(",")
+                if values.len() == current_columns.len():
+                    var row = SdnRow(fields: {})
+                    for i in 0..current_columns.len():
+                        val col = current_columns[i]
+                        val v = values[i].trim()
+                        row.set(col, v)
+                    if row.has("id"):
+                        val id_opt = row.get("id")
+                        if id_opt.?:
+                            current_index[id_opt?] = current_rows.len()
+                    current_rows = current_rows + [row]
+        # Save last table
+        if in_table and current_table_name != "":
+            val last_table = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: current_index)
+            db.tables[current_table_name] = last_table
+        Some(db)
 
 fn slow_it(name: text, block: fn()):
     it(name, block)
@@ -328,9 +400,31 @@ describe "SdnTable":
         expect(result.?).to_equal(false)
 
     slow_it "marks row as deleted":
-        # SKIP: mark_deleted modifies rows via self.rows[i].set() but
-        # SdnRow is value-typed, so mutation on array element does not persist
-        print "SKIP: mark_deleted does not persist due to value-type SdnRow in array"
+        var table = SdnTable(name: "deletable", columns: ["id", "valid"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "del_1")
+        row.set("valid", "true")
+        table.add_row(row)
+
+        var row2 = SdnRow(fields: {})
+        row2.set("id", "del_2")
+        row2.set("valid", "true")
+        table.add_row(row2)
+
+        expect(table.rows.len()).to_equal(2)
+
+        # Mark first row deleted
+        table.mark_deleted("del_1")
+
+        # Check the row was actually marked
+        val marked_row = table.rows[0]
+        val valid_val = marked_row.get("valid") ?? "missing"
+        expect(valid_val).to_equal("false")
+
+        # Valid rows should only return the second row
+        val valid = table.valid_rows()
+        expect(valid.len()).to_equal(1)
 
     slow_it "filters valid rows only":
         var table = SdnTable(name: "mixed", columns: ["id", "valid"], rows: [], index: {})
@@ -426,8 +520,42 @@ describe "SdnDatabase":
         expect(result.columns[0]).to_equal("new_col")
 
     slow_it "saves and loads database":
-        # SKIP: SdnDatabase stub load() returns nil - real impl needed for save/load roundtrip
-        print "SKIP: SdnDatabase stub load() always returns nil in this test"
+        val test_path = "/tmp/test_save_load_db.sdn"
+        # Cleanup
+        if file_exists(test_path):
+            file_delete(test_path)
+
+        # Create and populate database
+        var db = SdnDatabase(path: test_path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {})
+        var row1 = SdnRow(fields: {})
+        row1.set("id", "item_1")
+        row1.set("value", "hello")
+        table.add_row(row1)
+        var row2 = SdnRow(fields: {})
+        row2.set("id", "item_2")
+        row2.set("value", "world")
+        table.add_row(row2)
+        db.set_table("items", table)
+
+        # Save
+        val save_ok = db.save()
+        expect(save_ok).to_equal(true)
+        expect(file_exists(test_path)).to_equal(true)
+
+        # Load
+        val loaded_opt = SdnDatabase.load(test_path)
+        expect(loaded_opt.?).to_equal(true)
+
+        val loaded = loaded_opt?
+        val loaded_table = loaded.get_table("items")
+        expect(loaded_table.?).to_equal(true)
+        val tbl = loaded_table?
+        expect(tbl.rows.len()).to_equal(2)
+
+        # Cleanup
+        if file_exists(test_path):
+            file_delete(test_path)
 
     slow_it "handles multiple tables":
         var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)

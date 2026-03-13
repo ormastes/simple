@@ -550,8 +550,57 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             val needle_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val needle = val_get_text(needle_val)
-            return val_make_int(s.index_of(needle))
+            # Host binary returns Option<i64>; unwrap to raw i64 (-1 for not found)
+            return val_make_int(s.index_of(needle) ?? -1)
         return val_make_int(-1)
+
+    if method_name == "last_index_of":
+        if arg_eids.len() > 0:
+            val needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val needle = val_get_text(needle_val)
+            return val_make_int(s.last_index_of(needle) ?? -1)
+        return val_make_int(-1)
+
+    if method_name == "char_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            if idx >= 0 and idx < s.len():
+                return val_make_text(s.substring(idx, idx + 1))
+            return val_make_text("")
+        return val_make_text("")
+
+    if method_name == "parse_int":
+        val parsed = s.parse_int()
+        if parsed.?:
+            val int_val = parsed ?? 0
+            # Return as enum-like struct so ?? works on the result
+            var field_names: [text] = []
+            field_names.push("__tag")
+            field_names.push("__payload")
+            var field_values: [i64] = []
+            field_values.push(val_make_text("Some"))
+            field_values.push(val_make_int(int_val))
+            return val_make_struct("Option", field_names, field_values)
+        # Return None variant
+        var none_names: [text] = []
+        none_names.push("__tag")
+        none_names.push("__payload")
+        var none_values: [i64] = []
+        none_values.push(val_make_text("None"))
+        none_values.push(val_make_nil())
+        return val_make_struct("Option", none_names, none_values)
+
+    if method_name == "to_upper":
+        return val_make_text(s.to_upper())
+
+    if method_name == "to_lower":
+        return val_make_text(s.to_lower())
+
+    if method_name == "to_string":
+        return val_make_text(s)
 
     eval_set_error("no method '" + method_name + "' on text")
     -1
@@ -864,8 +913,25 @@ fn eval_null_coalesce(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val left = eval_expr(e_node.left)
     if eval_had_error: return -1
-    if val_is_nil(left) == false: return left
-    eval_expr(e_node.right)
+    # Plain nil → use right side
+    if val_is_nil(left):
+        return eval_expr(e_node.right)
+    # Enum/Option handling: struct with __tag field
+    if val_is_struct(left):
+        val tag_field = val_struct_get_field(left, "__tag")
+        if tag_field != VAL_NONE:
+            val tag_text = val_get_text(tag_field)
+            if tag_text == "None" or tag_text == "nil":
+                # None variant → use right side (fallback)
+                return eval_expr(e_node.right)
+            if tag_text == "Some" or tag_text == "Ok":
+                # Some/Ok variant → unwrap payload
+                val payload = val_struct_get_field(left, "__payload")
+                if payload != VAL_NONE:
+                    return payload
+                return left
+    # Non-nil, non-enum → return as-is
+    left
 
 # ===== Enum Variant Construction =====
 

@@ -284,6 +284,12 @@ pub(crate) fn call_extern_function(
         "rt_current_time_ms" => time::rt_current_time_ms(&evaluated),
 
         // ====================================================================
+        // High-Resolution Time Operations (2 functions)
+        // ====================================================================
+        "rt_time_now_nanos" => time::rt_time_now_nanos(&evaluated),
+        "rt_time_now_micros" => time::rt_time_now_micros(&evaluated),
+
+        // ====================================================================
         // DateTime Operations (11 functions)
         // ====================================================================
         "rt_time_now_unix_micros" => time::rt_time_now_unix_micros(&evaluated),

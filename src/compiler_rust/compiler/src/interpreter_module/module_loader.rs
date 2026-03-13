@@ -501,6 +501,10 @@ pub fn load_and_merge_module(
     }
     for (name, enum_def) in &module_enums {
         enums.insert(name.clone(), enum_def.clone());
+        // Also add to GLOBAL_ENUMS so cross-module fallback paths can find the enum
+        crate::interpreter::GLOBAL_ENUMS.with(|cell| {
+            cell.borrow_mut().insert(name.clone(), enum_def.clone());
+        });
     }
 
     // Clear partial exports now that full exports are available

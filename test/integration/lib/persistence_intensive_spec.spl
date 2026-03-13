@@ -91,7 +91,15 @@ class BugDatabase:
                 open = open + 1
         {total: total, open: open}
     me save() -> bool:
-        true
+        # Serialize bugs to SDN-like format and write to disk
+        var lines: [text] = []
+        lines.push("bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|")
+        for k in self.bugs.keys():
+            val b = self.bugs[k]
+            val valid_str = if b.valid: "true" else: "false"
+            lines.push("    {b.id}, {b.severity.value}, {b.status.value}, {b.title}, {b.file}, {b.line}, {b.reproducible_by}, {b.created_at}, {b.updated_at}, {valid_str}")
+        val content = lines.join("\n") + "\n"
+        file_write(self.path, content)
 
 fn create_bug_database(path: text) -> BugDatabase:
     BugDatabase(bugs: {}, path: path)
@@ -269,16 +277,59 @@ describe "Bug Database Persistence - Intensive":
 
     context "file system operations":
         slow_it "creates file if not exists":
-            # SKIP: stub save() returns true but does not write to disk
-            print "SKIP: stub BugDatabase.save() does not write files to disk"
+            val test_file = "{_tmp}/test_bugdb_create_file.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            bugdb.add_bug(generate_simple_bug("create_1"))
+            bugdb.save()
+
+            check(file_exists(test_file))
+            val content = file_read(test_file)
+            check(content.contains("create_1"))
+
+            cleanup_test_file(test_file)
 
         slow_it "overwrites existing file":
-            # SKIP: stub save() does not write to disk, create_bug_database creates empty db
-            print "SKIP: stub BugDatabase.save() does not write files to disk"
+            val test_file = "{_tmp}/test_bugdb_overwrite.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            bugdb.add_bug(generate_simple_bug("over_1"))
+            bugdb.save()
+
+            val content1 = file_read(test_file)
+            check(content1.contains("over_1"))
+
+            # Add another bug and re-save
+            bugdb.add_bug(generate_simple_bug("over_2"))
+            bugdb.save()
+
+            val content2 = file_read(test_file)
+            check(content2.contains("over_1"))
+            check(content2.contains("over_2"))
+
+            cleanup_test_file(test_file)
 
         slow_it "handles file deletion after save":
-            # SKIP: stub save() does not write to disk so file_exists check fails
-            print "SKIP: stub BugDatabase.save() does not write files to disk"
+            val test_file = "{_tmp}/test_bugdb_delete_after.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            bugdb.add_bug(generate_simple_bug("del_1"))
+            bugdb.save()
+
+            check(file_exists(test_file))
+
+            # Delete file
+            file_delete(test_file)
+            check(not file_exists(test_file))
+
+            # Re-save should re-create file
+            bugdb.save()
+            check(file_exists(test_file))
+
+            cleanup_test_file(test_file)
 
     context "error handling":
         slow_it "handles load of non-existent file":

@@ -256,6 +256,10 @@ pub fn merge_cached_module_definitions(
         if let Some(cached_enums) = cache.borrow().get(&key) {
             for (name, enum_def) in cached_enums {
                 enums.insert(name.clone(), enum_def.clone());
+                // Also add to GLOBAL_ENUMS so cross-module fallback paths can find the enum
+                crate::interpreter::GLOBAL_ENUMS.with(|cell| {
+                    cell.borrow_mut().insert(name.clone(), enum_def.clone());
+                });
             }
         }
     });

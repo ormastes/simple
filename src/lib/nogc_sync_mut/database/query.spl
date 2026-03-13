@@ -46,6 +46,21 @@ struct Filter:
             CompareOp.StartsWith: fv.starts_with(self.value)
             CompareOp.EndsWith: fv.ends_with(self.value)
 
+# IN filter — matches if field value equals ANY of the given values (OR semantics)
+struct InFilter:
+    field: text
+    values: [text]
+
+    fn matches(row: SdnRow) -> bool:
+        val field_value = row.get(self.field)
+        if not field_value.?:
+            return false
+        val fv = field_value.unwrap()
+        for v in self.values:
+            if fv == v:
+                return true
+        false
+
 # ============================================================================
 # QueryBuilder
 # ============================================================================
@@ -53,6 +68,7 @@ struct Filter:
 class QueryBuilder:
     table: SdnTable
     filters: [Filter]
+    in_filters: [InFilter]
     sort_field: text?
     sort_desc: bool
     limit_count: i64?
@@ -62,6 +78,7 @@ class QueryBuilder:
         QueryBuilder(
             table: table,
             filters: [],
+            in_filters: [],
             sort_field: nil,
             sort_desc: false,
             limit_count: nil
@@ -72,12 +89,9 @@ class QueryBuilder:
         self.filters.push(Filter(field: field, op: op, value: value))
         self
 
-    # Filter by multiple values (field IN (values))
+    # Filter by multiple values (field IN (values)) — OR semantics
     me filter_in(field: text, values: [text]) -> QueryBuilder:
-        # Add OR filters for each value
-        # Note: This is simplified - proper implementation would group OR conditions
-        for value in values:
-            self.filters.push(Filter(field: field, op: CompareOp.Eq, value: value))
+        self.in_filters.push(InFilter(field: field, values: values))
         self
 
     # Exclude soft-deleted rows (valid=true)
@@ -99,9 +113,13 @@ class QueryBuilder:
     fn execute() -> [SdnRow]:
         var results = self.table.rows
 
-        # Apply filters
+        # Apply filters (AND semantics)
         for filter in self.filters:
             results = results.filter(\row: filter.matches(row))
+
+        # Apply IN filters (each InFilter uses OR internally, AND between InFilters)
+        for in_filter in self.in_filters:
+            results = results.filter(\row: in_filter.matches(row))
 
         # Apply sorting (merge sort - O(n log n) stable sort)
         if self.sort_field.?:

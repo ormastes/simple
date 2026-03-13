@@ -97,6 +97,36 @@ pub fn rt_time_now_unix_micros(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(micros))
 }
 
+/// Get current monotonic time in nanoseconds
+///
+/// Callable from Simple as: `rt_time_now_nanos()`
+///
+/// Uses std::time::Instant for monotonic high-resolution timing.
+/// Suitable for benchmarking and performance measurement.
+pub fn rt_time_now_nanos(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+    Ok(Value::Int(nanos))
+}
+
+/// Get current monotonic time in microseconds
+///
+/// Callable from Simple as: `rt_time_now_micros()`
+///
+/// Uses std::time::Instant for monotonic high-resolution timing.
+/// Suitable for profiling and performance measurement.
+pub fn rt_time_now_micros(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64;
+    Ok(Value::Int(micros))
+}
+
 /// Extract year from timestamp (microseconds)
 ///
 /// Callable from Simple as: `rt_timestamp_get_year(micros)`

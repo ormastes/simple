@@ -935,10 +935,15 @@ impl<'a> Parser<'a> {
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let mut name = name.clone();
             self.advance();
-            // Allow trailing `?` as part of the name (e.g., fn iter_empty?())
+            // Allow trailing `?` as part of the name only when followed by `(`
+            // (e.g., fn iter_empty?()). When `?` is NOT followed by `(`, it is
+            // the postfix try operator (e.g., obj.field?) and must not be consumed.
             if self.check(&TokenKind::Question) {
-                name.push('?');
-                self.advance();
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::LParen) {
+                    name.push('?');
+                    self.advance();
+                }
             }
             return Ok(name);
         }
