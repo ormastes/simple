@@ -8,6 +8,17 @@
 # Text-based lint helpers
 # ============================================================================
 
+fn _to_chars(s: text) -> [text]:
+    """Convert text to character array (avoids .substring() corruption)."""
+    var result: [text] = []
+    for ch in s:
+        result.push(ch)
+    result
+
+fn _is_word_char(ch: text) -> bool:
+    """Check if a character is a word character (letter, digit, underscore)."""
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
 fn check_unused_vars_text(source: text) -> [text]:
     """Text-based heuristic for unused variable detection.
     Returns list of variable names found to be unused."""
@@ -55,12 +66,12 @@ fn _find_enclosing_fn_range(lines: [text], target_idx: i64) -> (i64, i64):
     var si = target_idx - 1
     while si >= 0:
         val sline = lines[si]
+        val sindent = _count_indent(sline)
         val st = sline.trim()
         if (st.starts_with("fn ") or st.starts_with("me ") or
             st.starts_with("static fn ")):
             fn_start = si
             break
-        val sindent = _count_indent(sline)
         if sindent == 0 and st != "" and not st.starts_with("#"):
             if (not st.starts_with("fn ") and not st.starts_with("me ") and
                 not st.starts_with("static fn ")):
@@ -72,11 +83,11 @@ fn _find_enclosing_fn_range(lines: [text], target_idx: i64) -> (i64, i64):
     var ei = fn_start + 1
     while ei < lines.len():
         val eline = lines[ei]
+        val eindent = _count_indent(eline)
         val et = eline.trim()
         if et == "":
             ei = ei + 1
             continue
-        val eindent = _count_indent(eline)
         if eindent == 0:
             break
         fn_end = ei
@@ -87,21 +98,25 @@ fn _word_occurs_in(line: text, word: text) -> bool:
     """Check if a word occurs as a whole word in a line."""
     if line.len() < word.len():
         return false
+    val line_chars = _to_chars(line)
+    val word_chars = _to_chars(word)
     var pos = 0
-    while pos <= line.len() - word.len():
-        val candidate = line.substring(pos, pos + word.len())
-        if candidate == word:
+    while pos <= line_chars.len() - word_chars.len():
+        var match_ok = true
+        var mi = 0
+        while mi < word_chars.len():
+            if line_chars[pos + mi] != word_chars[mi]:
+                match_ok = false
+                break
+            mi = mi + 1
+        if match_ok:
             var left_ok = true
             var right_ok = true
             if pos > 0:
-                val lch = line.substring(pos - 1, pos)
-                val lw = (lch >= "a" and lch <= "z") or (lch >= "A" and lch <= "Z") or (lch >= "0" and lch <= "9") or lch == "_"
-                if lw:
+                if _is_word_char(line_chars[pos - 1]):
                     left_ok = false
-            if pos + word.len() < line.len():
-                val rch = line.substring(pos + word.len(), pos + word.len() + 1)
-                val rw = (rch >= "a" and rch <= "z") or (rch >= "A" and rch <= "Z") or (rch >= "0" and rch <= "9") or rch == "_"
-                if rw:
+            if pos + word_chars.len() < line_chars.len():
+                if _is_word_char(line_chars[pos + word_chars.len()]):
                     right_ok = false
             if left_ok and right_ok:
                 return true

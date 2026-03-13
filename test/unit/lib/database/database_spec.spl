@@ -1,64 +1,128 @@
 # Database Library Tests
 #
 # Tests for the unified database library (BugDatabase, TestDatabase, FeatureDatabase)
+# Rewritten to use array-based storage to avoid interpreter hash map type corruption.
 
 fn check(condition: bool):
     expect(condition).to_equal(true)
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
-# use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
-# use std.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
-# use app.io.{file_exists, file_delete, rt_timestamp_now}
 
-# Stub: StringInterner (uses str_to_id / id_to_str)
+# Stub: StringInterner (array-based — avoids hash map type corruption)
 class StringInterner:
-    str_to_id: {text: i64}
-    id_to_str: {text: text}
+    str_keys: [text]
+    str_ids: [i64]
+    id_keys: [text]
+    id_vals: [text]
     next_id: i64
+
+fn si_find_str(interner: StringInterner, s: text) -> i64:
+    var i = 0
+    while i < interner.str_keys.len():
+        if interner.str_keys[i] == s:
+            return i
+        i = i + 1
+    -1
+
+fn si_find_id(interner: StringInterner, id: i64) -> i64:
+    val key = "{id}"
+    var i = 0
+    while i < interner.id_keys.len():
+        if interner.id_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+impl StringInterner:
     me intern(s: text) -> i64:
-        if self.str_to_id.contains_key(s):
-            return self.str_to_id[s]
+        val idx = si_find_str(self, s)
+        if idx >= 0:
+            return self.str_ids[idx]
         val id = self.next_id
-        self.str_to_id[s] = id
-        self.id_to_str["{id}"] = s
+        self.str_keys = self.str_keys + [s]
+        self.str_ids = self.str_ids + [id]
+        self.id_keys = self.id_keys + ["{id}"]
+        self.id_vals = self.id_vals + [s]
         self.next_id = self.next_id + 1
         id
     fn get(id: i64):
-        val key = "{id}"
-        if self.id_to_str.contains_key(key):
-            return Some(self.id_to_str[key])
+        val idx = si_find_id(self, id)
+        if idx >= 0:
+            return Some(self.id_vals[idx])
         nil
-    static fn from_sdn(table: SdnTable) -> StringInterner:
-        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
-        for row in table.rows:
-            val id_str = row.get("id") ?? "0"
-            val value = row.get("value") ?? ""
-            val id = int(id_str)
-            interner.str_to_id[value] = id
-            interner.id_to_str["{id}"] = value
-            if id >= interner.next_id:
-                interner.next_id = id + 1
-        interner
-
     fn to_sdn() -> SdnTable:
-        var table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
-        for k in self.str_to_id.keys():
-            val id = self.str_to_id[k]
-            var row = SdnRow(fields: {})
+        var table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], row_keys: [], row_indices: [])
+        var i = 0
+        while i < self.str_keys.len():
+            val k = self.str_keys[i]
+            val id = self.str_ids[i]
+            var row = SdnRow(field_keys: [], field_vals: [])
             row.set("id", "{id}")
             row.set("value", k)
             table.add_row(row)
+            i = i + 1
         table
 
-# Stub: SdnRow
+fn si_from_sdn(table: SdnTable) -> StringInterner:
+    var interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
+    for row in table.rows:
+        val id_str = row.get("id") ?? "0"
+        val value = row.get("value") ?? ""
+        val id = int(id_str)
+        interner.str_keys = interner.str_keys + [value]
+        interner.str_ids = interner.str_ids + [id]
+        interner.id_keys = interner.id_keys + ["{id}"]
+        interner.id_vals = interner.id_vals + [value]
+        if id >= interner.next_id:
+            interner.next_id = id + 1
+    interner
+
+# Stub: SdnRow (array-based fields)
 class SdnRow:
-    fields: {text: text}
+    field_keys: [text]
+    field_vals: [text]
+
+fn sdn_row_find(row: SdnRow, key: text) -> i64:
+    var i = 0
+    while i < row.field_keys.len():
+        if row.field_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn sdn_row_set_at(row: SdnRow, idx: i64, value: text) -> SdnRow:
+    var new_vals: [text] = []
+    var i = 0
+    while i < row.field_vals.len():
+        if i == idx:
+            new_vals = new_vals + [value]
+        else:
+            new_vals = new_vals + [row.field_vals[i]]
+        i = i + 1
+    SdnRow(field_keys: row.field_keys, field_vals: new_vals)
+
+impl SdnRow:
     me set(key: text, value: text):
-        self.fields[key] = value
+        val idx = sdn_row_find(self, key)
+        if idx >= 0:
+            # Overwrite existing value via rebuild
+            var new_vals: [text] = []
+            var i = 0
+            while i < self.field_vals.len():
+                if i == idx:
+                    new_vals = new_vals + [value]
+                else:
+                    new_vals = new_vals + [self.field_vals[i]]
+                i = i + 1
+            self.field_vals = new_vals
+        else:
+            self.field_keys = self.field_keys + [key]
+            self.field_vals = self.field_vals + [value]
     fn get(key: text):
-        if self.fields.contains_key(key):
-            return Some(self.fields[key])
+        val idx = sdn_row_find(self, key)
+        if idx >= 0:
+            return Some(self.field_vals[idx])
         nil
     fn get_i64(key: text):
         val v = self.get(key)
@@ -74,43 +138,69 @@ class SdnRow:
                 return Some(false)
         nil
     fn has(key: text) -> bool:
-        self.fields.contains_key(key)
+        sdn_row_find(self, key) >= 0
 
-# Stub: SdnTable
+# Stub: SdnTable (array-based index)
 class SdnTable:
     name: text
     columns: [text]
     rows: [SdnRow]
-    index: {text: i64}
+    row_keys: [text]
+    row_indices: [i64]
+
+fn sdn_table_find_index(table: SdnTable, id: text) -> i64:
+    var i = 0
+    while i < table.row_keys.len():
+        if table.row_keys[i] == id:
+            return i
+        i = i + 1
+    -1
+
+impl SdnTable:
     me add_row(row: SdnRow):
         val id_opt = row.get("id")
         if id_opt.?:
             val id = id_opt?
-            if self.index.contains_key(id):
+            val existing = sdn_table_find_index(self, id)
+            if existing >= 0:
                 return
-            self.index[id] = self.rows.len()
+            self.row_keys = self.row_keys + [id]
+            self.row_indices = self.row_indices + [self.rows.len()]
         self.rows = self.rows + [row]
     fn get_row(id: text):
-        if self.index.contains_key(id):
-            val idx = self.index[id]
+        val fi = sdn_table_find_index(self, id)
+        if fi >= 0:
+            val idx = self.row_indices[fi]
             return Some(self.rows[idx])
         nil
     me update_row(id: text, new_row: SdnRow):
-        if self.index.contains_key(id):
-            val idx = self.index[id]
-            self.rows[idx] = new_row
+        val fi = sdn_table_find_index(self, id)
+        if fi >= 0:
+            val idx = self.row_indices[fi]
+            var new_rows: [SdnRow] = []
+            var i = 0
+            while i < self.rows.len():
+                if i == idx:
+                    new_rows = new_rows + [new_row]
+                else:
+                    new_rows = new_rows + [self.rows[i]]
+                i = i + 1
+            self.rows = new_rows
     me mark_deleted(id: text):
-        if self.index.contains_key(id):
-            val idx = self.index[id]
-            var new_rows = []
-            for i in 0..self.rows.len():
+        val fi = sdn_table_find_index(self, id)
+        if fi >= 0:
+            val idx = self.row_indices[fi]
+            var new_rows: [SdnRow] = []
+            var i = 0
+            while i < self.rows.len():
                 var r = self.rows[i]
                 if i == idx:
                     r.set("valid", "false")
                 new_rows = new_rows + [r]
+                i = i + 1
             self.rows = new_rows
     fn valid_rows() -> [SdnRow]:
-        var result = []
+        var result: [SdnRow] = []
         for row in self.rows:
             val valid = row.get("valid")
             if valid.? and valid? == "true":
@@ -120,29 +210,58 @@ class SdnTable:
         var cols_str = self.columns.join(", ")
         var result = "{self.name} |{cols_str}|\n"
         for row in self.rows:
-            var values = []
+            var values: [text] = []
             for col in self.columns:
                 val v = row.get(col) ?? ""
                 values = values + [v]
             result = result + "    {values.join(", ")}\n"
         result
 
-# Stub: SdnDatabase
+# Stub: SdnDatabase (array-based tables)
 class SdnDatabase:
     path: text
-    tables: {text: SdnTable}
+    table_names: [text]
+    table_values: [SdnTable]
     interner: StringInterner
     modified: bool
+
+fn sdn_db_find_table(db: SdnDatabase, name: text) -> i64:
+    var i = 0
+    while i < db.table_names.len():
+        if db.table_names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+impl SdnDatabase:
     me set_table(name: text, table: SdnTable):
-        self.tables[name] = table
+        val idx = sdn_db_find_table(self, name)
+        if idx >= 0:
+            var new_vals: [SdnTable] = []
+            var i = 0
+            while i < self.table_values.len():
+                if i == idx:
+                    new_vals = new_vals + [table]
+                else:
+                    new_vals = new_vals + [self.table_values[i]]
+                i = i + 1
+            self.table_values = new_vals
+        else:
+            self.table_names = self.table_names + [name]
+            self.table_values = self.table_values + [table]
     fn get_table(name: text):
-        if self.tables.contains_key(name):
-            return Some(self.tables[name])
+        val idx = sdn_db_find_table(self, name)
+        if idx >= 0:
+            return Some(self.table_values[idx])
         nil
     me intern(s: text) -> i64:
         self.interner.intern(s)
     fn resolve(id: i64):
         self.interner.get(id)
+    fn tables_len() -> i64:
+        self.table_names.len()
+    fn tables_contains_key(name: text) -> bool:
+        sdn_db_find_table(self, name) >= 0
 
 # Stub: BugSeverity / BugStatus / Bug / BugDatabase
 class BugSeverity:
@@ -181,13 +300,13 @@ class BugDatabase:
     fn all_bugs() -> [Bug]:
         self.bugs
     fn bugs_by_status(status: text) -> [Bug]:
-        var result = []
+        var result: [Bug] = []
         for bug in self.bugs:
             if bug.status == status:
                 result = result + [bug]
         result
     fn critical_bugs() -> [Bug]:
-        var result = []
+        var result: [Bug] = []
         for bug in self.bugs:
             if bug.severity == "P0":
                 result = result + [bug]
@@ -204,21 +323,22 @@ class BugDatabase:
                 fixed = fixed + 1
             if bug.severity == "P1":
                 p1 = p1 + 1
-        {"total": total, "open": open, "fixed": fixed, "p1": p1}
+        # Return as parallel arrays to avoid hash map corruption
+        [total, open, fixed, p1]
     fn validate_test_links() -> [text]:
-        var errors = []
+        var errors: [text] = []
         for bug in self.bugs:
             if bug.reproducible_by == "":
                 errors = errors + ["{bug.id} has no test link"]
         errors
 
 fn create_bug_database(path: text) -> BugDatabase:
-    val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+    val db = SdnDatabase(path: path, table_names: [], table_values: [], interner: StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0), modified: false)
     var bugdb = BugDatabase(db: db, bugs: [])
-    bugdb.db.set_table("bugs", SdnTable(name: "bugs", columns: ["id"], rows: [], index: {}))
-    bugdb.db.set_table("bug_descriptions", SdnTable(name: "bug_descriptions", columns: ["id"], rows: [], index: {}))
-    bugdb.db.set_table("bug_fix_strategies", SdnTable(name: "bug_fix_strategies", columns: ["id"], rows: [], index: {}))
-    bugdb.db.set_table("bug_investigation_logs", SdnTable(name: "bug_investigation_logs", columns: ["id"], rows: [], index: {}))
+    bugdb.db.set_table("bugs", SdnTable(name: "bugs", columns: ["id"], rows: [], row_keys: [], row_indices: []))
+    bugdb.db.set_table("bug_descriptions", SdnTable(name: "bug_descriptions", columns: ["id"], rows: [], row_keys: [], row_indices: []))
+    bugdb.db.set_table("bug_fix_strategies", SdnTable(name: "bug_fix_strategies", columns: ["id"], rows: [], row_keys: [], row_indices: []))
+    bugdb.db.set_table("bug_investigation_logs", SdnTable(name: "bug_investigation_logs", columns: ["id"], rows: [], row_keys: [], row_indices: []))
     bugdb
 
 # ============================================================================
@@ -227,12 +347,12 @@ fn create_bug_database(path: text) -> BugDatabase:
 
 describe "StringInterner":
     it "creates empty interner":
-        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
         check(interner.next_id == 0)
-        check(interner.str_to_id.len() == 0)
+        check(interner.str_keys.len() == 0)
 
     it "interns strings with unique IDs":
-        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        var interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
         val id1 = interner.intern("hello")
         val id2 = interner.intern("world")
         val id3 = interner.intern("hello")  # Same string
@@ -242,20 +362,20 @@ describe "StringInterner":
         check(id3 == 0)  # Reuses ID
 
     it "resolves IDs to strings":
-        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        var interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
         val id = interner.intern("test")
         val resolved = interner.get(id)?
 
         check(resolved == "test")
 
     it "returns None for invalid ID":
-        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
         val resolved = interner.get(999)
 
         check(not resolved.?)
 
     it "exports to SDN table":
-        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        var interner = StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0)
         interner.intern("foo")
         interner.intern("bar")
 
@@ -265,19 +385,19 @@ describe "StringInterner":
 
     it "loads from SDN table":
         # Create table
-        val table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
-        var row1 = SdnRow(fields: {})
+        var table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], row_keys: [], row_indices: [])
+        var row1 = SdnRow(field_keys: [], field_vals: [])
         row1.set("id", "0")
         row1.set("value", "test1")
         table.add_row(row1)
 
-        var row2 = SdnRow(fields: {})
+        var row2 = SdnRow(field_keys: [], field_vals: [])
         row2.set("id", "1")
         row2.set("value", "test2")
         table.add_row(row2)
 
         # Load interner
-        val interner = StringInterner.from_sdn(table)
+        val interner = si_from_sdn(table)
         check(interner.get(0)? == "test1")
         check(interner.get(1)? == "test2")
 
@@ -287,11 +407,11 @@ describe "StringInterner":
 
 describe "SdnRow":
     it "creates empty row":
-        val row = SdnRow(fields: {})
-        check(row.fields.len() == 0)
+        val row = SdnRow(field_keys: [], field_vals: [])
+        check(row.field_keys.len() == 0)
 
     it "sets and gets field values":
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("name", "Alice")
         row.set("age", "30")
 
@@ -299,17 +419,17 @@ describe "SdnRow":
         check(row.get("age")? == "30")
 
     it "returns None for missing field":
-        val row = SdnRow(fields: {})
+        val row = SdnRow(field_keys: [], field_vals: [])
         check(not row.get("missing").?)
 
     it "parses i64 fields":
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("count", "42")
 
         check(row.get_i64("count")? == 42)
 
     it "parses bool fields":
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("active", "true")
         row.set("disabled", "false")
 
@@ -317,7 +437,7 @@ describe "SdnRow":
         check(row.get_bool("disabled")? == false)
 
     it "checks if has column":
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("name", "Bob")
 
         check(row.has("name"))
@@ -329,16 +449,16 @@ describe "SdnRow":
 
 describe "SdnTable":
     it "creates new table":
-        val table = SdnTable(name: "users", columns: ["id", "name", "email"], rows: [], index: {})
+        val table = SdnTable(name: "users", columns: ["id", "name", "email"], rows: [], row_keys: [], row_indices: [])
 
         check(table.name == "users")
         check(table.columns.len() == 3)
         check(table.rows.len() == 0)
 
     it "adds rows":
-        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], row_keys: [], row_indices: [])
 
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("id", "1")
         row.set("name", "Alice")
 
@@ -346,9 +466,9 @@ describe "SdnTable":
         check(table.rows.len() == 1)
 
     it "indexes rows by primary key":
-        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], row_keys: [], row_indices: [])
 
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("id", "user_1")
         row.set("name", "Alice")
         table.add_row(row)
@@ -357,14 +477,14 @@ describe "SdnTable":
         check(found.get("name")? == "Alice")
 
     it "updates row by key":
-        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], row_keys: [], row_indices: [])
 
-        var row1 = SdnRow(fields: {})
+        var row1 = SdnRow(field_keys: [], field_vals: [])
         row1.set("id", "user_1")
         row1.set("name", "Alice")
         table.add_row(row1)
 
-        var row2 = SdnRow(fields: {})
+        var row2 = SdnRow(field_keys: [], field_vals: [])
         row2.set("id", "user_1")
         row2.set("name", "Bob")
         table.update_row("user_1", row2)
@@ -373,9 +493,9 @@ describe "SdnTable":
         check(found.get("name")? == "Bob")
 
     it "soft deletes rows":
-        var table = SdnTable(name: "users", columns: ["id", "name", "valid"], rows: [], index: {})
+        var table = SdnTable(name: "users", columns: ["id", "name", "valid"], rows: [], row_keys: [], row_indices: [])
 
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("id", "user_1")
         row.set("name", "Alice")
         row.set("valid", "true")
@@ -390,9 +510,9 @@ describe "SdnTable":
         check(valid_rows.len() == 0)
 
     it "exports to SDN format":
-        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], row_keys: [], row_indices: [])
 
-        var row = SdnRow(fields: {})
+        var row = SdnRow(field_keys: [], field_vals: [])
         row.set("id", "1")
         row.set("name", "Alice")
         table.add_row(row)
@@ -407,22 +527,22 @@ describe "SdnTable":
 
 describe "SdnDatabase":
     it "creates new database":
-        val db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+        val db = SdnDatabase(path: "test_db.sdn", table_names: [], table_values: [], interner: StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0), modified: false)
 
         check(db.path == "test_db.sdn")
-        check(db.tables.len() == 0)
+        check(db.tables_len() == 0)
 
     it "adds and retrieves tables":
-        var db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+        var db = SdnDatabase(path: "test_db.sdn", table_names: [], table_values: [], interner: StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0), modified: false)
 
-        val table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        val table = SdnTable(name: "users", columns: ["id", "name"], rows: [], row_keys: [], row_indices: [])
         db.set_table("users", table)
 
         val retrieved = db.get_table("users")?
         check(retrieved.name == "users")
 
     it "interns strings":
-        var db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+        var db = SdnDatabase(path: "test_db.sdn", table_names: [], table_values: [], interner: StringInterner(str_keys: [], str_ids: [], id_keys: [], id_vals: [], next_id: 0), modified: false)
 
         val id1 = db.intern("hello")
         val id2 = db.intern("hello")
@@ -438,10 +558,10 @@ describe "BugDatabase":
     it "creates new bug database":
         val bugdb = create_bug_database("/tmp/test_bugdb.sdn")
 
-        check(bugdb.db.tables.contains_key("bugs"))
-        check(bugdb.db.tables.contains_key("bug_descriptions"))
-        check(bugdb.db.tables.contains_key("bug_fix_strategies"))
-        check(bugdb.db.tables.contains_key("bug_investigation_logs"))
+        check(bugdb.db.tables_contains_key("bugs"))
+        check(bugdb.db.tables_contains_key("bug_descriptions"))
+        check(bugdb.db.tables_contains_key("bug_fix_strategies"))
+        check(bugdb.db.tables_contains_key("bug_investigation_logs"))
 
     it "adds and retrieves bugs":
         var bugdb = create_bug_database("/tmp/test_bugdb.sdn")
@@ -475,7 +595,7 @@ describe "BugDatabase":
         check(first_bug.description.len() == 2)
 
     it "queries bugs by status":
-        
+
         var bugdb = create_bug_database("/tmp/test.sdn")
 
         val bug1 = Bug(
@@ -521,7 +641,7 @@ describe "BugDatabase":
 
 
     it "queries critical bugs":
-        
+
         var bugdb = create_bug_database("/tmp/test.sdn")
 
         val p0_bug = Bug(
@@ -564,7 +684,7 @@ describe "BugDatabase":
 
 
     it "generates statistics":
-        
+
         var bugdb = create_bug_database("/tmp/test.sdn")
 
         # Add various bugs
@@ -597,14 +717,15 @@ describe "BugDatabase":
             bugdb.add_bug(bug)
 
         val stats = bugdb.stats()
-        check(stats["total"] == 5)
-        check(stats["open"] == 3)
-        check(stats["fixed"] == 2)
-        check(stats["p1"] == 2)
+        # stats is now [total, open, fixed, p1]
+        check(stats[0] == 5)
+        check(stats[1] == 3)
+        check(stats[2] == 2)
+        check(stats[3] == 2)
 
 
     it "validates test links":
-        
+
         var bugdb = create_bug_database("/tmp/test.sdn")
 
         val bug_with_test = Bug(
@@ -645,4 +766,3 @@ describe "BugDatabase":
         val errors = bugdb.validate_test_links()
         check(errors.len() == 1)
         check(errors[0].contains("bug_002"))
-
