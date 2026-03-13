@@ -48,7 +48,7 @@ pub(crate) fn compile_closure_create<M: Module>(
             .map(|s| s.as_str());
 
         // If func_name contains _dot_, try the . form
-        let mut dot_unsanitized_storage = String::new();
+        let mut dot_unsanitized_storage;
         if resolved_name.is_none() && func_name.contains("_dot_") {
             dot_unsanitized_storage = func_name.replace("_dot_", ".");
             resolved_name = ctx.use_map.get(&dot_unsanitized_storage)
@@ -57,9 +57,9 @@ pub(crate) fn compile_closure_create<M: Module>(
         }
 
         // If func_name contains '.', try _dot_ sanitized form and other variants
-        let mut dot_sanitized_storage = String::new();
-        let mut type_prefixed_storage = String::new();
-        let mut dunder_storage = String::new();
+        let mut dot_sanitized_storage;
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
         if resolved_name.is_none() && func_name.contains('.') {
             dot_sanitized_storage = func_name.replace('.', "_dot_");
             resolved_name = ctx.use_map.get(&dot_sanitized_storage)
@@ -98,7 +98,7 @@ pub(crate) fn compile_closure_create<M: Module>(
         // Try: TypeName__method → typename_method (factory/constructor convention)
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
                     dunder_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
                     resolved_name = ctx.use_map.get(&dunder_storage)
                         .or_else(|| ctx.import_map.get(&dunder_storage))
@@ -288,7 +288,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             .map(|s| s.as_str());
 
         // If func_name contains _dot_, try the . form
-        let mut dot_unsanitized_storage = String::new();
+        let mut dot_unsanitized_storage;
         if resolved_name.is_none() && func_name.contains("_dot_") {
             dot_unsanitized_storage = func_name.replace("_dot_", ".");
             resolved_name = ctx.use_map.get(&dot_unsanitized_storage)
@@ -297,9 +297,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
 
         // If not found and func_name contains '.', try additional name variants
-        let mut type_prefixed_storage = String::new();
-        let mut dunder_storage = String::new();
-        let mut dot_sanitized_storage = String::new();
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
+        let mut dot_sanitized_storage;
         if resolved_name.is_none() {
             if let Some(dot_pos) = func_name.rfind('.') {
                 let type_name = &func_name[..dot_pos];
@@ -342,7 +342,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // e.g., TreeSitter__new → treesitter_new
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
                     type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
                     resolved_name = ctx.use_map.get(&type_prefixed_storage)
                         .or_else(|| ctx.import_map.get(&type_prefixed_storage))

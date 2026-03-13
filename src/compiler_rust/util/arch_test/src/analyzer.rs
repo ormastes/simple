@@ -97,7 +97,7 @@ impl<'a> Analyzer<'a> {
 
             if path.is_dir() {
                 self.scan_directory(&path, tree, patterns)?;
-            } else if path.extension().map_or(false, |e| e == "spl") {
+            } else if path.extension().is_some_and(|e| e == "spl") {
                 self.analyze_file(&path, tree, patterns)?;
             }
         }

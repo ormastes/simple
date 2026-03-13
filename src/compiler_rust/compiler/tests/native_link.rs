@@ -132,7 +132,7 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_recursive(&path, out);
-        } else if path.extension().map_or(false, |e| e == "spl") {
+        } else if path.extension().is_some_and(|e| e == "spl") {
             out.push(path);
         }
     }

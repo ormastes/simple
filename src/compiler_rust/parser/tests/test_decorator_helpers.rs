@@ -48,7 +48,7 @@ fn has_decorator_named(func: &simple_parser::ast::FunctionDef, name: &str) -> bo
 
 /// Helper to check if argument with name exists
 fn has_arg_named(args: &[simple_parser::ast::Argument], name: &str) -> bool {
-    args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
+    args.iter().any(|arg| arg.name.as_ref().is_some_and(|n| n == name))
 }
 
 #[test]

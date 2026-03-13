@@ -3,6 +3,10 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
+// CompileError is intentionally large (208+ bytes) due to rich error context;
+// boxing would change the entire error API surface for marginal benefit.
+#![allow(clippy::result_large_err)]
+
 pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;

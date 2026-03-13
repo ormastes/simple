@@ -272,22 +272,23 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         eprintln!("  Backend: {}", backend);
     }
 
-    let mut config = NativeBuildConfig::default();
-    config.file_timeout = timeout;
-    config.verbose = verbose;
-    config.strip = strip;
-    config.num_threads = threads;
-    config.incremental = incremental;
-    config.clean = clean;
-    config.cache_dir = cache_dir;
-    config.no_mangle = no_mangle;
-
     // Normalize backend aliases
     if backend == "llvm-lib" {
         backend = "llvm".to_string();
     }
 
-    config.backend = backend.clone();
+    let config = NativeBuildConfig {
+        file_timeout: timeout,
+        verbose,
+        strip,
+        num_threads: threads,
+        incremental,
+        clean,
+        cache_dir,
+        no_mangle,
+        backend: backend.clone(),
+        ..Default::default()
+    };
 
     // Also set env var so compile_file_to_object can read it
     if backend != "cranelift" {

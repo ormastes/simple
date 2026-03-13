@@ -349,7 +349,7 @@ pub fn load_and_merge_module(
     // Without preloading these siblings, bare exports resolve to nothing.
     let preloaded_env: Option<HashMap<String, Value>> = if module_path
         .file_name()
-        .map_or(false, |f| f == "__init__.spl")
+        .is_some_and(|f| f == "__init__.spl")
     {
         let has_bare_exports = module.items.iter().any(|item| {
             matches!(item, Node::ExportUseStmt(e) if e.path.segments.is_empty())
@@ -364,15 +364,15 @@ pub fn load_and_merge_module(
                         .filter_map(|e| e.ok())
                         .map(|e| e.path())
                         .filter(|p| {
-                            p.extension().map_or(false, |ext| ext == "spl")
-                                && p.file_name().map_or(false, |f| f != "__init__.spl")
+                            p.extension().is_some_and(|ext| ext == "spl")
+                                && p.file_name().is_some_and(|f| f != "__init__.spl")
                                 && p.is_file()
                         })
                         .collect();
                     // Sort for deterministic load order; mod.spl first if present
                     sibling_files.sort_by(|a, b| {
-                        let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
-                        let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
+                        let a_is_mod = a.file_name().is_some_and(|f| f == "mod.spl");
+                        let b_is_mod = b.file_name().is_some_and(|f| f == "mod.spl");
                         match (a_is_mod, b_is_mod) {
                             (true, false) => std::cmp::Ordering::Less,
                             (false, true) => std::cmp::Ordering::Greater,

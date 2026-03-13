@@ -102,7 +102,7 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
 
     // 5. Codegen (Cranelift AOT) - only if BATCH_CODEGEN=1
     //    Creating a Codegen per file is slow (~300ms each), so this is opt-in.
-    if std::env::var("BATCH_CODEGEN").map_or(false, |v| v == "1") {
+    if std::env::var("BATCH_CODEGEN").is_ok_and(|v| v == "1") {
         match Codegen::new() {
             Ok(codegen) => match codegen.compile_module(&mir_module) {
                 Ok(_object_code) => (Stage::Done, None),
@@ -153,7 +153,7 @@ fn collect_spl_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_spl_recursive(&path, out);
-        } else if path.extension().map_or(false, |ext| ext == "spl") {
+        } else if path.extension().is_some_and(|ext| ext == "spl") {
             out.push(path);
         }
     }
