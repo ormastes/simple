@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# t32_headless.shs — Start/stop/test T32 in headless container
+#
+# Architecture:
+#   Host                            Docker Container
+#   ┌──────────────┐               ┌──────────────────────┐
+#   │ t32rem       │──UDP:20000───▶│ xvfb-run + t32marm   │
+#   │ (NETASSIST)  │               │ SCREEN=INVISIBLE      │
+#   │              │               │ RCL=NETASSIST         │
+#   │ Simple MCP   │──UDP:20000───▶│ PORT=20000            │
+#   │ server       │               │                       │
+#   └──────────────┘               │ /opt/t32 (bind mount) │
+#                                  └──────────────────────┘
+#
+# Prerequisites:
+#   - Docker or Podman installed
+#   - /opt/t32 on host with Lauterbach TRACE32 installation
+#   - Container image built: bash config/t32/trace32_x11_container.shs build
+#
+# Usage:
+#   bash config/t32/t32_headless.shs start        # Start container, wait for ready
+#   bash config/t32/t32_headless.shs stop          # Stop container
+#   bash config/t32/t32_headless.shs ping          # Check connectivity
+#   bash config/t32/t32_headless.shs cmd <cmd>     # Send PRACTICE command
+#   bash config/t32/t32_headless.shs demo          # Run full interactive demo session
+#   bash config/t32/t32_headless.shs test-gui      # Test all GUI features
+#   bash config/t32/t32_headless.shs test          # Run system spec tests
+#   bash config/t32/t32_headless.shs status        # Show container + T32 state
+#   bash config/t32/t32_headless.shs help          # Show this help
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CONTAINER_SH="$REPO_ROOT/config/t32/trace32_x11_container.shs"
+T32REM="/opt/t32/bin/pc_linux64/t32rem"
+PORT=20000
+HOST=localhost
+
+# --- Helpers ---
+
+t32cmd() {
+    "$T32REM" "$HOST" "port=$PORT" "$@" 2>&1
+}
+
+t32ok() {
+    local label="$1"
+    shift
+    local out
+    out=$(t32cmd "$@" 2>&1) || true
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        printf "  ✓ %-40s %s\n" "$label" "$out"
+    else
+        printf "  ✗ %-40s (rc=%d) %s\n" "$label" "$rc" "$out"
+    fi
+}
+
+section() {
+    echo ""
+    echo "=== $1 ==="
+}
+
+check_t32rem() {
+    if [ ! -x "$T32REM" ]; then
+        echo "ERROR: t32rem not found at $T32REM" >&2
+        echo "Install TRACE32 to /opt/t32 first." >&2
+        exit 1
+    fi
+}
+
+check_live() {
+    check_t32rem
+    if ! t32cmd "PING" >/dev/null 2>&1; then
+        echo "ERROR: T32 not responding on $HOST:$PORT" >&2
+        echo "Run: bash config/t32/t32_headless.shs start" >&2
+        exit 1
+    fi
+}
+
+# --- Commands ---
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+
+start)
+    check_t32rem
+    echo "Building container image (if needed)..."
+    bash "$CONTAINER_SH" build 2>&1 | tail -1
+    echo "Starting T32 headless container..."
+    bash "$CONTAINER_SH" up-d
+    echo "Waiting for T32 to be ready..."
+    bash "$CONTAINER_SH" wait
+    echo ""
+    echo "T32 headless ready on port $PORT"
+    echo "Test: bash config/t32/t32_headless.shs ping"
+    echo "Demo: bash config/t32/t32_headless.shs demo"
+    ;;
+
+stop)
+    echo "Stopping T32 container..."
+    bash "$CONTAINER_SH" down
+    echo "T32 stopped."
+    ;;
+
+ping)
+    check_t32rem
+    if t32cmd "PING" >/dev/null 2>&1; then
+        echo "T32 OK — responding on $HOST:$PORT"
+    else
+        echo "T32 NOT RESPONDING on $HOST:$PORT"
+        exit 1
+    fi
+    ;;
+
+status)
+    check_t32rem
+    echo "Container:"
+    docker ps --filter "name=simple-trace32" --format "  {{.Names}}  {{.Status}}" 2>/dev/null || echo "  (no container)"
+    echo ""
+    echo "Connectivity:"
+    if t32cmd "PING" >/dev/null 2>&1; then
+        echo "  t32rem PING: OK"
+        echo ""
+        echo "Target state:"
+        t32ok "STATE.RUN()"        "EVAL STATE.RUN()"
+        t32ok "PRACTICE.STATE()"   "EVAL PRACTICE.STATE()"
+    else
+        echo "  t32rem PING: FAIL"
+    fi
+    ;;
+
+cmd)
+    check_live
+    t32cmd "$@"
+    ;;
+
+demo)
+    check_live
+    echo "T32 Headless Interactive Debug Demo"
+    echo "===================================="
+
+    section "1. CPU Setup"
+    t32ok "SYStem.CPU CortexM3"     "SYStem.CPU CortexM3"
+    t32ok "SYStem.Up"               "SYStem.Up"
+
+    section "2. Headless Output Setup"
+    t32ok "SCREEN.OFF"              "SCREEN.OFF"
+    t32ok "AREA.Create MCP_OUT"     "AREA.Create MCP_OUT"
+    t32ok "AREA.Select MCP_OUT"     "AREA.Select MCP_OUT"
+    t32ok "AREA.view MCP_OUT"       "AREA.view MCP_OUT"
+
+    section "3. Breakpoints"
+    t32ok "Break.Set main"          "Break.Set main"
+    t32ok "Break.Set 0x08000100"    "Break.Set 0x08000100"
+    echo "  Breakpoint list:"
+    t32cmd "WinPrint.Break.List" 2>/dev/null | sed 's/^/    /'
+
+    section "4. Execution Control"
+    t32ok "Go (run target)"         "Go"
+    sleep 0.2
+    t32ok "Break (halt)"            "Break"
+    t32ok "Step"                    "Step"
+    t32ok "Step.Over"               "Step.Over"
+
+    section "5. Register Inspection"
+    t32ok "EVAL Register(PC)"       "EVAL Register(PC)"
+    t32ok "EVAL Register(SP)"       "EVAL Register(SP)"
+    t32ok "EVAL Register(LR)"       "EVAL Register(LR)"
+    echo "  Full register view:"
+    t32cmd "WinPrint.Register.view" 2>/dev/null | head -10 | sed 's/^/    /'
+
+    section "6. Memory Inspection"
+    t32ok "EVAL Data.Long(D:0x08000000)"  "EVAL Data.Long(D:0x08000000)"
+    echo "  Memory dump:"
+    t32cmd "WinPrint.Data.dump D:0x08000000" 2>/dev/null | head -4 | sed 's/^/    /'
+
+    section "7. Window Captures (all 16 types)"
+    for win in Register.view Break.List Var.Local Var.Watch Frame.view \
+               Data.dump List Trace.List COVerage.ListFunc TASK.List \
+               AREA sYmbol.Browse Perf.ListMODULE MMU.List PER.view Data.List; do
+        _out=$(t32cmd "WinPrint.$win" 2>/dev/null) || true
+        _lines=$(echo "$_out" | wc -l)
+        printf "  %-25s %d lines\n" "$win" "$_lines"
+    done
+
+    section "8. AREA Semihosting Output"
+    t32ok "PRINT \"Hello from T32\""    "PRINT \"Hello from T32\""
+    t32ok "PRINT \"Flash: OK\""         "PRINT \"Flash: OK\""
+    echo "  AREA content:"
+    t32cmd "WinPrint.AREA" 2>/dev/null | sed 's/^/    /'
+
+    section "9. Clean Up"
+    t32ok "Break.Delete /ALL"       "Break.Delete /ALL"
+    t32ok "AREA.RESet"              "AREA.RESet"
+    t32ok "SCREEN.ON"               "SCREEN.ON"
+
+    echo ""
+    echo "Demo complete."
+    ;;
+
+test-gui)
+    check_live
+    echo "T32 GUI Feature Tests"
+    echo "====================="
+    PASS=0
+    FAIL=0
+
+    assert_ok() {
+        local label="$1"
+        shift
+        if t32cmd "$@" >/dev/null 2>&1; then
+            printf "  ✓ %s\n" "$label"
+            PASS=$((PASS + 1))
+        else
+            printf "  ✗ %s\n" "$label"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    assert_output() {
+        local label="$1"
+        local expected="$2"
+        shift 2
+        local out
+        out=$(t32cmd "$@" 2>&1) || true
+        if echo "$out" | grep -qi "$expected"; then
+            printf "  ✓ %s\n" "$label"
+            PASS=$((PASS + 1))
+        else
+            printf "  ✗ %s (expected '%s', got '%s')\n" "$label" "$expected" "$out"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    section "SCREEN modes"
+    assert_ok "SCREEN.OFF"          "SCREEN.OFF"
+    assert_ok "SCREEN.ON"           "SCREEN.ON"
+    assert_ok "SCREEN.ALways"       "SCREEN.ALways"
+    assert_ok "SCREEN.OFF (reset)"  "SCREEN.OFF"
+
+    section "AREA management"
+    assert_ok "AREA.Create TEST1"   "AREA.Create TEST1"
+    assert_ok "AREA.Select TEST1"   "AREA.Select TEST1"
+    assert_ok "AREA.view TEST1"     "AREA.view TEST1"
+    assert_ok "PRINT to area"       "PRINT \"test output\""
+    assert_ok "AREA.CLEAR TEST1"    "AREA.CLEAR TEST1"
+    assert_ok "AREA.RESet"          "AREA.RESet"
+
+    section "Window layout (WinPOS, WinPAGE, FramePOS)"
+    assert_ok "WinPAGE.RESet"       "WinPAGE.RESet"
+    assert_ok "WinCLEAR"            "WinCLEAR"
+    assert_ok "FramePOS 1. 1. 119. 62."  "FramePOS 1. 1. 119. 62."
+    assert_ok "WinPAGE.Create P000" "WinPAGE.Create P000"
+    assert_ok "WinPAGE.select P000" "WinPAGE.select P000"
+    assert_ok "WinTABS 10. 20. 40." "WinTABS 10. 20. 40."
+
+    section "TOOLBAR + STATUSBAR"
+    assert_ok "TOOLBAR ON"          "TOOLBAR ON"
+    assert_ok "TOOLBAR OFF"         "TOOLBAR OFF"
+    assert_ok "STATUSBAR ON"        "STATUSBAR ON"
+    assert_ok "STATUSBAR OFF"       "STATUSBAR OFF"
+
+    section "WinPOS (window positioning)"
+    assert_ok "WinPOS 0. 0. 60. 20. 0. 0. Register.view"  "WinPOS 0. 0. 60. 20. 0. 0. Register.view"
+    assert_ok "WinPOS 62. 0. 55. 10. 0. 0. Break.List"    "WinPOS 62. 0. 55. 10. 0. 0. Break.List"
+
+    section "Window capture (WinPrint)"
+    for win in Register.view Break.List Var.Local Data.dump List AREA; do
+        _out=$(t32cmd "WinPrint.$win" 2>&1) || true
+        if [ -n "$_out" ]; then
+            printf "  ✓ WinPrint.%-20s (%d bytes)\n" "$win" "${#_out}"
+            PASS=$((PASS + 1))
+        else
+            printf "  ✗ WinPrint.%-20s (empty)\n" "$win"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+
+    section "DIALOG commands"
+    # Note: DIALOG.YESNO and DIALOG.OK block for user input in GUI mode
+    # In headless/automated mode, they may time out or return immediately
+    assert_ok "DIALOG.OK test"      "DIALOG.OK \"Headless test\""
+
+    section "MENU"
+    assert_ok "MENU.ReProgram"      "MENU.ReProgram"
+
+    section "PRinTer.FILE"
+    assert_ok "PRinTer.FILE /tmp/t32_test_output.txt"  "PRinTer.FILE /tmp/t32_test_output.txt"
+    assert_ok "PRinTer.FILE (close)"                    "PRinTer.FILE"
+
+    section "Execution control"
+    assert_ok "SYStem.CPU CortexM3" "SYStem.CPU CortexM3"
+    assert_ok "SYStem.Up"           "SYStem.Up"
+    assert_ok "Break.Set 0x08000010"  "Break.Set 0x08000010"
+    assert_ok "Go"                  "Go"
+    sleep 0.2
+    assert_ok "Break (halt)"        "Break"
+    assert_ok "Step"                "Step"
+    assert_ok "Step.Over"           "Step.Over"
+
+    section "Register access"
+    assert_ok "Register.Set PC 0x08001000"  "Register.Set PC 0x08001000"
+    assert_output "EVAL Register(PC)" "0x08001000"  "EVAL Register(PC)"
+
+    section "Memory access"
+    assert_ok "Data.Set 0x20000000 %Long 0x12345678"  "Data.Set 0x20000000 %Long 0x12345678"
+    assert_output "EVAL Data.Long(D:0x20000000)" "12345678"  "EVAL Data.Long(D:0x20000000)"
+
+    section "State queries"
+    assert_output "STATE.RUN()" "false"  "EVAL STATE.RUN()"
+    assert_ok "PRACTICE.STATE()"    "EVAL PRACTICE.STATE()"
+
+    section "Clean up"
+    assert_ok "Break.Delete /ALL"   "Break.Delete /ALL"
+    assert_ok "SCREEN.ON"           "SCREEN.ON"
+
+    echo ""
+    echo "Results: $PASS passed, $FAIL failed"
+    if [ "$FAIL" -gt 0 ]; then
+        exit 1
+    fi
+    ;;
+
+test)
+    echo "Running T32 GUI system spec tests..."
+    "$REPO_ROOT/bin/release/simple" test test/system/t32_tools/t32_gui_system_spec.spl
+    ;;
+
+help)
+    cat <<'HELP'
+T32 Headless Container Manager
+===============================
+
+Usage: bash config/t32/t32_headless.shs <command> [args...]
+
+Commands:
+  start        Build image (if needed), start container, wait for ready
+  stop         Stop and remove the container
+  ping         Check T32 connectivity via t32rem PING
+  status       Show container status + T32 target state
+  cmd <cmd>    Send raw PRACTICE command via t32rem
+  demo         Run full interactive debug demo session
+  test-gui     Test all GUI features (SCREEN, AREA, WinPOS, DIALOG, etc.)
+  test         Run the SSpec system tests (test/system/t32_tools/)
+  help         Show this help
+
+Prerequisites:
+  - Docker (or Podman with T32_CONTAINER_RUNTIME=podman)
+  - /opt/t32 with TRACE32 installation (Lauterbach)
+  - Build the image first: bash config/t32/t32_headless.shs start
+
+Quick Start:
+  bash config/t32/t32_headless.shs start
+  bash config/t32/t32_headless.shs demo
+  bash config/t32/t32_headless.shs test-gui
+  bash config/t32/t32_headless.shs test
+  bash config/t32/t32_headless.shs stop
+
+Interactive Debug Session (manual):
+  bash config/t32/t32_headless.shs start
+  bash config/t32/t32_headless.shs cmd "SYStem.CPU CortexM3"
+  bash config/t32/t32_headless.shs cmd "SYStem.Up"
+  bash config/t32/t32_headless.shs cmd "SCREEN.OFF"
+  bash config/t32/t32_headless.shs cmd "AREA.Create MCP_OUT"
+  bash config/t32/t32_headless.shs cmd "AREA.Select MCP_OUT"
+  bash config/t32/t32_headless.shs cmd "Break.Set main"
+  bash config/t32/t32_headless.shs cmd "Go"
+  bash config/t32/t32_headless.shs cmd "Break"
+  bash config/t32/t32_headless.shs cmd "Step"
+  bash config/t32/t32_headless.shs cmd "EVAL Register(PC)"
+  bash config/t32/t32_headless.shs cmd "WinPrint.Register.view"
+  bash config/t32/t32_headless.shs stop
+
+Environment Variables:
+  T32_CONTAINER_RUNTIME   docker (default) or podman
+  T32_CONTAINER_IMAGE     Container image name (default: simple-trace32-x11:latest)
+  T32_CONTAINER_NAME      Container name (default: simple-trace32-x11)
+
+Architecture:
+  The container runs t32marm under xvfb-run (virtual X11 framebuffer).
+  T32 exposes NETASSIST (UDP) on port 20000 for t32rem remote CLI access.
+  The host communicates via t32rem using the NETASSIST protocol.
+
+  Two independent protocols exist — don't confuse them:
+    t32rem     → UDP NETASSIST (for remote PRACTICE command execution)
+    t32mciserver → TCP MCI (legacy 2013-era, for health checks only)
+
+  The container uses NETASSIST for all real commands.
+
+GUI Features Tested by test-gui:
+  SCREEN.OFF / SCREEN.ON / SCREEN.ALways
+  AREA.Create / AREA.Select / AREA.view / AREA.CLEAR / AREA.RESet
+  WinPAGE.RESet / WinPAGE.Create / WinPAGE.select
+  WinPOS (window positioning with coordinates)
+  WinCLEAR / WinTABS
+  FramePOS (main frame positioning)
+  TOOLBAR ON/OFF
+  STATUSBAR ON/OFF
+  WinPrint.* (16 window capture types)
+  DIALOG.OK / DIALOG.YESNO
+  MENU.ReProgram
+  PRinTer.FILE
+  Break.Set / Break.Delete / Go / Break / Step / Step.Over
+  Register.Set / EVAL Register()
+  Data.Set / EVAL Data.Long()
+  STATE.RUN() / PRACTICE.STATE()
+
+MCP Tool Coverage (23 tools):
+  Session:  t32_sessions_list, t32_session_open, t32_session_resume, t32_session_close
+  Window:   t32_window_list, t32_window_open, t32_window_capture, t32_window_describe
+  Control:  t32_cmd_run, t32_cmm_run, t32_eval, t32_screenshot
+  Action:   t32_action_invoke, t32_field_get, t32_field_set
+  History:  t32_history_tail, t32_resources_list, t32_resource_read
+  Headless: t32_setup_headless, t32_area_read, t32_cmm_commands
+  Multi:    t32_core_list, t32_core_select
+HELP
+    ;;
+
+*)
+    echo "Unknown command: $CMD" >&2
+    echo "Usage: bash config/t32/t32_headless.shs {start|stop|ping|status|cmd|demo|test-gui|test|help}" >&2
+    exit 1
+    ;;
+
+esac

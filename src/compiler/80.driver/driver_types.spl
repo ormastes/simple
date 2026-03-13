@@ -28,26 +28,25 @@ use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
 use compiler.common.compiler_services.{CompilerServices, create_default_services, LoggerPort}
 use compiler.mdsoc.feature.events.ports.{CompilationEventPort, create_noop_event_port}
 use compiler.mdsoc.feature.module_loading.app.module_storage_port.{ModuleStoragePort}
-use compiler.mdsoc.adapters.out.file_module_storage.{create_file_module_storage}
 use compiler.mdsoc.feature.cache.cache_port.{CachePort, create_noop_cache_port}
 use compiler.mdsoc.feature.metrics.metrics_port.{MetricsPort, create_noop_metrics_port}
 
 # FFI declarations used by SourceFile.load and CompileContext
 extern fn rt_file_read_text(path: text) -> text
 
+# Module-level logger port functions (must be at module scope for interpreter)
+fn _lp_debug(msg: text):
+    ()
+fn _lp_info(msg: text):
+    ()
+fn _lp_warn(msg: text):
+    print "[WARN] " + msg
+fn _lp_error(msg: text):
+    print "[ERROR] " + msg
 
-# Minimal logger to avoid import-map resolution issues
-class BootLogger:
-    level: i64
-
-    static fn from_env() -> BootLogger:
-        BootLogger(level: 0)
-
-    fn debug(message: text): ()
-    fn info(message: text): ()
-    fn warn(message: text): ()
-    fn error(message: text): ()
-    fn trace(message: text): ()
+# Module-level file module storage reader
+fn _fms_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 # Minimal logger to avoid import-map resolution issues
 class BootLogger:
@@ -327,13 +326,11 @@ class CompileContext:
 
         # Setup MDSOC typed ports
         val event_port = create_noop_event_port()
-        val module_storage = create_file_module_storage()
 
-        # Logger port: wire warn/error by default, debug/info only in verbose mode
-        fn _lp_debug(msg: text): ()
-        fn _lp_info(msg: text): ()
-        fn _lp_warn(msg: text): print "[WARN] {msg}"
-        fn _lp_error(msg: text): print "[ERROR] {msg}"
+        # File module storage — reads source from disk (production default)
+        val module_storage = ModuleStoragePort(name: "file-module-storage", read_source_fn: _fms_read)
+
+        # Logger port: uses module-level functions for interpreter compatibility
         val logger_port = LoggerPort(
             name: "boot-log",
             debug_fn: _lp_debug,

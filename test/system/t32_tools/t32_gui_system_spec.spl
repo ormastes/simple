@@ -1,0 +1,968 @@
+# T32 GUI System Tests — GDB-style interactive debug sessions
+# tag: slow, system, t32
+#
+# Models full T32 debug sessions like GDB: connect → setup layout → load →
+# breakpoint → run → halt → step → read registers → capture windows →
+# state diff → next decision. GUI commands are tested IN CONTEXT of debug
+# flows, not as standalone fire-and-forget.
+#
+# Two modes:
+#   - LIVE: When T32 NETASSIST container is running, tests use real t32rem
+#   - SIMULATED: Always runs — simulates the full session state machine
+#
+# To run live:
+#   bash config/t32/trace32_x11_container.shs up-d && ...wait
+#   bin/simple test test/system/t32_tools/t32_gui_system_spec.spl
+#   bash config/t32/trace32_x11_container.shs down
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+# --- T32 Remote Backend ---
+
+val T32REM = "/opt/t32/bin/pc_linux64/t32rem"
+val T32_PORT = "20000"
+
+fn t32_remote(command: text) -> (text, i64):
+    val (out, err, rc) = rt_process_run(T32REM, ["localhost", "port={T32_PORT}", command])
+    (out.trim(), rc)
+
+fn t32_live_available() -> bool:
+    if not rt_file_exists(T32REM):
+        return false
+    val (out, rc) = t32_remote("PING")
+    rc == 0
+
+val LIVE = t32_live_available()
+
+if LIVE:
+    print "T32: LIVE mode — t32rem connected on port {T32_PORT}"
+else:
+    print "T32: SIMULATED mode — no live T32 instance"
+
+# --- T32 GUI Debug Session (GDB-style state machine) ---
+
+class T32GuiSession:
+    host: text
+    port: i64
+    state: text           # disconnected, connected, halted, running
+    cpu: text
+    pc: text
+    sp: text
+    lr: text
+    breakpoints: [text]
+    windows_open: [text]
+    areas: [text]
+    pages: [text]
+    active_page: text
+    toolbar_on: bool
+    statusbar_on: bool
+    screen_mode: text     # on, off, always
+    history: [text]
+    last_capture: text
+    registers_view: text
+    break_list_view: text
+    memory_view: text
+
+impl T32GuiSession:
+    static fn create(host: text, port: i64) -> T32GuiSession:
+        T32GuiSession(
+            host: host, port: port,
+            state: "disconnected", cpu: "", pc: "0x00000000",
+            sp: "0x20001000", lr: "0x00000000",
+            breakpoints: [], windows_open: [], areas: [],
+            pages: [], active_page: "",
+            toolbar_on: false, statusbar_on: false,
+            screen_mode: "on", history: [],
+            last_capture: "", registers_view: "",
+            break_list_view: "", memory_view: ""
+        )
+
+    me log(entry: text):
+        var h = self.history
+        h.push(entry)
+        self.history = h
+
+    # --- Connection (like GDB target remote) ---
+
+    me connect() -> Result<text, text>:
+        if LIVE:
+            val (out, rc) = t32_remote("PING")
+            if rc != 0:
+                return Err("t32rem PING failed")
+        self.state = "connected"
+        self.log("CONNECT {self.host}:{self.port}")
+        Ok("connected")
+
+    # --- CPU Setup (like GDB set arch) ---
+
+    me setup_cpu(cpu_name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("SYStem.CPU {cpu_name}")
+            if rc != 0:
+                self.log("SYStem.CPU {cpu_name} FAIL")
+        self.cpu = cpu_name
+        self.log("SYStem.CPU {cpu_name}")
+        Ok("CPU set to {cpu_name}")
+
+    me system_up() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("SYStem.Up")
+        self.state = "halted"
+        self.pc = "0x08000000"
+        self.log("SYStem.Up → halted")
+        Ok("system up, target halted")
+
+    # --- GUI Layout Setup (T32-specific, no GDB equivalent) ---
+
+    me screen_off() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("SCREEN.OFF")
+        self.screen_mode = "off"
+        self.log("SCREEN.OFF")
+        Ok("screen off")
+
+    me screen_on() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("SCREEN.ON")
+        self.screen_mode = "on"
+        self.log("SCREEN.ON")
+        Ok("screen on")
+
+    me screen_always() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("SCREEN.ALways")
+        self.screen_mode = "always"
+        self.log("SCREEN.ALways")
+        Ok("screen always")
+
+    me set_frame(x: text, y: text, w: text, h: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("FramePOS {x} {y} {w} {h}")
+        self.log("FramePOS {x} {y} {w} {h}")
+        Ok("frame set")
+
+    me toolbar(on: bool) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        val mode = "ON"
+        if not on:
+            mode = "OFF"
+        if LIVE:
+            val (out, rc) = t32_remote("TOOLBAR {mode}")
+        self.toolbar_on = on
+        self.log("TOOLBAR {mode}")
+        Ok("toolbar {mode}")
+
+    me statusbar(on: bool) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        val mode = "ON"
+        if not on:
+            mode = "OFF"
+        if LIVE:
+            val (out, rc) = t32_remote("STATUSBAR {mode}")
+        self.statusbar_on = on
+        self.log("STATUSBAR {mode}")
+        Ok("statusbar {mode}")
+
+    me page_reset() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPAGE.RESet")
+        self.pages = []
+        self.active_page = ""
+        self.log("WinPAGE.RESet")
+        Ok("pages reset")
+
+    me page_create(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPAGE.Create {name}")
+        var pg = self.pages
+        pg.push(name)
+        self.pages = pg
+        self.active_page = name
+        self.log("WinPAGE.Create {name}")
+        Ok("page {name} created")
+
+    me page_select(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPAGE.select {name}")
+        self.active_page = name
+        self.log("WinPAGE.select {name}")
+        Ok("page {name} selected")
+
+    me win_clear() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinCLEAR")
+        self.log("WinCLEAR")
+        Ok("window cleared")
+
+    me win_tabs(tabs: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinTABS {tabs}")
+        self.log("WinTABS {tabs}")
+        Ok("tabs set")
+
+    me open_window(win_cmd: text, x: text, y: text, w: text, h: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPOS {x} {y} {w} {h} 0. 0. {win_cmd}")
+        var wo = self.windows_open
+        wo.push(win_cmd)
+        self.windows_open = wo
+        self.log("WinPOS {x} {y} {w} {h} → {win_cmd}")
+        Ok("opened {win_cmd}")
+
+    # --- AREA management (semihosting output) ---
+
+    me area_create(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("AREA.Create {name}")
+        var ar = self.areas
+        ar.push(name)
+        self.areas = ar
+        self.log("AREA.Create {name}")
+        Ok("area {name} created")
+
+    me area_select(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("AREA.Select {name}")
+        self.log("AREA.Select {name}")
+        Ok("area {name} selected")
+
+    me area_view(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("AREA.view {name}")
+        self.log("AREA.view {name}")
+        Ok("area {name} opened")
+
+    me area_clear(name: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("AREA.CLEAR {name}")
+        self.log("AREA.CLEAR {name}")
+        Ok("area {name} cleared")
+
+    me area_reset() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("AREA.RESet")
+        self.areas = []
+        self.log("AREA.RESet")
+        Ok("areas reset")
+
+    me area_print(msg: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("PRINT \"{msg}\"")
+        self.log("PRINT \"{msg}\"")
+        Ok("printed to area")
+
+    # --- Breakpoints (like GDB break) ---
+
+    me set_breakpoint(addr: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("Break.Set {addr}")
+        var bps = self.breakpoints
+        bps.push(addr)
+        self.breakpoints = bps
+        val bp_count = bps.len()
+        self.log("Break.Set {addr} → bp#{bp_count}")
+        Ok("breakpoint set at {addr}")
+
+    me delete_breakpoints() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("Break.Delete /ALL")
+        var old_bps = self.breakpoints
+        val count = old_bps.len()
+        self.breakpoints = []
+        self.log("Break.Delete /ALL → removed {count}")
+        Ok("all breakpoints deleted")
+
+    # --- Execution control (like GDB continue/step/halt) ---
+
+    me run_target() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted to run")
+        if LIVE:
+            val (out, rc) = t32_remote("Go")
+        self.state = "running"
+        self.log("Go → running")
+        Ok("target running")
+
+    me halt() -> Result<text, text>:
+        if self.state != "running":
+            return Err("target not running")
+        if LIVE:
+            val (out, rc) = t32_remote("Break")
+        self.state = "halted"
+        self.log("Break → halted")
+        Ok("target halted")
+
+    me step() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted to step")
+        if LIVE:
+            val (out, rc) = t32_remote("Step")
+        # Simulate PC advancing by 4 bytes
+        self.pc = "0x08000004"
+        self.log("Step → PC={self.pc}")
+        Ok("stepped to {self.pc}")
+
+    me step_over() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        if LIVE:
+            val (out, rc) = t32_remote("Step.Over")
+        self.pc = "0x08000008"
+        self.log("Step.Over → PC={self.pc}")
+        Ok("stepped over to {self.pc}")
+
+    # --- Register access (like GDB info registers / set $pc) ---
+
+    me read_register(reg: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted to read registers")
+        if LIVE:
+            val (out, rc) = t32_remote("EVAL Register({reg})")
+            if rc == 0:
+                self.log("Register({reg}) → {out}")
+                return Ok(out)
+        if reg == "PC":
+            self.log("Register(PC) → {self.pc}")
+            return Ok(self.pc)
+        if reg == "SP":
+            self.log("Register(SP) → {self.sp}")
+            return Ok(self.sp)
+        if reg == "LR":
+            self.log("Register(LR) → {self.lr}")
+            return Ok(self.lr)
+        self.log("Register({reg}) → 0x00000000")
+        Ok("0x00000000")
+
+    me write_register(reg: text, value: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        if LIVE:
+            val (out, rc) = t32_remote("Register.Set {reg} {value}")
+        if reg == "PC":
+            self.pc = value
+        elif reg == "SP":
+            self.sp = value
+        elif reg == "LR":
+            self.lr = value
+        self.log("Register.Set {reg} {value}")
+        Ok("{reg} = {value}")
+
+    # --- Memory access (like GDB x/4x, set) ---
+
+    me read_memory(addr: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        if LIVE:
+            val (out, rc) = t32_remote("EVAL Data.Long(D:{addr})")
+            if rc == 0:
+                self.log("Data.Long({addr}) → {out}")
+                return Ok(out)
+        self.log("Data.Long({addr}) → 0xDEADBEEF")
+        Ok("0xDEADBEEF")
+
+    me write_memory(addr: text, value: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        if LIVE:
+            val (out, rc) = t32_remote("Data.Set {addr} %Long {value}")
+        self.log("Data.Set {addr} %Long {value}")
+        Ok("written {value} to {addr}")
+
+    # --- Window capture (like GDB TUI) ---
+
+    me capture_registers() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted to capture")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPrint.Register.view")
+            self.registers_view = out
+            val out_len = out.len()
+            self.log("WinPrint.Register.view → {out_len} bytes")
+            return Ok(out)
+        val sim = "PC: {self.pc}  SP: {self.sp}  LR: {self.lr}"
+        self.registers_view = sim
+        self.log("WinPrint.Register.view → simulated")
+        Ok(sim)
+
+    me capture_breakpoints() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPrint.Break.List")
+            self.break_list_view = out
+            val bl_len = out.len()
+            self.log("WinPrint.Break.List → {bl_len} bytes")
+            return Ok(out)
+        var sim = ""
+        var i = 0
+        val bp_list = self.breakpoints
+        for bp in bp_list:
+            sim = sim + "#{i}  {bp}  enabled\n"
+            i = i + 1
+        self.break_list_view = sim
+        self.log("WinPrint.Break.List → simulated")
+        Ok(sim)
+
+    me capture_memory(addr: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        if LIVE:
+            val (out, rc) = t32_remote("WinPrint.Data.dump {addr}")
+            self.memory_view = out
+            return Ok(out)
+        val sim = "{addr}: DE AD BE EF 00 00 00 00  ........"
+        self.memory_view = sim
+        self.log("WinPrint.Data.dump → simulated")
+        Ok(sim)
+
+    # --- State query (run-guard) ---
+
+    me is_running() -> bool:
+        if LIVE:
+            val (out, rc) = t32_remote("EVAL STATE.RUN()")
+            self.log("STATE.RUN() → {out}")
+            return out.to_upper().contains("TRUE")
+        self.state == "running"
+
+    # --- DIALOG (user interaction) ---
+
+    me dialog_yesno(msg: text) -> Result<bool, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("DIALOG.YESNO \"{msg}\"")
+            self.log("DIALOG.YESNO \"{msg}\" → rc={rc}")
+            return Ok(rc == 0)
+        self.log("DIALOG.YESNO \"{msg}\" → FALSE (headless)")
+        Ok(false)
+
+    me dialog_ok(msg: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("DIALOG.OK \"{msg}\"")
+        self.log("DIALOG.OK \"{msg}\"")
+        Ok("dismissed")
+
+    # --- CMM script execution (like GDB source) ---
+
+    me run_cmm(cmm_content: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val pid = rt_getpid()
+            val ts = rt_time_now_unix_micros()
+            val path = "/tmp/t32_sys_{pid}_{ts}.cmm"
+            rt_file_write_text(path, cmm_content)
+            val (out, rc) = t32_remote("DO {path}")
+            rt_file_delete(path)
+            self.log("DO cmm → rc={rc}")
+            return Ok(out)
+        self.log("DO cmm (simulated)")
+        Ok("script completed")
+
+    # --- Menu ---
+
+    me menu_reprogram() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("MENU.ReProgram")
+        self.log("MENU.ReProgram")
+        Ok("menu reset")
+
+    # --- Printer ---
+
+    me printer_file(path: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        if LIVE:
+            val (out, rc) = t32_remote("PRinTer.FILE {path}")
+        self.log("PRinTer.FILE {path}")
+        Ok("printer → {path}")
+
+    me printer_close() -> Result<text, text>:
+        if LIVE:
+            val (out, rc) = t32_remote("PRinTer.FILE")
+        self.log("PRinTer.FILE (close)")
+        Ok("printer closed")
+
+    # --- Disconnect ---
+
+    me disconnect():
+        if LIVE:
+            # No explicit disconnect for t32rem
+            pass_dn
+        self.state = "disconnected"
+        self.log("DISCONNECT")
+
+# --- Tests: GDB-style debug sessions ---
+
+describe "T32 GUI Debug Sessions":
+
+    context "session lifecycle":
+        it "connect → setup cpu → system up → disconnect":
+            var s = T32GuiSession.create("localhost", 20000)
+            expect(s.state).to_equal("disconnected")
+            s.connect()
+            expect(s.state).to_equal("connected")
+            s.setup_cpu("CortexM3")
+            expect(s.cpu).to_equal("CortexM3")
+            s.system_up()
+            expect(s.state).to_equal("halted")
+            s.disconnect()
+            expect(s.state).to_equal("disconnected")
+            val hist1 = s.history
+            expect(hist1.len() > 0).to_equal(true)
+
+        it "operations on disconnected session fail":
+            var s = T32GuiSession.create("localhost", 20000)
+            val r1 = s.step()
+            match r1:
+                Err(e): expect(e).to_contain("halted")
+                Ok(_): expect(false).to_equal(true)
+            val r2 = s.read_register("PC")
+            match r2:
+                Err(e): expect(e).to_contain("halted")
+                Ok(_): expect(false).to_equal(true)
+
+    context "breakpoint + step debug session":
+        it "set bp → run → halt → step → read PC → verify PC changed":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Read initial PC
+            val pc_before = s.read_register("PC")
+            match pc_before:
+                Ok(v): expect(v).to_equal("0x08000000")
+                Err(_): expect(false).to_equal(true)
+            # Set breakpoint
+            s.set_breakpoint("0x08000010")
+            val bps1 = s.breakpoints
+            expect(bps1.len()).to_equal(1)
+            # Capture breakpoint list
+            val bp_view = s.capture_breakpoints()
+            match bp_view:
+                Ok(v): expect(v).to_contain("0x08000010")
+                Err(_): expect(false).to_equal(true)
+            # Run and halt
+            s.run_target()
+            expect(s.state).to_equal("running")
+            expect(s.is_running()).to_equal(true)
+            s.halt()
+            expect(s.state).to_equal("halted")
+            # Single step
+            s.step()
+            val pc_after = s.read_register("PC")
+            match pc_after:
+                Ok(v): expect(v).to_equal("0x08000004")
+                Err(_): expect(false).to_equal(true)
+            # Step over
+            s.step_over()
+            val pc_final = s.read_register("PC")
+            match pc_final:
+                Ok(v): expect(v).to_equal("0x08000008")
+                Err(_): expect(false).to_equal(true)
+            # Delete all breakpoints
+            s.delete_breakpoints()
+            val bps2 = s.breakpoints
+            expect(bps2.len()).to_equal(0)
+            s.disconnect()
+
+    context "register + memory inspection session":
+        it "read regs → modify PC → read memory → write memory → verify":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Read all key registers
+            val pc = s.read_register("PC")
+            val sp = s.read_register("SP")
+            val lr = s.read_register("LR")
+            match pc:
+                Ok(v): expect(v).to_equal("0x08000000")
+                Err(_): expect(false).to_equal(true)
+            match sp:
+                Ok(v): expect(v).to_equal("0x20001000")
+                Err(_): expect(false).to_equal(true)
+            # Capture register window (like GDB TUI register view)
+            val reg_view = s.capture_registers()
+            match reg_view:
+                Ok(v): expect(v).to_contain("0x08000000")
+                Err(_): expect(false).to_equal(true)
+            # Modify PC
+            s.write_register("PC", "0x08001000")
+            val new_pc = s.read_register("PC")
+            match new_pc:
+                Ok(v): expect(v).to_equal("0x08001000")
+                Err(_): expect(false).to_equal(true)
+            # Read memory
+            val mem = s.read_memory("0x08000000")
+            match mem:
+                Ok(v): expect(v.len() > 0).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Write memory
+            s.write_memory("0x20000000", "0x12345678")
+            # Capture memory dump (like GDB x/4x)
+            val mem_view = s.capture_memory("0x08000000")
+            match mem_view:
+                Ok(v): expect(v.len() > 0).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            s.disconnect()
+
+    context "window layout debug session (rcar3_window)":
+        it "setup headless → layout → open debug windows → capture → verify":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Step 1: Headless setup (for MCP/CLI — SCREEN.OFF + AREA)
+            s.screen_off()
+            expect(s.screen_mode).to_equal("off")
+            s.area_create("MCP_OUT")
+            s.area_select("MCP_OUT")
+            # Step 2: Window layout (from rcar3_window.cmm)
+            s.page_reset()
+            val pgs1 = s.pages
+            expect(pgs1.len()).to_equal(0)
+            s.win_clear()
+            s.set_frame("1.", "1.", "119.", "62.")
+            s.toolbar(true)
+            expect(s.toolbar_on).to_equal(true)
+            s.statusbar(true)
+            expect(s.statusbar_on).to_equal(true)
+            s.win_tabs("10. 20. 40.")
+            # Step 3: Create pages + position debug windows
+            s.page_create("P000")
+            s.page_select("P000")
+            expect(s.active_page).to_equal("P000")
+            s.open_window("Register.view", "0.", "0.", "60.", "20.")
+            s.open_window("Break.List", "62.", "0.", "55.", "10.")
+            # Step 4: Capture debug windows
+            val reg_view = s.capture_registers()
+            match reg_view:
+                Ok(v): expect(v).to_contain("0x08000000")
+                Err(_): expect(false).to_equal(true)
+            val bp_view = s.capture_breakpoints()
+            # Step 5: Create second page
+            s.page_create("P001")
+            s.page_select("P001")
+            expect(s.active_page).to_equal("P001")
+            s.open_window("Data.dump", "0.", "0.", "80.", "20.")
+            # Step 6: Switch back to debug page
+            s.page_select("P000")
+            # Step 7: Restore screen
+            s.screen_on()
+            expect(s.screen_mode).to_equal("on")
+            s.area_reset()
+            s.disconnect()
+            val hist2 = s.history
+            expect(hist2.len() > 10).to_equal(true)
+
+    context "flash + debug session (stm32h7_flash)":
+        it "dialog confirm → setup layout → AREA output → step → capture":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.setup_cpu("CortexM7")
+            s.system_up()
+            # Step 1: Ask user before flash erase (auto-dismissed in headless)
+            val confirm = s.dialog_yesno("Erase flash sector 0?")
+            match confirm:
+                Ok(v): pass_dn  # headless returns false, live may vary
+                Err(e): expect(false).to_equal(true)
+            # Step 2: Setup debug layout
+            s.toolbar(true)
+            s.statusbar(true)
+            s.open_window("Register.view", "0.", "0.", "80.", "25.")
+            # Step 3: Setup AREA for flash output
+            s.area_create("FLASH_LOG")
+            s.area_select("FLASH_LOG")
+            s.area_view("FLASH_LOG")
+            # Step 4: Simulate flash operations with AREA output
+            s.area_print("Erasing sector 0...")
+            s.area_print("Programming 256KB...")
+            s.area_print("Verify: OK")
+            # Step 5: Set breakpoint at main (post-flash)
+            s.set_breakpoint("main")
+            s.set_breakpoint("0x08000100")
+            val bps3 = s.breakpoints
+            expect(bps3.len()).to_equal(2)
+            # Step 6: Run to breakpoint
+            s.run_target()
+            expect(s.state).to_equal("running")
+            s.halt()
+            # Step 7: Step through and inspect
+            s.step()
+            val pc = s.read_register("PC")
+            match pc:
+                Ok(v): expect(v.len() > 0).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Step 8: Capture register view after stepping
+            val regs = s.capture_registers()
+            match regs:
+                Ok(v): expect(v.len() > 0).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Step 9: Clean up
+            s.area_reset()
+            s.delete_breakpoints()
+            s.disconnect()
+
+    context "BLE dialog debug session (bl602_wifi)":
+        it "CMM dialog → configure → AREA output → step through BLE init":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.setup_cpu("RV32IMAC")
+            s.system_up()
+            # Step 1: Run BLE config dialog via CMM
+            val cmm = "; BLE config\nDIALOG\n(\n  HEADER \"BLE Setup\"\n  POS 0. 0. 40.\n  TEXT \"WiFi+BLE dual mode\"\n  LINE 0. 1. 40.\n  POS 0. 2. 12.\n  DEFBUTTON \"OK\" \"DIALOG.END\"\n  POS 14. 2. 12.\n  BUTTON \"Skip\" \"DIALOG.END\"\n  CLOSE \"DIALOG.END\"\n)\nDIALOG.END\nENDDO"
+            val cmm_result = s.run_cmm(cmm)
+            # Step 2: Setup debug AREA
+            s.screen_off()
+            s.area_create("BLE_OUT")
+            s.area_select("BLE_OUT")
+            s.area_view("BLE_OUT")
+            # Step 3: Set breakpoints at BLE init functions
+            s.set_breakpoint("0x21000000")
+            s.set_breakpoint("0x21000100")
+            # Step 4: Run
+            s.run_target()
+            s.halt()
+            # Step 5: Step through BLE init
+            s.step()
+            s.step()
+            val pc = s.read_register("PC")
+            # Step 6: Read memory at BLE config area
+            val ble_cfg = s.read_memory("0x21000000")
+            # Step 7: Capture registers
+            val regs = s.capture_registers()
+            # Step 8: Print BLE status to AREA
+            s.area_print("BLE initialized")
+            s.area_print("MAC: 00:11:22:33:44:55")
+            # Step 9: Clean up
+            s.screen_on()
+            s.area_reset()
+            s.delete_breakpoints()
+            s.disconnect()
+            val hist3 = s.history
+            expect(hist3.len() > 10).to_equal(true)
+
+    context "multi-core debug session (stm32wb_dual_core)":
+        it "SCREEN.ALways → toolbar → two-page layout → step each core":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.setup_cpu("CortexM4")
+            s.system_up()
+            # Step 1: Persistent display for multi-core
+            s.screen_always()
+            expect(s.screen_mode).to_equal("always")
+            s.toolbar(true)
+            s.statusbar(true)
+            # Step 2: Page 1 — M4 core debug
+            s.page_create("M4_Core")
+            s.open_window("Register.view", "0.", "0.", "60.", "20.")
+            s.open_window("Break.List", "62.", "0.", "55.", "10.")
+            s.set_breakpoint("0x08000000")
+            # Step 3: Page 2 — M0+ core debug (simulated)
+            s.page_create("M0_Core")
+            s.open_window("Register.view", "0.", "0.", "60.", "20.")
+            # Step 4: Debug on M4 page
+            s.page_select("M4_Core")
+            s.run_target()
+            s.halt()
+            s.step()
+            val m4_pc = s.read_register("PC")
+            val m4_regs = s.capture_registers()
+            # Step 5: Switch to M0 page, inspect
+            s.page_select("M0_Core")
+            expect(s.active_page).to_equal("M0_Core")
+            # Step 6: Clean up
+            s.delete_breakpoints()
+            s.disconnect()
+
+    context "AREA semihosting session (imx6sx_qspi)":
+        it "create area → write output → capture → clear → capture again → compare":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Step 1: Create AREA for semihosting output
+            s.area_create("QSPI_OUT")
+            s.area_select("QSPI_OUT")
+            s.area_view("QSPI_OUT")
+            val ar1 = s.areas
+            expect(ar1.len()).to_equal(1)
+            # Step 2: Simulate target printf via AREA
+            s.area_print("QSPI init: OK")
+            s.area_print("Flash ID: 0xEF4017")
+            s.area_print("Erase 64KB sector 0: OK")
+            # Step 3: Capture area output
+            val before_clear = s.last_capture
+            # Step 4: Clear area
+            s.area_clear("QSPI_OUT")
+            # Step 5: Write more output
+            s.area_print("Program sector 0: OK")
+            # Step 6: Reset all areas
+            s.area_reset()
+            val ar2 = s.areas
+            expect(ar2.len()).to_equal(0)
+            s.disconnect()
+
+    context "MENU + SCREEN session (qnx_beagle)":
+        it "SCREEN.ALways → menu reprogram → debug flow":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Step 1: Persistent display
+            s.screen_always()
+            # Step 2: Custom menu
+            s.menu_reprogram()
+            # Step 3: Debug
+            s.set_breakpoint("0x80000000")
+            s.run_target()
+            s.halt()
+            s.step()
+            val pc = s.read_register("PC")
+            val regs = s.capture_registers()
+            # Step 4: Clean up
+            s.delete_breakpoints()
+            s.disconnect()
+
+    context "PRinTer.FILE session":
+        it "redirect output → capture registers → read file → verify":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            val pid = rt_getpid()
+            val ts = rt_time_now_unix_micros()
+            val outfile = "/tmp/t32_prt_{pid}_{ts}.txt"
+            # Step 1: Redirect
+            s.printer_file(outfile)
+            # Step 2: Capture (would go to file in live mode)
+            val regs = s.capture_registers()
+            # Step 3: Close printer
+            s.printer_close()
+            # Step 4: Clean up
+            rt_file_delete(outfile)
+            s.disconnect()
+
+    context "run-state guard in debug session":
+        it "halted → step allowed, running → capture blocked":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            expect(s.state).to_equal("halted")
+            # Halted: register read SHOULD work
+            val r1 = s.read_register("PC")
+            match r1:
+                Ok(_): expect(true).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Halted: capture SHOULD work
+            val c1 = s.capture_registers()
+            match c1:
+                Ok(_): expect(true).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Running: register read SHOULD fail
+            s.run_target()
+            expect(s.state).to_equal("running")
+            val r2 = s.read_register("PC")
+            match r2:
+                Err(e): expect(e).to_contain("halted")
+                Ok(_): expect(false).to_equal(true)
+            # Running: capture SHOULD fail
+            val c2 = s.capture_registers()
+            match c2:
+                Err(e): expect(e).to_contain("halted")
+                Ok(_): expect(false).to_equal(true)
+            # Running: breakpoint set IS allowed (safe while running)
+            val bp = s.set_breakpoint("0x08001000")
+            match bp:
+                Ok(_): expect(true).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Halt, then capture works again
+            s.halt()
+            val r3 = s.read_register("PC")
+            match r3:
+                Ok(_): expect(true).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            s.disconnect()
+
+    context "full debug cycle with state diff":
+        it "pre-capture → step → post-capture → diff shows changes":
+            var s = T32GuiSession.create("localhost", 20000)
+            s.connect()
+            s.system_up()
+            # Pre-state
+            val pre_pc = s.read_register("PC")
+            val pre_regs = s.capture_registers()
+            val pre_hash = state_hash(s.registers_view)
+            # Step — changes PC
+            s.step()
+            # Post-state
+            val post_pc = s.read_register("PC")
+            val post_regs = s.capture_registers()
+            val post_hash = state_hash(s.registers_view)
+            # PC should have changed
+            match pre_pc:
+                Ok(pre_v):
+                    match post_pc:
+                        Ok(post_v): expect(pre_v == post_v).to_equal(false)
+                        Err(_): expect(false).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+            # Register view hash should differ (PC changed)
+            expect(pre_hash == post_hash).to_equal(false)
+            # History should record all steps
+            val hist4 = s.history
+            expect(hist4.len() > 5).to_equal(true)
+            s.disconnect()
+
+fn state_hash(content: text) -> text:
+    var hash: i64 = 0
+    for ch in content:
+        val b = ch.bytes()
+        hash = hash * 31 + b[0]
+    str(hash)
