@@ -1,0 +1,63 @@
+# Simple Language LSP Server Launcher
+# Finds the Simple runtime binary, sets environment, and launches the LSP server.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn find_script_dir() -> text:
+    val args = rt_cli_get_args()
+    val script = args[0]
+    var last_slash = -1
+    var i = 0
+    while i < script.len():
+        if script[i] == '/':
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        script[0:last_slash]
+    else:
+        "."
+
+fn find_project_root(script_dir: text) -> text:
+    var last_slash = -1
+    var i = 0
+    while i < script_dir.len():
+        if script_dir[i] == '/':
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        script_dir[0:last_slash]
+    else:
+        ".."
+
+fn main() -> i64:
+    val script_dir = find_script_dir()
+    val project_root = find_project_root(script_dir)
+
+    # Find runtime binary
+    var runtime = "{script_dir}/release/simple"
+    if not rt_file_exists(runtime):
+        runtime = "{script_dir}/release/linux-x86_64/simple"
+
+    # Set environment (replaces 2>/dev/null by suppressing log output)
+    rt_env_set("SIMPLE_LIB", "{project_root}/src")
+    rt_env_set("SIMPLE_LOG", "error")
+    rt_env_set("RUST_LOG", "error")
+
+    val entry = "{project_root}/src/app/lsp/main.spl"
+
+    # Build args: runtime + "run" + entry + forwarded args
+    val all_args = rt_cli_get_args()
+    var run_args: [text] = ["run", entry]
+    var i = 1
+    while i < all_args.len():
+        run_args.push(all_args[i])
+        i = i + 1
+
+    val (stdout, stderr, code) = rt_process_run(runtime, run_args)
+    if stdout.len() > 0:
+        print stdout
+    code

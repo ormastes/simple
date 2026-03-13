@@ -1,6 +1,7 @@
 use compiler.core.interpreter.{
     eval_init, register_deferred_module, try_force_any_deferred_for,
-    module_get_file_path, func_table_lookup, core_interpret,
+    module_get_file_path, func_table_lookup, core_interpret, load_module,
+    load_module_parse_only, load_module_register_only,
     val_get_int, eval_get_error
 }
 
@@ -56,6 +57,68 @@ fn probe_wildcard_filter() -> text:
     if forced == 1 and not a_loaded and b_loaded and not alpha_registered and beta_registered:
         return "ok"
     "forced={forced} a_loaded={a_loaded} b_loaded={b_loaded} alpha={alpha_registered} beta={beta_registered}"
+
+fn probe_direct_load() -> text:
+    val tmpdir = lazy_test_tmpdir()
+    val main_path = "{tmpdir}/main.spl"
+    val a_path = "{tmpdir}/a.spl"
+
+    if not write_lazy_file(main_path, "# probe\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write main"
+    if not write_lazy_file(a_path, "pub fn alpha() -> i64:\n    11\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write a"
+
+    eval_init()
+    val loaded = load_module("a", main_path)
+    val a_loaded = module_get_file_path("a") != ""
+    val alpha_registered = func_table_lookup("alpha") >= 0
+    lazy_test_cleanup(tmpdir)
+
+    if loaded == 1 and a_loaded and alpha_registered:
+        return "ok"
+    "loaded={loaded} a_loaded={a_loaded} alpha={alpha_registered}"
+
+fn probe_parse_only() -> text:
+    val tmpdir = lazy_test_tmpdir()
+    val main_path = "{tmpdir}/main.spl"
+    val a_path = "{tmpdir}/a.spl"
+    if not write_lazy_file(main_path, "# probe\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write main"
+    if not write_lazy_file(a_path, "pub fn alpha() -> i64:\n    11\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write a"
+    eval_init()
+    val parsed = load_module_parse_only("a", main_path)
+    lazy_test_cleanup(tmpdir)
+    if parsed == 1:
+        return "ok"
+    "parsed={parsed}"
+
+fn probe_register_only() -> text:
+    val tmpdir = lazy_test_tmpdir()
+    val main_path = "{tmpdir}/main.spl"
+    val a_path = "{tmpdir}/a.spl"
+    if not write_lazy_file(main_path, "# probe\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write main"
+    if not write_lazy_file(a_path, "pub fn alpha() -> i64:\n    11\n"):
+        lazy_test_cleanup(tmpdir)
+        return "failed to write a"
+    eval_init()
+    val parsed = load_module_parse_only("a", main_path)
+    if parsed != 1:
+        lazy_test_cleanup(tmpdir)
+        return "parsed={parsed}"
+    val registered = load_module_register_only("a", main_path)
+    val a_loaded = module_get_file_path("a") != ""
+    val alpha_registered = func_table_lookup("alpha") >= 0
+    lazy_test_cleanup(tmpdir)
+    if registered == 1 and a_loaded and alpha_registered:
+        return "ok"
+    "registered={registered} a_loaded={a_loaded} alpha={alpha_registered}"
 
 fn probe_circular_wildcard() -> text:
     val tmpdir = lazy_test_tmpdir()
@@ -120,10 +183,13 @@ pub fn c_value() -> i64:
 fn main() -> i64:
     val args = sys_get_args()
     if args.len() < 2:
-        print "usage: lazy_shb_probe.spl <wildcard_filter|circular_wildcard>"
+        print "usage: lazy_shb_probe.spl <parse_only|register_only|direct_load|wildcard_filter|circular_wildcard>"
         return 1
 
     val result = match args[1]:
+        case "parse_only": probe_parse_only()
+        case "register_only": probe_register_only()
+        case "direct_load": probe_direct_load()
         case "wildcard_filter": probe_wildcard_filter()
         case "circular_wildcard": probe_circular_wildcard()
         case _: "unknown command: {args[1]}"

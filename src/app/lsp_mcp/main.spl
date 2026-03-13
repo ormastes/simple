@@ -1,0 +1,404 @@
+#![allow(unnamed_duplicate_typed_args)]
+# LSP MCP Server — Simple rewrite of bin/simple_lsp_mcp_server (Python)
+#
+# Minimal MCP wrapper for Simple LSP-style code intelligence tools.
+# Supports Content-Length framed stdio and raw JSON-lines stdio.
+#
+# 5 tools:
+#   lsp_definition(file, line, character)
+#   lsp_references(file, line, character)
+#   lsp_hover(file, line, character)
+#   lsp_symbols(file)
+#   lsp_diagnostics(file)
+#
+# Subprocess calls via rt_process_run to:
+#   bin/release/simple src/app/lsp/lsp_query.spl <subcmd> <file> <line+1> <col+1>
+#   bin/release/simple lint <file>
+
+# --- Extern declarations ---
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# --- Constants ---
+
+val SERVER_NAME = "simple-lsp-mcp"
+val SERVER_VERSION = "0.1.0-mvp"
+val NL = "\n"
+val LSP_QUERY_PATH = "src/app/lsp/lsp_query.spl"
+
+# --- Protocol state ---
+
+var USE_JSON_LINES = false
+
+# --- JSON helpers (inlined subset) ---
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(Q(), r"\" + Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
+
+fn js(s: text) -> text:
+    Q() + escape_json(s) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+# --- Safe substring using char iteration (avoids interpreter mutation bug) ---
+
+fn mcp_substr(s: text, start: i64, end_pos: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    for ch in s:
+        if i >= end_pos:
+            break
+        if i >= start:
+            parts.push(ch)
+        i = i + 1
+    parts.join("")
+
+# --- Field extraction from raw JSON ---
+
+fn extract_field(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = mcp_substr(json, start, json.len())
+    val trimmed = after.trim()
+    if trimmed.starts_with(Q()):
+        val after_quote = mcp_substr(trimmed, 1, trimmed.len())
+        val end_idx_result = after_quote.index_of(Q())
+        var end_idx = -1
+        match end_idx_result:
+            Some(i): end_idx = i
+            nil: return ""
+        if end_idx < 0:
+            return ""
+        return mcp_substr(after_quote, 0, end_idx)
+    else:
+        var parts: [text] = []
+        for ch in trimmed:
+            if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+                break
+            parts.push(ch)
+        return parts.join("")
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = mcp_substr(json, start, json.len())
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(Q()):
+        var out: [text] = [Q()]
+        var escaped = false
+        var pos = 1
+        while pos < rest.len():
+            val ch = mcp_substr(rest, pos, pos + 1)
+            out.push(ch)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                break
+            pos = pos + 1
+        return out.join("")
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
+
+fn extract_id(json: text) -> text:
+    extract_field_raw(json, "id")
+
+fn extract_nested(json: text, key: text) -> text:
+    val params_search = Q() + "params" + Q() + ":"
+    val params_idx_result = json.index_of(params_search)
+    var params_idx = -1
+    match params_idx_result:
+        Some(i): params_idx = i
+        nil: return ""
+    if params_idx < 0:
+        return ""
+    val params_start = params_idx + params_search.len()
+    val params = mcp_substr(json, params_start, json.len())
+    extract_field(params, key)
+
+# --- JSON response builders ---
+
+fn make_json_result(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", str(code)), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn text_byte_len(s: text) -> i64:
+    s.len()
+
+# --- Protocol I/O ---
+
+fn read_stdin_message() -> text:
+    var line = input()
+    if line == "":
+        return ""
+    if line.ends_with("\r"):
+        line = mcp_substr(line, 0, line.len() - 1)
+    if line.starts_with(LB()):
+        USE_JSON_LINES = true
+        return line
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
+
+fn write_stdout_message(body: text):
+    if USE_JSON_LINES:
+        print_raw(body + NL)
+    else:
+        val byte_count = text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
+        print_raw(header)
+        print_raw(body)
+
+# --- Binary finder ---
+
+fn _mcp_find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    val os_env = rt_env_get("OS") ?? ""
+    val is_win = os_env.contains("Windows")
+    if is_win:
+        if rt_file_exists("bin/release/simple.exe"):
+            return "bin/release/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+# --- Tool schemas (5 LSP tools) ---
+
+fn make_lsp_tool_schema(name: text, description: text, needs_position: bool) -> text:
+    var props = LB()
+    props = props + jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file"))))
+    if needs_position:
+        props = props + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("0-indexed line number"))))
+        props = props + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("0-indexed character offset"))))
+    props = props + RB()
+
+    var req = SB_L() + js("file")
+    if needs_position:
+        req = req + "," + js("line") + "," + js("character")
+    req = req + SB_R()
+
+    val schema = jo3(
+        jp("type", js("object")),
+        jp("properties", props),
+        jp("required", req)
+    )
+
+    val annotations = jo3(
+        jp("readOnlyHint", "true"),
+        jp("destructiveHint", "false"),
+        jp("idempotentHint", "true")
+    )
+
+    var tool_obj = LB()
+    tool_obj = tool_obj + jp("name", js(name))
+    tool_obj = tool_obj + "," + jp("description", js(description))
+    tool_obj = tool_obj + "," + jp("inputSchema", schema)
+    tool_obj = tool_obj + "," + jp("annotations", annotations)
+    tool_obj = tool_obj + RB()
+    tool_obj
+
+fn make_tools_list(id: text) -> text:
+    var tool_parts: [text] = []
+    tool_parts.push(make_lsp_tool_schema("lsp_definition", "Find where a symbol is defined in a Simple source file.", true))
+    tool_parts.push(make_lsp_tool_schema("lsp_references", "Find symbol references in Simple source.", true))
+    tool_parts.push(make_lsp_tool_schema("lsp_hover", "Get hover information for a symbol in Simple source.", true))
+    tool_parts.push(make_lsp_tool_schema("lsp_symbols", "List symbols in a Simple source file.", false))
+    tool_parts.push(make_lsp_tool_schema("lsp_diagnostics", "Run lightweight diagnostics via simple lint.", false))
+
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    make_json_result(id, result)
+
+# --- Tool execution ---
+
+fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
+    val bin = _mcp_find_simple_binary()
+    val line1 = str(line0 + 1)
+    val char1 = str(char0 + 1)
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run(bin, [LSP_QUERY_PATH, subcmd, file, line1, char1])
+    stdout.trim()
+
+fn run_lsp_symbols(file: text) -> text:
+    val bin = _mcp_find_simple_binary()
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run(bin, [LSP_QUERY_PATH, "symbols", file])
+    stdout.trim()
+
+fn run_lsp_diagnostics(file: text) -> text:
+    val bin = _mcp_find_simple_binary()
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run(bin, ["lint", file])
+    stdout.trim()
+
+fn tool_text_result(id: text, output: text) -> text:
+    val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(output))) + SB_R()
+    val result = jo1(jp("content", content))
+    make_json_result(id, result)
+
+fn handle_tool_call(id: text, body: text) -> text:
+    val tool_name = extract_nested(body, "name")
+    val file = extract_nested(body, "file")
+
+    if tool_name == "lsp_definition":
+        val line_str = extract_nested(body, "line")
+        val char_str = extract_nested(body, "character")
+        val line_num = int(line_str) ?? 0
+        val char_num = int(char_str) ?? 0
+        return tool_text_result(id, run_lsp_query("definition", file, line_num, char_num))
+
+    elif tool_name == "lsp_references":
+        val line_str = extract_nested(body, "line")
+        val char_str = extract_nested(body, "character")
+        val line_num = int(line_str) ?? 0
+        val char_num = int(char_str) ?? 0
+        return tool_text_result(id, run_lsp_query("references", file, line_num, char_num))
+
+    elif tool_name == "lsp_hover":
+        val line_str = extract_nested(body, "line")
+        val char_str = extract_nested(body, "character")
+        val line_num = int(line_str) ?? 0
+        val char_num = int(char_str) ?? 0
+        return tool_text_result(id, run_lsp_query("hover", file, line_num, char_num))
+
+    elif tool_name == "lsp_symbols":
+        return tool_text_result(id, run_lsp_symbols(file))
+
+    elif tool_name == "lsp_diagnostics":
+        return tool_text_result(id, run_lsp_diagnostics(file))
+
+    make_error(id, -32602, "Unknown tool: " + tool_name)
+
+# --- Initialize response ---
+
+fn make_init_response(id: text) -> text:
+    val tools_cap = jo1(jp("listChanged", "false"))
+    val caps = jo1(jp("tools", tools_cap))
+    val server_info = jo3(
+        jp("name", js(SERVER_NAME)),
+        jp("version", js(SERVER_VERSION)),
+        jp("instructions", js("Minimal Simple LSP MCP shim backed by lsp_query.spl and simple lint."))
+    )
+    val result = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("serverInfo", server_info)
+    )
+    make_json_result(id, result)
+
+# --- Server loop ---
+
+fn start_server():
+    var running = true
+    while running:
+        var line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            var method = extract_field(line, "method")
+            var id = extract_id(line)
+            var response = ""
+            if method == "initialize":
+                response = make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            elif method == "shutdown":
+                response = make_json_result(id, "null")
+            elif method == "ping":
+                response = make_json_result(id, LB() + RB())
+            elif method == "tools/list":
+                response = make_tools_list(id)
+            elif method == "tools/call":
+                response = handle_tool_call(id, line)
+            else:
+                if id != "" and id != "null":
+                    response = make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                write_stdout_message(response)
+
+fn main() -> i64:
+    start_server()
+    0

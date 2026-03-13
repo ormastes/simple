@@ -1,0 +1,76 @@
+# TRACE32 MCP Server Launcher
+# Finds the Simple runtime binary, sets environment, validates paths,
+# and launches the T32 MCP server entrypoint.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_exit(code: i64)
+
+fn find_script_dir() -> text:
+    val args = rt_cli_get_args()
+    val script = args[0]
+    # Strip filename to get directory
+    var last_slash = -1
+    var i = 0
+    while i < script.len():
+        if script[i] == '/':
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        script[0:last_slash]
+    else:
+        "."
+
+fn find_project_root(script_dir: text) -> text:
+    # script_dir is bin/, project root is one level up
+    var last_slash = -1
+    var i = 0
+    while i < script_dir.len():
+        if script_dir[i] == '/':
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        script_dir[0:last_slash]
+    else:
+        ".."
+
+fn main() -> i64:
+    val script_dir = find_script_dir()
+    val project_root = find_project_root(script_dir)
+
+    # Find runtime binary
+    var runtime = "{script_dir}/release/simple"
+    if not rt_file_exists(runtime):
+        runtime = "{script_dir}/release/linux-x86_64/simple"
+
+    if not rt_file_exists(runtime):
+        print "[t32-mcp] startup error: Simple runtime not found at '{script_dir}/release/simple' or '{script_dir}/release/linux-x86_64/simple'"
+        return 1
+
+    val entry = "{project_root}/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+    if not rt_file_exists(entry):
+        print "[t32-mcp] startup error: entrypoint not found at '{entry}'"
+        return 1
+
+    # Set environment
+    rt_env_set("SIMPLE_LIB", "{project_root}/src")
+    rt_env_set("SIMPLE_LOG", "error")
+    rt_env_set("RUST_LOG", "error")
+
+    # Build args: runtime + entry + forwarded args
+    val all_args = rt_cli_get_args()
+    var run_args: [text] = [entry]
+    var i = 1
+    while i < all_args.len():
+        run_args.push(all_args[i])
+        i = i + 1
+
+    val (stdout, stderr, code) = rt_process_run(runtime, run_args)
+    if stdout.len() > 0:
+        print stdout
+    if stderr.len() > 0:
+        print stderr
+    code
