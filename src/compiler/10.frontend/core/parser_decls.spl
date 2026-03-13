@@ -429,6 +429,7 @@ fn parse_enum_decl() -> i64:
     parser_expect(TOK_INDENT)
 
     var variant_names: [text] = []
+    var enum_method_ids: [i64] = []
 
     for i in 0..1000:
         parser_skip_newlines()
@@ -442,6 +443,38 @@ fn parse_enum_decl() -> i64:
         if par_kind_get() == TOK_STRING_LIT:
             parser_advance()
             parser_skip_newlines_and_semicolons()
+            continue
+
+        # Handle methods inside enum body: fn, static fn, me, pub fn, pub static fn
+        if par_kind_get() == TOK_KW_PUB:
+            parser_advance()
+            if par_kind_get() == TOK_KW_STATIC:
+                val sm_id = parse_class_body_method(enum_name, true, false)
+                if sm_id >= 0:
+                    enum_method_ids.push(sm_id)
+            elif par_kind_get() == TOK_KW_FN:
+                val fm_id = parse_class_body_method(enum_name, false, false)
+                if fm_id >= 0:
+                    enum_method_ids.push(fm_id)
+            elif par_kind_get() == TOK_KW_ME:
+                val mm_id = parse_class_body_method(enum_name, false, true)
+                if mm_id >= 0:
+                    enum_method_ids.push(mm_id)
+            continue
+        if par_kind_get() == TOK_KW_STATIC:
+            val sm_id = parse_class_body_method(enum_name, true, false)
+            if sm_id >= 0:
+                enum_method_ids.push(sm_id)
+            continue
+        if par_kind_get() == TOK_KW_FN:
+            val fm_id = parse_class_body_method(enum_name, false, false)
+            if fm_id >= 0:
+                enum_method_ids.push(fm_id)
+            continue
+        if par_kind_get() == TOK_KW_ME:
+            val mm_id = parse_class_body_method(enum_name, false, true)
+            if mm_id >= 0:
+                enum_method_ids.push(mm_id)
             continue
 
         # Skip comments that may appear as idents
@@ -474,7 +507,14 @@ fn parse_enum_decl() -> i64:
         variant_names.push(vname)
         parser_skip_newlines_and_semicolons()
 
-    decl_enum_def(enum_name, variant_names, 0)
+    val enum_did = decl_enum_def(enum_name, variant_names, 0)
+
+    # If enum had methods, create an impl block for them
+    if enum_method_ids.len() > 0:
+        val impl_d = decl_impl_block(enum_name, enum_method_ids, 0)
+        module_add_decl(impl_d)
+
+    enum_did
 
 # ===== Top-Level Module Parsing =====
 

@@ -1128,6 +1128,13 @@ pub(crate) fn evaluate_method_call_with_self_update(
         bail_unknown_method!(method, class, available_methods);
     }
 
+    // For Enum values, methods are pure (fn, not me) and should never clobber the variable.
+    // Return None for updated_self so the caller does not overwrite the enum binding.
+    if matches!(recv_val, Value::Enum { .. } | Value::EnumType { .. }) {
+        let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
+        return Ok((result, None));
+    }
+
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
     let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
 

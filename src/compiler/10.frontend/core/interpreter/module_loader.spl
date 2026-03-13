@@ -32,6 +32,7 @@ val DECL_VAR = 5
 val DECL_USE = 6
 val DECL_EXPORT = 7
 val DECL_ENUM = 8
+val DECL_IMPL = 9
 
 # Helper struct for building CoreDecl (defined in ast_types.spl)
 # Since we can't use generics at runtime, we construct these manually
@@ -378,11 +379,33 @@ fn register_module_functions():
 
         if tag == DECL_STRUCT:
             val name = decl_get_name(did)
+            struct_table_register(name, did)
             irt_track_struct(mod_path, name)
 
         if tag == DECL_ENUM:
             val name = decl_get_name(did)
+            val variants = decl_get_fields(did)
+            # Register enum in registry for variant resolution and exhaustiveness
+            enum_table_register(name, variants)
+            # Register variant constants as globals (same as eval_decl for DECL_ENUM)
+            var vi: i64 = 0
+            for variant_name in variants:
+                env_define_global(variant_name, val_make_int(vi))
+                irt_track_global(mod_path, variant_name)
+                vi = vi + 1
             irt_track_enum(mod_path, name)
+
+        if tag == DECL_IMPL:
+            # Register impl methods in function table
+            val impl_methods = decl_get_body(did)
+            for method_did in impl_methods:
+                val mtag = decl_get_tag(method_did)
+                if mtag == DECL_FN:
+                    val mname = decl_get_name(method_did)
+                    val mret = decl_get_ret_type(method_did)
+                    func_table_register(mname, method_did)
+                    func_register_return_type(mname, mret)
+                    irt_track_func(mod_path, mname)
 
 # ===== Public API =====
 

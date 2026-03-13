@@ -154,7 +154,15 @@ fn eval_call(eid: i64) -> i64:
             # Check enum variant constructor: Enum.Variant(payload)
             val enum_variants = enum_table_lookup(type_name)
             if enum_variants != "":
-                return eval_enum_variant_call(type_name, member_name, arg_eids)
+                # Only treat as variant if member_name is a known variant
+                val variant_list = enum_variants.split(",")
+                var is_variant = false
+                for vn in variant_list:
+                    if vn == member_name:
+                        is_variant = true
+                        break
+                if is_variant:
+                    return eval_enum_variant_call(type_name, member_name, arg_eids)
             # Check static method: Type.method() → Type__method in func table
             val static_fn_name = type_name + "__" + member_name
             val static_decl = func_table_lookup(static_fn_name)
@@ -387,6 +395,25 @@ fn eval_method_call(eid: i64) -> i64:
                 if eval_had_error: return -1
                 arg_values.push(av)
             return eval_method_with_args(decl_id, arg_values)
+        # Enum variant method dispatch: struct name "EnumType::Variant" -> try "EnumType__method"
+        var colon_pos: i64 = -1
+        var ci2: i64 = 0
+        for ch in type_name:
+            if ch == ":" and colon_pos == -1:
+                colon_pos = ci2
+            ci2 = ci2 + 1
+        if colon_pos > 0:
+            val enum_type_name = type_name[0:colon_pos]
+            val enum_full_name = enum_type_name + "__" + method_name
+            val enum_decl_id = func_table_lookup(enum_full_name)
+            if enum_decl_id >= 0:
+                var enum_arg_values: [i64] = []
+                enum_arg_values.push(receiver)
+                for aeid in arg_eids:
+                    val av = eval_expr(aeid)
+                    if eval_had_error: return -1
+                    enum_arg_values.push(av)
+                return eval_method_with_args(enum_decl_id, enum_arg_values)
 
     eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
     -1
@@ -397,14 +424,21 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
     val body_stmts = d_node.body_stmts
 
     env_push_scope()
-    # Bind self + params
-    var pi: i64 = 0
+    # Always bind 'self' to the receiver (first arg_value)
+    if arg_values.len() > 0:
+        env_define("self", arg_values[0])
+    # Bind declared params: skip 'self' if it appears, map rest to arg_values[1..]
+    var ai: i64 = 1  # Start after receiver
     for pname in param_names:
-        if pi < arg_values.len():
-            env_define(pname, arg_values[pi])
+        if pname == "self":
+            # Already bound above, don't advance ai
+            pass_do_nothing
         else:
-            env_define(pname, val_make_nil())
-        pi = pi + 1
+            if ai < arg_values.len():
+                env_define(pname, arg_values[ai])
+            else:
+                env_define(pname, val_make_nil())
+            ai = ai + 1
 
     var last_val = val_make_nil()
     for sid in body_stmts:
@@ -619,7 +653,15 @@ fn eval_field_access(eid: i64) -> i64:
         val type_name = base_node2.s_val
         val enum_variants = enum_table_lookup(type_name)
         if enum_variants != "":
-            return eval_enum_variant_access(type_name, field_name)
+            # Only treat as variant if field_name is a known variant
+            val variant_list2 = enum_variants.split(",")
+            var is_variant2 = false
+            for vn2 in variant_list2:
+                if vn2 == field_name:
+                    is_variant2 = true
+                    break
+            if is_variant2:
+                return eval_enum_variant_access(type_name, field_name)
         # Check for static method reference: Type.method
         val static_fn = type_name + "__" + field_name
         val static_decl = func_table_lookup(static_fn)

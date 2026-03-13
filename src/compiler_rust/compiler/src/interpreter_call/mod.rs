@@ -699,6 +699,10 @@ pub(crate) fn evaluate_call(
                         payload,
                     });
                 }
+                // Not a variant — check enum methods (static or instance used as static)
+                if let Some(method) = enum_def.methods.iter().find(|m| m.name == *method_name) {
+                    return core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
+                }
             }
 
             // Cross-module fallback: search MODULE_CLASSES_CACHE for the class definition.
