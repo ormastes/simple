@@ -314,6 +314,47 @@ impl SmfCache:
         """Get number of cached files."""
         self.cached_files.len()
 
+    me cache_from_bytes(module_id: text, smf_data: [u8]) -> Result<MappedSmf, text>:
+        """Cache an SMF module from in-memory bytes.
+
+        Creates a MappedSmf entry from raw bytes without requiring a file.
+        The module is stored under the given module_id key.
+        """
+        if self.cached_files.contains_key(module_id):
+            self.stats.cache_hits = self.stats.cache_hits + 1
+            return Ok(self.cached_files[module_id])
+
+        self.stats.cache_misses = self.stats.cache_misses + 1
+
+        val data_len = smf_data.len() as i64
+        if data_len < SMF_HEADER_SIZE:
+            return Err("SMF data too small: {data_len} bytes")
+
+        # Parse header from trailer (last 128 bytes)
+        var trailer_bytes: [u8] = []
+        var ti = data_len - 128
+        while ti < data_len:
+            trailer_bytes.push(smf_data[ti])
+            ti = ti + 1
+        val header = parse_header_minimal(trailer_bytes)
+
+        val mapped = MappedSmf(
+            path: module_id,
+            address: 0,
+            size: data_len,
+            header: header,
+            note_sdn: nil,
+            template_section_offset: 0,
+            note_sdn_section_offset: 0,
+            section_table_offset: 0
+        )
+
+        self.stats.total_files = self.stats.total_files + 1
+        self.stats.total_memory = self.stats.total_memory + data_len
+        self.cached_files[module_id] = mapped
+
+        Ok(mapped)
+
 # ============================================================================
 # Helper Functions
 # ============================================================================

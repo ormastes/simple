@@ -140,6 +140,19 @@ fn eval_call(eid: i64) -> i64:
                 val fn_decl = val_get_func_decl(fn_vid)
                 return eval_function_call(fn_decl, arg_eids)
 
+        # Try deferred (lazy) modules before giving up
+        val forced_ok = try_force_any_deferred_for(name)
+        if forced_ok == 1:
+            val decl_id2 = func_table_lookup(name)
+            if decl_id2 >= 0:
+                return eval_function_call(decl_id2, arg_eids)
+            # Maybe it's a struct constructor after forcing
+            val first_ch2 = name[0]
+            if first_ch2 >= "A" and first_ch2 <= "Z":
+                val struct_decl2 = struct_table_lookup(name)
+                if struct_decl2 >= 0:
+                    return eval_struct_constructor(name, struct_decl2, arg_eids)
+
         eval_set_error("undefined function: " + name)
         return -1
 
@@ -172,6 +185,30 @@ fn eval_call(eid: i64) -> i64:
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
                 return eval_struct_constructor(member_name, struct_decl2, arg_eids)
+
+            # Try deferred (lazy) modules for Type.method or Enum.Variant
+            val forced_path = try_force_any_deferred_for(type_name)
+            if forced_path == 1:
+                # Retry enum variant
+                val enum_variants2 = enum_table_lookup(type_name)
+                if enum_variants2 != "":
+                    val variant_list2 = enum_variants2.split(",")
+                    var is_variant2 = false
+                    for vn2 in variant_list2:
+                        if vn2 == member_name:
+                            is_variant2 = true
+                            break
+                    if is_variant2:
+                        return eval_enum_variant_call(type_name, member_name, arg_eids)
+                # Retry static method
+                val static_fn2 = type_name + "__" + member_name
+                val static_decl2 = func_table_lookup(static_fn2)
+                if static_decl2 >= 0:
+                    return eval_function_call(static_decl2, arg_eids)
+                # Retry struct constructor
+                val struct_decl3 = struct_table_lookup(member_name)
+                if struct_decl3 >= 0:
+                    return eval_struct_constructor(member_name, struct_decl3, arg_eids)
 
     # Indirect call (call on expression result)
     val callee_val = eval_expr(callee_eid)
@@ -396,6 +433,18 @@ fn eval_method_call(eid: i64) -> i64:
                 if eval_had_error: return -1
                 arg_values.push(av)
             return eval_method_with_args(decl_id, arg_values)
+        # Try deferred (lazy) modules for struct/class methods
+        val forced_mt = try_force_any_deferred_for(full_name)
+        if forced_mt == 1:
+            val decl_id2 = func_table_lookup(full_name)
+            if decl_id2 >= 0:
+                var arg_values2: [i64] = []
+                arg_values2.push(receiver)
+                for aeid2 in arg_eids:
+                    val av2 = eval_expr(aeid2)
+                    if eval_had_error: return -1
+                    arg_values2.push(av2)
+                return eval_method_with_args(decl_id2, arg_values2)
         # Enum variant method dispatch: struct name "EnumType::Variant" -> try "EnumType__method"
         var colon_pos: i64 = -1
         var ci2: i64 = 0
@@ -692,6 +741,26 @@ fn eval_field_access(eid: i64) -> i64:
         val static_decl = func_table_lookup(static_fn)
         if static_decl >= 0:
             return val_make_function(static_fn, static_decl)
+
+        # Try deferred (lazy) modules for Type.field or Enum.Variant
+        val forced_fa = try_force_any_deferred_for(type_name)
+        if forced_fa == 1:
+            # Retry enum variant access
+            val enum_variants3 = enum_table_lookup(type_name)
+            if enum_variants3 != "":
+                val variant_list3 = enum_variants3.split(",")
+                var is_variant3 = false
+                for vn3 in variant_list3:
+                    if vn3 == field_name:
+                        is_variant3 = true
+                        break
+                if is_variant3:
+                    return eval_enum_variant_access(type_name, field_name)
+            # Retry static method reference
+            val static_fn2 = type_name + "__" + field_name
+            val static_decl2 = func_table_lookup(static_fn2)
+            if static_decl2 >= 0:
+                return val_make_function(static_fn2, static_decl2)
 
     val base_val = eval_expr(base_eid)
     if eval_had_error: return -1

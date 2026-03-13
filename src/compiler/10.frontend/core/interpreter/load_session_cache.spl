@@ -1,0 +1,181 @@
+# Session-level caches for interpreter SMF loading
+#
+# Pure data types — no cross-layer imports.
+# Caches resolution decisions, freshness checks, compiled module state,
+# template metadata, and regeneration failure tracking.
+
+# ============================================================================
+# Interpreter Load Config — resolution policy for interpreter mode
+# ============================================================================
+
+class InterpreterLoadConfig:
+    prefer_compiled: bool
+    allow_library_smf: bool
+    allow_source_fallback: bool
+    regenerate_stale_smf: bool
+    compiled_imports: bool
+    smf_lib_paths: [text]
+
+fn interpreter_load_config_default() -> InterpreterLoadConfig:
+    InterpreterLoadConfig(
+        prefer_compiled: true,
+        allow_library_smf: true,
+        allow_source_fallback: true,
+        regenerate_stale_smf: false,
+        compiled_imports: false,
+        smf_lib_paths: []
+    )
+
+fn interpreter_load_config_source_only() -> InterpreterLoadConfig:
+    InterpreterLoadConfig(
+        prefer_compiled: false,
+        allow_library_smf: false,
+        allow_source_fallback: true,
+        regenerate_stale_smf: false,
+        compiled_imports: false,
+        smf_lib_paths: []
+    )
+
+# ============================================================================
+# Load Session Cache
+# ============================================================================
+
+# Module-level cache storage (flat dicts, text-keyed)
+var _lsc_target_kinds: {text: text} = {}
+var _lsc_target_paths: {text: text} = {}
+var _lsc_freshness: {text: bool} = {}
+var _lsc_compiled: {text: bool} = {}
+var _lsc_template_meta: {text: bool} = {}
+var _lsc_regen_failures: {text: text} = {}
+var _lsc_target_hits: i64 = 0
+var _lsc_target_misses: i64 = 0
+var _lsc_freshness_hits: i64 = 0
+var _lsc_freshness_misses: i64 = 0
+
+fn lsc_init():
+    _lsc_target_kinds = {}
+    _lsc_target_paths = {}
+    _lsc_freshness = {}
+    _lsc_compiled = {}
+    _lsc_template_meta = {}
+    _lsc_regen_failures = {}
+    _lsc_target_hits = 0
+    _lsc_target_misses = 0
+    _lsc_freshness_hits = 0
+    _lsc_freshness_misses = 0
+
+# ============================================================================
+# Target Resolution Cache
+# ============================================================================
+
+fn _lsc_target_key(module_name: text, current_file: text) -> text:
+    module_name + "|" + current_file
+
+fn lsc_cache_target(module_name: text, current_file: text, kind: text, path: text):
+    val key = _lsc_target_key(module_name, current_file)
+    _lsc_target_kinds[key] = kind
+    _lsc_target_paths[key] = path
+
+fn lsc_get_cached_target_kind(module_name: text, current_file: text) -> text:
+    val key = _lsc_target_key(module_name, current_file)
+    if _lsc_target_kinds.contains_key(key):
+        _lsc_target_hits = _lsc_target_hits + 1
+        return _lsc_target_kinds[key]
+    _lsc_target_misses = _lsc_target_misses + 1
+    ""
+
+fn lsc_get_cached_target_path(module_name: text, current_file: text) -> text:
+    val key = _lsc_target_key(module_name, current_file)
+    if _lsc_target_paths.contains_key(key):
+        return _lsc_target_paths[key]
+    ""
+
+# ============================================================================
+# Freshness Cache
+# ============================================================================
+
+fn lsc_cache_freshness(source_path: text, is_fresh: bool):
+    _lsc_freshness[source_path] = is_fresh
+
+fn lsc_get_cached_freshness(source_path: text) -> i64:
+    # Returns 1 for fresh, 0 for stale, -1 for not cached
+    if _lsc_freshness.contains_key(source_path):
+        _lsc_freshness_hits = _lsc_freshness_hits + 1
+        if _lsc_freshness[source_path]:
+            return 1
+        return 0
+    _lsc_freshness_misses = _lsc_freshness_misses + 1
+    -1
+
+# ============================================================================
+# Compiled Module Tracking
+# ============================================================================
+
+fn lsc_mark_compiled_loaded(module_name: text):
+    _lsc_compiled[module_name] = true
+
+fn lsc_is_compiled_loaded(module_name: text) -> bool:
+    if _lsc_compiled.contains_key(module_name):
+        return _lsc_compiled[module_name]
+    false
+
+# ============================================================================
+# Template Metadata
+# ============================================================================
+
+fn lsc_mark_template_metadata(module_id: text, has_metadata: bool):
+    _lsc_template_meta[module_id] = has_metadata
+
+fn lsc_has_template_metadata(module_id: text) -> bool:
+    if _lsc_template_meta.contains_key(module_id):
+        return _lsc_template_meta[module_id]
+    false
+
+# ============================================================================
+# Regeneration Failure Tracking
+# ============================================================================
+
+fn lsc_record_regen_failure(module_name: text, reason: text):
+    _lsc_regen_failures[module_name] = reason
+
+fn lsc_has_regen_failure(module_name: text) -> bool:
+    _lsc_regen_failures.contains_key(module_name)
+
+fn lsc_get_regen_failure_reason(module_name: text) -> text:
+    if _lsc_regen_failures.contains_key(module_name):
+        return _lsc_regen_failures[module_name]
+    ""
+
+# ============================================================================
+# Invalidation
+# ============================================================================
+
+fn lsc_invalidate_module(module_name: text):
+    # Remove from compiled modules
+    if _lsc_compiled.contains_key(module_name):
+        _lsc_compiled = _lsc_compiled.remove(module_name)
+    # Remove from template metadata
+    if _lsc_template_meta.contains_key(module_name):
+        _lsc_template_meta = _lsc_template_meta.remove(module_name)
+    # Remove from regen failures
+    if _lsc_regen_failures.contains_key(module_name):
+        _lsc_regen_failures = _lsc_regen_failures.remove(module_name)
+
+fn lsc_invalidate_all():
+    lsc_init()
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+fn lsc_target_hit_count() -> i64:
+    _lsc_target_hits
+
+fn lsc_target_miss_count() -> i64:
+    _lsc_target_misses
+
+fn lsc_freshness_hit_count() -> i64:
+    _lsc_freshness_hits
+
+fn lsc_freshness_miss_count() -> i64:
+    _lsc_freshness_misses

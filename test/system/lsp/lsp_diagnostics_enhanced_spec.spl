@@ -10,6 +10,11 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 
+class CheckResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
 fn _is_windows() -> bool:
     val (uname_out, _, _) = rt_process_run("uname", ["-s"])
     val os = uname_out.trim()
@@ -42,9 +47,10 @@ fn get_simple_binary() -> text:
     else:
         "bin/release/simple"
 
-fn run_check(file: text) -> (text, text, i64):
-    """Run check on a file and return (stdout, stderr, exit_code)."""
-    rt_process_run(get_simple_binary(), ["check", file])
+fn run_check(file: text) -> CheckResult:
+    """Run check on a file and return CheckResult."""
+    val (stdout, stderr, exit_code) = rt_process_run(get_simple_binary(), ["check", file])
+    CheckResult(stdout: stdout, stderr: stderr, exit_code: exit_code)
 
 fn write_temp_file(name: text, content: text) -> text:
     """Write a temporary .spl file for testing."""
@@ -62,9 +68,9 @@ describe "LSP Enhanced Diagnostics":
             expect(true).to_equal(true)
         else:
             val path = write_temp_file("syntax_err", "fn broken(\n    val x = \n")
-            val (stdout, stderr, exit_code) = run_check(path)
-            val combined = stdout + stderr
-            expect(exit_code).to_equal(1)
+            val res = run_check(path)
+            val combined = res.stdout + res.stderr
+            expect(res.exit_code).to_equal(1)
             val has_error = combined.contains("error")
             expect(has_error).to_equal(true)
 
@@ -73,17 +79,17 @@ describe "LSP Enhanced Diagnostics":
             expect(true).to_equal(true)
         else:
             val path = write_temp_file("line_num", "fn broken(\n")
-            val (_stdout, _stderr, exit_code) = run_check(path)
+            val res = run_check(path)
             # Error format includes file:line:col - error means check reported issue
-            expect(exit_code).to_equal(1)
+            expect(res.exit_code).to_equal(1)
 
     it "missing closing paren detected":
         if not _can_run:
             expect(true).to_equal(true)
         else:
             val path = write_temp_file("missing_paren", "fn test(a: i64\n    a + 1\n")
-            val (_stdout, _stderr, exit_code) = run_check(path)
-            expect(exit_code).to_equal(1)
+            val res = run_check(path)
+            expect(res.exit_code).to_equal(1)
 
     it "clean code passes check":
         if not _can_run:
@@ -91,8 +97,8 @@ describe "LSP Enhanced Diagnostics":
         else:
             val code = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
             val path = write_temp_file("clean", code)
-            val (_stdout, _stderr, exit_code) = run_check(path)
-            expect(exit_code).to_equal(0)
+            val res = run_check(path)
+            expect(res.exit_code).to_equal(0)
 
     it "valid function with return type passes":
         if not _can_run:
@@ -100,8 +106,8 @@ describe "LSP Enhanced Diagnostics":
         else:
             val code = "fn square(x: i64) -> i64:\n    x * x\n"
             val path = write_temp_file("valid_fn", code)
-            val (_stdout, _stderr, exit_code) = run_check(path)
-            expect(exit_code).to_equal(0)
+            val res = run_check(path)
+            expect(res.exit_code).to_equal(0)
 
     it "multiple syntax errors are reported":
         if not _can_run:
@@ -109,9 +115,9 @@ describe "LSP Enhanced Diagnostics":
         else:
             val code = "fn broken(\nfn also_broken(\n"
             val path = write_temp_file("multi_err", code)
-            val (stdout, stderr, exit_code) = run_check(path)
-            val combined = stdout + stderr
-            expect(exit_code).to_equal(1)
+            val res = run_check(path)
+            val combined = res.stdout + res.stderr
+            expect(res.exit_code).to_equal(1)
             val has_error = combined.contains("error")
             expect(has_error).to_equal(true)
 
@@ -120,8 +126,8 @@ describe "LSP Enhanced Diagnostics":
             expect(true).to_equal(true)
         else:
             val path = write_temp_file("expected_tok", "fn broken(\n")
-            val (stdout, stderr, _exit_code) = run_check(path)
-            val combined = stdout + stderr
+            val res = run_check(path)
+            val combined = res.stdout + res.stderr
             val has_expected = combined.contains("expected") or combined.contains("unexpected")
             expect(has_expected).to_equal(true)
 
@@ -130,7 +136,7 @@ describe "LSP Enhanced Diagnostics":
             expect(true).to_equal(true)
         else:
             val path = write_temp_file("err_summary", "fn broken(\n")
-            val (stdout, stderr, _exit_code) = run_check(path)
-            val combined = stdout + stderr
+            val res = run_check(path)
+            val combined = res.stdout + res.stderr
             val has_count = combined.contains("error(s)") or combined.contains("1 error")
             expect(has_count).to_equal(true)

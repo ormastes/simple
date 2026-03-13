@@ -27,6 +27,9 @@ use compiler.loader.compiler_ffi.{
 # use compiler.loader.smf_cache (SmfCache, MappedSmf)
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
+use compiler.backend.linker.smf_source.{SmfSource, FileSmf, MemorySmf, smf_source_get_reader}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+
 extern fn json_parse(input: text) -> Result<JsonValue, SimpleError>
 
 # ============================================================================
@@ -505,6 +508,128 @@ impl JitInstantiator:
             smf_files_mapped: cache_stats.total_files,
             smf_memory_mapped: cache_stats.total_memory
         )
+
+# ============================================================================
+# Byte-Backed Metadata Loading (Phases 7-8)
+# ============================================================================
+
+fn load_smf_metadata_from_bytes(module_id: text, smf_data: [u8]) -> Result<LoadedMetadata, text>:
+    """Load metadata from in-memory SMF bytes."""
+    val reader_result = SmfReaderMemory.from_data(smf_data)
+    if reader_result.is_err():
+        return Err(reader_result.unwrap_err())
+
+    val reader = reader_result.unwrap()
+    val note_text = reader.read_note_sdn()
+    if note_text == "":
+        return Ok(LoadedMetadata(possible: [], instantiations: []))
+
+    _parse_note_sdn_text_to_metadata(note_text)
+
+fn read_note_sdn_from_bytes(smf_data: [u8]) -> Result<LoadedMetadata, text>:
+    """Parse metadata section from in-memory SMF bytes."""
+    val reader_result = SmfReaderMemory.from_data(smf_data)
+    if reader_result.is_err():
+        return Err(reader_result.unwrap_err())
+
+    val reader = reader_result.unwrap()
+    val parsed_result = reader.read_note_sdn_parsed()
+    if parsed_result.is_err():
+        return Ok(LoadedMetadata(possible: [], instantiations: []))
+
+    _parse_note_sdn_text_to_metadata(parsed_result.unwrap())
+
+fn read_template_bytes_from_memory(smf_data: [u8], template_name: text) -> Result<[u8], text>:
+    """Extract template section bytes from in-memory SMF data."""
+    val reader_result = SmfReaderMemory.from_data(smf_data)
+    if reader_result.is_err():
+        return Err(reader_result.unwrap_err())
+
+    val reader = reader_result.unwrap()
+    val symbol_result = reader.lookup_symbol(template_name)
+    if symbol_result.is_err():
+        return Err("Template symbol not found: {template_name}")
+
+    val symbol = symbol_result.unwrap()
+    reader.read_template_section(symbol)
+
+fn compiled_module_init_templates(jit: JitInstantiator, module_id: text, smf_source: SmfSource) -> Result<i64, text>:
+    """Initialize template metadata from an SmfSource."""
+    match smf_source:
+        FileSmf(path):
+            val metadata = jit.read_note_sdn_from_file(path)?
+            jit.loaded_metadata[module_id] = metadata
+            Ok(metadata.possible.len() as i64)
+        MemorySmf(bytes, name):
+            val metadata = load_smf_metadata_from_bytes(name, bytes)?
+            jit.loaded_metadata[module_id] = metadata
+            Ok(metadata.possible.len() as i64)
+
+fn _parse_note_sdn_text_to_metadata(sdn_text: text) -> Result<LoadedMetadata, text>:
+    """Parse note.sdn text content into LoadedMetadata.
+
+    Expected format is line-based key=value or table rows.
+    Returns empty metadata if parsing fails (graceful degradation).
+    """
+    var possible: [PossibleInstantiation] = []
+    var instantiations: [InstantiationRecord] = []
+
+    val lines = sdn_text.split("\n")
+    var in_possible = false
+    var in_instantiations = false
+    var id_counter = 0
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        if trimmed.starts_with("possible"):
+            in_possible = true
+            in_instantiations = false
+            continue
+
+        if trimmed.starts_with("instantiations"):
+            in_possible = false
+            in_instantiations = true
+            continue
+
+        # Parse table rows (comma-delimited)
+        if in_possible and trimmed.contains(","):
+            val parts = trimmed.split(",")
+            if parts.len() >= 3:
+                val template_name = parts[0].trim()
+                val type_args = parts[1].trim()
+                val mangled_name = parts[2].trim()
+                possible.push(PossibleInstantiation(
+                    template_name: template_name,
+                    type_args: type_args,
+                    mangled_name: mangled_name
+                ))
+
+        if in_instantiations and trimmed.contains(","):
+            val parts = trimmed.split(",")
+            if parts.len() >= 7:
+                val template_name = parts[0].trim()
+                val type_args = parts[1].trim()
+                val mangled_name = parts[2].trim()
+                val from_file = parts[3].trim()
+                val from_loc = parts[4].trim()
+                val to_obj = parts[5].trim()
+                val status = parts[6].trim()
+                instantiations.push(InstantiationRecord(
+                    id: id_counter,
+                    template_name: template_name,
+                    type_args: type_args,
+                    mangled_name: mangled_name,
+                    from_file: from_file,
+                    from_loc: from_loc,
+                    to_obj: to_obj,
+                    status: status
+                ))
+                id_counter = id_counter + 1
+
+    Ok(LoadedMetadata(possible: possible, instantiations: instantiations))
 
 # ============================================================================
 # Statistics

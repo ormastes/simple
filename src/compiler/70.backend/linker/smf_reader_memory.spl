@@ -161,6 +161,46 @@ impl SmfReaderMemory:
             i = i + 1
         Ok(result)
 
+    """Read section data by index."""
+    fn read_section(section_index: i32) -> Result<[u8], text>:
+        val section_entry_size = 64
+        val section_count = self.header.section_count as i64
+        if section_index < 0 or section_index >= section_count:
+            return Err("Section index {section_index} out of range (0..{section_count})")
+
+        val entry_off = self.sections_offset + (section_index as i64) * section_entry_size
+        val entry_end = entry_off + section_entry_size
+        if entry_end > self.data.len():
+            return Err("Section entry {section_index} out of bounds")
+
+        # Read the section's file offset from the entry (bytes 8..16 within entry)
+        val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+
+        # Read the section's size from the entry (bytes 16..24 within entry)
+        val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
+
+        if sec_offset + sec_size > self.data.len():
+            return Err("Section data extends beyond file")
+
+        var result: [u8] = []
+        var i = sec_offset
+        while i < sec_offset + sec_size:
+            result.push(self.data[i])
+            i = i + 1
+        Ok(result)
+
+    """Read note.sdn / TemplateMeta section parsed as text."""
+    fn read_note_sdn_parsed() -> Result<text, text>:
+        val meta_section_index = find_section_index_by_type(self, 13)
+        if meta_section_index < 0:
+            return Err("No TemplateMeta section found")
+
+        val section_data = self.read_section(meta_section_index)
+        if section_data.is_err():
+            return Err(section_data.unwrap_err())
+
+        Ok(bytes_to_text(section_data.unwrap()))
+
     """Read template bytes for a generic symbol from TemplateCode."""
     fn read_template_section(symbol: SmfSymbol) -> Result<[u8], text>:
         if not symbol.is_generic_template:
@@ -642,6 +682,28 @@ fn find_section_index_by_type(reader: SmfReaderMemory, section_type: i32) -> i32
             return i as i32
         i = i + 1
     -1
+
+"""Parse a simple key=value pair from note.sdn text, returning the value for a given key."""
+fn parse_note_sdn_value(sdn_text: text, key: text) -> text:
+    val lines = sdn_text.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{key}"):
+            val eq_idx = trimmed.index_of("=")
+            if eq_idx >= 0:
+                return trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+    ""
+
+"""Extract a string value from parsed SDN text (strips surrounding quotes)."""
+fn sdn_as_string(value: text) -> text:
+    if value.len() >= 2 and value.starts_with("\"") and value.ends_with("\""):
+        return value.slice(1, value.len() - 1)
+    value
+
+"""Extract a boolean value from parsed SDN text."""
+fn sdn_as_bool(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed == "true" or trimmed == "yes" or trimmed == "1"
 
 """Convert a byte array to ASCII text, stopping at NUL."""
 fn bytes_to_text(bytes: [u8]) -> text:

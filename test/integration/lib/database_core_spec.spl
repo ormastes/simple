@@ -26,22 +26,282 @@ fn file_read(path: text) -> text:
     val result = rt_file_read_text(path)
     result ?? ""
 
+# ============================================================================
+# Local lightweight model classes for testing
+# ============================================================================
+
 class SdnRow:
     fields: {text: text}
+
 class SdnTable:
     name: text
     columns: [text]
     rows: [SdnRow]
     index: {text: i64}
+
+class StringInterner:
+    strings: {text: i64}
+    reverse: {i64: text}
+    next_id: i64
+
+class SdnDatabase:
+    path: text
+    tables: {text: SdnTable}
+    interner: StringInterner
+    modified: bool
+
+# ============================================================================
+# StringInterner helper functions
+# ============================================================================
+
+var _interner: StringInterner = StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0)
+
+fn si_reset():
+    _interner = StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0)
+
+fn si_intern(s: text) -> i64:
+    var strs = _interner.strings
+    if strs.contains_key(s):
+        return strs[s]
+    val id = _interner.next_id
+    strs[s] = id
+    _interner.strings = strs
+    var rev = _interner.reverse
+    rev[id] = s
+    _interner.reverse = rev
+    _interner.next_id = id + 1
+    id
+
+fn si_lookup(id: i64) -> text?:
+    var rev = _interner.reverse
+    if rev.contains_key(id):
+        Some(rev[id])
+    else:
+        nil
+
+fn si_get_id(s: text) -> i64?:
+    var strs = _interner.strings
+    if strs.contains_key(s):
+        Some(strs[s])
+    else:
+        nil
+
+fn si_get_next_id() -> i64:
+    _interner.next_id
+
+# ============================================================================
+# SdnRow helper functions
+# ============================================================================
+
+fn row_set(row: SdnRow, key: text, value: text) -> SdnRow:
+    var f = row.fields
+    f[key] = value
+    SdnRow(fields: f)
+
+fn row_get(row: SdnRow, key: text) -> text?:
+    var f = row.fields
+    if f.contains_key(key):
+        Some(f[key])
+    else:
+        nil
+
+fn row_get_i64(row: SdnRow, key: text) -> i64?:
+    val v = row_get(row, key)
+    if v.?:
+        val s = v?
+        Some(s.to_i64())
+    else:
+        nil
+
+fn row_get_bool(row: SdnRow, key: text) -> bool?:
+    val v = row_get(row, key)
+    if v.?:
+        val s = v?
+        if s == "true":
+            Some(true)
+        elif s == "false":
+            Some(false)
+        else:
+            nil
+    else:
+        nil
+
+# ============================================================================
+# SdnTable helper functions
+# ============================================================================
+
+fn tbl_add_row(table: SdnTable, row: SdnRow) -> SdnTable:
+    var rows = table.rows
+    rows.push(row)
+    var idx = table.index
+    val id_opt = row_get(row, "id")
+    if id_opt.?:
+        idx[id_opt?] = rows.len() - 1
+    SdnTable(name: table.name, columns: table.columns, rows: rows, index: idx)
+
+fn tbl_get_row(table: SdnTable, id: text) -> SdnRow?:
+    var idx = table.index
+    if idx.contains_key(id):
+        val i = idx[id]
+        Some(table.rows[i])
+    else:
+        nil
+
+fn tbl_mark_deleted(table: SdnTable, id: text) -> SdnTable:
+    var idx = table.index
+    if idx.contains_key(id):
+        val i = idx[id]
+        var rows = table.rows
+        val row = rows[i]
+        val new_row = row_set(row, "valid", "false")
+        rows[i] = new_row
+        SdnTable(name: table.name, columns: table.columns, rows: rows, index: idx)
+    else:
+        table
+
+fn tbl_valid_rows(table: SdnTable) -> [SdnRow]:
+    var result: [SdnRow] = []
+    for row in table.rows:
+        val valid_opt = row_get(row, "valid")
+        var include = true
+        if valid_opt.?:
+            if valid_opt? == "false":
+                include = false
+        if include:
+            result.push(row)
+    result
+
+# ============================================================================
+# SdnDatabase helper functions
+# ============================================================================
+
+var _db: SdnDatabase = SdnDatabase(path: "", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
+
+fn db_reset(path: text):
+    _db = SdnDatabase(path: path, tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
+
+fn db_get_table(name: text) -> SdnTable?:
+    var tbls = _db.tables
+    if tbls.contains_key(name):
+        Some(tbls[name])
+    else:
+        nil
+
+fn db_get_table_mut(name: text) -> SdnTable?:
+    db_get_table(name)
+
+fn db_set_table(name: text, table: SdnTable):
+    var tbls = _db.tables
+    tbls[name] = table
+    _db.tables = tbls
+    _db.modified = true
+
+fn db_save() -> bool:
+    # Serialize tables to SDN format and write to file
+    var content = ""
+    var tbls = _db.tables
+    for key in tbls.keys():
+        if key == "__init__":
+            continue
+        val table = tbls[key]
+        var cols = table.columns
+        content = content + "{table.name} |{cols.join(", ")}|\n"
+        for row in table.rows:
+            var values: [text] = []
+            for col in cols:
+                val v = row_get(row, col) ?? ""
+                values.push(v)
+            content = content + "    {values.join(", ")}\n"
+        content = content + "\n"
+    file_write(_db.path, content)
+
+fn db_load(path: text) -> bool:
+    if not file_exists(path):
+        return false
+    val content = file_read(path)
+    if content == "":
+        return false
+
+    val sentinel = SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})
+    _db = SdnDatabase(path: path, tables: {"__init__": sentinel}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
+
+    # Parse tables from content
+    val lines = content.split("\n")
+    var current_table_name = ""
+    var current_columns: [text] = []
+    var current_rows: [SdnRow] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            # End of table section - save current table if any
+            if current_table_name != "":
+                var tbl = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: {"__init__": -1})
+                # Rebuild index
+                var idx: {text: i64} = {"__init__": -1}
+                var ri = 0
+                while ri < current_rows.len():
+                    val r = current_rows[ri]
+                    val id_opt = row_get(r, "id")
+                    if id_opt.?:
+                        idx[id_opt?] = ri
+                    ri = ri + 1
+                tbl = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: idx)
+                db_set_table(current_table_name, tbl)
+                current_table_name = ""
                 current_columns = []
                 current_rows = []
+            continue
+
+        if trimmed.contains("|"):
+            # Header line: "name |col1, col2|"
+            val parts = trimmed.split("|")
+            if parts.len() >= 2:
+                current_table_name = parts[0].trim()
+                val col_str = parts[1].trim()
+                val raw_cols = col_str.split(", ")
+                current_columns = raw_cols
+                current_rows = []
+        else:
+            # Data row
+            if current_table_name != "":
+                val values = trimmed.split(", ")
+                var row = SdnRow(fields: {"__init__": "__init__"})
+                var ci = 0
+                while ci < current_columns.len() and ci < values.len():
+                    row = row_set(row, current_columns[ci], values[ci])
+                    ci = ci + 1
+                current_rows.push(row)
+
+    # Handle last table if content doesn't end with blank line
+    if current_table_name != "":
+        var idx: {text: i64} = {"__init__": -1}
+        var ri = 0
+        while ri < current_rows.len():
+            val r = current_rows[ri]
+            val id_opt = row_get(r, "id")
+            if id_opt.?:
+                idx[id_opt?] = ri
+            ri = ri + 1
+        val tbl = SdnTable(name: current_table_name, columns: current_columns, rows: current_rows, index: idx)
+        db_set_table(current_table_name, tbl)
+
+    true
+
+# ============================================================================
+# Helper for slow tests
+# ============================================================================
 
 fn slow_it(name: text, block: fn()):
     it(name, block)
 
+# ============================================================================
+# Tests
+# ============================================================================
+
 describe "StringInterner":
     slow_it "interns same string to same ID":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id1 = si_intern("test")
         val id2 = si_intern("test")
@@ -49,7 +309,7 @@ describe "StringInterner":
         expect(id1).to_equal(id2)
 
     slow_it "interns different strings to different IDs":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id1 = si_intern("first")
         val id2 = si_intern("second")
@@ -57,7 +317,7 @@ describe "StringInterner":
         expect(id1 == id2).to_equal(false)
 
     slow_it "lookups strings by ID":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id = si_intern("lookup_test")
         val result = si_lookup(id)
@@ -66,7 +326,7 @@ describe "StringInterner":
         expect(result?).to_equal("lookup_test")
 
     slow_it "lookups IDs by string":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id = si_intern("reverse_lookup")
         val result = si_get_id("reverse_lookup")
@@ -75,19 +335,19 @@ describe "StringInterner":
         expect(result?).to_equal(id)
 
     slow_it "returns None for unknown ID":
-        val interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val result = si_lookup(999)
         expect(result.?).to_equal(false)
 
     slow_it "returns None for unknown string":
-        val interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val result = si_get_id("nonexistent")
         expect(result.?).to_equal(false)
 
     slow_it "handles empty strings":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id = si_intern("")
         val result = si_lookup(id)
@@ -96,7 +356,7 @@ describe "StringInterner":
         expect(result?).to_equal("")
 
     slow_it "handles unicode strings":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         val id = si_intern("Hello 世界 🌍")
         val result = si_lookup(id)
@@ -106,7 +366,7 @@ describe "StringInterner":
         expect(value.contains("世界")).to_equal(true)
 
     slow_it "increments ID counter":
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        si_reset()
 
         expect(si_get_next_id()).to_equal(0)
 
@@ -137,19 +397,22 @@ describe "SdnRow":
 
     slow_it "returns None for missing field":
         val row = SdnRow(fields: {"__init__": "__init__"})
-        val result = row.get("nonexistent")
+        val result = row_get(row, "nonexistent")
 
         expect(result.?).to_equal(false)
 
     slow_it "gets field as i64":
         var row = SdnRow(fields: {"__init__": "__init__"})
-        row.set("count", "42")
+        row = row_set(row, "count", "42")
 
         val result = row_get_i64(row, "count")
         expect(result.?).to_equal(true)
         expect(result?).to_equal(42)
 
     slow_it "gets field as bool":
+        var row = SdnRow(fields: {"__init__": "__init__"})
+        row = row_set(row, "flag", "true")
+        row = row_set(row, "other", "false")
 
         expect(row_get_bool(row, "flag")?).to_equal(true)
         expect(row_get_bool(row, "other")?).to_equal(false)
@@ -184,8 +447,10 @@ describe "SdnTable":
     slow_it "adds row to table":
         var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {"__init__": -1})
 
-
-        table.add_row(row)
+        var row = SdnRow(fields: {"__init__": "__init__"})
+        row = row_set(row, "id", "item_1")
+        row = row_set(row, "value", "test")
+        table = tbl_add_row(table, row)
         var rows_a = table.rows
         expect(rows_a.len()).to_equal(1)
 
@@ -193,6 +458,10 @@ describe "SdnTable":
         var table = SdnTable(name: "data", columns: ["key", "value"], rows: [], index: {"__init__": -1})
 
         for i in 0..5:
+            var row = SdnRow(fields: {"__init__": "__init__"})
+            row = row_set(row, "key", "key_{i}")
+            row = row_set(row, "value", "val_{i}")
+            table = tbl_add_row(table, row)
 
         var rows_m = table.rows
         expect(rows_m.len()).to_equal(5)
@@ -200,29 +469,42 @@ describe "SdnTable":
     slow_it "gets row by ID":
         var table = SdnTable(name: "records", columns: ["id", "data"], rows: [], index: {"__init__": -1})
 
+        var row = SdnRow(fields: {"__init__": "__init__"})
+        row = row_set(row, "id", "record_123")
+        row = row_set(row, "data", "test_data")
+        table = tbl_add_row(table, row)
 
         val result = tbl_get_row(table, "record_123")
         expect(result.?).to_equal(true)
         val r1 = result ?? SdnRow(fields: {"__init__": "__init__"})
-        val data = r1.get("data") ?? ""
+        val data = row_get(r1, "data") ?? ""
         expect(data).to_equal("test_data")
 
     slow_it "returns None for missing row ID":
         val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {"__init__": -1})
-        val result = table.get_row("nonexistent")
+        val result = tbl_get_row(table, "nonexistent")
 
         expect(result.?).to_equal(false)
 
     slow_it "marks row as deleted":
         var table = SdnTable(name: "deletable", columns: ["id", "valid"], rows: [], index: {"__init__": -1})
 
+        var row1 = SdnRow(fields: {"__init__": "__init__"})
+        row1 = row_set(row1, "id", "del_1")
+        row1 = row_set(row1, "valid", "true")
+        table = tbl_add_row(table, row1)
 
-
+        var row2 = SdnRow(fields: {"__init__": "__init__"})
+        row2 = row_set(row2, "id", "del_2")
+        row2 = row_set(row2, "valid", "true")
+        table = tbl_add_row(table, row2)
 
         # Mark first row deleted
         table = tbl_mark_deleted(table, "del_1")
 
         # Check the row was actually marked
+        val deleted_row = tbl_get_row(table, "del_1") ?? SdnRow(fields: {"__init__": "__init__"})
+        val valid_val = row_get(deleted_row, "valid") ?? "unknown"
         expect(valid_val).to_equal("false")
 
         # Valid rows should only return the second row
@@ -235,7 +517,7 @@ describe "SdnTable":
         # Add some valid and invalid rows
         for i in 0..5:
             var row = SdnRow(fields: {"__init__": "__init__"})
-            row.set("id", "row_{i}")
+            row = row_set(row, "id", "row_{i}")
             val valid_str = if i % 2 == 0: "true" else: "false"
             row = row_set(row, "valid", valid_str)
             table = tbl_add_row(table, row)
@@ -248,7 +530,7 @@ describe "SdnTable":
 
         var r_empty = table.rows
         expect(r_empty.len()).to_equal(0)
-        val empty_valid = table.valid_rows()
+        val empty_valid = tbl_valid_rows(table)
         var ev = empty_valid
         expect(ev.len()).to_equal(0)
 
@@ -257,27 +539,27 @@ describe "SdnTable":
 
 describe "SdnDatabase":
     slow_it "creates new database":
-        val db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
-        var tbls_n = db.tables
+        var tbls_n = _db.tables
         expect(tbls_n.len()).to_equal(1)  # 1 for __init__ sentinel
 
     slow_it "adds table to database":
-        var db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         val table = SdnTable(name: "test_table", columns: ["id", "value"], rows: [], index: {"__init__": -1})
-        db.set_table("test_table", table)
+        db_set_table("test_table", table)
 
-        var tbls_check = db.tables
+        var tbls_check = _db.tables
         expect(tbls_check.len()).to_equal(2)  # 1 sentinel + 1 added
-        var tbls_check2 = db.tables
+        var tbls_check2 = _db.tables
         expect(tbls_check2.contains_key("test_table")).to_equal(true)
 
     slow_it "gets table from database":
-        var db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         val table = SdnTable(name: "my_table", columns: ["col1", "col2"], rows: [], index: {"__init__": -1})
-        db.set_table("my_table", table)
+        db_set_table("my_table", table)
 
         val result = db_get_table("my_table")
         expect(result.?).to_equal(true)
@@ -285,42 +567,50 @@ describe "SdnDatabase":
         expect(tbl.name).to_equal("my_table")
 
     slow_it "gets mutable table":
-        var db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         val table = SdnTable(name: "mut_table", columns: ["id"], rows: [], index: {"__init__": -1})
-        db.set_table("mut_table", table)
+        db_set_table("mut_table", table)
 
         var table_opt = db_get_table_mut("mut_table")
         expect(table_opt.?).to_equal(true)
 
         var mut_table = table_opt?
+        var new_row = SdnRow(fields: {"__init__": "__init__"})
+        new_row = row_set(new_row, "id", "mut_row_1")
+        mut_table = tbl_add_row(mut_table, new_row)
 
         # Must put back for changes to persist
         db_set_table("mut_table", mut_table)
 
         # Verify change persisted
-        val final_table = db.get_table("mut_table")?
+        val final_table = db_get_table("mut_table")?
         var ft_rows = final_table.rows
         expect(ft_rows.len()).to_equal(1)
 
     slow_it "returns None for missing table":
-        val db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         val result = db_get_table("nonexistent")
         expect(result.?).to_equal(false)
 
     slow_it "replaces existing table":
-        var db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         # Add initial table
         val table1 = SdnTable(name: "replaceable", columns: ["old_col"], rows: [], index: {"__init__": -1})
-        db.set_table("replaceable", table1)
+        db_set_table("replaceable", table1)
 
         # Replace with new table
         val table2 = SdnTable(name: "replaceable", columns: ["new_col"], rows: [], index: {"__init__": -1})
-        db.set_table("replaceable", table2)
+        db_set_table("replaceable", table2)
 
         # Verify replacement
+        val replaced = db_get_table("replaceable")
+        expect(replaced.?).to_equal(true)
+        val r_tbl = replaced ?? SdnTable(name: "", columns: [], rows: [], index: {"__init__": -1})
+        var r_cols = r_tbl.columns
+        expect(r_cols.len()).to_equal(1)
 
     slow_it "saves and loads database":
         val test_path = "/tmp/test_save_load_db.sdn"
@@ -329,17 +619,17 @@ describe "SdnDatabase":
             file_delete(test_path)
 
         # Create and populate database
-        var db = SdnDatabase(path: test_path, tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: test_path, tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
         var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {"__init__": -1})
         var row1 = SdnRow(fields: {"__init__": "__init__"})
-        row1.set("id", "item_1")
-        row1.set("value", "hello")
-        table.add_row(row1)
+        row1 = row_set(row1, "id", "item_1")
+        row1 = row_set(row1, "value", "hello")
+        table = tbl_add_row(table, row1)
         var row2 = SdnRow(fields: {"__init__": "__init__"})
-        row2.set("id", "item_2")
-        row2.set("value", "world")
-        table.add_row(row2)
-        db.set_table("items", table)
+        row2 = row_set(row2, "id", "item_2")
+        row2 = row_set(row2, "value", "world")
+        table = tbl_add_row(table, row2)
+        db_set_table("items", table)
 
         # Save
         val save_ok = db_save()
@@ -361,14 +651,14 @@ describe "SdnDatabase":
             file_delete(test_path)
 
     slow_it "handles multiple tables":
-        var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         # Add multiple tables
         for i in 0..5:
             val table = SdnTable(name: "table_{i}", columns: ["col_{i}"], rows: [], index: {"__init__": -1})
-            db.set_table("table_{i}", table)
+            db_set_table("table_{i}", table)
 
-        var tbls_m = db.tables
+        var tbls_m = _db.tables
         expect(tbls_m.len()).to_equal(6)  # 5 + 1 sentinel
 
         # Verify all tables accessible
@@ -377,12 +667,12 @@ describe "SdnDatabase":
             expect(table_opt.?).to_equal(true)
 
     slow_it "preserves table order":
-        var db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
 
         val names = ["first", "second", "third"]
         for name in names:
             val table = SdnTable(name: name, columns: ["id"], rows: [], index: {"__init__": -1})
-            db.set_table(name, table)
+            db_set_table(name, table)
 
         # Tables should be accessible in any order
         expect(db_get_table("first").?).to_equal(true)
@@ -391,8 +681,8 @@ describe "SdnDatabase":
 
 describe "Database Integration":
     slow_it "combines interner with database":
-        var db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
-        var interner = StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0)
+        _db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
+        si_reset()
 
         # Intern column names
         val col_id = si_intern("id")
@@ -402,24 +692,33 @@ describe "Database Integration":
         var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {"__init__": -1})
 
         # Add row
+        var row = SdnRow(fields: {"__init__": "__init__"})
+        row = row_set(row, "id", "user_1")
+        row = row_set(row, "name", "Alice")
+        table = tbl_add_row(table, row)
 
         db_set_table("users", table)
 
         # Verify
-        val saved_table = db.get_table("users")?
+        val saved_table = db_get_table("users")?
         var st_rows = saved_table.rows
         expect(st_rows.len()).to_equal(1)
 
     slow_it "handles large number of rows efficiently":
-        var db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {"__init__": "__init__"}, next_id: 0), modified: false)
+        _db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {"__init__": SdnTable(name: "__init__", columns: [], rows: [], index: {"__init__": -1})}, interner: StringInterner(strings: {"__init__": -1}, reverse: {-1: "__init__"}, next_id: 0), modified: false)
         var table = SdnTable(name: "large", columns: ["id", "data"], rows: [], index: {"__init__": -1})
 
         # Add 1000 rows
         for i in 0..1000:
+            var row = SdnRow(fields: {"__init__": "__init__"})
+            row = row_set(row, "id", "row_{i}")
+            row = row_set(row, "data", "data_{i}")
+            table = tbl_add_row(table, row)
 
         db_set_table("large", table)
 
         # Verify
+        val result = db_get_table("large") ?? SdnTable(name: "", columns: [], rows: [], index: {"__init__": -1})
 
         # Spot check
         val row_500 = tbl_get_row(result, "row_500")?

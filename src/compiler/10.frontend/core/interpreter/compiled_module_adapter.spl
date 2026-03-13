@@ -1,0 +1,109 @@
+# Compiled module adapter — bridge SMF exports to interpreter registry
+#
+# Pure data types — no cross-layer imports.
+# Uses flat parallel arrays with manual counters (arena pattern).
+
+# ============================================================================
+# Compiled Callable — registry entry for a compiled symbol
+# ============================================================================
+
+class CompiledCallable:
+    name: text
+    origin_kind: text       # "ast", "compiled", "jit"
+    decl_id: i64            # for ast origin
+    address: i64            # for compiled/jit origin
+    symbol_name: text       # for compiled origin
+    template_name: text     # for jit origin
+    type_args: text         # for jit origin
+    module_name: text
+    param_count: i64
+
+fn compiled_callable_from_ast(name: text, decl_id: i64, module_name: text, param_count: i64) -> CompiledCallable:
+    CompiledCallable(
+        name: name, origin_kind: "ast", decl_id: decl_id,
+        address: 0, symbol_name: "", template_name: "", type_args: "",
+        module_name: module_name, param_count: param_count
+    )
+
+fn compiled_callable_from_symbol(name: text, address: i64, symbol_name: text, module_name: text, param_count: i64) -> CompiledCallable:
+    CompiledCallable(
+        name: name, origin_kind: "compiled", decl_id: 0,
+        address: address, symbol_name: symbol_name, template_name: "", type_args: "",
+        module_name: module_name, param_count: param_count
+    )
+
+fn compiled_callable_from_jit(name: text, address: i64, template_name: text, type_args: text, module_name: text, param_count: i64) -> CompiledCallable:
+    CompiledCallable(
+        name: name, origin_kind: "jit", decl_id: 0,
+        address: address, symbol_name: "", template_name: template_name, type_args: type_args,
+        module_name: module_name, param_count: param_count
+    )
+
+# ============================================================================
+# Compiled Module Registry — parallel arrays
+# ============================================================================
+
+var _cmr_names: [text] = []
+var _cmr_callables: [CompiledCallable] = []
+var _cmr_count: i64 = 0
+var _cmr_module_exports: {text: text} = {}  # module_name -> comma-separated names
+
+fn cmr_init():
+    _cmr_names = []
+    _cmr_callables = []
+    _cmr_count = 0
+    _cmr_module_exports = {}
+
+fn cmr_register(callable: CompiledCallable):
+    # Check for existing entry with same name (overwrite)
+    var i: i64 = 0
+    while i < _cmr_count:
+        if _cmr_names[i] == callable.name:
+            _cmr_callables[i] = callable
+            return
+        i = i + 1
+    # Append new
+    _cmr_names.push(callable.name)
+    _cmr_callables.push(callable)
+    _cmr_count = _cmr_count + 1
+    # Track module exports
+    val mod = callable.module_name
+    if _cmr_module_exports.contains_key(mod):
+        _cmr_module_exports[mod] = _cmr_module_exports[mod] + "," + callable.name
+    else:
+        _cmr_module_exports[mod] = callable.name
+
+fn cmr_lookup(name: text) -> CompiledCallable?:
+    var i: i64 = 0
+    while i < _cmr_count:
+        if _cmr_names[i] == name:
+            return Some(_cmr_callables[i])
+        i = i + 1
+    nil
+
+fn cmr_has_module(module_name: text) -> bool:
+    _cmr_module_exports.contains_key(module_name)
+
+fn cmr_get_module_exports(module_name: text) -> text:
+    if _cmr_module_exports.contains_key(module_name):
+        return _cmr_module_exports[module_name]
+    ""
+
+fn cmr_unload_module(module_name: text):
+    # Tombstone entries for this module
+    var i: i64 = 0
+    while i < _cmr_count:
+        if _cmr_callables[i].module_name == module_name:
+            _cmr_names[i] = ""
+            _cmr_callables[i] = CompiledCallable(
+                name: "", origin_kind: "removed", decl_id: 0,
+                address: 0, symbol_name: "", template_name: "", type_args: "",
+                module_name: "", param_count: 0
+            )
+        i = i + 1
+    # Remove from module exports
+    if _cmr_module_exports.contains_key(module_name):
+        _cmr_module_exports = _cmr_module_exports.remove(module_name)
+
+fn cmr_count() -> i64:
+    _cmr_count

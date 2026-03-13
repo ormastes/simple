@@ -31,6 +31,7 @@ use .resource_lifecycle.{
 }
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
 use .smf_cache.{validated_smf_load}
+use compiler.backend.linker.smf_source.{SmfSource, FileSmf, MemorySmf, smf_source_get_name, smf_source_get_reader}
 
 # ============================================================================
 # Loaded Module
@@ -41,6 +42,7 @@ struct LoadedModule:
     path: text
     source_path: text
     smf_data: [u8]
+    smf_source: SmfSource
     symbols: Dict<text, LoadedSymbol>
     load_time: i64
     version: i32
@@ -244,10 +246,17 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             # Track symbol in lifecycle manager.
             lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
 
+        # Construct SmfSource — prefer file-backed when a source path exists.
+        val smf_source = if source_path != "":
+            SmfSource.FileSmf(path: source_path)
+        else:
+            SmfSource.MemorySmf(bytes: smf_data, logical_name: path)
+
         val module = LoadedModule(
             path: path,
             source_path: source_path,
             smf_data: smf_data,
+            smf_source: smf_source,
             symbols: symbols,
             load_time: current_time(),
             version: 1
@@ -399,26 +408,15 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                 val sym_name = _item_2[0]
                 val symbol = _item_2[1]
                 if sym_name == name:
-                    # Found template - instantiate with ObjTaker
-                    var result = ObjTakeResult.Error(message: "SMF reader unavailable for {path}")
-                    if module.source_path != "":
-                        val file_reader_result = SmfReaderImpl.open(module.source_path)
-                        if file_reader_result.is_err():
-                            return symbolresult_Error(message: file_reader_result.unwrap_err())
-                        result = self.obj_taker.take_with_types(
-                            file_reader_result.unwrap(),
-                            name,
-                            type_args
-                        )
-                    else:
-                        val mem_reader_result = SmfReaderMemory.from_data(module.smf_data)
-                        if mem_reader_result.is_err():
-                            return symbolresult_Error(message: mem_reader_result.unwrap_err())
-                        result = self.obj_taker.take_with_types(
-                            mem_reader_result.unwrap(),
-                            name,
-                            type_args
-                        )
+                    # Found template - instantiate with ObjTaker via SmfSource
+                    val reader_result = smf_source_get_reader(module.smf_source)
+                    if reader_result.is_err():
+                        return symbolresult_Error(message: reader_result.unwrap_err())
+                    val result = self.obj_taker.take_with_types(
+                        reader_result.unwrap(),
+                        name,
+                        type_args
+                    )
                     match result:
                         case Code(bytes, sym, _):
                             val exec_addr = moduleloader_allocate_exec_module(self, path, mangled, bytes, false)
