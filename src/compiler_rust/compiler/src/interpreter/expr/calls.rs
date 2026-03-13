@@ -49,18 +49,28 @@ pub(super) fn eval_call_expr(
                     enums,
                     impl_methods,
                 )?;
-                // If self was updated (from a me method), update the variable in env
+                // If self was updated (from a me method), update the variable in env.
+                // Guard: only apply when the returned value has the same type discriminant
+                // as the current binding.  Non-mutating methods (e.g. .len() on Array)
+                // return a different type (Int) and must NOT overwrite the original variable.
                 if let Some(new_self) = updated_self {
-                    env.insert(var_name.clone(), new_self.clone());
-                    // Sync mutating method updates to MODULE_GLOBALS so that
-                    // module-level vars (e.g., arrays used as global state)
-                    // persist across function calls within an imported module.
-                    MODULE_GLOBALS.with(|cell| {
-                        let mut globals = cell.borrow_mut();
-                        if globals.contains_key(var_name) {
-                            globals.insert(var_name.clone(), new_self);
-                        }
-                    });
+                    let should_update = if let Some(current_val) = env.get(var_name) {
+                        std::mem::discriminant(current_val) == std::mem::discriminant(&new_self)
+                    } else {
+                        true // variable not in env — allow update
+                    };
+                    if should_update {
+                        env.insert(var_name.clone(), new_self.clone());
+                        // Sync mutating method updates to MODULE_GLOBALS so that
+                        // module-level vars (e.g., arrays used as global state)
+                        // persist across function calls within an imported module.
+                        MODULE_GLOBALS.with(|cell| {
+                            let mut globals = cell.borrow_mut();
+                            if globals.contains_key(var_name) {
+                                globals.insert(var_name.clone(), new_self);
+                            }
+                        });
+                    }
                 }
                 Ok(Some(result))
             } else if let Expr::FieldAccess {
