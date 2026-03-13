@@ -3,6 +3,34 @@
 #
 # Uses daemon_sdk.client for submit/poll, keeps SHB/SMF-specific
 # freshness checks and inline fallback generation.
+#
+# SHB generation strategy (get_or_generate_shb):
+#   1. Check freshness — return cached SHB if fresh
+#   2. Request from watcher daemon if running
+#   3. External fallback — spawn subprocess (production-safe)
+#
+# All generation uses the external path (external_extract_write_shb).
+# In-process parse helpers are NOT used here — they are not production-safe
+# in interpreter runtime context.
+#
+# SHB Consumer Policies (Phase 7):
+#   This module provides low-level SHB freshness checks and generation
+#   primitives.  Two consumers use them with distinct policies:
+#
+#   Loader (99.loader/loader/module_loader.spl):
+#     - Calls check_shb_freshness() and ShbReader to validate artifacts
+#       *before* committing to a full SMF body load.
+#     - Checks dependency interface hashes via ShbDependencyEntry.
+#     - Goal: avoid loading a stale SMF; detect interface drift early.
+#
+#   Interpreter (95.interp/):
+#     - Uses SHB to decide whether a deferred module body needs to be
+#       force-loaded or whether interface-only access suffices.
+#     - Filters deferred force-loads — a concern separate from artifact
+#       validation.
+#
+#   Keep these policies separate.  This client module remains policy-free;
+#   it only provides freshness checks and get-or-generate flows.
 
 
 use compiler.driver.cache.cache_types.{
@@ -23,7 +51,7 @@ use compiler.driver.watcher.watcher_types.{
 }
 use compiler.driver.watcher.watcher_lock.{is_watcher_running}
 use compiler.shb.shb_cache.{ShbCacheManager, ShbCacheConfig}
-use compiler.shb.shb_extractor.{external_extract_write_shb}
+use compiler.shb.shb_extractor.{external_extract_write_shb, resolve_dep_interface_hash}
 use std.daemon_sdk.client.{daemon_submit_and_wait, daemon_ensure_running}
 use std.daemon_sdk.types.{DaemonResponse}
 
@@ -38,8 +66,26 @@ extern fn rt_time_now_unix_micros() -> i64
 # ============================================================================
 
 fn check_shb_freshness(source_path: text, shb_dir: text) -> CacheCheckResult:
+    """Check whether a module's .shb cache is fresh relative to its source.
+
+    Used by both the loader (artifact preflight) and the watcher (generation
+    gate).  The get_interface_hash callback is stubbed to 0 here because
+    full dependency-chain validation is the loader's responsibility
+    (see shb_check_dependencies_fresh in module_loader.spl).
+    """
     val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
     validate_shb(source_path, shb_path, fn(p: text) -> i64: 0)
+
+fn check_shb_freshness_with_deps(source_path: text, shb_dir: text) -> CacheCheckResult:
+    """Check SHB freshness including dependency interface hash validation.
+
+    Like check_shb_freshness but also validates that dependency interface
+    hashes recorded in the SHB still match their current values. Uses
+    resolve_dep_interface_hash to look up each dependency's cached SHB.
+    """
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+    val captured_shb_dir = shb_dir
+    validate_shb(source_path, shb_path, fn(mod_path: text) -> i64: resolve_dep_interface_hash(mod_path, captured_shb_dir))
 
 fn check_smf_freshness(source_path: text, smf_dir: text, options_hash: CompileOptionsHash) -> CacheCheckResult:
     val smf_path = source_to_cache_path(source_path, smf_dir, ".smf")
@@ -89,8 +135,10 @@ fn request_smf(source_path: text, options_hash: i64, config: WatcherConfig) -> R
     Err("SMF not ready after watcher response: {source_path}")
 
 # ============================================================================
-# Get-or-Generate (with inline fallback)
+# Get-or-Generate (with external fallback)
 # ============================================================================
+# Uses external_extract_write_shb as fallback — production-safe from any
+# runtime context. Does NOT use in-process parse helpers.
 
 struct ShbLoadResult:
     ok: bool
@@ -141,12 +189,12 @@ fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> ShbLoadResul
             if reader.is_valid():
                 return shb_load_result_ok(shb_path, reader.source_hash(), reader.interface_hash())
 
-    # Inline generation fallback
+    # External generation fallback (production-safe subprocess)
     rt_dir_create_all(config.shb_dir)
     val shb_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
     val persist_result = external_extract_write_shb(source_path, shb_path)
     if not persist_result.ok:
-        return shb_load_result_err(persist_result.error)
+        return shb_load_result_err("shb: external fallback failed for '{source_path}': {persist_result.error}")
 
     shb_load_result_ok(shb_path, persist_result.source_hash, persist_result.interface_hash)
 

@@ -1,3 +1,15 @@
+# SHB Emit — External emitter tool for SHB generation
+#
+# Called as a subprocess by external_extract_write_shb (shb_extractor.spl).
+# This runs as a compiled binary, so in-process parse helpers are safe here.
+#
+# Machine-parsable output format (one line on stdout):
+#   Success: "SHB_OK|<source_hash>|<interface_hash>"  exit 0
+#   Failure: "SHB_ERR|<error_tag>|<message>"           exit 1
+#   Usage:   "SHB_ERR|usage|..."                        exit 2
+#
+# Error tags: read_failed, parse_failed, write_failed
+
 use compiler.shb.shb_extractor.{parse_extract_write_shb}
 
 extern fn sys_get_args() -> [text]
@@ -6,20 +18,24 @@ extern fn rt_file_read_text(path: text) -> text
 fn main() -> i64:
     val args = sys_get_args()
     if args.len() < 3:
-        print "usage: shb_emit <source_path> <shb_path>"
+        print "SHB_ERR|usage|expected: shb_emit <source_path> <shb_path>"
         return 2
 
     val source_path = args[1]
     val shb_path = args[2]
     val source = rt_file_read_text(source_path) ?? ""
     if source == "":
-        print "read_failed"
+        print "SHB_ERR|read_failed|could not read source: {source_path}"
         return 1
 
     val result = parse_extract_write_shb(source, source_path, shb_path)
     if result.ok:
-        print "{result.source_hash}|{result.interface_hash}"
+        print "SHB_OK|{result.source_hash}|{result.interface_hash}"
         return 0
 
-    print result.error
+    # Classify the error from the persist result message
+    var tag = "parse_failed"
+    if result.error.contains("writer failure"):
+        tag = "write_failed"
+    print "SHB_ERR|{tag}|{result.error}"
     1

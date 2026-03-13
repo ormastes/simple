@@ -84,11 +84,25 @@ fn validate_shb(source_path: text, shb_path: text, get_interface_hash: fn(text) 
     val src_hash = rt_hash_text(source)
     val cached_src_hash = reader.source_hash()
 
-    if src_hash == cached_src_hash:
-        return cache_check_result_fresh(src_hash)
+    if src_hash != cached_src_hash:
+        # Source changed — return STALE (caller decides whether to check interface)
+        return cache_check_result_stale(src_hash, cached_src_hash, "source hash changed")
 
-    # Source changed — return STALE (caller decides whether to check interface)
-    cache_check_result_stale(src_hash, cached_src_hash, "source hash changed")
+    # Source unchanged — Level 4: check dependency interface hashes
+    val deps = reader.read_dependencies()
+    var di = 0
+    while di < deps.len():
+        val dep = deps[di]
+        # Only validate deps that have a recorded hash (non-zero)
+        if dep.interface_hash != 0:
+            val actual_hash = get_interface_hash(dep.module_path)
+            # If actual is 0, dep SHB is missing — skip (don't falsely invalidate)
+            if actual_hash != 0:
+                if actual_hash != dep.interface_hash:
+                    return cache_check_result_stale(src_hash, cached_src_hash, "dependency interface changed: {dep.module_path}")
+        di = di + 1
+
+    cache_check_result_fresh(src_hash)
 
 # ============================================================================
 # SMF Validation (Level 1 + Level 3)

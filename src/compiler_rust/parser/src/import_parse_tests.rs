@@ -53,7 +53,7 @@ mod tests {
                 "Group 2: mock_example",
                 "src/lib/nogc_sync_mut/examples/testing/mock_example.spl",
             ),
-            ("Group 2: path_ops", "src/lib/nogc_sync_mut/file_system/path_ops.spl"),
+            ("Group 2: path_ops", "src/lib/nogc_sync_mut/fs/path_ops.spl"),
             ("Group 3: checker", "src/lib/common/type/checker.spl"),
             ("Group 4: lz77", "src/lib/nogc_sync_mut/compression/gzip/lz77.spl"),
             ("Group 4: zlib", "src/lib/nogc_sync_mut/compression/zlib.spl"),

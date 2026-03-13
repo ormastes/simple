@@ -167,12 +167,12 @@ fn handle_debug_remove_breakpoint(id: text, body: text) -> text:
     make_tool_result(id, jo2(jp("removed", js(bp_id_str)), jp("status", js("ok"))))
 
 fn handle_debug_continue(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
-    if session_id == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     var s = DEBUG_SESSIONS[idx]
     s.state = "running"
     DEBUG_SESSIONS[idx] = s
@@ -180,15 +180,17 @@ fn handle_debug_continue(id: text, body: text) -> text:
     make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("state", js("running"))))
 
 fn handle_debug_step(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     var mode = extract_field(body, "mode")
-    if session_id == "" or mode == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/mode")
+    if mode == "":
+        return missing_param_error(id, "mode")
     if mode != "over" and mode != "in" and mode != "out":
         return make_tool_error(id, -32602, "Invalid step mode: " + mode)
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
     var s = DEBUG_SESSIONS[idx]
     s.state = "paused"
     DEBUG_SESSIONS[idx] = s
@@ -196,21 +198,21 @@ fn handle_debug_step(id: text, body: text) -> text:
     make_tool_result(id, jo3(jp("session_id", js(session_id)), jp("mode", js(mode)), jp("state", js("paused"))))
 
 fn handle_debug_get_variables(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
-    if session_id == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("variables", SB_L() + SB_R())))
 
 fn handle_debug_stack_trace(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
-    if session_id == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     val s = DEBUG_SESSIONS[idx]
     var frame = LB()
     frame = frame + jp("id", "0")
@@ -226,13 +228,15 @@ fn handle_debug_stack_trace(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_evaluate(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     val expression = extract_field(body, "expression")
-    if session_id == "" or expression == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/expression")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    if expression == "":
+        return missing_param_error(id, "expression")
     var r = LB()
     r = r + jp("session_id", js(session_id))
     r = r + "," + jp("expression", js(expression))
@@ -517,15 +521,12 @@ fn handle_debug_remove_data_breakpoint(id: text, body: text) -> text:
 # --- Hardware debug tool handlers ---
 
 fn handle_debug_trace_capture(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
-    if session_id == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
-    val s = DEBUG_SESSIONS[idx]
-    if s.target_type != "t32" and s.target_type != "t32_gdb":
-        return make_tool_error(id, -32602, "Trace capture requires T32 session (current: " + s.target_type + ")")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = require_t32_session(id, body, "Trace capture")
+    if err != "":
+        return err
     var duration_str = extract_field(body, "duration_ms")
     var duration = 1000
     if duration_str != "":
@@ -542,16 +543,15 @@ fn handle_debug_trace_capture(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_coverage_collect(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = require_t32_session(id, body, "Coverage collect")
+    if err != "":
+        return err
     val module = extract_field(body, "module")
-    if session_id == "" or module == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/module")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
-    val s = DEBUG_SESSIONS[idx]
-    if s.target_type != "t32" and s.target_type != "t32_gdb":
-        return make_tool_error(id, -32602, "Coverage collect requires T32 session (current: " + s.target_type + ")")
+    if module == "":
+        return missing_param_error(id, "module")
     debug_log_add("enter", "debug_coverage_collect", session_id + " " + module)
     var r = LB()
     r = r + jp("session_id", js(session_id))
@@ -564,16 +564,15 @@ fn handle_debug_coverage_collect(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_flash_program(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = require_hw_session(id, body, "Flash program")
+    if err != "":
+        return err
     val elf_path = extract_field(body, "elf_path")
-    if session_id == "" or elf_path == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/elf_path")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
-    val s = DEBUG_SESSIONS[idx]
-    if s.target_type != "t32" and s.target_type != "t32_gdb" and s.target_type != "openocd":
-        return make_tool_error(id, -32602, "Flash program requires T32 or OpenOCD session (current: " + s.target_type + ")")
+    if elf_path == "":
+        return missing_param_error(id, "elf_path")
     debug_log_add("enter", "debug_flash_program", session_id + " " + elf_path)
     var r = LB()
     r = r + jp("session_id", js(session_id))
@@ -583,15 +582,12 @@ fn handle_debug_flash_program(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_system_reset(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
-    if session_id == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
-    val s = DEBUG_SESSIONS[idx]
-    if s.target_type != "t32" and s.target_type != "t32_gdb" and s.target_type != "openocd":
-        return make_tool_error(id, -32602, "System reset requires hardware session (current: " + s.target_type + ")")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = require_hw_session(id, body, "System reset")
+    if err != "":
+        return err
     debug_log_add("enter", "debug_system_reset", session_id)
     var r = LB()
     r = r + jp("session_id", js(session_id))
@@ -601,16 +597,15 @@ fn handle_debug_system_reset(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_practice_script(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = require_t32_session(id, body, "PRACTICE script")
+    if err != "":
+        return err
     val script = extract_field(body, "script")
-    if session_id == "" or script == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/script")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
-    val s = DEBUG_SESSIONS[idx]
-    if s.target_type != "t32" and s.target_type != "t32_gdb":
-        return make_tool_error(id, -32602, "PRACTICE script requires T32 session (current: " + s.target_type + ")")
+    if script == "":
+        return missing_param_error(id, "script")
     debug_log_add("enter", "debug_practice_script", session_id + " " + script)
     var r = LB()
     r = r + jp("session_id", js(session_id))
@@ -620,13 +615,15 @@ fn handle_debug_practice_script(id: text, body: text) -> text:
     make_tool_result(id, r)
 
 fn handle_debug_openocd_monitor(id: text, body: text) -> text:
-    val session_id = extract_field(body, "session_id")
+    var err = ""
+    var session_id = ""
+    var idx: i64 = -1
+    (err, session_id, idx) = get_session_or_error(id, body)
+    if err != "":
+        return err
     val command = extract_field(body, "command")
-    if session_id == "" or command == "":
-        return make_tool_error(id, -32602, "Missing required parameter: session_id/command")
-    val idx = find_session_index(session_id)
-    if idx < 0:
-        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    if command == "":
+        return missing_param_error(id, "command")
     val s = DEBUG_SESSIONS[idx]
     if s.target_type != "openocd":
         return make_tool_error(id, -32602, "OpenOCD monitor requires OpenOCD session (current: " + s.target_type + ")")

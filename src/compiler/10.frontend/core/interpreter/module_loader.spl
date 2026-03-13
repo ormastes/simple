@@ -24,6 +24,20 @@ extern fn rt_path_join(base: text, rel: text) -> text
 extern fn rt_path_dirname(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
 
+# SMF loading hooks — implemented by driver layer (80.driver/smf_hooks.spl)
+extern fn smf_check_freshness(source_path: text, smf_path: text) -> i64
+extern fn smf_source_to_cache_path(source_path: text) -> text
+extern fn smf_resolve_library(module_name: text) -> text
+extern fn smf_get_or_generate(source_path: text, smf_path: text) -> i64
+
+# SMF loading state
+var _smf_enabled: bool = false
+var _smf_prefer_compiled: bool = false
+var _smf_allow_library: bool = false
+var _smf_allow_fallback: bool = true
+var _smf_regenerate: bool = false
+var _smf_freshness_cache: {text: bool} = {}
+
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
 val DECL_EXTERN_FN = 2
@@ -187,6 +201,8 @@ fn module_loader_init():
     _deferred_module_file_map = {}
     _deferred_module_imports_map = {}
     deferred_module_set = {}
+    _smf_freshness_cache = {}
+    _smf_enabled = false
     irt_init()
 
 fn module_is_loaded(module_path: text) -> i64:
@@ -487,7 +503,72 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
     module_mark_loaded(module_name, resolved_path, exports)
     1
 
+# ===== SMF Loading Support =====
+
+fn module_loader_enable_smf(prefer_compiled: bool, allow_library: bool, allow_fallback: bool, regenerate: bool):
+    _smf_enabled = true
+    _smf_prefer_compiled = prefer_compiled
+    _smf_allow_library = allow_library
+    _smf_allow_fallback = allow_fallback
+    _smf_regenerate = regenerate
+
+fn _resolve_smf_path(source_path: text) -> text:
+    if source_path == "":
+        return ""
+    smf_source_to_cache_path(source_path)
+
+fn _check_freshness(source_path: text, smf_path: text) -> bool:
+    val cache_key = source_path + "|" + smf_path
+    if _smf_freshness_cache.contains_key(cache_key):
+        return _smf_freshness_cache[cache_key]
+    val fresh = smf_check_freshness(source_path, smf_path) == 1
+    _smf_freshness_cache[cache_key] = fresh
+    fresh
+
 # ===== Public API =====
+
+fn _load_module_from_source(module_name: text, current_file: text) -> i64:
+    val resolved_path = resolve_module_path(module_name, current_file)
+    val source = load_module_source(resolved_path)
+    if source == "":
+        return 0
+    val parse_ok = parse_module_ast(source, resolved_path)
+    if parse_ok == 0:
+        return 0
+    irt_begin_module(module_name)
+    val exports = extract_module_exports()
+    register_module_functions()
+    module_mark_loaded(module_name, resolved_path, exports)
+    1
+
+fn _load_module_smf_aware(module_name: text, current_file: text) -> i64:
+    val source_path = resolve_module_path(module_name, current_file)
+
+    # Step 1: Check for fresh compiled artifact
+    if _smf_prefer_compiled:
+        val smf_path = _resolve_smf_path(source_path)
+        if smf_path != "" and rt_file_exists(smf_path) == 1:
+            if _check_freshness(source_path, smf_path):
+                # TODO: load compiled module via compiled_module_adapter
+                eprint("smf_loader: fresh SMF for {module_name}, falling back to source")
+
+    # Step 2: Check library
+    if _smf_allow_library:
+        val lib_path = smf_resolve_library(module_name)
+        if lib_path != "":
+            # TODO: load from library via compiled_module_adapter
+            eprint("smf_loader: library module {module_name} at {lib_path}, falling back to source")
+
+    # Step 3: Stale SMF with regeneration
+    if _smf_regenerate:
+        val smf_path = _resolve_smf_path(source_path)
+        if smf_path != "":
+            val regen_ok = smf_get_or_generate(source_path, smf_path)
+            if regen_ok == 1:
+                eprint("smf_loader: regenerated SMF for {module_name}")
+
+    # Step 4: Source fallback
+    _load_module_from_source(module_name, current_file)
 
 fn load_module(module_name: text, current_file: text) -> i64:
     # Load a module by name and register its exports
@@ -502,35 +583,14 @@ fn load_module(module_name: text, current_file: text) -> i64:
         return 0
     _module_load_depth = _module_load_depth + 1
 
-    # Resolve module path
-    val resolved_path = resolve_module_path(module_name, current_file)
-
-    # Load source
-    val source = load_module_source(resolved_path)
-    if source == "":
-        _module_load_depth = _module_load_depth - 1
-        return 0
-
-    # Parse module (append mode — preserves caller's AST)
-    val parse_ok = parse_module_ast(source, resolved_path)
-    if parse_ok == 0:
-        _module_load_depth = _module_load_depth - 1
-        return 0
-
-    # Begin tracking this module for selective unload
-    irt_begin_module(module_name)
-
-    # Extract exports
-    val exports = extract_module_exports()
-
-    # Register functions (also hooks into irt_track_*)
-    register_module_functions()
-
-    # Mark as loaded
-    module_mark_loaded(module_name, resolved_path, exports)
+    var result: i64 = 0
+    if _smf_enabled:
+        result = _load_module_smf_aware(module_name, current_file)
+    else:
+        result = _load_module_from_source(module_name, current_file)
 
     _module_load_depth = _module_load_depth - 1
-    1
+    result
 
 fn load_module_selective(module_name: text, imported_names: [text], current_file: text) -> i64:
     # Load module and register requested names

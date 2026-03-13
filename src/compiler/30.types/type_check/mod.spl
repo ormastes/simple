@@ -1,21 +1,17 @@
-# Type Checker
+# Promise Wrapping Checker
 #
-# Type checker for Simple language with bidirectional type checking.
+# HIR-level pass that auto-wraps async function return types in Promise<T>.
 #
-# This module implements:
-# - Promise auto-wrapping for async functions
-# - Function signature validation
-# - Return type checking
+# This is a focused, single-responsibility checker that runs after HIR lowering
+# but before the full type inference system (30.types/type_system/checker.spl).
 #
-# Architecture:
-# The type checker operates in multiple passes:
-# 1. Collect function signatures (already done in HIR lowering)
-# 2. Check function bodies match signatures
-# 3. Apply Promise auto-wrapping for async functions
+# NOTE: This is NOT the main type checker. The full compile-time type inference
+# system lives in compiler.types.type_system.checker (TypeChecker class).
+# This module only handles Promise auto-wrapping for async functions.
 #
 # Promise Auto-Wrapping:
 # Functions with suspension operators (`~=`, `if~`, etc.) are async.
-# If such a function declares return type `T`, the type checker
+# If such a function declares return type `T`, this checker
 # automatically wraps it to `Promise<T>`.
 #
 # Example:
@@ -33,20 +29,24 @@ use hir (HirFunction, HirModule, HirType, TypeId, TypeRegistry)
 use hir (LowerError, LowerResult)
 
 # ============================================================================
-# Type Checker
+# Promise Wrapping Checker
 # ============================================================================
 
-struct TypeChecker:
-    """Type checker context.
+struct PromiseWrappingChecker:
+    """Promise auto-wrapping checker for async functions.
 
-    Tracks function return types for checking calls.
+    Tracks function return types and applies Promise<T> wrapping
+    to async functions whose return types are not already wrapped.
+
+    This is distinct from compiler.types.type_system.checker.TypeChecker
+    which handles full compile-time type inference.
     """
     function_types: {text: TypeId}
 
-impl TypeChecker:
-    static fn new() -> TypeChecker:
-        """Create a new type checker."""
-        TypeChecker(function_types: {})
+impl PromiseWrappingChecker:
+    static fn new() -> PromiseWrappingChecker:
+        """Create a new promise wrapping checker."""
+        PromiseWrappingChecker(function_types: {})
 
     me register_function(name: text, return_type: TypeId):
         """Register a function's signature."""
@@ -93,7 +93,7 @@ impl TypeChecker:
     me apply_promise_wrapping(module: HirModule) -> LowerResult<()>:
         """Apply Promise auto-wrapping to all async functions in a module.
 
-        This is the main entry point for the type checker.
+        This is the main entry point for the promise wrapping checker.
         Called after HIR lowering to auto-wrap async function returns.
 
         CRITICAL: Two-pass algorithm:
@@ -110,3 +110,6 @@ impl TypeChecker:
                 self.wrap_return_in_promise(func, module.types)?
 
         Ok(())
+
+# Backward-compatible alias for existing imports
+type TypeChecker = PromiseWrappingChecker

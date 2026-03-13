@@ -23,73 +23,50 @@ fn file_exists(path: text) -> bool:
     rt_file_exists(path)
 
 # ============================================================================
-# Database paths
+# Database path + unified check
 # ============================================================================
 
-fn bug_db_path() -> text: "doc/bug/bug_db.sdn"
-fn test_db_path() -> text: "doc/test/test_db.sdn"
-fn feature_db_path() -> text: "doc/feature/feature_db.sdn"
-fn todo_db_path() -> text: "doc/todo/todo_db.sdn"
-fn task_db_path() -> text: "doc/task/task_db.sdn"
+fn db_path(db_type: text) -> text: "doc/{db_type}/{db_type}_db.sdn"
 
-# ============================================================================
-# Per-database check functions
-# ============================================================================
-
-fn check_bug_db() -> [DbIssue]:
-    val path = bug_db_path()
+fn check_db(db_type: text) -> [DbIssue]:
+    val path = db_path(db_type)
     if not file_exists(path):
-        return [DbIssue(db_name: "bug", severity: "error", issue_type: "file_missing",
+        return [DbIssue(db_name: db_type, severity: "error", issue_type: "file_missing",
             message: "Database file not found: {path}", auto_fixable: false)]
-    val db_opt = load_bug_database(path)
-    if not db_opt.?:
-        return [DbIssue(db_name: "bug", severity: "error", issue_type: "parse_error",
-            message: "Failed to parse bug database: {path}", auto_fixable: false)]
-    db_opt.unwrap().validate()
-
-fn check_test_db() -> [DbIssue]:
-    val path = test_db_path()
-    if not file_exists(path):
-        return [DbIssue(db_name: "test", severity: "error", issue_type: "file_missing",
-            message: "Database file not found: {path}", auto_fixable: false)]
-    val db_opt = load_test_database(path)
-    if not db_opt.?:
-        return [DbIssue(db_name: "test", severity: "error", issue_type: "parse_error",
-            message: "Failed to parse test database: {path}", auto_fixable: false)]
-    db_opt.unwrap().validate()
-
-fn check_feature_db() -> [DbIssue]:
-    val path = feature_db_path()
-    if not file_exists(path):
-        return [DbIssue(db_name: "feature", severity: "error", issue_type: "file_missing",
-            message: "Database file not found: {path}", auto_fixable: false)]
-    val db_opt = load_feature_database(path)
-    if not db_opt.?:
-        return [DbIssue(db_name: "feature", severity: "error", issue_type: "parse_error",
-            message: "Failed to parse feature database: {path}", auto_fixable: false)]
-    db_opt.unwrap().validate()
-
-fn check_todo_db() -> [DbIssue]:
-    val path = todo_db_path()
-    if not file_exists(path):
-        return [DbIssue(db_name: "todo", severity: "error", issue_type: "file_missing",
-            message: "Database file not found: {path}", auto_fixable: false)]
-    val db_opt = load_todo_database(path)
-    if not db_opt.?:
-        return [DbIssue(db_name: "todo", severity: "error", issue_type: "parse_error",
-            message: "Failed to parse todo database: {path}", auto_fixable: false)]
-    db_opt.unwrap().validate()
-
-fn check_task_db() -> [DbIssue]:
-    val path = task_db_path()
-    if not file_exists(path):
-        return [DbIssue(db_name: "task", severity: "error", issue_type: "file_missing",
-            message: "Database file not found: {path}", auto_fixable: false)]
-    val db_opt = load_task_database(path)
-    if not db_opt.?:
-        return [DbIssue(db_name: "task", severity: "error", issue_type: "parse_error",
-            message: "Failed to parse task database: {path}", auto_fixable: false)]
-    db_opt.unwrap().validate()
+    match db_type:
+        "bug":
+            val db_opt = load_bug_database(path)
+            if not db_opt.?:
+                return [DbIssue(db_name: db_type, severity: "error", issue_type: "parse_error",
+                    message: "Failed to parse {db_type} database: {path}", auto_fixable: false)]
+            db_opt.unwrap().validate()
+        "test":
+            val db_opt = load_test_database(path)
+            if not db_opt.?:
+                return [DbIssue(db_name: db_type, severity: "error", issue_type: "parse_error",
+                    message: "Failed to parse {db_type} database: {path}", auto_fixable: false)]
+            db_opt.unwrap().validate()
+        "feature":
+            val db_opt = load_feature_database(path)
+            if not db_opt.?:
+                return [DbIssue(db_name: db_type, severity: "error", issue_type: "parse_error",
+                    message: "Failed to parse {db_type} database: {path}", auto_fixable: false)]
+            db_opt.unwrap().validate()
+        "todo":
+            val db_opt = load_todo_database(path)
+            if not db_opt.?:
+                return [DbIssue(db_name: db_type, severity: "error", issue_type: "parse_error",
+                    message: "Failed to parse {db_type} database: {path}", auto_fixable: false)]
+            db_opt.unwrap().validate()
+        "task":
+            val db_opt = load_task_database(path)
+            if not db_opt.?:
+                return [DbIssue(db_name: db_type, severity: "error", issue_type: "parse_error",
+                    message: "Failed to parse {db_type} database: {path}", auto_fixable: false)]
+            db_opt.unwrap().validate()
+        _:
+            [DbIssue(db_name: db_type, severity: "error", issue_type: "unknown_db",
+                message: "Unknown database type: {db_type}", auto_fixable: false)]
 
 # ============================================================================
 # Output formatting
@@ -145,38 +122,21 @@ fn run_check_dbs(args: [text]) -> i64:
 
     val check_all = db_filters.len() == 0
 
-    # Determine which DBs to check
-    val do_bugs = check_all or db_filters.contains("bugs") or db_filters.contains("bug")
-    val do_tests = check_all or db_filters.contains("tests") or db_filters.contains("test")
-    val do_features = check_all or db_filters.contains("features") or db_filters.contains("feature")
-    val do_todos = check_all or db_filters.contains("todos") or db_filters.contains("todo")
-    val do_tasks = check_all or db_filters.contains("tasks") or db_filters.contains("task")
+    # All known DB types (singular)
+    val all_db_types: [text] = ["bug", "test", "feature", "todo", "task"]
+
+    # Determine which DBs to check (accept singular or plural form)
+    var active_dbs: [text] = []
+    for db_type in all_db_types:
+        val plural = "{db_type}s"
+        if check_all or db_filters.contains(db_type) or db_filters.contains(plural):
+            active_dbs.push(db_type)
 
     var all_issues: [DbIssue] = []
 
     # Run checks
-    if do_bugs:
-        val issues = check_bug_db()
-        for issue in issues:
-            all_issues.push(issue)
-
-    if do_tests:
-        val issues = check_test_db()
-        for issue in issues:
-            all_issues.push(issue)
-
-    if do_features:
-        val issues = check_feature_db()
-        for issue in issues:
-            all_issues.push(issue)
-
-    if do_todos:
-        val issues = check_todo_db()
-        for issue in issues:
-            all_issues.push(issue)
-
-    if do_tasks:
-        val issues = check_task_db()
+    for db_type in active_dbs:
+        val issues = check_db(db_type)
         for issue in issues:
             all_issues.push(issue)
 
@@ -188,36 +148,15 @@ fn run_check_dbs(args: [text]) -> i64:
         print "====================="
         print ""
 
-        if do_bugs:
-            val bug_issues = all_issues.filter(\i: i.db_name == "bug")
-            print_db_section("bugs", bug_db_path(), bug_issues)
-
-        if do_tests:
-            val test_issues = all_issues.filter(\i: i.db_name == "test")
-            print_db_section("tests", test_db_path(), test_issues)
-
-        if do_features:
-            val feature_issues = all_issues.filter(\i: i.db_name == "feature")
-            print_db_section("features", feature_db_path(), feature_issues)
-
-        if do_todos:
-            val todo_issues = all_issues.filter(\i: i.db_name == "todo")
-            print_db_section("todos", todo_db_path(), todo_issues)
-
-        if do_tasks:
-            val task_issues = all_issues.filter(\i: i.db_name == "task")
-            print_db_section("tasks", task_db_path(), task_issues)
+        for db_type in active_dbs:
+            val db_issues = all_issues.filter(\i: i.db_name == db_type)
+            print_db_section("{db_type}s", db_path(db_type), db_issues)
 
         # Summary
         val total_errors = count_by_severity(all_issues, "error")
         val total_warnings = count_by_severity(all_issues, "warning")
         val total_infos = count_by_severity(all_issues, "info")
-        var db_count = 0
-        if do_bugs: db_count = db_count + 1
-        if do_tests: db_count = db_count + 1
-        if do_features: db_count = db_count + 1
-        if do_todos: db_count = db_count + 1
-        if do_tasks: db_count = db_count + 1
+        val db_count = active_dbs.len()
 
         if total_errors == 0 and total_warnings == 0:
             print "Summary: All clean across {db_count} database(s)"

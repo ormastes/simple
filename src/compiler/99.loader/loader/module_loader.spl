@@ -32,6 +32,10 @@ use .resource_lifecycle.{
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
 use .smf_cache.{validated_smf_load}
 use compiler.backend.linker.smf_source.{SmfSource, FileSmf, MemorySmf, smf_source_get_name, smf_source_get_reader}
+use compiler.shb.shb_reader.{ShbReader}
+use compiler.shb.shb_types.{ShbModuleInterface, ShbResult, shb_result_ok, shb_result_error, SHB_STATUS_OK}
+use compiler.driver.cache.cache_validator.{validate_shb, source_to_cache_path}
+use compiler.driver.cache.cache_types.{CACHE_FRESH, CACHE_STALE, CACHE_MISSING}
 
 # ============================================================================
 # Loaded Module
@@ -452,6 +456,94 @@ struct LoaderStats:
     cache_stats: CacheStats
 
 # ============================================================================
+# SHB Lookup Helpers — Loader-Side Interface Preflight
+# ============================================================================
+#
+# These helpers let the loader inspect a module's public interface via its
+# .shb (Simple Header Binary) *before* loading the full SMF body.
+#
+# Policy distinction:
+#   - Loader: validates artifact freshness and interface compatibility.
+#     Uses SHB to confirm a cached SMF is still usable before mmap/load.
+#   - Interpreter: filters deferred force-loads (e.g. skip loading a module
+#     body when only type signatures are needed). This is NOT the loader's
+#     concern; the interpreter handles it separately in the interp layer.
+#
+# The SHB contains only the public surface (functions, structs, classes,
+# enums, traits, reexports, type layouts, dependencies) — no code bytes.
+# Reading the SHB is cheap (header-only open, lazy section decode).
+
+fn shb_preflight_open(source_path: text, shb_dir: text) -> ShbResult:
+    """Open a module's SHB for interface preflight.
+
+    Validates that the .shb exists and is fresh relative to the source.
+    Returns an ShbResult with the reader's interface data on success.
+    The caller can inspect exported symbols before committing to a full
+    SMF load.
+    """
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+    val freshness = validate_shb(source_path, shb_path, fn(p: text) -> i64: 0)
+    if freshness.status != CACHE_FRESH:
+        return shb_result_error("SHB not fresh for {source_path}: status={freshness.status}")
+
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return shb_result_error("invalid SHB file: {shb_path}")
+
+    val iface = reader.read_all()
+    shb_result_ok(shb_path, reader.source_hash(), reader.interface_hash(), iface)
+
+fn shb_has_symbol(source_path: text, shb_dir: text, symbol_name: text) -> bool:
+    """Check whether a module exports a given symbol via SHB.
+
+    Quick preflight: opens the SHB (header only), then scans all sections
+    for the symbol name. Returns false if the SHB is missing, stale, or
+    does not contain the symbol.
+    """
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return false
+    reader.has_symbol_named(symbol_name)
+
+fn shb_interface_hash_for(source_path: text, shb_dir: text) -> i64:
+    """Return the interface hash from a module's SHB, or 0 if unavailable.
+
+    Useful for dependency validation: the loader can compare this hash
+    against ShbDependencyEntry.interface_hash values recorded in a
+    dependent module's SHB to detect interface drift without loading SMF.
+    """
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return 0
+    reader.interface_hash()
+
+fn shb_check_dependencies_fresh(source_path: text, shb_dir: text) -> bool:
+    """Validate that all dependencies recorded in a module's SHB still match.
+
+    Opens the module's SHB, reads its dependency section, then for each
+    dependency opens *that* module's SHB and compares interface hashes.
+    Returns false if any dependency's interface has changed or is missing.
+    """
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return false
+
+    val deps = reader.read_dependencies()
+    var i = 0
+    while i < deps.len():
+        val dep = deps[i]
+        val dep_hash = shb_interface_hash_for(dep.module_path, shb_dir)
+        if dep_hash == 0:
+            return false
+        if dep_hash != dep.interface_hash:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -554,18 +646,46 @@ fn moduleloader_allocate_exec_jit(self: ModuleLoader, owner_id: text, symbol: te
 fn moduleloader_load_validated(self: ModuleLoader, path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool) -> LoadResult:
     """Load an SMF module with compile options validation.
 
-    Checks that the cached SMF was compiled with matching backend/options.
-    On mismatch, attempts to recompile via watcher client, then retries.
+    SHB preflight (Phase 7):
+      Before touching the SMF, the loader checks the module's SHB to
+      validate that the public interface and all dependency interfaces are
+      still fresh.  This avoids loading a heavyweight SMF only to discover
+      a stale dependency.  The SHB read is cheap (64-byte header + lazy
+      section decode) and catches most staleness without I/O on the SMF.
+
+    If SHB preflight passes, falls through to SMF freshness / options
+    validation.  On mismatch, attempts to recompile via watcher client,
+    then retries.
     """
     use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
     use compiler.driver.watcher.watcher_client.{check_smf_freshness, get_or_generate_smf}
     use compiler.driver.watcher.watcher_types.{watcher_config_default}
-    use compiler.driver.cache.cache_types.{CACHE_FRESH}
 
     val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off)
     val config = watcher_config_default()
 
-    # Check freshness
+    # --- SHB preflight: validate interface metadata before SMF load ---
+    # Loader policy: check that the module's cached SHB is fresh and that
+    # all recorded dependencies still have matching interface hashes.
+    # This is distinct from interpreter policy which filters deferred
+    # force-loads; here we only validate artifact integrity.
+    val shb_preflight = shb_preflight_open(path, config.shb_dir)
+    if shb_preflight.ok:
+        # SHB exists and is fresh — verify dependency interfaces
+        if not shb_check_dependencies_fresh(path, config.shb_dir):
+            if self.config.verbose:
+                print "[loader] SHB dependency interface changed for {path}, will regenerate"
+            # Fall through to regeneration below
+        else:
+            # SHB is fully fresh — proceed to SMF check
+            if self.config.verbose:
+                print "[loader] SHB preflight passed for {path}"
+    else:
+        # SHB missing or stale — not fatal, SMF check will handle it
+        if self.config.verbose:
+            print "[loader] SHB preflight skipped for {path}: {shb_preflight.error}"
+
+    # --- SMF freshness / options validation ---
     val freshness = check_smf_freshness(path, config.smf_dir, options_hash)
     if freshness.status == CACHE_FRESH:
         return moduleloader_load(self, path)

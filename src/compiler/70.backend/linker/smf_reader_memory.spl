@@ -11,6 +11,7 @@
 use ..monomorphize.note_sdn.*
 use .obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use .smf_enums.{Platform, Arch, CompressionType}
+use .smf_parser_common.{SmfFlags, parse_platform, parse_arch, parse_compression, parse_flags, parse_symbol_type, parse_symbol_binding, derive_section_index, read_string_from_table, char_from_byte}
 use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE}
 
 # ============================================================================
@@ -37,14 +38,6 @@ impl SmfHeader:
         """Check if header is valid (called by from_data)."""
         # Magic check is done during parsing
         true
-
-"""SMF flags."""
-struct SmfFlags:
-    executable: bool
-    reloadable: bool
-    debug_info: bool
-    pic: bool
-    has_stub: bool
 
 # ============================================================================
 # In-Memory SMF Reader
@@ -569,10 +562,10 @@ fn parse_symbol_table(data: [u8], header: SmfHeader, string_table: [u8]) -> Resu
         val section_idx = derive_section_index(sym_type)
 
         # Parse binding
-        val binding = parse_binding(binding_raw)
+        val binding = parse_symbol_binding(binding_raw)
 
         # Parse symbol type
-        val sym_ty = parse_sym_type(sym_type)
+        val sym_ty = parse_symbol_type(sym_type)
 
         # Check if generic template
         val is_generic = (flags_raw & 0x10) != 0
@@ -619,54 +612,9 @@ fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
 
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
 
-"""Read a null-terminated string from the string table at the given byte offset."""
-fn read_string_from_table(table: [u8], offset: i64) -> text:
-    var chars: [text] = []
-    var pos = offset
-    while pos < table.len():
-        val byte = table[pos]
-        if byte == 0:
-            return chars.join("")
-        chars.push(char_from_byte(byte))
-        pos = pos + 1
-    chars.join("")
-
-"""Convert a single byte to its ASCII character as text."""
-fn char_from_byte(b: u8) -> text:
-    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-    val idx = (b as i32) - 32
-    if idx >= 0 and idx < ascii_table.len():
-        ascii_table[idx:idx + 1]
-    else:
-        "?"
-
-"""Derive section index from symbol type byte."""
-fn derive_section_index(sym_type: u8) -> i32:
-    # Functions go in code section (0), data/constants in data section (1).
-    match sym_type:
-        0: 0   # Function -> code section
-        1: 1   # Data -> data section
-        5: 1   # Constant -> data section
-        _: 0   # Default to code section
-
-"""Parse symbol binding from byte value."""
-fn parse_binding(b: u8) -> SymbolBinding:
-    match b:
-        0: SymbolBinding.Local
-        1: SymbolBinding.Global
-        2: SymbolBinding.Weak
-        _: SymbolBinding.Local
-
-"""Parse symbol type from byte value."""
-fn parse_sym_type(t: u8) -> SymbolType:
-    match t:
-        0: SymbolType.Function
-        1: SymbolType.Data
-        2: SymbolType.Type
-        3: SymbolType.Trait
-        4: SymbolType.ActorSymbol
-        5: SymbolType.Constant
-        _: SymbolType.Unknown
+# Helper functions moved to smf_parser_common.spl:
+# read_string_from_table, char_from_byte, derive_section_index,
+# parse_symbol_binding (was parse_binding), parse_symbol_type (was parse_sym_type)
 
 """Find a section index by wire section type."""
 fn find_section_index_by_type(reader: SmfReaderMemory, section_type: i32) -> i32:

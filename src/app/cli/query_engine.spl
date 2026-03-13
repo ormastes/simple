@@ -13,7 +13,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # ============================================================================
-# Internal Types (used within this file only)
+# Shared Types (used by query_engine and query_ast_query)
 # ============================================================================
 
 struct _SymInfo:
@@ -44,7 +44,7 @@ fn _parse_source(content: text) -> [_SymInfo]:
     val lines = content.split("\n")
     var symbols: [_SymInfo] = []
     var doc_lines: [text] = []
-    var current_impl = ""
+    var current_parent = ""
     var line_num = 0
 
     while line_num < lines.len():
@@ -65,7 +65,7 @@ fn _parse_source(content: text) -> [_SymInfo]:
         doc_lines = []
 
         if indent == 0:
-            current_impl = ""
+            current_parent = ""
             if trimmed.starts_with("fn "):
                 symbols.push(_parse_fn(trimmed, line_num, doc, ""))
             elif trimmed.starts_with("me "):
@@ -77,18 +77,21 @@ fn _parse_source(content: text) -> [_SymInfo]:
             elif trimmed.starts_with("class "):
                 val name = _extract_ident(trimmed.substring(6))
                 symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
             elif trimmed.starts_with("struct "):
                 val name = _extract_ident(trimmed.substring(7))
                 symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
             elif trimmed.starts_with("enum "):
                 val name = _extract_ident(trimmed.substring(5))
                 symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
             elif trimmed.starts_with("trait "):
                 val name = _extract_ident(trimmed.substring(6))
                 symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
             elif trimmed.starts_with("impl "):
-                current_impl = _extract_ident(trimmed.substring(5))
-                symbols.push(_SymInfo(name: current_impl, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: current_parent, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
             elif trimmed.starts_with("val "):
                 val name = _extract_ident(trimmed.substring(4))
                 val rtype = _extract_binding_type(trimmed)
@@ -97,13 +100,41 @@ fn _parse_source(content: text) -> [_SymInfo]:
                 val name = _extract_ident(trimmed.substring(4))
                 val rtype = _extract_binding_type(trimmed)
                 symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: rtype, params: ""))
-        elif indent > 0 and current_impl != "":
+            elif trimmed.starts_with("use ") or trimmed.starts_with("import "):
+                var mod_path = trimmed
+                if mod_path.starts_with("use "):
+                    mod_path = mod_path.substring(4)
+                elif mod_path.starts_with("import "):
+                    mod_path = mod_path.substring(7)
+                # Strip brace part
+                var brace_idx = -1
+                var bi = 0
+                while bi < mod_path.len():
+                    if mod_path.substring(bi, bi + 1) == "{":
+                        brace_idx = bi
+                        break
+                    bi = bi + 1
+                if brace_idx > 0:
+                    mod_path = mod_path.substring(0, brace_idx).trim()
+                    if mod_path.ends_with("."):
+                        mod_path = mod_path.substring(0, mod_path.len() - 1)
+                symbols.push(_SymInfo(name: mod_path, kind: "import", line: line_num, signature: trimmed, doc_comment: "", parent: "", return_type: "", params: ""))
+        elif indent > 0 and current_parent != "":
             if trimmed.starts_with("fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
             elif trimmed.starts_with("me "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
             elif trimmed.starts_with("static fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            # Fields inside struct/class
+            elif trimmed.contains(":") and not trimmed.starts_with("#"):
+                val colon_pos = _find_char(trimmed, ":")
+                if colon_pos > 0:
+                    val field_name = trimmed.substring(0, colon_pos).trim()
+                    val field_type = trimmed.substring(colon_pos + 1).trim()
+                    val is_ident = _is_valid_ident(field_name)
+                    if is_ident and field_name != "if" and field_name != "elif" and field_name != "else" and field_name != "for" and field_name != "while" and field_name != "return" and field_name != "val" and field_name != "var":
+                        symbols.push(_SymInfo(name: field_name, kind: "field", line: line_num, signature: trimmed, doc_comment: doc, parent: current_parent, return_type: field_type, params: ""))
 
     symbols
 
@@ -284,6 +315,26 @@ fn _leading_spaces(line: text) -> i64:
         else:
             break
     count
+
+fn _find_char(s: text, target: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1
+
+fn _is_valid_ident(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+        i = i + 1
+    true
 
 # ============================================================================
 # Safe grep wrapper (local copy to avoid import issues)

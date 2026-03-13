@@ -10,6 +10,7 @@
 # Stub NoteSdnMetadata locally for type compatibility
 use .obj_taker (SmfSymbol, SymbolType, SymbolBinding)
 use .smf_enums (Platform, Arch, CompressionType)
+use .smf_parser_common (SmfFlags, parse_platform, parse_arch, parse_compression, parse_flags, parse_symbol_type, parse_symbol_binding, derive_section_index, read_string_from_table, char_from_byte)
 
 # Stub for NoteSdnMetadata (real impl in monomorphize.note_sdn, compiled-only)
 struct NoteSdnMetadata:
@@ -100,13 +101,6 @@ struct SmfHeader:
     has_note_sdn: bool
     compression: CompressionType
 
-struct SmfFlags:
-    executable: bool
-    reloadable: bool
-    debug_info: bool
-    pic: bool
-    has_stub: bool
-
 impl SmfHeader:
     static fn from_raw(raw: SmfHeaderRaw) -> SmfHeader:
         # Convert raw header to parsed header.
@@ -162,7 +156,7 @@ impl SmfReaderImpl:
         var symbols: Dict<text, SmfSymbol> = {}
 
         for raw in raw_symbols:
-            val name = read_string_from_table(string_table, raw.name_offset)
+            val name = read_string_from_table(string_table, raw.name_offset as i64)
             val is_gen = (raw.flags and 0x10) != 0
             val symbol = SmfSymbol(
                 name: name,
@@ -281,73 +275,8 @@ impl SmfReaderImpl:
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-fn parse_platform(p: u8) -> Platform:
-    Platform.from_u8(p)
-
-fn parse_arch(a: u8) -> Arch:
-    Arch.from_u8(a)
-
-fn parse_compression(c: u8) -> CompressionType:
-    CompressionType.from_u8(c)
-
-fn parse_flags(f: u32) -> SmfFlags:
-    val is_exec = (f and 0x01) != 0
-    val is_reload = (f and 0x02) != 0
-    val is_debug = (f and 0x04) != 0
-    val is_pic = (f and 0x08) != 0
-    val is_stub = (f and 0x10) != 0
-    SmfFlags(
-        executable: is_exec,
-        reloadable: is_reload,
-        debug_info: is_debug,
-        pic: is_pic,
-        has_stub: is_stub
-    )
-
-fn derive_section_index(sym_type: u8) -> i32:
-    # Derive section index from symbol type.
-    # Functions go in code section (0), data/constants in data section (1).
-    match sym_type:
-        case 0: 0  # Function -> code section
-        case 1: 1  # Data -> data section
-        case 5: 1  # Constant -> data section
-        case _: 0  # Default to code section
-
-fn parse_symbol_type(t: u8) -> SymbolType:
-    match t:
-        case 0: SymbolType.Function
-        case 1: SymbolType.Data
-        case 2: SymbolType.Type
-        case 3: SymbolType.Trait
-        case 4: SymbolType.ActorSymbol
-        case 5: SymbolType.Constant
-        case _: SymbolType.Unknown
-
-fn parse_symbol_binding(b: u8) -> SymbolBinding:
-    match b:
-        case 0: SymbolBinding.Local
-        case 1: SymbolBinding.Global
-        case 2: SymbolBinding.Weak
-        case _: SymbolBinding.Local
-
-fn read_string_from_table(table: [u8], offset: u32) -> text:
-    # Read null-terminated string from string table.
-    var chars = []
-    for i in (offset as i32)..table.len():
-        if table[i] == 0:
-            return chars.join("")
-        chars.push(char_from_byte(table[i]))
-    chars.join("")
-
-fn char_from_byte(b: u8) -> text:
-    # Convert byte to single-character string using ASCII mapping
-    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-    val idx = (b as i32) - 32
-    if idx >= 0 and idx < ascii_table.len():
-        ascii_table[idx:idx + 1]
-    else:
-        "?"  # Non-printable character
+# Most parse helpers moved to smf_parser_common.spl.
+# Only smf_reader-specific helpers remain here.
 
 fn bytes_to_string(bytes: [u8]) -> text:
     # Convert byte array to string.

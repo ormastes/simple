@@ -2,6 +2,19 @@
 #
 # Walks the AST arena and extracts only public declarations
 # into the SHB type system. Re-exports are tracked from use + export decls.
+#
+# Two generation paths:
+#
+#   IN-PROCESS PATH (parse_and_extract_shb, parse_extract_write_shb):
+#     Parses source and extracts SHB in the same process.
+#     NOT production-safe in interpreter runtime — the frontend parser
+#     requires global init that is not re-entrant from the interpreter.
+#     Safe when called from a compiled binary (e.g. shb_emit tool).
+#
+#   EXTERNAL PATH (external_extract_write_shb):
+#     Spawns a subprocess running bin/release/simple with shb_emit.spl.
+#     Production-safe fallback — works from any runtime context.
+#     Output is machine-parsable: "source_hash|interface_hash" on success.
 
 use compiler.shb.shb_types.{
     ShbModuleInterface, ShbFnEntry, ShbStructEntry, ShbClassEntry,
@@ -27,6 +40,73 @@ use compiler.core.ast.{
     DECL_CLASS, DECL_USE, DECL_EXPORT, DECL_IMPL
 }
 use compiler.common.visibility.{effective_visibility}
+
+# --- Generation stack for preventing recursive SHB loops ---
+# Tracks module paths currently being generated to break cycles.
+var _shb_generation_stack: [text] = []
+
+fn shb_generation_in_progress(module_path: text) -> bool:
+    var i = 0
+    val ref_stack = _shb_generation_stack
+    while i < ref_stack.len():
+        if ref_stack[i] == module_path:
+            return true
+        i = i + 1
+    false
+
+fn shb_generation_push(module_path: text):
+    _shb_generation_stack.push(module_path)
+
+fn shb_generation_pop():
+    val ref_stack = _shb_generation_stack
+    val stack_len = ref_stack.len()
+    if stack_len > 0:
+        var new_stack: [text] = []
+        var i = 0
+        while i < stack_len - 1:
+            new_stack.push(ref_stack[i])
+            i = i + 1
+        _shb_generation_stack = new_stack
+
+# --- Dependency interface hash resolution ---
+# Given a module path and a cache directory, attempt to load the
+# dependency's existing SHB and return its interface hash.
+# Returns 0 if no valid SHB exists (explicit "unknown" sentinel).
+
+fn resolve_dep_interface_hash(module_path: text, shb_dir: text) -> i64:
+    if shb_dir == "":
+        return 0
+    # If this module is currently being generated, return 0 to break cycle
+    if shb_generation_in_progress(module_path):
+        return 0
+    val dep_shb_path = _module_path_to_shb_path(module_path, shb_dir)
+    if rt_file_exists(dep_shb_path) == false:
+        return 0
+    val reader = ShbReader.open(dep_shb_path)
+    if reader.is_valid() == false:
+        return 0
+    reader.interface_hash()
+
+fn _module_path_to_shb_path(module_path: text, shb_dir: text) -> text:
+    # Convert dotted module path to SHB cache path.
+    # Module path "compiler.shb.shb_types" -> source path "src/compiler/..." -> shb path.
+    # We use the same convention as source_to_shb_path: replace / with _ and .spl with "".
+    # But we start from the module path, so convert dots to / first, then prefix with src/.
+    #
+    # Rewrite std -> lib as first segment to match module resolver convention.
+    val relative = module_path.replace(".", "/")
+    # Build a safe copy for mutation (avoid substring mutation bug)
+    var src_relative = "" + relative
+    # "std/X/Y" -> "lib/X/Y": replace only the leading "std/" prefix
+    if src_relative.starts_with("std/"):
+        # Safe: build "lib/" + rest by replacing first 4 chars via known prefix replace
+        src_relative = "lib" + src_relative[3:]
+    val source_path = "src/" + src_relative + ".spl"
+    val with_slashes = source_path.replace("/", "_")
+    val base = with_slashes.replace(".spl", "")
+    "{shb_dir}/{base}.shb"
+
+extern fn rt_file_exists(path: text) -> bool
 
 fn shb_type_name_from_tag(type_tag: i64) -> text:
     if type_tag <= 0:
@@ -60,9 +140,18 @@ fn shb_persist_result_ok(source_hash: i64, interface_hash: i64) -> ShbPersistRes
 fn shb_persist_result_err(message: text) -> ShbPersistResult:
     ShbPersistResult(ok: false, source_hash: 0, interface_hash: 0, error: message)
 
-# --- Main extraction function ---
+# ============================================================================
+# In-process extraction (NOT production-safe in interpreter runtime)
+# ============================================================================
+# These functions call the parser directly. They require frontend global state
+# to be initialized, which is NOT safe when running inside the interpreter.
+# Use only from compiled binaries (e.g. shb_emit tool).
+# For production use from interpreter context, use external_extract_write_shb.
 
 fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
+    shb_extract_with_deps(source, filename, "")
+
+fn shb_extract_with_deps(source: text, filename: text, shb_dir: text) -> ShbModuleInterface:
     val src_hash = shb_source_hash(source)
     var functions: [ShbFnEntry] = []
     var structs: [ShbStructEntry] = []
@@ -105,7 +194,7 @@ fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
                 reexports.push(extracted_reexports[eri])
                 eri = eri + 1
         else if tag == DECL_USE:
-            val dep = extract_dependency(i)
+            val dep = extract_dependency_with_hash(i, shb_dir)
             if dep.?:
                 var found = false
                 var di = 0
@@ -136,18 +225,49 @@ fn shb_extract(source: text, filename: text) -> ShbModuleInterface:
 
     iface
 
+# In-process parse helper. NOT production-safe in interpreter runtime.
+fn shb_parse_source(source: text, filename: text) -> bool:
+    parse_module(source, filename)
+    not parser_has_errors()
+
+# In-process extract. NOT production-safe in interpreter runtime.
 fn parse_and_extract_shb(source: text, filename: text) -> ShbExtractResult:
     if not shb_parse_source(source, filename):
-        return shb_extract_result_err("failed to parse source for SHB extraction: {filename}")
+        return shb_extract_result_err("shb: parse failure for '{filename}' — syntax errors in source")
     shb_extract_result_ok(shb_extract(source, filename))
 
+# In-process extract with dependency hash resolution.
+fn parse_and_extract_shb_with_deps(source: text, filename: text, shb_dir: text) -> ShbExtractResult:
+    if not shb_parse_source(source, filename):
+        return shb_extract_result_err("shb: parse failure for '{filename}' — syntax errors in source")
+    shb_extract_result_ok(shb_extract_with_deps(source, filename, shb_dir))
+
+# In-process extract + write. NOT production-safe in interpreter runtime.
 fn parse_extract_write_shb(source: text, filename: text, shb_path: text) -> ShbPersistResult:
     if not shb_parse_source(source, filename):
-        return shb_persist_result_err("failed to parse source for SHB extraction: {filename}")
+        return shb_persist_result_err("shb: parse failure for '{filename}' — syntax errors in source")
     val iface = shb_extract(source, filename)
     if not shb_write(iface, shb_path):
-        return shb_persist_result_err("failed to write SHB: {shb_path}")
+        return shb_persist_result_err("shb: writer failure — could not write SHB to '{shb_path}'")
     shb_persist_result_ok(iface.header.source_hash, iface.header.interface_hash)
+
+# In-process extract + write with dependency hash resolution.
+fn parse_extract_write_shb_with_deps(source: text, filename: text, shb_path: text, shb_dir: text) -> ShbPersistResult:
+    if not shb_parse_source(source, filename):
+        return shb_persist_result_err("shb: parse failure for '{filename}' — syntax errors in source")
+    val iface = shb_extract_with_deps(source, filename, shb_dir)
+    if not shb_write(iface, shb_path):
+        return shb_persist_result_err("shb: writer failure — could not write SHB to '{shb_path}'")
+    shb_persist_result_ok(iface.header.source_hash, iface.header.interface_hash)
+
+# ============================================================================
+# External generation path (production-safe fallback)
+# ============================================================================
+# Spawns a subprocess to generate SHB. Safe from any runtime context.
+# The external emitter (shb_emit.spl) outputs a machine-parsable format:
+#   Success: "SHB_OK|<source_hash>|<interface_hash>" on stdout, exit 0
+#   Failure: "SHB_ERR|<error_tag>|<message>" on stdout, exit 1
+#     error_tag: "read_failed", "parse_failed", "write_failed"
 
 fn external_extract_write_shb(source_path: text, shb_path: text) -> ShbPersistResult:
     val (stdout, stderr, exit_code) = rt_process_run(
@@ -156,15 +276,12 @@ fn external_extract_write_shb(source_path: text, shb_path: text) -> ShbPersistRe
     )
     if exit_code != 0:
         val message = if stderr != "": stderr else: stdout
-        return shb_persist_result_err("external SHB emit failed: {message}")
+        return shb_persist_result_err("shb: external emit failed for '{source_path}': {message}")
+    # Validate the written SHB is readable
     val reader = ShbReader.open(shb_path)
     if reader.is_valid() == false:
-        return shb_persist_result_err("external SHB emit wrote invalid SHB: {shb_path}")
+        return shb_persist_result_err("shb: invalid SHB readback — file written to '{shb_path}' is not a valid SHB")
     shb_persist_result_ok(reader.source_hash(), reader.interface_hash())
-
-fn shb_parse_source(source: text, filename: text) -> bool:
-    parse_module(source, filename)
-    not parser_has_errors()
 
 # --- Individual extractors ---
 
@@ -277,6 +394,16 @@ fn extract_dependency(decl_idx: i64) -> ShbDependencyEntry?:
         return ShbDependencyEntry(
             module_path: mod_path,
             interface_hash: 0
+        )
+    nil
+
+fn extract_dependency_with_hash(decl_idx: i64, shb_dir: text) -> ShbDependencyEntry?:
+    val mod_path = decl_get_name(decl_idx)
+    if mod_path != "":
+        val dep_hash = resolve_dep_interface_hash(mod_path, shb_dir)
+        return ShbDependencyEntry(
+            module_path: mod_path,
+            interface_hash: dep_hash
         )
     nil
 
