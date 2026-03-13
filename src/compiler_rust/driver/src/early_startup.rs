@@ -199,7 +199,7 @@ pub unsafe fn parse_early_args_raw(argc: i32, argv: *const *const u8) -> EarlyCo
             break;
         }
 
-        let c_str = CStr::from_ptr(arg_ptr as *const i8);
+        let c_str = CStr::from_ptr(arg_ptr as *const std::ffi::c_char);
         if let Ok(arg_str) = c_str.to_str() {
             args.push(OsString::from(arg_str));
         }
