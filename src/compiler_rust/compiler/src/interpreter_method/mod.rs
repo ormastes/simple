@@ -1125,30 +1125,11 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
     let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
 
-    // Mutating methods that return updated collections should be propagated
-    // Check if the method is a known mutating method
-    let is_mutating_method = matches!(
-        method,
-        "push"
-            | "append"
-            | "pop"
-            | "insert"
-            | "remove"
-            | "reverse"
-            | "rev"
-            | "sort"
-            | "clear"
-            | "extend"
-            | "concat"
-            | "set"
-            | "delete"
-            | "update"
-    );
-
-    if is_mutating_method {
-        // The result IS the updated self for these methods
-        Ok((result.clone(), Some(result)))
-    } else {
-        Ok((result, None))
-    }
+    // Always propagate potential mutations for FieldAccess receivers.
+    // Custom `me` methods (e.g., push_scope, add_symbol) mutate the receiver
+    // but were previously missed because they weren't in a hardcoded list.
+    // For non-mutating methods (e.g., .len()), the result type differs from the
+    // receiver type, so reassigning back is harmless — it's a no-op in practice
+    // because the FieldAccess handler only updates if updated_field.is_some().
+    Ok((result.clone(), Some(result)))
 }

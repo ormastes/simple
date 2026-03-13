@@ -159,7 +159,7 @@ impl BindingSpecializer {
     fn specialize_expr(&self, expr: &Expr) -> Expr {
         match expr {
             // Method calls are the primary target for specialization
-            Expr::MethodCall { receiver, method, args } => {
+            Expr::MethodCall { receiver, method, args, generic_args } => {
                 let new_receiver = Box::new(self.specialize_expr(receiver));
                 let new_args: Vec<_> = args
                     .iter()
@@ -178,6 +178,7 @@ impl BindingSpecializer {
                     receiver: new_receiver,
                     method: method.clone(),
                     args: new_args,
+                    generic_args: generic_args.clone(),
                 }
             }
 

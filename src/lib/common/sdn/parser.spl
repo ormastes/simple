@@ -3,8 +3,8 @@
 # One-pass LL(2) parser for SDN documents.
 # Port of rust/sdn/src/parser.rs
 
-from value import {SdnValue, Span}
-from lexer import {Token, TokenKind, Lexer}
+use common.sdn.value.{SdnValue, Span}
+use common.sdn.lexer.{Token, TokenKind, Lexer}
 
 
 # Parse error
@@ -52,7 +52,7 @@ impl SdnParser:
             self.span_map[path] = start_span.merge(end_span)
 
     # Parse document into SdnValue (typically a Dict)
-    fn parse() -> Result<SdnValue, SdnError>:
+    me parse() -> Result<SdnValue, SdnError>:
         var root = {}
         while not self.is_at_end():
             self.skip_newlines()
@@ -78,22 +78,24 @@ impl SdnParser:
         val name = self.expect_identifier()?
         self.current_path.push(name)
 
-        val result = match self.peek_kind():
+        # Use var + match (not val = match) to avoid interpreter mutation bug
+        var result: Result<(text, SdnValue)?, SdnError> = Err(SdnError.SyntaxError(
+            message: "Expected ':', '=', or '|' after identifier '{name}'",
+            span: self.current_span()
+        ))
+        match self.peek_kind():
             case Some(TokenKind.Colon):
                 self.advance()
-                self.parse_colon_stmt(name)
+                result = self.parse_colon_stmt(name)
             case Some(TokenKind.Equals):
                 self.advance()
                 val value = self.parse_inline_value()?
                 self.skip_newlines()
-                Ok(Some((name, value)))
+                result = Ok(Some((name, value)))
             case Some(TokenKind.Pipe):
-                self.parse_named_table(name)
+                result = self.parse_named_table(name)
             case _:
-                Err(SdnError.SyntaxError(
-                    message: "Expected ':', '=', or '|' after identifier '{name}'",
-                    span: self.current_span()
-                ))
+                pass
 
         self.record_span(start, self.current_span())
         self.current_path.pop()
@@ -305,7 +307,8 @@ impl SdnParser:
                             break
                         val token = self.advance()
                         if token.?:
-                            combined = combined + " " + token.unwrap().lexeme
+                            val tok_val = token.unwrap()
+                            combined = combined + " " + tok_val.lexeme
                     row.push(SdnValue.String(combined))
                 else:
                     row.push(value)
@@ -425,14 +428,16 @@ impl SdnParser:
 
     fn peek_kind() -> TokenKind?:
         if self.pos < self.tokens.len():
-            Some(self.tokens[self.pos].kind)
+            val tok = self.tokens[self.pos]
+            Some(tok.kind)
         else:
             nil
 
     fn peek_kind_at(offset: i64) -> TokenKind?:
         val idx = self.pos + offset
         if idx < self.tokens.len():
-            Some(self.tokens[idx].kind)
+            val tok = self.tokens[idx]
+            Some(tok.kind)
         else:
             nil
 
@@ -459,7 +464,8 @@ impl SdnParser:
 
     fn current_span() -> Span:
         if self.pos < self.tokens.len():
-            self.tokens[self.pos].span
+            val tok = self.tokens[self.pos]
+            tok.span
         else:
             Span.empty()
 

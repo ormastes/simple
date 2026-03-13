@@ -268,6 +268,7 @@ impl TypeChecker {
                 receiver,
                 method,
                 args,
+                ..
             } => {
                 let _ = self.infer_expr(receiver)?;
                 for arg in args {

@@ -1,4 +1,4 @@
-use crate::ast::{Argument, Expr, LambdaParam, MoveMode};
+use crate::ast::{Argument, Expr, LambdaParam, MoveMode, Type};
 use crate::error::ParseError;
 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
@@ -216,6 +216,10 @@ impl<'a> Parser<'a> {
                         };
                     } else {
                         let field = self.expect_method_name()?;
+
+                        // Parse optional generic type arguments: method<T, U>(...)
+                        let generic_args = self.try_parse_method_generic_args();
+
                         if self.check(&TokenKind::LParen) {
                             let mut args = self.parse_arguments()?;
                             // Check for trailing block: obj.method(args) \x: body
@@ -238,6 +242,7 @@ impl<'a> Parser<'a> {
                                     receiver: Box::new(expr),
                                     method: field,
                                     args,
+                                    generic_args,
                                 };
                             }
                         } else if self.check(&TokenKind::Backslash) {
@@ -247,6 +252,7 @@ impl<'a> Parser<'a> {
                                 receiver: Box::new(expr),
                                 method: field,
                                 args: vec![Argument::new(None, trailing_lambda)],
+                                generic_args,
                             };
                         } else if self.check(&TokenKind::LBrace)
                             && !self.no_brace_postfix
@@ -323,6 +329,7 @@ impl<'a> Parser<'a> {
                                 receiver: Box::new(expr),
                                 method: field,
                                 args: vec![Argument::new(None, dict_expr)],
+                                generic_args,
                             };
                         } else {
                             expr = Expr::FieldAccess {
@@ -738,5 +745,97 @@ impl<'a> Parser<'a> {
             self.parse_remaining_lambda_params(&mut params)?;
         }
         Ok(params)
+    }
+
+    /// Try to parse generic type arguments on a method call: `method<T, U>(...)`.
+    ///
+    /// The `<` token is ambiguous — it could be a generic arg list or a less-than comparison.
+    /// We use speculative parsing: save the parser state, try to parse as generic args
+    /// (comma-separated types ending with `>` followed by `(`), and backtrack if it fails.
+    ///
+    /// Returns the parsed generic args, or an empty vec if this is not a generic arg list.
+    fn try_parse_method_generic_args(&mut self) -> Vec<Type> {
+        if !self.check(&TokenKind::Lt) {
+            return Vec::new();
+        }
+
+        // Save parser state for backtracking
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let saved_pending = self.pending_tokens.clone();
+        let saved_lexer = self.lexer.clone();
+
+        // Try to parse generic args
+        self.advance(); // consume '<'
+
+        let mut args = Vec::new();
+        let mut succeeded = false;
+
+        // Try to parse comma-separated type arguments
+        loop {
+            // Handle >> token splitting for nested generics like method<List<T>>()
+            if self.check(&TokenKind::ShiftRight) {
+                // Split >> into two > tokens
+                let shift_span = self.current.span;
+                use crate::token::{Span, Token};
+
+                let first_gt = Token::new(
+                    TokenKind::Gt,
+                    Span::new(
+                        shift_span.start,
+                        shift_span.start + 1,
+                        shift_span.line,
+                        shift_span.column,
+                    ),
+                    ">".to_string(),
+                );
+                let second_gt = Token::new(
+                    TokenKind::Gt,
+                    Span::new(
+                        shift_span.start + 1,
+                        shift_span.end,
+                        shift_span.line,
+                        shift_span.column + 1,
+                    ),
+                    ">".to_string(),
+                );
+
+                self.current = first_gt;
+                self.pending_tokens.push_front(second_gt);
+            }
+
+            if self.check(&TokenKind::Gt) {
+                // End of generic args — check that `(` follows
+                self.advance(); // consume '>'
+                if self.check(&TokenKind::LParen) || self.check(&TokenKind::Backslash) || self.check(&TokenKind::LBrace) {
+                    succeeded = true;
+                }
+                break;
+            }
+
+            // Try to parse a type
+            match self.parse_type() {
+                Ok(ty) => args.push(ty),
+                Err(_) => break, // Not a valid type — this is not a generic arg list
+            }
+
+            // Expect comma or closing >
+            if self.check(&TokenKind::Comma) {
+                self.advance(); // consume ','
+            } else if !self.check(&TokenKind::Gt) && !self.check(&TokenKind::ShiftRight) {
+                break; // Neither comma nor > — not a generic arg list
+            }
+        }
+
+        if succeeded && !args.is_empty() {
+            args
+        } else {
+            // Backtrack: restore parser state
+            self.current = saved_current;
+            self.previous = saved_previous;
+            self.pending_tokens = saved_pending;
+            self.lexer = saved_lexer;
+            Vec::new()
+        }
     }
 }

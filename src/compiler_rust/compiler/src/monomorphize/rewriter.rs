@@ -196,7 +196,7 @@ impl<'a> CallSiteRewriter<'a> {
                 op: *op,
                 operand: Box::new(self.rewrite_expr(operand)),
             },
-            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+            Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
                 receiver: Box::new(self.rewrite_expr(receiver)),
                 method: method.clone(),
                 args: args
@@ -205,6 +205,7 @@ impl<'a> CallSiteRewriter<'a> {
                         simple_parser::ast::Argument::with_span(a.name.clone(), self.rewrite_expr(&a.value), a.span)
                     })
                     .collect(),
+                generic_args: generic_args.clone(),
             },
             Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
                 receiver: Box::new(self.rewrite_expr(receiver)),

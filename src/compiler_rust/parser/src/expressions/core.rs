@@ -12,6 +12,7 @@ impl<'a> Parser<'a> {
                 receiver,
                 method: field,
                 args,
+                generic_args: vec![],
             },
             _ => Expr::Call {
                 callee: Box::new(expr),

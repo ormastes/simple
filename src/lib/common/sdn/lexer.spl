@@ -4,7 +4,7 @@
 # Port of rust/sdn/src/lexer.rs
 
 
-from value import {Span}
+use common.sdn.value.{Span}
 
 
 # Token kinds
@@ -78,6 +78,12 @@ struct Token:
     span: Span
     lexeme: text
 
+impl Token:
+    fn is_eof() -> bool:
+        match self.kind:
+            case TokenKind.Eof: true
+            case _: false
+
 # SDN Lexer with indentation tracking
 class Lexer:
     source: text
@@ -102,22 +108,37 @@ impl Lexer:
             bracket_depth: 0
         )
 
+    # Pop last element from pending_tokens and return it.
+    # Workaround: interpreter pop() returns remaining array, not removed element.
+    me _pop_pending() -> Token:
+        val idx = self.pending_tokens.len() - 1
+        val token = self.pending_tokens[idx]
+        self.pending_tokens.remove(idx)
+        token
+
     # Tokenize entire source into a list of tokens
-    fn tokenize() -> [Token]:
+    me tokenize() -> [Token]:
         var tokens = []
-        while true:
+        var done = false
+        while not done:
             val token = self.next_token()
-            val is_eof = token.kind.is_eof()
+            val token_lexeme = token.lexeme
+            val token_kind_name = token_lexeme
             tokens.push(token)
-            if is_eof:
-                break
+            # Check if we got an EOF token by checking kind
+            val tk = token.kind
+            match tk:
+                case TokenKind.Eof:
+                    done = true
+                case _:
+                    pass_do_nothing
         tokens
 
     # Get the next token
     me next_token() -> Token:
         # Return pending tokens first (INDENT/DEDENT)
         if self.pending_tokens.len() > 0:
-            return self.pending_tokens.pop()
+            return self._pop_pending()
 
         # Handle indentation at line start
         if self.at_line_start:
@@ -157,7 +178,7 @@ impl Lexer:
                     lexeme: ""
                 ))
             if self.pending_tokens.len() > 0:
-                return self.pending_tokens.pop()
+                return self._pop_pending()
             return Token(
                 kind: TokenKind.Eof,
                 span: Span(start: start_pos, end: start_pos, line: start_line, column: start_col),
@@ -168,61 +189,65 @@ impl Lexer:
         self.pos = self.pos + 1
         self.column = self.column + 1
 
-        val kind = if ch == "\n":
+        # Dispatch character to token kind
+        # Using separate statements instead of val-if to ensure
+        # side effects from scan methods persist in interpreter mode
+        if ch == "\n":
             self.line = self.line + 1
             self.column = 1
             self.at_line_start = true
-            TokenKind.Newline
-        elif ch == "(":
+            val end_pos = self.pos
+            return Token(kind: TokenKind.Newline, span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col), lexeme: self.source[start_pos:end_pos])
+        if ch == "(":
             self.bracket_depth = self.bracket_depth + 1
-            TokenKind.LParen
-        elif ch == ")":
+            return Token(kind: TokenKind.LParen, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "(")
+        if ch == ")":
             if self.bracket_depth > 0:
                 self.bracket_depth = self.bracket_depth - 1
-            TokenKind.RParen
-        elif ch == "[":
+            return Token(kind: TokenKind.RParen, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: ")")
+        if ch == "[":
             self.bracket_depth = self.bracket_depth + 1
-            TokenKind.LBracket
-        elif ch == "]":
+            return Token(kind: TokenKind.LBracket, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "[")
+        if ch == "]":
             if self.bracket_depth > 0:
                 self.bracket_depth = self.bracket_depth - 1
-            TokenKind.RBracket
-        elif ch == "{":
+            return Token(kind: TokenKind.RBracket, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "]")
+        if ch == "{":
             self.bracket_depth = self.bracket_depth + 1
-            TokenKind.LBrace
-        elif ch == "}":
+            return Token(kind: TokenKind.LBrace, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "{")
+        if ch == "}":
             if self.bracket_depth > 0:
                 self.bracket_depth = self.bracket_depth - 1
-            TokenKind.RBrace
-        elif ch == ",":
-            TokenKind.Comma
-        elif ch == ":":
-            TokenKind.Colon
-        elif ch == "=":
-            TokenKind.Equals
-        elif ch == "|":
-            TokenKind.Pipe
-        elif ch == "#":
+            return Token(kind: TokenKind.RBrace, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "}")
+        if ch == ",":
+            return Token(kind: TokenKind.Comma, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: ",")
+        if ch == ":":
+            return Token(kind: TokenKind.Colon, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: ":")
+        if ch == "=":
+            return Token(kind: TokenKind.Equals, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "=")
+        if ch == "|":
+            return Token(kind: TokenKind.Pipe, span: Span(start: start_pos, end: self.pos, line: start_line, column: start_col), lexeme: "|")
+        if ch == "#":
             self.skip_comment()
             return self.next_token()
-        elif ch == "\"":
-            self.scan_string()
-        elif ch == "-" and self.pos < self.source.len() and self.source[self.pos].is_digit():
-            self.scan_number(ch)
-        elif ch.is_digit():
-            self.scan_number(ch)
-        elif ch.is_alpha() or ch == "_":
-            self.scan_identifier(ch)
-        else:
-            return self.next_token()
-
-        val end_pos = self.pos
-        val lexeme = self.source[start_pos:end_pos]
-        Token(
-            kind: kind,
-            span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col),
-            lexeme: lexeme
-        )
+        if ch == "\"":
+            val str_kind = self.scan_string()
+            val end_pos = self.pos
+            return Token(kind: str_kind, span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col), lexeme: self.source[start_pos:end_pos])
+        if ch == "-" and self.pos < self.source.len() and self.source[self.pos].is_digit():
+            val num_kind = self.scan_number(ch)
+            val end_pos = self.pos
+            return Token(kind: num_kind, span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col), lexeme: self.source[start_pos:end_pos])
+        if ch.is_digit():
+            val num_kind = self.scan_number(ch)
+            val end_pos = self.pos
+            return Token(kind: num_kind, span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col), lexeme: self.source[start_pos:end_pos])
+        if ch.is_alpha() or ch == "_":
+            val id_kind = self.scan_identifier(ch)
+            val end_pos = self.pos
+            return Token(kind: id_kind, span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col), lexeme: self.source[start_pos:end_pos])
+        # Unknown character - skip and get next
+        return self.next_token()
 
     me skip_whitespace():
         while self.pos < self.source.len():
@@ -298,7 +323,7 @@ impl Lexer:
                 else:
                     break
             if self.pending_tokens.len() > 0:
-                Some(self.pending_tokens.pop())
+                Some(self._pop_pending())
             else:
                 nil
         else:

@@ -71,6 +71,7 @@ pub(super) fn dispatch_context_method(
         receiver: Box::new(recv_expr),
         method: method.to_string(),
         args: args.to_vec(),
+        generic_args: vec![],
     };
     evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)
 }

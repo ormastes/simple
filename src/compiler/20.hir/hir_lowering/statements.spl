@@ -14,8 +14,6 @@ use hir_lowering.types.HirLowering
 impl HirLowering:
     me lower_stmt(s: Stmt) -> HirStmt:
         """Lower statement to HIR."""
-        # Workaround: Capture self reference to ensure it's available in match arms
-        val lowerer = self
         val kind = match s.kind:
             case StmtKind.Expr(expr):
                 HirStmtKind.Expr(self.lower_expr(expr))
@@ -23,19 +21,13 @@ impl HirLowering:
             case StmtKind.Val(name, type_, init):
                 val hir_type = type_.map(\t: self.lower_type(t))
                 val hir_init = self.lower_expr(init)
-                # Workaround: Store symbols in local var to avoid interpreter bug
-                var symbols_table = self.symbols
-                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
-                self.symbols = symbols_table
+                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
                 val hir_type = type_.map(\t: self.lower_type(t))
                 val hir_init = init.map(\i: self.lower_expr(i)) ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                # Workaround: Store symbols in local var to avoid interpreter bug
-                var symbols_table = self.symbols
-                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
-                self.symbols = symbols_table
+                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
@@ -49,20 +41,13 @@ impl HirLowering:
                 HirStmtKind.Assign(self.lower_expr(target), hir_op, self.lower_expr(value))
 
             case StmtKind.For(var_, iter, body):
-                # Workaround: Store symbols in local var to avoid interpreter bug
-                var symbols_table = self.symbols
-                symbols_table.push_scope(ScopeKind.Loop)
-                self.symbols = symbols_table
+                self.symbols.push_scope(ScopeKind.Loop)
                 self.loop_depth = self.loop_depth + 1
-                symbols_table = self.symbols
-                val symbol = symbols_table.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
-                self.symbols = symbols_table
+                val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
                 val hir_iter = self.lower_expr(iter)
                 val hir_body = self.lower_block(body)
                 self.loop_depth = self.loop_depth - 1
-                symbols_table = self.symbols
-                symbols_table.pop_scope()
-                self.symbols = symbols_table
+                self.symbols.pop_scope()
                 # Desugar to loop
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.For(symbol, hir_iter, hir_body, nil),
@@ -140,9 +125,7 @@ impl HirLowering:
                     var hir_target: SymbolId? = nil
                     if item.target.?:
                         # Define symbol for the bound variable
-                        var symbols_table = self.symbols
-                        val symbol = symbols_table.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
-                        self.symbols = symbols_table
+                        val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
                         hir_target = symbol
 
                     # Create HIR with item

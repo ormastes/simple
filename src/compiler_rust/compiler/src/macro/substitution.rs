@@ -274,7 +274,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                 })
                 .collect(),
         },
-        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+        Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
             receiver: Box::new(substitute_expr_templates(receiver, const_bindings)),
             method: method.clone(),
             args: args
@@ -287,6 +287,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                     )
                 })
                 .collect(),
+            generic_args: generic_args.clone(),
         },
         Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
             receiver: Box::new(substitute_expr_templates(receiver, const_bindings)),

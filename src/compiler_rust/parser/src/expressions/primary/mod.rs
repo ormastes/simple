@@ -296,6 +296,7 @@ impl<'a> Parser<'a> {
                     receiver: Box::new(Expr::Identifier("__p0".to_string())),
                     method: method_name,
                     args: vec![],
+                    generic_args: vec![],
                 };
                 Ok(Expr::Lambda {
                     params: vec![param],

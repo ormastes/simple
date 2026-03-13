@@ -72,6 +72,14 @@ pub(super) fn eval_control_expr(
                         }
                     }
                 }
+                // Write back mutations from block_env to the outer env.
+                // This ensures that me-method self-updates inside if-expression
+                // branches propagate correctly.
+                for (key, value) in &block_env {
+                    if env.contains_key(key) {
+                        env.insert(key.clone(), value.clone());
+                    }
+                }
                 last_val
             } else {
                 branch_result

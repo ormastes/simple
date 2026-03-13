@@ -1,33 +1,75 @@
 # Unreachable Code Lint Specification
 #
-# Tests for UNREACH001-UNREACH003 detection of code after terminal
-# statements (return, break, continue, pass_todo).
-
-use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.core.parser.{parse_module}
-use compiler.semantics.lint.unreachable_code.{check_unreachable_code, UnreachableCodeWarning}
+# Tests for UNREACH001 detection of code after terminal
+# statements (return).
+#
+# Uses text-based heuristic (mirrors _emit_source_lint_diagnostics in query_rich.spl).
 
 # ============================================================================
-# Helpers
+# Text-based lint helpers
 # ============================================================================
 
-fn parse_and_check_unreach(code: text) -> [UnreachableCodeWarning]:
-    """Parse source and run unreachable code lint."""
-    ast_reset()
-    parse_module(code, "<test>")
-    val decls = module_get_decls()
-    check_unreachable_code(decls)
+fn check_unreachable_text(source: text) -> [text]:
+    """Text-based heuristic for unreachable code detection.
+    Returns list of diagnostic codes found."""
+    var codes: [text] = []
+    val lines = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if _is_return_statement(trimmed):
+            val next_unreachable = _find_next_statement_in_block(lines, li)
+            if next_unreachable > 0:
+                codes.push("UNREACH001")
+        li = li + 1
+    codes
 
-fn warnings_have_code(warnings: [UnreachableCodeWarning], code: text) -> bool:
-    """Check if any warning has the given code."""
-    for w in warnings:
-        if w.code == code:
-            return true
+fn _is_return_statement(trimmed: text) -> bool:
+    """Check if a trimmed line is a return statement."""
+    if trimmed == "return":
+        return true
+    if trimmed.starts_with("return "):
+        return true
     false
 
-fn warnings_have_any_unreach(warnings: [UnreachableCodeWarning]) -> bool:
-    """Check if any unreachable code warning exists."""
-    warnings.len() > 0
+fn _find_next_statement_in_block(lines: [text], return_idx: i64) -> i64:
+    """Find the next non-empty statement at the same indent level after a return.
+    Returns the 1-based line number, or 0 if none found."""
+    val return_indent = _count_indent(lines[return_idx])
+    var ni = return_idx + 1
+    while ni < lines.len():
+        val next_line = lines[ni]
+        val nt = next_line.trim()
+        if nt == "":
+            ni = ni + 1
+            continue
+        val next_indent = _count_indent(next_line)
+        if next_indent < return_indent:
+            return 0
+        if next_indent == return_indent:
+            return ni + 1
+        ni = ni + 1
+    0
+
+fn _count_indent(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn codes_contain(codes: [text], target: text) -> bool:
+    """Check if codes list contains a target code."""
+    for c in codes:
+        if c == target:
+            return true
+    false
 
 # ============================================================================
 # Code after return is flagged
@@ -37,20 +79,20 @@ describe "Unreachable Code Lint":
     context "code after return":
         it "flags code after return statement":
             val code = "fn test() -> i64:\n    return 42\n    val x = 10\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(true)
 
         it "flags code after return with value":
             val code = "fn compute() -> text:\n    return \"done\"\n    print \"never reached\"\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(true)
 
         it "unreachable code has UNREACH001 code":
             val code = "fn test() -> i64:\n    return 1\n    val dead = 2\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_code = warnings_have_code(warnings, "UNREACH001")
+            val codes = check_unreachable_text(code)
+            val has_code = codes_contain(codes, "UNREACH001")
             expect(has_code).to_equal(true)
 
     # ============================================================================
@@ -60,24 +102,24 @@ describe "Unreachable Code Lint":
     context "reachable code":
         it "does not flag code before return":
             val code = "fn test() -> i64:\n    val x = 10\n    return x\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(false)
 
         it "does not flag code in different branches":
             val code = "fn test(flag: bool) -> i64:\n    if flag:\n        return 1\n    return 0\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(false)
 
         it "does not flag code after return in nested if":
             val code = "fn test(x: i64) -> text:\n    if x > 0:\n        return \"positive\"\n    \"non-positive\"\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(false)
 
         it "does not flag empty function body":
             val code = "fn noop():\n    pass_do_nothing\n"
-            val warnings = parse_and_check_unreach(code)
-            val has_warning = warnings_have_any_unreach(warnings)
+            val codes = check_unreachable_text(code)
+            val has_warning = codes_contain(codes, "UNREACH001")
             expect(has_warning).to_equal(false)

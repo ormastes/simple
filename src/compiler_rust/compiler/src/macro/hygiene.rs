@@ -297,13 +297,14 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
         },
-        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+        Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),
             method: method.clone(),
             args: args
                 .iter()
                 .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
+            generic_args: generic_args.clone(),
         },
         Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),

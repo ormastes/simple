@@ -1401,7 +1401,7 @@ impl LintChecker {
                         check_expr(checker, &arg.value);
                     }
                 }
-                Expr::MethodCall { receiver, method, args } => {
+                Expr::MethodCall { receiver, method, args, .. } => {
                     // Try to look up method
                     check_call(checker, method, args, Span::new(0, 0, 0, 0));
                     check_expr(checker, receiver);

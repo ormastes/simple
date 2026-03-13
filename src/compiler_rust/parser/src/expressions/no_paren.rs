@@ -114,6 +114,7 @@ impl<'a> Parser<'a> {
                 receiver: Box::new(expr),
                 method: method_name.to_string(),
                 args: vec![Argument::new(None, arg_expr)],
+                generic_args: vec![],
             };
         }
         Ok(expr)

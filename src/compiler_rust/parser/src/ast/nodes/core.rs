@@ -505,6 +505,7 @@ pub enum Expr {
         receiver: Box<Expr>,
         method: String,
         args: Vec<Argument>,
+        generic_args: Vec<Type>,
     },
     FieldAccess {
         receiver: Box<Expr>,

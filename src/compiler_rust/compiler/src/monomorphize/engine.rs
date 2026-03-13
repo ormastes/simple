@@ -503,7 +503,7 @@ impl<'a> Monomorphizer<'a> {
                 operand: Box::new(self.substitute_in_expr(operand, bindings)),
             },
             // Method calls
-            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+            Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
                 receiver: Box::new(self.substitute_in_expr(receiver, bindings)),
                 method: method.clone(),
                 args: args
@@ -516,6 +516,7 @@ impl<'a> Monomorphizer<'a> {
                         )
                     })
                     .collect(),
+                generic_args: generic_args.clone(),
             },
             // Field access
             Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
