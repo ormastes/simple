@@ -329,7 +329,24 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             }
 
             if result.failed > 0 {
-                eprintln!("\nWarning: {} files failed to compile", result.failed);
+                // Check if any critical files (compiler core) failed — those should be fatal
+                let critical_failures: Vec<_> = result.failures.iter()
+                    .filter(|(path, _)| {
+                        let p = path.display().to_string();
+                        p.contains("/src/compiler/") || p.contains("\\src\\compiler\\")
+                    })
+                    .collect();
+
+                if !critical_failures.is_empty() {
+                    eprintln!("\nError: {} compiler file(s) failed to compile:", critical_failures.len());
+                    for (path, msg) in &critical_failures {
+                        eprintln!("  {}: {}", path.display(), msg);
+                    }
+                    eprintln!("\nBuild aborted — compiler source must compile without errors.");
+                    return 1;
+                }
+
+                eprintln!("\nWarning: {} non-compiler files failed to compile (stubs generated)", result.failed);
             }
 
             0
