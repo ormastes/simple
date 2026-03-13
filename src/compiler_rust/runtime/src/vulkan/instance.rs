@@ -56,7 +56,7 @@ impl VulkanInstance {
 
         // Enable validation layers in debug builds
         let layer_names_raw: Vec<CString>;
-        let layer_names: Vec<*const i8>;
+        let layer_names: Vec<*const std::ffi::c_char>;
 
         #[cfg(debug_assertions)]
         {

@@ -72,7 +72,7 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
             }
 
             // Convert C string to Rust String
-            let c_str = CStr::from_ptr(arg_ptr as *const i8);
+            let c_str = CStr::from_ptr(arg_ptr as *const std::ffi::c_char);
             match c_str.to_str() {
                 Ok(s) => args.push(s.to_string()),
                 Err(e) => {

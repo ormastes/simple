@@ -641,7 +641,7 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
 /// The pointer must be a valid null-terminated C string (or null).
 /// The string data must be valid UTF-8.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cstring_to_text(cstr: *const i8) -> RuntimeValue {
+pub unsafe extern "C" fn rt_cstring_to_text(cstr: *const std::ffi::c_char) -> RuntimeValue {
     if cstr.is_null() {
         return rt_string_new(std::ptr::null(), 0);
     }

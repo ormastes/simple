@@ -335,7 +335,7 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
         };
 
         unsafe {
-            let path_cstr = CStr::from_ptr(path_ptr as *const i8);
+            let path_cstr = CStr::from_ptr(path_ptr as *const std::ffi::c_char);
             let path_bytes = path_cstr.to_bytes_with_nul();
 
             // Convert flags to Windows access and creation disposition
@@ -548,7 +548,7 @@ pub extern "C" fn sys_file_exists(path_ptr: i64) -> i32 {
         use windows_sys::Win32::Storage::FileSystem::INVALID_FILE_ATTRIBUTES;
 
         unsafe {
-            let path_cstr = CStr::from_ptr(path_ptr as *const i8);
+            let path_cstr = CStr::from_ptr(path_ptr as *const std::ffi::c_char);
             let path_bytes = path_cstr.to_bytes_with_nul();
 
             let attrs = GetFileAttributesA(path_bytes.as_ptr());

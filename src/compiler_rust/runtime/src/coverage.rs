@@ -190,7 +190,7 @@ fn get_coverage_data() -> &'static Mutex<CoverageData> {
 pub unsafe extern "C" fn rt_coverage_decision_probe(
     decision_id: u32,
     result: bool,
-    file: *const i8,
+    file: *const std::ffi::c_char,
     line: u32,
     column: u32,
 ) {
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn rt_coverage_condition_probe(
     decision_id: u32,
     condition_id: u32,
     result: bool,
-    file: *const i8,
+    file: *const std::ffi::c_char,
     line: u32,
     column: u32,
 ) {
@@ -250,7 +250,7 @@ pub extern "C" fn rt_coverage_path_finalize(path_id: u32) {
 /// # Safety
 /// The returned pointer must be freed by the caller using `rt_coverage_free_sdn`.
 #[no_mangle]
-pub extern "C" fn rt_coverage_dump_sdn() -> *mut i8 {
+pub extern "C" fn rt_coverage_dump_sdn() -> *mut std::ffi::c_char {
     let sdn = if let Ok(data) = get_coverage_data().lock() {
         data.to_sdn()
     } else {
@@ -269,7 +269,7 @@ pub extern "C" fn rt_coverage_dump_sdn() -> *mut i8 {
 /// # Safety
 /// The pointer must have been returned by `rt_coverage_dump_sdn`.
 #[no_mangle]
-pub unsafe extern "C" fn rt_coverage_free_sdn(ptr: *mut i8) {
+pub unsafe extern "C" fn rt_coverage_free_sdn(ptr: *mut std::ffi::c_char) {
     if !ptr.is_null() {
         drop(std::ffi::CString::from_raw(ptr));
     }

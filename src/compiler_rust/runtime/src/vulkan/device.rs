@@ -113,7 +113,7 @@ impl VulkanDevice {
         #[cfg(feature = "vulkan")]
         extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
 
-        let extension_names: Vec<*const i8> = extension_names_raw;
+        let extension_names: Vec<*const std::ffi::c_char> = extension_names_raw;
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
