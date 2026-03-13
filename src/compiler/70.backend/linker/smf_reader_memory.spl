@@ -101,6 +101,10 @@ impl SmfReaderMemory:
             symbols_offset: symbols_offset
         ))
 
+    """Return a synthetic path for trait compatibility."""
+    fn path() -> text:
+        "<memory>"
+
     """Look up a symbol by name."""
     fn lookup_symbol(name: text) -> Result<SmfSymbol, text>:
         if self.symbols.contains_key(name):
@@ -156,6 +160,43 @@ impl SmfReaderMemory:
             result.push(self.data[i])
             i = i + 1
         Ok(result)
+
+    """Read template bytes for a generic symbol from TemplateCode."""
+    fn read_template_section(symbol: SmfSymbol) -> Result<[u8], text>:
+        if not symbol.is_generic_template:
+            return Err("Symbol {symbol.name} is not a generic template")
+
+        val template_section_index = find_section_index_by_type(self, 12)
+        if template_section_index < 0:
+            return Err("No TemplateCode section found")
+
+        val section_data = self.read_section(template_section_index)
+        if section_data.is_err():
+            return Err(section_data.unwrap_err())
+
+        val data = section_data.unwrap()
+        val start = symbol.template_offset
+        if start < 0 or start >= data.len():
+            return Err("Template offset out of bounds")
+
+        var result: [u8] = []
+        var i = start
+        while i < data.len():
+            result.push(data[i])
+            i = i + 1
+        Ok(result)
+
+    """Read note.sdn / TemplateMeta as plain text for trait compatibility."""
+    fn read_note_sdn() -> text:
+        val meta_section_index = find_section_index_by_type(self, 13)
+        if meta_section_index < 0:
+            return ""
+
+        val section_data = self.read_section(meta_section_index)
+        if section_data.is_err():
+            return ""
+
+        bytes_to_text(section_data.unwrap())
 
     """Get the parsed header."""
     fn get_header() -> SmfHeader:
@@ -587,7 +628,33 @@ fn parse_sym_type(t: u8) -> SymbolType:
         5: SymbolType.Constant
         _: SymbolType.Unknown
 
+"""Find a section index by wire section type."""
+fn find_section_index_by_type(reader: SmfReaderMemory, section_type: i32) -> i32:
+    val section_entry_size = 64
+    val section_count = reader.header.section_count as i64
+    var i = 0
+    while i < section_count:
+        val entry_off = reader.sections_offset + i * section_entry_size
+        val entry_end = entry_off + section_entry_size
+        if entry_end > reader.data.len():
+            return -1
+        if reader.data[entry_off] as i32 == section_type:
+            return i as i32
+        i = i + 1
+    -1
+
+"""Convert a byte array to ASCII text, stopping at NUL."""
+fn bytes_to_text(bytes: [u8]) -> text:
+    var chars: [text] = []
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i]
+        if b == 0:
+            return chars.join("")
+        chars.push(char_from_byte(b))
+        i = i + 1
+    chars.join("")
+
 # ============================================================================
 # Exports
 # ============================================================================
-

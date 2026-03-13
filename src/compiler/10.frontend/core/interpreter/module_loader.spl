@@ -61,16 +61,16 @@ var loaded_module_paths: [text] = []
 var loaded_module_file_paths: [text] = []
 var loaded_module_exports: [text] = []
 var _loaded_module_order: text = ""
-var _loaded_module_file_map = {}
-var _loaded_module_exports_map = {}
-var loaded_module_set = {}
+var _loaded_module_file_map: {text: text} = {}
+var _loaded_module_exports_map: {text: text} = {}
+var loaded_module_set: {text: bool} = {}
 
 # ===== Deferred (Lazy) Module Tracking =====
 
 var _deferred_module_order: text = ""
-var _deferred_module_file_map = {}
-var _deferred_module_imports_map = {}
-var deferred_module_set = {}
+var _deferred_module_file_map: {text: text} = {}
+var _deferred_module_imports_map: {text: text} = {}
+var deferred_module_set: {text: bool} = {}
 
 fn encode_module_names(names: [text]) -> text:
     if names.len() == 0:
@@ -114,27 +114,19 @@ fn deferred_module_may_define_symbol(module_name: text, current_file: text, impo
     if resolved_path == "":
         return 1
 
-    use compiler.shb.shb_extractor.{external_extract_write_shb}
-    use compiler.shb.shb_reader.{ShbReader}
-
-    rt_dir_create_all("/tmp/simple_interp_shb")
-    val shb_name = resolved_path.replace("/", "_").replace(".spl", "")
-    val shb_path = "/tmp/simple_interp_shb/{shb_name}.shb"
-
-    val persist_result = external_extract_write_shb(resolved_path, shb_path)
-    if not persist_result.ok:
-        return 1
-
-    val reader = ShbReader.open(shb_path)
-    if not reader.is_valid():
-        return 1
-
-    if reader.has_symbol_named(symbol_name):
+    # Lightweight source scan: check if the source text contains the symbol name.
+    # This avoids requiring SHB infrastructure (shb_extractor/shb_reader) that
+    # may not be available yet. Will be upgraded to SHB-based check later.
+    val source = load_module_source(resolved_path)
+    if source == "":
+        return 0
+    if source.contains(symbol_name):
         return 1
     0
 
 fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
-    if deferred_module_set.contains_key(name):
+    val ds_ref = deferred_module_set
+    if ds_ref.contains_key(name):
         return
     _deferred_module_order = append_module_name(_deferred_module_order, name)
     _deferred_module_file_map[name] = current_file
@@ -142,7 +134,8 @@ fn register_deferred_module(name: text, current_file: text, imported_names: [tex
     deferred_module_set[name] = true
 
 fn is_deferred_module(name: text) -> i64:
-    if deferred_module_set.contains_key(name):
+    val ds_ref = deferred_module_set
+    if ds_ref.contains_key(name):
         return 1
     0
 
@@ -197,7 +190,8 @@ fn module_loader_init():
     irt_init()
 
 fn module_is_loaded(module_path: text) -> i64:
-    if loaded_module_set.contains_key(module_path):
+    val ls_ref = loaded_module_set
+    if ls_ref.contains_key(module_path):
         return 1
     0
 
@@ -260,7 +254,7 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # 1. Local directory (relative to current file)
     val current_dir = rt_path_dirname(current_file)
     val local_path = rt_path_join(current_dir, relative_path)
-    if rt_file_exists(local_path) == 1:
+    if rt_file_exists(local_path):
         return local_path
 
     # 2. SIMPLE_LIB environment variable
@@ -270,12 +264,12 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     val should_check_lib = has_simple_lib and lib_not_nil
     if should_check_lib:
         val lib_path = rt_path_join(simple_lib, relative_path)
-        if rt_file_exists(lib_path) == 1:
+        if rt_file_exists(lib_path):
             return lib_path
 
     # 3. Fallback to src/ directory
     val src_path = rt_path_join("src", relative_path)
-    if rt_file_exists(src_path) == 1:
+    if rt_file_exists(src_path):
         return src_path
 
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
@@ -285,25 +279,25 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
         val lib_subpath = relative_path.substring(4)
         val lib_dir = rt_path_join("src", "lib")
         val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
-        if rt_file_exists(nam) == 1:
+        if rt_file_exists(nam):
             return nam
         val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
-        if rt_file_exists(nsm) == 1:
+        if rt_file_exists(nsm):
             return nsm
         val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
-        if rt_file_exists(cm) == 1:
+        if rt_file_exists(cm):
             return cm
         val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
-        if rt_file_exists(gam) == 1:
+        if rt_file_exists(gam):
             return gam
         val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
-        if rt_file_exists(nanm) == 1:
+        if rt_file_exists(nanm):
             return nanm
 
     # 5. Try numbered directory resolution (NN.name pattern)
     val numbered_path = resolve_with_numbered_dirs("src", path_parts)
     if numbered_path != "":
-        if rt_file_exists(numbered_path) == 1:
+        if rt_file_exists(numbered_path):
             return numbered_path
 
     # Return attempted path even if not found (will error later)
@@ -319,7 +313,7 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
         if pi < last_idx:
             # Intermediate segment — must be a directory
             val direct = rt_path_join(current_dir, part)
-            if rt_dir_exists(direct) == 1:
+            if rt_dir_exists(direct):
                 current_dir = direct
             else:
                 # Try numbered directory
@@ -337,7 +331,7 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
 
 fn find_numbered_dir_interp(parent: text, segment: text) -> text:
     """Find NN.segment directory in parent. Returns path or empty string."""
-    if rt_dir_exists(parent) != 1:
+    if not rt_dir_exists(parent):
         return ""
 
     val entries = rt_dir_list(parent)
@@ -362,7 +356,7 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
                 val name = entry.substring(dot_pos + 1)
                 if name == segment:
                     val full_path = rt_path_join(parent, entry)
-                    if rt_dir_exists(full_path) == 1:
+                    if rt_dir_exists(full_path):
                         return full_path
     ""
 
@@ -375,10 +369,15 @@ val _MODULE_LOAD_MAX_DEPTH = 16
 
 fn load_module_source(file_path: text) -> text:
     # Read module source file
+    # Note: rt_file_read_text returns Option::None in interpreter mode for missing files
+    # (not nil), so we check both nil and string representation
     val source = rt_file_read_text(file_path)
     if source == nil:
         return ""
-    source
+    val source_str = "{source}"
+    if source_str == "" or source_str == "Option::None":
+        return ""
+    source_str
 
 fn parse_module_ast(source: text, path: text) -> i64:
     # Parse module into AST using APPEND mode to preserve caller's AST.

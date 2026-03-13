@@ -70,6 +70,36 @@ val _has_jupyter = check_python_jupyter()
 val _has_notebook = check_notebook_package()
 val _has_binary = _check_binary_runnable()
 
+# --- Module-level helpers to avoid tuple destructuring inside it blocks ---
+
+class CmdResult:
+    stdout: text
+    stderr: text
+    code: i64
+
+fn _wrap_run(cmd: text, args: [text]) -> CmdResult:
+    val (stdout, stderr, code) = rt_process_run(cmd, args)
+    CmdResult(stdout: stdout, stderr: stderr, code: code)
+
+fn _docker_image_exists() -> bool:
+    val res = _wrap_run("docker", ["image", "inspect", "simple-jupyter-test"])
+    res.code == 0
+
+fn _run_docker_e2e() -> CmdResult:
+    print "Running E2E test in Docker container..."
+    _wrap_run("docker", ["run", "--rm", "simple-jupyter-test"])
+
+fn _run_server_check() -> CmdResult:
+    val helper = "test/system/jupyter/helpers/run_server_check.py"
+    _wrap_run("python3", [helper])
+
+fn _run_notebook_test(notebook: text) -> CmdResult:
+    val helper = "test/system/jupyter/helpers/run_notebook_server_test.py"
+    _wrap_run("python3", [helper, "--notebook", notebook, "--skip-server"])
+
+fn _run_python_check(py_code: text) -> CmdResult:
+    _wrap_run("python3", ["-c", py_code])
+
 describe "Jupyter Notebook Server E2E":
 
     # -----------------------------------------------------------------------
@@ -89,18 +119,16 @@ describe "Jupyter Notebook Server E2E":
                     print "SKIP: tools/docker/Dockerfile.jupyter-test not found"
                     expect(true).to_equal(true)
                 else:
-                    val (img_out, img_err, img_code) = rt_process_run("docker", ["image", "inspect", "simple-jupyter-test"])
-                    if img_code != 0:
+                    if not _docker_image_exists():
                         print "SKIP: simple-jupyter-test Docker image not built (run: sh scripts/test/jupyter-docker-test.shs)"
                         expect(true).to_equal(true)
                     else:
-                        print "Running E2E test in Docker container..."
-                        val (stdout, stderr, code) = rt_process_run("docker", ["run", "--rm", "simple-jupyter-test"])
-                        print stdout
-                        if code != 0 and stderr.trim() != "":
-                            print "stderr (tail): {stderr.substring(stderr.len() - 300)}"
-                        expect(code).to_equal(0)
-                        expect(stdout).to_contain("ALL CHECKS PASSED")
+                        val res = _run_docker_e2e()
+                        print res.stdout
+                        if res.code != 0 and res.stderr.trim() != "":
+                            print "stderr (tail): {res.stderr.substring(res.stderr.len() - 300)}"
+                        expect(res.code).to_equal(0)
+                        expect(res.stdout).to_contain("ALL CHECKS PASSED")
 
     # -----------------------------------------------------------------------
     # Local E2E: Start real Jupyter server, HTTP + ZMQ checks
@@ -110,17 +138,16 @@ describe "Jupyter Notebook Server E2E":
         if not _has_notebook or not _has_binary or not _has_jupyter:
             expect(true).to_equal(true)
         else:
-            val helper = "test/system/jupyter/helpers/run_server_check.py"
-            val (stdout, stderr, code) = rt_process_run("python3", [helper])
-            print stdout
-            if code != 0 and stderr.trim() != "":
-                val tail_start = stderr.len() - 300
+            val res = _run_server_check()
+            print res.stdout
+            if res.code != 0 and res.stderr.trim() != "":
+                val tail_start = res.stderr.len() - 300
                 if tail_start < 0:
-                    print "stderr: {stderr}"
+                    print "stderr: {res.stderr}"
                 else:
-                    print "stderr (tail): {stderr.substring(tail_start)}"
-            expect(code).to_equal(0)
-            expect(stdout).to_contain("ALL CHECKS PASSED")
+                    print "stderr (tail): {res.stderr.substring(tail_start)}"
+            expect(res.code).to_equal(0)
+            expect(res.stdout).to_contain("ALL CHECKS PASSED")
 
     # -----------------------------------------------------------------------
     # nbconvert E2E: Execute hello.ipynb, verify cell outputs
@@ -133,13 +160,12 @@ describe "Jupyter Notebook Server E2E":
         if not _has_jupyter or not _has_binary:
             expect(true).to_equal(true)
         else:
-            val helper = "test/system/jupyter/helpers/run_notebook_server_test.py"
-            val (stdout, stderr, code) = rt_process_run("python3", [helper, "--notebook", "test/system/jupyter/fixtures/hello.ipynb", "--skip-server"])
-            print stdout
-            if code != 0 and stderr.trim() != "":
-                print "stderr: {stderr}"
-            expect(code).to_equal(0)
-            expect(stdout).to_contain("ALL CHECKS PASSED")
+            val res = _run_notebook_test("test/system/jupyter/fixtures/hello.ipynb")
+            print res.stdout
+            if res.code != 0 and res.stderr.trim() != "":
+                print "stderr: {res.stderr}"
+            expect(res.code).to_equal(0)
+            expect(res.stdout).to_contain("ALL CHECKS PASSED")
 
     # -----------------------------------------------------------------------
     # nbconvert E2E: Execute state_persistence.ipynb
@@ -153,22 +179,21 @@ describe "Jupyter Notebook Server E2E":
         if not _has_jupyter or not _has_binary:
             expect(true).to_equal(true)
         else:
-            val helper = "test/system/jupyter/helpers/run_notebook_server_test.py"
-            val (stdout, stderr, code) = rt_process_run("python3", [helper, "--notebook", "test/system/jupyter/fixtures/state_persistence.ipynb", "--skip-server"])
-            print stdout
-            if code != 0 and stderr.trim() != "":
-                print "stderr: {stderr}"
-            expect(code).to_equal(0)
+            val res = _run_notebook_test("test/system/jupyter/fixtures/state_persistence.ipynb")
+            print res.stdout
+            if res.code != 0 and res.stderr.trim() != "":
+                print "stderr: {res.stderr}"
+            expect(res.code).to_equal(0)
 
     # -----------------------------------------------------------------------
     # Static checks
     # -----------------------------------------------------------------------
     it "should have kernel.json with display_name 'Simple'":
-        val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import json; d=json.load(open('tools/jupyter/kernel.json')); print(d['display_name'])"])
-        expect(code).to_equal(0)
-        expect(stdout.trim()).to_equal("Simple")
+        val res = _run_python_check("import json; d=json.load(open('tools/jupyter/kernel.json')); print(d['display_name'])")
+        expect(res.code).to_equal(0)
+        expect(res.stdout.trim()).to_equal("Simple")
 
     it "should have kernel_wrapper.py with valid Python syntax":
-        val (stdout, stderr, code) = rt_process_run("python3", ["-c", "import ast; ast.parse(open('tools/jupyter/kernel_wrapper.py').read()); print('ok')"])
-        expect(code).to_equal(0)
-        expect(stdout.trim()).to_equal("ok")
+        val res = _run_python_check("import ast; ast.parse(open('tools/jupyter/kernel_wrapper.py').read()); print('ok')")
+        expect(res.code).to_equal(0)
+        expect(res.stdout.trim()).to_equal("ok")

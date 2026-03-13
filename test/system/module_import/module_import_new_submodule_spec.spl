@@ -46,7 +46,7 @@ fn run_fixture(name: text) -> (text, text, i64):
 
 fn copy_fixture(fixture_name: text, dest_path: text):
     val src = FIXTURES + "/" + fixture_name
-    val content = rt_file_read_text(src)
+    val content = rt_file_read_text(src) ?? ""
     rt_file_write_text(dest_path, content)
 
 fn setup_probe_module():
@@ -67,6 +67,68 @@ fn cleanup_fresh_package():
     rt_file_delete("src/lib/nogc_sync_mut/_test_fresh_pkg/_test_fresh_mod.spl")
     rt_file_delete("src/lib/nogc_sync_mut/_test_fresh_pkg/__init__.spl")
 
+# --- Module-level helpers to avoid tuple destructuring inside if/else in it blocks ---
+
+fn _run_and_check(fixture: text, label: text):
+    val (stdout, stderr, code) = run_fixture(fixture)
+    if code != 0:
+        print "[FAIL] " + label + ": stderr=" + stderr
+    expect(code).to_equal(0)
+
+fn _run_and_check_known_bug(fixture: text, label: text):
+    val (stdout, stderr, code) = run_fixture(fixture)
+    if code != 0:
+        print "[KNOWN BUG] " + label + ": " + stderr
+    expect(code).to_equal(0)
+
+fn _run_and_check_info(fixture: text, label: text):
+    val (stdout, stderr, code) = run_fixture(fixture)
+    if code != 0:
+        print "[INFO] " + label + ": " + stderr
+    expect(code).to_equal(0)
+
+fn _run_setup_probe_and_check(fixture: text, label: text):
+    setup_probe_module()
+    val (stdout, stderr, code) = run_fixture(fixture)
+    cleanup_probe_module()
+    if code != 0:
+        print "[KNOWN BUG] " + label + ": " + stderr
+    expect(code).to_equal(0)
+
+fn _run_setup_probe_direct_and_check():
+    setup_probe_module()
+    val (stdout, stderr, code) = rt_process_run(SIMPLE, ["src/lib/nogc_sync_mut/cli_output/_test_probe.spl"])
+    cleanup_probe_module()
+    expect(code).to_equal(0)
+
+fn _run_setup_fresh_and_check(fixture: text, label: text):
+    setup_fresh_package()
+    val (stdout, stderr, code) = run_fixture(fixture)
+    cleanup_fresh_package()
+    if code != 0:
+        print "[INFO] " + label + ": " + stderr
+    expect(code).to_equal(0)
+
+fn _run_setup_probe_extern_and_check():
+    setup_probe_module_with_extern()
+    val (stdout, stderr, code) = run_fixture("probe_extern_import.spl")
+    cleanup_probe_module()
+    if code != 0:
+        print "[DIAG] extern fn in new submodule: " + stderr
+    expect(code).to_equal(0)
+
+fn _run_diag_module_loading():
+    val (_, stderr_bad, code_bad) = run_fixture("nonexistent_module.spl")
+    val (_, stderr_buf, code_buf) = run_fixture("buffer_direct_import.spl")
+    print "[DIAG] nonexistent module error: " + stderr_bad
+    print "[DIAG] buffer module error: " + stderr_buf
+    var is_module_not_found = false
+    if stderr_buf.contains("module not found"):
+        is_module_not_found = true
+    if stderr_buf.contains("file not found"):
+        is_module_not_found = true
+    expect(is_module_not_found).to_equal(false)
+
 # ============================================================================
 # Test Group 1: Baseline - Existing Compiled-In Imports
 # ============================================================================
@@ -79,23 +141,13 @@ describe "Module Import - Compiled-In Package":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                val _r = run_fixture("baseline_init_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                if code != 0:
-                    print "[FAIL] baseline init import: stderr=" + stderr
-                expect(code).to_equal(0)
+                _run_and_check("baseline_init_import.spl", "baseline init import")
 
         it "imports existing std.cli_output submodule directly":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                val _r = run_fixture("baseline_direct_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                if code != 0:
-                    print "[FAIL] baseline direct import: stderr=" + stderr
-                expect(code).to_equal(0)
+                _run_and_check("baseline_direct_import.spl", "baseline direct import")
 
 # ============================================================================
 # Test Group 2: New Submodule in Compiled-In Package
@@ -107,24 +159,13 @@ describe "Module Import - Compiled-In Package":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                setup_probe_module()
-                val _r = rt_process_run(SIMPLE, ["src/lib/nogc_sync_mut/cli_output/_test_probe.spl"])
-                val code = _r.2
-                cleanup_probe_module()
-                expect(code).to_equal(0)
+                _run_setup_probe_direct_and_check()
 
         it "can import function from new submodule via direct path":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                setup_probe_module()
-                val _r = run_fixture("probe_direct_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                cleanup_probe_module()
-                if code != 0:
-                    print "[KNOWN BUG] New submodule direct import fails: " + stderr
-                expect(code).to_equal(0)
+                _run_setup_probe_and_check("probe_direct_import.spl", "New submodule direct import fails")
 
 # ============================================================================
 # Test Group 3: buffer.spl Specifically
@@ -136,34 +177,19 @@ describe "Module Import - Compiled-In Package":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                val _r = run_fixture("buffer_direct_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                if code != 0:
-                    print "[KNOWN BUG] buffer.spl direct import fails: " + stderr
-                expect(code).to_equal(0)
+                _run_and_check_known_bug("buffer_direct_import.spl", "buffer.spl direct import fails")
 
         it "can import log_print via direct submodule path":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                val _r = run_fixture("buffer_logprint_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                if code != 0:
-                    print "[KNOWN BUG] buffer.spl log_print import fails: " + stderr
-                expect(code).to_equal(0)
+                _run_and_check_known_bug("buffer_logprint_import.spl", "buffer.spl log_print import fails")
 
         it "can import buffer functions via init reexport":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                val _r = run_fixture("buffer_init_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                if code != 0:
-                    print "[KNOWN BUG] buffer.spl init re-export fails: " + stderr
-                expect(code).to_equal(0)
+                _run_and_check_known_bug("buffer_init_import.spl", "buffer.spl init re-export fails")
 
 # ============================================================================
 # Test Group 4: Control - Fresh Non-Compiled Package
@@ -175,27 +201,13 @@ describe "Module Import - Compiled-In Package":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                setup_fresh_package()
-                val _r = run_fixture("fresh_pkg_direct_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                cleanup_fresh_package()
-                if code != 0:
-                    print "[INFO] Fresh package direct import: " + stderr
-                expect(code).to_equal(0)
+                _run_setup_fresh_and_check("fresh_pkg_direct_import.spl", "Fresh package direct import")
 
         it "can import from a completely new package via init":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                setup_fresh_package()
-                val _r = run_fixture("fresh_pkg_init_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                cleanup_fresh_package()
-                if code != 0:
-                    print "[INFO] Fresh package init import: " + stderr
-                expect(code).to_equal(0)
+                _run_setup_fresh_and_check("fresh_pkg_init_import.spl", "Fresh package init import")
 
 # ============================================================================
 # Test Group 5: Module Loading vs Function Registration
@@ -207,33 +219,10 @@ describe "Module Import - Compiled-In Package":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                # nonexistent module gives one error type
-                val _r_bad = run_fixture("nonexistent_module.spl")
-                val stderr_bad = _r_bad.1
-                # buffer gives another
-                val _r_buf = run_fixture("buffer_direct_import.spl")
-                val stderr_buf = _r_buf.1
-
-                print "[DIAG] nonexistent module error: " + stderr_bad
-                print "[DIAG] buffer module error: " + stderr_buf
-
-                # buffer.spl should NOT produce "module not found"
-                var is_module_not_found = false
-                if stderr_buf.contains("module not found"):
-                    is_module_not_found = true
-                if stderr_buf.contains("file not found"):
-                    is_module_not_found = true
-                expect(is_module_not_found).to_equal(false)
+                _run_diag_module_loading()
 
         it "extern fn in module does not prevent function registration":
             if not _can_run:
                 expect(true).to_equal(true)
             else:
-                setup_probe_module_with_extern()
-                val _r = run_fixture("probe_extern_import.spl")
-                val stderr = _r.1
-                val code = _r.2
-                cleanup_probe_module()
-                if code != 0:
-                    print "[DIAG] extern fn in new submodule: " + stderr
-                expect(code).to_equal(0)
+                _run_setup_probe_extern_and_check()

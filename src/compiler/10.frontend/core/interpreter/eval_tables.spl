@@ -21,18 +21,21 @@ var ft_keys: [text] = []
 var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
+var ft_len: i64 = 0            # manual counter (avoids .len() corruption)
 
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
 var frt_vals: [i64] = []
 var frt_buckets: [i64] = []
 var frt_nexts: [i64] = []
+var frt_len: i64 = 0           # manual counter (avoids .len() corruption)
 
 # ===== Must-Use Function Registry (Hash Map, R9) =====
 var mu_keys: [text] = []
 var mu_reasons: [text] = []
 var mu_buckets: [i64] = []
 var mu_nexts: [i64] = []
+var mu_len: i64 = 0            # manual counter (avoids .len() corruption)
 var must_use_critical_mode: bool = false
 
 # @init and @teardown function name lists
@@ -109,14 +112,17 @@ fn func_table_reset():
     ft_vals = []
     ft_buckets = hm_make_global_buckets()
     ft_nexts = []
+    ft_len = 0
     frt_keys = []
     frt_vals = []
     frt_buckets = hm_make_global_buckets()
     frt_nexts = []
+    frt_len = 0
     mu_keys = []
     mu_reasons = []
     mu_buckets = hm_make_global_buckets()
     mu_nexts = []
+    mu_len = 0
     must_use_critical_mode = false
 
 fn func_table_register(name: text, decl_id: i64):
@@ -128,11 +134,12 @@ fn func_table_register(name: text, decl_id: i64):
             return
         idx = ft_nexts[idx]
     # New entry
-    val new_idx = ft_keys.len()
+    val new_idx = ft_len
     ft_keys.push(name)
     ft_vals.push(decl_id)
     ft_nexts.push(ft_buckets[bucket])
     ft_buckets[bucket] = new_idx
+    ft_len = ft_len + 1
 
 fn func_table_lookup(name: text) -> i64:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -185,11 +192,12 @@ fn func_register_return_type(name: text, ret_type: i64):
             frt_vals[idx] = ret_type
             return
         idx = frt_nexts[idx]
-    val new_idx = frt_keys.len()
+    val new_idx = frt_len
     frt_keys.push(name)
     frt_vals.push(ret_type)
     frt_nexts.push(frt_buckets[bucket])
     frt_buckets[bucket] = new_idx
+    frt_len = frt_len + 1
 
 fn func_lookup_return_type(name: text) -> i64:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -210,11 +218,12 @@ fn must_use_register(name: text, reason: text):
             mu_reasons[idx] = reason
             return
         idx = mu_nexts[idx]
-    val new_idx = mu_keys.len()
+    val new_idx = mu_len
     mu_keys.push(name)
     mu_reasons.push(reason)
     mu_nexts.push(mu_buckets[bucket])
     mu_buckets[bucket] = new_idx
+    mu_len = mu_len + 1
 
 fn must_use_is_registered(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -240,6 +249,7 @@ fn must_use_scan_source(source: text):
     mu_reasons = []
     mu_buckets = hm_make_global_buckets()
     mu_nexts = []
+    mu_len = 0
     must_use_critical_mode = false
     # Split source into lines and scan for comment annotations
     var lines: [text] = []
@@ -422,6 +432,7 @@ var st_vals: [i64] = []
 var st_buckets: [i64] = []
 var st_nexts: [i64] = []
 var st_module_paths: [text] = []
+var st_len: i64 = 0            # manual counter (avoids .len() corruption)
 
 fn struct_table_reset():
     st_keys = []
@@ -429,6 +440,7 @@ fn struct_table_reset():
     st_buckets = hm_make_global_buckets()
     st_nexts = []
     st_module_paths = []
+    st_len = 0
 
 fn struct_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -439,12 +451,13 @@ fn struct_table_register(name: text, decl_id: i64):
             st_module_paths[idx] = module_get_path()
             return
         idx = st_nexts[idx]
-    val new_idx = st_keys.len()
+    val new_idx = st_len
     st_keys.push(name)
     st_vals.push(decl_id)
     st_nexts.push(st_buckets[bucket])
     st_buckets[bucket] = new_idx
     st_module_paths.push(module_get_path())
+    st_len = st_len + 1
 
 fn struct_table_lookup(name: text) -> i64:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -490,30 +503,36 @@ var enum_reg_names: [text] = []
 var enum_reg_variants: [text] = []
 var enum_hm_buckets: [i64] = []
 var enum_hm_nexts: [i64] = []
+var enum_reg_len: i64 = 0      # manual counter (avoids .len() corruption)
+var enum_hm_initialized: bool = false
 
 fn enum_table_reset():
     enum_reg_names = []
     enum_reg_variants = []
     enum_hm_buckets = hm_make_global_buckets()
     enum_hm_nexts = []
+    enum_reg_len = 0
+    enum_hm_initialized = true
 
 fn enum_table_register(name: text, variants: [text]):
-    if enum_hm_buckets.len() == 0:
+    if not enum_hm_initialized:
         enum_hm_buckets = hm_make_global_buckets()
+        enum_hm_initialized = true
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
             return
         idx = enum_hm_nexts[idx]
-    val new_idx = enum_reg_names.len()
+    val new_idx = enum_reg_len
     enum_reg_names.push(name)
     enum_reg_variants.push(variants.join(","))
     enum_hm_nexts.push(enum_hm_buckets[bucket])
     enum_hm_buckets[bucket] = new_idx
+    enum_reg_len = enum_reg_len + 1
 
 fn enum_table_lookup(name: text) -> text:
-    if enum_hm_buckets.len() == 0: return ""
+    if not enum_hm_initialized: return ""
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
@@ -523,7 +542,7 @@ fn enum_table_lookup(name: text) -> text:
     ""
 
 fn enum_table_remove(name: text) -> bool:
-    if enum_hm_buckets.len() == 0: return false
+    if not enum_hm_initialized: return false
     val bucket = hm_hash_text(name) % HM_SIZE
     var prev: i64 = -1
     var idx = enum_hm_buckets[bucket]
@@ -546,22 +565,26 @@ fn enum_table_remove(name: text) -> bool:
 var phantom_reg_names: [text] = []
 var phantom_hm_buckets: [i64] = []
 var phantom_hm_nexts: [i64] = []
+var phantom_reg_len: i64 = 0   # manual counter (avoids .len() corruption)
+var phantom_hm_initialized: bool = false
 
 fn phantom_struct_register(name: text):
-    if phantom_hm_buckets.len() == 0:
+    if not phantom_hm_initialized:
         phantom_hm_buckets = hm_make_global_buckets()
+        phantom_hm_initialized = true
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = phantom_hm_buckets[bucket]
     while idx != -1:
         if phantom_reg_names[idx] == name: return
         idx = phantom_hm_nexts[idx]
-    val new_idx = phantom_reg_names.len()
+    val new_idx = phantom_reg_len
     phantom_reg_names.push(name)
     phantom_hm_nexts.push(phantom_hm_buckets[bucket])
     phantom_hm_buckets[bucket] = new_idx
+    phantom_reg_len = phantom_reg_len + 1
 
 fn phantom_struct_is_registered(name: text) -> bool:
-    if phantom_hm_buckets.len() == 0: return false
+    if not phantom_hm_initialized: return false
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = phantom_hm_buckets[bucket]
     while idx != -1:
@@ -573,6 +596,8 @@ fn phantom_reg_reset():
     phantom_reg_names = []
     phantom_hm_buckets = hm_make_global_buckets()
     phantom_hm_nexts = []
+    phantom_reg_len = 0
+    phantom_hm_initialized = true
 
 # ===== Match Exhaustiveness Helpers =====
 

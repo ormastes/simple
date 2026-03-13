@@ -16,7 +16,9 @@ use ..loader.compiler_ffi.*
 use ..linker.obj_taker.*
 use ..linker.smf_reader.*
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
+use compiler.backend.linker.smf_getter.{SmfSourceType}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
+use std.io_runtime.{file_exists}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
 use .smf_mmap_native.{native_alloc_rw_memory, native_make_executable, native_make_rw, native_flush_icache, native_write_exec_memory}
 use .jit_instantiator.*
@@ -37,7 +39,8 @@ use .smf_cache.{validated_smf_load}
 struct LoadedModule:
     """A loaded SMF module."""
     path: text
-    reader: SmfReaderImpl
+    source_path: text
+    smf_data: [u8]
     symbols: Dict<text, LoadedSymbol>
     load_time: i64
     version: i32
@@ -194,15 +197,25 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         # Register with lifecycle manager for resource tracking.
         lifecycle_on_module_load(self.lifecycle, path, self.jit.exec_mapper.generation, current_time())
 
-        # Prefer shared object provider so we work for .smf and .lsm inputs.
-        var reader_result = self.provider.get_reader(path)
-        if reader_result_is_err(reader_result):
-            # Fallback to direct file reader (legacy path)
-            reader_result = SmfReaderImpl.open(path)
-            if reader_result_is_err(reader_result):
-                return loadresult_Error(message: reader_result.unwrap_err())
+        # Read module bytes through the shared provider so .smf and .lsm both work.
+        val smf_bytes_result = self.provider.get_module_bytes(path)
+        if smf_bytes_result.is_err():
+            return loadresult_Error(message: smf_bytes_result.unwrap_err())
 
-        val reader = reader_result_value
+        val smf_data = smf_bytes_result.unwrap()
+        val mem_reader_result = SmfReaderMemory.from_data(smf_data)
+        if mem_reader_result.is_err():
+            return loadresult_Error(message: mem_reader_result.unwrap_err())
+
+        val reader = mem_reader_result.unwrap()
+        var source_path = ""
+        val location_result = self.provider.get_location(path)
+        if location_result.is_ok():
+            val location = location_result.unwrap()
+            if location.source_type == SmfSourceType.SingleFile:
+                source_path = location.file_path
+        elif file_exists(path):
+            source_path = path
 
         # Build loaded module
         var symbols: Dict<text, LoadedSymbol> = {}
@@ -233,13 +246,18 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
         val module = LoadedModule(
             path: path,
-            reader: reader,
+            source_path: source_path,
+            smf_data: smf_data,
             symbols: symbols,
             load_time: current_time(),
             version: 1
         )
 
         self.modules[path] = module
+
+        # Seed JIT metadata when we have a concrete backing SMF file.
+        if source_path != "":
+            _ = self.jit.load_smf_metadata(source_path)
 
         if self.config.verbose:
             print "[loader] Loaded {symbols.len()} symbols from {path}"
@@ -382,11 +400,25 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                 val symbol = _item_2[1]
                 if sym_name == name:
                     # Found template - instantiate with ObjTaker
-                    val result = self.obj_taker.take_with_types(
-                        module.reader,
-                        name,
-                        type_args
-                    )
+                    var result = ObjTakeResult.Error(message: "SMF reader unavailable for {path}")
+                    if module.source_path != "":
+                        val file_reader_result = SmfReaderImpl.open(module.source_path)
+                        if file_reader_result.is_err():
+                            return symbolresult_Error(message: file_reader_result.unwrap_err())
+                        result = self.obj_taker.take_with_types(
+                            file_reader_result.unwrap(),
+                            name,
+                            type_args
+                        )
+                    else:
+                        val mem_reader_result = SmfReaderMemory.from_data(module.smf_data)
+                        if mem_reader_result.is_err():
+                            return symbolresult_Error(message: mem_reader_result.unwrap_err())
+                        result = self.obj_taker.take_with_types(
+                            mem_reader_result.unwrap(),
+                            name,
+                            type_args
+                        )
                     match result:
                         case Code(bytes, sym, _):
                             val exec_addr = moduleloader_allocate_exec_module(self, path, mangled, bytes, false)
@@ -554,4 +586,3 @@ fn moduleloader_load_validated(self: ModuleLoader, path: text, backend: text, op
 # ============================================================================
 # Exports
 # ============================================================================
-
