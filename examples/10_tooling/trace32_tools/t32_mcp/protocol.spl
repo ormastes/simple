@@ -3,6 +3,12 @@
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 
 extern fn stdin_read_char() -> text
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+
+fn t32_stderr(message: text):
+    stderr_write("[t32-mcp] " + message + "\n")
+    stderr_flush()
 
 fn t32_read_line() -> text:
     var result = ""
@@ -31,11 +37,15 @@ fn t32_read_chars(count: i64) -> text:
 
 fn t32_read_stdin_message() -> text:
     var content_length = 0
+    var saw_header = false
     while true:
         var line = t32_read_line()
         if line == "":
             if content_length > 0:
+                t32_stderr("startup/protocol error: EOF while reading message body, expected " + str(content_length) + " bytes")
                 break
+            if saw_header:
+                t32_stderr("startup/protocol error: EOF before Content-Length header completed")
             return ""
         if line == "\r\n" or line == "\r" or line == "\n":
             if content_length > 0:
@@ -46,13 +56,33 @@ fn t32_read_stdin_message() -> text:
         if line.starts_with(t32_LB()):
             T32_USE_JSON_LINES = true
             return line
+        saw_header = true
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
+            if not t32_is_ascii_digits(len_str):
+                t32_stderr("startup/protocol error: invalid Content-Length header '" + len_str + "'")
+                return ""
             content_length = int(len_str)
+        elif line.starts_with("Content-Type:"):
+            continue
+        else:
+            t32_stderr("startup/protocol warning: ignoring unexpected header line '" + line + "'")
     if content_length <= 0:
+        t32_stderr("startup/protocol error: no valid Content-Length found")
         return ""
     return t32_read_chars(content_length)
+
+fn t32_is_ascii_digits(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
 
 fn t32_write_stdout_message(body: text):
     if T32_USE_JSON_LINES:

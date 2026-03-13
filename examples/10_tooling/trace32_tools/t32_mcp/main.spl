@@ -19,6 +19,8 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
 
 use app.mcp_t32.json_helpers
 use app.mcp_t32.protocol
@@ -66,22 +68,33 @@ var MCP_T32_CURRENT_CORE = ""
 var MCP_T32_HISTORY: [McpT32HistoryItem] = []
 var MCP_T32_AREA_READY = false
 var MCP_T32_AREA_NAME = ""
+var T32_SEEN_FIRST_MESSAGE = false
+
+fn t32_startup_diag(message: text):
+    stderr_write("[t32-mcp] " + message + "\n")
+    stderr_flush()
 
 # --- Entry point ---
 
 fn main():
+    if rt_env_get("SIMPLE_LIB") == "":
+        t32_startup_diag("startup warning: SIMPLE_LIB is not set; relative imports/resources may fail in some launch modes")
     t32_start_server()
 
 fn t32_start_server():
     while true:
         var msg = t32_read_stdin_message()
         if msg == "":
+            if not T32_SEEN_FIRST_MESSAGE:
+                t32_startup_diag("startup error: no MCP request received on stdin")
             return
         else:
+            T32_SEEN_FIRST_MESSAGE = true
             var method = t32_extract_field(msg, "method")
             var id = t32_extract_id(msg)
             var response = ""
             if method == "initialize":
+                t32_startup_diag("initialize received; server version " + T32_SERVER_VERSION)
                 response = t32_make_init_response(id)
             elif method == "initialized" or method == "notifications/initialized":
                 response = ""
@@ -100,6 +113,8 @@ fn t32_start_server():
             elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
                 response = ""
             else:
+                if method == "":
+                    t32_startup_diag("protocol error: request missing method field: " + msg)
                 if id != "" and id != "null":
                     response = t32_make_error(id, -32601, "Method not found: " + method)
             if response != "":
