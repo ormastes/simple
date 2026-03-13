@@ -1,0 +1,161 @@
+# Simple Tool - find
+#
+# Search for files in a directory hierarchy.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, eprint)
+use std.nogc_sync_mut.file_system (dir_walk, dir_walk_files, dir_walk_dirs, file_size, file_is_file, file_is_directory, path_basename, glob_match)
+use app.tools.common.args (parse_args, has_flag, get_option)
+
+fn print_help():
+    print "Usage: find [PATH...] [OPTIONS]"
+    print ""
+    print "Search for files in a directory hierarchy."
+    print ""
+    print "Options:"
+    print "  --name PAT     Match file name against glob pattern"
+    print "  --type TYPE    File type: f (file), d (directory)"
+    print "  --maxdepth N   Descend at most N levels"
+    print "  --mindepth N   Do not apply tests at levels less than N"
+    print "  --size N       File size (e.g., +1M, -100k)"
+    print "  --help         Display this help"
+
+fn parse_size_filter(spec: text) -> (text, i64):
+    """Parse size spec like +1M, -100k. Returns (comparison, bytes)."""
+    if spec.len() == 0:
+        return ("", 0)
+
+    var cmp = ""
+    var num_str = spec
+    if spec.starts_with("+"):
+        cmp = "+"
+        num_str = spec[1:]
+    elif spec.starts_with("-"):
+        cmp = "-"
+        num_str = spec[1:]
+
+    var multiplier = 1
+    val last_char = num_str[num_str.len() - 1:]
+    if last_char == "k" or last_char == "K":
+        multiplier = 1024
+        num_str = num_str[:num_str.len() - 1]
+    elif last_char == "M" or last_char == "m":
+        multiplier = 1024 * 1024
+        num_str = num_str[:num_str.len() - 1]
+    elif last_char == "G" or last_char == "g":
+        multiplier = 1024 * 1024 * 1024
+        num_str = num_str[:num_str.len() - 1]
+
+    val num = num_str.to_int()
+    (cmp, num * multiplier)
+
+fn matches_size(actual_size: i64, cmp: text, target: i64) -> bool:
+    """Check if file size matches the filter."""
+    if cmp == "+":
+        actual_size > target
+    elif cmp == "-":
+        actual_size < target
+    else:
+        actual_size == target
+
+fn count_depth(path: text, base: text) -> i64:
+    """Count directory depth relative to base path."""
+    val relative = if path.starts_with(base): path[base.len():] else: path
+    var depth = 0
+    var i = 0
+    while i < relative.len():
+        if relative[i:i + 1] == "/":
+            depth = depth + 1
+        i = i + 1
+    depth
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    # find has unusual arg parsing: paths come first, then predicates
+    var search_paths: [text] = []
+    var name_pattern = ""
+    var type_filter = ""
+    var max_depth = 999999
+    var min_depth = 0
+    var size_spec = ""
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--name" or arg == "-name":
+            if i + 1 < args.len():
+                i = i + 1
+                name_pattern = args[i]
+        elif arg == "--type" or arg == "-type":
+            if i + 1 < args.len():
+                i = i + 1
+                type_filter = args[i]
+        elif arg == "--maxdepth" or arg == "-maxdepth":
+            if i + 1 < args.len():
+                i = i + 1
+                max_depth = args[i].to_int()
+        elif arg == "--mindepth" or arg == "-mindepth":
+            if i + 1 < args.len():
+                i = i + 1
+                min_depth = args[i].to_int()
+        elif arg == "--size" or arg == "-size":
+            if i + 1 < args.len():
+                i = i + 1
+                size_spec = args[i]
+        elif not arg.starts_with("-"):
+            search_paths.push(arg)
+        i = i + 1
+
+    if search_paths.len() == 0:
+        search_paths.push(".")
+
+    val size_filter = parse_size_filter(size_spec)
+    val has_size_filter = size_spec.len() > 0
+
+    for base_path in search_paths:
+        if not file_exists(base_path):
+            eprint("find: '{base_path}': No such file or directory")
+            return 1
+
+        val all_paths = dir_walk(base_path)
+        for path in all_paths:
+            val depth = count_depth(path, base_path)
+
+            if depth > max_depth:
+                pass
+            elif depth < min_depth:
+                pass
+            else:
+                # Type filter
+                var type_ok = true
+                if type_filter == "f":
+                    type_ok = file_is_file(path)
+                elif type_filter == "d":
+                    type_ok = file_is_directory(path)
+
+                if not type_ok:
+                    pass
+                else:
+                    # Name filter
+                    var name_ok = true
+                    if name_pattern.len() > 0:
+                        val basename = path_basename(path)
+                        name_ok = glob_match(name_pattern, basename)
+
+                    if not name_ok:
+                        pass
+                    else:
+                        # Size filter
+                        var size_ok = true
+                        if has_size_filter:
+                            val fsize = file_size(path) ?? 0
+                            size_ok = matches_size(fsize, size_filter.0, size_filter.1)
+
+                        if size_ok:
+                            print path
+
+    0

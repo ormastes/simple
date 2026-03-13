@@ -1,0 +1,124 @@
+# Simple Tool - cut
+#
+# Remove sections from each line of files.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, eprint)
+use app.tools.common.args (parse_args, has_flag, get_option)
+use app.tools.common.files (read_file_or_stdin)
+
+fn print_help():
+    print "Usage: cut [OPTIONS] [FILE...]"
+    print ""
+    print "Print selected parts of lines from each FILE."
+    print "With no FILE, read standard input."
+    print ""
+    print "Options:"
+    print "  -d DELIM    Use DELIM instead of TAB for field delimiter"
+    print "  -f FIELDS   Select only these fields (e.g., 1,3 or 1-3)"
+    print "  -c CHARS    Select only these characters (e.g., 1-5)"
+    print "  -s          Do not print lines not containing delimiters"
+    print "  --help      Display this help"
+
+fn parse_ranges(spec: text) -> [(i64, i64)]:
+    """Parse a field/char specification like '1,3,5-7' into ranges."""
+    var ranges: [(i64, i64)] = []
+    val parts = spec.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        val dash_idx = trimmed.index_of("-")
+        if dash_idx >= 0:
+            val start_str = trimmed[:dash_idx]
+            val end_str = trimmed[dash_idx + 1:]
+            var start = 1
+            var end_val = 999999
+            if start_str.len() > 0:
+                start = start_str.to_int()
+            if end_str.len() > 0:
+                end_val = end_str.to_int()
+            ranges.push((start, end_val))
+        else:
+            val num = trimmed.to_int()
+            ranges.push((num, num))
+    ranges
+
+fn is_in_ranges(pos: i64, ranges: [(i64, i64)]) -> bool:
+    """Check if position is within any range (1-based)."""
+    for range in ranges:
+        if pos >= range.0 and pos <= range.1:
+            return true
+    false
+
+fn cut_fields(line: text, ranges: [(i64, i64)], delimiter: text, suppress: bool) -> text:
+    """Extract fields from a line."""
+    if not line.contains(delimiter):
+        if suppress:
+            return ""
+        return line
+
+    val fields = line.split(delimiter)
+    var result: [text] = []
+    var i = 1
+    for field in fields:
+        if is_in_ranges(i, ranges):
+            result.push(field)
+        i = i + 1
+
+    result.join(delimiter)
+
+fn cut_chars(line: text, ranges: [(i64, i64)]) -> text:
+    """Extract characters from a line."""
+    var result = ""
+    var i = 1
+    while i <= line.len():
+        if is_in_ranges(i, ranges):
+            result = result + line[i - 1:i]
+        i = i + 1
+    result
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    val delimiter = get_option(parsed, "d", "\t")
+    val field_spec = get_option(parsed, "f", "")
+    val char_spec = get_option(parsed, "c", "")
+    val suppress = has_flag(parsed, "s", "only-delimited")
+
+    if field_spec.len() == 0 and char_spec.len() == 0:
+        eprint("cut: you must specify a list of bytes, characters, or fields")
+        return 1
+
+    val use_fields = field_spec.len() > 0
+    val spec = if use_fields: field_spec else: char_spec
+    val ranges = parse_ranges(spec)
+
+    val files = parsed.positional
+
+    if files.len() == 0:
+        val content = read_file_or_stdin("")
+        val lines = content.split("\n")
+        for line in lines:
+            if use_fields:
+                val result = cut_fields(line, ranges, delimiter, suppress)
+                if result.len() > 0 or not suppress:
+                    print result
+            else:
+                print cut_chars(line, ranges)
+    else:
+        for path in files:
+            val content = read_file_or_stdin(path)
+            val lines = content.split("\n")
+            for line in lines:
+                if use_fields:
+                    val result = cut_fields(line, ranges, delimiter, suppress)
+                    if result.len() > 0 or not suppress:
+                        print result
+                else:
+                    print cut_chars(line, ranges)
+
+    0

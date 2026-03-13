@@ -1,0 +1,142 @@
+# Simple Tool - grep
+#
+# Search files for lines matching a pattern.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, eprint)
+use std.common.regex (compile_pattern, is_match)
+use app.tools.common.args (parse_args, has_flag, get_option)
+use app.tools.common.stdio (read_stdin_text)
+
+fn print_help():
+    print "Usage: grep [OPTIONS] PATTERN [FILE...]"
+    print ""
+    print "Search for PATTERN in each FILE."
+    print "With no FILE, read standard input."
+    print ""
+    print "Options:"
+    print "  -i          Ignore case distinctions"
+    print "  -v          Invert match (select non-matching lines)"
+    print "  -c          Print only a count of matching lines"
+    print "  -l          Print only names of files with matches"
+    print "  -n          Prefix each line with line number"
+    print "  -r          Recursively search directories"
+    print "  -w          Match whole words only"
+    print "  -x          Match whole lines only"
+    print "  --color     Highlight matches (ignored, for compatibility)"
+    print "  --help      Display this help"
+
+fn line_matches(line: text, pattern: text, ignore_case: bool, whole_word: bool, whole_line: bool) -> bool:
+    """Check if a line matches the pattern."""
+    var haystack = line
+    var needle = pattern
+
+    if ignore_case:
+        haystack = haystack.lower()
+        needle = needle.lower()
+
+    if whole_line:
+        return haystack == needle
+
+    if whole_word:
+        # Simple whole-word check: look for pattern surrounded by non-word chars
+        val idx = haystack.index_of(needle)
+        if idx < 0:
+            return false
+        val before_ok = idx == 0 or not is_word_char(haystack[idx - 1:idx])
+        val after_pos = idx + needle.len()
+        val after_ok = after_pos >= haystack.len() or not is_word_char(haystack[after_pos:after_pos + 1])
+        return before_ok and after_ok
+
+    haystack.contains(needle)
+
+fn is_word_char(ch: text) -> bool:
+    """Check if character is a word character [a-zA-Z0-9_]."""
+    if ch.len() == 0:
+        return false
+    val c = ch[0:1]
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn grep_content(content: text, pattern: text, filename: text, show_filename: bool, ignore_case: bool, invert: bool, count_only: bool, list_files: bool, show_line_num: bool, whole_word: bool, whole_line: bool) -> i64:
+    """Search content for pattern. Returns number of matches."""
+    val lines = content.split("\n")
+    var match_count = 0
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        var matched = line_matches(line, pattern, ignore_case, whole_word, whole_line)
+        if invert:
+            matched = not matched
+
+        if matched:
+            match_count = match_count + 1
+            if not count_only and not list_files:
+                var prefix = ""
+                if show_filename:
+                    prefix = "{filename}:"
+                if show_line_num:
+                    prefix = prefix + "{line_num}:"
+                print "{prefix}{line}"
+
+    if count_only:
+        if show_filename:
+            print "{filename}:{match_count}"
+        else:
+            print "{match_count}"
+
+    if list_files and match_count > 0:
+        print filename
+
+    match_count
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    val ignore_case = has_flag(parsed, "i", "ignore-case")
+    val invert = has_flag(parsed, "v", "invert-match")
+    val count_only = has_flag(parsed, "c", "count")
+    val list_files = has_flag(parsed, "l", "files-with-matches")
+    val show_line_num = has_flag(parsed, "n", "line-number")
+    val recursive = has_flag(parsed, "r", "recursive")
+    val whole_word = has_flag(parsed, "w", "word-regexp")
+    val whole_line = has_flag(parsed, "x", "line-regexp")
+
+    val positional = parsed.positional
+
+    if positional.len() == 0:
+        eprint("grep: missing pattern")
+        return 2
+
+    val pattern = positional[0]
+    var files: [text] = []
+    var i = 1
+    while i < positional.len():
+        files.push(positional[i])
+        i = i + 1
+
+    val show_filename = files.len() > 1
+    var total_matches = 0
+
+    if files.len() == 0:
+        # Read from stdin
+        val content = read_stdin_text()
+        total_matches = grep_content(content, pattern, "(standard input)", false, ignore_case, invert, count_only, list_files, show_line_num, whole_word, whole_line)
+    else:
+        for path in files:
+            if not file_exists(path):
+                eprint("grep: {path}: No such file or directory")
+            else:
+                val content = file_read(path)
+                val matches = grep_content(content, pattern, path, show_filename, ignore_case, invert, count_only, list_files, show_line_num, whole_word, whole_line)
+                total_matches = total_matches + matches
+
+    if total_matches > 0:
+        0
+    else:
+        1

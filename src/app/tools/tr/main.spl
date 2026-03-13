@@ -1,0 +1,160 @@
+# Simple Tool - tr
+#
+# Translate or delete characters.
+
+use std.cli.cli_util (get_cli_args)
+use app.tools.common.args (parse_args, has_flag)
+use app.tools.common.stdio (read_stdin_text)
+
+fn print_help():
+    print "Usage: tr [OPTIONS] SET1 [SET2]"
+    print ""
+    print "Translate, squeeze, or delete characters from standard input."
+    print ""
+    print "Options:"
+    print "  -d          Delete characters in SET1"
+    print "  -s          Squeeze repeated output characters in SET2"
+    print "  -c          Use complement of SET1"
+    print "  --help      Display this help"
+    print ""
+    print "Character classes:"
+    print "  [:upper:]   Upper case letters"
+    print "  [:lower:]   Lower case letters"
+    print "  [:digit:]   Digits"
+    print "  [:alpha:]   Letters"
+    print "  [:alnum:]   Letters and digits"
+    print "  [:space:]   Whitespace"
+
+fn expand_set(spec: text) -> text:
+    """Expand a character set specification."""
+    var result = ""
+
+    # Handle character classes
+    if spec == "[:upper:]":
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    elif spec == "[:lower:]":
+        return "abcdefghijklmnopqrstuvwxyz"
+    elif spec == "[:digit:]":
+        return "0123456789"
+    elif spec == "[:alpha:]":
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    elif spec == "[:alnum:]":
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    elif spec == "[:space:]":
+        return " \t\n\r"
+
+    # Handle ranges like a-z
+    var i = 0
+    while i < spec.len():
+        if i + 2 < spec.len() and spec[i + 1:i + 2] == "-":
+            val start_ch = spec[i:i + 1]
+            val end_ch = spec[i + 2:i + 3]
+            # Expand range
+            var ch_code = char_code_val(start_ch)
+            val end_code = char_code_val(end_ch)
+            while ch_code <= end_code:
+                result = result + code_to_char(ch_code)
+                ch_code = ch_code + 1
+            i = i + 3
+        elif spec[i:i + 1] == "\\" and i + 1 < spec.len():
+            val next = spec[i + 1:i + 2]
+            if next == "n":
+                result = result + "\n"
+            elif next == "t":
+                result = result + "\t"
+            elif next == "\\":
+                result = result + "\\"
+            else:
+                result = result + next
+            i = i + 2
+        else:
+            result = result + spec[i:i + 1]
+            i = i + 1
+
+    result
+
+fn char_code_val(ch: text) -> i64:
+    """Get ASCII code of a character."""
+    # Map common characters to their ASCII values
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < chars.len():
+        if chars[i:i + 1] == ch:
+            return 32 + i
+        i = i + 1
+    0
+
+fn code_to_char(code: i64) -> text:
+    """Get character from ASCII code."""
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = code - 32
+    if idx >= 0 and idx < chars.len():
+        chars[idx:idx + 1]
+    else:
+        ""
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    val delete_mode = has_flag(parsed, "d", "delete")
+    val squeeze = has_flag(parsed, "s", "squeeze-repeats")
+    val complement = has_flag(parsed, "c", "complement")
+
+    val positional = parsed.positional
+
+    if positional.len() == 0:
+        print "tr: missing operand"
+        return 1
+
+    val set1 = expand_set(positional[0])
+    val set2 = if positional.len() > 1: expand_set(positional[1]) else: ""
+
+    val content = read_stdin_text()
+    var result = ""
+    var prev_ch = ""
+
+    var i = 0
+    while i < content.len():
+        val ch = content[i:i + 1]
+        var in_set1 = set1.contains(ch)
+        if complement:
+            in_set1 = not in_set1
+
+        if delete_mode:
+            if not in_set1:
+                result = result + ch
+        elif in_set1 and set2.len() > 0:
+            # Find position in set1 and map to set2
+            val pos = set1.index_of(ch)
+            var mapped_ch = ch
+            if pos >= 0:
+                if pos < set2.len():
+                    mapped_ch = set2[pos:pos + 1]
+                else:
+                    # Use last char of set2
+                    mapped_ch = set2[set2.len() - 1:]
+
+            if squeeze and mapped_ch == prev_ch:
+                pass
+            else:
+                result = result + mapped_ch
+            prev_ch = mapped_ch
+        else:
+            if squeeze and ch == prev_ch and set2.contains(ch):
+                pass
+            else:
+                result = result + ch
+            prev_ch = ch
+        i = i + 1
+
+    # Write result without trailing newline (matches tr behavior)
+    val out = std.common.io.pipe.Stdout.new()
+    val _ = out.write_text(result)
+    val _ = out.flush()
+
+    0

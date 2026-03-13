@@ -1,0 +1,216 @@
+# Simple Tool - sed
+#
+# Stream editor for filtering and transforming text.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, file_write, eprint)
+use std.common.regex (compile_pattern, replace_all, replace_first, is_match)
+use app.tools.common.stdio (read_stdin_text)
+
+fn print_help():
+    print "Usage: sed [OPTIONS] SCRIPT [FILE...]"
+    print ""
+    print "Stream editor for filtering and transforming text."
+    print "With no FILE, read standard input."
+    print ""
+    print "Commands:"
+    print "  s/PATTERN/REPLACEMENT/[g]   Substitute"
+    print "  d                            Delete line"
+    print "  p                            Print line"
+    print "  q                            Quit"
+    print ""
+    print "Options:"
+    print "  -n          Suppress automatic printing"
+    print "  -i          Edit files in place"
+    print "  -e SCRIPT   Add script commands"
+    print "  --help      Display this help"
+
+struct SedCommand:
+    """A parsed sed command."""
+    cmd_type: text      # "s", "d", "p", "q"
+    pattern: text       # regex pattern for s command
+    replacement: text   # replacement text for s command
+    global_flag: bool   # g flag for s command
+    address: text       # line number or pattern address (empty = all lines)
+
+fn parse_substitute(script: text) -> SedCommand:
+    """Parse s/pattern/replacement/flags command."""
+    if script.len() < 4 or script[0:1] != "s":
+        return SedCommand(cmd_type: "", pattern: "", replacement: "", global_flag: false, address: "")
+
+    val delim = script[1:2]
+    var pattern = ""
+    var replacement = ""
+    var global_flag = false
+
+    # Find pattern between first and second delimiter
+    var i = 2
+    var escaped = false
+    while i < script.len():
+        val ch = script[i:i + 1]
+        if escaped:
+            pattern = pattern + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+            pattern = pattern + ch
+        elif ch == delim:
+            i = i + 1
+            # break - find replacement
+            while i < script.len():
+                val rch = script[i:i + 1]
+                if rch == delim:
+                    i = i + 1
+                    # Check flags
+                    while i < script.len():
+                        if script[i:i + 1] == "g":
+                            global_flag = true
+                        i = i + 1
+                    return SedCommand(cmd_type: "s", pattern: pattern, replacement: replacement, global_flag: global_flag, address: "")
+                else:
+                    replacement = replacement + rch
+                i = i + 1
+            return SedCommand(cmd_type: "s", pattern: pattern, replacement: replacement, global_flag: global_flag, address: "")
+        else:
+            pattern = pattern + ch
+        i = i + 1
+
+    SedCommand(cmd_type: "s", pattern: pattern, replacement: replacement, global_flag: global_flag, address: "")
+
+fn parse_sed_script(script: text) -> SedCommand:
+    """Parse a sed script into a command."""
+    val trimmed = script.trim()
+    if trimmed.len() == 0:
+        return SedCommand(cmd_type: "", pattern: "", replacement: "", global_flag: false, address: "")
+
+    if trimmed[0:1] == "s":
+        return parse_substitute(trimmed)
+    elif trimmed == "d":
+        return SedCommand(cmd_type: "d", pattern: "", replacement: "", global_flag: false, address: "")
+    elif trimmed == "p":
+        return SedCommand(cmd_type: "p", pattern: "", replacement: "", global_flag: false, address: "")
+    elif trimmed == "q":
+        return SedCommand(cmd_type: "q", pattern: "", replacement: "", global_flag: false, address: "")
+
+    # Address + command (e.g., "2d", "/pattern/d")
+    SedCommand(cmd_type: "", pattern: "", replacement: "", global_flag: false, address: "")
+
+fn apply_command(line: text, cmd: SedCommand) -> (text, bool, bool):
+    """Apply a sed command to a line.
+
+    Returns (result_line, should_print, should_quit).
+    """
+    if cmd.cmd_type == "s":
+        val regex = compile_pattern(cmd.pattern)
+        var result = line
+        if cmd.global_flag:
+            result = replace_all(regex, line, cmd.replacement)
+        else:
+            result = replace_first(regex, line, cmd.replacement)
+        return (result, true, false)
+    elif cmd.cmd_type == "d":
+        return ("", false, false)
+    elif cmd.cmd_type == "p":
+        return (line, true, false)
+    elif cmd.cmd_type == "q":
+        return (line, true, true)
+
+    (line, true, false)
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var suppress_auto_print = false
+    var in_place = false
+    var scripts: [text] = []
+    var files: [text] = []
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help":
+            print_help()
+            return 0
+        elif arg == "-n":
+            suppress_auto_print = true
+        elif arg == "-i":
+            in_place = true
+        elif arg == "-e":
+            if i + 1 < args.len():
+                i = i + 1
+                scripts.push(args[i])
+        elif scripts.len() == 0 and not arg.starts_with("-"):
+            scripts.push(arg)
+        else:
+            files.push(arg)
+        i = i + 1
+
+    if scripts.len() == 0:
+        eprint("sed: no script command")
+        return 1
+
+    # Parse all scripts
+    var commands: [SedCommand] = []
+    for script in scripts:
+        val cmd = parse_sed_script(script)
+        if cmd.cmd_type.len() > 0:
+            commands.push(cmd)
+
+    if commands.len() == 0:
+        eprint("sed: invalid script")
+        return 1
+
+    if files.len() == 0:
+        val content = read_stdin_text()
+        val lines = content.split("\n")
+        for line in lines:
+            var current = line
+            var should_print = true
+            var should_quit = false
+            for cmd in commands:
+                val result = apply_command(current, cmd)
+                current = result.0
+                should_print = result.1
+                should_quit = result.2
+                if should_quit:
+                    if should_print and not suppress_auto_print:
+                        print current
+                    return 0
+            if should_print and not suppress_auto_print:
+                print current
+    else:
+        for path in files:
+            if not file_exists(path):
+                eprint("sed: can't read {path}: No such file or directory")
+                return 2
+            val content = file_read(path)
+            val lines = content.split("\n")
+            var output_lines: [text] = []
+            for line in lines:
+                var current = line
+                var should_print = true
+                var should_quit = false
+                for cmd in commands:
+                    val result = apply_command(current, cmd)
+                    current = result.0
+                    should_print = result.1
+                    should_quit = result.2
+                    if should_quit:
+                        if should_print:
+                            output_lines.push(current)
+                        if in_place:
+                            file_write(path, output_lines.join("\n"))
+                        else:
+                            for ol in output_lines:
+                                print ol
+                        return 0
+                if should_print:
+                    output_lines.push(current)
+
+            if in_place:
+                file_write(path, output_lines.join("\n"))
+            elif not suppress_auto_print:
+                for ol in output_lines:
+                    print ol
+
+    0

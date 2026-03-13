@@ -100,6 +100,31 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc)
     (stdout, rc)
 
+fn t32_run_remote_timed(session: McpT32Session, cmd: text, timeout_ms: i64) -> (text, i64, bool):
+    val backend = t32_find_backend()
+    if backend == "":
+        return (t32_err_backend_not_found(), -1, false)
+    val intercom = session.intercom_name
+    var full_cmd = backend + " " + session.host + " port=" + str(session.port)
+    if intercom != "":
+        full_cmd = full_cmd + " INTERCOM=" + intercom
+    full_cmd = full_cmd + " timeout=" + str(timeout_ms) + " " + cmd
+    val start_time = rt_time_now_unix_micros()
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    val end_time = rt_time_now_unix_micros()
+    val elapsed_ms = (end_time - start_time) / 1000
+    # Detect timeout: if elapsed >= timeout, mark as timed out
+    var timed_out = false
+    if elapsed_ms >= timeout_ms:
+        timed_out = true
+    if rc != 0 and stderr != "":
+        val backend_label = MCP_T32_BACKEND_TYPE
+        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc, timed_out)
+    (stdout, rc, timed_out)
+
 fn t32_find_current_session() -> Option<McpT32Session>:
     if MCP_T32_CURRENT_SESSION == "":
         # Return first session if any

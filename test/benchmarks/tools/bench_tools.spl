@@ -1,0 +1,106 @@
+# Tool Benchmarks
+#
+# Compare Simple tools vs system coreutils performance.
+
+use app.io.mod (process_run, file_exists, eprint, current_time_ms)
+
+struct BenchResult:
+    tool: text
+    simple_ms: i64
+    system_ms: i64
+    ratio: text
+
+fn run_timed(cmd: text) -> i64:
+    """Run a command and return elapsed milliseconds."""
+    val start = current_time_ms()
+    val result = process_run(cmd, "", 60000)
+    val end = current_time_ms()
+    end - start
+
+fn bench_tool(tool: text, simple_args: text, system_args: text, data_file: text) -> BenchResult:
+    """Benchmark a Simple tool against system equivalent."""
+    val simple_cmd = "bin/tools/{tool} {simple_args}"
+    val system_cmd = "{tool} {system_args}"
+
+    # Warm up
+    val _ = process_run(simple_cmd, "", 30000)
+    val _ = process_run(system_cmd, "", 30000)
+
+    # Measure Simple tool (3 runs, take average)
+    var simple_total = 0
+    var i = 0
+    while i < 3:
+        simple_total = simple_total + run_timed(simple_cmd)
+        i = i + 1
+    val simple_ms = simple_total / 3
+
+    # Measure system tool (3 runs, take average)
+    var system_total = 0
+    i = 0
+    while i < 3:
+        system_total = system_total + run_timed(system_cmd)
+        i = i + 1
+    val system_ms = system_total / 3
+
+    val ratio = if system_ms > 0: "{simple_ms / system_ms}x" else: "N/A"
+
+    BenchResult(tool: tool, simple_ms: simple_ms, system_ms: system_ms, ratio: ratio)
+
+fn print_result(r: BenchResult):
+    var tool_str = r.tool
+    while tool_str.len() < 10:
+        tool_str = tool_str + " "
+    print "  {tool_str}  Simple: {r.simple_ms}ms  System: {r.system_ms}ms  Ratio: {r.ratio}"
+
+fn main() -> i64:
+    val data = "test/benchmarks/tools/data/medium.txt"
+
+    if not file_exists(data):
+        eprint("Benchmark data not found. Run bench_data_gen first.")
+        return 1
+
+    if not file_exists("bin/tools/wc"):
+        eprint("Tools not built. Run tools-build first.")
+        return 1
+
+    print "Tool Benchmark: Simple vs System Coreutils"
+    print "Data file: {data}"
+    print "==========================================="
+    print ""
+
+    var results: [BenchResult] = []
+
+    # wc benchmark
+    if file_exists("bin/tools/wc"):
+        val r = bench_tool("wc", data, data, data)
+        results.push(r)
+        print_result(r)
+
+    # cat benchmark (redirect to /dev/null)
+    if file_exists("bin/tools/cat"):
+        val r = bench_tool("cat", "{data} > /dev/null", "{data} > /dev/null", data)
+        results.push(r)
+        print_result(r)
+
+    # head benchmark
+    if file_exists("bin/tools/head"):
+        val r = bench_tool("head", "--n=100 {data}", "-n 100 {data}", data)
+        results.push(r)
+        print_result(r)
+
+    # sort benchmark
+    if file_exists("bin/tools/sort"):
+        val r = bench_tool("sort", "{data} > /dev/null", "{data} > /dev/null", data)
+        results.push(r)
+        print_result(r)
+
+    # grep benchmark
+    if file_exists("bin/tools/grep"):
+        val r = bench_tool("grep", "fox {data}", "fox {data}", data)
+        results.push(r)
+        print_result(r)
+
+    print ""
+    print "Done. {results.len()} tools benchmarked."
+
+    0

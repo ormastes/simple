@@ -1,0 +1,146 @@
+# Simple Tool - wc
+#
+# Print newline, word, and byte counts for files.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, eprint)
+use app.tools.common.args (parse_args, has_flag)
+use app.tools.common.stdio (read_stdin_text)
+
+fn print_help():
+    print "Usage: wc [OPTIONS] [FILE...]"
+    print ""
+    print "Print newline, word, and byte counts for each FILE."
+    print "With no FILE, read standard input."
+    print ""
+    print "Options:"
+    print "  -l          Print the newline counts"
+    print "  -w          Print the word counts"
+    print "  -c          Print the byte counts"
+    print "  -m          Print the character counts"
+    print "  -L          Print the maximum line length"
+    print "  --help      Display this help"
+
+fn count_words(content: text) -> i64:
+    """Count words (whitespace-separated tokens)."""
+    var count = 0
+    var in_word = false
+    var i = 0
+    while i < content.len():
+        val ch = content[i:i + 1]
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            in_word = false
+        else:
+            if not in_word:
+                count = count + 1
+                in_word = true
+        i = i + 1
+    count
+
+fn count_lines(content: text) -> i64:
+    """Count newlines."""
+    var count = 0
+    var i = 0
+    while i < content.len():
+        if content[i:i + 1] == "\n":
+            count = count + 1
+        i = i + 1
+    count
+
+fn max_line_length(content: text) -> i64:
+    """Find the length of the longest line."""
+    val lines = content.split("\n")
+    var max_len = 0
+    for line in lines:
+        if line.len() > max_len:
+            max_len = line.len()
+    max_len
+
+fn format_count(value: i64, width: i64) -> text:
+    """Right-align a number to given width."""
+    var s = "{value}"
+    while s.len() < width:
+        s = " " + s
+    s
+
+fn print_counts(lines: i64, words: i64, bytes: i64, chars: i64, max_len: i64, name: text, show_lines: bool, show_words: bool, show_bytes: bool, show_chars: bool, show_max_len: bool):
+    var parts: [text] = []
+    if show_lines:
+        parts.push(format_count(lines, 7))
+    if show_words:
+        parts.push(format_count(words, 7))
+    if show_bytes:
+        parts.push(format_count(bytes, 7))
+    if show_chars:
+        parts.push(format_count(chars, 7))
+    if show_max_len:
+        parts.push(format_count(max_len, 7))
+
+    var output = ""
+    for part in parts:
+        output = output + part
+    if name.len() > 0:
+        output = output + " " + name
+    print output
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    var show_lines = has_flag(parsed, "l", "")
+    var show_words = has_flag(parsed, "w", "")
+    var show_bytes = has_flag(parsed, "c", "")
+    var show_chars = has_flag(parsed, "m", "")
+    var show_max_len = has_flag(parsed, "L", "")
+
+    # Default: show lines, words, bytes
+    val no_flags = not show_lines and not show_words and not show_bytes and not show_chars and not show_max_len
+    if no_flags:
+        show_lines = true
+        show_words = true
+        show_bytes = true
+
+    val files = parsed.positional
+    var exit_code = 0
+    var total_lines = 0
+    var total_words = 0
+    var total_bytes = 0
+    var total_chars = 0
+    var total_max_len = 0
+
+    if files.len() == 0:
+        val content = read_stdin_text()
+        val l = count_lines(content)
+        val w = count_words(content)
+        val b = content.len()
+        val c = content.len()
+        val m = max_line_length(content)
+        print_counts(l, w, b, c, m, "", show_lines, show_words, show_bytes, show_chars, show_max_len)
+    else:
+        for path in files:
+            if not file_exists(path):
+                eprint("wc: {path}: No such file or directory")
+                exit_code = 1
+            else:
+                val content = file_read(path)
+                val l = count_lines(content)
+                val w = count_words(content)
+                val b = content.len()
+                val c = content.len()
+                val m = max_line_length(content)
+                total_lines = total_lines + l
+                total_words = total_words + w
+                total_bytes = total_bytes + b
+                total_chars = total_chars + c
+                if m > total_max_len:
+                    total_max_len = m
+                print_counts(l, w, b, c, m, path, show_lines, show_words, show_bytes, show_chars, show_max_len)
+
+        if files.len() > 1:
+            print_counts(total_lines, total_words, total_bytes, total_chars, total_max_len, "total", show_lines, show_words, show_bytes, show_chars, show_max_len)
+
+    exit_code

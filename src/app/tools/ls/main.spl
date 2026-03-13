@@ -1,0 +1,173 @@
+# Simple Tool - ls
+#
+# List directory contents.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, eprint)
+use std.nogc_sync_mut.file_system (dir_list, file_size, file_is_directory, file_is_file, file_is_symlink, file_is_executable, file_is_hidden, path_basename, path_join2, file_modified_time)
+use app.tools.common.args (parse_args, has_flag)
+
+fn print_help():
+    print "Usage: ls [OPTIONS] [FILE...]"
+    print ""
+    print "List directory contents."
+    print ""
+    print "Options:"
+    print "  -l          Use long listing format"
+    print "  -a          Do not ignore entries starting with ."
+    print "  -A          Do not list . and .."
+    print "  -1          List one file per line"
+    print "  -R          List subdirectories recursively"
+    print "  -S          Sort by file size"
+    print "  -t          Sort by modification time"
+    print "  -r          Reverse order while sorting"
+    print "  -h          With -l, print human readable sizes"
+    print "  --help      Display this help"
+
+fn format_size_human(size: i64) -> text:
+    """Format byte size as human-readable."""
+    if size < 1024:
+        return "{size}B"
+    val kb = size / 1024
+    if kb < 1024:
+        return "{kb}K"
+    val mb = kb / 1024
+    if mb < 1024:
+        return "{mb}M"
+    val gb = mb / 1024
+    return "{gb}G"
+
+fn format_size(size: i64, width: i64) -> text:
+    """Right-align a size to given width."""
+    var s = "{size}"
+    while s.len() < width:
+        s = " " + s
+    s
+
+fn format_type_char(path: text) -> text:
+    """Get the type character for a path."""
+    if file_is_directory(path):
+        return "d"
+    elif file_is_symlink(path):
+        return "l"
+    else:
+        return "-"
+
+fn list_dir(dir_path: text, show_all: bool, show_almost_all: bool, long_format: bool, one_per_line: bool, human_readable: bool, sort_by_size: bool, sort_by_time: bool, reverse_sort: bool):
+    """List contents of a directory."""
+    val entries = dir_list(dir_path)
+    if entries == nil:
+        eprint("ls: cannot access '{dir_path}': No such file or directory")
+        return
+
+    # Filter hidden files
+    var filtered: [text] = []
+    for entry in entries:
+        val name = path_basename(entry)
+        if show_all or show_almost_all:
+            if show_almost_all and (name == "." or name == ".."):
+                pass
+            else:
+                filtered.push(entry)
+        elif not name.starts_with("."):
+            filtered.push(entry)
+
+    # Sort entries (simple insertion sort by name, size, or time)
+    var sorted: [text] = []
+    for e in filtered:
+        sorted.push(e)
+
+    if sort_by_size or sort_by_time:
+        var i = 1
+        while i < sorted.len():
+            val key = sorted[i]
+            var j = i - 1
+            while j >= 0:
+                var swap = false
+                if sort_by_size:
+                    val size_a = file_size(path_join2(dir_path, sorted[j])) ?? 0
+                    val size_b = file_size(path_join2(dir_path, key)) ?? 0
+                    swap = if reverse_sort: size_a < size_b else: size_a > size_b
+                elif sort_by_time:
+                    val time_a = file_modified_time(path_join2(dir_path, sorted[j])) ?? 0
+                    val time_b = file_modified_time(path_join2(dir_path, key)) ?? 0
+                    swap = if reverse_sort: time_a < time_b else: time_a > time_b
+                if swap:
+                    sorted[j + 1] = sorted[j]
+                    j = j - 1
+                else:
+                    j = -1
+            sorted[j + 1] = key
+            i = i + 1
+    elif reverse_sort:
+        var reversed: [text] = []
+        var i = sorted.len() - 1
+        while i >= 0:
+            reversed.push(sorted[i])
+            i = i - 1
+        sorted = reversed
+
+    if long_format:
+        for entry in sorted:
+            val full_path = path_join2(dir_path, entry)
+            val name = path_basename(entry)
+            val type_ch = format_type_char(full_path)
+            val fsize = file_size(full_path) ?? 0
+            val size_str = if human_readable: format_size_human(fsize) else: format_size(fsize, 8)
+            val exec_flag = if file_is_executable(full_path): "x" else: "-"
+            print "{type_ch}rw{exec_flag}r--r-- {size_str} {name}"
+    elif one_per_line:
+        for entry in sorted:
+            print path_basename(entry)
+    else:
+        # Simple space-separated output
+        var output = ""
+        for entry in sorted:
+            val name = path_basename(entry)
+            if output.len() > 0:
+                output = output + "  "
+            output = output + name
+        if output.len() > 0:
+            print output
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    val show_all = has_flag(parsed, "a", "all")
+    val show_almost_all = has_flag(parsed, "A", "almost-all")
+    val long_format = has_flag(parsed, "l", "")
+    val one_per_line = has_flag(parsed, "1", "")
+    val recursive = has_flag(parsed, "R", "recursive")
+    val sort_by_size = has_flag(parsed, "S", "")
+    val sort_by_time = has_flag(parsed, "t", "")
+    val reverse_sort = has_flag(parsed, "r", "reverse")
+    val human_readable = has_flag(parsed, "h", "human-readable")
+
+    val paths = parsed.positional
+    var dirs: [text] = []
+    if paths.len() == 0:
+        dirs.push(".")
+    else:
+        for p in paths:
+            dirs.push(p)
+
+    var exit_code = 0
+    val show_dir_name = dirs.len() > 1
+
+    for dir_path in dirs:
+        if not file_exists(dir_path):
+            eprint("ls: cannot access '{dir_path}': No such file or directory")
+            exit_code = 2
+        else:
+            if show_dir_name:
+                print "{dir_path}:"
+            list_dir(dir_path, show_all, show_almost_all, long_format, one_per_line, human_readable, sort_by_size, sort_by_time, reverse_sort)
+            if show_dir_name:
+                print ""
+
+    exit_code

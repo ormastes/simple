@@ -1,0 +1,140 @@
+# Simple Tool - sort
+#
+# Sort lines of text files.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, eprint)
+use app.tools.common.args (parse_args, has_flag, get_option)
+use app.tools.common.stdio (read_stdin_text)
+
+fn print_help():
+    print "Usage: sort [OPTIONS] [FILE...]"
+    print ""
+    print "Sort lines of text files."
+    print "With no FILE, read standard input."
+    print ""
+    print "Options:"
+    print "  -r          Reverse the result of comparisons"
+    print "  -n          Compare according to string numerical value"
+    print "  -u          Output only unique lines"
+    print "  -f          Fold lower case to upper case (case insensitive)"
+    print "  -t CHAR     Use CHAR as field separator"
+    print "  -k NUM      Sort by field NUM (1-based)"
+    print "  --help      Display this help"
+
+fn extract_field(line: text, field_num: i64, separator: text) -> text:
+    """Extract a field from a line (1-based index)."""
+    val fields = line.split(separator)
+    if field_num > 0 and field_num <= fields.len():
+        fields[field_num - 1]
+    else:
+        line
+
+fn insertion_sort(lines: [text], numeric: bool, reverse: bool, case_insensitive: bool, field_num: i64, separator: text) -> [text]:
+    """Sort lines using insertion sort."""
+    var result: [text] = []
+    for line in lines:
+        result.push(line)
+
+    var i = 1
+    while i < result.len():
+        val key = result[i]
+        var j = i - 1
+        while j >= 0:
+            val should_swap = compare_lines(result[j], key, numeric, case_insensitive, field_num, separator)
+            if reverse:
+                if not should_swap:
+                    result[j + 1] = result[j]
+                    j = j - 1
+                else:
+                    j = -1  # break
+            else:
+                if should_swap:
+                    result[j + 1] = result[j]
+                    j = j - 1
+                else:
+                    j = -1  # break
+        result[j + 1] = key
+        i = i + 1
+
+    result
+
+fn compare_lines(a: text, b: text, numeric: bool, case_insensitive: bool, field_num: i64, separator: text) -> bool:
+    """Compare two lines. Returns true if a > b."""
+    var val_a = a
+    var val_b = b
+
+    if field_num > 0:
+        val_a = extract_field(a, field_num, separator)
+        val_b = extract_field(b, field_num, separator)
+
+    if case_insensitive:
+        val_a = val_a.lower()
+        val_b = val_b.lower()
+
+    if numeric:
+        val num_a = val_a.trim().to_int()
+        val num_b = val_b.trim().to_int()
+        return num_a > num_b
+
+    val_a > val_b
+
+fn remove_duplicates(lines: [text]) -> [text]:
+    """Remove consecutive duplicate lines."""
+    var result: [text] = []
+    var prev = ""
+    var first = true
+    for line in lines:
+        if first or line != prev:
+            result.push(line)
+            prev = line
+            first = false
+    result
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val parsed = parse_args(args)
+
+    if has_flag(parsed, "", "help"):
+        print_help()
+        return 0
+
+    val reverse = has_flag(parsed, "r", "reverse")
+    val numeric = has_flag(parsed, "n", "numeric-sort")
+    val unique = has_flag(parsed, "u", "unique")
+    val case_insensitive = has_flag(parsed, "f", "ignore-case")
+    val separator = get_option(parsed, "t", " ")
+    val field_str = get_option(parsed, "k", "0")
+    val field_num = field_str.to_int()
+
+    val files = parsed.positional
+    var all_lines: [text] = []
+
+    if files.len() == 0:
+        val content = read_stdin_text()
+        val lines = content.split("\n")
+        for line in lines:
+            all_lines.push(line)
+    else:
+        for path in files:
+            if not file_exists(path):
+                eprint("sort: cannot read: {path}: No such file or directory")
+                return 2
+            val content = file_read(path)
+            val lines = content.split("\n")
+            for line in lines:
+                all_lines.push(line)
+
+    # Remove trailing empty line if present
+    if all_lines.len() > 0 and all_lines[all_lines.len() - 1] == "":
+        all_lines = all_lines[:all_lines.len() - 1]
+
+    var sorted = insertion_sort(all_lines, numeric, reverse, case_insensitive, field_num, separator)
+
+    if unique:
+        sorted = remove_duplicates(sorted)
+
+    for line in sorted:
+        print line
+
+    0
