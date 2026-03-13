@@ -1,7 +1,7 @@
 # Path Handling Cross-Platform Design
 
 **Date:** 2026-03-13
-**Status:** Planned
+**Status:** Implemented (Phase 1-2, 4-5 done; Phase 3 remaining)
 **Purpose:** Consolidate path construction onto platform-aware utilities, eliminating raw `"/"` concatenation across 25+ files for correct Windows and double-slash behavior.
 **Related:**
 - `src/lib/nogc_sync_mut/path.spl` — pure-function path utilities
@@ -489,16 +489,16 @@ describe "WSL paths":
 
 ## 8. Migration Checklist
 
-- [ ] Phase 1: Enhance `path_join()` and add `join2()` in `path.spl`
-- [ ] Phase 1: Fix `is_absolute()` for drive letters
-- [ ] Phase 1: Fix `normalize()` for backslashes
-- [ ] Phase 2: Replace raw concat in compiler core (7 files)
-- [ ] Phase 2: Replace raw concat in applications (5 files)
-- [ ] Phase 2: Replace raw concat in libraries (4 files)
+- [x] Phase 1: Enhance `path_join()` and add `join2()` in `path.spl`
+- [x] Phase 1: Fix `is_absolute()` for drive letters
+- [x] Phase 1: Fix `normalize()` for backslashes (via `normalize_path()`)
+- [x] Phase 2: Replace raw concat in compiler core (7 files)
+- [x] Phase 2: Replace raw concat in applications (5 files)
+- [x] Phase 2: Replace raw concat in libraries (4 files)
 - [ ] Phase 3: Full `normalize()` rewrite with UNC support
-- [ ] Phase 4: Add `to_wsl_path()` / `from_wsl_path()`
-- [ ] Phase 5: Linker path cleanup
-- [ ] Testing: Add `path_join_spec.spl`
+- [x] Phase 4: Add `to_wsl_path()` / `from_wsl_path()`
+- [x] Phase 5: Linker path cleanup
+- [x] Testing: Add `path_cross_platform_spec.spl` (52 tests, all pass)
 - [ ] Testing: Unskip `windows_spec.spl`
 - [ ] Testing: Add Windows CI job
 
