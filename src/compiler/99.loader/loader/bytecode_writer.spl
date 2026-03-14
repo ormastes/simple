@@ -1,0 +1,407 @@
+# Bytecode Writer
+#
+# Serializes compiled code into the SMF (Simple Module Format) binary.
+# Writes header, code section, data section, string table, symbol table,
+# and trailer in the SMF v1.1 layout.
+#
+# Port of rust/compiler/src/smf/bytecode_writer.rs
+
+use std.log.{debug}
+
+# ============================================================================
+# SMF Section Types
+# ============================================================================
+
+"""Section type identifiers for the section table."""
+enum SmfSectionType:
+    Code             # Executable code (type=0)
+    Data             # Initialized data (type=1)
+    Bss              # Uninitialized data (type=2)
+    SymTab           # Symbol table (type=3)
+    StrTab           # String table (type=4)
+    RelTab           # Relocation table (type=5)
+    Debug            # Debug info (type=6)
+    Note             # Note section (type=7)
+    Dynamic          # Dynamic linking info (type=8)
+    Init             # Init functions (type=9)
+    Fini             # Finalization functions (type=10)
+    Custom(id: i64)  # Custom section type
+
+impl SmfSectionType:
+    fn to_u32() -> u32:
+        match self:
+            case Code: 0
+            case Data: 1
+            case Bss: 2
+            case SymTab: 3
+            case StrTab: 4
+            case RelTab: 5
+            case Debug: 6
+            case Note: 7
+            case Dynamic: 8
+            case Init: 9
+            case Fini: 10
+            case Custom(id): id as u32
+
+# ============================================================================
+# Section Descriptor
+# ============================================================================
+
+struct SectionDescriptor:
+    """Describes a section in the SMF file."""
+    name: text
+    type_: SmfSectionType
+    offset: i64              # Offset in output file
+    size: i64                # Size of section data
+    alignment: i64           # Required alignment
+    flags: u32               # Section flags (writable, executable, etc.)
+    data: [u8]               # Section data bytes
+
+# ============================================================================
+# Symbol Entry (for writing)
+# ============================================================================
+
+struct SmfSymbolEntry:
+    """Symbol table entry for serialization."""
+    name: text
+    name_offset: i64        # Offset into string table
+    value: i64              # Address or offset
+    size: i64
+    type_: SmfSymbolType
+    binding: SmfSymbolBinding
+    section_index: i32      # Index of containing section
+
+enum SmfSymbolType:
+    NoType
+    Function
+    Object
+    Section
+
+enum SmfSymbolBinding:
+    Local
+    Global
+    Weak
+
+# ============================================================================
+# Bytecode Writer
+# ============================================================================
+
+class SmfBytecodeWriter:
+    """Writes compiled code into SMF binary format.
+
+    Usage:
+        val writer = SmfBytecodeWriter.create()
+        writer.set_entry_point(addr)
+        writer.add_code_section("main", code_bytes)
+        writer.add_data_section("rodata", data_bytes, false)
+        writer.add_symbol("main", addr, size, SmfSymbolType.Function)
+        val bytes = writer.finalize()
+    """
+    sections: [SectionDescriptor]
+    symbols: [SmfSymbolEntry]
+    string_table: [u8]
+    string_offsets: Dict<text, i64>
+    next_string_offset: i64
+    entry_point: i64
+    platform: u8
+    arch: u8
+    flags: u32
+
+impl SmfBytecodeWriter:
+    static fn create() -> SmfBytecodeWriter:
+        var writer = SmfBytecodeWriter(
+            sections: [],
+            symbols: [],
+            string_table: [],
+            string_offsets: {},
+            next_string_offset: 0,
+            entry_point: 0,
+            platform: 0,
+            arch: 0,
+            flags: 0
+        )
+        # Add empty string at offset 0 (convention)
+        writer.string_table.push(0)
+        writer.next_string_offset = 1
+        writer
+
+    me set_entry_point(addr: i64):
+        """Set the entry point address."""
+        self.entry_point = addr
+
+    me set_platform(platform: u8, arch: u8):
+        """Set target platform and architecture."""
+        self.platform = platform
+        self.arch = arch
+
+    me set_flags(flags: u32):
+        """Set SMF flags (executable, reloadable, etc.)."""
+        self.flags = flags
+
+    me intern_string(s: text) -> i64:
+        """Add a string to the string table, returning its offset."""
+        if self.string_offsets.contains(s):
+            return self.string_offsets[s]
+
+        val offset = self.next_string_offset
+        self.string_offsets[s] = offset
+
+        var i = 0
+        while i < s.len():
+            self.string_table.push(s[i] as u8)
+            i = i + 1
+        self.string_table.push(0)
+        self.next_string_offset = self.next_string_offset + s.len() + 1
+        offset
+
+    me add_code_section(name: text, data: [u8]):
+        """Add a code section."""
+        val sec = SectionDescriptor(
+            name: name,
+            type_: SmfSectionType.Code,
+            offset: 0,
+            size: data.len(),
+            alignment: 16,
+            flags: 0x05,     # readable + executable
+            data: data
+        )
+        self.sections.push(sec)
+
+    me add_data_section(name: text, data: [u8], writable: bool):
+        """Add a data section."""
+        val flags_val = if writable: 0x03u32 else: 0x01u32  # readable, optionally writable
+        val sec = SectionDescriptor(
+            name: name,
+            type_: SmfSectionType.Data,
+            offset: 0,
+            size: data.len(),
+            alignment: 8,
+            flags: flags_val,
+            data: data
+        )
+        self.sections.push(sec)
+
+    me add_bss_section(name: text, size: i64):
+        """Add an uninitialized data section (no bytes in file)."""
+        val sec = SectionDescriptor(
+            name: name,
+            type_: SmfSectionType.Bss,
+            offset: 0,
+            size: size,
+            alignment: 8,
+            flags: 0x03,     # readable + writable
+            data: []
+        )
+        self.sections.push(sec)
+
+    me add_note_section(name: text, data: [u8]):
+        """Add a note section (metadata, SDN, etc.)."""
+        val sec = SectionDescriptor(
+            name: name,
+            type_: SmfSectionType.Note,
+            offset: 0,
+            size: data.len(),
+            alignment: 1,
+            flags: 0x01,     # readable
+            data: data
+        )
+        self.sections.push(sec)
+
+    me add_symbol(name: text, value: i64, size: i64, type_: SmfSymbolType, binding: SmfSymbolBinding, section: i32):
+        """Add a symbol to the symbol table."""
+        val name_offset = self.intern_string(name)
+        val sym = SmfSymbolEntry(
+            name: name,
+            name_offset: name_offset,
+            value: value,
+            size: size,
+            type_: type_,
+            binding: binding,
+            section_index: section
+        )
+        self.symbols.push(sym)
+
+    me finalize() -> [u8]:
+        """Produce the final SMF binary.
+
+        Layout: [sections data...] [strtab] [symtab] [section table] [trailer/header]
+        """
+        var output: [u8] = []
+
+        # Phase 1: Compute section offsets and write section data
+        var current_offset = 0i64
+        var section_count = self.sections.len()
+
+        # Write section data and record offsets
+        var i = 0
+        while i < section_count:
+            # Align to section alignment
+            var sec = self.sections[i]
+            val alignment = sec.alignment
+            while (current_offset % alignment) != 0:
+                output.push(0)
+                current_offset = current_offset + 1
+
+            sec.offset = current_offset
+            self.sections[i] = sec
+
+            for b in sec.data:
+                output.push(b)
+            current_offset = current_offset + sec.size
+            i = i + 1
+
+        # Phase 2: Write string table
+        val strtab_offset = current_offset
+        for b in self.string_table:
+            output.push(b)
+        current_offset = current_offset + self.string_table.len()
+
+        # Phase 3: Write symbol table (24 bytes per entry)
+        val symtab_offset = current_offset
+        for sym in self.symbols:
+            # name_offset: u32
+            _write_u32(output, sym.name_offset as u32)
+            # value: u64
+            _write_u64(output, sym.value)
+            # size: u64
+            _write_u64(output, sym.size)
+            # type: u8, binding: u8, section_index: i16
+            val type_byte = match sym.type_:
+                case NoType: 0u8
+                case Function: 1u8
+                case Object: 2u8
+                case Section: 3u8
+            val bind_byte = match sym.binding:
+                case Local: 0u8
+                case Global: 1u8
+                case Weak: 2u8
+            output.push(type_byte)
+            output.push(bind_byte)
+            _write_u16(output, sym.section_index as u16)
+            current_offset = current_offset + 24
+
+        # Phase 4: Write section table (64 bytes per entry)
+        val section_table_offset = current_offset
+        # Include strtab and symtab as implicit sections
+        val total_sections = section_count + 2
+
+        i = 0
+        while i < section_count:
+            val sec = self.sections[i]
+            _write_section_entry(output, sec)
+            current_offset = current_offset + 64
+            i = i + 1
+
+        # String table section entry
+        _write_section_entry(output, SectionDescriptor(
+            name: ".strtab",
+            type_: SmfSectionType.StrTab,
+            offset: strtab_offset,
+            size: self.string_table.len(),
+            alignment: 1,
+            flags: 0x01,
+            data: []
+        ))
+        current_offset = current_offset + 64
+
+        # Symbol table section entry
+        _write_section_entry(output, SectionDescriptor(
+            name: ".symtab",
+            type_: SmfSectionType.SymTab,
+            offset: symtab_offset,
+            size: self.symbols.len() * 24,
+            alignment: 8,
+            flags: 0x01,
+            data: []
+        ))
+        current_offset = current_offset + 64
+
+        # Phase 5: Write trailer (128 bytes — SMF v1.1 header at end)
+        val trailer_start = current_offset
+        # Magic
+        output.push(0x53)  # S
+        output.push(0x4D)  # M
+        output.push(0x46)  # F
+        output.push(0x00)  # \0
+        # Version
+        output.push(1)     # major
+        output.push(1)     # minor
+        # Platform / Arch
+        output.push(self.platform)
+        output.push(self.arch)
+        # Flags (u32)
+        _write_u32(output, self.flags)
+        # Section count (u32)
+        _write_u32(output, total_sections as u32)
+        # Section table offset (u64)
+        _write_u64(output, section_table_offset)
+        # Symbol count (u32)
+        _write_u32(output, self.symbols.len() as u32)
+        # Symbol table offset (u64) — offset 28
+        _write_u64(output, symtab_offset)
+        # Exported count (u32)
+        var exported_count = 0u32
+        for sym in self.symbols:
+            match sym.binding:
+                case Global: exported_count = exported_count + 1
+                case _: pass
+        _write_u32(output, exported_count)
+        # Entry point (u64) — offset 40
+        _write_u64(output, self.entry_point)
+        # Compression type (u32)
+        _write_u32(output, 0)
+        # Stub size (u64)
+        _write_u64(output, 0)
+        # SMF data offset (u64)
+        _write_u64(output, 0)
+        # Reserved — pad to 128 bytes total trailer
+        while output.len() < (trailer_start + 128):
+            output.push(0)
+
+        debug("bytecode_writer", "Finalized SMF: {output.len()} bytes, {total_sections} sections, {self.symbols.len()} symbols")
+        output
+
+# ============================================================================
+# Internal Byte-Writing Helpers
+# ============================================================================
+
+fn _write_u16(output: [u8], value: u16):
+    output.push((value & 0xFF) as u8)
+    output.push(((value >> 8) & 0xFF) as u8)
+
+fn _write_u32(output: [u8], value: u32):
+    output.push((value & 0xFF) as u8)
+    output.push(((value >> 8) & 0xFF) as u8)
+    output.push(((value >> 16) & 0xFF) as u8)
+    output.push(((value >> 24) & 0xFF) as u8)
+
+fn _write_u64(output: [u8], value: i64):
+    output.push((value & 0xFF) as u8)
+    output.push(((value >> 8) & 0xFF) as u8)
+    output.push(((value >> 16) & 0xFF) as u8)
+    output.push(((value >> 24) & 0xFF) as u8)
+    output.push(((value >> 32) & 0xFF) as u8)
+    output.push(((value >> 40) & 0xFF) as u8)
+    output.push(((value >> 48) & 0xFF) as u8)
+    output.push(((value >> 56) & 0xFF) as u8)
+
+fn _write_section_entry(output: [u8], sec: SectionDescriptor):
+    """Write a 64-byte section table entry."""
+    val start = output.len()
+    # name offset (u32) — would need string table, use 0 for now
+    _write_u32(output, 0)
+    # name length (u32)
+    _write_u32(output, sec.name.len() as u32)
+    # type (u32)
+    _write_u32(output, sec.type_.to_u32())
+    # flags (u32)
+    _write_u32(output, sec.flags)
+    # offset (u64)
+    _write_u64(output, sec.offset)
+    # size (u64)
+    _write_u64(output, sec.size)
+    # alignment (u64)
+    _write_u64(output, sec.alignment)
+    # Padding to 64 bytes
+    while output.len() < (start + 64):
+        output.push(0)

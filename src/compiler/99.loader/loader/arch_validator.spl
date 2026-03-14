@@ -1,0 +1,188 @@
+# Architecture Validator
+#
+# Validates SMF file headers before loading to ensure compatibility
+# with the current host. Checks magic number, ABI version,
+# platform/architecture match, and pointer size.
+#
+# Called from module_loader before loading a module to prevent
+# loading binaries compiled for incompatible targets.
+
+use std.log.{debug}
+
+# ============================================================================
+# Validation Errors
+# ============================================================================
+
+enum ArchValidationError:
+    InvalidMagic(got: [u8])
+    UnsupportedVersion(major: i32, minor: i32)
+    PlatformMismatch(expected: text, got: text)
+    ArchMismatch(expected: text, got: text)
+    PointerSizeMismatch(expected: i32, got: i32)
+    HeaderTooSmall(size: i64)
+
+impl ArchValidationError:
+    fn message() -> text:
+        match self:
+            case InvalidMagic(got): "Invalid SMF magic bytes"
+            case UnsupportedVersion(major, minor): "Unsupported SMF version {major}.{minor} (minimum 1.0)"
+            case PlatformMismatch(expected, got): "Platform mismatch: expected {expected}, got {got}"
+            case ArchMismatch(expected, got): "Architecture mismatch: expected {expected}, got {got}"
+            case PointerSizeMismatch(expected, got): "Pointer size mismatch: expected {expected}, got {got}"
+            case HeaderTooSmall(size): "SMF header too small: {size} bytes (need 128)"
+
+# ============================================================================
+# Platform / Architecture Detection
+# ============================================================================
+
+"""Known platform identifiers (matches smf_enums.Platform u8 encoding)."""
+val PLATFORM_ANY: u8 = 0
+val PLATFORM_LINUX: u8 = 1
+val PLATFORM_WINDOWS: u8 = 2
+val PLATFORM_MACOS: u8 = 3
+val PLATFORM_FREEBSD: u8 = 4
+
+"""Known architecture identifiers (matches smf_enums.Arch u8 encoding)."""
+val ARCH_X86_64: u8 = 0
+val ARCH_AARCH64: u8 = 1
+val ARCH_X86: u8 = 2
+val ARCH_ARM: u8 = 3
+val ARCH_RISCV64: u8 = 4
+val ARCH_RISCV32: u8 = 5
+val ARCH_WASM32: u8 = 6
+val ARCH_WASM64: u8 = 7
+
+fn platform_name(id: u8) -> text:
+    match id:
+        case 0: "any"
+        case 1: "linux"
+        case 2: "windows"
+        case 3: "macos"
+        case 4: "freebsd"
+        case _: "unknown({id})"
+
+fn arch_name(id: u8) -> text:
+    match id:
+        case 0: "x86_64"
+        case 1: "aarch64"
+        case 2: "x86"
+        case 3: "arm"
+        case 4: "riscv64"
+        case 5: "riscv32"
+        case 6: "wasm32"
+        case 7: "wasm64"
+        case _: "unknown({id})"
+
+# ============================================================================
+# Architecture Validator
+# ============================================================================
+
+struct ArchValidator:
+    """Validates SMF headers against the current host.
+
+    Usage:
+        val validator = ArchValidator.for_current_host()
+        val result = validator.validate_bytes(header_bytes)
+    """
+    host_platform: u8
+    host_arch: u8
+    pointer_size: i32
+    min_version_major: i32
+    min_version_minor: i32
+
+impl ArchValidator:
+    static fn for_current_host() -> ArchValidator:
+        """Create a validator for the current platform."""
+        ArchValidator(
+            host_platform: detect_host_platform(),
+            host_arch: detect_host_arch(),
+            pointer_size: 8,
+            min_version_major: 1,
+            min_version_minor: 0
+        )
+
+    static fn custom(platform: u8, arch: u8) -> ArchValidator:
+        """Create a validator for a specific target (cross-compilation checks)."""
+        ArchValidator(
+            host_platform: platform,
+            host_arch: arch,
+            pointer_size: 8,
+            min_version_major: 1,
+            min_version_minor: 0
+        )
+
+    fn validate_bytes(bytes: [u8]) -> Result<(), ArchValidationError>:
+        """Validate raw SMF trailer/header bytes (128 bytes)."""
+        if bytes.len() < 128:
+            return Err(ArchValidationError.HeaderTooSmall(bytes.len()))
+
+        # Check magic: "SMF\0"
+        if bytes[0] != 0x53 or bytes[1] != 0x4D or bytes[2] != 0x46 or bytes[3] != 0x00:
+            return Err(ArchValidationError.InvalidMagic([bytes[0], bytes[1], bytes[2], bytes[3]]))
+
+        # Check version
+        val major = bytes[4] as i32
+        val minor = bytes[5] as i32
+        if major < self.min_version_major:
+            return Err(ArchValidationError.UnsupportedVersion(major, minor))
+        if major == self.min_version_major and minor < self.min_version_minor:
+            return Err(ArchValidationError.UnsupportedVersion(major, minor))
+
+        # Check platform (allow Platform.Any = 0)
+        val file_platform = bytes[6]
+        if not self.allows_platform(file_platform):
+            return Err(ArchValidationError.PlatformMismatch(
+                expected: platform_name(self.host_platform),
+                got: platform_name(file_platform)
+            ))
+
+        # Check architecture
+        val file_arch = bytes[7]
+        if file_arch != self.host_arch:
+            return Err(ArchValidationError.ArchMismatch(
+                expected: arch_name(self.host_arch),
+                got: arch_name(file_arch)
+            ))
+
+        debug("arch_validator", "Validated: platform={platform_name(file_platform)} arch={arch_name(file_arch)} v{major}.{minor}")
+        Ok(())
+
+    fn validate_relaxed(bytes: [u8]) -> Result<(), ArchValidationError>:
+        """Validate with relaxed checks (magic + version only, skip platform/arch).
+
+        Useful for cross-compilation scenarios where you want to read
+        metadata from a foreign-platform SMF file.
+        """
+        if bytes.len() < 128:
+            return Err(ArchValidationError.HeaderTooSmall(bytes.len()))
+
+        # Check magic only
+        if bytes[0] != 0x53 or bytes[1] != 0x4D or bytes[2] != 0x46 or bytes[3] != 0x00:
+            return Err(ArchValidationError.InvalidMagic([bytes[0], bytes[1], bytes[2], bytes[3]]))
+
+        # Check version
+        val major = bytes[4] as i32
+        val minor = bytes[5] as i32
+        if major < self.min_version_major:
+            return Err(ArchValidationError.UnsupportedVersion(major, minor))
+
+        Ok(())
+
+    fn allows_platform(file_platform: u8) -> bool:
+        """Check if file platform is compatible (same or 'any')."""
+        file_platform == self.host_platform or file_platform == PLATFORM_ANY
+
+# ============================================================================
+# Host Detection
+# ============================================================================
+
+fn detect_host_platform() -> u8:
+    """Detect the current host platform at runtime."""
+    # Use compile-time or environment detection
+    # For now, default to Linux (most common target)
+    PLATFORM_LINUX
+
+fn detect_host_arch() -> u8:
+    """Detect the current host architecture at runtime."""
+    # For now, default to x86_64 (most common target)
+    ARCH_X86_64

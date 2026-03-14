@@ -23,9 +23,10 @@ use compiler.loader.compiler_ffi.{
     parse_types_json
 }
 
-# mmap functions not yet available in app.io.mod; SmfCache/MappedSmf stubbed locally
+# SmfCache/MappedSmf stubbed locally; file-based reads use mmap via smf_mmap_native
 # use compiler.loader.smf_cache (SmfCache, MappedSmf)
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
+use compiler.loader.smf_mmap_native.{native_mmap_file, native_mmap_read_bytes, native_munmap}
 
 use compiler.backend.linker.smf_source.{SmfSource, FileSmf, MemorySmf, smf_source_get_reader}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
@@ -280,11 +281,21 @@ impl JitInstantiator:
         _ = self.exec_mapper.unmap_symbol(symbol)
 
     me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
-        """Read note.sdn section from SMF file using mmap cache."""
-        # Get mapped SMF file from cache (auto-loads if not cached)
-        var mapped_smf = self.smf_cache.get(smf_path)?
+        """Read note.sdn section from SMF file using mmap."""
+        # Try mmap-based file reading (bypasses stub SmfCache)
+        val mmap_result = native_mmap_file(smf_path, 0x1, 0x2, 0, 0)
+        val address = mmap_result[0]
+        val size = mmap_result[1]
 
-        # Read note.sdn metadata
+        if address != 0 and size > 0:
+            # Read file bytes via mmap
+            val bytes = native_mmap_read_bytes(address, 0, size)
+            val _ = native_munmap(address, size)
+            # Parse metadata from bytes using SmfReaderMemory
+            return load_smf_metadata_from_bytes(smf_path, bytes)
+
+        # Fallback: use stub SmfCache (returns empty metadata)
+        var mapped_smf = self.smf_cache.get(smf_path)?
         val metadata = mapped_smf.read_note_sdn()?
 
         # Convert NoteSdnMetadata to LoadedMetadata

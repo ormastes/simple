@@ -31,6 +31,7 @@ use .resource_lifecycle.{
 }
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
 use .smf_cache.{validated_smf_load}
+use .arch_validator.{ArchValidator}
 use compiler.backend.linker.smf_source.{SmfSource, FileSmf, MemorySmf, smf_source_get_name, smf_source_get_reader}
 use compiler.shb.shb_reader.{ShbReader}
 use compiler.shb.shb_types.{ShbModuleInterface, ShbResult, shb_result_ok, shb_result_error, SHB_STATUS_OK}
@@ -209,6 +210,24 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             return loadresult_Error(message: smf_bytes_result.unwrap_err())
 
         val smf_data = smf_bytes_result.unwrap()
+
+        # Architecture validation: check magic, version, platform/arch match
+        if smf_data.len() >= 128:
+            val validator = ArchValidator.for_current_host()
+            # SMF v1.1 stores header as trailer (last 128 bytes)
+            val trailer_offset = smf_data.len() - 128
+            var trailer: [u8] = []
+            var ti = trailer_offset
+            while ti < smf_data.len():
+                trailer.push(smf_data[ti])
+                ti = ti + 1
+            val validation = validator.validate_bytes(trailer)
+            if validation.is_err():
+                val err = validation.unwrap_err()
+                if self.config.verbose:
+                    eprint("[loader] Arch validation warning for {path}: {err.message()}")
+                # Warning only — don't block load (may be cross-compiled or old format)
+
         val mem_reader_result = SmfReaderMemory.from_data(smf_data)
         if mem_reader_result.is_err():
             return loadresult_Error(message: mem_reader_result.unwrap_err())

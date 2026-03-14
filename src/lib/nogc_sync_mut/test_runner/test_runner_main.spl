@@ -112,6 +112,13 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "  Indexed {fresh_manifest.entries.len()} test files, {fresh_manifest.sdoctest_entries.len()} sdoctest files"
         print ""
 
+    # AllModes: run each mode sequentially with per-mode file filtering
+    match updated_options.mode:
+        case TestExecutionMode.AllModes:
+            return run_tests_all_modes(updated_options)
+        case _:
+            pass_do_nothing
+
     val use_cache = not updated_options.no_cache
     val all_files = discover_test_files_fast(updated_options.path, updated_options, use_cache)
 
@@ -394,6 +401,56 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_native(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
             run_test_file_composite(file_path, effective_options, spec)
+        case TestExecutionMode.AllModes:
+            # Fallback: run as interpreter when reached from single-test dispatch
+            run_test_file_interpreter(file_path, effective_options)
+
+# =========================================================================
+# AllModes Sequential Execution
+# =========================================================================
+
+fn run_tests_all_modes(options: TestOptions) -> TestRunResult:
+    """Run tests in interpreter, smf, and native modes sequentially."""
+    var all_results: [TestFileResult] = []
+    var total_passed = 0
+    var total_failed = 0
+    var total_skipped = 0
+    var total_pending = 0
+    var total_timed_out = 0
+    var total_duration_ms = 0
+
+    val modes = [TestExecutionMode.Interpreter, TestExecutionMode.Smf, TestExecutionMode.Native]
+    for mode in modes:
+        var mode_options = options
+        mode_options.mode = mode
+        val mode_name = mode_to_str(mode)
+        print "\n=== {mode_name} Mode ==="
+
+        val result = run_tests(mode_options)
+        total_passed = total_passed + result.total_passed
+        total_failed = total_failed + result.total_failed
+        total_skipped = total_skipped + result.total_skipped
+        total_pending = total_pending + result.total_pending
+        total_timed_out = total_timed_out + result.total_timed_out
+        total_duration_ms = total_duration_ms + result.total_duration_ms
+        for f in result.files:
+            all_results.push(f)
+
+        print "  {mode_name}: {result.total_passed} passed, {result.total_failed} failed"
+
+        if options.fail_fast and result.total_failed > 0:
+            break
+
+    TestRunResult(
+        files: all_results,
+        total_passed: total_passed,
+        total_failed: total_failed,
+        total_skipped: total_skipped,
+        total_pending: total_pending,
+        total_timed_out: total_timed_out,
+        total_duration_ms: total_duration_ms,
+        total_setup_ms: 0
+    )
 
 # =========================================================================
 # Main Entry Point

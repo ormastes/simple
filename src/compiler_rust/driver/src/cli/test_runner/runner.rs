@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use simple_compiler::{init_coverage, is_coverage_enabled};
 
-use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag};
+use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag, matches_mode};
 use super::types::{
     TestFileResult, TestExecutionMode, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log,
 };
@@ -557,6 +557,25 @@ fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<Pat
             before_count,
             test_files.len()
         );
+    }
+
+    // Apply mode filter (# @mode: / # @skip_mode: annotations)
+    {
+        let mode_name = options.execution_mode.name();
+        let before_count = test_files.len();
+        test_files.retain(|path| matches_mode(path, mode_name));
+        let filtered = before_count - test_files.len();
+        if filtered > 0 {
+            debug_log!(
+                DebugLevel::Detailed,
+                "Discovery",
+                "Mode filter '{}': {} -> {} files ({} filtered)",
+                mode_name,
+                before_count,
+                test_files.len(),
+                filtered
+            );
+        }
     }
 
     // Apply seed for shuffling

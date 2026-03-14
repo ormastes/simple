@@ -214,6 +214,79 @@ pub fn is_gui_test(path: &Path) -> bool {
     tags.contains(&"gui".to_string()) || tags.contains(&"screenshot".to_string())
 }
 
+/// Extract mode tags from a test file.
+///
+/// Looks for `# @mode: <modes>` and `# @skip_mode: <modes>` annotations.
+/// Returns a list of mode tags (skip modes prefixed with `!`).
+pub fn extract_mode_tags(path: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    extract_mode_tags_from_content(&content)
+}
+
+/// Extract mode tags from file content string.
+fn extract_mode_tags_from_content(content: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# @mode:") {
+            for part in rest.split(',') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    tags.push(p.to_string());
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("# @skip_mode:") {
+            for part in rest.split(',') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    tags.push(format!("!{}", p));
+                }
+            }
+        }
+    }
+    tags
+}
+
+/// Check if a file's mode tags allow it to run in the given mode.
+///
+/// Empty mode_tags means no restriction (runs in all modes).
+pub fn matches_mode(path: &Path, mode_name: &str) -> bool {
+    let tags = extract_mode_tags(path);
+    if tags.is_empty() {
+        return true;
+    }
+    mode_tags_match(&tags, mode_name)
+}
+
+/// Check if mode tags allow running in the given mode.
+fn mode_tags_match(tags: &[String], mode_name: &str) -> bool {
+    let mut has_positive = false;
+    let mut has_skip = false;
+    for tag in tags {
+        if let Some(skip_name) = tag.strip_prefix('!') {
+            if skip_name == mode_name {
+                return false;
+            }
+            has_skip = true;
+        } else {
+            has_positive = true;
+            if tag == mode_name {
+                return true;
+            }
+        }
+    }
+    if has_skip && !has_positive {
+        return true;
+    }
+    if has_positive {
+        return false;
+    }
+    true
+}
+
 /// Check if a file matches the tag filter.
 ///
 /// Returns true if:

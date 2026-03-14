@@ -1,0 +1,320 @@
+# Settlement Container
+#
+# Multi-module container lifecycle management.
+# Tracks loaded modules, their dependencies, exports/imports,
+# and provides topological ordering for link-time resolution.
+#
+# Port of rust/compiler/src/loader/settlement/container.rs
+
+use std.log.{debug}
+use compiler.loader.settlement.linker.{
+    SettlementLinker,
+    SymbolEntry,
+    SymbolVisibility,
+    SymbolBinding,
+    ImportRef,
+    RelocationKind,
+    LinkError,
+    LinkerStats
+}
+
+# ============================================================================
+# Module Entry
+# ============================================================================
+
+"""State of a module in the container."""
+enum ModuleState:
+    Registered       # Known but not yet loaded
+    Loading          # Currently being loaded (cycle detection)
+    Loaded           # Code loaded into memory
+    Linked           # All symbols resolved
+    Failed(reason: text)  # Load or link failed
+
+struct ModuleEntry:
+    """A module tracked by the settlement container."""
+    id: text
+    path: text
+    state: ModuleState
+    exports: [SymbolEntry]
+    imports: [ImportRef]
+    dependencies: [text]     # Module IDs this module depends on
+    dependents: [text]       # Module IDs that depend on this module
+    load_order: i64          # Assigned during topological sort
+
+impl ModuleEntry:
+    static fn create(id: text, path: text) -> ModuleEntry:
+        ModuleEntry(
+            id: id,
+            path: path,
+            state: ModuleState.Registered,
+            exports: [],
+            imports: [],
+            dependencies: [],
+            dependents: [],
+            load_order: -1
+        )
+
+# ============================================================================
+# Container Errors
+# ============================================================================
+
+enum ContainerError:
+    ModuleNotFound(id: text)
+    ModuleAlreadyLoaded(id: text)
+    CircularDependency(cycle: [text])
+    LinkFailed(errors: [LinkError])
+    LoadFailed(id: text, reason: text)
+
+impl ContainerError:
+    fn message() -> text:
+        match self:
+            case ModuleNotFound(id): "Module not found: {id}"
+            case ModuleAlreadyLoaded(id): "Module already loaded: {id}"
+            case CircularDependency(cycle): "Circular dependency: {cycle.join(" -> ")}"
+            case LinkFailed(errors):
+                var msgs: [text] = []
+                for e in errors:
+                    msgs.push(e.message())
+                "Link failed:\n  {msgs.join("\n  ")}"
+            case LoadFailed(id, reason): "Failed to load module {id}: {reason}"
+
+# ============================================================================
+# Settlement Container
+# ============================================================================
+
+class SettlementContainer:
+    """Multi-module container with dependency tracking.
+
+    Manages the lifecycle of multiple modules:
+    1. Register modules (declare existence)
+    2. Load modules (read code + metadata)
+    3. Link modules (resolve cross-module symbols)
+    """
+    modules: Dict<text, ModuleEntry>
+    load_order: [text]       # Modules in topological order
+    linker: SettlementLinker
+    is_linked: bool
+
+impl SettlementContainer:
+    static fn create() -> SettlementContainer:
+        SettlementContainer(
+            modules: {},
+            load_order: [],
+            linker: SettlementLinker.create(),
+            is_linked: false
+        )
+
+    me add_module(id: text, path: text) -> Result<(), ContainerError>:
+        """Register a new module in the container."""
+        if self.modules.contains(id):
+            return Err(ContainerError.ModuleAlreadyLoaded(id))
+        val entry = ModuleEntry.create(id, path)
+        self.modules[id] = entry
+        self.linker.add_module(id)
+        self.is_linked = false
+        debug("settlement", "Added module: {id}")
+        Ok(())
+
+    me add_dependency(from_id: text, to_id: text) -> Result<(), ContainerError>:
+        """Declare that from_id depends on to_id."""
+        if not self.modules.contains(from_id):
+            return Err(ContainerError.ModuleNotFound(from_id))
+        if not self.modules.contains(to_id):
+            return Err(ContainerError.ModuleNotFound(to_id))
+
+        var from_mod = self.modules[from_id]
+        from_mod.dependencies.push(to_id)
+        self.modules[from_id] = from_mod
+
+        var to_mod = self.modules[to_id]
+        to_mod.dependents.push(from_id)
+        self.modules[to_id] = to_mod
+
+        self.is_linked = false
+        Ok(())
+
+    me set_exports(module_id: text, exports: [SymbolEntry]) -> Result<(), ContainerError>:
+        """Set the exported symbols for a module."""
+        if not self.modules.contains(module_id):
+            return Err(ContainerError.ModuleNotFound(module_id))
+
+        var entry = self.modules[module_id]
+        entry.exports = exports
+        self.modules[module_id] = entry
+
+        # Register exports with the linker
+        for sym in exports:
+            val result = self.linker.add_export(sym)
+            if result.is_err():
+                debug("settlement", "Warning: duplicate export {sym.name}")
+
+        self.is_linked = false
+        Ok(())
+
+    me set_imports(module_id: text, imports: [ImportRef]) -> Result<(), ContainerError>:
+        """Set the import references for a module."""
+        if not self.modules.contains(module_id):
+            return Err(ContainerError.ModuleNotFound(module_id))
+
+        var entry = self.modules[module_id]
+        entry.imports = imports
+        self.modules[module_id] = entry
+
+        # Register imports with the linker
+        for ref in imports:
+            self.linker.add_import(ref)
+
+        self.is_linked = false
+        Ok(())
+
+    me mark_loaded(module_id: text) -> Result<(), ContainerError>:
+        """Mark a module as loaded."""
+        if not self.modules.contains(module_id):
+            return Err(ContainerError.ModuleNotFound(module_id))
+        var entry = self.modules[module_id]
+        entry.state = ModuleState.Loaded
+        self.modules[module_id] = entry
+        Ok(())
+
+    me mark_failed(module_id: text, reason: text):
+        """Mark a module as failed."""
+        if self.modules.contains(module_id):
+            var entry = self.modules[module_id]
+            entry.state = ModuleState.Failed(reason)
+            self.modules[module_id] = entry
+
+    me remove_module(module_id: text) -> Result<(), ContainerError>:
+        """Remove a module from the container."""
+        if not self.modules.contains(module_id):
+            return Err(ContainerError.ModuleNotFound(module_id))
+
+        # Remove from dependents of other modules
+        val entry = self.modules[module_id]
+        for dep_id in entry.dependencies:
+            if self.modules.contains(dep_id):
+                var dep = self.modules[dep_id]
+                dep.dependents = dep.dependents.filter(\d: d != module_id)
+                self.modules[dep_id] = dep
+
+        self.modules = self.modules.remove(module_id)
+        self.is_linked = false
+        Ok(())
+
+    me topological_sort() -> Result<[text], ContainerError>:
+        """Sort modules in dependency order (leaves first).
+
+        Uses Kahn's algorithm for topological sorting.
+        Returns error if circular dependency detected.
+        """
+        # Build in-degree map
+        var in_degree: Dict<text, i64> = {}
+        for id in self.modules.keys():
+            in_degree[id] = 0
+
+        for id in self.modules.keys():
+            val entry = self.modules[id]
+            for dep_id in entry.dependencies:
+                if in_degree.contains(dep_id):
+                    in_degree[dep_id] = in_degree[dep_id] + 1
+
+        # Find all modules with no incoming edges
+        var queue: [text] = []
+        for id in in_degree.keys():
+            if in_degree[id] == 0:
+                queue.push(id)
+
+        var sorted: [text] = []
+        while queue.len() > 0:
+            val current = queue[0]
+            queue = queue[1..]
+            sorted.push(current)
+
+            val entry = self.modules[current]
+            for dep_id in entry.dependencies:
+                if in_degree.contains(dep_id):
+                    in_degree[dep_id] = in_degree[dep_id] - 1
+                    if in_degree[dep_id] == 0:
+                        queue.push(dep_id)
+
+        if sorted.len() != self.modules.len():
+            # Circular dependency — find the cycle
+            var cycle: [text] = []
+            for id in self.modules.keys():
+                if not sorted.contains(id):
+                    cycle.push(id)
+            return Err(ContainerError.CircularDependency(cycle))
+
+        # Assign load order
+        var order = 0i64
+        for id in sorted:
+            var entry = self.modules[id]
+            entry.load_order = order
+            self.modules[id] = entry
+            order = order + 1
+
+        self.load_order = sorted
+        Ok(sorted)
+
+    me link() -> Result<Dict<text, SymbolEntry>, ContainerError>:
+        """Link all modules — resolve cross-module symbols."""
+        # Sort first
+        val sort_result = self.topological_sort()
+        if sort_result.is_err():
+            return Err(sort_result.unwrap_err())
+
+        # Resolve symbols
+        val link_result = self.linker.resolve()
+        match link_result:
+            case Ok(symbols):
+                # Mark all modules as linked
+                for id in self.modules.keys():
+                    var entry = self.modules[id]
+                    entry.state = ModuleState.Linked
+                    self.modules[id] = entry
+                self.is_linked = true
+                Ok(symbols)
+            case Err(errors):
+                Err(ContainerError.LinkFailed(errors))
+
+    fn get_module(id: text) -> ModuleEntry?:
+        """Get a module entry by ID."""
+        if self.modules.contains(id):
+            Some(self.modules[id])
+        else:
+            nil
+
+    fn module_count() -> i64:
+        """Get the number of modules."""
+        self.modules.len()
+
+    fn get_load_order() -> [text]:
+        """Get modules in topological load order."""
+        self.load_order
+
+    fn stats() -> ContainerStats:
+        """Get container statistics."""
+        var loaded = 0i64
+        var linked = 0i64
+        var failed = 0i64
+        for id in self.modules.keys():
+            val entry = self.modules[id]
+            match entry.state:
+                case Loaded: loaded = loaded + 1
+                case Linked: linked = linked + 1
+                case Failed(_): failed = failed + 1
+                case _: pass
+
+        ContainerStats(
+            total_modules: self.modules.len(),
+            loaded: loaded,
+            linked: linked,
+            failed: failed,
+            linker_stats: self.linker.stats()
+        )
+
+struct ContainerStats:
+    total_modules: i64
+    loaded: i64
+    linked: i64
+    failed: i64
+    linker_stats: LinkerStats

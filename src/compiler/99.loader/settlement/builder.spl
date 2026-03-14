@@ -1,0 +1,270 @@
+# Settlement Builder
+#
+# Builds SSMF (Simple Static Module Format) files and executable stubs
+# from linked settlement containers. Serializes code, data, symbol tables,
+# and metadata into the final binary format.
+#
+# Port of rust/compiler/src/loader/settlement/builder.rs
+
+use std.log.{debug}
+use compiler.loader.settlement.linker.{
+    SymbolEntry,
+    SymbolVisibility,
+    SymbolBinding
+}
+use compiler.loader.settlement.container.{
+    SettlementContainer,
+    ModuleEntry,
+    ContainerError
+}
+
+# ============================================================================
+# Builder Configuration
+# ============================================================================
+
+struct BuilderConfig:
+    """Configuration for settlement builder."""
+    output_path: text
+    entry_point: text         # Entry function name (e.g., "main")
+    emit_debug_info: bool
+    strip_internals: bool     # Remove internal-only symbols from output
+    compression: CompressionOption
+    target_platform: text     # "linux", "macos", "windows"
+    target_arch: text         # "x86_64", "aarch64", "riscv64"
+
+impl BuilderConfig:
+    static fn default(output_path: text) -> BuilderConfig:
+        BuilderConfig(
+            output_path: output_path,
+            entry_point: "main",
+            emit_debug_info: false,
+            strip_internals: false,
+            compression: CompressionOption.None,
+            target_platform: "linux",
+            target_arch: "x86_64"
+        )
+
+enum CompressionOption:
+    None
+    Zstd(level: i32)
+
+# ============================================================================
+# Build Result
+# ============================================================================
+
+enum BuildError:
+    NoEntryPoint(name: text)
+    NoModules
+    ContainerNotLinked
+    WriteFailed(path: text, reason: text)
+    SerializationError(reason: text)
+
+impl BuildError:
+    fn message() -> text:
+        match self:
+            case NoEntryPoint(name): "Entry point '{name}' not found"
+            case NoModules: "No modules in container"
+            case ContainerNotLinked: "Container must be linked before building"
+            case WriteFailed(path, reason): "Failed to write {path}: {reason}"
+            case SerializationError(reason): "Serialization error: {reason}"
+
+struct BuildResult:
+    """Result of a successful build."""
+    output_path: text
+    total_size: i64
+    code_size: i64
+    data_size: i64
+    symbol_count: i64
+    section_count: i64
+
+# ============================================================================
+# Settlement Builder
+# ============================================================================
+
+class SettlementBuilder:
+    """Builds SSMF files from linked settlement containers.
+
+    Build pipeline:
+    1. Validate container is linked
+    2. Collect code sections from all modules (in load order)
+    3. Collect data sections
+    4. Build unified symbol table with relocated addresses
+    5. Build string table for symbol names
+    6. Write SSMF file: header + sections + tables + trailer
+    """
+    config: BuilderConfig
+    code_sections: [CodeSection]
+    data_sections: [DataSection]
+    symbols: [SymbolEntry]
+    string_table: [u8]
+    string_offsets: Dict<text, i64>   # name -> offset in string table
+    next_string_offset: i64
+
+impl SettlementBuilder:
+    static fn create(config: BuilderConfig) -> SettlementBuilder:
+        SettlementBuilder(
+            config: config,
+            code_sections: [],
+            data_sections: [],
+            symbols: [],
+            string_table: [],
+            string_offsets: {},
+            next_string_offset: 0
+        )
+
+    me add_string(s: text) -> i64:
+        """Add a string to the string table, returning its offset."""
+        if self.string_offsets.contains(s):
+            return self.string_offsets[s]
+
+        val offset = self.next_string_offset
+        self.string_offsets[s] = offset
+
+        # Append string bytes + null terminator
+        var i = 0
+        while i < s.len():
+            self.string_table.push(s[i] as u8)
+            i = i + 1
+        self.string_table.push(0)
+        self.next_string_offset = self.next_string_offset + s.len() + 1
+        offset
+
+    me build(container: SettlementContainer) -> Result<BuildResult, BuildError>:
+        """Build SSMF from a linked container."""
+        if not container.is_linked:
+            return Err(BuildError.ContainerNotLinked)
+
+        if container.module_count() == 0:
+            return Err(BuildError.NoModules)
+
+        # Check entry point exists
+        val entry = container.linker.get_export(self.config.entry_point)
+        if not entry.?:
+            return Err(BuildError.NoEntryPoint(self.config.entry_point))
+
+        val load_order = container.get_load_order()
+
+        # Phase 1: Collect code and data from modules
+        var total_code_size = 0i64
+        var total_data_size = 0i64
+
+        for module_id in load_order:
+            val mod_entry = container.get_module(module_id)
+            if mod_entry.?:
+                val m = mod_entry.unwrap()
+                # Add exports to symbol list
+                for sym in m.exports:
+                    if self.config.strip_internals and sym.visibility == SymbolVisibility.Internal:
+                        continue
+                    val name_offset = self.add_string(sym.name)
+                    self.symbols.push(sym)
+
+        debug("settlement", "Build: {self.symbols.len()} symbols, {load_order.len()} modules")
+
+        # Phase 2: Serialize to SSMF format
+        val output_bytes = self.serialize_ssmf(entry.unwrap())
+
+        val result = BuildResult(
+            output_path: self.config.output_path,
+            total_size: output_bytes.len(),
+            code_size: total_code_size,
+            data_size: total_data_size,
+            symbol_count: self.symbols.len(),
+            section_count: self.code_sections.len() + self.data_sections.len() + 2
+        )
+
+        Ok(result)
+
+    fn serialize_ssmf(entry_point: SymbolEntry) -> [u8]:
+        """Serialize all collected data into SSMF byte format."""
+        var output: [u8] = []
+
+        # Write magic: "SSMF"
+        output.push(0x53)  # S
+        output.push(0x53)  # S
+        output.push(0x4D)  # M
+        output.push(0x46)  # F
+
+        # Write version: 1.0
+        output.push(1)
+        output.push(0)
+
+        # Write platform/arch
+        output.push(0)  # Platform placeholder
+        output.push(0)  # Arch placeholder
+
+        # Write section count (u32 LE)
+        val section_count = self.code_sections.len() + self.data_sections.len() + 2
+        write_u32_le(output, section_count as u32)
+
+        # Write symbol count (u32 LE)
+        write_u32_le(output, self.symbols.len() as u32)
+
+        # Write entry point address (u64 LE)
+        write_u64_le(output, entry_point.address)
+
+        # Reserved (fill to 64-byte header)
+        while output.len() < 64:
+            output.push(0)
+
+        # Write string table section
+        for b in self.string_table:
+            output.push(b)
+
+        # Write symbol table section
+        for sym in self.symbols:
+            val name_offset = self.string_offsets[sym.name] ?? 0
+            write_u32_le(output, name_offset as u32)
+            write_u64_le(output, sym.address)
+            write_u64_le(output, sym.size)
+            # Visibility + binding flags
+            val vis_flag = match sym.visibility:
+                case Public: 0u8
+                case Internal: 1u8
+                case Hidden: 2u8
+            val bind_flag = match sym.binding:
+                case Strong: 0u8
+                case Weak: 1u8
+                case Lazy: 2u8
+            output.push(vis_flag)
+            output.push(bind_flag)
+            # Padding to 24 bytes per entry
+            output.push(0)
+            output.push(0)
+
+        output
+
+struct CodeSection:
+    """A code section from a module."""
+    module_id: text
+    offset: i64
+    data: [u8]
+
+struct DataSection:
+    """A data section from a module."""
+    module_id: text
+    offset: i64
+    data: [u8]
+    is_writable: bool
+
+# ============================================================================
+# Byte Writing Helpers
+# ============================================================================
+
+fn write_u32_le(output: [u8], value: u32):
+    """Write u32 in little-endian format."""
+    output.push((value & 0xFF) as u8)
+    output.push(((value >> 8) & 0xFF) as u8)
+    output.push(((value >> 16) & 0xFF) as u8)
+    output.push(((value >> 24) & 0xFF) as u8)
+
+fn write_u64_le(output: [u8], value: i64):
+    """Write u64/i64 in little-endian format."""
+    output.push((value & 0xFF) as u8)
+    output.push(((value >> 8) & 0xFF) as u8)
+    output.push(((value >> 16) & 0xFF) as u8)
+    output.push(((value >> 24) & 0xFF) as u8)
+    output.push(((value >> 32) & 0xFF) as u8)
+    output.push(((value >> 40) & 0xFF) as u8)
+    output.push(((value >> 48) & 0xFF) as u8)
+    output.push(((value >> 56) & 0xFF) as u8)
