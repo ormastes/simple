@@ -196,8 +196,14 @@ impl ExecCore {
             return;
         }
 
+        // Only show Hint/Info level messages when there are actual errors or warnings
+        let has_errors = hints.iter().any(|h| matches!(h.level, ErrorHintLevel::Error | ErrorHintLevel::Warning));
+
         // Display hints to stderr
         for hint in hints {
+            if !has_errors && matches!(hint.level, ErrorHintLevel::Hint | ErrorHintLevel::Info) {
+                continue;
+            }
             let level_str = match hint.level {
                 ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",     // red
                 ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow

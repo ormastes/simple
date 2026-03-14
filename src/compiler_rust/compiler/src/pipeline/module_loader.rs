@@ -22,8 +22,14 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     let allow_deprecated =
         std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok() || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
 
+    // Only show Hint/Info level messages when there are actual errors or warnings
+    let has_errors = hints.iter().any(|h| matches!(h.level, ErrorHintLevel::Error | ErrorHintLevel::Warning));
+
     // Display hints to stderr
     for hint in hints {
+        if !has_errors && matches!(hint.level, ErrorHintLevel::Hint | ErrorHintLevel::Info) {
+            continue;
+        }
         // Skip deprecation warnings if --allow-deprecated is set
         if allow_deprecated && hint.level == ErrorHintLevel::Warning && hint.message.contains("Deprecated syntax") {
             continue;
