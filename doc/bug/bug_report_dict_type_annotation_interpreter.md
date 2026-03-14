@@ -71,6 +71,11 @@ fn has_bp(key: text) -> bool:
 - **DAP test files**: Multiple test files under `test/feature/dap/` require typed empty dicts for breakpoint tracking, variable watches, and session state
 - **Any interpreter-mode code** that needs an initially-empty dict with a known key/value type
 - Forces use of dummy-seeded dicts or array-based workarounds, which obscure intent
+- **Struct/class field types**: `Dict<K,V>` and `{K: V}` type annotations on struct/class fields are also resolved as `bool`, making any struct with dict fields unusable in interpreter mode (confirmed 2026-03-14 with `duplicate_check/detector.spl` TokenInterner)
+- **Module-level dict vars**: Even seeded dicts (`var d = {"key": 0}`) lose their type when accessed inside functions, causing "cannot index assign value of type bool" at runtime
+- **Module-level array vars**: Also lose type — `.push()` on `[i64]` fails with "method not found on i64"
+- **Blocks duplicate-check tool**: The `bin/simple build duplication` command is completely blocked by this bug (TokenInterner struct has dict fields)
+- **Stale .smf files**: When .spl sources are edited to work around this bug, stale .smf compiled files may shadow the fixes (see WATCHER-SMF-001)
 
 ## Environment
 
@@ -80,5 +85,7 @@ fn has_bp(key: text) -> bool:
 
 ## Related
 
+- `WATCHER-SMF-001` — stale .smf files shadow .spl source edits
 - Module-level dict variables also lose type when accessed via `dict[key]` inside functions (separate but related issue)
+- Module-level array variables also lose type (`.push()` on `[i64]` fails with "method not found on i64")
 - The interpreter evaluates `{}` as a block/expression rather than as a dict literal when no entries are present
