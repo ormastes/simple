@@ -1,10 +1,12 @@
 #!/usr/bin/env simple
 # Standalone duplicate checker — NO app.io imports (avoids loading entire compiler)
+# Perf: O(n log n) via sort+group instead of O(n²) pairwise comparison
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_walk(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_text_to_bytes(s: text) -> [i64]
 
 fn file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""
@@ -14,119 +16,210 @@ fn dir_walk(path: text) -> [text]:
 
 fn collect_spl_files(dir_path: text) -> [text]:
     val all_files = dir_walk(dir_path)
-    var spl_files: [text] = []
+    var spl_files = []
     for f in all_files:
         if f.ends_with(".spl") and not f.ends_with("_spec.spl") and not f.ends_with("_test.spl") and not f.contains("/test/"):
             spl_files.push(f)
     spl_files
 
+# DJB2 hash using rt_text_to_bytes (avoids broken .bytes() in interpreter)
 fn hash_line(line: text) -> i64:
     val trimmed = line.trim()
-    # Simple hash using len + first/last chars as discriminator
-    var h = trimmed.len() * 7919
-    if trimmed.len() > 0:
-        h = h + trimmed[0:1].len() * 31
-    if trimmed.len() > 3:
-        h = h + trimmed[1:2].len() * 37
-    h % 1000000007
+    if trimmed.len() == 0:
+        return 0
+    val codes = rt_text_to_bytes(trimmed)
+    var h = 5381
+    var i = 0
+    while i < codes.len():
+        h = ((h * 33) + codes[i]) % 1000000007
+        i = i + 1
+    h
 
 fn find_duplicates(files: [text], min_lines: i64):
     print "Scanning {files.len()} files for {min_lines}+ line duplicates..."
 
-    # Build line hash sequences per file
-    var total_groups = 0
-    var total_dup_lines = 0
+    # Phase 1: Collect all windows with their combined hashes
+    # Store as parallel arrays (hash, file_index, start_line)
+    var w_hashes = []
+    var w_file_idx = []
+    var w_starts = []
 
-    # Collect all line-hash windows across all files
-    # Key: concatenated hash of N consecutive lines -> list of (file, start_line)
-    var window_hashes: [i64] = []
-    var window_files: [text] = []
-    var window_starts: [i64] = []
+    # Cache file contents (read each file only once)
+    var file_contents = []     # file_index -> content
+    var file_lines_cache = []  # file_index -> lines (list of lists)
 
+    var file_idx = 0
     for file_path in files:
         val content = file_read(file_path)
+        file_contents.push(content)
         val lines = content.split("\n")
+        file_lines_cache.push(lines)
 
-        if lines.len() < min_lines:
-            continue
+        if lines.len() >= min_lines:
+            var line_idx = 0
+            while line_idx <= lines.len() - min_lines:
+                # Compute rolling hash of min_lines consecutive non-blank lines
+                var combined = 0
+                var all_blank = true
+                var k = 0
+                while k < min_lines:
+                    val line = lines[line_idx + k]
+                    if line.trim().len() > 0:
+                        all_blank = false
+                    combined = (combined * 31 + hash_line(line)) % 1000000007
+                    k = k + 1
 
-        var line_idx = 0
-        while line_idx <= lines.len() - min_lines:
-            # Compute combined hash of min_lines consecutive lines
-            var combined = 0
-            var all_blank = true
-            var k = 0
-            while k < min_lines:
-                val line = lines[line_idx + k]
-                if line.trim().len() > 0:
-                    all_blank = false
-                combined = (combined * 31 + hash_line(lines[line_idx + k])) % 1000000007
-                k = k + 1
+                if not all_blank:
+                    w_hashes.push(combined)
+                    w_file_idx.push(file_idx)
+                    w_starts.push(line_idx + 1)
 
-            if not all_blank:
-                window_hashes.push(combined)
-                window_files.push(file_path)
-                window_starts.push(line_idx + 1)
+                line_idx = line_idx + 1
 
-            line_idx = line_idx + 1
+        file_idx = file_idx + 1
 
-    print "Computed {window_hashes.len()} windows"
+    val n = w_hashes.len()
+    print "Computed {n} windows from {files.len()} files"
 
-    # Find matching hashes (O(n^2) but works for small sets)
-    var reported: [text] = []
+    # Phase 2: Sort indices by hash for O(n log n) grouping
+    # Create index array and sort by hash value
+    var indices = []
+    var idx = 0
+    while idx < n:
+        indices.push(idx)
+        idx = idx + 1
+
+    # Simple merge sort on indices by w_hashes[index]
+    indices = merge_sort(indices, w_hashes)
+
+    # Phase 3: Walk sorted indices, group consecutive equal hashes
+    var total_groups = 0
+    var total_dup_lines = 0
     var i = 0
-    while i < window_hashes.len():
-        var j = i + 1
-        while j < window_hashes.len():
-            if window_hashes[i] == window_hashes[j]:
-                # Same file + overlapping range = skip
-                if window_files[i] == window_files[j]:
-                    val diff = window_starts[j] - window_starts[i]
-                    if diff < min_lines and diff > -min_lines:
-                        j = j + 1
-                        continue
 
-                val key = "{window_hashes[i]}:{window_files[i]}:{window_starts[i]}"
-                var already = false
-                for r in reported:
-                    if r == key:
-                        already = true
-                        break
-                if not already:
-                    total_groups = total_groups + 1
-                    total_dup_lines = total_dup_lines + min_lines
-                    reported.push(key)
+    while i < n:
+        val current_hash = w_hashes[indices[i]]
 
-                    print ""
-                    print "Duplicate #{total_groups} ({min_lines} lines):"
-                    print "  A: {window_files[i]}:{window_starts[i]}-{window_starts[i] + min_lines - 1}"
-                    print "  B: {window_files[j]}:{window_starts[j]}-{window_starts[j] + min_lines - 1}"
+        # Find end of group with same hash
+        var group_end = i + 1
+        while group_end < n and w_hashes[indices[group_end]] == current_hash:
+            group_end = group_end + 1
 
-                    # Show code preview
-                    val content_a = file_read(window_files[i])
-                    val lines_a = content_a.split("\n")
-                    var preview_k = 0
-                    while preview_k < min_lines and preview_k < 3:
-                        val idx = window_starts[i] - 1 + preview_k
-                        if idx < lines_a.len():
-                            print "    {lines_a[idx]}"
-                        preview_k = preview_k + 1
-                    if min_lines > 3:
-                        print "    ..."
+        val group_size = group_end - i
 
-            j = j + 1
+        # Only process groups with 2+ entries (potential duplicates)
+        if group_size >= 2 and group_size <= 100:
+            # Check pairs within group — verify they're cross-file or non-overlapping
+            var gi = i
+            while gi < group_end:
+                var gj = gi + 1
+                while gj < group_end:
+                    val idx_a = indices[gi]
+                    val idx_b = indices[gj]
+                    val file_a = w_file_idx[idx_a]
+                    val file_b = w_file_idx[idx_b]
+                    val start_a = w_starts[idx_a]
+                    val start_b = w_starts[idx_b]
 
-        # Progress every 1000
-        if i % 1000 == 0 and i > 0:
-            print "  ... checked {i}/{window_hashes.len()} windows"
+                    # Skip same-file overlapping windows
+                    var should_skip = false
+                    if file_a == file_b:
+                        val diff = start_b - start_a
+                        if diff < min_lines and diff > (0 - min_lines):
+                            should_skip = true
 
-        i = i + 1
+                    if not should_skip:
+                        # Verify actual content match (not just hash collision)
+                        val lines_a = file_lines_cache[file_a]
+                        val lines_b = file_lines_cache[file_b]
+                        var is_match = true
+                        var mk = 0
+                        while mk < min_lines:
+                            val idx_la = start_a - 1 + mk
+                            val idx_lb = start_b - 1 + mk
+                            var la = ""
+                            var lb = ""
+                            if idx_la < lines_a.len():
+                                la = lines_a[idx_la]
+                            if idx_lb < lines_b.len():
+                                lb = lines_b[idx_lb]
+                            if la.trim() != lb.trim():
+                                is_match = false
+                                break
+                            mk = mk + 1
+
+                        if is_match:
+                            total_groups = total_groups + 1
+                            total_dup_lines = total_dup_lines + min_lines
+
+                            print ""
+                            print "Duplicate #{total_groups} ({min_lines} lines):"
+                            print "  A: {files[file_a]}:{start_a}-{start_a + min_lines - 1}"
+                            print "  B: {files[file_b]}:{start_b}-{start_b + min_lines - 1}"
+
+                            # Preview from cached content (no re-read)
+                            var pk = 0
+                            while pk < min_lines and pk < 3:
+                                val pidx = start_a - 1 + pk
+                                if pidx < lines_a.len():
+                                    print "    {lines_a[pidx]}"
+                                pk = pk + 1
+                            if min_lines > 3:
+                                print "    ..."
+
+                    gj = gj + 1
+                gi = gi + 1
+
+        i = group_end
 
     print ""
     print "=== Summary ==="
     print "Files scanned: {files.len()}"
     print "Duplicate groups: {total_groups}"
     print "Total duplicated lines: {total_dup_lines}"
+
+# Merge sort: returns sorted index array by values[index]
+fn merge_sort(arr: [i64], values: [i64]) -> [i64]:
+    if arr.len() <= 1:
+        return arr
+
+    val mid = arr.len() / 2
+    var left = []
+    var right = []
+
+    var i = 0
+    while i < mid:
+        left.push(arr[i])
+        i = i + 1
+    while i < arr.len():
+        right.push(arr[i])
+        i = i + 1
+
+    left = merge_sort(left, values)
+    right = merge_sort(right, values)
+    merge(left, right, values)
+
+fn merge(left: [i64], right: [i64], values: [i64]) -> [i64]:
+    var result = []
+    var li = 0
+    var ri = 0
+
+    while li < left.len() and ri < right.len():
+        if values[left[li]] <= values[right[ri]]:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+
+    result
 
 fn main():
     val args = rt_cli_get_args()
