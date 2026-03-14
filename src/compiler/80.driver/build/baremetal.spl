@@ -18,6 +18,7 @@ enum BaremetalTarget:
     Arm           # ARM Cortex-M (versatilepb in QEMU)
     X86_64        # x86_64 with multiboot2
     Riscv         # RISC-V 64-bit (virt machine)
+    Riscv32       # RISC-V 32-bit (virt machine)
 
 # Bare-metal build configuration
 class BaremetalConfig:
@@ -51,12 +52,23 @@ impl BaremetalConfig:
             alloc_allowed: false
         )
 
-    # Create RISC-V config
+    # Create RISC-V 64-bit config
     static fn riscv() -> BaremetalConfig:
         BaremetalConfig(
             target: BaremetalTarget.Riscv,
             output_dir: "build/baremetal-riscv",
             linker_script: "src/compiler/70.backend/baremetal/riscv/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/riscv/crt0.s",
+            entry_point: "_start",
+            alloc_allowed: false
+        )
+
+    # Create RISC-V 32-bit config
+    static fn riscv32() -> BaremetalConfig:
+        BaremetalConfig(
+            target: BaremetalTarget.Riscv32,
+            output_dir: "build/baremetal-riscv32",
+            linker_script: "src/lib/nogc_async_mut_noalloc/baremetal/riscv32/linker.ld",
             crt0_path: "src/compiler/70.backend/baremetal/riscv/crt0.s",
             entry_point: "_start",
             alloc_allowed: false
@@ -83,6 +95,7 @@ impl BaremetalConfig:
             case BaremetalTarget.Arm: "armv7m-none-eabi"
             case BaremetalTarget.X86_64: "x86_64-unknown-none"
             case BaremetalTarget.Riscv: "riscv64gc-unknown-none-elf"
+            case BaremetalTarget.Riscv32: "riscv32-unknown-none-elf"
 
 # Factory functions (exported)
 fn baremetal_config_arm() -> BaremetalConfig:
@@ -93,6 +106,9 @@ fn baremetal_config_x86_64() -> BaremetalConfig:
 
 fn baremetal_config_riscv() -> BaremetalConfig:
     BaremetalConfig.riscv()
+
+fn baremetal_config_riscv32() -> BaremetalConfig:
+    BaremetalConfig.riscv32()
 
 # Bare-metal builder
 class BaremetalBuilder:
@@ -289,6 +305,8 @@ impl BaremetalBuilder:
                 ["--target=x86_64-unknown-none-elf"]
             case BaremetalTarget.Riscv:
                 ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d"]
+            case BaremetalTarget.Riscv32:
+                ["--target=riscv32-unknown-elf", "-march=rv32imc", "-mabi=ilp32"]
 
     fn llc_args(ir_file: text, obj_file: text) -> [text]:
         var args = ["--filetype=obj", "--relocation-model=static", "-mtriple", self.config.target_triple(), ir_file, "-o", obj_file]
@@ -299,6 +317,9 @@ impl BaremetalBuilder:
             case BaremetalTarget.Riscv:
                 args.push("-march=riscv64")
                 args.push("-mattr=+m,+a,+f,+d,+c")
+            case BaremetalTarget.Riscv32:
+                args.push("-march=riscv32")
+                args.push("-mattr=+m,+c")
             case _: ()
         args
 
@@ -317,6 +338,7 @@ impl QemuRunner:
             case BaremetalTarget.Arm: "qemu-system-arm"
             case BaremetalTarget.X86_64: "qemu-system-x86_64"
             case BaremetalTarget.Riscv: "qemu-system-riscv64"
+            case BaremetalTarget.Riscv32: "qemu-system-riscv32"
 
     # Build QEMU command line arguments
     fn build_args(kernel_path: text) -> [text]:
@@ -329,6 +351,8 @@ impl QemuRunner:
                 args = ["-kernel", kernel_path, "-serial", "stdio", "-display", "none", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
             case BaremetalTarget.Riscv:
                 args = ["-M", "virt", "-bios", "none", "-nographic", "-serial", "stdio", "-kernel", kernel_path]
+            case BaremetalTarget.Riscv32:
+                args = ["-M", "virt", "-bios", "none", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel", kernel_path]
 
         args
 
