@@ -156,6 +156,20 @@ A path stack (`shb_generation_push` / `shb_generation_pop`) tracks modules curre
 
 Source: `src/compiler/80.driver/shb/shb_extractor.spl`
 
+### Generation States
+
+Each module tracks an explicit generation state (`shb_extractor.spl:83-87`):
+
+| State | Constant | Meaning |
+|-------|----------|---------|
+| `"missing"` | `SHB_STATE_MISSING` | No SHB exists on disk |
+| `"generating-interface"` | `SHB_STATE_GENERATING` | Interface extraction in progress (on generation stack) |
+| `"interface-ready"` | `SHB_STATE_READY` | SHB written and valid; interface hash available |
+| `"stale"` | `SHB_STATE_STALE` | SHB exists but source or dependency hash mismatch |
+| `"failed"` | `SHB_STATE_FAILED` | Generation attempted but failed |
+
+When module `A` needs `B`'s interface and `B` is in `"generating-interface"` state, the system consumes the last-known-fresh SHB if one exists. This breaks cycles without requiring body evaluation.
+
 ### Interface-First Loading
 
 The circular dependency model separates interface extraction from body-sensitive runtime loading:
@@ -222,7 +236,8 @@ This ensures compilation never fails due to SHB unavailability; it only loses th
 | `src/compiler/80.driver/shb/shb_extractor.spl` | AST-to-SHB extraction, generation paths |
 | `src/compiler/80.driver/shb/shb_reader.spl` | Binary reader, lazy section decoding |
 | `src/compiler/80.driver/shb/shb_writer.spl` | Binary writer |
-| `src/compiler/80.driver/shb/shb_hash.spl` | Source and interface hash computation |
+| `src/compiler/80.driver/shb/shb_hash.spl` | FNV-1a source and interface hash computation |
+| `src/compiler/80.driver/shb/shb_string_table.spl` | String table encoding for SHB sections |
 | `src/compiler/80.driver/shb/shb_cache.spl` | Cache manager, three-level validation |
 | `src/compiler/80.driver/watcher/watcher_client.spl` | Watcher integration, get-or-generate |
 | `src/compiler/99.loader/loader/module_loader.spl` | Loader-side SHB preflight |

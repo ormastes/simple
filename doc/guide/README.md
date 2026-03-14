@@ -42,6 +42,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
+| [tooling/shb.md](tooling/shb.md) | SHB binary format — module interface caching, generation, consumers |
 
 ## FFI
 
