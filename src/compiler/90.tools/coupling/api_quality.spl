@@ -1,0 +1,335 @@
+# Public API Quality Metrics
+#
+# Measures the quality and complexity of a module's public API surface.
+# Includes PSS (Public Surface Size), EUR (External Usage Ratio),
+# normalized entropy, and a weighted API complexity index.
+
+# ============================================================================
+# Math Helpers (avoid import dependency on std.math for tool modules)
+# ============================================================================
+
+extern fn rt_math_log(x: f64) -> f64
+
+fn _ln(x: f64) -> f64:
+    """Natural logarithm via runtime FFI."""
+    rt_math_log(x)
+
+fn _log2(x: f64) -> f64:
+    """Base-2 logarithm: log2(x) = ln(x) / ln(2)."""
+    val ln2 = 0.6931471805599453
+    _ln(x) / ln2
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct MethodUsage:
+    method_name: text
+    external_call_count: i64
+
+struct PublicAPIMetrics:
+    module_name: text
+    public_method_count: i64
+    public_field_count: i64
+    total_method_count: i64
+    total_field_count: i64
+    pss: i64                    # Public Surface Size = pub methods + pub fields
+    public_ratio: f64           # pss / total members
+    avg_param_count: f64
+    max_param_count: i64
+    overload_groups: i64        # count of overloaded method name groups
+    eur: f64                    # External Usage Ratio
+    entropy: f64                # Normalized API entropy
+    api_complexity: f64         # Weighted composite index
+
+# ============================================================================
+# Individual Metric Computations
+# ============================================================================
+
+fn compute_pss(pub_methods: i64, pub_fields: i64) -> i64:
+    """Public Surface Size = public methods + public fields."""
+    pub_methods + pub_fields
+
+fn compute_public_ratio(pss: i64, total: i64) -> f64:
+    """Ratio of public surface to total members."""
+    if total == 0:
+        return 0.0
+    pss.to_f64() / total.to_f64()
+
+fn compute_avg_param_count(param_counts: [i64]) -> f64:
+    """Average parameter count across all public methods."""
+    if param_counts.len() == 0:
+        return 0.0
+    var sum = 0
+    for c in param_counts:
+        sum = sum + c
+    sum.to_f64() / param_counts.len().to_f64()
+
+fn compute_max_param_count(param_counts: [i64]) -> i64:
+    """Maximum parameter count across all public methods."""
+    var max_val = 0
+    for c in param_counts:
+        if c > max_val:
+            max_val = c
+    max_val
+
+fn compute_overload_groups(method_names: [text]) -> i64:
+    """Count how many method names appear more than once (overload groups).
+
+    An overload group is a name that has 2+ methods with the same base name.
+    This counts the number of such distinct names.
+    """
+    # Count occurrences of each name
+    var name_counts: {text: i64} = {}
+    for name in method_names:
+        if name_counts.contains_key(name):
+            name_counts[name] = name_counts[name] + 1
+        else:
+            name_counts[name] = 1
+
+    # Count names with > 1 occurrence
+    var groups = 0
+    for (_, count) in name_counts:
+        if count > 1:
+            groups = groups + 1
+    groups
+
+fn compute_eur(usages: [MethodUsage], total_public: i64) -> f64:
+    """External Usage Ratio = fraction of public methods actually used externally.
+
+    EUR = (number of public methods with >= 1 external call) / total_public
+    """
+    if total_public == 0:
+        return 0.0
+    var used_count = 0
+    for u in usages:
+        if u.external_call_count > 0:
+            used_count = used_count + 1
+    used_count.to_f64() / total_public.to_f64()
+
+fn compute_entropy(usages: [MethodUsage]) -> f64:
+    """Normalized Shannon entropy of external usage distribution.
+
+    Measures how evenly distributed the external calls are across methods.
+    Returns 0.0 if no usage, 1.0 if perfectly uniform.
+    Higher entropy = more balanced API usage = healthier.
+    """
+    # Filter to methods with > 0 external calls and compute total
+    var total = 0
+    var used_count = 0
+    for u in usages:
+        if u.external_call_count > 0:
+            total = total + u.external_call_count
+            used_count = used_count + 1
+
+    if total == 0:
+        return 0.0
+
+    if used_count <= 1:
+        return 0.0
+
+    # Compute Shannon entropy: H = -sum(p * log2(p))
+    var entropy = 0.0
+    val total_f = total.to_f64()
+
+    for u in usages:
+        if u.external_call_count > 0:
+            val p = u.external_call_count.to_f64() / total_f
+            entropy = entropy - p * _log2(p)
+
+    # Normalize by log2(k) where k = number of used methods
+    val max_entropy = _log2(used_count.to_f64())
+    if max_entropy == 0.0:
+        return 0.0
+    entropy / max_entropy
+
+fn compute_api_complexity(metrics: PublicAPIMetrics) -> f64:
+    """Weighted composite API complexity index.
+
+    Higher values indicate more complex/harder-to-use API.
+    Components:
+      - PSS (30%): larger surface = more complexity
+      - avg_param_count (20%): more params = harder methods
+      - overload_groups (10%): overloads add confusion
+      - dead_surface (20%): 1 - EUR, unused public methods
+      - usage_imbalance (20%): 1 - entropy, uneven usage
+    """
+    val w1 = 0.3   # PSS weight
+    val w2 = 0.2   # avg param count weight
+    val w3 = 0.1   # overload confusion weight
+    val w4 = 0.2   # dead surface weight (1 - EUR)
+    val w5 = 0.2   # usage imbalance weight (1 - entropy)
+
+    val pss_norm = metrics.pss.to_f64() / 20.0
+    val param_norm = metrics.avg_param_count / 5.0
+    val overload_norm = metrics.overload_groups.to_f64() / 5.0
+    val dead_surface = 1.0 - metrics.eur
+    val usage_imbalance = 1.0 - metrics.entropy
+
+    w1 * pss_norm + w2 * param_norm + w3 * overload_norm + w4 * dead_surface + w5 * usage_imbalance
+
+# ============================================================================
+# Combined Computation
+# ============================================================================
+
+fn compute_api_quality(
+    module_name: text,
+    pub_methods: i64,
+    pub_fields: i64,
+    total_methods: i64,
+    total_fields: i64,
+    param_counts: [i64],
+    method_names: [text],
+    usages: [MethodUsage]
+) -> PublicAPIMetrics:
+    """Compute all API quality metrics for a module."""
+    val pss = compute_pss(pub_methods, pub_fields)
+    val total = total_methods + total_fields
+    val public_ratio = compute_public_ratio(pss, total)
+    val avg_params = compute_avg_param_count(param_counts)
+    val max_params = compute_max_param_count(param_counts)
+    val overloads = compute_overload_groups(method_names)
+    val eur = compute_eur(usages, pss)
+    val entropy = compute_entropy(usages)
+
+    var metrics = PublicAPIMetrics(
+        module_name: module_name,
+        public_method_count: pub_methods,
+        public_field_count: pub_fields,
+        total_method_count: total_methods,
+        total_field_count: total_fields,
+        pss: pss,
+        public_ratio: public_ratio,
+        avg_param_count: avg_params,
+        max_param_count: max_params,
+        overload_groups: overloads,
+        eur: eur,
+        entropy: entropy,
+        api_complexity: 0.0
+    )
+
+    # Compute composite after all fields are set
+    val complexity = compute_api_complexity(metrics)
+    metrics = PublicAPIMetrics(
+        module_name: module_name,
+        public_method_count: pub_methods,
+        public_field_count: pub_fields,
+        total_method_count: total_methods,
+        total_field_count: total_fields,
+        pss: pss,
+        public_ratio: public_ratio,
+        avg_param_count: avg_params,
+        max_param_count: max_params,
+        overload_groups: overloads,
+        eur: eur,
+        entropy: entropy,
+        api_complexity: complexity
+    )
+
+    metrics
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn format_f64(val_f: f64, decimals: i64) -> text:
+    """Format f64 with limited decimal places (simple truncation approach)."""
+    val multiplier = _pow10(decimals)
+    val scaled = (val_f * multiplier.to_f64()).to_i64()
+    val int_part = scaled / multiplier
+    val frac_part = scaled % multiplier
+    var frac_abs = frac_part
+    if frac_abs < 0:
+        frac_abs = -frac_abs
+    var frac_str = "{frac_abs}"
+    # Pad with leading zeros if needed
+    while frac_str.len() < decimals:
+        frac_str = "0{frac_str}"
+    "{int_part}.{frac_str}"
+
+fn _pow10(n: i64) -> i64:
+    """Compute 10^n for small n."""
+    var result = 1
+    var i = 0
+    while i < n:
+        result = result * 10
+        i = i + 1
+    result
+
+fn api_quality_to_text(m: PublicAPIMetrics) -> text:
+    """Format API quality metrics as readable text."""
+    var lines: [text] = []
+    lines.push("Module: {m.module_name}")
+    lines.push("  Public Surface Size (PSS): {m.pss} ({m.public_method_count} methods, {m.public_field_count} fields)")
+    lines.push("  Total members: {m.total_method_count + m.total_field_count} ({m.total_method_count} methods, {m.total_field_count} fields)")
+    lines.push("  Public ratio: {format_f64(m.public_ratio, 3)}")
+    lines.push("  Avg param count: {format_f64(m.avg_param_count, 2)}")
+    lines.push("  Max param count: {m.max_param_count}")
+    lines.push("  Overload groups: {m.overload_groups}")
+    lines.push("  EUR (External Usage Ratio): {format_f64(m.eur, 3)}")
+    lines.push("  Entropy (normalized): {format_f64(m.entropy, 3)}")
+    lines.push("  API Complexity: {format_f64(m.api_complexity, 3)}")
+
+    # Quality assessment
+    if m.api_complexity < 0.3:
+        lines.push("  Assessment: GOOD - low complexity, well-designed API")
+    else if m.api_complexity < 0.6:
+        lines.push("  Assessment: MODERATE - some complexity, review suggested")
+    else:
+        lines.push("  Assessment: HIGH - complex API, consider simplification")
+
+    if m.eur < 0.5 and m.pss > 5:
+        lines.push("  NOTE: low EUR ({format_f64(m.eur, 2)}) — many public methods are unused externally")
+
+    if m.entropy < 0.3 and m.pss > 3:
+        lines.push("  NOTE: low entropy ({format_f64(m.entropy, 2)}) — usage is concentrated on few methods")
+
+    lines.join("\n")
+
+fn api_quality_report(metrics_list: [PublicAPIMetrics]) -> text:
+    """Generate a full API quality report for multiple modules."""
+    var lines: [text] = []
+    lines.push("# API Quality Report")
+    lines.push("# ==================")
+    lines.push("")
+
+    var total_modules = 0
+    var good_count = 0
+    var moderate_count = 0
+    var high_count = 0
+
+    for m in metrics_list:
+        lines.push(api_quality_to_text(m))
+        lines.push("")
+        total_modules = total_modules + 1
+        if m.api_complexity < 0.3:
+            good_count = good_count + 1
+        else if m.api_complexity < 0.6:
+            moderate_count = moderate_count + 1
+        else:
+            high_count = high_count + 1
+
+    lines.push("# Summary")
+    lines.push("# -------")
+    lines.push("# Total modules: {total_modules}")
+    lines.push("# Good (complexity < 0.3): {good_count}")
+    lines.push("# Moderate (0.3 - 0.6): {moderate_count}")
+    lines.push("# High (> 0.6): {high_count}")
+
+    lines.join("\n")
+
+# Exports
+export MethodUsage
+export PublicAPIMetrics
+export compute_pss
+export compute_public_ratio
+export compute_avg_param_count
+export compute_max_param_count
+export compute_overload_groups
+export compute_eur
+export compute_entropy
+export compute_api_complexity
+export compute_api_quality
+export format_f64
+export api_quality_to_text
+export api_quality_report

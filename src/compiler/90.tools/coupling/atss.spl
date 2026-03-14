@@ -1,0 +1,374 @@
+# Argument Type Set Similarity (ATSS) — Cross-function type-set comparison
+#
+# Detects functions with similar parameter type signatures, which indicates
+# potential coupling or API design issues. Uses sorted type vectors and
+# edit distance to find near-duplicate function signatures.
+#
+# W0509: Functions with similar parameter type sets
+#
+# Algorithm:
+# 1. Extract sorted type vectors from function parameter registries
+# 2. Hash type vectors for fast exact-match grouping
+# 3. Generate deletion variants for near-match detection
+# 4. Report pairs within edit distance threshold
+
+use compiler.core.ast.{
+    DECL_FN, decl_tag, decl_name, decl_params, decl_param_types
+}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct ATSSWarning:
+    code: text
+    severity: text
+    message: text
+    fn1_name: text
+    fn2_name: text
+    fn1_types: [text]
+    fn2_types: [text]
+    edit_distance: i64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message}"
+
+# ============================================================================
+# Type Vector
+# ============================================================================
+
+struct TypeVector:
+    fn_name: text
+    types: [text]
+    hash: i64
+
+# ============================================================================
+# Function Registry (mirrors duplicate_typed_args pattern)
+# ============================================================================
+
+var _atss_fn_param_names: {text: [text]} = {}
+var _atss_fn_param_types: {text: [text]} = {}
+
+fn collect_functions_for_atss(decl_indices: [i64]):
+    """Pass 1: Collect function definitions and their parameter info."""
+    _atss_fn_param_names = {}
+    _atss_fn_param_types = {}
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag == DECL_FN:
+            val name = decl_name[idx]
+            val params = decl_params[idx]
+            val types = decl_param_types[idx]
+            _atss_fn_param_names[name] = params
+            _atss_fn_param_types[name] = types
+
+# ============================================================================
+# Sorting Helper
+# ============================================================================
+
+fn sort_texts(items: [text]) -> [text]:
+    """Merge sort for text arrays."""
+    if items.len() <= 1:
+        return items
+    val mid = items.len() / 2
+    var left: [text] = []
+    var right: [text] = []
+    var i = 0
+    while i < mid:
+        left.push(items[i])
+        i = i + 1
+    while i < items.len():
+        right.push(items[i])
+        i = i + 1
+    left = sort_texts(left)
+    right = sort_texts(right)
+    _merge_texts(left, right)
+
+fn _merge_texts(left: [text], right: [text]) -> [text]:
+    var result: [text] = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        if left[li] <= right[ri]:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
+
+# ============================================================================
+# Hash Computation
+# ============================================================================
+
+fn compute_type_hash(types: [text]) -> i64:
+    """Compute a hash of a sorted type list for fast grouping."""
+    var hash = 0
+    val base = 31
+    val prime = 1000000007
+    for ty in types:
+        val bytes = ty.bytes()
+        var char_sum = 0
+        var j = 0
+        while j < bytes.len():
+            char_sum = char_sum + bytes[j]
+            j = j + 1
+        hash = (hash * base + char_sum) % prime
+    hash
+
+# ============================================================================
+# Type Vector Extraction
+# ============================================================================
+
+fn extract_type_vectors(fn_names: {text: [text]}, fn_types: {text: [text]}) -> [TypeVector]:
+    """Extract sorted type vectors from the function parameter registries."""
+    var vectors: [TypeVector] = []
+    for name in fn_types.keys():
+        val raw_types = fn_types[name]
+        # Filter out empty type strings
+        var non_empty: [text] = []
+        for ty in raw_types:
+            if ty != "" and ty != "?":
+                non_empty.push(ty)
+        # Skip functions with no typed parameters
+        if non_empty.len() == 0:
+            continue
+        val sorted = sort_texts(non_empty)
+        val h = compute_type_hash(sorted)
+        vectors.push(TypeVector(fn_name: name, types: sorted, hash: h))
+    vectors
+
+# ============================================================================
+# Edit Distance
+# ============================================================================
+
+fn type_set_edit_distance(a: [text], b: [text]) -> i64:
+    """Compute minimum additions/removals to transform sorted type set a into b.
+
+    Both inputs must be sorted. Uses a merge-like comparison:
+    - If elements match, advance both pointers (no cost).
+    - If a[i] < b[j], a[i] needs removal (cost 1, advance i).
+    - If a[i] > b[j], b[j] needs addition (cost 1, advance j).
+    - Remaining elements in either array are extra additions/removals.
+    """
+    var i = 0
+    var j = 0
+    var dist = 0
+    while i < a.len() and j < b.len():
+        if a[i] == b[j]:
+            i = i + 1
+            j = j + 1
+        else if a[i] < b[j]:
+            dist = dist + 1
+            i = i + 1
+        else:
+            dist = dist + 1
+            j = j + 1
+    dist = dist + (a.len() - i) + (b.len() - j)
+    dist
+
+# ============================================================================
+# Deletion Variant Generation
+# ============================================================================
+
+fn generate_deletion_variants(types: [text]) -> [[text]]:
+    """Generate all 1-deletion variants of a sorted type list.
+
+    For a list of length N, produces N variants, each with one element removed.
+    """
+    var variants: [[text]] = []
+    var skip_idx = 0
+    while skip_idx < types.len():
+        var variant: [text] = []
+        var i = 0
+        while i < types.len():
+            if i != skip_idx:
+                variant.push(types[i])
+            i = i + 1
+        variants.push(variant)
+        skip_idx = skip_idx + 1
+    variants
+
+# ============================================================================
+# Warning Builder
+# ============================================================================
+
+fn make_atss_warning(v1: TypeVector, v2: TypeVector, dist: i64) -> ATSSWarning:
+    """Build an ATSSWarning for a pair of functions with similar type signatures."""
+    val msg = if dist == 0:
+        "functions '{v1.fn_name}' and '{v2.fn_name}' have identical parameter type sets [{v1.types.join(\", \")}]"
+    else:
+        "functions '{v1.fn_name}' and '{v2.fn_name}' have similar parameter type sets (edit distance {dist})"
+    ATSSWarning(
+        code: "W0509",
+        severity: "WARNING",
+        message: msg,
+        fn1_name: v1.fn_name,
+        fn2_name: v2.fn_name,
+        fn1_types: v1.types,
+        fn2_types: v2.types,
+        edit_distance: dist
+    )
+
+# ============================================================================
+# Similar Signature Detection
+# ============================================================================
+
+fn find_similar_signatures(vectors: [TypeVector], threshold: i64) -> [ATSSWarning]:
+    """Find pairs of functions with similar parameter type sets.
+
+    Phase 1: Group by exact hash for edit_distance == 0 matches.
+    Phase 2: For threshold >= 1, generate 1-deletion variants, hash them,
+             and check candidate pairs via full edit distance.
+    """
+    var warnings: [ATSSWarning] = []
+
+    # Phase 1: Exact hash grouping
+    var hash_groups: {text: [i64]} = {}
+    var vi = 0
+    while vi < vectors.len():
+        val key = "{vectors[vi].hash}"
+        if hash_groups.contains_key(key):
+            hash_groups[key].push(vi)
+        else:
+            hash_groups[key] = [vi]
+        vi = vi + 1
+
+    # Report exact duplicates from same-hash groups
+    # (verify with actual type comparison to avoid hash collisions)
+    var reported_pairs: {text: bool} = {}
+    for key in hash_groups.keys():
+        val group = hash_groups[key]
+        if group.len() >= 2:
+            var gi = 0
+            while gi < group.len():
+                var gj = gi + 1
+                while gj < group.len():
+                    val v1 = vectors[group[gi]]
+                    val v2 = vectors[group[gj]]
+                    val dist = type_set_edit_distance(v1.types, v2.types)
+                    if dist <= threshold:
+                        # Deduplicate: use sorted pair key
+                        val pair_key = if v1.fn_name < v2.fn_name:
+                            "{v1.fn_name}|{v2.fn_name}"
+                        else:
+                            "{v2.fn_name}|{v1.fn_name}"
+                        if not reported_pairs.contains_key(pair_key):
+                            reported_pairs[pair_key] = true
+                            warnings.push(make_atss_warning(v1, v2, dist))
+                    gj = gj + 1
+                gi = gi + 1
+
+    # Phase 2: Deletion-variant near-match detection (only if threshold >= 1)
+    if threshold >= 1:
+        # Build deletion variant index: hash(variant) -> [(vector_index, original_types)]
+        var deletion_index: {text: [i64]} = {}
+        var di = 0
+        while di < vectors.len():
+            val vec = vectors[di]
+            # Only generate variants for vectors with > 1 type
+            if vec.types.len() > 1:
+                val variants = generate_deletion_variants(vec.types)
+                for variant in variants:
+                    val variant_hash = compute_type_hash(variant)
+                    val dkey = "{variant_hash}"
+                    if deletion_index.contains_key(dkey):
+                        deletion_index[dkey].push(di)
+                    else:
+                        deletion_index[dkey] = [di]
+            di = di + 1
+
+        # Also index the original vectors by their hash in the deletion index
+        # so that a vector of size N-1 can match a deletion variant of size N
+        var orig_by_hash: {text: [i64]} = {}
+        var oi = 0
+        while oi < vectors.len():
+            val oh = "{vectors[oi].hash}"
+            if orig_by_hash.contains_key(oh):
+                orig_by_hash[oh].push(oi)
+            else:
+                orig_by_hash[oh] = [oi]
+            oi = oi + 1
+
+        # For each deletion variant group, find candidate pairs
+        for dkey in deletion_index.keys():
+            val candidates = deletion_index[dkey]
+            # Also check original vectors with same hash
+            if orig_by_hash.contains_key(dkey):
+                val orig_candidates = orig_by_hash[dkey]
+                for oc in orig_candidates:
+                    for dc in candidates:
+                        if oc != dc:
+                            val v1 = vectors[oc]
+                            val v2 = vectors[dc]
+                            val pair_key = if v1.fn_name < v2.fn_name:
+                                "{v1.fn_name}|{v2.fn_name}"
+                            else:
+                                "{v2.fn_name}|{v1.fn_name}"
+                            if not reported_pairs.contains_key(pair_key):
+                                val dist = type_set_edit_distance(v1.types, v2.types)
+                                if dist <= threshold:
+                                    reported_pairs[pair_key] = true
+                                    warnings.push(make_atss_warning(v1, v2, dist))
+
+            # Also check pairs within deletion candidates sharing a variant hash
+            if candidates.len() >= 2:
+                var ci = 0
+                while ci < candidates.len():
+                    var cj = ci + 1
+                    while cj < candidates.len():
+                        val v1 = vectors[candidates[ci]]
+                        val v2 = vectors[candidates[cj]]
+                        val pair_key = if v1.fn_name < v2.fn_name:
+                            "{v1.fn_name}|{v2.fn_name}"
+                        else:
+                            "{v2.fn_name}|{v1.fn_name}"
+                        if not reported_pairs.contains_key(pair_key):
+                            val dist = type_set_edit_distance(v1.types, v2.types)
+                            if dist <= threshold:
+                                reported_pairs[pair_key] = true
+                                warnings.push(make_atss_warning(v1, v2, dist))
+                        cj = cj + 1
+                    ci = ci + 1
+
+    warnings
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_atss(decl_indices: [i64], threshold: i64) -> [ATSSWarning]:
+    """Run ATSS analysis on module declarations.
+
+    1. Collect function definitions into the parameter registry.
+    2. Extract sorted type vectors from all functions.
+    3. Find similar signatures within the edit distance threshold.
+    4. Return warnings for detected similarities.
+    """
+    # Pass 1: collect functions into registry
+    collect_functions_for_atss(decl_indices)
+
+    # Pass 2: extract type vectors
+    val vectors = extract_type_vectors(_atss_fn_param_names, _atss_fn_param_types)
+
+    # Pass 3: find similar signatures
+    val warnings = find_similar_signatures(vectors, threshold)
+
+    warnings
+
+# Exports
+export ATSSWarning
+export TypeVector
+export type_set_edit_distance
+export find_similar_signatures
+export check_atss
+export extract_type_vectors
+export compute_type_hash
+export generate_deletion_variants

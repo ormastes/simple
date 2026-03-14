@@ -1,0 +1,364 @@
+# Dependency Structure Matrix (DSM) - Visualization of module dependencies
+#
+# Builds an NxN matrix showing dependency counts between modules.
+# Supports alphabetical and layer-ordered output, with text, markdown,
+# and JSON formatters.
+
+use compiler.common.dependency.graph.{ImportGraph, ImportEdge}
+
+# A single entry in the DSM
+struct DSMEntry:
+    from_module: text
+    to_module: text
+    count: i64
+
+# The full DSM matrix
+struct DSMMatrix:
+    modules: [text]       # ordered list of module names
+    matrix: [[i64]]       # NxN matrix of dependency counts
+
+# ============================================================================
+# DSM Construction
+# ============================================================================
+
+# Build a DSM from an import graph, with modules sorted alphabetically
+fn build_dsm(graph: ImportGraph) -> DSMMatrix:
+    # Collect all unique module names
+    var module_set: Dict<text, bool> = {}
+    for module_name in graph.edges.keys():
+        module_set = module_set.set(module_name, true)
+        val deps = graph.edges.get(module_name)
+        if deps != nil:
+            var i = 0
+            while i < deps.len():
+                module_set = module_set.set(deps.get(i), true)
+                i = i + 1
+
+    # Sort alphabetically
+    var modules: [text] = []
+    for name in module_set.keys():
+        modules = modules.append(name)
+    modules.sort()
+
+    build_dsm_with_order(graph, modules)
+
+# Build a DSM with modules sorted by layer number (then alphabetically within layer)
+fn build_layer_ordered_dsm(graph: ImportGraph) -> DSMMatrix:
+    # Collect all unique module names
+    var module_set: Dict<text, bool> = {}
+    for module_name in graph.edges.keys():
+        module_set = module_set.set(module_name, true)
+        val deps = graph.edges.get(module_name)
+        if deps != nil:
+            var i = 0
+            while i < deps.len():
+                module_set = module_set.set(deps.get(i), true)
+                i = i + 1
+
+    var modules: [text] = []
+    for name in module_set.keys():
+        modules = modules.append(name)
+
+    # Sort by layer number, then alphabetically
+    modules = modules.sort_by(\a, b:
+        val la = get_layer_for_sort(a)
+        val lb = get_layer_for_sort(b)
+        if la != lb:
+            la - lb
+        else:
+            if a < b:
+                -1
+            elif a > b:
+                1
+            else:
+                0
+    )
+
+    build_dsm_with_order(graph, modules)
+
+# Extract layer number for sorting, defaulting to 999 for non-layer modules
+fn get_layer_for_sort(module_path: text) -> i64:
+    # Reuse the same logic as layer_check but inline to avoid circular deps
+    val parts = module_path.split("/")
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i)
+        if part.len() >= 2:
+            val first = part[0:1]
+            val second = part[1:2]
+            if is_dsm_digit(first) and is_dsm_digit(second):
+                val num_end = find_digit_end(part, 2)
+                val num_str = part[0:num_end]
+                val num = num_str.parse_int()
+                if num != nil:
+                    return num ?? 999
+        i = i + 1
+
+    # Try dot-separated paths
+    val dot_parts = module_path.split("\\.")
+    var j = 0
+    while j < dot_parts.len():
+        val part = dot_parts.get(j)
+        if part.len() >= 2:
+            val first = part[0:1]
+            val second = part[1:2]
+            if is_dsm_digit(first) and is_dsm_digit(second):
+                val num = part.parse_int()
+                if num != nil:
+                    return num ?? 999
+        j = j + 1
+
+    999
+
+fn find_digit_end(s: text, start: i64) -> i64:
+    var pos = start
+    while pos < s.len():
+        val ch = s[pos:pos + 1]
+        if not is_dsm_digit(ch):
+            return pos
+        pos = pos + 1
+    pos
+
+fn is_dsm_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+# Build the DSM matrix given a specific module ordering
+fn build_dsm_with_order(graph: ImportGraph, modules: [text]) -> DSMMatrix:
+    val n = modules.len()
+
+    # Build index map: module_name -> index
+    var index_map: Dict<text, i64> = {}
+    var idx = 0
+    while idx < n:
+        index_map = index_map.set(modules.get(idx), idx)
+        idx = idx + 1
+
+    # Initialize NxN matrix of zeros
+    var matrix: [[i64]] = []
+    var r = 0
+    while r < n:
+        var row: [i64] = []
+        var c = 0
+        while c < n:
+            row = row.append(0)
+            c = c + 1
+        matrix = matrix.append(row)
+        r = r + 1
+
+    # Fill the matrix from detailed_edges if available
+    if graph.detailed_edges.len() > 0:
+        var i = 0
+        while i < graph.detailed_edges.len():
+            val edge = graph.detailed_edges.get(i)
+            val from_idx = index_map.get(edge.from)
+            val to_idx = index_map.get(edge.to)
+            if from_idx != nil and to_idx != nil:
+                val fi = from_idx ?? 0
+                val ti = to_idx ?? 0
+                var row = matrix.get(fi)
+                val current = row.get(ti)
+                row = row.set(ti, current + 1)
+                matrix = matrix.set(fi, row)
+            i = i + 1
+    else:
+        # Fall back to edges dict (each entry counts as 1)
+        for module_name in graph.edges.keys():
+            val from_idx = index_map.get(module_name)
+            if from_idx == nil:
+                continue
+
+            val fi = from_idx ?? 0
+            val deps = graph.edges.get(module_name)
+            if deps == nil:
+                continue
+
+            var j = 0
+            while j < deps.len():
+                val target = deps.get(j)
+                val to_idx = index_map.get(target)
+                if to_idx != nil:
+                    val ti = to_idx ?? 0
+                    var row = matrix.get(fi)
+                    val current = row.get(ti)
+                    row = row.set(ti, current + 1)
+                    matrix = matrix.set(fi, row)
+                j = j + 1
+
+    DSMMatrix(modules: modules, matrix: matrix)
+
+# ============================================================================
+# DSM Formatting
+# ============================================================================
+
+# Format DSM as plain text table
+fn format_dsm_text(dsm: DSMMatrix) -> text:
+    val n = dsm.modules.len()
+    if n == 0:
+        return "(empty DSM)"
+
+    # Find max module name length for alignment
+    var max_name_len = 0
+    var i = 0
+    while i < n:
+        val name_len = dsm.modules.get(i).len()
+        if name_len > max_name_len:
+            max_name_len = name_len
+        i = i + 1
+
+    # Header row with column indices
+    var header = pad_right("", max_name_len + 2)
+    var col = 0
+    while col < n:
+        header = header + pad_left("{col}", 4)
+        col = col + 1
+    var result = header + "\n"
+
+    # Separator
+    var sep = pad_right("", max_name_len + 2)
+    var s = 0
+    while s < n:
+        sep = sep + "----"
+        s = s + 1
+    result = result + sep + "\n"
+
+    # Data rows
+    var row = 0
+    while row < n:
+        var line = pad_right(dsm.modules.get(row), max_name_len) + " |"
+        var c = 0
+        while c < n:
+            val v = dsm.matrix.get(row).get(c)
+            if v == 0:
+                line = line + "   ."
+            else:
+                line = line + pad_left("{v}", 4)
+            c = c + 1
+        result = result + line + "\n"
+        row = row + 1
+
+    # Legend
+    result = result + "\n# Legend: Row imports Column. Numbers = dependency count.\n"
+
+    # Module index
+    result = result + "\n# Module Index:\n"
+    var m = 0
+    while m < n:
+        result = result + "#   {m}: {dsm.modules.get(m)}\n"
+        m = m + 1
+
+    result
+
+# Format DSM as markdown table
+fn format_dsm_markdown(dsm: DSMMatrix) -> text:
+    val n = dsm.modules.len()
+    if n == 0:
+        return "_Empty DSM_\n"
+
+    # Shorten module names for readability
+    var short_names: [text] = []
+    var i = 0
+    while i < n:
+        val full = dsm.modules.get(i)
+        val parts = full.split("/")
+        val short = parts.get(parts.len() - 1)
+        short_names = short_names.append(short)
+        i = i + 1
+
+    # Header row
+    var header = "| Module |"
+    var sep_line = "|--------|"
+    var col = 0
+    while col < n:
+        header = header + " {col} |"
+        sep_line = sep_line + "----|"
+        col = col + 1
+    var result = header + "\n" + sep_line + "\n"
+
+    # Data rows
+    var row = 0
+    while row < n:
+        var line = "| **{short_names.get(row)}** |"
+        var c = 0
+        while c < n:
+            val v = dsm.matrix.get(row).get(c)
+            if v == 0:
+                line = line + " . |"
+            else:
+                line = line + " {v} |"
+            c = c + 1
+        result = result + line + "\n"
+        row = row + 1
+
+    # Legend
+    result = result + "\n**Legend:** Row imports Column\n\n"
+    result = result + "| Index | Module |\n|-------|--------|\n"
+    var m = 0
+    while m < n:
+        result = result + "| {m} | {dsm.modules.get(m)} |\n"
+        m = m + 1
+
+    result
+
+# Format DSM as JSON
+fn format_dsm_json(dsm: DSMMatrix) -> text:
+    val n = dsm.modules.len()
+
+    var result = "{\n"
+    result = result + "  \"modules\": ["
+    var i = 0
+    while i < n:
+        if i > 0:
+            result = result + ", "
+        result = result + "\"{dsm.modules.get(i)}\""
+        i = i + 1
+    result = result + "],\n"
+
+    result = result + "  \"matrix\": [\n"
+    var row = 0
+    while row < n:
+        result = result + "    ["
+        var c = 0
+        while c < n:
+            if c > 0:
+                result = result + ", "
+            result = result + "{dsm.matrix.get(row).get(c)}"
+            c = c + 1
+        result = result + "]"
+        if row < n - 1:
+            result = result + ","
+        result = result + "\n"
+        row = row + 1
+    result = result + "  ]\n"
+    result = result + "}"
+
+    result
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+# Pad a string on the right to a minimum length
+fn pad_right(s: text, min_len: i64) -> text:
+    var result = s
+    while result.len() < min_len:
+        result = result + " "
+    result
+
+# Pad a string on the left to a minimum length
+fn pad_left(s: text, min_len: i64) -> text:
+    var result = s
+    while result.len() < min_len:
+        result = " " + result
+    result
+
+# Exports
+export DSMEntry
+export DSMMatrix
+export build_dsm
+export build_layer_ordered_dsm
+export build_dsm_with_order
+export format_dsm_text
+export format_dsm_markdown
+export format_dsm_json
+export pad_right
+export pad_left

@@ -38,13 +38,93 @@ fn get_embedding(base_url: text, model: text, input_text: text) -> EmbeddingResu
     EmbeddingResult(vector: vec, error: "")
 
 fn get_embeddings_batch(base_url: text, model: text, texts: [text], batch_size: i64) -> [EmbeddingResult]:
+    """Batch embedding using Ollama's array input API for fewer HTTP round-trips."""
     var results: [EmbeddingResult] = []
     var i = 0
     while i < texts.len():
-        val result = get_embedding(base_url, model, texts[i])
-        results = results + [result]
-        i = i + 1
+        val end = (i + batch_size).min(texts.len())
+        var batch_texts: [text] = []
+        var j = i
+        while j < end:
+            batch_texts.push(texts[j])
+            j = j + 1
+        val batch_results = get_embeddings_array(base_url, model, batch_texts)
+        for r in batch_results:
+            results.push(r)
+        i = end
     results
+
+fn get_embeddings_array(base_url: text, model: text, texts: [text]) -> [EmbeddingResult]:
+    """Send multiple texts in one Ollama /api/embed request using array input."""
+    val url = base_url + "/api/embed"
+    var input_parts: [text] = []
+    for t in texts:
+        val escaped = escape_json(t)
+        input_parts.push(Q() + escaped + Q())
+    val input_array = "[" + input_parts.join(",") + "]"
+    val body = LB() + Q() + "model" + Q() + ":" + Q() + model + Q() + "," + Q() + "input" + Q() + ":" + input_array + RB()
+    val headers = "Content-Type: application/json"
+
+    val result = rt_http_request("POST", url, headers, body)
+    val (status, response_body, err) = result
+
+    if status != 200:
+        # Fall back to individual requests on error
+        var results: [EmbeddingResult] = []
+        for t in texts:
+            results.push(get_embedding(base_url, model, t))
+        return results
+
+    # Parse batch response: {"embeddings": [[...], [...], ...]}
+    val vecs = parse_batch_embeddings(response_body)
+    if vecs.len() != texts.len():
+        # Mismatch — fall back to individual requests
+        var results: [EmbeddingResult] = []
+        for t in texts:
+            results.push(get_embedding(base_url, model, t))
+        return results
+
+    var results: [EmbeddingResult] = []
+    for vec in vecs:
+        results.push(EmbeddingResult(vector: vec, error: ""))
+    results
+
+fn parse_batch_embeddings(json: text) -> [[f64]]:
+    """Parse Ollama response with multiple embedding arrays."""
+    val embed_key = Q() + "embeddings" + Q()
+    val key_idx = find_in_text(json, embed_key)
+    if key_idx < 0:
+        return []
+
+    # Find the outer '[' after "embeddings":
+    var i = key_idx + embed_key.len()
+    while i < json.len() and json[i:i+1] != "[":
+        i = i + 1
+    if i >= json.len():
+        return []
+    i = i + 1  # skip outer [
+
+    var all_vecs: [[f64]] = []
+    while i < json.len():
+        val ch = json[i:i+1]
+        if ch == "]":
+            break
+        if ch == "[":
+            val vec = parse_float_array_from(json, i + 1)
+            all_vecs.push(vec)
+            # Skip past matching ]
+            var depth = 1
+            i = i + 1
+            while i < json.len() and depth > 0:
+                val c = json[i:i+1]
+                if c == "[":
+                    depth = depth + 1
+                elif c == "]":
+                    depth = depth - 1
+                i = i + 1
+        else:
+            i = i + 1
+    all_vecs
 
 fn parse_embedding_response(json: text) -> [f64]:
     # Response format: {"embeddings":[[0.1, 0.2, ...]]}
@@ -135,9 +215,10 @@ fn parse_float_safe(s: text) -> f64:
         negative = true
         i = 1
 
+    val bytes = trimmed.bytes()
     while i < trimmed.len():
         val ch = trimmed[i:i+1]
-        val byte = trimmed.bytes()[i]
+        val byte = bytes[i]
         if byte >= 48 and byte <= 57:
             val digit = (byte - 48) * 1.0
             if decimal_place > 0:
@@ -183,8 +264,9 @@ fn parse_exponent(s: text) -> i64:
         i = 1
     elif s[0:1] == "+":
         i = 1
+    val bytes = s.bytes()
     while i < s.len():
-        val byte = s.bytes()[i]
+        val byte = bytes[i]
         if byte >= 48 and byte <= 57:
             result = result * 10 + (byte - 48)
         else:

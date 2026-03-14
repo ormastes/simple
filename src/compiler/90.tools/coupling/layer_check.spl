@@ -1,0 +1,163 @@
+# Layer Violation Detection - Enforces compiler layer ordering
+#
+# Compiler layers are numbered 00 < 10 < 15 < 20 < ... < 99.
+# Lower-numbered layers are foundation layers. Higher-numbered layers
+# should depend on lower-numbered layers. If a lower-numbered layer
+# depends on a higher-numbered layer, that is a violation.
+
+use compiler.common.dependency.graph.{ImportGraph, ImportEdge}
+
+# A layer ordering violation
+struct LayerViolation:
+    from_module: text   # the module that imports (lower layer = violation source)
+    to_module: text     # the module being imported (higher layer = violation target)
+    from_layer: i64     # layer number of the importing module
+    to_layer: i64       # layer number of the imported module
+
+# ============================================================================
+# Layer Number Extraction
+# ============================================================================
+
+# Extract a layer number from a module path.
+# Looks for a path component matching the pattern "NN.name" where NN is 1-3 digits.
+# Examples:
+#   "compiler/30.types/foo" -> Some(30)
+#   "compiler/00.common/bar" -> Some(0)
+#   "std/text/utils" -> nil (no numbered layer)
+fn extract_layer_number(module_path: text) -> Option<i64>:
+    # Split the path by "/" or "." separators to find numbered segments
+    # We look for segments like "00", "10", "15", "20" etc.
+    # A numbered compiler layer segment has format "NN.name" in the path
+    val parts = module_path.split("/")
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i)
+        val layer = try_parse_layer_segment(part)
+        if layer != nil:
+            return layer
+        i = i + 1
+
+    # Also try splitting by "." for dot-separated module paths like "compiler.common.dependency"
+    val dot_parts = module_path.split("\\.")
+    var j = 0
+    while j < dot_parts.len():
+        val part = dot_parts.get(j)
+        val layer = try_parse_layer_segment(part)
+        if layer != nil:
+            return layer
+        j = j + 1
+
+    nil
+
+# Try to parse a path segment as a layer number.
+# A layer segment looks like "NN" where NN is a 2-digit number,
+# or it appears as "NNname" where NN is digits followed by non-digits.
+# We check the segment for patterns like "00", "10", "15", etc.
+fn try_parse_layer_segment(segment: text) -> Option<i64>:
+    if segment.len() < 2:
+        return nil
+
+    # Check if first characters are digits followed by a dot or end
+    # Pattern: digits at the start
+    val first_char = segment[0:1]
+    val second_char = segment[1:2]
+
+    if not is_digit(first_char) or not is_digit(second_char):
+        return nil
+
+    # We have at least two leading digits. Extract the number part.
+    # Find where the digits end
+    var digit_end = 2
+    while digit_end < segment.len():
+        val ch = segment[digit_end:digit_end + 1]
+        if not is_digit(ch):
+            break
+        digit_end = digit_end + 1
+
+    # The segment must have non-digit content after the digits (e.g., "10frontend")
+    # or be all digits. For layer detection, we expect "NNname" or "NN"
+    # But actually layer dirs are "NN.name" which when split by "/" gives "NN.name"
+    # and when split by "." gives just "NN" (the number part)
+    val num_str = segment[0:digit_end]
+    val num = num_str.parse_int()
+    if num != nil:
+        return num
+
+    nil
+
+# Check if a single character is a digit
+fn is_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+# ============================================================================
+# Layer Violation Detection
+# ============================================================================
+
+# Find all layer violations in an import graph.
+# A violation occurs when a module in a lower-numbered layer depends on
+# a module in a higher-numbered layer (backward dependency).
+fn find_layer_violations(graph: ImportGraph) -> [LayerViolation]:
+    var violations: [LayerViolation] = []
+
+    var i = 0
+    while i < graph.detailed_edges.len():
+        val edge = graph.detailed_edges.get(i)
+        val from_layer = extract_layer_number(edge.from)
+        val to_layer = extract_layer_number(edge.to)
+
+        if from_layer != nil and to_layer != nil:
+            val from_num = from_layer ?? 0
+            val to_num = to_layer ?? 0
+
+            # Violation: lower layer (from) imports higher layer (to)
+            if from_num < to_num:
+                val v = LayerViolation(
+                    from_module: edge.from,
+                    to_module: edge.to,
+                    from_layer: from_num,
+                    to_layer: to_num
+                )
+                violations = violations.append(v)
+        i = i + 1
+
+    # If detailed_edges is empty, fall back to edges dict
+    if graph.detailed_edges.len() == 0:
+        for module_name in graph.edges.keys():
+            val from_layer = extract_layer_number(module_name)
+            if from_layer == nil:
+                continue
+
+            val from_num = from_layer ?? 0
+            val deps = graph.edges.get(module_name)
+            if deps == nil:
+                continue
+
+            var j = 0
+            while j < deps.len():
+                val target = deps.get(j)
+                val to_layer = extract_layer_number(target)
+                if to_layer != nil:
+                    val to_num = to_layer ?? 0
+                    if from_num < to_num:
+                        val v = LayerViolation(
+                            from_module: module_name,
+                            to_module: target,
+                            from_layer: from_num,
+                            to_layer: to_num
+                        )
+                        violations = violations.append(v)
+                j = j + 1
+
+    violations
+
+# Format a layer violation as a human-readable string
+fn format_violation(v: LayerViolation) -> text:
+    "Layer violation: {v.from_module} (layer {v.from_layer}) -> {v.to_module} (layer {v.to_layer})"
+
+# Exports
+export LayerViolation
+export extract_layer_number
+export try_parse_layer_segment
+export is_digit
+export find_layer_violations
+export format_violation

@@ -1,0 +1,325 @@
+# Gap-Tolerant Matching — Structural similarity with gap tolerance
+#
+# Finds matching subsequences between two token streams using rolling hash
+# on token kind ordinals, then merges adjacent matches separated by small
+# gaps (non-matching regions) into unified GapMatch results.
+#
+# This detects structural similarities even when code has been modified
+# with small insertions/deletions between matching blocks.
+
+use compiler.tools.coupling.relaxed_tokenizer.{
+    RelaxedToken, relaxed_rolling_hash, relaxed_power_mod
+}
+
+# ============================================================================
+# Match Block
+# ============================================================================
+
+struct MatchBlock:
+    start_line: i64
+    end_line: i64
+    is_gap: bool
+
+# ============================================================================
+# Gap Match
+# ============================================================================
+
+struct GapMatch:
+    blocks: [MatchBlock]
+    total_matching_lines: i64
+    total_gap_lines: i64
+
+# ============================================================================
+# Raw Match (internal)
+# ============================================================================
+
+struct RawSegment:
+    a_start: i64
+    a_end: i64
+    b_start: i64
+    b_end: i64
+    token_count: i64
+
+# ============================================================================
+# Sorting Helper
+# ============================================================================
+
+fn sort_raw_segments(segments: [RawSegment]) -> [RawSegment]:
+    """Merge sort raw segments by a_start."""
+    if segments.len() <= 1:
+        return segments
+    val mid = segments.len() / 2
+    var left: [RawSegment] = []
+    var right: [RawSegment] = []
+    var i = 0
+    while i < mid:
+        left.push(segments[i])
+        i = i + 1
+    while i < segments.len():
+        right.push(segments[i])
+        i = i + 1
+    left = sort_raw_segments(left)
+    right = sort_raw_segments(right)
+    _merge_raw_segments(left, right)
+
+fn _merge_raw_segments(left: [RawSegment], right: [RawSegment]) -> [RawSegment]:
+    var result: [RawSegment] = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        if left[li].a_start <= right[ri].a_start:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
+
+# ============================================================================
+# Raw Match Finding
+# ============================================================================
+
+fn find_raw_matches(tokens_a: [RelaxedToken], tokens_b: [RelaxedToken], min_match: i64) -> [RawSegment]:
+    """Find matching subsequences using rolling hash on token kind ordinals.
+
+    Builds a hash index from tokens_b, then scans tokens_a to find windows
+    with matching hashes. Verifies matches by comparing kind ordinals.
+    """
+    if tokens_a.len() < min_match or tokens_b.len() < min_match:
+        return []
+
+    val base = 7
+    val prime = 1000000007
+    val base_power = relaxed_power_mod(base, min_match - 1, prime)
+
+    # Build hash index for tokens_b
+    var b_index: {text: [i64]} = {}
+    var b_hash = 0
+    var bi = 0
+    while bi < min_match and bi < tokens_b.len():
+        b_hash = (b_hash * base + tokens_b[bi].kind_ordinal) % prime
+        bi = bi + 1
+
+    if tokens_b.len() >= min_match:
+        val bk = "{b_hash}"
+        b_index[bk] = [0]
+
+    var b_pos = 1
+    while b_pos + min_match <= tokens_b.len():
+        val old_ord = tokens_b[b_pos - 1].kind_ordinal
+        val new_ord = tokens_b[b_pos + min_match - 1].kind_ordinal
+        b_hash = (b_hash - (old_ord * base_power) % prime + prime) % prime
+        b_hash = (b_hash * base + new_ord) % prime
+        val bk = "{b_hash}"
+        if b_index.contains_key(bk):
+            b_index[bk].push(b_pos)
+        else:
+            b_index[bk] = [b_pos]
+        b_pos = b_pos + 1
+
+    # Scan tokens_a and match against B index
+    var segments: [RawSegment] = []
+    var a_hash = 0
+    var ai = 0
+    while ai < min_match and ai < tokens_a.len():
+        a_hash = (a_hash * base + tokens_a[ai].kind_ordinal) % prime
+        ai = ai + 1
+
+    var a_pos = 0
+    while a_pos + min_match <= tokens_a.len():
+        if a_pos > 0:
+            val old_ord = tokens_a[a_pos - 1].kind_ordinal
+            val new_ord = tokens_a[a_pos + min_match - 1].kind_ordinal
+            a_hash = (a_hash - (old_ord * base_power) % prime + prime) % prime
+            a_hash = (a_hash * base + new_ord) % prime
+
+        val ak = "{a_hash}"
+        if b_index.contains_key(ak):
+            val b_positions = b_index[ak]
+            for bp in b_positions:
+                # Verify match
+                var ok = true
+                var vi = 0
+                while vi < min_match:
+                    if tokens_a[a_pos + vi].kind_ordinal != tokens_b[bp + vi].kind_ordinal:
+                        ok = false
+                        break
+                    vi = vi + 1
+
+                if ok:
+                    # Try to extend match beyond min_match
+                    var ext = min_match
+                    while (a_pos + ext) < tokens_a.len() and (bp + ext) < tokens_b.len():
+                        if tokens_a[a_pos + ext].kind_ordinal != tokens_b[bp + ext].kind_ordinal:
+                            break
+                        ext = ext + 1
+
+                    val a_line_start = tokens_a[a_pos].line
+                    val a_line_end = tokens_a[a_pos + ext - 1].line
+                    val b_line_start = tokens_b[bp].line
+                    val b_line_end = tokens_b[bp + ext - 1].line
+
+                    segments.push(RawSegment(
+                        a_start: a_line_start,
+                        a_end: a_line_end,
+                        b_start: b_line_start,
+                        b_end: b_line_end,
+                        token_count: ext
+                    ))
+        a_pos = a_pos + 1
+
+    # Deduplicate overlapping segments: sort by a_start, then remove overlaps
+    val sorted = sort_raw_segments(segments)
+    var deduped: [RawSegment] = []
+    var prev_a_end = -1
+    for seg in sorted:
+        if seg.a_start > prev_a_end:
+            deduped.push(seg)
+            prev_a_end = seg.a_end
+        else:
+            # Keep the one with more tokens if overlapping
+            if deduped.len() > 0:
+                val last_idx = deduped.len() - 1
+                val last = deduped[last_idx]
+                if seg.token_count > last.token_count:
+                    deduped[last_idx] = seg
+                    prev_a_end = seg.a_end
+
+    deduped
+
+# ============================================================================
+# Gap-Tolerant Merging
+# ============================================================================
+
+fn merge_with_gaps(segments: [RawSegment], gap_tolerance: i64) -> [GapMatch]:
+    """Merge adjacent matching segments separated by <= gap_tolerance non-matching lines.
+
+    For each group of mergeable segments, builds alternating MatchBlock entries:
+    - Matching blocks (is_gap = false) for actual matches.
+    - Gap blocks (is_gap = true) for small non-matching regions between matches.
+    """
+    if segments.len() == 0:
+        return []
+
+    val sorted = sort_raw_segments(segments)
+
+    var results: [GapMatch] = []
+    var current_group: [RawSegment] = [sorted[0]]
+
+    var i = 1
+    while i < sorted.len():
+        val prev = current_group[current_group.len() - 1]
+        val curr = sorted[i]
+
+        # Gap in A between prev.a_end and curr.a_start
+        val gap_a = curr.a_start - prev.a_end - 1
+        # Gap in B between prev.b_end and curr.b_start
+        val gap_b = curr.b_start - prev.b_end - 1
+
+        # Use the maximum gap as the effective gap
+        val effective_gap = if gap_a > gap_b: gap_a else: gap_b
+
+        if effective_gap >= 0 and effective_gap <= gap_tolerance:
+            # Merge into current group
+            current_group.push(curr)
+        else:
+            # Finalize current group and start new one
+            val gm = build_gap_match(current_group)
+            results.push(gm)
+            current_group = [curr]
+        i = i + 1
+
+    # Finalize last group
+    val last_gm = build_gap_match(current_group)
+    results.push(last_gm)
+
+    results
+
+fn build_gap_match(segments: [RawSegment]) -> GapMatch:
+    """Build a GapMatch from a group of consecutive RawSegments.
+
+    Creates alternating MatchBlock and gap MatchBlock entries.
+    """
+    var blocks: [MatchBlock] = []
+    var total_matching = 0
+    var total_gap = 0
+
+    var i = 0
+    while i < segments.len():
+        val seg = segments[i]
+
+        # Add gap block if there is a gap between previous and current segment
+        if i > 0:
+            val prev = segments[i - 1]
+            val gap_lines = seg.a_start - prev.a_end - 1
+            if gap_lines > 0:
+                blocks.push(MatchBlock(
+                    start_line: prev.a_end + 1,
+                    end_line: seg.a_start - 1,
+                    is_gap: true
+                ))
+                total_gap = total_gap + gap_lines
+
+        # Add matching block
+        val match_lines = seg.a_end - seg.a_start + 1
+        blocks.push(MatchBlock(
+            start_line: seg.a_start,
+            end_line: seg.a_end,
+            is_gap: false
+        ))
+        total_matching = total_matching + match_lines
+
+        i = i + 1
+
+    GapMatch(
+        blocks: blocks,
+        total_matching_lines: total_matching,
+        total_gap_lines: total_gap
+    )
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn find_with_gap_tolerance(tokens_a: [RelaxedToken], tokens_b: [RelaxedToken], min_match: i64, gap_tolerance: i64) -> [GapMatch]:
+    """Find structural similarities between two token streams with gap tolerance.
+
+    Algorithm:
+    1. Find matching subsequences using rolling hash on token kind ordinals.
+    2. For adjacent matches separated by <= gap_tolerance non-matching lines,
+       merge into one GapMatch.
+    3. Each GapMatch contains alternating MatchBlocks (matching and gap).
+    4. Report if total_matching_lines >= min_match.
+    """
+    # Find raw matching segments
+    val raw_segments = find_raw_matches(tokens_a, tokens_b, min_match)
+
+    if raw_segments.len() == 0:
+        return []
+
+    # Merge with gap tolerance
+    val gap_matches = merge_with_gaps(raw_segments, gap_tolerance)
+
+    # Filter: only keep matches with enough total matching lines
+    var filtered: [GapMatch] = []
+    for gm in gap_matches:
+        if gm.total_matching_lines >= min_match:
+            filtered.push(gm)
+
+    filtered
+
+# Exports
+export MatchBlock
+export GapMatch
+export RawSegment
+export find_raw_matches
+export merge_with_gaps
+export build_gap_match
+export find_with_gap_tolerance
+export sort_raw_segments

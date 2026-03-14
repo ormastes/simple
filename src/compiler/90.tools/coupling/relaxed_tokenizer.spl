@@ -1,0 +1,295 @@
+# Relaxed Tokenizer — Token-kind-only normalization for coupling analysis
+#
+# Wraps the existing tokenizer to provide token-kind-only normalization,
+# discarding identifier names and literal values. This enables structural
+# similarity detection that is insensitive to naming differences.
+#
+# Used by the gap matcher for cross-file structural comparison.
+
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize}
+use compiler.tools.duplicate_check.config.{DuplicationConfig}
+
+# ============================================================================
+# Relaxed Token
+# ============================================================================
+
+struct RelaxedToken:
+    kind_ordinal: i64
+    line: i64
+    column: i64
+
+# ============================================================================
+# Relaxed Match Result
+# ============================================================================
+
+struct RelaxedMatch:
+    file_a_line_start: i64
+    file_a_line_end: i64
+    file_b_line_start: i64
+    file_b_line_end: i64
+    matching_tokens: i64
+    gap_lines: i64
+
+# ============================================================================
+# Token Kind Ordinal Mapping
+# ============================================================================
+
+fn token_kind_ordinal(kind: SimpleTokenKind) -> i64:
+    """Map SimpleTokenKind enum to integer ordinal for hashing."""
+    match kind:
+        SimpleTokenKind.Identifier: 0
+        SimpleTokenKind.Keyword: 1
+        SimpleTokenKind.Operator: 2
+        SimpleTokenKind.Literal: 3
+        SimpleTokenKind.Punctuation: 4
+        SimpleTokenKind.Comment: 5
+        SimpleTokenKind.Whitespace: 6
+
+# ============================================================================
+# Token Conversion
+# ============================================================================
+
+fn to_relaxed_tokens(tokens: [SimpleToken]) -> [RelaxedToken]:
+    """Convert SimpleTokens to RelaxedTokens, filtering out whitespace and comments.
+
+    Only keeps the kind ordinal and position, discarding all value information.
+    """
+    var result: [RelaxedToken] = []
+    for t in tokens:
+        if t.kind != SimpleTokenKind.Whitespace and t.kind != SimpleTokenKind.Comment:
+            result.push(RelaxedToken(
+                kind_ordinal: token_kind_ordinal(t.kind),
+                line: t.line,
+                column: t.column
+            ))
+    result
+
+# ============================================================================
+# Relaxed Rolling Hash
+# ============================================================================
+
+fn relaxed_rolling_hash(tokens: [RelaxedToken], start: i64, window: i64) -> i64:
+    """Compute rolling hash over token kind ordinals for a window of tokens.
+
+    Uses a simple polynomial hash: hash = sum(ordinal * base^i) % prime.
+    """
+    var hash = 0
+    val base = 7
+    val prime = 1000000007
+    var i = 0
+    while i < window and (start + i) < tokens.len():
+        hash = (hash * base + tokens[start + i].kind_ordinal) % prime
+        i = i + 1
+    hash
+
+# ============================================================================
+# Hash Power Helper
+# ============================================================================
+
+fn relaxed_power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
+    """Compute base^exp % mod_val using fast exponentiation."""
+    var result = 1
+    var b = base % mod_val
+    var e = exp
+    while e > 0:
+        if e % 2 == 1:
+            result = (result * b) % mod_val
+        b = (b * b) % mod_val
+        e = e / 2
+    result
+
+# ============================================================================
+# Relaxed Duplicate Detection
+# ============================================================================
+
+fn find_relaxed_duplicates(source_a: text, source_b: text, config: DuplicationConfig, min_tokens: i64) -> [RelaxedMatch]:
+    """Find structural duplicates between two source texts using token-kind-only comparison.
+
+    Algorithm:
+    1. Tokenize both sources and convert to relaxed tokens.
+    2. For each window of min_tokens in source_a, compute rolling hash.
+    3. Build a hash index from source_b windows.
+    4. Match windows by hash, then verify kind ordinal sequences.
+    5. Merge adjacent matches and compute gap lines.
+    """
+    # Tokenize and convert
+    val tokens_a_raw = tokenize(source_a, config)
+    val tokens_b_raw = tokenize(source_b, config)
+    val tokens_a = to_relaxed_tokens(tokens_a_raw)
+    val tokens_b = to_relaxed_tokens(tokens_b_raw)
+
+    if tokens_a.len() < min_tokens or tokens_b.len() < min_tokens:
+        return []
+
+    val base = 7
+    val prime = 1000000007
+    val base_power = relaxed_power_mod(base, min_tokens - 1, prime)
+
+    # Build hash index for source_b windows
+    var b_hash_index: {text: [i64]} = {}
+    var b_hash = 0
+    var bi = 0
+    # Compute initial hash for first window in B
+    while bi < min_tokens and bi < tokens_b.len():
+        b_hash = (b_hash * base + tokens_b[bi].kind_ordinal) % prime
+        bi = bi + 1
+
+    if tokens_b.len() >= min_tokens:
+        val bkey0 = "{b_hash}"
+        b_hash_index[bkey0] = [0]
+
+    var b_pos = 1
+    while b_pos + min_tokens <= tokens_b.len():
+        val old_ord = tokens_b[b_pos - 1].kind_ordinal
+        val new_ord = tokens_b[b_pos + min_tokens - 1].kind_ordinal
+        b_hash = (b_hash - (old_ord * base_power) % prime + prime) % prime
+        b_hash = (b_hash * base + new_ord) % prime
+        val bkey = "{b_hash}"
+        if b_hash_index.contains_key(bkey):
+            b_hash_index[bkey].push(b_pos)
+        else:
+            b_hash_index[bkey] = [b_pos]
+        b_pos = b_pos + 1
+
+    # Scan source_a windows and match against B index
+    var raw_matches: [RelaxedMatch] = []
+
+    var a_hash = 0
+    var ai = 0
+    while ai < min_tokens and ai < tokens_a.len():
+        a_hash = (a_hash * base + tokens_a[ai].kind_ordinal) % prime
+        ai = ai + 1
+
+    var a_pos = 0
+    while a_pos + min_tokens <= tokens_a.len():
+        if a_pos > 0:
+            val old_ord = tokens_a[a_pos - 1].kind_ordinal
+            val new_ord = tokens_a[a_pos + min_tokens - 1].kind_ordinal
+            a_hash = (a_hash - (old_ord * base_power) % prime + prime) % prime
+            a_hash = (a_hash * base + new_ord) % prime
+
+        val akey = "{a_hash}"
+        if b_hash_index.contains_key(akey):
+            val b_positions = b_hash_index[akey]
+            for bp in b_positions:
+                # Verify token kind sequence matches
+                var match_ok = true
+                var vi = 0
+                while vi < min_tokens:
+                    if tokens_a[a_pos + vi].kind_ordinal != tokens_b[bp + vi].kind_ordinal:
+                        match_ok = false
+                        break
+                    vi = vi + 1
+
+                if match_ok:
+                    val a_line_start = tokens_a[a_pos].line
+                    val a_end_idx = a_pos + min_tokens - 1
+                    val a_line_end = tokens_a[a_end_idx].line
+                    val b_line_start = tokens_b[bp].line
+                    val b_end_idx = bp + min_tokens - 1
+                    val b_line_end = tokens_b[b_end_idx].line
+                    raw_matches.push(RelaxedMatch(
+                        file_a_line_start: a_line_start,
+                        file_a_line_end: a_line_end,
+                        file_b_line_start: b_line_start,
+                        file_b_line_end: b_line_end,
+                        matching_tokens: min_tokens,
+                        gap_lines: 0
+                    ))
+        a_pos = a_pos + 1
+
+    # Merge overlapping/adjacent matches
+    val merged = merge_relaxed_matches(raw_matches)
+    merged
+
+# ============================================================================
+# Match Merging
+# ============================================================================
+
+fn merge_relaxed_matches(matches: [RelaxedMatch]) -> [RelaxedMatch]:
+    """Merge overlapping or adjacent relaxed matches.
+
+    Sort by file_a_line_start, then merge consecutive matches where
+    the next match starts within or adjacent to the current match.
+    """
+    if matches.len() <= 1:
+        return matches
+
+    # Sort by file_a_line_start using merge sort
+    val sorted = sort_relaxed_matches(matches)
+
+    var merged: [RelaxedMatch] = []
+    var current = sorted[0]
+    var i = 1
+    while i < sorted.len():
+        val next = sorted[i]
+        # Check if next overlaps or is adjacent in both files
+        val a_adjacent = next.file_a_line_start <= current.file_a_line_end + 1
+        val b_adjacent = next.file_b_line_start <= current.file_b_line_end + 1
+        if a_adjacent and b_adjacent:
+            # Merge: extend the current match
+            val new_a_end = if next.file_a_line_end > current.file_a_line_end: next.file_a_line_end else: current.file_a_line_end
+            val new_b_end = if next.file_b_line_end > current.file_b_line_end: next.file_b_line_end else: current.file_b_line_end
+            val new_tokens = current.matching_tokens + next.matching_tokens
+            current = RelaxedMatch(
+                file_a_line_start: current.file_a_line_start,
+                file_a_line_end: new_a_end,
+                file_b_line_start: current.file_b_line_start,
+                file_b_line_end: new_b_end,
+                matching_tokens: new_tokens,
+                gap_lines: 0
+            )
+        else:
+            merged.push(current)
+            current = next
+        i = i + 1
+    merged.push(current)
+    merged
+
+fn sort_relaxed_matches(matches: [RelaxedMatch]) -> [RelaxedMatch]:
+    """Merge sort relaxed matches by file_a_line_start."""
+    if matches.len() <= 1:
+        return matches
+    val mid = matches.len() / 2
+    var left: [RelaxedMatch] = []
+    var right: [RelaxedMatch] = []
+    var i = 0
+    while i < mid:
+        left.push(matches[i])
+        i = i + 1
+    while i < matches.len():
+        right.push(matches[i])
+        i = i + 1
+    left = sort_relaxed_matches(left)
+    right = sort_relaxed_matches(right)
+    _merge_relaxed(left, right)
+
+fn _merge_relaxed(left: [RelaxedMatch], right: [RelaxedMatch]) -> [RelaxedMatch]:
+    var result: [RelaxedMatch] = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        if left[li].file_a_line_start <= right[ri].file_a_line_start:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
+
+# Exports
+export RelaxedToken
+export RelaxedMatch
+export token_kind_ordinal
+export to_relaxed_tokens
+export relaxed_rolling_hash
+export relaxed_power_mod
+export find_relaxed_duplicates
+export merge_relaxed_matches
+export sort_relaxed_matches

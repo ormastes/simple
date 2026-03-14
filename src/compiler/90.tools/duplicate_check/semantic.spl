@@ -4,7 +4,7 @@
 
 use app.duplicate_check.config.{DuplicationConfig}
 use app.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, extract_docs_from_directory, build_embedding_key, content_hash}
-use app.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
+use app.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding, get_embeddings_batch}
 use app.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, get_cached, set_cached, csv_to_floats, floats_to_csv}
 use app.duplicate_check.detector.{collect_files}
 use std.text.{levenshtein_distance}
@@ -77,8 +77,13 @@ fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> Semant
     if config.rebuild_embeddings:
         cache = load_embedding_cache("/dev/null/nonexistent", config.semantic_model)
 
-    # Get embeddings for all documented entries
+    # Get embeddings: check cache first, batch-fetch uncached from Ollama
     var embeddings: [[f64]] = []
+    var uncached_indices: [i64] = []
+    var uncached_texts: [text] = []
+    var uncached_keys: [text] = []
+    var uncached_hashes: [text] = []
+
     var embed_idx = 0
     while embed_idx < documented.len():
         val entry = documented[embed_idx]
@@ -86,22 +91,31 @@ fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> Semant
         val emb_text = build_embedding_key(entry)
         val hash = content_hash(emb_text)
 
-        # Check cache first
         val cached_csv = get_cached(cache, emb_key, hash)
         if cached_csv.len() > 0:
             val vec = csv_to_floats(cached_csv)
-            embeddings = embeddings + [vec]
+            embeddings.push(vec)
         else:
-            # Fetch from Ollama
-            val result = get_embedding(config.ollama_url, config.semantic_model, emb_text)
-            if result.error.len() == 0 and result.vector.len() > 0:
-                val csv = floats_to_csv(result.vector)
-                set_cached(cache, emb_key, hash, csv)
-                embeddings = embeddings + [result.vector]
-            else:
-                embeddings = embeddings + [[]]
+            embeddings.push([])
+            uncached_indices.push(embed_idx)
+            uncached_texts.push(emb_text)
+            uncached_keys.push(emb_key)
+            uncached_hashes.push(hash)
 
         embed_idx = embed_idx + 1
+
+    # Batch fetch uncached embeddings (fewer HTTP round-trips)
+    if uncached_texts.len() > 0:
+        val batch_results = get_embeddings_batch(config.ollama_url, config.semantic_model, uncached_texts, 32)
+        var ri = 0
+        while ri < batch_results.len() and ri < uncached_indices.len():
+            val idx = uncached_indices[ri]
+            val result = batch_results[ri]
+            if result.error.len() == 0 and result.vector.len() > 0:
+                embeddings[idx] = result.vector
+                val csv = floats_to_csv(result.vector)
+                set_cached(cache, uncached_keys[ri], uncached_hashes[ri], csv)
+            ri = ri + 1
 
     # Save cache
     save_embedding_cache(cache)
@@ -186,20 +200,44 @@ fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, 
 
         i = i + 1
 
-    # Sort by similarity descending (bubble sort)
-    var n = matches.len()
-    var si = 0
-    while si < n - 1:
-        var sj = 0
-        while sj < n - si - 1:
-            if matches[sj].similarity < matches[sj + 1].similarity:
-                val tmp = matches[sj]
-                matches[sj] = matches[sj + 1]
-                matches[sj + 1] = tmp
-            sj = sj + 1
-        si = si + 1
+    sort_matches_desc(matches)
 
-    matches
+fn sort_matches_desc(matches: [SemanticMatch]) -> [SemanticMatch]:
+    """O(n log n) merge sort for semantic matches by similarity (descending)."""
+    if matches.len() <= 1:
+        return matches
+    val mid = matches.len() / 2
+    var left: [SemanticMatch] = []
+    var right: [SemanticMatch] = []
+    var i = 0
+    while i < mid:
+        left.push(matches[i])
+        i = i + 1
+    while i < matches.len():
+        right.push(matches[i])
+        i = i + 1
+    left = sort_matches_desc(left)
+    right = sort_matches_desc(right)
+    _merge_matches(left, right)
+
+fn _merge_matches(left: [SemanticMatch], right: [SemanticMatch]) -> [SemanticMatch]:
+    var result: [SemanticMatch] = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        if left[li].similarity >= right[ri].similarity:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
 
 fn classify_match(a: DocEntry, b: DocEntry, sim: f64) -> text:
     if sim >= 0.97:

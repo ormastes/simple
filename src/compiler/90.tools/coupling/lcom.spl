@@ -1,0 +1,273 @@
+# LCOM4 (Lack of Cohesion of Methods) Computation
+#
+# Computes LCOM4 metric for classes. LCOM4 counts the number of connected
+# components in the method-field access graph. A value of 1 means the class
+# is cohesive; higher values suggest it should be split.
+#
+# Algorithm:
+#   1. Build undirected graph where nodes = methods
+#   2. Edge between Mi and Mj if they share a field OR one calls the other
+#   3. Count connected components via union-find
+#   4. LCOM4 = number of connected components
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct MethodFieldAccess:
+    method_name: text
+    fields_accessed: [text]
+    methods_called: [text]
+
+struct LCOMResult:
+    class_name: text
+    lcom4: i64              # connected components count
+    method_count: i64
+    field_count: i64
+    component_sizes: [i64]  # size of each connected component
+
+struct ClassInfo:
+    class_name: text
+    methods: [MethodFieldAccess]
+    field_names: [text]
+
+# ============================================================================
+# Union-Find (inline, module-level arrays)
+# ============================================================================
+
+var uf_parent: [i64] = []
+var uf_rank: [i64] = []
+
+fn uf_init(n: i64):
+    """Initialize union-find with n elements."""
+    uf_parent = []
+    uf_rank = []
+    var i = 0
+    while i < n:
+        uf_parent.push(i)
+        uf_rank.push(0)
+        i = i + 1
+
+fn uf_find(x: i64) -> i64:
+    """Find root with path compression."""
+    var current = x
+    # Find root
+    var root = current
+    while uf_parent[root] != root:
+        root = uf_parent[root]
+    # Path compression
+    while uf_parent[current] != root:
+        val next = uf_parent[current]
+        uf_parent[current] = root
+        current = next
+    root
+
+fn uf_union(a: i64, b: i64):
+    """Union by rank."""
+    val ra = uf_find(a)
+    val rb = uf_find(b)
+    if ra != rb:
+        if uf_rank[ra] < uf_rank[rb]:
+            uf_parent[ra] = rb
+        else if uf_rank[ra] > uf_rank[rb]:
+            uf_parent[rb] = ra
+        else:
+            uf_parent[rb] = ra
+            uf_rank[ra] = uf_rank[ra] + 1
+
+# ============================================================================
+# LCOM4 Computation
+# ============================================================================
+
+fn find_method_index(methods: [MethodFieldAccess], name: text) -> i64:
+    """Find the index of a method by name, or -1 if not found."""
+    var i = 0
+    while i < methods.len():
+        if methods[i].method_name == name:
+            return i
+        i = i + 1
+    -1
+
+fn fields_share_access(a: [text], b: [text]) -> bool:
+    """Check if two field-access lists share any field."""
+    for fa in a:
+        for fb in b:
+            if fa == fb:
+                return true
+    false
+
+fn compute_lcom4(class_name: text, methods: [MethodFieldAccess]) -> LCOMResult:
+    """Compute LCOM4 for a class given its method-field access data.
+
+    LCOM4 = number of connected components in the method graph where
+    methods are connected if they share a field or one calls the other.
+    """
+    val n = methods.len()
+
+    # Edge case: no methods
+    if n == 0:
+        return LCOMResult(
+            class_name: class_name,
+            lcom4: 0,
+            method_count: 0,
+            field_count: 0,
+            component_sizes: []
+        )
+
+    # Edge case: single method
+    if n == 1:
+        return LCOMResult(
+            class_name: class_name,
+            lcom4: 1,
+            method_count: 1,
+            field_count: methods[0].fields_accessed.len(),
+            component_sizes: [1]
+        )
+
+    # Collect all unique field names
+    var all_fields: [text] = []
+    for m in methods:
+        for f in m.fields_accessed:
+            var found = false
+            for af in all_fields:
+                if af == f:
+                    found = true
+            if not found:
+                all_fields.push(f)
+
+    # Initialize union-find for n methods
+    uf_init(n)
+
+    # Build edges: shared field access
+    var i = 0
+    while i < n:
+        var j = i + 1
+        while j < n:
+            if fields_share_access(methods[i].fields_accessed, methods[j].fields_accessed):
+                uf_union(i, j)
+            j = j + 1
+        i = i + 1
+
+    # Build edges: method calls
+    i = 0
+    while i < n:
+        for called in methods[i].methods_called:
+            val callee_idx = find_method_index(methods, called)
+            if callee_idx >= 0:
+                uf_union(i, callee_idx)
+        i = i + 1
+
+    # Count connected components and their sizes
+    var component_map: {i64: i64} = {}   # root -> size
+    i = 0
+    while i < n:
+        val root = uf_find(i)
+        if component_map.contains_key(root):
+            component_map[root] = component_map[root] + 1
+        else:
+            component_map[root] = 1
+        i = i + 1
+
+    var component_sizes: [i64] = []
+    for (_, size) in component_map:
+        component_sizes.push(size)
+
+    # Sort component sizes descending for readability
+    component_sizes = sort_descending(component_sizes)
+
+    LCOMResult(
+        class_name: class_name,
+        lcom4: component_sizes.len(),
+        method_count: n,
+        field_count: all_fields.len(),
+        component_sizes: component_sizes
+    )
+
+fn sort_descending(arr: [i64]) -> [i64]:
+    """Simple insertion sort, descending order."""
+    var result: [i64] = []
+    for item in arr:
+        result.push(item)
+
+    var i = 1
+    while i < result.len():
+        val key = result[i]
+        var j = i - 1
+        while j >= 0 and result[j] < key:
+            result[j + 1] = result[j]
+            j = j - 1
+        result[j + 1] = key
+        i = i + 1
+
+    result
+
+fn compute_all_lcom(class_data: [ClassInfo]) -> [LCOMResult]:
+    """Compute LCOM4 for all classes in the input list."""
+    var results: [LCOMResult] = []
+    for cd in class_data:
+        val result = compute_lcom4(cd.class_name, cd.methods)
+        results.push(result)
+    results
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn lcom_to_text(result: LCOMResult) -> text:
+    """Format LCOM4 result as readable text."""
+    var lines: [text] = []
+    lines.push("Class: {result.class_name}")
+    lines.push("  LCOM4: {result.lcom4}")
+    lines.push("  Methods: {result.method_count}")
+    lines.push("  Fields: {result.field_count}")
+
+    if result.component_sizes.len() > 0:
+        var sizes_strs: [text] = []
+        for s in result.component_sizes:
+            sizes_strs.push("{s}")
+        lines.push("  Component sizes: [{sizes_strs.join(\", \")}]")
+
+    if result.lcom4 > 1:
+        lines.push("  WARNING: class may lack cohesion (consider splitting)")
+
+    lines.join("\n")
+
+fn lcom_report(results: [LCOMResult]) -> text:
+    """Generate a full LCOM4 report for multiple classes."""
+    var lines: [text] = []
+    lines.push("# LCOM4 Cohesion Report")
+    lines.push("# =====================")
+    lines.push("")
+
+    var total_classes = 0
+    var cohesive_count = 0
+    var non_cohesive_count = 0
+
+    for r in results:
+        lines.push(lcom_to_text(r))
+        lines.push("")
+        total_classes = total_classes + 1
+        if r.lcom4 <= 1:
+            cohesive_count = cohesive_count + 1
+        else:
+            non_cohesive_count = non_cohesive_count + 1
+
+    lines.push("# Summary")
+    lines.push("# -------")
+    lines.push("# Total classes: {total_classes}")
+    lines.push("# Cohesive (LCOM4 <= 1): {cohesive_count}")
+    lines.push("# Non-cohesive (LCOM4 > 1): {non_cohesive_count}")
+
+    lines.join("\n")
+
+# Exports
+export MethodFieldAccess
+export LCOMResult
+export ClassInfo
+export compute_lcom4
+export compute_all_lcom
+export find_method_index
+export fields_share_access
+export sort_descending
+export lcom_to_text
+export lcom_report

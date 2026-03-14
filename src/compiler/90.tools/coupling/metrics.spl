@@ -1,0 +1,250 @@
+# Coupling Metrics - Core coupling analysis computed from ImportGraph
+#
+# Provides CBO (Coupling Between Objects), fan-in/fan-out, instability,
+# abstractness, distance from main sequence, instability inversions,
+# and cycle detection via SCC.
+
+use compiler.common.dependency.graph.{ImportGraph, ImportEdge, ImportKind}
+use std.graph.{graph_new, graph_add_vertex, graph_add_edge_unweighted, graph_strongly_connected_components}
+
+# Coupling metrics for a single module
+struct CouplingMetrics:
+    module_name: text
+    cbo: i64           # Coupling Between Objects = fan_out (distinct deps)
+    fan_in: i64        # modules that depend on this module
+    fan_out: i64       # modules this module depends on
+    instability: f64   # fan_out / (fan_in + fan_out), [0,1]
+    abstractness: f64  # trait_count / total_type_count
+    distance: f64      # |abstractness + instability - 1|
+
+# An instability inversion: a stable module depends on an unstable one
+struct InstabilityInversion:
+    stable_module: text
+    unstable_module: text
+    stable_instability: f64
+    unstable_instability: f64
+
+# ============================================================================
+# Fan-in / Fan-out Computation
+# ============================================================================
+
+# Compute fan-out for each module (number of unique modules it depends on)
+fn compute_fan_out(graph: ImportGraph) -> Dict<text, i64>:
+    var result: Dict<text, i64> = {}
+    for module_name in graph.edges.keys():
+        val deps = graph.edges.get(module_name)
+        if deps != nil:
+            result = result.set(module_name, deps.len())
+        else:
+            result = result.set(module_name, 0)
+    result
+
+# Compute fan-in for each module (number of modules that depend on it)
+fn compute_fan_in(graph: ImportGraph) -> Dict<text, i64>:
+    # Initialize all modules with 0
+    var result: Dict<text, i64> = {}
+    for module_name in graph.edges.keys():
+        result = result.set(module_name, 0)
+
+    # Count incoming edges: for each module's dependency list, increment the target
+    for module_name in graph.edges.keys():
+        val deps = graph.edges.get(module_name)
+        if deps != nil:
+            var i = 0
+            while i < deps.len():
+                val target = deps.get(i)
+                # Ensure target is in the result map
+                val current = result.get(target)
+                if current != nil:
+                    result = result.set(target, current + 1)
+                else:
+                    result = result.set(target, 1)
+                i = i + 1
+    result
+
+# ============================================================================
+# Coupling Metrics Computation
+# ============================================================================
+
+# Compute all coupling metrics for every module in the graph
+fn compute_all_metrics(graph: ImportGraph) -> [CouplingMetrics]:
+    compute_all_metrics_with_abstractions(graph, {}, {})
+
+# Compute all coupling metrics with abstractness information
+# trait_counts: Dict mapping module_name -> number of traits defined
+# type_counts: Dict mapping module_name -> total number of types defined
+fn compute_all_metrics_with_abstractions(graph: ImportGraph, trait_counts: Dict<text, i64>, type_counts: Dict<text, i64>) -> [CouplingMetrics]:
+    val fan_in_map = compute_fan_in(graph)
+    val fan_out_map = compute_fan_out(graph)
+
+    var metrics: [CouplingMetrics] = []
+
+    for module_name in graph.edges.keys():
+        val fi = fan_in_map.get(module_name) ?? 0
+        val fo = fan_out_map.get(module_name) ?? 0
+
+        # instability = fan_out / (fan_in + fan_out), handle div by zero
+        var inst: f64 = 0.0
+        val total = fi + fo
+        if total > 0:
+            inst = fo.to_f64() / total.to_f64()
+
+        # abstractness = trait_count / total_type_count
+        var abst: f64 = 0.0
+        val tc = trait_counts.get(module_name) ?? 0
+        val tyc = type_counts.get(module_name) ?? 0
+        if tyc > 0:
+            abst = tc.to_f64() / tyc.to_f64()
+
+        # distance from main sequence = |abstractness + instability - 1|
+        val raw_dist = abst + inst - 1.0
+        var dist: f64 = raw_dist
+        if dist < 0.0:
+            dist = 0.0 - dist
+
+        val m = CouplingMetrics(
+            module_name: module_name,
+            cbo: fo,
+            fan_in: fi,
+            fan_out: fo,
+            instability: inst,
+            abstractness: abst,
+            distance: dist
+        )
+        metrics = metrics.append(m)
+
+    metrics
+
+# ============================================================================
+# Instability Inversions
+# ============================================================================
+
+# Find instability inversions: cases where a stable module (low instability)
+# depends on an unstable module (high instability). This violates the
+# Stable Dependencies Principle.
+fn find_instability_inversions(metrics: [CouplingMetrics], graph: ImportGraph) -> [InstabilityInversion]:
+    # Build a lookup from module name to instability
+    var instability_map: Dict<text, f64> = {}
+    var i = 0
+    while i < metrics.len():
+        val m = metrics.get(i)
+        instability_map = instability_map.set(m.module_name, m.instability)
+        i = i + 1
+
+    var inversions: [InstabilityInversion] = []
+
+    # For each edge in the graph, check if a stable module depends on an unstable one
+    for module_name in graph.edges.keys():
+        val from_inst = instability_map.get(module_name)
+        if from_inst == nil:
+            continue
+
+        val deps = graph.edges.get(module_name)
+        if deps == nil:
+            continue
+
+        var j = 0
+        while j < deps.len():
+            val target = deps.get(j)
+            val to_inst = instability_map.get(target)
+            if to_inst != nil:
+                # Inversion: the depender is more stable (lower instability) than the dependee
+                if from_inst < to_inst:
+                    val inv = InstabilityInversion(
+                        stable_module: module_name,
+                        unstable_module: target,
+                        stable_instability: from_inst,
+                        unstable_instability: to_inst
+                    )
+                    inversions = inversions.append(inv)
+            j = j + 1
+
+    inversions
+
+# ============================================================================
+# Cycle Detection via SCC
+# ============================================================================
+
+# Find dependency cycles using Strongly Connected Components (Kosaraju's algorithm).
+# Returns list of cycles (each cycle is a list of module names with >1 member).
+fn find_cycles(graph: ImportGraph) -> [[text]]:
+    # Collect all unique module names and assign integer IDs
+    var module_list: [text] = []
+    var module_to_id: Dict<text, i64> = {}
+    var id_counter: i64 = 0
+
+    for module_name in graph.edges.keys():
+        if module_to_id.get(module_name) == nil:
+            module_to_id = module_to_id.set(module_name, id_counter)
+            module_list = module_list.append(module_name)
+            id_counter = id_counter + 1
+
+    # Also add targets that might not be keys
+    for module_name in graph.edges.keys():
+        val deps = graph.edges.get(module_name)
+        if deps != nil:
+            var i = 0
+            while i < deps.len():
+                val target = deps.get(i)
+                if module_to_id.get(target) == nil:
+                    module_to_id = module_to_id.set(target, id_counter)
+                    module_list = module_list.append(target)
+                    id_counter = id_counter + 1
+                i = i + 1
+
+    # Build the tuple-based graph
+    var g = graph_new(true, false)
+    # Add all vertices
+    var v = 0
+    while v < id_counter:
+        g = graph_add_vertex(g)
+        v = v + 1
+
+    # Add edges
+    for module_name in graph.edges.keys():
+        val from_id = module_to_id.get(module_name)
+        if from_id == nil:
+            continue
+
+        val deps = graph.edges.get(module_name)
+        if deps == nil:
+            continue
+
+        var j = 0
+        while j < deps.len():
+            val target = deps.get(j)
+            val to_id = module_to_id.get(target)
+            if to_id != nil:
+                g = graph_add_edge_unweighted(g, from_id, to_id)
+            j = j + 1
+
+    # Run Kosaraju's SCC
+    val sccs = graph_strongly_connected_components(g)
+
+    # Filter to SCCs with more than 1 member and map back to module names
+    var cycles: [[text]] = []
+    var s = 0
+    while s < sccs.len():
+        val scc = sccs.get(s)
+        if scc.len() > 1:
+            var cycle: [text] = []
+            var k = 0
+            while k < scc.len():
+                val vertex_id = scc.get(k)
+                if vertex_id >= 0 and vertex_id < module_list.len():
+                    cycle = cycle.append(module_list.get(vertex_id))
+                k = k + 1
+            cycles = cycles.append(cycle)
+        s = s + 1
+
+    cycles
+
+# Exports
+export CouplingMetrics
+export InstabilityInversion
+export compute_fan_out
+export compute_fan_in
+export compute_all_metrics
+export compute_all_metrics_with_abstractions
+export find_instability_inversions
+export find_cycles
