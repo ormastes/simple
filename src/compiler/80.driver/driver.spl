@@ -36,6 +36,9 @@ use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use compiler.driver.driver_aot_output.*
 use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
+use compiler.driver.smf_hooks.{smf_hooks_init}
+use compiler.driver.watcher.watcher_client.{check_smf_freshness as _driver_check_smf_freshness}
+use compiler.driver.watcher.watcher_types.{watcher_config_default}
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
@@ -64,6 +67,9 @@ extern fn rt_time_ms() -> i64
 fn _default_read_source(path: text) -> text:
     rt_file_read_text(path) ?? ""
 var _active_read_source: fn(text) -> text = _default_read_source
+
+# Phase 4: Track modules with fresh cached SMF (module_name -> source_path)
+var _smf_cached_modules: {text: text} = {}
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -256,6 +262,10 @@ class CompilerDriver:
     me compile() -> CompileResult:
         val log = self.ctx.logger
 
+        # Initialize SMF hooks if SMF input resolution is enabled
+        if self.ctx.options.prefer_smf and not self.ctx.options.no_smf_imports:
+            smf_hooks_init(self.ctx.options.smf_lib_paths)
+
         # Phase 1: Load source files
         if not self.load_sources_impl():
             log_error("phase 1 FAILED")
@@ -381,6 +391,28 @@ class CompilerDriver:
                     val loaded = _driver_collect_sources(p)
                     for s in loaded:
                         all_sources = all_sources.push(s)
+
+        # SMF-aware filtering: skip sources that have fresh cached SMF
+        if self.ctx.options.prefer_smf and not self.ctx.options.no_smf_imports:
+            var filtered_sources: [SourceFile] = []
+            val config = watcher_config_default()
+            val opts = self.ctx.options
+            val options_hash = compile_options_hash_compute(opts.backend, opts.opt_level ?? 0, opts.release, opts.debug_info, opts.gc_off)
+            var skipped = 0
+            var filter_idx = 0
+            while filter_idx < all_sources.len():
+                val source = all_sources[filter_idx]
+                val freshness = _driver_check_smf_freshness(source.path, config.smf_dir, options_hash)
+                if freshness.status == CACHE_FRESH:
+                    # Fresh SMF exists — record for later linking, skip source parsing
+                    _smf_cached_modules[source.module_name] = source.path
+                    skipped = skipped + 1
+                else:
+                    filtered_sources = filtered_sources.push(source)
+                filter_idx = filter_idx + 1
+            if skipped > 0:
+                log_debug("SMF cache: skipped {skipped} sources with fresh cached SMF")
+            all_sources = filtered_sources
 
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources

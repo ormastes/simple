@@ -16,7 +16,7 @@ extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_met
 extern fn rt_native_build(args: [text]) -> i64
 
 # Pure Simple compiler implementation (no Rust FFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, prefer_smf: bool, no_smf_imports: bool, smf_libs: [text], regenerate_stale_smf: bool) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -52,6 +52,10 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.output_file = out
     options.verbose = verbose
     options.low_memory = low_memory
+    options.prefer_smf = prefer_smf
+    options.smf_lib_paths = smf_libs
+    options.regenerate_stale_smf = regenerate_stale_smf
+    options.no_smf_imports = no_smf_imports
     if release:
         options.release = true
         options.optimize = true
@@ -93,6 +97,10 @@ fn cli_compile(args: [text]) -> i64:
     var release_optimized: bool = false
     var emit_c: bool = false
     var low_memory: bool = false
+    var prefer_smf: bool = false
+    var no_smf_imports: bool = false
+    var smf_libs: [text] = []
+    var regenerate_stale_smf: bool = false
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -175,6 +183,23 @@ fn cli_compile(args: [text]) -> i64:
             backend = "c"
         elif arg == "--low-memory":
             low_memory = true
+        elif arg == "--prefer-smf":
+            prefer_smf = true
+        elif arg == "--no-smf-imports":
+            no_smf_imports = true
+        elif arg.starts_with("--smf-libs="):
+            val libs_str = arg.substring(11)
+            val parts = libs_str.split(",")
+            for part in parts:
+                smf_libs.push(part)
+        elif arg == "--smf-libs":
+            i = i + 1
+            if i < args.len():
+                val parts = args[i].split(",")
+                for part in parts:
+                    smf_libs.push(part)
+        elif arg == "--regenerate-stale-smf":
+            regenerate_stale_smf = true
         elif arg == "--native":
             emit = "native"
         elif arg == "-o":
@@ -223,7 +248,7 @@ fn cli_compile(args: [text]) -> i64:
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
         if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, prefer_smf, no_smf_imports, smf_libs, regenerate_stale_smf)
         return compile_native(source_file, out, verbose, "", false, backend)
 
     if target.starts_with("baremetal-"):
@@ -236,7 +261,7 @@ fn cli_compile(args: [text]) -> i64:
             return 1
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, prefer_smf, no_smf_imports, smf_libs, regenerate_stale_smf)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:

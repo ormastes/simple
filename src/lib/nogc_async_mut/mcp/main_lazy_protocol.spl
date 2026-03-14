@@ -9,7 +9,7 @@ fn read_stdin_message() -> text:
     if line == "":
         return ""
     if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
+        line = mcp_substr(line, 0, line.len() - 1)
     if line.starts_with(LB()):
         USE_JSON_LINES = true
         return line
@@ -28,7 +28,8 @@ fn write_stdout_message(body: text):
     if USE_JSON_LINES:
         print_raw(body + NL)
     else:
-        var header = "Content-Length: " + str(body.len()) + "\r" + NL + "\r" + NL
+        val byte_count = text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
         print_raw(header)
         print_raw(body)
 
@@ -45,11 +46,11 @@ fn make_init_response(id: text) -> text:
         jp("resources", resources_cap),
         jp("prompts", prompts_cap)
     )
-    caps = caps.substring(0, caps.len() - 1) + "," + jp("logging", LB() + RB()) + "," + jp("completions", LB() + RB()) + "," + jp("roots", jo1(jp("listChanged", "false"))) + RB()
+    caps = mcp_substr(caps, 0, caps.len() - 1) + "," + jp("logging", LB() + RB()) + "," + jp("completions", LB() + RB()) + "," + jp("roots", jo1(jp("listChanged", "false"))) + RB()
     val server_info = jo3(
         jp("name", js(SERVER_NAME)),
         jp("version", js(SERVER_VERSION)),
-        jp("instructions", js("Full-featured MCP server with inline tool handlers. All 66 tools available with zero-import fast execution."))
+        jp("instructions", js("Full-featured MCP server with inline tool handlers. All 69 tools available with zero-import fast execution. Long-running tools return task handles for async polling."))
     )
     val result = jo3(
         jp("protocolVersion", js("2025-06-18")),
@@ -88,6 +89,14 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_tool_schema("debug_remove_data_breakpoint", "Remove variable-change breakpoint"))
     tool_parts.push(make_tool_schema("debug_terminate", "Terminate debug session"))
 
+    # Hardware debug tools (6)
+    tool_parts.push(make_tool_schema("debug_trace_capture", "T32 ETM trace capture"))
+    tool_parts.push(make_tool_schema("debug_coverage_collect", "T32 code coverage"))
+    tool_parts.push(make_tool_schema("debug_flash_program", "Flash ELF to target"))
+    tool_parts.push(make_tool_schema("debug_system_reset", "Hardware reset"))
+    tool_parts.push(make_tool_schema("debug_practice_script", "T32 PRACTICE script execution"))
+    tool_parts.push(make_tool_schema("debug_openocd_monitor", "Raw OpenOCD telnet command"))
+
     # Debug log tools (6)
     tool_parts.push(make_tool_schema("debug_log_enable", "Enable debug logging"))
     tool_parts.push(make_tool_schema("debug_log_disable", "Disable debug logging"))
@@ -102,16 +111,23 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_tool_schema("simple_symbols", "List symbols in file"))
     tool_parts.push(make_tool_schema("simple_status", "Get project status"))
 
+    # MCP diagnostics tool (1)
+    tool_parts.push(make_tool_schema("simple_diagnostics", "Run diagnostics on a file or directory, returning MCP-formatted structured content with diagnostics array"))
+
     # Diagnostic edit tools (3)
     tool_parts.push(make_tool_schema("simple_edit", "Edit Simple source file"))
     tool_parts.push(make_tool_schema("simple_multi_edit", "Edit multiple files"))
     tool_parts.push(make_tool_schema("simple_run", "Run Simple code"))
 
-    # Diagnostic VCS tools (4)
+    # Diagnostic VCS tools (8)
     tool_parts.push(make_tool_schema("simple_diff", "Show file diff"))
-    tool_parts.push(make_tool_schema("simple_log", "Show git log"))
+    tool_parts.push(make_tool_schema("simple_log", "Show jj log"))
     tool_parts.push(make_tool_schema("simple_squash", "Squash commits"))
     tool_parts.push(make_tool_schema("simple_new", "Create new change"))
+    tool_parts.push(make_tool_schema("simple_commit", "Commit working copy with message"))
+    tool_parts.push(make_tool_schema("simple_push", "Set bookmark and push to remote"))
+    tool_parts.push(make_tool_schema("simple_rebase", "Rebase revision onto destination"))
+    tool_parts.push(make_tool_schema("simple_pull", "Fetch from remote and rebase"))
 
     # API search tools (1)
     tool_parts.push(make_tool_schema("simple_api", "Search module API with visibility-aware filtering"))
@@ -124,41 +140,27 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_tool_schema("simple_fix", "Auto-fix issues"))
     tool_parts.push(make_tool_schema("simple_doc_coverage", "Doc coverage report"))
 
-    # Query tools — Tier 2 (5)
-    tool_parts.push(make_tool_schema("simple_definition", "Go-to-definition"))
-    tool_parts.push(make_tool_schema("simple_references", "Find all references"))
-    tool_parts.push(make_tool_schema("simple_hover", "Type + docs at position"))
-    tool_parts.push(make_tool_schema("simple_completions", "Code completions"))
-    tool_parts.push(make_tool_schema("simple_type_at", "Type info at position"))
-
     # Analysis tools — Tier 3 (4)
     tool_parts.push(make_tool_schema("simple_dependencies", "Module dependency graph"))
     tool_parts.push(make_tool_schema("simple_api_diff", "API surface diff"))
     tool_parts.push(make_tool_schema("simple_context", "Context pack for AI/docs"))
     tool_parts.push(make_tool_schema("simple_search", "Language-aware code search"))
 
-    # LSP tools — Tier 4 (10)
-    tool_parts.push(make_tool_schema("simple_signature_help", "Function parameter hints at call site"))
-    tool_parts.push(make_tool_schema("simple_rename", "Rename symbol across project"))
-    tool_parts.push(make_tool_schema("simple_code_actions", "Quick fixes for diagnostics at position"))
-    tool_parts.push(make_tool_schema("simple_workspace_symbols", "Search symbols across project"))
-    tool_parts.push(make_tool_schema("simple_call_hierarchy", "Incoming/outgoing call chains"))
-    tool_parts.push(make_tool_schema("simple_type_hierarchy", "Super/sub type relationships"))
-    tool_parts.push(make_tool_schema("simple_semantic_tokens", "Semantic token data for highlighting"))
-    tool_parts.push(make_tool_schema("simple_inlay_hints", "Inline type/parameter annotations"))
-    tool_parts.push(make_tool_schema("simple_selection_range", "Smart selection expand/shrink"))
-    tool_parts.push(make_tool_schema("simple_document_formatting", "Format a document"))
-
-    # LSP extra tools (4)
-    tool_parts.push(make_tool_schema("simple_document_highlight", "Same-file references with Read/Write classification"))
-    tool_parts.push(make_tool_schema("simple_type_definition", "Find where a type is defined"))
-    tool_parts.push(make_tool_schema("simple_implementation", "Find trait implementations"))
-    tool_parts.push(make_tool_schema("simple_folding_range", "Get folding ranges for a file"))
+    # Background task management (3)
+    tool_parts.push(make_tool_schema("task_status", "Get status of a background task"))
+    tool_parts.push(make_tool_schema("task_cancel", "Cancel a running background task"))
+    tool_parts.push(make_tool_schema("task_list", "List all background tasks"))
 
     # Code query tools (3)
     tool_parts.push(make_tool_schema("simple_ast_query", "S-expression structural pattern matching against code outline"))
     tool_parts.push(make_tool_schema("simple_sem_query", "CodeQL-style semantic query with SQL-like syntax"))
     tool_parts.push(make_tool_schema("simple_query_schema", "List available query node types and predicates"))
+
+    # Test daemon tools (4)
+    tool_parts.push(make_tool_schema("test_daemon_run", "Run test with change detection via test daemon"))
+    tool_parts.push(make_tool_schema("test_daemon_clean", "Force-run test bypassing cache"))
+    tool_parts.push(make_tool_schema("test_daemon_status", "Get test daemon status and queue info"))
+    tool_parts.push(make_tool_schema("test_daemon_stop", "Shut down test daemon"))
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
@@ -263,6 +265,39 @@ fn make_tool_schema(name: text, description: text) -> text:
             jp("breakpoint_id", jo1(jp("type", js("string"))))
         )
         req = "[" + js("session_id") + "," + js("breakpoint_id") + "]"
+    elif name == "debug_trace_capture":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))),
+            jp("duration_ms", jo2(jp("type", js("string")), jp("description", js("Trace duration in ms"))))
+        )
+        req = "[" + js("session_id") + "]"
+    elif name == "debug_coverage_collect":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))),
+            jp("module", jo2(jp("type", js("string")), jp("description", js("Module name for coverage"))))
+        )
+        req = "[" + js("session_id") + "," + js("module") + "]"
+    elif name == "debug_flash_program":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))),
+            jp("elf_path", jo2(jp("type", js("string")), jp("description", js("Path to ELF binary"))))
+        )
+        req = "[" + js("session_id") + "," + js("elf_path") + "]"
+    elif name == "debug_system_reset":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))))
+        req = "[" + js("session_id") + "]"
+    elif name == "debug_practice_script":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))),
+            jp("script", jo2(jp("type", js("string")), jp("description", js("PRACTICE script path or command"))))
+        )
+        req = "[" + js("session_id") + "," + js("script") + "]"
+    elif name == "debug_openocd_monitor":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))),
+            jp("command", jo2(jp("type", js("string")), jp("description", js("OpenOCD telnet command"))))
+        )
+        req = "[" + js("session_id") + "," + js("command") + "]"
     elif name == "debug_log_enable":
         props = jo1(jp("pattern", jo1(jp("type", js("string")))))
     elif name == "debug_log_query":
@@ -289,7 +324,7 @@ fn make_tool_schema(name: text, description: text) -> text:
         p = p + RB()
         props = p
         req = "[" + js("path") + "]"
-    elif name == "simple_check" or name == "simple_symbols" or name == "simple_run":
+    elif name == "simple_check" or name == "simple_symbols" or name == "simple_run" or name == "simple_diagnostics":
         props = jo1(jp("path", jo1(jp("type", js("string")))))
         req = "[" + js("path") + "]"
     elif name == "simple_status":
@@ -309,8 +344,14 @@ fn make_tool_schema(name: text, description: text) -> text:
         props = jo2(jp("revision", jo1(jp("type", js("string")))), jp("paths", jo1(jp("type", js("string")))))
     elif name == "simple_log":
         props = jo2(jp("limit", jo1(jp("type", js("integer")))), jp("revsets", jo1(jp("type", js("string")))))
-    elif name == "simple_squash" or name == "simple_new":
+    elif name == "simple_squash" or name == "simple_new" or name == "simple_commit":
         props = jo2(jp("revision", jo1(jp("type", js("string")))), jp("message", jo1(jp("type", js("string")))))
+    elif name == "simple_push":
+        props = jo2(jp("bookmark", jo1(jp("type", js("string")))), jp("revision", jo1(jp("type", js("string")))))
+    elif name == "simple_rebase":
+        props = jo2(jp("revision", jo1(jp("type", js("string")))), jp("destination", jo1(jp("type", js("string")))))
+    elif name == "simple_pull":
+        props = jo1(jp("dummy", jo1(jp("type", js("string")))))
     elif name == "simple_api":
         var p = LB()
         p = p + jp("module", jo1(jp("type", js("string"))))
@@ -354,25 +395,6 @@ fn make_tool_schema(name: text, description: text) -> text:
             jp("missing", jo2(jp("type", js("string")), jp("description", js("Show only undocumented items (true/false)"))))
         )
 
-    # --- Tier 2: Query tools ---
-    elif name == "simple_definition" or name == "simple_references" or name == "simple_hover" or name == "simple_type_at":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "]"
-    elif name == "simple_completions":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + "," + jp("prefix", jo2(jp("type", js("string")), jp("description", js("Completion prefix filter"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "]"
-
     # --- Tier 3: Analysis tools ---
     elif name == "simple_dependencies":
         var p = LB()
@@ -403,71 +425,12 @@ fn make_tool_schema(name: text, description: text) -> text:
         props = p
         req = "[" + js("query") + "]"
 
-    # --- Tier 4: LSP tools ---
-    elif name == "simple_signature_help" or name == "simple_code_actions" or name == "simple_selection_range":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "]"
-    elif name == "simple_rename":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + "," + jp("new_name", jo2(jp("type", js("string")), jp("description", js("New name for the symbol"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "," + js("new_name") + "]"
-    elif name == "simple_workspace_symbols":
-        var p = LB()
-        p = p + jp("query", jo2(jp("type", js("string")), jp("description", js("Symbol search query"))))
-        p = p + "," + jp("kind", jo2(jp("type", js("string")), jp("description", js("Symbol kind filter: fn, class, struct, enum, trait"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("query") + "]"
-    elif name == "simple_call_hierarchy" or name == "simple_type_hierarchy":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + "," + jp("direction", jo2(jp("type", js("string")), jp("description", js("Direction: incoming|outgoing or supertypes|subtypes"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "]"
-    elif name == "simple_semantic_tokens" or name == "simple_inlay_hints":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("start_line", jo2(jp("type", js("string")), jp("description", js("Start line (1-based, optional)"))))
-        p = p + "," + jp("end_line", jo2(jp("type", js("string")), jp("description", js("End line (1-based, optional)"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "]"
-    elif name == "simple_document_formatting":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("options", jo2(jp("type", js("string")), jp("description", js("Formatting options (optional)"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "]"
-
-    # --- LSP extra tools ---
-    elif name == "simple_document_highlight" or name == "simple_type_definition" or name == "simple_implementation":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + "," + jp("line", jo2(jp("type", js("string")), jp("description", js("Line number (1-based)"))))
-        p = p + "," + jp("column", jo2(jp("type", js("string")), jp("description", js("Column number (1-based, optional)"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "," + js("line") + "]"
-    elif name == "simple_folding_range":
-        var p = LB()
-        p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Source file path"))))
-        p = p + RB()
-        props = p
-        req = "[" + js("file") + "]"
+    # --- Background task management tools ---
+    elif name == "task_status" or name == "task_cancel":
+        props = jo1(jp("task_id", jo2(jp("type", js("string")), jp("description", js("Task ID (e.g. t1, t2)")))))
+        req = "[" + js("task_id") + "]"
+    elif name == "task_list":
+        props = LB() + RB()
 
     # --- Code query tools ---
     elif name == "simple_ast_query" or name == "simple_sem_query":
@@ -480,6 +443,20 @@ fn make_tool_schema(name: text, description: text) -> text:
         req = "[" + js("query") + "]"
     elif name == "simple_query_schema":
         props = jo1(jp("kind", jo2(jp("type", js("string")), jp("description", js("Schema kind: ast, sem, or empty for both")))))
+    elif name == "test_daemon_run":
+        var p = LB()
+        p = p + jp("path", jo2(jp("type", js("string")), jp("description", js("Test file or directory path"))))
+        p = p + "," + jp("filter", jo2(jp("type", js("string")), jp("description", js("Filter test names"))))
+        p = p + "," + jp("clean", jo2(jp("type", js("string")), jp("description", js("Bypass cache, force re-run (true/false)"))))
+        p = p + RB()
+        props = p
+    elif name == "test_daemon_clean":
+        props = jo1(jp("path", jo2(jp("type", js("string")), jp("description", js("Test file path to force-run")))))
+        req = "[" + js("path") + "]"
+    elif name == "test_daemon_status":
+        props = LB() + RB()
+    elif name == "test_daemon_stop":
+        props = LB() + RB()
 
     var schema = LB()
     schema = schema + jp("type", js("object"))
@@ -490,18 +467,17 @@ fn make_tool_schema(name: text, description: text) -> text:
     var read_only = "false"
     var destructive = "false"
     var idempotent = "true"
-    if (name.starts_with("simple_read") or name == "simple_check" or name == "simple_symbols" or name == "simple_status" or name == "simple_log" or name == "simple_api" or
+    if (name.starts_with("simple_read") or name == "simple_check" or name == "simple_diagnostics" or name == "simple_symbols" or name == "simple_status" or name == "simple_log" or name == "simple_api" or
         name == "simple_test" or name == "simple_lint" or name == "simple_doc_coverage" or
-        name == "simple_definition" or name == "simple_references" or name == "simple_hover" or name == "simple_completions" or name == "simple_type_at" or
         name == "simple_dependencies" or name == "simple_api_diff" or name == "simple_context" or name == "simple_search" or
-        name == "simple_signature_help" or name == "simple_code_actions" or name == "simple_workspace_symbols" or name == "simple_call_hierarchy" or name == "simple_type_hierarchy" or name == "simple_semantic_tokens" or name == "simple_inlay_hints" or name == "simple_selection_range" or
-        name == "simple_document_highlight" or name == "simple_type_definition" or name == "simple_implementation" or name == "simple_folding_range" or
-        name == "debug_list_sessions" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_evaluate" or name == "debug_get_source" or name == "debug_log_query" or name == "debug_log_tree" or name == "debug_log_status" or name == "debug_list_data_breakpoints" or
-        name == "simple_ast_query" or name == "simple_sem_query" or name == "simple_query_schema"):
+        name == "debug_list_sessions" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_evaluate" or name == "debug_get_source" or name == "debug_log_query" or name == "debug_log_tree" or name == "debug_log_status" or name == "debug_list_data_breakpoints" or name == "debug_trace_capture" or name == "debug_coverage_collect" or
+        name == "simple_ast_query" or name == "simple_sem_query" or name == "simple_query_schema" or
+        name == "task_status" or name == "task_list" or
+        name == "test_daemon_status"):
         read_only = "true"
-    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "simple_rename" or name == "simple_document_formatting":
+    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "task_cancel" or name == "test_daemon_stop":
         destructive = "true"
-    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "simple_test" or name == "simple_rename" or name == "simple_document_formatting":
+    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "debug_practice_script" or name == "debug_openocd_monitor" or name == "simple_test" or name == "test_daemon_run" or name == "test_daemon_clean":
         idempotent = "false"
 
     var annotations = LB()
@@ -516,7 +492,7 @@ fn make_tool_schema(name: text, description: text) -> text:
         jp("description", js(description)),
         jp("inputSchema", schema)
     )
-    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
+    tool_obj = mcp_substr(tool_obj, 0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
     tool_obj
 
 # ============================================================================
@@ -566,10 +542,12 @@ fn handle_resource_templates_list(id: text) -> text:
     make_result_response(id, result)
 
 fn get_cwd() -> text:
-    val (out, _) = shell_cmd("pwd")
-    if out.ends_with(NL):
-        return out.substring(0, out.len() - 1)
-    out
+    # Fall back to shell pwd if rt_getcwd is unavailable
+    var cwd = ""
+    var _rc: i64 = 0
+    (cwd, _rc) = shell_cmd("pwd")
+    cwd = cwd.trim()
+    cwd
 
 fn make_resource_content_response(id: text, uri: text, content: text, mime: text) -> text:
     var rc = LB()
@@ -587,7 +565,7 @@ fn handle_resources_read(id: text, uri: text) -> text:
         val info = "Simple MCP (main_lazy)" + NL + "Working Dir: " + get_cwd()
         return make_resource_content_response(id, uri, info, "text/plain")
     if uri.starts_with("file:///"):
-        val path = uri.substring(8)
+        val path = mcp_substr(uri, 7, uri.len())
         val content = file_read(path)
         if content == "":
             return make_error(id, -32002, "File not found: " + path)
@@ -601,9 +579,7 @@ fn make_prompt_arg(name: text, desc: text, required: bool) -> text:
     var r = LB()
     r = r + jp("name", js(name))
     r = r + "," + jp("description", js(desc))
-    var req = "false"
-    if required:
-        req = "true"
+    val req = if required then "true" else "false"
     r = r + "," + jp("required", req)
     r = r + RB()
     r

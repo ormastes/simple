@@ -40,6 +40,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
+| **shell-runner** | Running terminal commands, checking outputs, reporting results (offloads Bash from main agent) | — |
 
 **Usage pattern:** When spawning a Task, include the relevant agent context:
 ```

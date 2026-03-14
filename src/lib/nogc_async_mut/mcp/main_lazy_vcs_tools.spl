@@ -1,6 +1,6 @@
 # MCP Lazy Server - VCS tool handlers
 # Extracted from main_lazy.spl
-# Handles: simple_diff, simple_log, simple_squash, simple_new
+# Handles: simple_diff, simple_log, simple_squash, simple_new, simple_commit, simple_push, simple_rebase, simple_pull
 
 # ============================================================================
 # simple_diff — jj diff with file list
@@ -23,7 +23,9 @@ fn handle_simple_diff(id: text, body: text) -> text:
                 diff_cmd = diff_cmd + " " + pt
     diff_cmd = diff_cmd + " 2>&1"
 
-    val (diff_out, _) = shell_cmd(diff_cmd)
+    var diff_out = ""
+    var _u: i64 = 0
+    (diff_out, _u) = shell_cmd(diff_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_diff -r " + rev + " --" + NL)
@@ -49,7 +51,9 @@ fn handle_simple_log(id: text, body: text) -> text:
         log_cmd = log_cmd + " -r " + revsets
     log_cmd = log_cmd + " 2>&1"
 
-    val (log_out, _) = shell_cmd(log_cmd)
+    var log_out = ""
+    var _u: i64 = 0
+    (log_out, _u) = shell_cmd(log_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_log --" + NL)
@@ -71,7 +75,9 @@ fn handle_simple_squash(id: text, body: text) -> text:
         squash_cmd = squash_cmd + " -m '" + message + "'"
     squash_cmd = squash_cmd + " 2>&1"
 
-    val (squash_out, squash_exit) = shell_cmd(squash_cmd)
+    var squash_out = ""
+    var squash_exit: i64 = 0
+    (squash_out, squash_exit) = shell_cmd(squash_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_squash --" + NL)
@@ -97,10 +103,14 @@ fn handle_simple_new(id: text, body: text) -> text:
         new_cmd = new_cmd + " -m '" + message + "'"
     new_cmd = new_cmd + " 2>&1"
 
-    val (new_out, new_exit) = shell_cmd(new_cmd)
+    var new_out = ""
+    var new_exit: i64 = 0
+    (new_out, new_exit) = shell_cmd(new_cmd)
 
     # Get revision info
-    val (rev_info, _) = shell_cmd("timeout 10 jj --no-pager --color never log -r @ --limit 1 2>&1")
+    var rev_info = ""
+    var _u2: i64 = 0
+    (rev_info, _u2) = shell_cmd("timeout 10 jj --no-pager --color never log -r @ --limit 1 2>&1")
 
     var out_parts: [text] = []
     out_parts.push("-- simple_new --" + NL)
@@ -110,4 +120,137 @@ fn handle_simple_new(id: text, body: text) -> text:
         out_parts.push(NL + "New revision created.")
     else:
         out_parts.push(NL + "Failed (exit code " + str(new_exit) + ").")
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# simple_commit — jj commit (snapshot working copy with message)
+# ============================================================================
+
+fn handle_simple_commit(id: text, body: text) -> text:
+    val message = extract_field(body, "message")
+
+    var commit_cmd = "timeout 30 jj --no-pager --color never commit"
+    if message != "":
+        commit_cmd = commit_cmd + " -m '" + message + "'"
+    commit_cmd = commit_cmd + " 2>&1"
+
+    var commit_out = ""
+    var commit_exit: i64 = 0
+    (commit_out, commit_exit) = shell_cmd(commit_cmd)
+
+    var rev_info = ""
+    var _u: i64 = 0
+    (rev_info, _u) = shell_cmd("timeout 10 jj --no-pager --color never log -r @- --limit 1 2>&1")
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_commit --" + NL)
+    out_parts.push(commit_out + NL)
+    out_parts.push(rev_info)
+    if commit_exit == 0:
+        out_parts.push(NL + "Commit created successfully.")
+    else:
+        out_parts.push(NL + "Commit failed (exit code " + str(commit_exit) + ").")
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# simple_push — jj bookmark set + jj git push
+# ============================================================================
+
+fn handle_simple_push(id: text, body: text) -> text:
+    val bookmark = extract_field(body, "bookmark")
+    val revision = extract_field(body, "revision")
+
+    var bm = "main"
+    if bookmark != "":
+        bm = bookmark
+
+    var rev = "@-"
+    if revision != "":
+        rev = revision
+
+    # Set bookmark
+    var set_cmd = "timeout 30 jj --no-pager --color never bookmark set " + bm + " -r " + rev + " 2>&1"
+    var set_out = ""
+    var set_exit: i64 = 0
+    (set_out, set_exit) = shell_cmd(set_cmd)
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_push --" + NL)
+    out_parts.push("bookmark set: " + set_out + NL)
+
+    if set_exit != 0:
+        out_parts.push("Bookmark set failed (exit code " + str(set_exit) + ").")
+        return make_tool_result(id, out_parts.join(""))
+
+    # Push
+    var push_cmd = "timeout 60 jj --no-pager --color never git push --bookmark " + bm + " 2>&1"
+    var push_out = ""
+    var push_exit: i64 = 0
+    (push_out, push_exit) = shell_cmd(push_cmd)
+
+    out_parts.push("push: " + push_out)
+    if push_exit == 0:
+        out_parts.push(NL + "Push completed successfully.")
+    else:
+        out_parts.push(NL + "Push failed (exit code " + str(push_exit) + ").")
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# simple_rebase — jj rebase
+# ============================================================================
+
+fn handle_simple_rebase(id: text, body: text) -> text:
+    val revision = extract_field(body, "revision")
+    val destination = extract_field(body, "destination")
+
+    var rebase_cmd = "timeout 30 jj --no-pager --color never rebase"
+    if revision != "":
+        rebase_cmd = rebase_cmd + " -r " + revision
+    if destination != "":
+        rebase_cmd = rebase_cmd + " -d " + destination
+    else:
+        rebase_cmd = rebase_cmd + " -d main@origin"
+    rebase_cmd = rebase_cmd + " 2>&1"
+
+    var rebase_out = ""
+    var rebase_exit: i64 = 0
+    (rebase_out, rebase_exit) = shell_cmd(rebase_cmd)
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_rebase --" + NL)
+    out_parts.push(rebase_out)
+    if rebase_exit == 0:
+        out_parts.push(NL + "Rebase completed successfully.")
+    else:
+        out_parts.push(NL + "Rebase failed (exit code " + str(rebase_exit) + ").")
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# simple_pull — jj git fetch + jj rebase -d main@origin
+# ============================================================================
+
+fn handle_simple_pull(id: text, body: text) -> text:
+    # Fetch
+    var fetch_out = ""
+    var fetch_exit: i64 = 0
+    (fetch_out, fetch_exit) = shell_cmd("timeout 60 jj --no-pager --color never git fetch 2>&1")
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_pull --" + NL)
+    out_parts.push("fetch: " + fetch_out + NL)
+
+    if fetch_exit != 0:
+        out_parts.push("Fetch failed (exit code " + str(fetch_exit) + ").")
+        return make_tool_result(id, out_parts.join(""))
+
+    # Rebase onto fetched main
+    var rebase_out = ""
+    var rebase_exit: i64 = 0
+    (rebase_out, rebase_exit) = shell_cmd("timeout 30 jj --no-pager --color never rebase -d main@origin 2>&1")
+
+    out_parts.push("rebase: " + rebase_out)
+    if rebase_exit == 0:
+        out_parts.push(NL + "Pull completed successfully.")
+    else:
+        out_parts.push(NL + "Rebase failed (exit code " + str(rebase_exit) + ").")
     make_tool_result(id, out_parts.join(""))

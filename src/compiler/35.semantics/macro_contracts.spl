@@ -3,6 +3,9 @@
 # Processes macro contracts: intro (symbol introduction), inject (code injection),
 # and returns (return type declaration). Enables IDE autocomplete without expansion.
 #
+# Delegates all validation to MacroValidator (macro_validation.spl) to avoid
+# duplicating shadowing/ordering checks.
+#
 # Port of rust/compiler/src/macro_contracts.rs (535 lines)
 
 
@@ -80,7 +83,31 @@ fn macrocontractresult_empty() -> MacroContractResult:
 fn process_macro_contract(contract_items: [MacroContractItem],
                           const_bindings: {text: text},
                           existing_symbols: SymbolScope) -> text:
-    """Process all contract items in a macro definition."""
+    """Process all contract items in a macro definition.
+
+    Delegates validation to MacroValidator for:
+    - Contract item ordering (returns before intro before inject)
+    - Symbol shadowing detection
+    - Const binding validation
+    """
+    # Validate contract ordering via MacroValidator
+    val validator = MacroValidator.create()
+    val item_kinds = [for item in contract_items: item.kind]
+    val ordering_result = validator.validate_contract(item_kinds, const_bindings)
+    if not ordering_result.is_valid:
+        return Err(ordering_result.errors[0])
+
+    # Build scope list from existing symbols for shadowing checks
+    var scope_names: [text] = []
+    for name in existing_symbols.functions:
+        scope_names = scope_names.push(name)
+    for name in existing_symbols.classes:
+        scope_names = scope_names.push(name)
+    for name in existing_symbols.variables:
+        scope_names = scope_names.push(name)
+    for name in existing_symbols.types:
+        scope_names = scope_names.push(name)
+
     var result = macrocontractresult_empty()
     var introduced_names: [text] = []
 
@@ -100,15 +127,16 @@ fn process_macro_contract(contract_items: [MacroContractItem],
                         return_type: item.type_name,
                         return_label: item.label)
             case "intro":
-                # Check for shadowing
-                if item.name.?:
-                    if existing_symbols_contains(existing_symbols, item.name_value):
-                    return Err("macro intro '{item.name_value}' shadows existing symbol")
-                if item.name.?:
-                    if introduced_names_contains(introduced_names, item.name_value):
-                    return Err("macro intro '{item.name_value}' already introduced")
+                # Delegate shadowing checks to MacroValidator
                 if item.has_name:
-                    introduced_names = introduced_names_push(introduced_names, item.name_value)
+                    val shadow_result = validator.validate_no_shadowing(item.name, scope_names)
+                    if not shadow_result.is_valid:
+                        return Err(shadow_result.errors[0])
+                    # Check against already-introduced names
+                    val intro_shadow = validator.validate_no_shadowing(item.name, introduced_names)
+                    if not intro_shadow.is_valid:
+                        return Err("macro intro '{item.name}' already introduced")
+                    introduced_names = introduced_names.push(item.name)
             case "inject":
                 if item.anchor.?:
                     if item.has_label:

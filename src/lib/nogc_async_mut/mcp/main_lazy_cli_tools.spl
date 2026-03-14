@@ -1,8 +1,14 @@
 # MCP Lazy Server - CLI tool handlers (Tier 1)
 # Handles: simple_test, simple_build, simple_format, simple_lint, simple_fix, simple_doc_coverage
+#
+# Uses shell_cmd() with timeout wrappers to prevent indefinite blocking.
+# IMPORTANT: Cannot use bg_task_spawn() — module vars (BG_NEXT_TASK_ID, BG_TASKS)
+# from imported modules are not accessible in interpreter mode.
+# Cannot use rt_process_execute — not registered in current runtime binary.
+# Must use shell_cmd() which uses rt_process_run (tuple destructuring works).
 
 # ============================================================================
-# simple_test — Run tests
+# simple_test — Run tests (timeout 600s)
 # ============================================================================
 
 fn handle_simple_test(id: text, body: text) -> text:
@@ -12,9 +18,12 @@ fn handle_simple_test(id: text, body: text) -> text:
     val list_flag = extract_field(body, "list")
 
     val _bin = _mcp_find_simple_binary()
-    var cmd = "timeout 120 " + _bin + " test"
+    var cmd = "timeout 600 " + _bin + " test"
     if list_flag == "true":
-        cmd = cmd + " --list"
+        # --list produces ~29K lines; redirect to file then show summary.
+        # Limit output to 50 lines to avoid large JSON response buffer issues.
+        val _tmp = rt_env_get("TEMP") ?? rt_env_get("TMP") ?? "/tmp"
+        cmd = "timeout 30 " + _bin + " test --list 1>" + _tmp + "/mcp_test_list.txt 2>/dev/null; echo '--- test list (first 50 of '$(wc -l < " + _tmp + "/mcp_test_list.txt)' total) ---'; head -50 " + _tmp + "/mcp_test_list.txt"
     elif path != "":
         cmd = cmd + " " + path
     if filter_str != "":
@@ -23,11 +32,10 @@ fn handle_simple_test(id: text, body: text) -> text:
         cmd = cmd + " --only-slow"
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_test (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_test", cmd, "600s")
 
 # ============================================================================
-# simple_build — Build project
+# simple_build — Build project (timeout 300s)
 # ============================================================================
 
 fn handle_simple_build(id: text, body: text) -> text:
@@ -45,11 +53,10 @@ fn handle_simple_build(id: text, body: text) -> text:
         cmd = cmd + " --warn-docs"
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_build (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_build", cmd, "300s")
 
 # ============================================================================
-# simple_format — Format file or project
+# simple_format — Format file or project (timeout 60s)
 # ============================================================================
 
 fn handle_simple_format(id: text, body: text) -> text:
@@ -64,27 +71,28 @@ fn handle_simple_format(id: text, body: text) -> text:
         cmd = cmd + " " + path
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_format (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_format", cmd, "60s")
 
 # ============================================================================
-# simple_lint — Lint with output
+# simple_lint — Lint with output (timeout 60s)
 # ============================================================================
 
 fn handle_simple_lint(id: text, body: text) -> text:
     val path = extract_field(body, "path")
 
     val _bin = _mcp_find_simple_binary()
-    var cmd = "timeout 60 " + _bin + " lint"
+    # Project-wide lint can take >60s on large codebases; use 180s timeout.
+    # Single-file lint is fast (<1s).
+    val timeout_s = if path != "" then "60" else "180"
+    var cmd = "timeout " + timeout_s + " " + _bin + " lint"
     if path != "":
         cmd = cmd + " " + path
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_lint (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_lint", cmd, timeout_s + "s")
 
 # ============================================================================
-# simple_fix — Auto-fix issues
+# simple_fix — Auto-fix issues (timeout 60s)
 # ============================================================================
 
 fn handle_simple_fix(id: text, body: text) -> text:
@@ -100,11 +108,10 @@ fn handle_simple_fix(id: text, body: text) -> text:
         cmd = cmd + " --dry-run"
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_fix (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_fix", cmd, "60s")
 
 # ============================================================================
-# simple_doc_coverage — Documentation coverage report
+# simple_doc_coverage — Documentation coverage report (timeout 60s)
 # ============================================================================
 
 fn handle_simple_doc_coverage(id: text, body: text) -> text:
@@ -119,5 +126,4 @@ fn handle_simple_doc_coverage(id: text, body: text) -> text:
         cmd = cmd + " --missing"
     cmd = cmd + " 2>&1"
 
-    val (out, exit_code) = shell_cmd(cmd)
-    make_tool_result(id, "-- simple_doc_coverage (exit: " + str(exit_code) + ") --\n" + out)
+    run_cli_tool(id, "simple_doc_coverage", cmd, "60s")

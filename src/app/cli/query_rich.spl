@@ -44,6 +44,27 @@ fn _diag_emit_or_collect(json_str: text):
     else:
         print json_str
 
+fn _emit_lint_diag(severity: i64, code: text, message: text, line_num: i64, col: i64, end_col: i64, tags: text, file: text, format: text):
+    """Unified lint diagnostic emitter — reduces duplication across _check_* functions.
+
+    severity: 1=error, 2=warning, 3=info
+    tags: JSON array string, e.g. "[]", "[1]", "[2]"
+    """
+    if format == "json":
+        _diag_emit_or_collect("{\"severity\":{severity},\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":{tags},\"source\":\"simple-lint\"}")
+    else:
+        val sev_label = if severity == 1: "error" elif severity == 3: "info" else: "warning"
+        print "{file}:{line_num}: {sev_label}[{code}]: {message}"
+
+fn _emit_ast_lint_diag(w_code: text, w_message: text, w_severity: text, line_num: i64, file: text, format: text, emitter: LspEmitter, tags: text):
+    """Unified AST lint diagnostic emitter — reduces duplication in _run_ast_lint_passes."""
+    val sev = _severity_text_to_json(w_severity)
+    if format == "json":
+        val msg = emitter.escape_string(w_message)
+        _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w_code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":{tags},\"source\":\"simple-lint\"}")
+    else:
+        print "{file}:{line_num}: {w_severity}[{w_code}]: {w_message}"
+
 fn query_file_read_rich(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
@@ -1723,10 +1744,7 @@ fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text,
                 not word.ends_with("__") and word.contains("__")):
                 # Check if followed by (
                 if end_ci < trimmed.len() and trimmed.substring(end_ci, end_ci + 1) == "(":
-                    if format == "json":
-                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{word}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{ci + 1},\"end_line\":{line_num},\"end_col\":{end_ci + 1},\"tags\":[2],\"source\":\"simple-lint\"}")
-                    else:
-                        print "{file}:{line_num}: warning[DEPR001]: '{word}()' uses deprecated Type__method() syntax"
+                    _emit_lint_diag(2, "DEPR001", "'{word}()' uses deprecated Type__method() syntax", line_num, ci + 1, end_ci + 1, "[2]", file, format)
                     found = found + 1
             ci = end_ci
         else:
@@ -1798,12 +1816,9 @@ fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: Lsp
                     ri = ri + 1
                 if not referenced:
                     val line_num = li + 1
-                    if format == "json":
-                        val col = _find_in_line(trimmed, decl_name) + 1
-                        val end_col = col + decl_name.len()
-                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{decl_name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
-                    else:
-                        print "{file}:{line_num}: warning[UNUSED001]: variable '{decl_name}' is declared but never used"
+                    val col = _find_in_line(trimmed, decl_name) + 1
+                    val end_col = col + decl_name.len()
+                    _emit_lint_diag(2, "UNUSED001", "variable '{decl_name}' is declared but never used", line_num, col, end_col, "[1]", file, format)
                     count = count + 1
         li = li + 1
     count
@@ -1916,10 +1931,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text, emi
 
             if arm_count > 0 and not has_wildcard:
                 val line_num = li + 1
-                if format == "json":
-                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"MEXH002\",\"message\":\"match expression has no wildcard/default case\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                else:
-                    print "{file}:{line_num}: warning[MEXH002]: match expression has no wildcard/default case"
+                _emit_lint_diag(2, "MEXH002", "match expression has no wildcard/default case", line_num, 1, trimmed.len(), "[]", file, format)
                 count = count + 1
 
         li = li + 1
@@ -1963,10 +1975,7 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text, emitter:
                     for ovar in outer_vars:
                         if _is_assign_to_clos(bt, ovar):
                             val bline_num = body_start + 1
-                            if format == "json":
-                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{ovar}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                            else:
-                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{ovar}'"
+                            _emit_lint_diag(2, "CLOS001", "closure modifies outer variable '{ovar}' — changes won't persist (capture-by-value)", bline_num, 1, bt.len(), "[]", file, format)
                             count = count + 1
                     body_start = body_start + 1
         li = li + 1
@@ -2046,10 +2055,7 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text, emitter: 
                                 break
                     if not is_side_effect:
                         if not _is_last_stmt_ret(lines, li):
-                            if format == "json":
-                                _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
-                            else:
-                                print "{file}:{line_num}: info[RET001]: return value of '{call_name}()' is discarded"
+                            _emit_lint_diag(3, "RET001", "return value of '{call_name}()' is discarded", line_num, 1, trimmed.len(), "[1]", file, format)
                             count = count + 1
         li = li + 1
     count
@@ -2140,10 +2146,7 @@ fn _check_multiline_bool_text(lines: [text], file: text, format: text, emitter: 
                 next_starts_bool = (next_t.starts_with("and ") or next_t.starts_with("or "))
             if ends_with_bool or next_starts_bool:
                 if not cs.starts_with("("):
-                    if format == "json":
-                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"BOOL001\",\"message\":\"multiline boolean in '{keyword}' without parentheses — may parse incorrectly\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                    else:
-                        print "{file}:{line_num}: warning[BOOL001]: multiline boolean in '{keyword}' without parentheses"
+                    _emit_lint_diag(2, "BOOL001", "multiline boolean in '{keyword}' without parentheses — may parse incorrectly", line_num, 1, trimmed.len(), "[]", file, format)
                     count = count + 1
         li = li + 1
     count
@@ -2171,18 +2174,12 @@ fn _check_safety_text(lines: [text], file: text, format: text, emitter: LspEmitt
             unsafe_indent = -1
         if not in_unsafe and indent > 0:
             if trimmed.starts_with("asm ") or trimmed.starts_with("asm(") or trimmed == "asm":
-                if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                else:
-                    print "{file}:{line_num}: error[SAFE001]: inline assembly outside unsafe block"
+                _emit_lint_diag(1, "SAFE001", "inline assembly outside unsafe block", line_num, 1, trimmed.len(), "[]", file, format)
                 count = count + 1
             if (trimmed.contains("ptr_read(") or trimmed.contains("ptr_write(") or
                 trimmed.contains("ptr_cast(") or trimmed.contains("ptr_offset(") or
                 trimmed.contains("mem_copy(") or trimmed.contains("mem_set(")):
-                if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                else:
-                    print "{file}:{line_num}: error[SAFE003]: raw pointer operation outside unsafe block"
+                _emit_lint_diag(1, "SAFE003", "raw pointer operation outside unsafe block", line_num, 1, trimmed.len(), "[]", file, format)
                 count = count + 1
         li = li + 1
     count
@@ -2209,11 +2206,8 @@ fn _check_visibility_text(lines: [text], file: text, format: text, emitter: LspE
                     val imp_name = imp.trim()
                     if (imp_name.starts_with("_") and not imp_name.starts_with("__") and
                         imp_name.len() > 1):
-                        if format == "json":
-                            val col = _find_in_line(trimmed, imp_name) + 1
-                            _diag_emit_or_collect("{\"severity\":2,\"code\":\"W0401\",\"message\":\"importing private symbol '{imp_name}' from another module\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + imp_name.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                        else:
-                            print "{file}:{line_num}: warning[W0401]: importing private symbol '{imp_name}' from another module"
+                        val col = _find_in_line(trimmed, imp_name) + 1
+                        _emit_lint_diag(2, "W0401", "importing private symbol '{imp_name}' from another module", line_num, col, col + imp_name.len(), "[]", file, format)
                         count = count + 1
         li = li + 1
     count

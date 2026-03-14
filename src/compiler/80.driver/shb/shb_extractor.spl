@@ -68,6 +68,58 @@ fn shb_generation_pop():
             i = i + 1
         _shb_generation_stack = new_stack
 
+# --- Explicit Generation State Tracking (Phase 4: Circular Interface Model) ---
+#
+# Tracks per-module generation state for circular-safe SHB resolution.
+# States are encoded as text values in a module-level dict:
+#   "missing"              — no SHB exists on disk
+#   "generating-interface" — interface extraction in progress (on generation stack)
+#   "interface-ready"      — SHB written and valid; interface hash available
+#   "stale"                — SHB exists but source or dep hash mismatch
+#   "failed"               — generation attempted but failed
+#
+# The state map is keyed by module path (dotted form, e.g. "compiler.shb.shb_types").
+
+val SHB_STATE_MISSING: text = "missing"
+val SHB_STATE_GENERATING: text = "generating-interface"
+val SHB_STATE_READY: text = "interface-ready"
+val SHB_STATE_STALE: text = "stale"
+val SHB_STATE_FAILED: text = "failed"
+
+var _shb_gen_state_map: {text: text} = {"__init__": "sentinel"}
+
+fn shb_get_gen_state(module_path: text) -> text:
+    val state = _shb_gen_state_map[module_path] ?? ""
+    if state == "":
+        return SHB_STATE_MISSING
+    state
+
+fn shb_set_gen_state(module_path: text, state: text):
+    _shb_gen_state_map[module_path] = state
+
+fn shb_is_interface_ready(module_path: text) -> bool:
+    shb_get_gen_state(module_path) == SHB_STATE_READY
+
+fn shb_is_generating(module_path: text) -> bool:
+    shb_get_gen_state(module_path) == SHB_STATE_GENERATING
+
+fn shb_generation_push_with_state(module_path: text):
+    shb_generation_push(module_path)
+    shb_set_gen_state(module_path, SHB_STATE_GENERATING)
+
+fn shb_generation_pop_with_state(module_path: text, success: bool):
+    shb_generation_pop()
+    if success:
+        shb_set_gen_state(module_path, SHB_STATE_READY)
+    else:
+        shb_set_gen_state(module_path, SHB_STATE_FAILED)
+
+fn shb_mark_stale(module_path: text):
+    shb_set_gen_state(module_path, SHB_STATE_STALE)
+
+fn shb_reset_gen_states():
+    _shb_gen_state_map = {"__init__": "sentinel"}
+
 # --- Dependency interface hash resolution ---
 # Given a module path and a cache directory, attempt to load the
 # dependency's existing SHB and return its interface hash.

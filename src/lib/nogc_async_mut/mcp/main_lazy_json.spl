@@ -2,6 +2,25 @@
 # MCP Lazy Server - JSON helpers
 # Extracted from main_lazy.spl
 
+# --- Safe string helpers (workaround for interpreter-mode .substring() mutation bug) ---
+
+fn mcp_substr(s: text, start: i64, end_pos: i64) -> text:
+    var buf: [text] = []
+    var idx = 0
+    for ch in s:
+        if idx >= start and idx < end_pos:
+            buf.push(ch)
+        idx = idx + 1
+    buf.join("")
+
+fn mcp_char_at(s: text, index: i64) -> text:
+    var idx = 0
+    for ch in s:
+        if idx == index:
+            return ch
+        idx = idx + 1
+    ""
+
 # --- JSON helpers (inlined for zero-import startup) ---
 
 fn Q() -> text:
@@ -20,21 +39,13 @@ fn SB_R() -> text:
     "]"
 
 fn escape_json(s: text) -> text:
-    var parts: [text] = []
-    for ch in s:
-        if ch == "\"":
-            parts.push("\\\"")
-        elif ch == "\\":
-            parts.push("\\\\")
-        elif ch == "\n":
-            parts.push("\\n")
-        elif ch == "\r":
-            parts.push("\\r")
-        elif ch == "\t":
-            parts.push("\\t")
-        else:
-            parts.push(ch)
-    parts.join("")
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(Q(), r"\" + Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
 
 fn js(s: text) -> text:
     Q() + escape_json(s) + Q()
@@ -61,10 +72,10 @@ fn extract_field(json: text, key: text) -> text:
     if idx < 0:
         return ""
     val start = idx + search.len()
-    val after = json.substring(start)
+    val after = mcp_substr(json, start, json.len())
     val trimmed = after.trim()
     if trimmed.starts_with(Q()):
-        val after_quote = trimmed.substring(1)
+        val after_quote = mcp_substr(trimmed, 1, trimmed.len())
         val end_idx_result = after_quote.index_of(Q())
         var end_idx = -1
         match end_idx_result:
@@ -72,7 +83,7 @@ fn extract_field(json: text, key: text) -> text:
             nil: return ""
         if end_idx < 0:
             return ""
-        return trimmed.substring(1, end_idx + 1)
+        return mcp_substr(trimmed, 1, end_idx + 1)
     else:
         var parts: [text] = []
         for ch in trimmed:
@@ -93,7 +104,7 @@ fn extract_field_raw(json: text, key: text) -> text:
     var start = idx + search.len()
     if start >= json.len():
         return "null"
-    var rest = json.substring(start)
+    var rest = mcp_substr(json, start, json.len())
     rest = rest.trim()
     if rest == "":
         return "null"
@@ -101,10 +112,8 @@ fn extract_field_raw(json: text, key: text) -> text:
         var out: [text] = [Q()]
         var escaped = false
         var pos = 1
-        for _i in range(0, 100000):
-            if pos >= rest.len():
-                break
-            val ch = rest.substring(pos, pos + 1)
+        while pos < rest.len():
+            val ch = mcp_char_at(rest, pos)
             out.push(ch)
             if escaped:
                 escaped = false
@@ -137,7 +146,7 @@ fn extract_nested(json: text, key: text) -> text:
     if params_idx < 0:
         return ""
     val params_start = params_idx + params_search.len()
-    val params = json.substring(params_start)
+    val params = mcp_substr(json, params_start, json.len())
     extract_field(params, key)
 
 fn make_json_result(id: text, result: text) -> text:
@@ -227,7 +236,7 @@ fn summarize_json_shape(raw: text, depth: i64) -> text:
     if value_type == "array":
         var inner = raw.trim()
         if inner.len() >= 2:
-            inner = inner.substring(1, inner.len() - 1).trim()
+            inner = mcp_substr(inner, 1, inner.len() - 1).trim()
         var first = ""
         var d = 0
         var in_s = false
@@ -280,34 +289,89 @@ fn summarize_json_shape(raw: text, depth: i64) -> text:
                 in_s = true
             elif ch == ":":
                 pair_count = pair_count + 1
-        return "object{pairs=" + str(pair_count) + "}"
+        val lb = "{"
+        val rb = "}"
+        return "object" + lb + "pairs=" + str(pair_count) + rb
     value_type
 
 fn make_tool_result(id: text, output: text) -> text:
-    val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(output))) + SB_R()
+    val escaped = escape_json(output)
+    val quoted = Q() + escaped + Q()
+    val content = SB_L() + jo2(jp("type", js("text")), jp("text", quoted)) + SB_R()
     val inferred = infer_json_value_type(output)
     val shape = summarize_json_shape(output, 2)
-    val structured = jo3(
-        jp("rawText", js(output)),
+    val structured = jo2(
         jp("inferredType", js(inferred)),
         jp("shape", js(shape))
     )
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("structuredContent", structured) + RB()
+    val result = jo2(jp("content", content), jp("structuredContent", structured))
     make_json_result(id, result)
 
 fn make_tool_error(id: text, code: i64, msg: text) -> text:
     val content = SB_L() + jo2(jp("type", js("text")), jp("text", js("ERROR " + str(code) + ": " + msg))) + SB_R()
     val structured = jo2(jp("code", str(code)), jp("message", js(msg)))
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("isError", "true") + "," + jp("structuredContent", structured) + RB()
-    make_json_result(id, result)
+    var err_result = LB() + jp("content", content) + "," + jp("isError", "true") + "," + jp("structuredContent", structured) + RB()
+    make_json_result(id, err_result)
 
 # --- Shell helper ---
+# Uses rt_process_run (returns tuple). Note: val (a,b) = expr is broken
+# in interpreter, so we use var + assignment destructuring instead.
+
+fn _mcp_detect_shell() -> text:
+    # On Windows, /bin/sh doesn't resolve for native PE binaries.
+    # Use "sh" (found on PATH via Git Bash/MSYS2) or fall back to "cmd".
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        # Check for sh on PATH (Git Bash / MSYS2)
+        var sh_out = ""
+        var sh_err = ""
+        var sh_rc: i64 = 0
+        (sh_out, sh_err, sh_rc) = rt_process_run("sh", ["-c", "echo ok"])
+        if sh_rc == 0 and sh_out.trim() == "ok":
+            return "sh"
+        return "cmd"
+    "/bin/sh"
+
+var _SHELL_CMD = ""
+
+fn _get_shell() -> text:
+    if _SHELL_CMD == "":
+        _SHELL_CMD = _mcp_detect_shell()
+    _SHELL_CMD
+
+fn strip_ansi(s: text) -> text:
+    val shell = _get_shell()
+    if shell == "cmd":
+        # No ANSI stripping needed on Windows cmd
+        return s
+    var e_out = ""
+    var e_err = ""
+    var e_rc: i64 = 0
+    (e_out, e_err, e_rc) = rt_process_run(shell, ["-c", r"printf '\033'"])
+    if e_out == "" or not s.contains(e_out):
+        return s
+    s.replace(e_out, "")
 
 fn shell_cmd(command: text) -> (text, i64):
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    val shell = _get_shell()
+    if shell == "cmd":
+        (stdout, stderr, code) = rt_process_run("cmd", ["/C", command])
+    elif shell == "sh":
+        # Windows Git Bash: < /dev/null breaks piped commands, so omit it
+        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+    else:
+        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    if stdout != "":
+        stdout = strip_ansi(stdout)
     (stdout, code)
+
+fn text_byte_len(s: text) -> i64:
+    # For ASCII-dominated JSON payloads, codepoint count == byte count.
+    # Avoids 2 subprocess spawns (file_write + wc -c) per MCP response.
+    s.len()
 
 fn file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""
