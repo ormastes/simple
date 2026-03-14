@@ -80,7 +80,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `rule` | Engineering rules, doc folder map, ADR process |
 | `git-jj-sync` | One-step commit-fetch-rebase-push with SDN conflict auto-resolution |
 | `worktree` | JJ workspace isolation for parallel development |
-| `impl` | 15-phase implementation lifecycle with agent teams, BDD, duplication checks |
+| `impl` | 17-phase implementation lifecycle with agent teams, codex verification, gemini visual design |
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`

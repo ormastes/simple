@@ -1,6 +1,6 @@
 # MCP Lazy Server - VCS tool handlers
 # Extracted from main_lazy.spl
-# Handles: simple_diff, simple_log, simple_squash, simple_new, simple_commit, simple_push, simple_rebase, simple_pull
+# Handles: simple_diff, simple_log, simple_squash, simple_new, simple_commit, simple_push, simple_rebase, simple_pull, simple_commit_pull_rebase_push
 
 # ============================================================================
 # simple_diff — jj diff with file list
@@ -253,4 +253,89 @@ fn handle_simple_pull(id: text, body: text) -> text:
         out_parts.push(NL + "Pull completed successfully.")
     else:
         out_parts.push(NL + "Rebase failed (exit code " + str(rebase_exit) + ").")
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# simple_commit_pull_rebase_push — Full sync: commit → fetch → rebase → push
+# Stops on conflict and reports status.
+# ============================================================================
+
+fn handle_simple_commit_pull_rebase_push(id: text, body: text) -> text:
+    val message = extract_field(body, "message")
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_commit_pull_rebase_push --" + NL)
+
+    # Step 1: Commit (skip if no message provided)
+    if message != "":
+        out_parts.push("Step 1: Commit" + NL)
+        var commit_out = ""
+        var commit_exit: i64 = 0
+        (commit_out, commit_exit) = shell_cmd("timeout 30 jj --no-pager --color never commit -m '" + message + "' 2>&1")
+        out_parts.push(commit_out + NL)
+        if commit_exit != 0:
+            out_parts.push("Commit failed (exit code " + str(commit_exit) + ").")
+            return make_tool_result(id, out_parts.join(""))
+    else:
+        # Check if working copy has changes
+        var st_out = ""
+        var _st_exit: i64 = 0
+        (st_out, _st_exit) = shell_cmd("timeout 10 jj --no-pager --color never st 2>&1")
+        if st_out.contains("no changes"):
+            out_parts.push("Step 1: Commit (skipped — no changes)" + NL)
+        else:
+            out_parts.push("ERROR: Working copy has changes but no commit message provided." + NL)
+            out_parts.push(st_out)
+            return make_tool_result(id, out_parts.join(""))
+
+    # Step 2: Fetch
+    out_parts.push("Step 2: Fetch" + NL)
+    var fetch_out = ""
+    var fetch_exit: i64 = 0
+    (fetch_out, fetch_exit) = shell_cmd("timeout 60 jj --no-pager --color never git fetch 2>&1")
+    out_parts.push(fetch_out + NL)
+    if fetch_exit != 0:
+        out_parts.push("Fetch failed (exit code " + str(fetch_exit) + ").")
+        return make_tool_result(id, out_parts.join(""))
+
+    # Step 3: Rebase
+    out_parts.push("Step 3: Rebase" + NL)
+    var rebase_out = ""
+    var rebase_exit: i64 = 0
+    (rebase_out, rebase_exit) = shell_cmd("timeout 30 jj --no-pager --color never rebase -d main@origin 2>&1")
+    out_parts.push(rebase_out + NL)
+    if rebase_exit != 0:
+        out_parts.push("Rebase failed (exit code " + str(rebase_exit) + ").")
+        return make_tool_result(id, out_parts.join(""))
+
+    # Step 4: Conflict check
+    out_parts.push("Step 4: Conflict check" + NL)
+    var status_out = ""
+    var _status_exit: i64 = 0
+    (status_out, _status_exit) = shell_cmd("timeout 10 jj --no-pager --color never st 2>&1")
+    if status_out.contains("onflict"):
+        out_parts.push("CONFLICT DETECTED — stopping before push." + NL)
+        out_parts.push(status_out + NL)
+        out_parts.push("Resolve conflicts, then run: jj bookmark set main -r @- && jj git push --bookmark main")
+        return make_tool_result(id, out_parts.join(""))
+    out_parts.push("No conflicts." + NL)
+
+    # Step 5: Bookmark + Push
+    out_parts.push("Step 5: Push" + NL)
+    var set_out = ""
+    var set_exit: i64 = 0
+    (set_out, set_exit) = shell_cmd("timeout 30 jj --no-pager --color never bookmark set main -r @- 2>&1")
+    out_parts.push("bookmark: " + set_out + NL)
+    if set_exit != 0:
+        out_parts.push("Bookmark set failed (exit code " + str(set_exit) + ").")
+        return make_tool_result(id, out_parts.join(""))
+
+    var push_out = ""
+    var push_exit: i64 = 0
+    (push_out, push_exit) = shell_cmd("timeout 60 jj --no-pager --color never git push --bookmark main 2>&1")
+    out_parts.push("push: " + push_out + NL)
+    if push_exit == 0:
+        out_parts.push("Sync complete.")
+    else:
+        out_parts.push("Push failed (exit code " + str(push_exit) + ").")
     make_tool_result(id, out_parts.join(""))

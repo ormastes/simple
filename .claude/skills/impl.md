@@ -1,6 +1,6 @@
-# Impl Skill — 15-Phase Implementation Workflow
+# Impl Skill — 17-Phase Implementation Workflow
 
-**Purpose**: Full feature implementation lifecycle from requirements through VCS sync, with agent teams, BDD, duplication checks, and doc consistency.
+**Purpose**: Full feature implementation lifecycle from requirements through VCS sync, with agent teams, BDD, duplication checks, codex verification, and gemini visual design.
 
 ---
 
@@ -12,8 +12,11 @@
 | 2 | Research | research-team | `doc/research/<feature>.md` |
 | 3 | Req Update | main | Updated `doc/requirement/<feature>.md` |
 | 4 | Plan + Design | design-team | `doc/plan/<feature>.md`, `doc/design/<feature>.md` |
+| 4g | GUI/Visual Design | **gemini-designer** | Layout mockups, UI concepts, image assets |
+| 4v | Plan Verification | **codex-verifier** | Verification report (status accuracy + achievability) |
 | 5 | Model Selection | main | Task-to-model assignment |
 | 6 | System Test (SSpec) | test-agent | `test/system/<feature>_spec.spl` |
+| 6v | Test Verification | **codex-verifier** | Coverage + integrity report |
 | 7 | Doc Consistency | review-agent | Cross-ref validation |
 | 8 | Implementation | code-team | `src/**/<feature>.spl` |
 | 9 | Unit + IT Tests | test-agent | 80%+ branch coverage |
@@ -29,10 +32,32 @@
 ## Agent Teams
 
 ```
-research-team:  explore → docs          (sequential)
-design-team:    explore → code → docs   (sequential)
-code-team:      code → test             (sequential)
-review-team:    explore → docs          (sequential)
+research-team:   explore → docs                    (sequential)
+design-team:     explore → code → docs             (sequential)
+code-team:       code → test                       (sequential)
+review-team:     explore → docs                    (sequential)
+```
+
+### LLM Subagents (via llm_cli_tools agent worker)
+
+| Subagent | Provider | Role | When Used |
+|----------|----------|------|-----------|
+| **codex-verifier** | `codex_cli` | Verification: plan accuracy, test coverage, dummy detection | Phase 4v, 6v |
+| **gemini-designer** | `gemini_cli` | Visual design: UI layout, mockups, image concepts, GUI wireframes | Phase 4g, any visual update |
+
+**Spawn command** (from `examples/llm_cli_tools/`):
+```bash
+# Codex verifier
+AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
+  AGENT_SYSTEM="You are a plan verification agent..." \
+  AGENT_PROMPT_FILE=doc/plan/<feature>.md \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
+
+# Gemini designer
+AGENT_CMD=spawn AGENT_PROVIDER=gemini_cli AGENT_ROLE=design \
+  AGENT_SYSTEM="You are a UI/visual design agent..." \
+  AGENT_PROMPT_FILE=doc/design/<feature>.md \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
 ```
 
 Use `agent_team_create` + `agent_team_run` MCP tools, or spawn Task agents manually with the corresponding agent definitions from `.claude/agents/`.
@@ -73,16 +98,106 @@ Use `agent_team_create` + `agent_team_run` MCP tools, or spawn Task agents manua
 
 **Agent:** design-team (explore → code → docs)
 
-1. Create `doc/plan/<feature>.md`:
+1. Create `doc/plan/<feature>.md` with **standardized header**:
+
+```markdown
+# <Feature> — Plan
+
+## Objective
+What this achieves (1-3 sentences).
+
+## Current Status
+| Component | Status | Evidence |
+|-----------|--------|----------|
+| module_x  | Real   | test/unit/module_x_spec.spl passes |
+| module_y  | Dummy (pass_todo) | src/module_y.spl:42 |
+| module_z  | Fallback to other module | uses module_w instead |
+
+## What To Do
+1. Task description (difficulty: N)...
+2. Task description (difficulty: N)...
+```
+
    - Task breakdown with numbered items
    - Dependencies between tasks (DAG)
    - Difficulty rating per task (1-5 scale)
    - **Split any task rated ≥4** into smaller subtasks
+
 2. Create `doc/design/<feature>.md`:
    - Module structure
    - Type definitions
    - API surface
    - Integration points with existing code
+
+### Phase 4g: GUI/Visual Design (conditional)
+
+**Agent:** gemini-designer (LLM subagent)
+**When:** Feature involves UI, TUI, GUI, images, visual layout, or any graphical component.
+**Skip:** Pure backend/compiler/library features with no visual component.
+
+Gemini receives the design doc and produces:
+
+1. **Layout mockups** — ASCII wireframes or textual UI descriptions
+2. **Visual concepts** — Color schemes, component hierarchy, interaction flow
+3. **Image asset descriptions** — If icons, logos, or graphics are needed
+4. **TUI panel layout** — For terminal-based interfaces (box drawing, panel arrangement)
+5. **Accessibility notes** — Keyboard navigation, screen reader considerations
+
+**Gemini prompt template:**
+```
+You are a UI/visual design agent for the Simple language project.
+Given the design document, produce:
+1. ASCII wireframe of the main interface layout
+2. Component hierarchy (which panels contain what)
+3. Color scheme recommendations (ANSI terminal colors for TUI, or CSS for web)
+4. Interaction flow (key bindings, mouse events, navigation)
+5. Responsive behavior (narrow terminal, small window)
+
+Design doc:
+<contents of doc/design/<feature>.md>
+```
+
+**Output:** Appended to `doc/design/<feature>.md` under `## Visual Design` section, or as separate `doc/design/<feature>_visual.md`.
+
+### Phase 4v: Plan Verification
+
+**Agent:** codex-verifier (LLM subagent)
+**Always runs** after Phase 4 completes.
+
+Codex receives the plan doc and verifies:
+
+1. **Current status accuracy:**
+   - For each component listed as "Real": verify source file exists and has **no** `pass_todo`, `pass_do_nothing`, or placeholder implementations
+   - For each component listed as "Done": verify tests exist and reference the module
+   - **Flag** any component with dummy/temp/fallback that claims to be "Real"
+   - **Flag** any component that delegates to another module differently than designed
+
+2. **Objective achievability:**
+   - Check that the listed to-do tasks, if all completed, would satisfy the stated objective
+   - Flag missing prerequisite tasks or unreachable goals
+   - Flag tasks that depend on unimplemented infrastructure
+
+**Codex prompt template:**
+```
+You are a plan verification agent. Given a plan document, verify:
+1. CURRENT STATUS: For each component marked "Real" or "Done", check if the source
+   file exists and contains no pass_todo, pass_do_nothing, or placeholder stubs.
+   Report any component where status is inaccurate.
+2. ACHIEVABILITY: Check if completing all listed tasks would achieve the stated
+   objective. Report any missing prerequisites or impossible goals.
+
+Output format:
+STATUS_CHECK:
+  - component_name: PASS/FAIL (reason)
+ACHIEVABILITY_CHECK:
+  - PASS/FAIL (reason)
+OVERALL: PASS/FAIL
+
+Plan doc:
+<contents of doc/plan/<feature>.md>
+```
+
+**If FAIL:** Loop back to Phase 4 to fix the plan before proceeding.
 
 ### Phase 5: Model Selection
 
@@ -103,8 +218,76 @@ Assign model per task based on difficulty:
 1. Create `test/system/<feature>_spec.spl` using SSpec BDD format
 2. Tests MUST assert-fail-first (write tests before implementation)
 3. Tests are doc-driven — each test traces to a requirement
-4. Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
-5. See `/sspec` skill for template and conventions
+4. Add cross-reference tags:
+   ```simple
+   # @req REQ-042
+   # @feature feature_name
+   tag: slow, system
+
+   describe "Feature Name":
+       # @scenario SC-001
+       it "does the main thing":
+           ...
+   ```
+5. Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
+6. See `/sspec` skill for template and conventions
+
+### Phase 6v: Test Verification
+
+**Agent:** codex-verifier (LLM subagent)
+**Always runs** after Phase 6 completes.
+
+Codex checks:
+
+1. **Document existence:**
+   - `doc/requirement/<feature>.md` exists
+   - `doc/research/<feature>.md` exists (or Phase 2 was skipped with approval)
+   - `doc/plan/<feature>.md` exists with standardized header
+   - `test/system/<feature>_spec.spl` exists
+
+2. **SSpec scenario coverage:**
+   - System test covers **all acceptance criteria** from requirement doc
+   - Each `it` block tests a meaningful scenario (not trivial pass-through)
+   - Cases that **cannot** be system-tested are documented for integration test with mock
+
+3. **Test integrity:**
+   - System test path has **NO mock or dummy implementations**
+   - Mock-based tests belong in `test/integration/` not `test/system/`
+   - System test file has `# @req` cross-reference tag
+
+4. **Coverage plan:**
+   - Implementation modules planned for **≥80% branch coverage** with unit tests
+   - Unit/integration tests reference parent system test: `# @parent test/system/<feature>_spec.spl`
+
+**Codex prompt template:**
+```
+You are a test verification agent. Given the requirement doc and system test file, verify:
+1. DOCUMENTS: requirement, research, plan all exist
+2. COVERAGE: every acceptance criterion has a matching it() block
+3. INTEGRITY: no mock/dummy in system test path, proper @req tags
+4. PLAN: unit test coverage target >= 80%
+
+Output format:
+DOC_CHECK:
+  - requirement.md: EXISTS/MISSING
+  - research.md: EXISTS/MISSING/SKIPPED
+  - plan.md: EXISTS/MISSING
+  - system_spec.spl: EXISTS/MISSING
+COVERAGE_CHECK:
+  - criterion_1: COVERED by "it block name" / UNCOVERED
+INTEGRITY_CHECK:
+  - mocks_in_system_test: NONE/FOUND (list)
+  - req_tag_present: YES/NO
+OVERALL: PASS/FAIL
+
+Requirement doc:
+<contents>
+
+System test:
+<contents>
+```
+
+**If FAIL:** Loop back to Phase 6 to fix tests before proceeding.
 
 ### Phase 7: Doc Consistency
 
@@ -123,8 +306,10 @@ All documents link bidirectionally:
 
 ```
 requirement/<f>.md ↔ plan/<f>.md ↔ design/<f>.md ↔ research/<f>.md
-                  ↘ test/system/<f>_spec.spl
+                  ↘ test/system/<f>_spec.spl    (# @req REQ-NNN)
                   ↘ src/**/<f>.spl
+                  ↘ test/unit/**/<f>_spec.spl   (# @parent test/system/...)
+                  ↘ test/integration/**/<f>_spec.spl (# @parent test/system/...)
 ```
 
 ### Phase 8: Implementation
@@ -144,7 +329,12 @@ requirement/<f>.md ↔ plan/<f>.md ↔ design/<f>.md ↔ research/<f>.md
 1. Write unit tests alongside implementation
 2. Write integration tests for module boundaries
 3. Target: **80%+ branch coverage**
-4. Run: `bin/simple test test/.../<feature>_spec.spl`
+4. Add cross-reference tags:
+   ```simple
+   # @parent test/system/<feature>_spec.spl
+   # @req REQ-042
+   ```
+5. Run: `bin/simple test test/.../<feature>_spec.spl`
 
 ### Phase 10: Doctest
 
@@ -241,6 +431,11 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 | Unit Tests | test/.../<feature>_spec.spl |
 | Bug Report | doc/bug/<feature>_limitations.md |
 
+## Verification Results
+- Plan verification (codex): PASS/FAIL
+- Test verification (codex): PASS/FAIL
+- Visual design (gemini): PASS/SKIPPED
+
 ## Test Results
 - Total: X passed, Y failed
 - Coverage: Z%
@@ -251,6 +446,56 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 ## Limitations Found
 - <list from Phase 11>
+```
+
+---
+
+## LLM Subagent Details
+
+### Codex Verifier
+
+**Provider:** `codex_cli` (OpenAI Codex CLI)
+**Binary:** `codex`
+**Flags:** `--full-auto --quiet`
+**Role:** Automated verification — never writes code, only reports findings.
+
+**Used in:**
+- Phase 4v: Verify plan current-status is real (not dummy/fallback)
+- Phase 6v: Verify system test coverage and integrity
+
+**Spawn from `examples/llm_cli_tools/`:**
+```bash
+AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
+  AGENT_SYSTEM="You are a verification agent. Check for accuracy, do not modify files." \
+  AGENT_PROMPT_FILE=<path_to_verify> \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
+```
+
+**Result:** Read via `AGENT_CMD=result AGENT_ID=<id> ... orchestrator.spl`
+
+### Gemini Designer
+
+**Provider:** `gemini_cli` (Google Gemini CLI)
+**Binary:** `gemini`
+**Flags:** `--sandbox off`
+**Role:** Visual/UI design — produces layout mockups, wireframes, visual concepts.
+
+**Used in:**
+- Phase 4g: GUI/TUI/visual design when feature has UI component
+- Any phase where visual updates are needed (on-demand)
+
+**Triggers** (when to invoke gemini-designer):
+- Feature mentions: UI, TUI, GUI, dashboard, panel, layout, widget, screen, window, dialog
+- Feature mentions: image, icon, logo, graphic, visual, color, theme, style
+- Design doc includes visual components
+- User explicitly requests visual design
+
+**Spawn from `examples/llm_cli_tools/`:**
+```bash
+AGENT_CMD=spawn AGENT_PROVIDER=gemini_cli AGENT_ROLE=design \
+  AGENT_SYSTEM="You are a UI/visual design agent. Produce ASCII wireframes, layout specs, and visual concepts." \
+  AGENT_PROMPT_FILE=doc/design/<feature>.md \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
 ```
 
 ---
@@ -276,10 +521,11 @@ Main agent additionally checks:
 Some phases may be skipped with user approval:
 
 - **Phase 2 (Research)**: Skip if feature is well-understood and isolated
+- **Phase 4g (GUI Design)**: Skip if no visual component (auto-skipped)
 - **Phase 10 (Doctest)**: Skip for internal/private modules
 - **Phase 12 (Duplication)**: Skip for small changes (<50 lines)
 
-Always ask user before skipping. Never skip Phases 1, 6, 8, 14, 15.
+Always ask user before skipping. Never skip Phases 1, 4v, 6, 6v, 8, 14, 15.
 
 ---
 
