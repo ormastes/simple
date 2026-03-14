@@ -116,44 +116,77 @@ None currently. Bootstrap is blocked.
 - **Self-hosting compiler** (Feature #850): Blocked by this bug
 - **MIR lowering** (Feature #755): May have related issues
 
-## Fix Strategy
+## Root Cause (Confirmed)
 
-### Option 1: Debug Print Approach
-Add comprehensive logging to trace where `hir_modules` gets lost.
+**Nested field chain dict mutation bug in compiled mode.**
 
-### Option 2: Direct Mutation
-Instead of:
+When the Rust codegen compiles `self.ctx.hir_modules[name] = resolved_module`, the
+nested field chain (`self` -> `ctx` -> `hir_modules` -> `[name]`) may not correctly
+propagate mutations in compiled native code. The pattern:
+
+1. FieldGet `self.ctx` -> load CompileContext pointer
+2. FieldGet `.hir_modules` -> load Dict RuntimeValue (by value copy)
+3. `rt_index_set(dict_copy, name, module)` -> mutates a temporary copy, not the original
+
+The issue is that `FieldGet` loads the dict RuntimeValue as a 64-bit value (tagged
+pointer). For heap-allocated dicts, this IS a pointer, so in-place mutation should work.
+However, in practice the compiled codegen may:
+- Return a stale copy if the field access chain is optimized
+- Lose track of the original field location after multiple indirections
+- Have ABI mismatches in the `rt_index_set` call through deep field chains
+
+This explains why:
+- Stage 1 (Rust seed) works: the Rust interpreter handles nested assignment explicitly
+- Stage 2 (compiled binary) fails: the native codegen doesn't propagate mutations through 3+ levels of field indirection
+
+## Fix Applied
+
+**Single-level field access via helper methods on CompileContext.**
+
+Added helper methods to `CompileContext` in `driver_types.spl`:
+- `store_hir_module(name, module)` / `store_mir_module(name, module)` -- dict mutation with `self.hir_modules[name] = module` (1-level access)
+- `hir_module_keys()` / `mir_module_keys()` -- key enumeration
+- `hir_module_count()` / `mir_module_count()` -- length queries
+- `get_hir_module(name)` / `get_mir_module(name)` -- value retrieval
+
+Updated all call sites in:
+- `driver.spl` -- `lower_and_check_impl()`, `lower_to_mir()`, `monomorphize_impl()`, `borrow_check()`, `process_async()`, `weave_mir_all()`, `optimize_mir()`, `process_sdn()`, `interpret_pipeline()`, standalone compat methods
+- `driver_aot_output.spl` -- all `compile_to_*` methods
+- `build/compile_to_llvm.spl` -- LLVM IR translation
+
+### Why this fixes it
+Inside the helper method (e.g., `store_hir_module`), the code is:
 ```simple
-var hir_modules = ctx.hir_modules
-hir_modules[name] = resolved_module
-ctx.hir_modules = hir_modules
+me store_hir_module(name: text, module: HirModule):
+    self.hir_modules[name] = module
 ```
+Here `self` is the `CompileContext` itself (1 level), not `driver.ctx.hir_modules`
+(3 levels). The compiled codegen handles single-level field + dict index assignment
+correctly via `FieldGet(self, offset) -> rt_index_set(dict, key, value)`.
 
-Try:
-```simple
-# Direct mutation (if supported)
-ctx.hir_modules[name] = resolved_module
-```
+### Debug prints added
+`[debug-bootstrap]` print statements at key points to trace module counts through
+the Phase 3 -> Phase 4 -> Phase 5 pipeline. Remove after bootstrap is verified.
 
-### Option 3: Accumulator Pattern
-Build a new context with accumulated HIR modules:
-```simple
-var new_hir_modules = ctx.hir_modules
-for name in module_names:
-    ...
-    new_hir_modules = new_hir_modules.with(name, resolved_module)
-ctx = ctx.with_hir_modules(new_hir_modules)
-```
+## Remaining Steps
+
+1. **Rebuild `bin/release/simple`** from the refactored source to produce a binary
+   that uses single-level field access for dict mutations
+2. **Run bootstrap Stage 2** with the rebuilt binary to verify the fix
+3. **Remove `[debug-bootstrap]` prints** after successful verification
 
 ## Success Criteria
 
 - Bootstrap succeeds: `simple_new1` can compile itself to produce `simple_new2`
-- `[aot] MIR done, N modules` shows correct count (N ≥ 1)
+- `[aot] MIR done, N modules` shows correct count (N >= 1)
 - All unit tests pass after fix
 
 ## Notes
 
 - This bug affects **generation 2** of bootstrap, not generation 1
 - `simple_old` (Rust implementation) successfully compiles to `simple_new1`
-- Bug is in the **Simple-based compiler implementation**, not Rust runtime
+- Bug is in nested field chain dict mutation in **compiled native code**
+- The Rust interpreter explicitly handles 3-level nested field+index assignment
+  (node_exec.rs lines 991-1072) but compiled codegen does not
+- The existing comment `# Store final module directly (avoids copy-modify-reassign bug in compiled mode)` at driver.spl:522 confirms awareness of this class of bugs
 - MCP server integration planned to help analyze this and future bugs
