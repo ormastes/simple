@@ -186,6 +186,13 @@ if (( deploy )); then
   mkdir -p bin/release
   cp "${output_dir}/simple_stage3.exe" "bin/release/simple.exe"
   echo "Deployed verified binary to bin/release/simple.exe"
+
+  # Create bin/simple.cmd wrapper (Windows equivalent of bin/simple -> release/simple symlink)
+  cat > bin/simple.cmd <<'WRAPPER'
+@echo off
+"%~dp0release\simple.exe" %*
+WRAPPER
+  echo "Created bin/simple.cmd wrapper (forwards to bin/release/simple.exe)"
 fi
 
 echo ""

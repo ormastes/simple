@@ -128,15 +128,58 @@ fn deferred_module_may_define_symbol(module_name: text, current_file: text, impo
     if resolved_path == "":
         return 1
 
-    # Lightweight source scan: check if the source text contains the symbol name.
-    # This avoids requiring SHB infrastructure (shb_extractor/shb_reader) that
-    # may not be available yet. Will be upgraded to SHB-based check later.
+    # Phase 4: SHB-based symbol check — interface-only, no body execution.
+    # Try SHB first for accurate exported-symbol lookup. Falls back to
+    # source scan if SHB is unavailable (e.g. first run before any SHB
+    # has been generated).
+    val shb_result = _shb_check_symbol(resolved_path, symbol_name)
+    if shb_result >= 0:
+        return shb_result
+
+    # Fallback: lightweight source scan when no SHB is available.
     val source = load_module_source(resolved_path)
     if source == "":
         return 0
     if source.contains(symbol_name):
         return 1
     0
+
+fn _shb_check_symbol(source_path: text, symbol_name: text) -> i64:
+    """Check SHB for symbol presence. Returns 1 (found), 0 (not found),
+    or -1 (SHB unavailable — caller should fall back to source scan).
+    Interface-only check: reads .shb header, never executes module body."""
+    val shb_dir = _shb_cache_dir()
+    if shb_dir == "":
+        return -1
+    val shb_path = _source_to_shb_path_for_check(source_path, shb_dir)
+    if rt_file_exists(shb_path) == 0:
+        return -1
+    val content = rt_file_read_text(shb_path)
+    if content == nil:
+        return -1
+    val content_str = "{content}"
+    if content_str == "" or content_str == "Option::None":
+        return -1
+    # Check if the SHB content contains the symbol name.
+    # This is a lightweight check — the SHB binary format stores symbol
+    # names as plain text strings, so contains() works for a quick scan.
+    if content_str.contains(symbol_name):
+        return 1
+    0
+
+fn _shb_cache_dir() -> text:
+    """Return the SHB cache directory path, or empty if not configured."""
+    # Default SHB cache location used by shb_cache.spl
+    val default_dir = ".build/headers"
+    if rt_file_exists(default_dir):
+        return default_dir
+    ""
+
+fn _source_to_shb_path_for_check(source_path: text, shb_dir: text) -> text:
+    """Convert source path to SHB cache path for symbol checking."""
+    val with_slashes = source_path.replace("/", "_")
+    val base = with_slashes.replace(".spl", "")
+    "{shb_dir}/{base}.shb"
 
 fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
     val ds_ref = deferred_module_set

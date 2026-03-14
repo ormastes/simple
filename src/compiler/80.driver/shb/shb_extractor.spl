@@ -128,8 +128,20 @@ fn shb_reset_gen_states():
 fn resolve_dep_interface_hash(module_path: text, shb_dir: text) -> i64:
     if shb_dir == "":
         return 0
-    # If this module is currently being generated, return 0 to break cycle
+    # Phase 4: Circular-safe dependency resolution.
+    # If the dependency is currently being generated (circular dep), try to
+    # consume last-known-fresh SHB if one exists on disk. This allows A <-> B
+    # circular imports to resolve through SHB interfaces without deadlock.
     if shb_generation_in_progress(module_path):
+        # Check if a valid SHB exists from a previous generation pass
+        val dep_shb_path = _module_path_to_shb_path(module_path, shb_dir)
+        if rt_file_exists(dep_shb_path):
+            val reader = ShbReader.open(dep_shb_path)
+            if reader.is_valid():
+                # Return the last-known interface hash — may be stale but
+                # breaks the cycle. Next generation pass will re-validate.
+                return reader.interface_hash()
+        # No usable SHB — return 0 sentinel to break cycle
         return 0
     val dep_shb_path = _module_path_to_shb_path(module_path, shb_dir)
     if rt_file_exists(dep_shb_path) == false:
