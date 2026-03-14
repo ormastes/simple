@@ -1,487 +1,160 @@
 #!/usr/bin/env simple
 # Standalone duplicate checker — NO app.io imports (avoids loading entire compiler)
-# Perf: O(n log n) via sort+group instead of O(n²) pairwise comparison
-# Phase 1: Token-based windowing + Karp-Rabin rolling hash + identifier normalization
+# O(n log n) via sort+group instead of O(n²) pairwise comparison
+# Line-based mode for fast interpreter execution
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_walk(path: text) -> [text]
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_text_to_bytes(s: text) -> [i64]
 
 fn file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
-fn dir_walk(path: text) -> [text]:
-    rt_dir_walk(path)
-
 fn collect_spl_files(dir_path: text) -> [text]:
-    val all_files = dir_walk(dir_path)
+    val all_files = rt_dir_walk(dir_path)
     var spl_files = []
     for f in all_files:
         if f.ends_with(".spl") and not f.ends_with("_spec.spl") and not f.ends_with("_test.spl") and not f.contains("/test/"):
             spl_files.push(f)
     spl_files
 
-# ── Token types ──────────────────────────────────────────────────────────────
-# 0 = keyword, 1 = identifier, 2 = operator, 3 = literal, 4 = punctuation
-# 5 = whitespace (skipped), 6 = comment (skipped)
-
-# Simple keywords in the language
-fn is_keyword(word: text) -> bool:
-    if word == "fn" or word == "var" or word == "val" or word == "if" or word == "else":
-        return true
-    if word == "while" or word == "for" or word == "in" or word == "return" or word == "class":
-        return true
-    if word == "trait" or word == "impl" or word == "enum" or word == "struct" or word == "type":
-        return true
-    if word == "alias" or word == "use" or word == "extern" or word == "static" or word == "self":
-        return true
-    if word == "true" or word == "false" or word == "nil" or word == "not" or word == "and" or word == "or":
-        return true
-    if word == "me" or word == "mut" or word == "pub" or word == "super" or word == "import":
-        return true
-    if word == "break" or word == "continue" or word == "yield" or word == "async" or word == "await":
-        return true
-    if word == "pass_todo" or word == "pass_do_nothing" or word == "pass_dn" or word == "pass":
-        return true
-    false
-
-fn is_alpha(ch: i64) -> bool:
-    if ch >= 65 and ch <= 90:
-        return true
-    if ch >= 97 and ch <= 122:
-        return true
-    if ch == 95:
-        return true
-    false
-
-fn is_digit(ch: i64) -> bool:
-    ch >= 48 and ch <= 57
-
-fn is_alnum(ch: i64) -> bool:
-    is_alpha(ch) or is_digit(ch)
-
-fn is_whitespace(ch: i64) -> bool:
-    ch == 32 or ch == 9 or ch == 10 or ch == 13
-
-# ── Character extraction ─────────────────────────────────────────────────────
-# Split source into individual character strings (avoids destructive substring)
-fn split_chars(source: text) -> [text]:
-    var chars = []
-    for ch in source:
-        chars.push(ch)
-    chars
-
-# Extract text from character array between positions [start, end)
-fn chars_slice(chars: [text], start_pos: i64, end_pos: i64) -> text:
-    var result = ""
-    var ci = start_pos
-    while ci < end_pos and ci < chars.len():
-        result = result + chars[ci]
-        ci = ci + 1
-    result
-
-# ── Token representation ─────────────────────────────────────────────────────
-# Parallel arrays for token data:
-#   tok_types:  [i64]   — 0=keyword, 1=identifier, 2=operator, 3=literal, 4=punctuation
-#   tok_values: [text]  — the text of the token
-#   tok_lines:  [i64]   — 1-based line number where the token appears
-
-# ── Inline tokenizer ─────────────────────────────────────────────────────────
-# Returns number of tokens produced; populates the parallel arrays passed in.
-fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]) -> i64:
-    var bytes = rt_text_to_bytes(source)
-    var chars = split_chars(source)
-    var pos = 0
-    var line_num = 1
-    var count = 0
-    var src_len = bytes.len()
-
-    while pos < src_len:
-        var ch = bytes[pos]
-
-        # ── Newline ──────────────────────────────────────────────────────
-        if ch == 10:
-            line_num = line_num + 1
-            pos = pos + 1
-            continue
-
-        # ── Whitespace (skip) ────────────────────────────────────────────
-        if is_whitespace(ch):
-            pos = pos + 1
-            continue
-
-        # ── Comment (# to end of line — skip) ───────────────────────────
-        if ch == 35:
-            while pos < src_len and bytes[pos] != 10:
-                pos = pos + 1
-            continue
-
-        # ── String literal (double-quoted) ───────────────────────────────
-        if ch == 34:
-            var str_end = pos + 1
-            while str_end < src_len and bytes[str_end] != 34:
-                if bytes[str_end] == 92:
-                    str_end = str_end + 2
-                else:
-                    if bytes[str_end] == 10:
-                        line_num = line_num + 1
-                    str_end = str_end + 1
-            if str_end < src_len:
-                str_end = str_end + 1
-            out_types.push(3)
-            out_values.push("_STR_")
-            out_lines.push(line_num)
-            count = count + 1
-            pos = str_end
-            continue
-
-        # ── Numeric literal ──────────────────────────────────────────────
-        if is_digit(ch):
-            var num_end = pos + 1
-            while num_end < src_len and (is_digit(bytes[num_end]) or bytes[num_end] == 46):
-                num_end = num_end + 1
-            out_types.push(3)
-            out_values.push("_NUM_")
-            out_lines.push(line_num)
-            count = count + 1
-            pos = num_end
-            continue
-
-        # ── Identifier or keyword ────────────────────────────────────────
-        if is_alpha(ch):
-            var id_end = pos + 1
-            while id_end < src_len and is_alnum(bytes[id_end]):
-                id_end = id_end + 1
-            # Extract identifier text from char array (avoids destructive substring)
-            var id_text = chars_slice(chars, pos, id_end)
-            if is_keyword(id_text):
-                out_types.push(0)
-                out_values.push(id_text)
-            else:
-                out_types.push(1)
-                out_values.push(id_text)
-            out_lines.push(line_num)
-            count = count + 1
-            pos = id_end
-            continue
-
-        # ── Multi-char operators ─────────────────────────────────────────
-        var next_ch = 0
-        if pos + 1 < src_len:
-            next_ch = bytes[pos + 1]
-
-        # Two-character operators
-        var is_two_char_op = false
-        if ch == 61 and next_ch == 61:
-            is_two_char_op = true
-        if ch == 33 and next_ch == 61:
-            is_two_char_op = true
-        if ch == 60 and next_ch == 61:
-            is_two_char_op = true
-        if ch == 62 and next_ch == 61:
-            is_two_char_op = true
-        if ch == 45 and next_ch == 62:
-            is_two_char_op = true
-        if ch == 124 and next_ch == 62:
-            is_two_char_op = true
-        if ch == 62 and next_ch == 62:
-            is_two_char_op = true
-        if ch == 126 and next_ch == 62:
-            is_two_char_op = true
-        if ch == 42 and next_ch == 42:
-            is_two_char_op = true
-        if ch == 58 and next_ch == 61:
-            is_two_char_op = true
-        if ch == 46 and next_ch == 63:
-            is_two_char_op = true
-        if ch == 63 and next_ch == 63:
-            is_two_char_op = true
-        if ch == 38 and next_ch == 58:
-            is_two_char_op = true
-
-        if is_two_char_op:
-            var op_text = chars_slice(chars, pos, pos + 2)
-            out_types.push(2)
-            out_values.push(op_text)
-            out_lines.push(line_num)
-            count = count + 1
-            pos = pos + 2
-            continue
-
-        # ── Single-char operators ────────────────────────────────────────
-        var is_op = false
-        if ch == 43 or ch == 45 or ch == 42 or ch == 47 or ch == 37:
-            is_op = true
-        if ch == 61 or ch == 60 or ch == 62 or ch == 33:
-            is_op = true
-        if ch == 124 or ch == 38 or ch == 126 or ch == 94:
-            is_op = true
-
-        if is_op:
-            out_types.push(2)
-            out_values.push(chars[pos])
-            out_lines.push(line_num)
-            count = count + 1
-            pos = pos + 1
-            continue
-
-        # ── Punctuation (parens, brackets, braces, comma, colon, dot, etc.) ─
-        var is_punct = false
-        if ch == 40 or ch == 41 or ch == 91 or ch == 93 or ch == 123 or ch == 125:
-            is_punct = true
-        if ch == 44 or ch == 58 or ch == 46 or ch == 59 or ch == 64:
-            is_punct = true
-
-        if is_punct:
-            out_types.push(4)
-            out_values.push(chars[pos])
-            out_lines.push(line_num)
-            count = count + 1
-            pos = pos + 1
-            continue
-
-        # ── Unknown character — skip ─────────────────────────────────────
-        pos = pos + 1
-
-    count
-
-# ── Karp-Rabin token hash ────────────────────────────────────────────────────
-# Hash a single token value to a number for use in rolling hash
-fn hash_token_value(token_val: text) -> i64:
-    var codes = rt_text_to_bytes(token_val)
-    var h = 0
-    var ci = 0
-    while ci < codes.len():
-        h = (h * 31 + codes[ci]) % 1000000007
-        ci = ci + 1
-    if h < 0:
-        h = h + 1000000007
+# DJB2 hash using rt_text_to_bytes
+fn hash_line(line: text) -> i64:
+    val trimmed = line.trim()
+    if trimmed.len() == 0:
+        return 0
+    val codes = rt_text_to_bytes(trimmed)
+    var h = 5381
+    var i = 0
+    while i < codes.len():
+        h = ((h * 33) + codes[i]) % 1000000007
+        i = i + 1
     h
 
-# Compute base^exp mod m using repeated squaring
-fn pow_mod(base_val: i64, exp_val: i64, mod_val: i64) -> i64:
-    var result = 1
-    var b = base_val % mod_val
-    var e = exp_val
-    while e > 0:
-        if e % 2 == 1:
-            result = (result * b) % mod_val
-        e = e / 2
-        b = (b * b) % mod_val
-    result
+fn find_duplicates(files: [text], min_lines: i64):
+    print "Scanning {files.len()} files for {min_lines}+ line duplicates..."
 
-# ── Normalize tokens for identifier-insensitive matching ─────────────────────
-# Returns new values array with identifiers replaced by _ID_
-fn normalize_tokens(types: [i64], values: [text]) -> [text]:
-    var normalized = []
-    var ti = 0
-    while ti < types.len():
-        if types[ti] == 1:
-            normalized.push("_ID_")
-        else:
-            normalized.push(values[ti])
-        ti = ti + 1
-    normalized
-
-# ── Main duplicate finder (token-based) ──────────────────────────────────────
-fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
-    print "Scanning {files.len()} files for {min_tokens}+ token duplicates..."
-    if do_normalize:
-        print "  (identifier normalization ON — detects renamed-variable clones)"
-
-    # Phase 1: Tokenize all files and collect windows
+    # Phase 1: Read all files, compute window hashes
     var w_hashes = []
     var w_file_idx = []
-    var w_starts = []       # start line of the window (1-based)
-    var w_tok_starts = []   # start token index within file's token list
+    var w_starts = []
 
-    # Cache file contents and tokens
-    var file_contents = []
-    var all_tok_types = []   # file_index -> [i64]
-    var all_tok_values = []  # file_index -> [text] (possibly normalized)
-    var all_tok_lines = []   # file_index -> [i64]
-    var all_tok_raw_values = []  # file_index -> [text] (original, for content verification)
+    # Cache file lines (read each file once)
+    var file_lines_list = []
 
     var file_idx = 0
-    var total_tokens = 0
     for file_path in files:
-        var content = file_read(file_path)
-        file_contents.push(content)
+        val content = file_read(file_path)
+        val lines = content.split("\n")
+        file_lines_list.push(lines)
 
-        var cur_types = []
-        var cur_values = []
-        var cur_lines = []
-        var tok_count = tokenize(content, cur_types, cur_values, cur_lines)
-        total_tokens = total_tokens + tok_count
+        if lines.len() >= min_lines:
+            var line_idx = 0
+            while line_idx <= lines.len() - min_lines:
+                # Combined hash of min_lines consecutive lines
+                var combined = 0
+                var all_blank = true
+                var k = 0
+                while k < min_lines:
+                    val line = lines[line_idx + k]
+                    if line.trim().len() > 0:
+                        all_blank = false
+                    combined = (combined * 31 + hash_line(line)) % 1000000007
+                    k = k + 1
 
-        # Store raw values for content verification
-        all_tok_raw_values.push(cur_values)
+                if not all_blank:
+                    w_hashes.push(combined)
+                    w_file_idx.push(file_idx)
+                    w_starts.push(line_idx + 1)
 
-        # Normalize if requested
-        var effective_values = cur_values
-        if do_normalize:
-            effective_values = normalize_tokens(cur_types, cur_values)
-
-        all_tok_types.push(cur_types)
-        all_tok_values.push(effective_values)
-        all_tok_lines.push(cur_lines)
-
-        # Build token windows with Karp-Rabin rolling hash
-        # Guard: verify arrays were actually populated (interpreter param mutation bug)
-        if tok_count >= min_tokens and cur_lines.len() >= min_tokens:
-            # Pre-hash all token values for this file
-            var token_hashes = []
-            var thi = 0
-            while thi < tok_count:
-                token_hashes.push(hash_token_value(effective_values[thi]))
-                thi = thi + 1
-
-            # Compute base^(min_tokens-1) mod M for rolling removal
-            var base_power = pow_mod(31, min_tokens - 1, 1000000007)
-
-            # Compute hash of first window
-            var rolling = 0
-            var wi = 0
-            while wi < min_tokens:
-                rolling = (rolling * 31 + token_hashes[wi]) % 1000000007
-                wi = wi + 1
-            if rolling < 0:
-                rolling = rolling + 1000000007
-
-            w_hashes.push(rolling)
-            w_file_idx.push(file_idx)
-            w_starts.push(cur_lines[0])
-            w_tok_starts.push(0)
-
-            # Slide the window using Karp-Rabin rolling update
-            var slide_pos = 1
-            while slide_pos <= tok_count - min_tokens:
-                var old_tok_h = token_hashes[slide_pos - 1]
-                var new_tok_h = token_hashes[slide_pos + min_tokens - 1]
-
-                # Rolling hash: remove leading token, add trailing token
-                # new = ((old - leading * base^(w-1)) * base + trailing) mod M
-                var remove_part = (old_tok_h * base_power) % 1000000007
-                rolling = rolling - remove_part + 1000000007
-                rolling = (rolling * 31 + new_tok_h) % 1000000007
-                if rolling < 0:
-                    rolling = rolling + 1000000007
-
-                w_hashes.push(rolling)
-                w_file_idx.push(file_idx)
-                w_starts.push(cur_lines[slide_pos])
-                w_tok_starts.push(slide_pos)
-
-                slide_pos = slide_pos + 1
+                line_idx = line_idx + 1
 
         file_idx = file_idx + 1
 
-    var n = w_hashes.len()
-    print "Tokenized {total_tokens} tokens, computed {n} windows from {files.len()} files"
+    val n = w_hashes.len()
+    print "Computed {n} windows from {files.len()} files"
 
-    if n == 0:
-        print ""
-        print "=== Summary ==="
-        print "Files scanned: {files.len()}"
-        print "Total tokens: {total_tokens}"
-        print "Duplicate groups: 0"
-        print "Total duplicated tokens: 0"
-        return
-
-    # Phase 2: Sort indices by hash for O(n log n) grouping
+    # Phase 2: Sort indices by hash — O(n log n)
     var indices = []
-    var sort_idx = 0
-    while sort_idx < n:
-        indices.push(sort_idx)
-        sort_idx = sort_idx + 1
+    var idx = 0
+    while idx < n:
+        indices.push(idx)
+        idx = idx + 1
 
     indices = merge_sort(indices, w_hashes)
 
-    # Phase 3: Walk sorted indices, group consecutive equal hashes
+    # Phase 3: Walk sorted, group equal hashes, verify content
     var total_groups = 0
-    var total_dup_tokens = 0
+    var total_dup_lines = 0
     var i = 0
 
     while i < n:
-        var current_hash = w_hashes[indices[i]]
+        val current_hash = w_hashes[indices[i]]
 
-        # Find end of group with same hash
         var group_end = i + 1
         while group_end < n and w_hashes[indices[group_end]] == current_hash:
             group_end = group_end + 1
 
-        var group_size = group_end - i
+        val group_size = group_end - i
 
-        # Only process groups with 2+ entries (potential duplicates)
         if group_size >= 2 and group_size <= 100:
-            # Check pairs within group
             var gi = i
             while gi < group_end:
                 var gj = gi + 1
                 while gj < group_end:
-                    var idx_a = indices[gi]
-                    var idx_b = indices[gj]
-                    var file_a = w_file_idx[idx_a]
-                    var file_b = w_file_idx[idx_b]
-                    var tok_start_a = w_tok_starts[idx_a]
-                    var tok_start_b = w_tok_starts[idx_b]
+                    val idx_a = indices[gi]
+                    val idx_b = indices[gj]
+                    val file_a = w_file_idx[idx_a]
+                    val file_b = w_file_idx[idx_b]
+                    val start_a = w_starts[idx_a]
+                    val start_b = w_starts[idx_b]
 
-                    # Skip same-file overlapping windows
+                    # Skip same-file overlapping
                     var should_skip = false
                     if file_a == file_b:
-                        var diff = tok_start_b - tok_start_a
-                        if diff < min_tokens and diff > (0 - min_tokens):
+                        val diff = start_b - start_a
+                        if diff < min_lines and diff > (0 - min_lines):
                             should_skip = true
 
                     if not should_skip:
-                        # Verify actual content match (not just hash collision)
-                        # Use the effective (possibly normalized) values
-                        var vals_a = all_tok_values[file_a]
-                        var vals_b = all_tok_values[file_b]
+                        # Verify actual content
+                        val lines_a = file_lines_list[file_a]
+                        val lines_b = file_lines_list[file_b]
                         var is_match = true
                         var mk = 0
-                        while mk < min_tokens:
-                            val ta = tok_start_a + mk
-                            val tb = tok_start_b + mk
-                            if ta < vals_a.len() and tb < vals_b.len():
-                                if vals_a[ta] != vals_b[tb]:
-                                    is_match = false
-                                    break
-                            else:
+                        while mk < min_lines:
+                            val idx_la = start_a - 1 + mk
+                            val idx_lb = start_b - 1 + mk
+                            var la = ""
+                            var lb = ""
+                            if idx_la < lines_a.len():
+                                la = lines_a[idx_la]
+                            if idx_lb < lines_b.len():
+                                lb = lines_b[idx_lb]
+                            if la.trim() != lb.trim():
                                 is_match = false
                                 break
                             mk = mk + 1
 
                         if is_match:
                             total_groups = total_groups + 1
-                            total_dup_tokens = total_dup_tokens + min_tokens
-
-                            val line_a = w_starts[idx_a]
-                            val line_b = w_starts[idx_b]
-                            val end_line_a = all_tok_lines[file_a][tok_start_a + min_tokens - 1]
-                            val end_line_b = all_tok_lines[file_b][tok_start_b + min_tokens - 1]
+                            total_dup_lines = total_dup_lines + min_lines
 
                             print ""
-                            print "Duplicate #{total_groups} ({min_tokens} tokens, lines {line_a}-{end_line_a} / {line_b}-{end_line_b}):"
-                            print "  A: {files[file_a]}:{line_a}-{end_line_a}"
-                            print "  B: {files[file_b]}:{line_b}-{end_line_b}"
+                            print "Duplicate #{total_groups} ({min_lines} lines):"
+                            print "  A: {files[file_a]}:{start_a}-{start_a + min_lines - 1}"
+                            print "  B: {files[file_b]}:{start_b}-{start_b + min_lines - 1}"
 
-                            # Preview first 5 tokens from each (raw, not normalized)
-                            val raw_a = all_tok_raw_values[file_a]
-                            var preview_a = ""
+                            # Preview from cache
                             var pk = 0
-                            while pk < min_tokens and pk < 8:
-                                val pidx = tok_start_a + pk
-                                if pidx < raw_a.len():
-                                    if pk > 0:
-                                        preview_a = preview_a + " "
-                                    preview_a = preview_a + raw_a[pidx]
+                            while pk < min_lines and pk < 3:
+                                val pidx = start_a - 1 + pk
+                                if pidx < lines_a.len():
+                                    print "    {lines_a[pidx]}"
                                 pk = pk + 1
-                            if min_tokens > 8:
-                                preview_a = preview_a + " ..."
-                            print "    {preview_a}"
+                            if min_lines > 3:
+                                print "    ..."
 
                     gj = gj + 1
                 gi = gi + 1
@@ -491,11 +164,8 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
     print ""
     print "=== Summary ==="
     print "Files scanned: {files.len()}"
-    print "Total tokens: {total_tokens}"
     print "Duplicate groups: {total_groups}"
-    print "Total duplicated tokens: {total_dup_tokens}"
-    if do_normalize:
-        print "(identifiers normalized — renamed-variable clones detected)"
+    print "Total duplicated lines: {total_dup_lines}"
 
 # Merge sort: returns sorted index array by values[index]
 fn merge_sort(arr: [i64], values: [i64]) -> [i64]:
@@ -543,21 +213,13 @@ fn merge_lists(left: [i64], right: [i64], values: [i64]) -> [i64]:
 fn main():
     val args = rt_cli_get_args()
     var target = "src/compiler/00.common/"
-    var min_tokens = 30
-    var do_normalize = true
+    var min_lines = 5
 
     # args[0]=binary, args[1]=script, args[2+]=user args
     if args.len() > 2:
         target = args[2]
     if args.len() > 3:
-        min_tokens = int(args[3])
-
-    # Check for --no-normalize flag in any position
-    var arg_idx = 2
-    while arg_idx < args.len():
-        if args[arg_idx] == "--no-normalize":
-            do_normalize = false
-        arg_idx = arg_idx + 1
+        min_lines = int(args[3])
 
     val files = collect_spl_files(target)
-    find_duplicates(files, min_tokens, do_normalize)
+    find_duplicates(files, min_lines)
