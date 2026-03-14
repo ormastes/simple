@@ -31,7 +31,7 @@ RULES → enforced by CI + review
 | **Guide / Runbook** | `doc/guide/` | Markdown | How to use or operate |
 | **Rule** | `doc/rule/` | Markdown | How engineers must work |
 | **Report** | `doc/report/` | Markdown | Session summaries, completion reports |
-| **API Docs** | `doc/spec/generated/` | Markdown | Auto-generated from SSpec tests |
+| **API Docs** | `doc/spec/language/` | Markdown | Auto-generated from SSpec tests |
 
 ## Critical Rules
 
@@ -112,7 +112,7 @@ let FEATURE = FeatureMetadata {
     difficulty: 4,
     status: "Implementing",
     impl_type: "Simple",
-    spec_ref: "doc/spec/generated/feature_name.md",
+    spec_ref: "doc/spec/language/feature_name.md",
     files: [
         "path/to/implementation.spl"
     ],
@@ -533,7 +533,7 @@ users |id, name, role|
 # Generate documentation from specs
 bin/simple doc-gen
 
-# Output: doc/spec/generated/
+# Output: doc/spec/language/
 ```
 
 ## Common Pitfalls
@@ -569,7 +569,7 @@ Include setup, usage, and cleanup in examples.
 # Generate docs from SSpec tests
 bin/simple src/lib/test/features/generate_docs.spl
 
-# Outputs to: doc/spec/generated/
+# Outputs to: doc/spec/language/
 ```
 
 ## Examples from Codebase

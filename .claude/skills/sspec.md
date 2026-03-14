@@ -121,15 +121,15 @@ bin/simple test --fail-fast
 # Generate docs for feature specs
 bin/simple doc-gen
 
-# Output: doc/spec/generated/
+# Output: doc/spec/language/
 ```
 
 ### 6. Review Generated Docs
 
 ```bash
 # View generated docs
-cat doc/spec/generated/README.md
-cat doc/spec/generated/my_feature_spec.md
+cat doc/spec/language/README.md
+cat doc/spec/language/my_feature_spec.md
 ```
 
 The generator:
@@ -349,7 +349,7 @@ Then link: [Go to section](#custom-anchor)
 ### Generated Output Location
 
 ```
-doc/spec/generated/
+doc/spec/language/
   README.md           # Index with links to all specs
   syntax.md           # Generated from syntax_spec.spl
   types.md            # Generated from types_spec.spl

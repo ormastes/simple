@@ -1,4 +1,10 @@
-# Public Documentation Lint — Step 2r: contains instead of find
+# Public Documentation Lint
+#
+# PDOC001-005: Doc comment reference and sdoctest coverage validation.
+#
+# CONSTRAINT: .find() result comparison (>= 0) fails in interpreter at
+# nesting depth 3+. All .find() usage kept at while>if level (depth 2).
+# Uses .contains() for boolean checks, .find() only for position.
 
 struct PublicDocWarning:
     code: text
@@ -7,29 +13,350 @@ struct PublicDocWarning:
     fn_name: text
     line: i64
 
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
 fn check_public_doc(source: text) -> [PublicDocWarning]:
     var warnings: [PublicDocWarning] = []
     val lines = source.split("\n")
     val line_count = lines.len()
 
+    # ---- Pass 1: Collect declarations with doc comments ----
+    var decl_names: [text] = []
+    var decl_kinds: [text] = []
+    var decl_docs: [text] = []
+    var decl_line_nums: [i64] = []
+
+    var in_doc_block = false
+    var pending_doc = ""
+    val tq = "\"\"\""
+
     var line_idx = 0
     while line_idx < line_count:
         val src_line = lines[line_idx]
         val trimmed = src_line.trim()
-        if trimmed.starts_with("fn "):
-            val after_fn = trimmed.slice(3)
-            val p = after_fn.find("(")
-            val the_name = after_fn.slice(0, p)
-            if the_name.contains("_"):
-                line_idx = line_idx + 1
-                continue
-            warnings.push(PublicDocWarning(
-                code: "PDOC001",
-                severity: "WARNING",
-                message: "test",
-                fn_name: the_name,
-                line: 1
-            ))
+        val indent = src_line.len() - trimmed.len()
+        val line_num = line_idx + 1
+
+        # Handle doc block continuation
+        if in_doc_block:
+            if trimmed.ends_with(tq):
+                val before = trimmed.slice(0, trimmed.len() - 3)
+                pending_doc = pending_doc + "\n" + before
+                in_doc_block = false
+            else:
+                pending_doc = pending_doc + "\n" + trimmed
+            line_idx = line_idx + 1
+            continue
+
+        # Handle doc block opening (indent 0)
+        if indent == 0 and trimmed.starts_with(tq):
+            val after_open = trimmed.slice(3)
+            if after_open == "":
+                in_doc_block = true
+                pending_doc = ""
+            else:
+                in_doc_block = true
+                pending_doc = after_open
+            line_idx = line_idx + 1
+            continue
+
+        # ---- Declaration detection (each at while>if level) ----
+        if indent == 0 and trimmed.starts_with("extern fn "):
+            val after = trimmed.slice(10)
+            val p = after.find("(")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("extern_fn")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        if indent == 0 and trimmed.starts_with("fn "):
+            val after = trimmed.slice(3)
+            val p = after.find("(")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("fn")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        if indent == 0 and trimmed.starts_with("class "):
+            val after = trimmed.slice(6)
+            val p = after.find(":")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("class")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        if indent == 0 and trimmed.starts_with("struct "):
+            val after = trimmed.slice(7)
+            val p = after.find(":")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("struct")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        if indent == 0 and trimmed.starts_with("enum "):
+            val after = trimmed.slice(5)
+            val p = after.find(":")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("enum")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        if indent == 0 and trimmed.starts_with("trait "):
+            val after = trimmed.slice(6)
+            val p = after.find(":")
+            val dn = after.slice(0, p)
+            decl_names.push(dn)
+            decl_kinds.push("trait")
+            decl_docs.push(pending_doc)
+            decl_line_nums.push(line_num)
+            pending_doc = ""
+            line_idx = line_idx + 1
+            continue
+
+        # Non-declaration, non-comment → reset doc
+        if indent == 0 and not trimmed.starts_with("#") and trimmed != "":
+            pending_doc = ""
+
         line_idx = line_idx + 1
 
+    # ---- Pass 2: Body end lines ----
+    val num_decls = decl_names.len()
+    var body_ends: [i64] = []
+    var bi = 0
+    while bi < num_decls:
+        if bi + 1 < num_decls:
+            body_ends.push(decl_line_nums[bi + 1] - 1)
+        else:
+            body_ends.push(line_count)
+        bi = bi + 1
+
+    # ---- Pass 3: Pre-extract refs (separate loop to avoid nesting) ----
+    # Store ref names as comma-separated strings to avoid [[text]] type
+    var decl_see_csv: [text] = []
+    var decl_sd_csv: [text] = []
+    var ri = 0
+    while ri < num_decls:
+        val rdoc = decl_docs[ri]
+        val see = pdoc_extract_refs(rdoc, "@see(")
+        val sd = pdoc_extract_refs(rdoc, "@sdoctest(")
+        decl_see_csv.push(pdoc_join_refs(see))
+        decl_sd_csv.push(pdoc_join_refs(sd))
+        ri = ri + 1
+
+    # ---- Pass 4: Apply PDOC rules ----
+    var di = 0
+    while di < num_decls:
+        val name = decl_names[di]
+        val kind = decl_kinds[di]
+        val doc = decl_docs[di]
+        val dline = decl_line_nums[di]
+        val bend = body_ends[di]
+
+        # Skip exempt
+        if kind == "extern_fn" or name.starts_with("_"):
+            di = di + 1
+            continue
+
+        # Skip pass_todo fns
+        if kind == "fn":
+            if pdoc_body_has_pass(lines, dline, bend):
+                di = di + 1
+                continue
+
+        # PDOC001: Missing sdoctest
+        if kind == "fn" or kind == "class":
+            if not doc.contains("sdoctest:") and not doc.contains("@sdoctest("):
+                warnings.push(PublicDocWarning(
+                    code: "PDOC001",
+                    severity: "WARNING",
+                    message: "public {kind} missing sdoctest or @sdoctest link",
+                    fn_name: name,
+                    line: dline
+                ))
+
+        val see_csv = decl_see_csv[di]
+        val sd_csv = decl_sd_csv[di]
+        val see_refs = pdoc_split_refs(see_csv)
+        val sdoctest_refs = pdoc_split_refs(sd_csv)
+
+        # PDOC002: Invalid @see targets
+        for ref_name in see_refs:
+            if ref_name != "" and not pdoc_name_exists(decl_names, ref_name):
+                warnings.push(PublicDocWarning(
+                    code: "PDOC002",
+                    severity: "WARNING",
+                    message: "doc reference '@see({ref_name})' targets unknown name",
+                    fn_name: name,
+                    line: dline
+                ))
+
+        # PDOC002 + PDOC004 + PDOC005 for @sdoctest targets
+        for ref_name in sdoctest_refs:
+            if ref_name == "":
+                continue
+
+            if not pdoc_name_exists(decl_names, ref_name):
+                warnings.push(PublicDocWarning(
+                    code: "PDOC002",
+                    severity: "WARNING",
+                    message: "doc reference '@sdoctest({ref_name})' targets unknown name",
+                    fn_name: name,
+                    line: dline
+                ))
+
+            if pdoc_name_exists(decl_names, ref_name):
+                val target_kind = pdoc_find_kind(decl_names, decl_kinds, ref_name)
+                # PDOC004
+                if kind == "fn" and target_kind != "fn" and target_kind != "extern_fn":
+                    warnings.push(PublicDocWarning(
+                        code: "PDOC004",
+                        severity: "WARNING",
+                        message: "@sdoctest({ref_name}) type mismatch: '{ref_name}' is a {target_kind}",
+                        fn_name: name,
+                        line: dline
+                    ))
+                if kind == "class" and target_kind != "class":
+                    warnings.push(PublicDocWarning(
+                        code: "PDOC004",
+                        severity: "WARNING",
+                        message: "@sdoctest({ref_name}) type mismatch: '{ref_name}' is a {target_kind}",
+                        fn_name: name,
+                        line: dline
+                    ))
+                # PDOC005
+                val target_doc = pdoc_find_doc(decl_names, decl_docs, ref_name)
+                if not target_doc.contains("sdoctest:"):
+                    warnings.push(PublicDocWarning(
+                        code: "PDOC005",
+                        severity: "WARNING",
+                        message: "@sdoctest({ref_name}) target has no sdoctest block",
+                        fn_name: name,
+                        line: dline
+                    ))
+
+        # PDOC003: @see(X) not used in body
+        if kind == "fn":
+            val body_text = pdoc_get_body_text(lines, dline, bend)
+            for ref_name in see_refs:
+                if ref_name != "" and pdoc_name_exists(decl_names, ref_name) and not body_text.contains(ref_name):
+                    warnings.push(PublicDocWarning(
+                        code: "PDOC003",
+                        severity: "WARNING",
+                        message: "doc reference '@see({ref_name})' not used in body",
+                        fn_name: name,
+                        line: dline
+                    ))
+
+        di = di + 1
+
     warnings
+
+# ============================================================================
+# Helpers — no .find() in these, only .contains() and iteration
+# ============================================================================
+
+fn pdoc_index_of(s: text, target: text) -> i64:
+    # Custom index_of returning plain i64 (not Option).
+    # Returns -1 if not found.
+    # Uses .slice(i).starts_with() instead of .slice(i, end) with computed end.
+    val slen = s.len()
+    val tlen = target.len()
+    if tlen == 0 or slen < tlen:
+        return -1
+    var i = 0
+    val limit = slen - tlen + 1
+    while i < limit:
+        val sub = s.slice(i)
+        if sub.starts_with(target):
+            return i
+        i = i + 1
+    -1
+
+fn pdoc_extract_one_ref(tr: text, marker: text) -> text:
+    # Extract single ref name from a line containing the marker
+    if not tr.contains(marker):
+        return ""
+    val mpos = pdoc_index_of(tr, marker)
+    if mpos < 0:
+        return ""
+    val mlen = marker.len()
+    val after = tr.slice(mpos + mlen)
+    if not after.contains(")"):
+        return ""
+    val cpos = pdoc_index_of(after, ")")
+    if cpos < 0:
+        return ""
+    val rname = after.slice(0, cpos)
+    rname.trim()
+
+fn pdoc_extract_refs(doc: text, marker: text) -> [text]:
+    var refs: [text] = []
+    if not doc.contains(marker):
+        return refs
+    val doc_lines = doc.split("\n")
+    for dline in doc_lines:
+        val ref = pdoc_extract_one_ref(dline.trim(), marker)
+        if ref != "":
+            refs.push(ref)
+    refs
+
+fn pdoc_name_exists(names: [text], target: text) -> bool:
+    for n in names:
+        if n == target:
+            return true
+    false
+
+fn pdoc_find_kind(names: [text], kinds: [text], target: text) -> text:
+    var i = 0
+    while i < names.len():
+        if names[i] == target:
+            return kinds[i]
+        i = i + 1
+    ""
+
+fn pdoc_find_doc(names: [text], docs: [text], target: text) -> text:
+    var i = 0
+    while i < names.len():
+        if names[i] == target:
+            return docs[i]
+        i = i + 1
+    ""
+
+fn pdoc_body_has_pass(lines: [text], start: i64, end_l: i64) -> bool:
+    var idx = start
+    while idx < end_l and idx < lines.len():
+        val tr = lines[idx].trim()
+        if tr == "pass_todo" or tr == "pass_do_nothing" or tr == "pass_dn":
+            return true
+        idx = idx + 1
+    false
+
+fn pdoc_get_body_text(lines: [text], start: i64, end_l: i64) -> text:
+    var result = ""
+    var idx = start
+    while idx < end_l and idx < lines.len():
+        result = result + " " + lines[idx]
+        idx = idx + 1
+    result

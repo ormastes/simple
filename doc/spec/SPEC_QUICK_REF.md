@@ -1,7 +1,6 @@
 # _spec.spl Quick Reference
 
-**For:** Writing executable specification files  
-**See:** [SPEC_GUIDELINES.md](SPEC_GUIDELINES.md) for full documentation
+**For:** Writing executable specification files
 
 ---
 
@@ -131,4 +130,4 @@ tests/
 
 ---
 
-**Full Guide:** [SPEC_GUIDELINES.md](SPEC_GUIDELINES.md)
+**Full Guide:** [README.md](README.md)

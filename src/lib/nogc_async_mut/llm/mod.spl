@@ -145,6 +145,14 @@ fn llm_chat(user_msg: text) -> text:
         val r = _send_openai()
         result_content = r.0
         result_error = r.1
+    elif LLM_PROVIDER == "codex_cli":
+        val r = _send_codex_cli(user_msg)
+        result_content = r.0
+        result_error = r.1
+    elif LLM_PROVIDER == "gemini_cli":
+        val r = _send_gemini_cli(user_msg)
+        result_content = r.0
+        result_error = r.1
     else:
         result_error = "unsupported provider: " + LLM_PROVIDER
     if result_error != "":
@@ -284,6 +292,80 @@ fn _send_openai() -> (text, text):
 # Direct send (without history management)
 # ============================================================================
 
+# ============================================================================
+# Send via Codex CLI
+# ============================================================================
+
+fn _send_codex_cli(prompt: text) -> (text, text):
+    var args: [text] = []
+    args = args + ["exec"]
+    args = args + ["--json"]
+    args = args + ["--full-auto"]
+    args = args + ["--sandbox", "off"]
+    if LLM_MODEL != "":
+        args = args + ["--model", LLM_MODEL]
+    if LLM_SYSTEM_PROMPT != "":
+        args = args + ["--instructions", LLM_SYSTEM_PROMPT]
+    args = args + [prompt]
+    val result = rt_process_run(LLM_CLI_PATH, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "codex CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    # Parse JSONL — find last assistant message
+    var content = ""
+    val lines = stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val role = extract_json_string(trimmed, "role")
+        if role == "assistant":
+            val text_val = extract_json_string(trimmed, "text")
+            if text_val != "":
+                content = text_val
+        val etype = extract_json_string(trimmed, "type")
+        if etype == "error":
+            val err_msg = extract_json_string(trimmed, "message")
+            return ("", err_msg)
+    (content, "")
+
+# ============================================================================
+# Send via Gemini CLI
+# ============================================================================
+
+fn _send_gemini_cli(prompt: text) -> (text, text):
+    var args: [text] = []
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    if LLM_MODEL != "":
+        args = args + ["--model", LLM_MODEL]
+    if LLM_SESSION_ID != "":
+        args = args + ["--resume", LLM_SESSION_ID]
+    val result = rt_process_run(LLM_CLI_PATH, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "gemini CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    # Parse JSON — Gemini uses "response" field
+    val content = extract_json_string(stdout, "response")
+    val error_val = extract_json_string(stdout, "error")
+    if error_val != "":
+        return ("", error_val)
+    (content, "")
+
+# ============================================================================
+# Direct send (without history management)
+# ============================================================================
+
 fn llm_send(prompt: text) -> text:
     if not LLM_INITIALIZED:
         return "ERROR: call llm_init_defaults() or llm_init() first"
@@ -292,4 +374,14 @@ fn llm_send(prompt: text) -> text:
         if r.1 != "":
             return "ERROR: " + r.1
         return r.0
-    "ERROR: llm_send only supports claude_cli provider"
+    if LLM_PROVIDER == "codex_cli":
+        val r = _send_codex_cli(prompt)
+        if r.1 != "":
+            return "ERROR: " + r.1
+        return r.0
+    if LLM_PROVIDER == "gemini_cli":
+        val r = _send_gemini_cli(prompt)
+        if r.1 != "":
+            return "ERROR: " + r.1
+        return r.0
+    "ERROR: llm_send only supports claude_cli, codex_cli, gemini_cli providers"

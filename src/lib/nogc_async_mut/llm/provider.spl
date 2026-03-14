@@ -46,7 +46,7 @@ fn new_llm_error(provider: text, error_msg: text) -> LLMResponse:
 # ============================================================================
 
 fn list_providers() -> [text]:
-    ["claude_cli", "claude_api", "openai", "openai_compat", "local_torch"]
+    ["claude_cli", "claude_api", "openai", "openai_compat", "local_torch", "codex_cli", "gemini_cli"]
 
 fn is_valid_provider(provider: text) -> bool:
     if provider == "claude_cli":
@@ -58,6 +58,10 @@ fn is_valid_provider(provider: text) -> bool:
     if provider == "openai_compat":
         return true
     if provider == "local_torch":
+        return true
+    if provider == "codex_cli":
+        return true
+    if provider == "gemini_cli":
         return true
     false
 
@@ -77,6 +81,10 @@ fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_
         return _dispatch_openai(api_key, base_url, model, messages_json, max_tokens)
     elif provider == "openai_compat":
         return _dispatch_compat(base_url, api_key, model, messages_json, max_tokens)
+    elif provider == "codex_cli":
+        return _dispatch_codex_cli(cli_path, prompt, model, system_prompt)
+    elif provider == "gemini_cli":
+        return _dispatch_gemini_cli(cli_path, prompt, model, session_id)
     else:
         return new_llm_error(provider, "provider not implemented: " + provider)
 
@@ -273,6 +281,118 @@ fn _dispatch_openai(api_key: text, base_url: text, model: text, messages_json: t
 # ============================================================================
 # OpenAI-Compatible dispatch
 # ============================================================================
+
+# ============================================================================
+# Codex CLI dispatch
+# ============================================================================
+
+fn _dispatch_codex_cli(cli_path: text, prompt: text, model: text, instructions: text) -> LLMResponse:
+    var path = cli_path
+    if path == "":
+        path = "codex"
+    var args: [text] = []
+    args.push("exec")
+    args.push("--json")
+    args.push("--full-auto")
+    args.push("--sandbox")
+    args.push("off")
+    if model != "":
+        args.push("--model")
+        args.push(model)
+    if instructions != "":
+        args.push("--instructions")
+        args.push(instructions)
+    args.push(prompt)
+    val result = rt_process_run(path, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err_msg = "codex CLI exited with code " + exit_code.to_text()
+        if stderr != "":
+            err_msg = err_msg + ": " + stderr
+        return new_llm_error("codex_cli", err_msg)
+    # Parse JSONL — find last assistant message with output_text
+    var content = ""
+    var resp_model = ""
+    val lines = stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val role = extract_json_string(trimmed, "role")
+        if role == "assistant":
+            val text_val = extract_json_string(trimmed, "text")
+            if text_val != "":
+                content = text_val
+        val etype = extract_json_string(trimmed, "type")
+        if etype == "error":
+            val err_msg = extract_json_string(trimmed, "message")
+            return new_llm_error("codex_cli", err_msg)
+        val mdl = extract_json_string(trimmed, "model")
+        if mdl != "":
+            resp_model = mdl
+    LLMResponse(
+        content: content,
+        model: resp_model,
+        provider: "codex_cli",
+        session_id: "",
+        stop_reason: "end_turn",
+        input_tokens: 0,
+        output_tokens: 0,
+        error: "",
+        is_error: false,
+        raw: stdout
+    )
+
+# ============================================================================
+# Gemini CLI dispatch
+# ============================================================================
+
+fn _dispatch_gemini_cli(cli_path: text, prompt: text, model: text, session_id: text) -> LLMResponse:
+    var path = cli_path
+    if path == "":
+        path = "gemini"
+    var args: [text] = []
+    args.push("-p")
+    args.push(prompt)
+    args.push("--output-format")
+    args.push("json")
+    if model != "":
+        args.push("--model")
+        args.push(model)
+    if session_id != "":
+        args.push("--resume")
+        args.push(session_id)
+    val result = rt_process_run(path, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err_msg = "gemini CLI exited with code " + exit_code.to_text()
+        if stderr != "":
+            err_msg = err_msg + ": " + stderr
+        return new_llm_error("gemini_cli", err_msg)
+    # Parse JSON — Gemini uses "response" field, not "result"
+    val content = extract_json_string(stdout, "response")
+    val resp_model = extract_json_string(stdout, "model")
+    val in_tok = extract_json_int(stdout, "input_tokens")
+    val out_tok = extract_json_int(stdout, "output_tokens")
+    val error_val = extract_json_string(stdout, "error")
+    if error_val != "":
+        return new_llm_error("gemini_cli", error_val)
+    LLMResponse(
+        content: content,
+        model: resp_model,
+        provider: "gemini_cli",
+        session_id: "",
+        stop_reason: "end_turn",
+        input_tokens: in_tok,
+        output_tokens: out_tok,
+        error: "",
+        is_error: false,
+        raw: stdout
+    )
 
 fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64) -> LLMResponse:
     var url = base_url
