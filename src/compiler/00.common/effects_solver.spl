@@ -117,22 +117,51 @@ impl EffectSolver:
 
 
 # ============================================================================
-# Tests
+# Test Helpers
 # ============================================================================
 
-fn test_single_function():
-    """Test solver on single function"""
-    val env = EffectEnv.new()
-    var solver = EffectSolver.create(env)
-
-    # Sync function
-    val sync_func = FunctionEffectInfo(
-        name: "sync_fn",
+fn make_sync_effect(name: text) -> FunctionEffectInfo:
+    """Build a sync FunctionEffectInfo with no calls."""
+    FunctionEffectInfo(
+        name: name,
         is_async: false,
         contains_suspension: false,
         called_functions: []
     )
 
+fn make_async_effect(name: text) -> FunctionEffectInfo:
+    """Build an async-annotated FunctionEffectInfo with no calls."""
+    FunctionEffectInfo(
+        name: name,
+        is_async: true,
+        contains_suspension: false,
+        called_functions: []
+    )
+
+fn make_calling_effect(name: text, callees: [text]) -> FunctionEffectInfo:
+    """Build a sync FunctionEffectInfo that calls the given functions."""
+    FunctionEffectInfo(
+        name: name,
+        is_async: false,
+        contains_suspension: false,
+        called_functions: callees
+    )
+
+fn make_solver() -> (EffectEnv, EffectSolver):
+    """Create a fresh EffectEnv and EffectSolver pair."""
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+    (env, solver)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_single_function():
+    """Test solver on single function"""
+    val (env, solver) = make_solver()
+
+    val sync_func = make_sync_effect("sync_fn")
     val iterations = solver.solve([sync_func])
 
     assert env.get_effect("sync_fn") == EffectTag.Sync
@@ -140,16 +169,9 @@ fn test_single_function():
 
 fn test_async_function():
     """Test solver on async function (annotation)"""
-    val env = EffectEnv.new()
-    var solver = EffectSolver.create(env)
+    val (env, solver) = make_solver()
 
-    val async_func = FunctionEffectInfo(
-        name: "async_fn",
-        is_async: true,
-        contains_suspension: false,
-        called_functions: []
-    )
-
+    val async_func = make_async_effect("async_fn")
     val iterations = solver.solve([async_func])
 
     assert env.get_effect("async_fn") == EffectTag.Async
@@ -157,32 +179,16 @@ fn test_async_function():
 
 fn test_call_chain():
     """Test effect propagation through call chain"""
-    val env = EffectEnv.new()
-    var solver = EffectSolver.create(env)
+    val (env, solver) = make_solver()
 
     # leaf: calls http.get (async builtin)
-    val leaf_func = FunctionEffectInfo(
-        name: "leaf",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: ["http.get"]
-    )
+    val leaf_func = make_calling_effect("leaf", ["http.get"])
 
     # middle: calls leaf
-    val middle_func = FunctionEffectInfo(
-        name: "middle",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: ["leaf"]
-    )
+    val middle_func = make_calling_effect("middle", ["leaf"])
 
     # top: calls middle
-    val top_func = FunctionEffectInfo(
-        name: "top",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: ["middle"]
-    )
+    val top_func = make_calling_effect("top", ["middle"])
 
     val iterations = solver.solve([leaf_func, middle_func, top_func])
 
@@ -193,29 +199,11 @@ fn test_call_chain():
 
 fn test_mixed_functions():
     """Test mix of sync and async functions"""
-    val env = EffectEnv.new()
-    var solver = EffectSolver.create(env)
+    val (env, solver) = make_solver()
 
-    val sync_func = FunctionEffectInfo(
-        name: "sync_fn",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: []
-    )
-
-    val async_func = FunctionEffectInfo(
-        name: "async_fn",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: ["http.get"]
-    )
-
-    val sync_caller = FunctionEffectInfo(
-        name: "sync_caller",
-        is_async: false,
-        contains_suspension: false,
-        called_functions: ["sync_fn"]
-    )
+    val sync_func = make_sync_effect("sync_fn")
+    val async_func = make_calling_effect("async_fn", ["http.get"])
+    val sync_caller = make_calling_effect("sync_caller", ["sync_fn"])
 
     val iterations = solver.solve([sync_func, async_func, sync_caller])
 
