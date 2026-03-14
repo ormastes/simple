@@ -4,7 +4,7 @@
 **Date:** 2026-03-14
 **Severity:** P2 - Medium (causes stale compiled modules to shadow source edits)
 **Component:** Watcher — File Change Handler
-**Status:** Confirmed
+**Status:** Fixed (2026-03-14) — SMF deleted on .spl change in process_file_changes()
 
 ## Summary
 

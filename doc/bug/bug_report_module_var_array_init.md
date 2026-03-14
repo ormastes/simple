@@ -3,7 +3,7 @@
 **Severity:** Critical
 **Component:** Interpreter / Module Variable Binding
 **Date:** 2026-03-13
-**Status:** Open
+**Status:** Fixed in source (deep-copy locals in mir_interpreter.spl:454-470), needs binary rebuild
 
 ## Summary
 

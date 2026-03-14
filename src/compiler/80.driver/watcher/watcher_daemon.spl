@@ -30,6 +30,8 @@ use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_re
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
 # Watcher Daemon
@@ -98,12 +100,18 @@ impl WatcherDaemon:
     # --- Process file changes ---
 
     me process_file_changes(changes: [FileChangeEvent]):
+        use compiler.driver.cache.cache_validator.{source_to_cache_path}
+
         var shb_changes: [ShbChangeEvent] = []
         var i = 0
         while i < changes.len():
             val change = changes[i]
             if change.path.ends_with(".spl"):
                 shb_changes.push(ShbChangeEvent(path: change.path, event_type: change.event_type))
+                # Invalidate stale SMF when source changes
+                val smf_path = source_to_cache_path(change.path, self.config.smf_dir, ".smf")
+                if rt_file_exists(smf_path):
+                    rt_file_delete(smf_path)
             i = i + 1
 
         if shb_changes.len() > 0:
