@@ -94,11 +94,34 @@ fn working_index_of(s: text, target: text) -> i64:
 - Any text-scanning code using `.find()` with comparisons in nested scopes is affected
 - Compiled mode is NOT affected (`.find()` returns `i64` correctly)
 
-## Root Cause (Suspected)
+## Root Cause (Confirmed)
 
-The interpreter's type system wraps `.find()` return in `Option<i64>` (an enum with `Some(i64)` / `None` variants). At shallow nesting, the interpreter auto-unwraps. At deeper nesting, auto-unwrap fails, exposing the raw enum type which cannot be compared with `i64`.
+The frontend tree-walking interpreter's `eval_text_method` in `eval_ops.spl` handled
+`"index_of"` (with `?? -1` unwrap of the host's `Option<i64>` return) but had **no handler
+for `"find"` or `"find_str"`**. When user code called `.find()` on text, the interpreter
+fell through to the host binary's native `.find()` method dispatch, which returns
+`Option<i64>` (an enum with `Some(i64)` / `None` variants). The raw enum value was then
+stored in the local variable, causing "cannot convert enum to int" when compared with `>=`.
+
+The Rust interpreter (`string.rs`) correctly maps `"find_str" | "find" | "index_of"` to the
+same implementation returning `Value::some(Value::Int(...))` / `Value::none()`. The compiled
+codegen (`calls.rs`) maps all three to `rt_string_index_of` which returns plain `i64`.
+Only the Simple self-hosted interpreter was missing the aliases.
+
+## Fix Applied (2026-03-14)
+
+**File:** `src/compiler/10.frontend/core/interpreter/eval_ops.spl`
+
+Changed the `"index_of"` condition to also match `"find"` and `"find_str"`:
+```simple
+if method_name == "index_of" or method_name == "find" or method_name == "find_str":
+```
+
+Also added `"rfind"` as alias for `"last_index_of"` for consistency with the Rust interpreter.
 
 ## Related Files
 
-- `src/compiler/35.semantics/lint/public_doc.spl` — workarounds applied
-- `src/compiler/95.interp/` — interpreter implementation (likely fix location)
+- `src/compiler/10.frontend/core/interpreter/eval_ops.spl` — **fix location** (eval_text_method)
+- `src/compiler_rust/compiler/src/interpreter_method/string.rs` — Rust interpreter (correct, has all aliases)
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs` — codegen (correct, maps find to rt_string_index_of)
+- `src/compiler/35.semantics/lint/public_doc.spl` — workarounds applied (can now be simplified)

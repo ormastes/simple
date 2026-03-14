@@ -419,6 +419,39 @@ fn eval_method_call(eid: i64) -> i64:
     if kind == VAL_TEXT:
         return eval_text_method(receiver, method_name, arg_eids)
 
+    # Dict built-in methods (for __dict structs)
+    if kind == VAL_STRUCT:
+        val type_name_chk = val_get_struct_name(receiver)
+        if type_name_chk == "__dict":
+            if method_name == "len":
+                val dict_fields = val_get_struct_fields(receiver)
+                return val_make_int(dict_fields.len())
+            if method_name == "keys":
+                val dict_fields2 = val_get_struct_fields(receiver)
+                var key_vals: [i64] = []
+                for kf in dict_fields2:
+                    key_vals.push(val_make_text(kf))
+                return val_make_array(key_vals)
+            if method_name == "values":
+                val dict_values = val_get_struct_values(receiver)
+                return val_make_array(dict_values)
+            if method_name == "contains":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+            if method_name == "contains_key":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+
     # Struct methods — look up Type__method in function table
     if kind == VAL_STRUCT:
         val type_name = val_get_struct_name(receiver)
@@ -653,7 +686,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
     if method_name == "trim":
         return val_make_text(s.trim())
 
-    if method_name == "index_of":
+    if method_name == "index_of" or method_name == "find" or method_name == "find_str":
         if arg_eids.len() > 0:
             val needle_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
@@ -662,7 +695,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_int(s.index_of(needle) ?? -1)
         return val_make_int(-1)
 
-    if method_name == "last_index_of":
+    if method_name == "last_index_of" or method_name == "rfind":
         if arg_eids.len() > 0:
             val needle_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
@@ -816,6 +849,15 @@ fn eval_index_expr(eid: i64) -> i64:
             eval_set_error("string index out of bounds: " + "{idx}")
             return -1
 
+    # Dict/struct indexing: dict["key"] -> struct field lookup by name
+    if val_is_struct(base_val):
+        val key_text = val_to_text(index_val)
+        val field_val = val_struct_get_field(base_val, key_text)
+        if field_val >= 0:
+            return field_val
+        # Key not found — return nil (dict access semantics)
+        return val_make_nil()
+
     eval_set_error("cannot index " + val_kind_name(val_get_kind(base_val)))
     -1
 
@@ -944,6 +986,34 @@ fn eval_struct_lit(eid: i64) -> i64:
 
     val_make_struct(type_name, field_names, field_values)
 
+# ===== Dict Literal =====
+# Dict literals are represented as structs with type name "__dict".
+# Keys are evaluated as text field names, values are evaluated normally.
+# Empty {} creates an empty __dict struct that supports dynamic field add/get.
+
+fn eval_dict_lit(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val key_eids = e_node.args
+    val value_eids = e_node.stmts
+
+    var field_names: [text] = []
+    var field_values: [i64] = []
+
+    var i: i64 = 0
+    for k_eid in key_eids:
+        val key_val = eval_expr(k_eid)
+        if eval_had_error: return -1
+        # Convert key to text for struct field name
+        val key_text = val_to_text(key_val)
+        field_names.push(key_text)
+
+        val v_val = eval_expr(value_eids[i])
+        if eval_had_error: return -1
+        field_values.push(v_val)
+        i = i + 1
+
+    val_make_struct("__dict", field_names, field_values)
+
 # ===== Assignment Expression =====
 
 fn eval_assign_expr(eid: i64) -> i64:
@@ -986,6 +1056,46 @@ fn eval_assign_expr(eid: i64) -> i64:
             eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
             return -1
         eval_set_error("cannot set field on " + val_kind_name(val_get_kind(base_val)))
+        return -1
+
+    # Index assignment: base[key] = value (dict/array)
+    if target_tag == EXPR_INDEX:
+        val idx_base_eid = target_node.left
+        val idx_key_eid = target_node.right
+        val base_val = eval_expr(idx_base_eid)
+        if eval_had_error: return -1
+        val key_val = eval_expr(idx_key_eid)
+        if eval_had_error: return -1
+
+        if val_is_struct(base_val):
+            val key_text = val_to_text(key_val)
+            # Try to update existing field
+            val fi = val_struct_find_field_idx(base_val, key_text)
+            if fi >= 0:
+                val_struct_set_field_idx(base_val, fi, new_val)
+                return new_val
+            # Add new field to dict struct
+            var fields = val_get_struct_fields(base_val)
+            var values = val_get_struct_values(base_val)
+            fields.push(key_text)
+            values.push(new_val)
+            val_struct_fields[base_val] = fields
+            val_struct_values[base_val] = values
+            return new_val
+
+        if val_is_array(base_val):
+            if val_is_int(key_val):
+                val idx = val_get_int(key_val)
+                var elements = val_get_array(base_val)
+                if idx >= 0:
+                    if idx < elements.len():
+                        elements[idx] = new_val
+                        val_arrays[base_val] = elements
+                        return new_val
+                eval_set_error("array index out of bounds: " + "{idx}")
+                return -1
+
+        eval_set_error("cannot index-assign " + val_kind_name(val_get_kind(base_val)))
         return -1
 
     eval_set_error("invalid assignment target")
