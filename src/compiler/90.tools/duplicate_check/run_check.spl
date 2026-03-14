@@ -1,0 +1,143 @@
+#!/usr/bin/env simple
+# Standalone duplicate checker — NO app.io imports (avoids loading entire compiler)
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn dir_walk(path: text) -> [text]:
+    rt_dir_walk(path)
+
+fn collect_spl_files(dir_path: text) -> [text]:
+    val all_files = dir_walk(dir_path)
+    var spl_files: [text] = []
+    for f in all_files:
+        if f.ends_with(".spl") and not f.ends_with("_spec.spl") and not f.ends_with("_test.spl") and not f.contains("/test/"):
+            spl_files.push(f)
+    spl_files
+
+fn hash_line(line: text) -> i64:
+    val trimmed = line.trim()
+    # Simple hash using len + first/last chars as discriminator
+    var h = trimmed.len() * 7919
+    if trimmed.len() > 0:
+        h = h + trimmed[0:1].len() * 31
+    if trimmed.len() > 3:
+        h = h + trimmed[1:2].len() * 37
+    h % 1000000007
+
+fn find_duplicates(files: [text], min_lines: i64):
+    print "Scanning {files.len()} files for {min_lines}+ line duplicates..."
+
+    # Build line hash sequences per file
+    var total_groups = 0
+    var total_dup_lines = 0
+
+    # Collect all line-hash windows across all files
+    # Key: concatenated hash of N consecutive lines -> list of (file, start_line)
+    var window_hashes: [i64] = []
+    var window_files: [text] = []
+    var window_starts: [i64] = []
+
+    for file_path in files:
+        val content = file_read(file_path)
+        val lines = content.split("\n")
+
+        if lines.len() < min_lines:
+            continue
+
+        var line_idx = 0
+        while line_idx <= lines.len() - min_lines:
+            # Compute combined hash of min_lines consecutive lines
+            var combined = 0
+            var all_blank = true
+            var k = 0
+            while k < min_lines:
+                val line = lines[line_idx + k]
+                if line.trim().len() > 0:
+                    all_blank = false
+                combined = (combined * 31 + hash_line(lines[line_idx + k])) % 1000000007
+                k = k + 1
+
+            if not all_blank:
+                window_hashes.push(combined)
+                window_files.push(file_path)
+                window_starts.push(line_idx + 1)
+
+            line_idx = line_idx + 1
+
+    print "Computed {window_hashes.len()} windows"
+
+    # Find matching hashes (O(n^2) but works for small sets)
+    var reported: [text] = []
+    var i = 0
+    while i < window_hashes.len():
+        var j = i + 1
+        while j < window_hashes.len():
+            if window_hashes[i] == window_hashes[j]:
+                # Same file + overlapping range = skip
+                if window_files[i] == window_files[j]:
+                    val diff = window_starts[j] - window_starts[i]
+                    if diff < min_lines and diff > -min_lines:
+                        j = j + 1
+                        continue
+
+                val key = "{window_hashes[i]}:{window_files[i]}:{window_starts[i]}"
+                var already = false
+                for r in reported:
+                    if r == key:
+                        already = true
+                        break
+                if not already:
+                    total_groups = total_groups + 1
+                    total_dup_lines = total_dup_lines + min_lines
+                    reported.push(key)
+
+                    print ""
+                    print "Duplicate #{total_groups} ({min_lines} lines):"
+                    print "  A: {window_files[i]}:{window_starts[i]}-{window_starts[i] + min_lines - 1}"
+                    print "  B: {window_files[j]}:{window_starts[j]}-{window_starts[j] + min_lines - 1}"
+
+                    # Show code preview
+                    val content_a = file_read(window_files[i])
+                    val lines_a = content_a.split("\n")
+                    var preview_k = 0
+                    while preview_k < min_lines and preview_k < 3:
+                        val idx = window_starts[i] - 1 + preview_k
+                        if idx < lines_a.len():
+                            print "    {lines_a[idx]}"
+                        preview_k = preview_k + 1
+                    if min_lines > 3:
+                        print "    ..."
+
+            j = j + 1
+
+        # Progress every 1000
+        if i % 1000 == 0 and i > 0:
+            print "  ... checked {i}/{window_hashes.len()} windows"
+
+        i = i + 1
+
+    print ""
+    print "=== Summary ==="
+    print "Files scanned: {files.len()}"
+    print "Duplicate groups: {total_groups}"
+    print "Total duplicated lines: {total_dup_lines}"
+
+fn main():
+    val args = rt_cli_get_args()
+    var target = "src/compiler/00.common/"
+    var min_lines = 5
+
+    # args[0]=binary, args[1]=script, args[2+]=user args
+    if args.len() > 2:
+        target = args[2]
+    if args.len() > 3:
+        min_lines = int(args[3])
+
+    val files = collect_spl_files(target)
+    find_duplicates(files, min_lines)
