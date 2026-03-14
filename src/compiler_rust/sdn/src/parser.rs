@@ -1240,7 +1240,7 @@ mod tests {
 
     #[test]
     fn test_parse_test_db_file() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/test/test_db.sdn");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/db/test_db.sdn");
         if !path.exists() {
             return;
         }

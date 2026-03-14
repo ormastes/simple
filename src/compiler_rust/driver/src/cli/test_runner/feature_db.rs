@@ -10,7 +10,7 @@ use super::types::{TestFileResult, DebugLevel, debug_log};
 pub fn update_feature_database(test_files: &[PathBuf], results: &mut [TestFileResult], total_failed: &mut usize) {
     debug_log!(DebugLevel::Basic, "FeatureDB", "Updating feature database");
 
-    let feature_db_path = PathBuf::from("doc/feature/feature_db.sdn");
+    let feature_db_path = PathBuf::from("data/db/feature_db.sdn");
     let sspec_files: Vec<PathBuf> = test_files
         .iter()
         .filter(|path| {

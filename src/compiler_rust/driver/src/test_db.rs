@@ -1266,7 +1266,7 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
             db.rebuild_tree();
             db.rebuild_timing_from_records();
             // Save migrated format
-            eprintln!("[INFO] Auto-migrating test_db.sdn from V2 to V3 format");
+            eprintln!("[INFO] Auto-migrating data/db/test_db.sdn from V2 to V3 format");
             let backup_path = path.with_extension("sdn.v2_backup");
             if let Err(e) = fs::copy(path, &backup_path) {
                 debug_log!(
@@ -1300,7 +1300,7 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
 
     let dict = match root {
         SdnValue::Dict(d) => d,
-        _ => return Err("Expected dict at root of V3 test_db.sdn".to_string()),
+        _ => return Err("Expected dict at root of V3 data/db/test_db.sdn".to_string()),
     };
 
     let mut db = TestDb::new();
@@ -1908,7 +1908,7 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
                 debug_log!(
                     DebugLevel::Detailed,
                     "TestDB",
-                    "No changes to test_db.sdn, skipping write"
+                    "No changes to data/db/test_db.sdn, skipping write"
                 );
                 // Still save volatile data
                 save_volatile_data(path, db)?;

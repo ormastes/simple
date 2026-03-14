@@ -198,8 +198,8 @@ The compiler shells out to system linkers: `mold` (preferred) → `lld` → `ld`
 ## Related Documents
 
 - [`backend_default_decision.md`](backend_default_decision.md) — Decision doc for LLVM as default
-- [`BACKEND_COMPLETE_SUMMARY.md`](BACKEND_COMPLETE_SUMMARY.md) — Backend completion tracking
+- [`backend_complete_summary.md`](backend_complete_summary.md) — Backend completion tracking
 - [`backend_shared_architecture.md`](backend_shared_architecture.md) — Shared backend infrastructure
 - [`backend_production_plan.md`](backend_production_plan.md) — Production readiness plan
 - [`gpu_backend_design.md`](gpu_backend_design.md) — GPU backend design (CUDA/Vulkan)
-- [`VHDL_BACKEND_DESIGN.md`](VHDL_BACKEND_DESIGN.md) — VHDL synthesis backend
+- [`vhdl_backend_design.md`](vhdl_backend_design.md) — VHDL synthesis backend

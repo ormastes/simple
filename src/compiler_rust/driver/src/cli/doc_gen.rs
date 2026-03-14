@@ -30,7 +30,7 @@ pub fn run_feature_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/feature/feature_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/feature_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -69,7 +69,7 @@ pub fn run_task_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/task/task_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/task_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -331,7 +331,7 @@ pub fn run_todo_scan(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/todo_db.sdn"));
 
     let scan_path = args
         .iter()
@@ -410,7 +410,7 @@ pub fn run_todo_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/todo_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -448,7 +448,7 @@ pub fn run_test_result_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/test/test_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/test_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -486,7 +486,7 @@ pub fn run_bug_add(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/bug_db.sdn"));
 
     // Parse arguments
     let bug_id = match args.iter().position(|a| a == "--id").and_then(|i| args.get(i + 1)) {
@@ -588,7 +588,7 @@ pub fn run_bug_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/bug_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -626,7 +626,7 @@ pub fn run_bug_update(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("data/db/bug_db.sdn"));
 
     let bug_id = match args.iter().position(|a| a == "--id").and_then(|i| args.get(i + 1)) {
         Some(id) => id,
@@ -735,12 +735,12 @@ pub fn print_doc_gen_help() {
     eprintln!("  --verified-by <ids>      Comma-separated test IDs that verify fix");
     eprintln!();
     eprintln!("Defaults:");
-    eprintln!("  feature-gen:     doc/feature/feature_db.sdn -> doc/feature/");
-    eprintln!("  task-gen:        doc/task/task_db.sdn -> doc/task/");
+    eprintln!("  feature-gen:     data/db/feature_db.sdn -> doc/feature/");
+    eprintln!("  task-gen:        data/db/task_db.sdn -> doc/task/");
     eprintln!("  spec-gen:        tests/spec/ -> doc/spec/generated/");
-    eprintln!("  todo-scan:       . -> doc/todo/todo_db.sdn");
-    eprintln!("  todo-gen:        doc/todo/todo_db.sdn -> doc/TODO.md");
-    eprintln!("  test-result-gen: doc/test/test_db.sdn -> doc/test/");
-    eprintln!("  bug-add/update:  doc/bug/bug_db.sdn");
-    eprintln!("  bug-gen:         doc/bug/bug_db.sdn -> doc/bug/");
+    eprintln!("  todo-scan:       . -> data/db/todo_db.sdn");
+    eprintln!("  todo-gen:        data/db/todo_db.sdn -> doc/TODO.md");
+    eprintln!("  test-result-gen: data/db/test_db.sdn -> doc/test/");
+    eprintln!("  bug-add/update:  data/db/bug_db.sdn");
+    eprintln!("  bug-gen:         data/db/bug_db.sdn -> doc/bug/");
 }

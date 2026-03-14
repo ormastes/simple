@@ -178,7 +178,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     print_discovery_summary(&test_files, &doctest_cache, quiet);
 
     // Start test run tracking
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("data/db/test_db.sdn");
     let test_run = match crate::test_db::start_test_run(&db_path) {
         Ok(run) => {
             if !quiet {
@@ -430,7 +430,7 @@ fn prompt_for_ignored_qualifications() {
     }
 
     // Load test database to find unqualified ones
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("data/db/test_db.sdn");
     let db = match crate::test_db::load_test_db(&db_path) {
         Ok(db) => db,
         Err(_) => return,
@@ -616,7 +616,7 @@ fn execute_test_files(
         eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
         eprintln!("   Tip: Limit scope with path argument, e.g.:");
         eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
-        eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
+        eprintln!("   Or use test database: cat data/db/test_db.sdn | grep skip\n");
     }
 
     for (idx, path) in test_files.iter().enumerate() {
@@ -1063,7 +1063,7 @@ use crate::test_db::{TestRunRecord, TestRunStatus, cleanup_stale_runs, list_runs
 
 /// Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
 fn handle_run_management(options: &TestOptions) -> TestRunResult {
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("data/db/test_db.sdn");
     let quiet = matches!(options.format, OutputFormat::Json);
 
     // Cleanup stale runs first (if requested or before listing)

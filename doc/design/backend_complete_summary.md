@@ -55,7 +55,7 @@ Completed comprehensive backend planning, design, refactoring, and testing for t
    - Compatibility override: `--target-cpu=x86-64`
    - Performance validation requirements
 
-5. **`BACKEND_PLANNING_SUMMARY.md`** (12 pages)
+5. **`backend_planning_summary.md`** (12 pages)
    - Executive summary of all planning work
    - Implementation status and timeline
    - Success criteria and approval checklist
@@ -82,7 +82,7 @@ Completed comprehensive backend planning, design, refactoring, and testing for t
    - Coverage breakdown by component
    - CI/CD integration plan
 
-8. **`BACKEND_COMPLETE_SUMMARY.md`** (12 pages)
+8. **`backend_complete_summary.md`** (12 pages)
    - **THIS FILE** - Overall summary
 
 ---
@@ -340,12 +340,12 @@ simple build --release --target-cpu=x86-64-v4
 2. `backend_completeness_checklist.md` - 18 pages - 646 tasks
 3. `backend_default_decision.md` - 48 pages - LLVM as default
 4. `x86_64_v3_default_target.md` - 34 pages - CPU optimization
-5. `BACKEND_PLANNING_SUMMARY.md` - 12 pages - Executive summary
+5. `backend_planning_summary.md` - 12 pages - Executive summary
 
 ### Design (3 documents)
 6. `backend_shared_architecture.md` - 60 pages - Refactoring design
 7. `backend_testing_summary.md` - 34 pages - Test strategy
-8. `BACKEND_COMPLETE_SUMMARY.md` - 12 pages - **THIS FILE**
+8. `backend_complete_summary.md` - 12 pages - **THIS FILE**
 
 ### Tests (5 files)
 9. `type_mapper_spec.spl` - 585 lines - 60+ tests

@@ -162,7 +162,7 @@ pub fn handle_qualify_ignore(args: QualifyIgnoreArgs) -> Result<(), String> {
     // Determine database path
     let db_path = args.db_path.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        cwd.join("doc/test/test_db.sdn")
+        cwd.join("data/db/test_db.sdn")
     });
 
     // Handle configuration commands first (no auth required)

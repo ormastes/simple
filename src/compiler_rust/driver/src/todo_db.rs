@@ -678,7 +678,7 @@ pub fn generate_todo_docs(db: &TodoDb, output_dir: &Path) -> Result<(), String> 
         "**Total:** {} items | **Open:** {} | **Blocked:** {} | **Stale:** {}\n",
         total, open, blocked, stale
     ));
-    md.push_str("**Database:** `doc/todo/todo_db.sdn`\n\n");
+    md.push_str("**Database:** `data/db/todo_db.sdn`\n\n");
 
     // Statistics by area
     md.push_str("## Statistics\n\n");

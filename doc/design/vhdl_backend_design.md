@@ -456,7 +456,7 @@ Co-simulation with Verilog backend outputs via GHDL + Verilator for cross-verifi
 
 ## See Also
 
-- [VHDL Support Research](../research/VHDL_SUPPORT_RESEARCH.md) - Research and toolchain analysis
-- [VHDL Backend Plan](../plan/VHDL_BACKEND_PLAN.md) - Implementation milestones
+- [VHDL Support Research](../research/vhdl_support_research.md) - Research and toolchain analysis
+- [VHDL Backend Plan](../plan/vhdl_backend_plan.md) - Implementation milestones
 - [GPU Backend Design](gpu_backend_design.md) - Pattern reference (CUDA/Vulkan)
 - [Pipeline Operators Design](pipeline_operators_design.md) - Related: `~>` layer connect

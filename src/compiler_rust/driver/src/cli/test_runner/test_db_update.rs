@@ -37,7 +37,7 @@ pub fn update_test_database(
     results: &[TestFileResult],
     all_tests_run: bool,
 ) -> Result<(), String> {
-    let db_path = Path::new("doc/test/test_db.sdn");
+    let db_path = Path::new("data/db/test_db.sdn");
 
     debug_log!(
         DebugLevel::Basic,
@@ -197,7 +197,7 @@ pub fn update_test_database(
 
 /// Update test database with Rust test results
 pub fn update_rust_test_database(results: &[TestFileResult]) -> Result<(), String> {
-    let db_path = Path::new("doc/test/test_db.sdn");
+    let db_path = Path::new("data/db/test_db.sdn");
 
     debug_log!(
         DebugLevel::Basic,
