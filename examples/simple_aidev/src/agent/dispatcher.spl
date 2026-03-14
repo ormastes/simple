@@ -1,0 +1,84 @@
+# simple-aidev Agent Dispatcher
+#
+# Routes tasks to agents by strategy: capability, round-robin, priority.
+
+# ============================================================================
+# Module state
+# ============================================================================
+
+var DISPATCH_STRATEGY = "capability"
+var DISPATCH_RR_INDEX = 0
+
+# ============================================================================
+# Strategy selection
+# ============================================================================
+
+fn dispatcher_set_strategy(strategy: text):
+    DISPATCH_STRATEGY = strategy
+    DISPATCH_RR_INDEX = 0
+
+fn dispatcher_get_strategy() -> text:
+    DISPATCH_STRATEGY
+
+# ============================================================================
+# Select agent by strategy
+# ============================================================================
+
+fn dispatcher_select_agent(capability: text, agent_ids: [text],
+                           agent_capabilities: [text],
+                           default_agent: text, fallback_agent: text) -> text:
+    if DISPATCH_STRATEGY == "capability":
+        return _select_by_capability(capability, agent_ids, agent_capabilities, default_agent, fallback_agent)
+    elif DISPATCH_STRATEGY == "round-robin":
+        return _select_round_robin(agent_ids)
+    elif DISPATCH_STRATEGY == "priority":
+        # Priority: prefer default, then first available
+        if default_agent != "":
+            return default_agent
+        if agent_ids.len() > 0:
+            return agent_ids[0]
+        return fallback_agent
+    # Default to capability
+    _select_by_capability(capability, agent_ids, agent_capabilities, default_agent, fallback_agent)
+
+fn _select_by_capability(capability: text, agent_ids: [text],
+                         agent_capabilities: [text],
+                         default_agent: text, fallback_agent: text) -> text:
+    if capability == "":
+        if default_agent != "":
+            return default_agent
+        return fallback_agent
+    # Find agents with matching capability
+    var i = 0
+    while i < agent_ids.len():
+        val caps = agent_capabilities[i].split(",")
+        for cap in caps:
+            if cap.trim() == capability:
+                return agent_ids[i]
+        i = i + 1
+    # Fallback
+    if default_agent != "":
+        return default_agent
+    fallback_agent
+
+fn _select_round_robin(agent_ids: [text]) -> text:
+    if agent_ids.len() == 0:
+        return ""
+    val idx = DISPATCH_RR_INDEX % agent_ids.len()
+    DISPATCH_RR_INDEX = DISPATCH_RR_INDEX + 1
+    agent_ids[idx]
+
+# ============================================================================
+# Pattern-based routing
+# ============================================================================
+
+fn dispatcher_match_pattern(message: text, patterns: [text], agents: [text]) -> text:
+    var i = 0
+    while i < patterns.len():
+        val parts = patterns[i].split("|")
+        for part in parts:
+            val trimmed = part.trim()
+            if trimmed != "" and message.contains(trimmed):
+                return agents[i]
+        i = i + 1
+    ""

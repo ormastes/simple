@@ -1,0 +1,112 @@
+# simple-aidev Claude CLI Provider
+#
+# Direct invocation of the `claude` binary via rt_process_run.
+# Returns (content, error) tuple.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# JSON extraction helpers (inline to avoid circular deps)
+# ============================================================================
+
+fn _claude_extract_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    if not after.starts_with(quote):
+        return ""
+    val rest = after.substring(1)
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest.substring(0, end)
+        end = end + 1
+    ""
+
+fn _claude_extract_bool(json: text, key: text) -> bool:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return false
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    after.starts_with("true")
+
+# ============================================================================
+# Send message via Claude CLI
+# ============================================================================
+
+fn claude_send(cli_path: text, prompt: text, model: text,
+               system_prompt: text, session_id: text) -> (text, text, text):
+    # Returns (content, error, session_id)
+    var cmd = cli_path
+    if cmd == "":
+        cmd = "claude"
+    var args: [text] = []
+    args = args + ["--dangerously-skip-permissions"]
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    if model != "":
+        args = args + ["--model", model]
+    if system_prompt != "":
+        args = args + ["--system-prompt", system_prompt]
+    if session_id != "":
+        args = args + ["--resume", session_id]
+
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+
+    if exit_code != 0:
+        var err = "claude CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err, "")
+
+    # Parse JSON response
+    val content = _claude_extract_string(stdout, "result")
+    val sess = _claude_extract_string(stdout, "session_id")
+    val is_err = _claude_extract_bool(stdout, "is_error")
+
+    if is_err:
+        return ("", content, sess)
+    (content, "", sess)
+
+# ============================================================================
+# Simple send (no session tracking)
+# ============================================================================
+
+fn claude_send_simple(prompt: text) -> (text, text):
+    # Returns (content, error)
+    val r = claude_send("claude", prompt, "", "", "")
+    (r.0, r.1)
+
+# ============================================================================
+# Test connectivity
+# ============================================================================
+
+fn claude_test(cli_path: text) -> (bool, text):
+    # Returns (success, message)
+    var cmd = cli_path
+    if cmd == "":
+        cmd = "claude"
+    val result = rt_process_run(cmd, ["--version"])
+    val stdout = result.0 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        return (false, "claude CLI not found or not working")
+    (true, "claude CLI version: " + stdout.trim())

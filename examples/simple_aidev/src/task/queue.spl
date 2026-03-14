@@ -1,0 +1,230 @@
+# simple-aidev Task Queue
+#
+# Priority queue with SDN persistence.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# Queue state (parallel arrays)
+# ============================================================================
+
+var Q_IDS: [text] = []
+var Q_CONTENTS: [text] = []
+var Q_PRIORITIES: [i64] = []
+var Q_STATUSES: [text] = []
+var Q_AGENT_IDS: [text] = []
+var Q_RESULTS: [text] = []
+var Q_ERRORS: [text] = []
+var Q_NEXT_ID = 1
+var Q_PERSIST_PATH = "data/task_queue.sdn"
+var Q_MAX_ITEMS = 100
+
+# ============================================================================
+# Init
+# ============================================================================
+
+fn queue_init(persist_path: text, max_items: i64):
+    Q_PERSIST_PATH = persist_path
+    Q_MAX_ITEMS = max_items
+
+fn queue_clear():
+    Q_IDS = []
+    Q_CONTENTS = []
+    Q_PRIORITIES = []
+    Q_STATUSES = []
+    Q_AGENT_IDS = []
+    Q_RESULTS = []
+    Q_ERRORS = []
+    Q_NEXT_ID = 1
+
+# ============================================================================
+# Add
+# ============================================================================
+
+fn queue_add(content: text, priority: i64) -> text:
+    if Q_IDS.len() >= Q_MAX_ITEMS:
+        return ""
+    val id = "task-" + Q_NEXT_ID.to_text()
+    Q_NEXT_ID = Q_NEXT_ID + 1
+    Q_IDS.push(id)
+    Q_CONTENTS.push(content)
+    Q_PRIORITIES.push(priority)
+    Q_STATUSES.push("pending")
+    Q_AGENT_IDS.push("")
+    Q_RESULTS.push("")
+    Q_ERRORS.push("")
+    id
+
+fn queue_add_with_agent(content: text, priority: i64, agent_id: text) -> text:
+    val id = queue_add(content, priority)
+    if id != "":
+        val idx = Q_IDS.len() - 1
+        Q_AGENT_IDS[idx] = agent_id
+    id
+
+# ============================================================================
+# Pop highest priority pending task
+# ============================================================================
+
+fn queue_pop_index() -> i64:
+    var best_idx = -1
+    var best_priority = -1
+    var i = 0
+    while i < Q_IDS.len():
+        if Q_STATUSES[i] == "pending" and Q_PRIORITIES[i] > best_priority:
+            best_priority = Q_PRIORITIES[i]
+            best_idx = i
+        i = i + 1
+    best_idx
+
+fn queue_count() -> i64:
+    Q_IDS.len()
+
+fn queue_pending_count() -> i64:
+    var count = 0
+    for s in Q_STATUSES:
+        if s == "pending":
+            count = count + 1
+    count
+
+# ============================================================================
+# Status updates
+# ============================================================================
+
+fn queue_set_running(idx: i64):
+    if idx >= 0 and idx < Q_STATUSES.len():
+        Q_STATUSES[idx] = "running"
+
+fn queue_set_completed(idx: i64, agent_id: text, result: text):
+    if idx >= 0 and idx < Q_STATUSES.len():
+        Q_STATUSES[idx] = "completed"
+        Q_AGENT_IDS[idx] = agent_id
+        Q_RESULTS[idx] = result
+
+fn queue_set_failed(idx: i64, error: text):
+    if idx >= 0 and idx < Q_STATUSES.len():
+        Q_STATUSES[idx] = "failed"
+        Q_ERRORS[idx] = error
+
+# ============================================================================
+# Accessors
+# ============================================================================
+
+fn queue_get_id(idx: i64) -> text:
+    if idx >= 0 and idx < Q_IDS.len():
+        return Q_IDS[idx]
+    ""
+
+fn queue_get_content(idx: i64) -> text:
+    if idx >= 0 and idx < Q_CONTENTS.len():
+        return Q_CONTENTS[idx]
+    ""
+
+fn queue_get_priority(idx: i64) -> i64:
+    if idx >= 0 and idx < Q_PRIORITIES.len():
+        return Q_PRIORITIES[idx]
+    0
+
+fn queue_get_status(idx: i64) -> text:
+    if idx >= 0 and idx < Q_STATUSES.len():
+        return Q_STATUSES[idx]
+    ""
+
+fn queue_get_agent_id(idx: i64) -> text:
+    if idx >= 0 and idx < Q_AGENT_IDS.len():
+        return Q_AGENT_IDS[idx]
+    ""
+
+fn queue_get_result(idx: i64) -> text:
+    if idx >= 0 and idx < Q_RESULTS.len():
+        return Q_RESULTS[idx]
+    ""
+
+# ============================================================================
+# List
+# ============================================================================
+
+fn queue_list_text() -> text:
+    if Q_IDS.len() == 0:
+        return "  (no tasks)"
+    var parts: [text] = []
+    var i = 0
+    while i < Q_IDS.len():
+        val line = "  " + Q_IDS[i] + " [" + Q_STATUSES[i] + "] (p=" + Q_PRIORITIES[i].to_text() + ") " + Q_CONTENTS[i]
+        parts.push(line)
+        i = i + 1
+    parts.join("\n")
+
+# ============================================================================
+# Persistence (simple SDN format)
+# ============================================================================
+
+fn queue_save() -> bool:
+    var lines: [text] = []
+    lines.push("tasks:")
+    var i = 0
+    while i < Q_IDS.len():
+        lines.push("  " + Q_IDS[i] + ":")
+        lines.push("    content: " + Q_CONTENTS[i])
+        lines.push("    priority: " + Q_PRIORITIES[i].to_text())
+        lines.push("    status: " + Q_STATUSES[i])
+        lines.push("    agent_id: " + Q_AGENT_IDS[i])
+        i = i + 1
+    lines.push("")
+    lines.push("next_id: " + Q_NEXT_ID.to_text())
+    rt_file_write_text(Q_PERSIST_PATH, lines.join("\n") + "\n")
+
+fn queue_load() -> bool:
+    if not rt_file_exists(Q_PERSIST_PATH):
+        return false
+    val content = rt_file_read_text(Q_PERSIST_PATH)
+    if content == "":
+        return false
+    queue_clear()
+    var current_id = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        var indent = 0
+        var k = 0
+        while k < line.len():
+            if line[k:k + 1] == " ":
+                indent = indent + 1
+            else:
+                break
+            k = k + 1
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed.substring(0, colon_pos).trim()
+        var value = ""
+        if colon_pos + 1 < trimmed.len():
+            value = trimmed.substring(colon_pos + 1).trim()
+        if key == "next_id":
+            Q_NEXT_ID = int(value)
+        elif key == "tasks":
+            continue
+        elif indent <= 4 and value == "":
+            current_id = key
+            Q_IDS.push(current_id)
+            Q_CONTENTS.push("")
+            Q_PRIORITIES.push(0)
+            Q_STATUSES.push("pending")
+            Q_AGENT_IDS.push("")
+            Q_RESULTS.push("")
+            Q_ERRORS.push("")
+        elif current_id != "":
+            val idx = Q_IDS.len() - 1
+            if key == "content":
+                Q_CONTENTS[idx] = value
+            elif key == "priority":
+                Q_PRIORITIES[idx] = int(value)
+            elif key == "status":
+                Q_STATUSES[idx] = value
+            elif key == "agent_id":
+                Q_AGENT_IDS[idx] = value
+    true

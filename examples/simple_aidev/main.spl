@@ -1,0 +1,1030 @@
+# simple-aidev - AI Development Platform
+#
+# Multi-LLM agent coordination with theme-based architecture.
+# Implements chat, task queue, agent management, and theme discovery.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# CLI Parser Setup
+# ============================================================================
+
+struct ArgDef:
+    name: text
+    short: text
+    description: text
+    is_required: bool
+    default_value: text?
+    arg_kind: text
+
+struct SubcommandDef:
+    name: text
+    description: text
+    aliases: [text]
+
+struct ParsedResult:
+    flags: Dict<text, bool>
+    options: Dict<text, text>
+    positionals: [text]
+    subcommand: text?
+    subcommand_args: [text]
+
+impl ParsedResult:
+    fn get_flag(name: text) -> bool:
+        self.flags.get(name) ?? false
+
+    fn get_option(name: text) -> text?:
+        self.options.get(name)
+
+    fn get_option_or(name: text, default: text) -> text:
+        self.options.get(name) ?? default
+
+    fn has_subcommand() -> bool:
+        self.subcommand.?
+
+    fn get_subcommand() -> text?:
+        self.subcommand
+
+    fn get_subcommand_args() -> [text]:
+        self.subcommand_args
+
+struct SimpleParser:
+    program_name: text
+    description: text
+    args: [ArgDef]
+    subcommands: [SubcommandDef]
+    auto_stage: bool
+
+impl SimpleParser:
+    fn flag(name: text, short: text, description: text) -> SimpleParser:
+        var new_args = self.args
+        new_args.push(ArgDef(
+            name: name, short: short, description: description,
+            is_required: false, default_value: nil, arg_kind: "flag"
+        ))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: new_args, subcommands: self.subcommands, auto_stage: self.auto_stage
+        )
+
+    fn option(name: text, short: text, description: text, required: bool, default_value: text?) -> SimpleParser:
+        var new_args = self.args
+        new_args.push(ArgDef(
+            name: name, short: short, description: description,
+            is_required: required, default_value: default_value, arg_kind: "option"
+        ))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: new_args, subcommands: self.subcommands, auto_stage: self.auto_stage
+        )
+
+    fn subcommand(name: text, description: text) -> SimpleParser:
+        var new_subs = self.subcommands
+        new_subs.push(SubcommandDef(name: name, description: description, aliases: []))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: self.args, subcommands: new_subs, auto_stage: self.auto_stage
+        )
+
+    fn parse(input_args: [text]) -> Result<ParsedResult, text>:
+        var flags: Dict<text, bool> = {}
+        var options: Dict<text, text> = {}
+        var positionals: [text] = []
+        var subcommand: text? = nil
+        var subcommand_args: [text] = []
+
+        for a in self.args:
+            if a.arg_kind == "flag":
+                flags[a.name] = false
+            if a.arg_kind == "option" and a.default_value.?:
+                options[a.name] = a.default_value.unwrap()
+
+        var i = 0
+        while i < input_args.len():
+            val arg = input_args[i]
+
+            if not arg.starts_with("-") and subcommand == nil and self.subcommands.len() > 0:
+                var found = false
+                for s in self.subcommands:
+                    if s.name == arg:
+                        subcommand = Some(s.name)
+                        found = true
+                        break
+                if found:
+                    var j = i + 1
+                    while j < input_args.len():
+                        subcommand_args.push(input_args[j])
+                        j = j + 1
+                    break
+
+            if arg.starts_with("--"):
+                val rest = arg.substring(2)
+                if rest.contains("="):
+                    val eq_pos = rest.index_of("=") ?? 0
+                    val name = rest.substring(0, eq_pos)
+                    val value = rest.substring(eq_pos + 1)
+                    options[name] = value
+                else:
+                    var is_flag = false
+                    for a in self.args:
+                        if a.arg_kind == "flag" and a.name == rest:
+                            flags[rest] = true
+                            is_flag = true
+                            break
+                    if not is_flag:
+                        if i + 1 < input_args.len():
+                            i = i + 1
+                            options[rest] = input_args[i]
+                        else:
+                            return Err("Option --" + rest + " requires a value")
+            elif arg.starts_with("-") and arg.len() > 1:
+                val ch = arg.substring(1, 2)
+                var is_flag = false
+                for a in self.args:
+                    if a.arg_kind == "flag" and a.short == ch:
+                        flags[a.name] = true
+                        is_flag = true
+                        break
+                if not is_flag:
+                    if i + 1 < input_args.len():
+                        i = i + 1
+                        # Find option by short name
+                        var opt_name = ch
+                        for a in self.args:
+                            if a.arg_kind == "option" and a.short == ch:
+                                opt_name = a.name
+                                break
+                        options[opt_name] = input_args[i]
+            else:
+                positionals.push(arg)
+
+            i = i + 1
+
+        Ok(ParsedResult(
+            flags: flags,
+            options: options,
+            positionals: positionals,
+            subcommand: subcommand,
+            subcommand_args: subcommand_args
+        ))
+
+fn simple_parser(name: text, description: text) -> SimpleParser:
+    SimpleParser(
+        program_name: name,
+        description: description,
+        args: [],
+        subcommands: [],
+        auto_stage: true
+    )
+
+# ============================================================================
+# Forward declarations for command handlers (defined in commands.spl-like sections below)
+# ============================================================================
+
+# Config state
+var APP_CONFIG_LOADED = false
+var APP_BASE_DIR = ""
+
+# ============================================================================
+# Agent Registry state (module-level parallel arrays)
+# ============================================================================
+
+var REG_IDS: [text] = []
+var REG_PROVIDERS: [text] = []
+var REG_CLI_PATHS: [text] = []
+var REG_MODELS: [text] = []
+var REG_BASE_URLS: [text] = []
+var REG_SYSTEM_PROMPTS: [text] = []
+var REG_CAPABILITIES: [text] = []
+var REG_API_KEYS: [text] = []
+var REG_COUNT = 0  # manual counter (module-level .len() bug workaround)
+
+# Config state
+var CFG_PROJECT_NAME = "simple-aidev"
+var CFG_PROJECT_VERSION = "1.0.0"
+var CFG_DEFAULT_AGENT = "claude"
+var CFG_FALLBACK_AGENT = "ollama"
+var CFG_STRATEGY = "capability"
+var CFG_TASK_PERSISTENCE_PATH = "data/task_queue.sdn"
+var CFG_TASK_MAX_ITEMS = 100
+var CFG_THEMES_DIR = "themes"
+
+# Task queue state
+var TQ_IDS: [text] = []
+var TQ_CONTENTS: [text] = []
+var TQ_PRIORITIES: [i64] = []
+var TQ_STATUSES: [text] = []
+var TQ_AGENT_IDS: [text] = []
+var TQ_RESULTS: [text] = []
+var TQ_ERRORS: [text] = []
+var TQ_NEXT_ID = 1
+var TQ_COUNT = 0  # manual counter
+
+# Chat session state
+var CHAT_SESSION_ID = ""
+var CHAT_AGENT_ID = ""
+var MAIN_EXECUTED = false
+
+# ============================================================================
+# JSON helpers
+# ============================================================================
+
+fn _extract_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    if not after.starts_with(quote):
+        return ""
+    val rest = after.substring(1)
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest.substring(0, end)
+        end = end + 1
+    ""
+
+fn _extract_bool(json: text, key: text) -> bool:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return false
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    after.starts_with("true")
+
+# ============================================================================
+# Env var resolution
+# ============================================================================
+
+extern fn rt_env_get(key: text) -> text
+
+fn _resolve_env(value: text) -> text:
+    if not value.contains("$"):
+        return value
+    var out_parts: [text] = []
+    var i = 0
+    while i < value.len():
+        if value[i:i + 1] == "$":
+            var j = i + 1
+            var has_brace = false
+            if j < value.len() and value[j:j + 1] == "{":
+                has_brace = true
+                j = j + 1
+            var name_start = j
+            while j < value.len():
+                val ch = value[j:j + 1]
+                if has_brace and ch == "}":
+                    break
+                if not has_brace:
+                    val is_alnum = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+                    if not is_alnum:
+                        break
+                j = j + 1
+            val var_name = value[name_start:j]
+            if has_brace and j < value.len():
+                j = j + 1
+            val env_val = rt_env_get(var_name) ?? ""
+            out_parts.push(env_val)
+            i = j
+        else:
+            out_parts.push(value[i:i + 1])
+            i = i + 1
+    out_parts.join("")
+
+# ============================================================================
+# Config loading
+# ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
+
+# Parallel arrays for parsed lines (set by _parse_lines_with_indent)
+var _PARSED_LINES: [text] = []
+var _PARSED_INDENTS: [i64] = []
+var _PARSED_COUNT = 0
+
+fn _parse_lines_with_indent(content: text):
+    # Split text into lines preserving indent info.
+    # Results stored in _PARSED_LINES / _PARSED_INDENTS / _PARSED_COUNT.
+    _PARSED_LINES = []
+    _PARSED_INDENTS = []
+    _PARSED_COUNT = 0
+    # First, split raw content by scanning for \n using slices
+    var line_starts: [i64] = []
+    var line_ends: [i64] = []
+    var start = 0
+    var pos = 0
+    # We need content length but can't call .len() safely on module-level
+    # content is a local param so .len() should be safe
+    val clen = content.len()
+    while pos < clen:
+        val ch = content[pos:pos + 1]
+        if ch == "\n":
+            line_starts.push(start)
+            line_ends.push(pos)
+            start = pos + 1
+        pos = pos + 1
+    # Last line (no trailing newline)
+    if start < clen:
+        line_starts.push(start)
+        line_ends.push(clen)
+    # Process each line
+    var li = 0
+    for ls in line_starts:
+        val le = line_ends[li]
+        # Count leading spaces using slices
+        var spaces = 0
+        var sp = ls
+        while sp < le:
+            val sc = content[sp:sp + 1]
+            if sc == " ":
+                spaces = spaces + 1
+            else:
+                break
+            sp = sp + 1
+        # Get trimmed line content
+        val trimmed_start = ls + spaces
+        if trimmed_start < le:
+            val line_text = content[trimmed_start:le]
+            # Further trim trailing whitespace
+            val final_text = line_text.trim()
+            if final_text != "":
+                _PARSED_LINES = _PARSED_LINES + [final_text]
+                _PARSED_INDENTS = _PARSED_INDENTS + [spaces]
+                _PARSED_COUNT = _PARSED_COUNT + 1
+        li = li + 1
+
+fn _load_config(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return false
+    var current_section = ""
+    var current_agent_id = ""
+    _parse_lines_with_indent(content)
+    var line_idx = 0
+    while line_idx < _PARSED_COUNT:
+        val trimmed = _PARSED_LINES[line_idx]
+        val indent = _PARSED_INDENTS[line_idx]
+        line_idx = line_idx + 1
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed[0:colon_pos].trim()
+        var value = ""
+        val tlen = trimmed.len()
+        if colon_pos + 1 < tlen:
+            value = trimmed[colon_pos + 1:tlen].trim()
+        value = _resolve_env(value)
+        if indent == 0:
+            current_section = key
+            current_agent_id = ""
+            continue
+        if current_section == "project":
+            if key == "name":
+                CFG_PROJECT_NAME = value
+            elif key == "version":
+                CFG_PROJECT_VERSION = value
+        elif current_section == "routing":
+            if key == "default_agent":
+                CFG_DEFAULT_AGENT = value
+            elif key == "fallback_agent":
+                CFG_FALLBACK_AGENT = value
+            elif key == "strategy":
+                CFG_STRATEGY = value
+        elif current_section == "task_queue":
+            if key == "persistence_path":
+                CFG_TASK_PERSISTENCE_PATH = value
+            elif key == "max_items":
+                CFG_TASK_MAX_ITEMS = int(value)
+        elif current_section == "themes":
+            if key == "directory":
+                CFG_THEMES_DIR = value
+        elif current_section == "agents":
+            if indent <= 4 and value == "":
+                current_agent_id = key
+                REG_IDS = REG_IDS + [current_agent_id]
+                REG_PROVIDERS = REG_PROVIDERS + [""]
+                REG_CLI_PATHS = REG_CLI_PATHS + [""]
+                REG_MODELS = REG_MODELS + [""]
+                REG_BASE_URLS = REG_BASE_URLS + [""]
+                REG_SYSTEM_PROMPTS = REG_SYSTEM_PROMPTS + [""]
+                REG_CAPABILITIES = REG_CAPABILITIES + [""]
+                REG_API_KEYS = REG_API_KEYS + [""]
+                REG_COUNT = REG_COUNT + 1
+            elif current_agent_id != "":
+                val idx = REG_COUNT - 1
+                if key == "provider":
+                    REG_PROVIDERS[idx] = value
+                elif key == "cli_path":
+                    REG_CLI_PATHS[idx] = value
+                elif key == "model":
+                    REG_MODELS[idx] = value
+                elif key == "base_url":
+                    REG_BASE_URLS[idx] = value
+                elif key == "system_prompt":
+                    REG_SYSTEM_PROMPTS[idx] = value
+                elif key == "capabilities":
+                    var caps = value
+                    if caps.starts_with("["):
+                        val clen1 = caps.len()
+                        caps = caps[1:clen1]
+                    if caps.ends_with("]"):
+                        val clen2 = caps.len()
+                        caps = caps[0:clen2 - 1]
+                    REG_CAPABILITIES[idx] = caps.replace(" ", "")
+    true
+
+# ============================================================================
+# Registry helpers
+# ============================================================================
+
+fn _registry_find_index(id: text) -> i64:
+    var i = 0
+    while i < REG_COUNT:
+        if REG_IDS[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _registry_find_by_capability(capability: text) -> [text]:
+    var matches: [text] = []
+    var i = 0
+    while i < REG_COUNT:
+        val caps = REG_CAPABILITIES[i].split(",")
+        for cap in caps:
+            if cap.trim() == capability:
+                matches.push(REG_IDS[i])
+                break
+        i = i + 1
+    matches
+
+# ============================================================================
+# Provider: Claude CLI
+# ============================================================================
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _send_claude(idx: i64, prompt: text) -> (text, text):
+    var cmd = REG_CLI_PATHS[idx]
+    if cmd == "":
+        cmd = "claude"
+    var args: [text] = []
+    args = args + ["--dangerously-skip-permissions"]
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    val model = REG_MODELS[idx]
+    if model != "":
+        args = args + ["--model", model]
+    val sys_prompt = REG_SYSTEM_PROMPTS[idx]
+    if sys_prompt != "":
+        args = args + ["--system-prompt", sys_prompt]
+    if CHAT_SESSION_ID != "":
+        args = args + ["--resume", CHAT_SESSION_ID]
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "claude CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    val content = _extract_string(stdout, "result")
+    val sess = _extract_string(stdout, "session_id")
+    val is_err = _extract_bool(stdout, "is_error")
+    if sess != "":
+        CHAT_SESSION_ID = sess
+    if is_err:
+        return ("", content)
+    (content, "")
+
+# ============================================================================
+# Provider: Gemini CLI
+# ============================================================================
+
+fn _send_gemini(idx: i64, prompt: text) -> (text, text):
+    var cmd = REG_CLI_PATHS[idx]
+    if cmd == "":
+        cmd = "gemini"
+    var args: [text] = []
+    args = args + ["--sandbox", "off"]
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    val model = REG_MODELS[idx]
+    if model != "":
+        args = args + ["--model", model]
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "gemini CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    val content = _extract_string(stdout, "response")
+    val error_val = _extract_string(stdout, "error")
+    if error_val != "":
+        return ("", error_val)
+    (content, "")
+
+# ============================================================================
+# Provider: OpenAI-compatible (Ollama)
+# ============================================================================
+
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
+fn _send_openai_compat(idx: i64, prompt: text) -> (text, text):
+    var base_url = REG_BASE_URLS[idx]
+    if base_url == "":
+        base_url = "http://localhost:11434"
+    val url = base_url + "/v1/chat/completions"
+    var model = REG_MODELS[idx]
+    if model == "":
+        model = "llama3"
+    val q = "\""
+    val body = "{" + q + "model" + q + ":" + q + model + q + "," + q + "messages" + q + ":[{" + q + "role" + q + ":" + q + "user" + q + "," + q + "content" + q + ":" + q + prompt + q + "}]}"
+    val headers = "Content-Type: application/json"
+    val result = rt_http_request("POST", url, headers, body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return ("", "HTTP error: " + http_error)
+    val content = _extract_string(resp_body, "content")
+    (content, "")
+
+# ============================================================================
+# Dispatch to provider
+# ============================================================================
+
+fn _dispatch_send(agent_id: text, prompt: text) -> (text, text):
+    val idx = _registry_find_index(agent_id)
+    if idx < 0:
+        return ("", "Agent not found: " + agent_id)
+    val provider = REG_PROVIDERS[idx]
+    if provider == "claude_cli":
+        return _send_claude(idx, prompt)
+    elif provider == "gemini_cli":
+        return _send_gemini(idx, prompt)
+    elif provider == "openai_compat":
+        return _send_openai_compat(idx, prompt)
+    ("", "Unsupported provider: " + provider)
+
+# ============================================================================
+# Task queue operations
+# ============================================================================
+
+fn _task_add(content: text, priority: i64) -> text:
+    var tmp_id = TQ_NEXT_ID
+    val id = "task-" + tmp_id.to_text()
+    TQ_NEXT_ID = TQ_NEXT_ID + 1
+    TQ_IDS = TQ_IDS + [id]
+    TQ_CONTENTS = TQ_CONTENTS + [content]
+    TQ_PRIORITIES = TQ_PRIORITIES + [priority]
+    TQ_STATUSES = TQ_STATUSES + ["pending"]
+    TQ_AGENT_IDS = TQ_AGENT_IDS + [""]
+    TQ_RESULTS = TQ_RESULTS + [""]
+    TQ_ERRORS = TQ_ERRORS + [""]
+    TQ_COUNT = TQ_COUNT + 1
+    id
+
+fn _task_list_text() -> text:
+    if TQ_COUNT == 0:
+        return "  (no tasks)"
+    var parts: [text] = []
+    var i = 0
+    while i < TQ_COUNT:
+        var tmp_p = TQ_PRIORITIES[i]
+        val line = "  " + TQ_IDS[i] + " [" + TQ_STATUSES[i] + "] (p=" + tmp_p.to_text() + ") " + TQ_CONTENTS[i]
+        parts.push(line)
+        i = i + 1
+    parts.join("\n")
+
+fn _task_find_next_pending() -> i64:
+    var best_idx = -1
+    var best_priority = -1
+    var i = 0
+    while i < TQ_COUNT:
+        if TQ_STATUSES[i] == "pending" and TQ_PRIORITIES[i] > best_priority:
+            best_priority = TQ_PRIORITIES[i]
+            best_idx = i
+        i = i + 1
+    best_idx
+
+fn _task_run_one() -> text:
+    val idx = _task_find_next_pending()
+    if idx < 0:
+        return "No pending tasks."
+    TQ_STATUSES[idx] = "running"
+    val content = TQ_CONTENTS[idx]
+    # Route to agent
+    var agent_id = TQ_AGENT_IDS[idx]
+    if agent_id == "":
+        agent_id = CFG_DEFAULT_AGENT
+    val result = _dispatch_send(agent_id, content)
+    if result.1 != "":
+        TQ_STATUSES[idx] = "failed"
+        TQ_ERRORS[idx] = result.1
+        return "Task " + TQ_IDS[idx] + " FAILED: " + result.1
+    TQ_STATUSES[idx] = "completed"
+    TQ_RESULTS[idx] = result.0
+    TQ_AGENT_IDS[idx] = agent_id
+    "Task " + TQ_IDS[idx] + " completed by " + agent_id + ":\n" + result.0
+
+fn _task_run_all() -> text:
+    var results: [text] = []
+    var ran = 0
+    while true:
+        val idx = _task_find_next_pending()
+        if idx < 0:
+            break
+        val r = _task_run_one()
+        results.push(r)
+        ran = ran + 1
+    if ran == 0:
+        return "No pending tasks."
+    results.join("\n\n")
+
+# ============================================================================
+# Theme discovery
+# ============================================================================
+
+extern fn rt_dir_list(path: text) -> [text]
+
+fn _discover_themes() -> [text]:
+    var themes: [text] = []
+    if not rt_file_exists(CFG_THEMES_DIR):
+        return themes
+    val entries = rt_dir_list(CFG_THEMES_DIR)
+    for entry in entries:
+        val manifest_path = CFG_THEMES_DIR + "/" + entry + "/theme.sdn"
+        if rt_file_exists(manifest_path):
+            themes.push(entry)
+    themes
+
+fn _theme_list_text() -> text:
+    val themes = _discover_themes()
+    if themes.len() == 0:
+        return "  (no themes found in " + CFG_THEMES_DIR + "/)"
+    var parts: [text] = []
+    for t in themes:
+        parts.push("  " + t)
+    parts.join("\n")
+
+# ============================================================================
+# Theme scaffold
+# ============================================================================
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _theme_create(name: text) -> text:
+    val dir = CFG_THEMES_DIR + "/" + name
+    if rt_file_exists(dir):
+        return "Theme directory already exists: " + dir
+    rt_dir_create_all(dir)
+    val manifest = "name: " + name + "\ndescription: A new theme\nversion: 1.0.0\ndefault_agent: claude\ncapabilities: [code, research]\n"
+    rt_file_write_text(dir + "/theme.sdn", manifest)
+    "Created theme: " + dir
+
+# ============================================================================
+# Chat commands
+# ============================================================================
+
+fn _handle_chat(args: [text]) -> text:
+    # Parse chat subcommand args: [--agent <id>] [--room <name>] <message...>
+    var agent_id = ""
+    var room_name = ""
+    var message_parts: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--agent" and i + 1 < args.len():
+            i = i + 1
+            agent_id = args[i]
+        elif arg == "--room" and i + 1 < args.len():
+            i = i + 1
+            room_name = args[i]
+        else:
+            message_parts.push(arg)
+        i = i + 1
+    if message_parts.len() == 0:
+        return "Usage: simple-aidev chat [--agent <id>] <message>"
+    val message = message_parts.join(" ")
+    if agent_id == "":
+        agent_id = CFG_DEFAULT_AGENT
+    if room_name != "":
+        return _handle_room_chat(room_name, message)
+    CHAT_AGENT_ID = agent_id
+    val result = _dispatch_send(agent_id, message)
+    if result.1 != "":
+        return "Error: " + result.1
+    result.0
+
+# ============================================================================
+# Multi-agent room chat
+# ============================================================================
+
+fn _handle_room_chat(room_name: text, message: text) -> text:
+    # Simple round-robin: send to all agents, collect responses
+    var responses: [text] = []
+    var i = 0
+    while i < REG_COUNT:
+        val agent_id = REG_IDS[i]
+        val result = _dispatch_send(agent_id, message)
+        if result.1 != "":
+            responses.push("[" + agent_id + "] Error: " + result.1)
+        else:
+            responses.push("[" + agent_id + "] " + result.0)
+        i = i + 1
+    "Room: " + room_name + "\n\n" + responses.join("\n\n")
+
+# ============================================================================
+# Agent commands
+# ============================================================================
+
+fn _handle_agent(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev agent <list|test <id>>"
+    val sub = args[0]
+    if sub == "list":
+        var parts: [text] = []
+        parts.push("Registered Agents:")
+        var i = 0
+        while i < REG_COUNT:
+            val caps = REG_CAPABILITIES[i]
+            parts.push("  " + REG_IDS[i] + " (" + REG_PROVIDERS[i] + ", model=" + REG_MODELS[i] + ", caps=[" + caps + "])")
+            i = i + 1
+        if REG_COUNT == 0:
+            parts.push("  (no agents registered)")
+        return parts.join("\n")
+    elif sub == "test":
+        if args.len() < 2:
+            return "Usage: simple-aidev agent test <id>"
+        val id = args[1]
+        val idx = _registry_find_index(id)
+        if idx < 0:
+            return "Agent not found: " + id
+        val provider = REG_PROVIDERS[idx]
+        if provider == "claude_cli":
+            val cli = REG_CLI_PATHS[idx]
+            var cmd = cli
+            if cmd == "":
+                cmd = "claude"
+            val result = rt_process_run(cmd, ["--version"])
+            val exit_code = result.2
+            if exit_code != 0:
+                return "FAIL: " + id + " - claude CLI not available"
+            return "OK: " + id + " - " + (result.0 ?? "").trim()
+        elif provider == "gemini_cli":
+            val cli = REG_CLI_PATHS[idx]
+            var cmd = cli
+            if cmd == "":
+                cmd = "gemini"
+            val result = rt_process_run(cmd, ["--version"])
+            val exit_code = result.2
+            if exit_code != 0:
+                return "FAIL: " + id + " - gemini CLI not available"
+            return "OK: " + id + " - " + (result.0 ?? "").trim()
+        elif provider == "openai_compat":
+            return "OK: " + id + " - openai_compat (connectivity test not implemented)"
+        return "Unknown provider: " + provider
+    "Unknown agent command: " + sub
+
+# ============================================================================
+# Task commands
+# ============================================================================
+
+fn _handle_task(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev task <add|list|run>"
+    val sub = args[0]
+    if sub == "add":
+        if args.len() < 2:
+            return "Usage: simple-aidev task add <content>"
+        var content_parts: [text] = []
+        var priority = 0
+        var i = 1
+        while i < args.len():
+            if args[i] == "--priority" and i + 1 < args.len():
+                i = i + 1
+                priority = int(args[i])
+            else:
+                content_parts.push(args[i])
+            i = i + 1
+        val content = content_parts.join(" ")
+        val id = _task_add(content, priority)
+        return "Added task: " + id + " (priority=" + priority.to_text() + ")"
+    elif sub == "list":
+        return "Tasks:\n" + _task_list_text()
+    elif sub == "run":
+        var run_all = false
+        if args.len() > 1 and args[1] == "--all":
+            run_all = true
+        if run_all:
+            return _task_run_all()
+        return _task_run_one()
+    "Unknown task command: " + sub
+
+# ============================================================================
+# Theme commands
+# ============================================================================
+
+fn _handle_theme(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev theme <list|create <name>>"
+    val sub = args[0]
+    if sub == "list":
+        return "Themes:\n" + _theme_list_text()
+    elif sub == "create":
+        if args.len() < 2:
+            return "Usage: simple-aidev theme create <name>"
+        return _theme_create(args[1])
+    "Unknown theme command: " + sub
+
+# ============================================================================
+# Config command
+# ============================================================================
+
+fn _handle_config(args: [text]) -> text:
+    var parts: [text] = []
+    parts.push("Configuration:")
+    parts.push("  Project: " + CFG_PROJECT_NAME + " v" + CFG_PROJECT_VERSION)
+    parts.push("  Default Agent: " + CFG_DEFAULT_AGENT)
+    parts.push("  Fallback Agent: " + CFG_FALLBACK_AGENT)
+    parts.push("  Strategy: " + CFG_STRATEGY)
+    var tmp_max = CFG_TASK_MAX_ITEMS
+    parts.push("  Task Queue: " + CFG_TASK_PERSISTENCE_PATH + " (max " + tmp_max.to_text() + ")")
+    parts.push("  Themes Dir: " + CFG_THEMES_DIR)
+    parts.push("")
+    parts.push("  Agents:")
+    var i = 0
+    while i < REG_COUNT:
+        parts.push("    " + REG_IDS[i] + " (" + REG_PROVIDERS[i] + ")")
+        i = i + 1
+    parts.join("\n")
+
+# ============================================================================
+# Init command
+# ============================================================================
+
+fn _handle_init(args: [text]) -> text:
+    var name = "my-aidev-project"
+    if args.len() > 0:
+        name = args[0]
+    # Create project directory structure
+    rt_dir_create_all(name)
+    rt_dir_create_all(name + "/themes")
+    rt_dir_create_all(name + "/data")
+    # Write default config
+    var cfg_parts: [text] = []
+    cfg_parts.push("project:")
+    cfg_parts.push("  name: " + name)
+    cfg_parts.push("  version: 1.0.0")
+    cfg_parts.push("")
+    cfg_parts.push("agents:")
+    cfg_parts.push("  claude:")
+    cfg_parts.push("    provider: claude_cli")
+    cfg_parts.push("    cli_path: claude")
+    cfg_parts.push("    model: claude-sonnet-4-20250514")
+    cfg_parts.push("    system_prompt: You are a helpful coding assistant.")
+    cfg_parts.push("    capabilities: [code, review, research, test]")
+    cfg_parts.push("")
+    cfg_parts.push("routing:")
+    cfg_parts.push("  default_agent: claude")
+    cfg_parts.push("  strategy: capability")
+    cfg_parts.push("")
+    cfg_parts.push("task_queue:")
+    cfg_parts.push("  persistence_path: data/task_queue.sdn")
+    cfg_parts.push("  max_items: 100")
+    cfg_parts.push("")
+    cfg_parts.push("themes:")
+    cfg_parts.push("  directory: themes")
+    cfg_parts.push("  auto_load: true")
+    rt_file_write_text(name + "/config.sdn", cfg_parts.join("\n") + "\n")
+    "Initialized project: " + name + "/\n  config.sdn\n  themes/\n  data/"
+
+# ============================================================================
+# Help
+# ============================================================================
+
+fn _show_help() -> text:
+    var parts: [text] = []
+    parts.push("simple-aidev - AI Development Platform")
+    parts.push("")
+    parts.push("Usage: simple-aidev <command> [options]")
+    parts.push("")
+    parts.push("Commands:")
+    parts.push("  chat <message>              Chat with default agent")
+    parts.push("  chat --agent <id> <msg>     Chat with specific agent")
+    parts.push("  chat --room <name> <msg>    Multi-agent room chat")
+    parts.push("")
+    parts.push("  task add <content>          Add task to queue")
+    parts.push("  task list                   List tasks")
+    parts.push("  task run                    Execute next task")
+    parts.push("  task run --all              Execute all pending tasks")
+    parts.push("")
+    parts.push("  agent list                  List registered agents")
+    parts.push("  agent test <id>             Test agent connectivity")
+    parts.push("")
+    parts.push("  theme list                  List discovered themes")
+    parts.push("  theme create <name>         Create new theme")
+    parts.push("")
+    parts.push("  config show                 Display configuration")
+    parts.push("  init [name]                 Create new project")
+    parts.push("  help                        Show this help")
+    parts.push("")
+    parts.push("Options:")
+    parts.push("  --config <path>             Config file path (default: config.sdn)")
+    parts.push("  --verbose, -v               Verbose output")
+    parts.join("\n")
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    if MAIN_EXECUTED:
+        return
+    MAIN_EXECUTED = true
+    val parser = simple_parser("simple-aidev", "AI Development Platform")
+    var p = parser
+    p = p.flag("verbose", "v", "Verbose output")
+    p = p.option("config", "c", "Config file path", false, Some("config.sdn"))
+    p = p.subcommand("chat", "Chat with an agent")
+    p = p.subcommand("task", "Manage tasks")
+    p = p.subcommand("agent", "Manage agents")
+    p = p.subcommand("theme", "Manage themes")
+    p = p.subcommand("config", "Show configuration")
+    p = p.subcommand("init", "Initialize new project")
+    p = p.subcommand("help", "Show help")
+
+    val raw_args = rt_cli_get_args()
+    # Strip leading args up to and including the .spl script path
+    var args: [text] = []
+    var found_script = false
+    for a in raw_args:
+        if found_script:
+            args.push(a)
+        elif a.ends_with(".spl"):
+            found_script = true
+    val result = p.parse(args)
+    match result:
+        case Err(e):
+            print("Error: " + e)
+            print(_show_help())
+            return
+        case Ok(parsed):
+            # Load config
+            val config_path = parsed.get_option("config") ?? "config.sdn"
+            _load_config(config_path)
+
+            val verbose = parsed.get_flag("verbose")
+            if verbose:
+                print("Config loaded from: " + config_path)
+                var tmp_rc = REG_COUNT
+                print("Agents: " + tmp_rc.to_text())
+
+            if not parsed.has_subcommand():
+                print(_show_help())
+                return
+
+            val cmd = parsed.get_subcommand() ?? ""
+            val sub_args = parsed.get_subcommand_args()
+
+            if cmd == "help":
+                print(_show_help())
+            elif cmd == "chat":
+                print(_handle_chat(sub_args))
+            elif cmd == "task":
+                print(_handle_task(sub_args))
+            elif cmd == "agent":
+                print(_handle_agent(sub_args))
+            elif cmd == "theme":
+                print(_handle_theme(sub_args))
+            elif cmd == "config":
+                print(_handle_config(sub_args))
+            elif cmd == "init":
+                print(_handle_init(sub_args))
+            else:
+                print("Unknown command: " + cmd)
+                print(_show_help())
+
+main()

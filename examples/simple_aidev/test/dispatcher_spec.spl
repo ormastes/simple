@@ -1,0 +1,78 @@
+# Tests for agent dispatcher
+
+var DISPATCH_STRATEGY = "capability"
+var DISPATCH_RR_INDEX = 0
+
+fn _select_by_capability(capability: text, agent_ids: [text],
+                         agent_capabilities: [text],
+                         default_agent: text, fallback_agent: text) -> text:
+    if capability == "":
+        if default_agent != "":
+            return default_agent
+        return fallback_agent
+    var i = 0
+    while i < agent_ids.len():
+        val caps = agent_capabilities[i].split(",")
+        for cap in caps:
+            if cap.trim() == capability:
+                return agent_ids[i]
+        i = i + 1
+    if default_agent != "":
+        return default_agent
+    fallback_agent
+
+fn _select_round_robin(agent_ids: [text]) -> text:
+    if agent_ids.len() == 0:
+        return ""
+    val idx = DISPATCH_RR_INDEX % agent_ids.len()
+    DISPATCH_RR_INDEX = DISPATCH_RR_INDEX + 1
+    agent_ids[idx]
+
+fn _match_pattern(message: text, patterns: [text], agents: [text]) -> text:
+    var i = 0
+    while i < patterns.len():
+        val parts = patterns[i].split("|")
+        for part in parts:
+            val trimmed = part.trim()
+            if trimmed != "" and message.contains(trimmed):
+                return agents[i]
+        i = i + 1
+    ""
+
+describe "Dispatcher":
+    it "selects by capability":
+        val ids = ["claude", "ollama"]
+        val caps = ["code,review", "code,research"]
+        val result = _select_by_capability("review", ids, caps, "claude", "ollama")
+        expect(result).to_equal("claude")
+
+    it "falls back to default when no capability match":
+        val ids = ["claude", "ollama"]
+        val caps = ["code", "research"]
+        val result = _select_by_capability("deploy", ids, caps, "claude", "ollama")
+        expect(result).to_equal("claude")
+
+    it "uses fallback when no default":
+        val ids = ["claude"]
+        val caps = ["code"]
+        val result = _select_by_capability("deploy", ids, caps, "", "ollama")
+        expect(result).to_equal("ollama")
+
+    it "round robin cycles through agents":
+        DISPATCH_RR_INDEX = 0
+        val ids = ["a", "b", "c"]
+        val r1 = _select_round_robin(ids)
+        val r2 = _select_round_robin(ids)
+        val r3 = _select_round_robin(ids)
+        val r4 = _select_round_robin(ids)
+        expect(r1).to_equal("a")
+        expect(r2).to_equal("b")
+        expect(r3).to_equal("c")
+        expect(r4).to_equal("a")
+
+    it "matches patterns":
+        val patterns = ["local|offline", "claude|anthropic"]
+        val agents = ["ollama", "claude"]
+        expect(_match_pattern("run locally offline", patterns, agents)).to_equal("ollama")
+        expect(_match_pattern("ask claude about this", patterns, agents)).to_equal("claude")
+        expect(_match_pattern("generic question", patterns, agents)).to_equal("")

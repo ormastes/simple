@@ -1,0 +1,95 @@
+# simple-aidev Ollama Provider (OpenAI-compatible)
+#
+# Sends messages to Ollama via its OpenAI-compatible API endpoint.
+
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
+# ============================================================================
+# JSON helpers
+# ============================================================================
+
+fn _ollama_extract_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    if not after.starts_with(quote):
+        return ""
+    val rest = after.substring(1)
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest.substring(0, end)
+        end = end + 1
+    ""
+
+fn _ollama_escape(s: text) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch == "\"":
+            parts.push("\\\"")
+        elif ch == "\\":
+            parts.push("\\\\")
+        elif ch == "\n":
+            parts.push("\\n")
+        elif ch == "\t":
+            parts.push("\\t")
+        else:
+            parts.push(ch)
+        i = i + 1
+    parts.join("")
+
+# ============================================================================
+# Send message
+# ============================================================================
+
+fn ollama_send(base_url: text, model: text, prompt: text,
+               system_prompt: text) -> (text, text):
+    var url = base_url
+    if url == "":
+        url = "http://localhost:11434"
+    url = url + "/v1/chat/completions"
+    var mdl = model
+    if mdl == "":
+        mdl = "llama3"
+
+    val q = "\""
+    var messages = "[{" + q + "role" + q + ":" + q + "user" + q + "," + q + "content" + q + ":" + q + _ollama_escape(prompt) + q + "}]"
+    if system_prompt != "":
+        messages = "[{" + q + "role" + q + ":" + q + "system" + q + "," + q + "content" + q + ":" + q + _ollama_escape(system_prompt) + q + "},{" + q + "role" + q + ":" + q + "user" + q + "," + q + "content" + q + ":" + q + _ollama_escape(prompt) + q + "}]"
+
+    val body = "{" + q + "model" + q + ":" + q + mdl + q + "," + q + "messages" + q + ":" + messages + "}"
+    val headers = "Content-Type: application/json"
+    val result = rt_http_request("POST", url, headers, body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return ("", "HTTP error: " + http_error)
+    val content = _ollama_extract_string(resp_body, "content")
+    if content == "":
+        val err_msg = _ollama_extract_string(resp_body, "error")
+        if err_msg != "":
+            return ("", err_msg)
+    (content, "")
+
+fn ollama_test(base_url: text) -> (bool, text):
+    var url = base_url
+    if url == "":
+        url = "http://localhost:11434"
+    val result = rt_http_request("GET", url + "/api/tags", "", "")
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return (false, "Ollama not reachable: " + http_error)
+    (true, "Ollama reachable at " + url)

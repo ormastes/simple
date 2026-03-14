@@ -1,0 +1,115 @@
+# simple-aidev Theme Discovery
+#
+# Scan theme directories, load theme.sdn manifests.
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_list(path: text) -> [text]
+
+# ============================================================================
+# Theme state (parallel arrays)
+# ============================================================================
+
+var THEME_NAMES: [text] = []
+var THEME_DESCRIPTIONS: [text] = []
+var THEME_VERSIONS: [text] = []
+var THEME_DIRECTORIES: [text] = []
+var THEME_DEFAULT_AGENTS: [text] = []
+var THEME_CAPABILITIES: [text] = []  # comma-separated
+
+# ============================================================================
+# Discovery
+# ============================================================================
+
+fn themes_discover(themes_dir: text) -> i64:
+    THEME_NAMES = []
+    THEME_DESCRIPTIONS = []
+    THEME_VERSIONS = []
+    THEME_DIRECTORIES = []
+    THEME_DEFAULT_AGENTS = []
+    THEME_CAPABILITIES = []
+
+    if not rt_file_exists(themes_dir):
+        return 0
+    val entries = rt_dir_list(themes_dir)
+    var count = 0
+    for entry in entries:
+        val manifest_path = themes_dir + "/" + entry + "/theme.sdn"
+        if rt_file_exists(manifest_path):
+            _load_theme_manifest(entry, themes_dir + "/" + entry, manifest_path)
+            count = count + 1
+    count
+
+fn _load_theme_manifest(name: text, directory: text, manifest_path: text):
+    val content = rt_file_read_text(manifest_path)
+    THEME_NAMES.push(name)
+    THEME_DIRECTORIES.push(directory)
+    # Parse simple key: value
+    var description = ""
+    var version = "1.0.0"
+    var default_agent = ""
+    var capabilities = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed.substring(0, colon_pos).trim()
+        var value = ""
+        if colon_pos + 1 < trimmed.len():
+            value = trimmed.substring(colon_pos + 1).trim()
+        if key == "description":
+            description = value
+        elif key == "version":
+            version = value
+        elif key == "default_agent":
+            default_agent = value
+        elif key == "capabilities":
+            var caps = value
+            if caps.starts_with("["):
+                caps = caps.substring(1)
+            if caps.ends_with("]"):
+                caps = caps.substring(0, caps.len() - 1)
+            capabilities = caps.replace(" ", "")
+    THEME_DESCRIPTIONS.push(description)
+    THEME_VERSIONS.push(version)
+    THEME_DEFAULT_AGENTS.push(default_agent)
+    THEME_CAPABILITIES.push(capabilities)
+
+# ============================================================================
+# Accessors
+# ============================================================================
+
+fn themes_count() -> i64:
+    THEME_NAMES.len()
+
+fn themes_get_name(idx: i64) -> text:
+    if idx >= 0 and idx < THEME_NAMES.len():
+        return THEME_NAMES[idx]
+    ""
+
+fn themes_get_description(idx: i64) -> text:
+    if idx >= 0 and idx < THEME_DESCRIPTIONS.len():
+        return THEME_DESCRIPTIONS[idx]
+    ""
+
+fn themes_get_directory(idx: i64) -> text:
+    if idx >= 0 and idx < THEME_DIRECTORIES.len():
+        return THEME_DIRECTORIES[idx]
+    ""
+
+fn themes_list_text() -> text:
+    if THEME_NAMES.len() == 0:
+        return "  (no themes found)"
+    var parts: [text] = []
+    var i = 0
+    while i < THEME_NAMES.len():
+        var line = "  " + THEME_NAMES[i] + " v" + THEME_VERSIONS[i]
+        if THEME_DESCRIPTIONS[i] != "":
+            line = line + " - " + THEME_DESCRIPTIONS[i]
+        parts.push(line)
+        i = i + 1
+    parts.join("\n")

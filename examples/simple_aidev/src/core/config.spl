@@ -1,0 +1,300 @@
+# simple-aidev Configuration
+#
+# SDN config loader with env var resolution and agent/routing setup.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# Module-level config state
+# ============================================================================
+
+var CFG_PROJECT_NAME = "simple-aidev"
+var CFG_PROJECT_VERSION = "1.0.0"
+var CFG_DEFAULT_AGENT = "claude"
+var CFG_FALLBACK_AGENT = "ollama"
+var CFG_STRATEGY = "capability"
+var CFG_TASK_PERSISTENCE_PATH = "data/task_queue.sdn"
+var CFG_TASK_MAX_ITEMS = 100
+var CFG_THEMES_DIR = "themes"
+var CFG_THEMES_AUTO_LOAD = true
+
+# Agent configs stored as parallel arrays
+var CFG_AGENT_IDS: [text] = []
+var CFG_AGENT_PROVIDERS: [text] = []
+var CFG_AGENT_CLI_PATHS: [text] = []
+var CFG_AGENT_MODELS: [text] = []
+var CFG_AGENT_BASE_URLS: [text] = []
+var CFG_AGENT_SYSTEM_PROMPTS: [text] = []
+var CFG_AGENT_CAPABILITIES: [text] = []  # comma-separated per agent
+
+# Routing rules as parallel arrays
+var CFG_RULE_PATTERNS: [text] = []
+var CFG_RULE_AGENTS: [text] = []
+
+# ============================================================================
+# Resolve env vars in text: $ENV_VAR or ${ENV_VAR}
+# ============================================================================
+
+fn resolve_env(value: text) -> text:
+    var result = value
+    # Simple $VAR replacement
+    if result.contains("$"):
+        var out_parts: [text] = []
+        var i = 0
+        while i < result.len():
+            if result[i:i + 1] == "$":
+                # Read variable name
+                var j = i + 1
+                # Skip optional {
+                var has_brace = false
+                if j < result.len() and result[j:j + 1] == "{":
+                    has_brace = true
+                    j = j + 1
+                var name_start = j
+                while j < result.len():
+                    val ch = result[j:j + 1]
+                    if has_brace and ch == "}":
+                        break
+                    if not has_brace:
+                        val is_alnum = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+                        if not is_alnum:
+                            break
+                    j = j + 1
+                val var_name = result[name_start:j]
+                if has_brace and j < result.len():
+                    j = j + 1  # skip closing }
+                val env_val = rt_env_get(var_name) ?? ""
+                out_parts.push(env_val)
+                i = j
+            else:
+                out_parts.push(result[i:i + 1])
+                i = i + 1
+        result = out_parts.join("")
+    result
+
+# ============================================================================
+# Load defaults
+# ============================================================================
+
+fn config_load_defaults():
+    CFG_PROJECT_NAME = "simple-aidev"
+    CFG_PROJECT_VERSION = "1.0.0"
+    CFG_DEFAULT_AGENT = "claude"
+    CFG_FALLBACK_AGENT = "ollama"
+    CFG_STRATEGY = "capability"
+    CFG_TASK_PERSISTENCE_PATH = "data/task_queue.sdn"
+    CFG_TASK_MAX_ITEMS = 100
+    CFG_THEMES_DIR = "themes"
+    CFG_THEMES_AUTO_LOAD = true
+
+    # Default Claude agent
+    CFG_AGENT_IDS = ["claude"]
+    CFG_AGENT_PROVIDERS = ["claude_cli"]
+    CFG_AGENT_CLI_PATHS = ["claude"]
+    CFG_AGENT_MODELS = ["claude-sonnet-4-20250514"]
+    CFG_AGENT_BASE_URLS = [""]
+    CFG_AGENT_SYSTEM_PROMPTS = ["You are a helpful coding assistant."]
+    CFG_AGENT_CAPABILITIES = ["code,review,research,test"]
+
+    CFG_RULE_PATTERNS = []
+    CFG_RULE_AGENTS = []
+
+# ============================================================================
+# Parse SDN config file
+# ============================================================================
+
+fn config_load_file(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val content = rt_file_read_text(path)
+    if content == "":
+        return false
+    config_load_defaults()
+    # Parse simple key: value lines from SDN
+    var current_section = ""
+    var current_agent_id = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        # Detect indentation level
+        var indent = 0
+        var k = 0
+        while k < line.len():
+            if line[k:k + 1] == " ":
+                indent = indent + 1
+            else:
+                break
+            k = k + 1
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed.substring(0, colon_pos).trim()
+        var value = ""
+        if colon_pos + 1 < trimmed.len():
+            value = trimmed.substring(colon_pos + 1).trim()
+        value = resolve_env(value)
+        # Top-level sections
+        if indent == 0:
+            current_section = key
+            current_agent_id = ""
+            continue
+        # Section-specific parsing
+        if current_section == "project":
+            if key == "name":
+                CFG_PROJECT_NAME = value
+            elif key == "version":
+                CFG_PROJECT_VERSION = value
+        elif current_section == "routing":
+            if key == "default_agent":
+                CFG_DEFAULT_AGENT = value
+            elif key == "fallback_agent":
+                CFG_FALLBACK_AGENT = value
+            elif key == "strategy":
+                CFG_STRATEGY = value
+        elif current_section == "task_queue":
+            if key == "persistence_path":
+                CFG_TASK_PERSISTENCE_PATH = value
+            elif key == "max_items":
+                CFG_TASK_MAX_ITEMS = int(value)
+        elif current_section == "themes":
+            if key == "directory":
+                CFG_THEMES_DIR = value
+            elif key == "auto_load":
+                CFG_THEMES_AUTO_LOAD = value == "true"
+        elif current_section == "agents":
+            if indent <= 4 and value == "":
+                # New agent subsection
+                current_agent_id = key
+                CFG_AGENT_IDS.push(current_agent_id)
+                CFG_AGENT_PROVIDERS.push("")
+                CFG_AGENT_CLI_PATHS.push("")
+                CFG_AGENT_MODELS.push("")
+                CFG_AGENT_BASE_URLS.push("")
+                CFG_AGENT_SYSTEM_PROMPTS.push("")
+                CFG_AGENT_CAPABILITIES.push("")
+            elif current_agent_id != "":
+                val idx = CFG_AGENT_IDS.len() - 1
+                if key == "provider":
+                    CFG_AGENT_PROVIDERS[idx] = value
+                elif key == "cli_path":
+                    CFG_AGENT_CLI_PATHS[idx] = value
+                elif key == "model":
+                    CFG_AGENT_MODELS[idx] = value
+                elif key == "base_url":
+                    CFG_AGENT_BASE_URLS[idx] = value
+                elif key == "system_prompt":
+                    CFG_AGENT_SYSTEM_PROMPTS[idx] = value
+                elif key == "capabilities":
+                    # Parse [code, review, ...] format
+                    var caps = value
+                    if caps.starts_with("["):
+                        caps = caps.substring(1)
+                    if caps.ends_with("]"):
+                        caps = caps.substring(0, caps.len() - 1)
+                    CFG_AGENT_CAPABILITIES[idx] = caps.replace(" ", "")
+    true
+
+# ============================================================================
+# Accessors
+# ============================================================================
+
+fn config_project_name() -> text:
+    CFG_PROJECT_NAME
+
+fn config_project_version() -> text:
+    CFG_PROJECT_VERSION
+
+fn config_default_agent() -> text:
+    CFG_DEFAULT_AGENT
+
+fn config_fallback_agent() -> text:
+    CFG_FALLBACK_AGENT
+
+fn config_strategy() -> text:
+    CFG_STRATEGY
+
+fn config_task_path() -> text:
+    CFG_TASK_PERSISTENCE_PATH
+
+fn config_task_max_items() -> i64:
+    CFG_TASK_MAX_ITEMS
+
+fn config_themes_dir() -> text:
+    CFG_THEMES_DIR
+
+fn config_themes_auto_load() -> bool:
+    CFG_THEMES_AUTO_LOAD
+
+fn config_agent_count() -> i64:
+    CFG_AGENT_IDS.len()
+
+fn config_agent_id(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_IDS.len():
+        return CFG_AGENT_IDS[idx]
+    ""
+
+fn config_agent_provider(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_PROVIDERS.len():
+        return CFG_AGENT_PROVIDERS[idx]
+    ""
+
+fn config_agent_cli_path(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_CLI_PATHS.len():
+        return CFG_AGENT_CLI_PATHS[idx]
+    ""
+
+fn config_agent_model(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_MODELS.len():
+        return CFG_AGENT_MODELS[idx]
+    ""
+
+fn config_agent_base_url(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_BASE_URLS.len():
+        return CFG_AGENT_BASE_URLS[idx]
+    ""
+
+fn config_agent_system_prompt(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_AGENT_SYSTEM_PROMPTS.len():
+        return CFG_AGENT_SYSTEM_PROMPTS[idx]
+    ""
+
+fn config_agent_capabilities(idx: i64) -> [text]:
+    if idx >= 0 and idx < CFG_AGENT_CAPABILITIES.len():
+        val caps = CFG_AGENT_CAPABILITIES[idx]
+        if caps == "":
+            return []
+        return caps.split(",")
+    []
+
+fn config_rule_count() -> i64:
+    CFG_RULE_PATTERNS.len()
+
+fn config_rule_pattern(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_RULE_PATTERNS.len():
+        return CFG_RULE_PATTERNS[idx]
+    ""
+
+fn config_rule_agent(idx: i64) -> text:
+    if idx >= 0 and idx < CFG_RULE_AGENTS.len():
+        return CFG_RULE_AGENTS[idx]
+    ""
+
+fn config_show() -> text:
+    var parts: [text] = []
+    parts.push("Project: " + CFG_PROJECT_NAME + " v" + CFG_PROJECT_VERSION)
+    parts.push("Default Agent: " + CFG_DEFAULT_AGENT)
+    parts.push("Fallback Agent: " + CFG_FALLBACK_AGENT)
+    parts.push("Strategy: " + CFG_STRATEGY)
+    parts.push("Task Queue: " + CFG_TASK_PERSISTENCE_PATH + " (max " + CFG_TASK_MAX_ITEMS.to_text() + ")")
+    parts.push("Themes: " + CFG_THEMES_DIR + " (auto_load=" + CFG_THEMES_AUTO_LOAD.to_text() + ")")
+    parts.push("")
+    parts.push("Agents:")
+    var i = 0
+    while i < CFG_AGENT_IDS.len():
+        parts.push("  " + CFG_AGENT_IDS[i] + " (" + CFG_AGENT_PROVIDERS[i] + ", model=" + CFG_AGENT_MODELS[i] + ")")
+        i = i + 1
+    parts.join("\n")
