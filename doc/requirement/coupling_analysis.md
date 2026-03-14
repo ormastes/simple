@@ -39,9 +39,9 @@
    - Extend `DuplicationConfig` with `relaxed` and `gap_tolerance` fields
    - Lint rule `W0510` for structural code duplication
 6. **SCC cycle detection** — Tarjan's algorithm to find strongly connected components (circular dependencies)
-4. **DSM (Dependency Structure Matrix)** — N×N matrix output for visualizing module dependencies
-5. **Layer violation detection** — Enforce compiler layer ordering (00 < 10 < 15 < 20 < ... < 99), flag backward dependencies
-6. **CLI integration** — `bin/simple build coupling` command with options:
+7. **DSM (Dependency Structure Matrix)** — N×N matrix output for visualizing module dependencies
+8. **Layer violation detection** — Enforce compiler layer ordering (00 < 10 < 15 < 20 < ... < 99), flag backward dependencies
+9. **CLI integration** — `bin/simple build coupling` command with options:
    - `--format=text|json|md` — output format
    - `--threshold=N` — flag modules with CBO > N
    - `--layers` — check layer violations only
@@ -49,7 +49,7 @@
    - `--cycles` — show SCC cycles only
    - `--api` — show public API quality report (PSS, EUR, entropy, complexity index)
    - `--lcom` — show LCOM cohesion report
-7. **Lint rules** — New lint rules integrated into `bin/simple build lint`:
+10. **Lint rules** — New lint rules integrated into `bin/simple build lint`:
    - `W0501` — High CBO (>15 by default)
    - `W0502` — Circular dependency (SCC with >1 member)
    - `W0503` — Layer violation (backward dependency)
@@ -153,7 +153,7 @@ SCC #2 (3 modules):
 | ID | Criterion | Priority |
 |----|-----------|----------|
 | AC-01 | `bin/simple build coupling` produces a coupling report with CBO, fan-in, fan-out, instability per module | Must |
-| AC-02 | SCC detection finds all circular dependency cycles using Tarjan's algorithm | Must |
+| AC-02 | SCC detection finds all circular dependency cycles using Tarjan's or Kosaraju's algorithm | Must |
 | AC-03 | Layer violation detection flags backward dependencies between numbered compiler layers | Must |
 | AC-04 | DSM matrix output shows module-to-module dependency counts | Must |
 | AC-05 | RFC metric counts methods + directly called external methods per class/module | Should |
@@ -205,3 +205,4 @@ SCC #2 (3 modules):
 - Design: `doc/design/coupling_analysis.md` (Phase 4)
 - System Tests: `test/system/coupling_analysis_spec.spl` (Phase 6)
 - Architecture: `doc/architecture/dependency_graphs.md`
+- Limitations: `doc/bug/coupling_analysis_limitations.md` (Phase 11)
