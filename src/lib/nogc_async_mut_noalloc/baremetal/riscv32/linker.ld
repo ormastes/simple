@@ -39,8 +39,8 @@ SECTIONS
     .text : ALIGN(4)
     {
         _stext = .;
-        KEEP(*(.text.entry))       /* Entry point first */
-        *(.text.trap_vector)       /* Trap vector (aligned) */
+        KEEP(*(.text.start))       /* Entry point first (matches crt0.s) */
+        *(.text.trap)              /* Trap vector */
         *(.text)
         *(.text.*)
         _etext = .;

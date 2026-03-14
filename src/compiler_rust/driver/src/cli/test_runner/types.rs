@@ -72,7 +72,7 @@ impl TestExecutionMode {
             "interpreter" | "interp" => Some((Self::Interpreter, None)),
             "smf" | "loader" => Some((Self::Smf, None)),
             "native" | "binary" => Some((Self::Native, None)),
-            s if s.contains("baremetal") || s.contains("remote") || s.contains("container") => {
+            s if s.contains("baremetal") || s.contains("remote") || s.contains("container") || s.contains("t32") => {
                 // Composite platform spec like "native(baremetal(riscv32))"
                 let spec = if !s.starts_with("interpreter(") && !s.starts_with("smf(") && !s.starts_with("native(") {
                     format!("interpreter({})", s)

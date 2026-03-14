@@ -15,10 +15,12 @@ use app.build.compile_to_llvm.{compile_to_llvm_ir_pure}
 
 # Bare-metal target architectures
 enum BaremetalTarget:
-    Arm           # ARM Cortex-M (versatilepb in QEMU)
+    Arm           # ARM Cortex-M4 generic (versatilepb in QEMU)
     X86_64        # x86_64 with multiboot2
     Riscv         # RISC-V 64-bit (virt machine)
     Riscv32       # RISC-V 32-bit (virt machine)
+    Stm32h7       # STM32H7 (Cortex-M7, flash @ 0x08000000)
+    Stm32wb       # STM32WB (Cortex-M4, flash @ 0x08000000)
 
 # Bare-metal build configuration
 class BaremetalConfig:
@@ -74,6 +76,28 @@ impl BaremetalConfig:
             alloc_allowed: false
         )
 
+    # Create STM32H7 config (Cortex-M7)
+    static fn stm32h7() -> BaremetalConfig:
+        BaremetalConfig(
+            target: BaremetalTarget.Stm32h7,
+            output_dir: "build/baremetal-stm32h7",
+            linker_script: "src/compiler/70.backend/baremetal/arm/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/arm/crt0.s",
+            entry_point: "reset_handler",
+            alloc_allowed: false
+        )
+
+    # Create STM32WB config (Cortex-M4)
+    static fn stm32wb() -> BaremetalConfig:
+        BaremetalConfig(
+            target: BaremetalTarget.Stm32wb,
+            output_dir: "build/baremetal-stm32wb",
+            linker_script: "src/compiler/70.backend/baremetal/arm/linker.ld",
+            crt0_path: "src/compiler/70.backend/baremetal/arm/crt0.s",
+            entry_point: "reset_handler",
+            alloc_allowed: false
+        )
+
     # Create x86_64 QEMU config (alias for x86_64)
     static fn qemu_x86() -> BaremetalConfig:
         BaremetalConfig.x86_64()
@@ -96,6 +120,8 @@ impl BaremetalConfig:
             case BaremetalTarget.X86_64: "x86_64-unknown-none"
             case BaremetalTarget.Riscv: "riscv64gc-unknown-none-elf"
             case BaremetalTarget.Riscv32: "riscv32-unknown-none-elf"
+            case BaremetalTarget.Stm32h7: "armv7em-none-eabihf"
+            case BaremetalTarget.Stm32wb: "armv7m-none-eabi"
 
 # Factory functions (exported)
 fn baremetal_config_arm() -> BaremetalConfig:
@@ -109,6 +135,12 @@ fn baremetal_config_riscv() -> BaremetalConfig:
 
 fn baremetal_config_riscv32() -> BaremetalConfig:
     BaremetalConfig.riscv32()
+
+fn baremetal_config_stm32h7() -> BaremetalConfig:
+    BaremetalConfig.stm32h7()
+
+fn baremetal_config_stm32wb() -> BaremetalConfig:
+    BaremetalConfig.stm32wb()
 
 # Bare-metal builder
 class BaremetalBuilder:
@@ -307,6 +339,10 @@ impl BaremetalBuilder:
                 ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d"]
             case BaremetalTarget.Riscv32:
                 ["--target=riscv32-unknown-elf", "-march=rv32imc", "-mabi=ilp32"]
+            case BaremetalTarget.Stm32h7:
+                ["--target=armv7em-none-eabihf", "-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-sp-d16", "-mfloat-abi=hard"]
+            case BaremetalTarget.Stm32wb:
+                ["--target=armv7m-none-eabi", "-mcpu=cortex-m4", "-mthumb"]
 
     fn llc_args(ir_file: text, obj_file: text) -> [text]:
         var args = ["--filetype=obj", "--relocation-model=static", "-mtriple", self.config.target_triple(), ir_file, "-o", obj_file]
@@ -320,6 +356,12 @@ impl BaremetalBuilder:
             case BaremetalTarget.Riscv32:
                 args.push("-march=riscv32")
                 args.push("-mattr=+m,+c")
+            case BaremetalTarget.Stm32h7:
+                args.push("-mcpu=cortex-m7")
+                args.push("-mattr=+thumb2,+fp-armv8d16")
+            case BaremetalTarget.Stm32wb:
+                args.push("-mcpu=cortex-m4")
+                args.push("-mattr=+thumb2")
             case _: ()
         args
 
@@ -339,6 +381,8 @@ impl QemuRunner:
             case BaremetalTarget.X86_64: "qemu-system-x86_64"
             case BaremetalTarget.Riscv: "qemu-system-riscv64"
             case BaremetalTarget.Riscv32: "qemu-system-riscv32"
+            case BaremetalTarget.Stm32h7: "qemu-system-arm"
+            case BaremetalTarget.Stm32wb: "qemu-system-arm"
 
     # Build QEMU command line arguments
     fn build_args(kernel_path: text) -> [text]:
@@ -353,6 +397,10 @@ impl QemuRunner:
                 args = ["-M", "virt", "-bios", "none", "-nographic", "-serial", "stdio", "-kernel", kernel_path]
             case BaremetalTarget.Riscv32:
                 args = ["-M", "virt", "-bios", "none", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel", kernel_path]
+            case BaremetalTarget.Stm32h7:
+                args = ["-M", "netduinoplus2", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel", kernel_path]
+            case BaremetalTarget.Stm32wb:
+                args = ["-M", "netduinoplus2", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel", kernel_path]
 
         args
 

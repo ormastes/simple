@@ -11,7 +11,7 @@ use test_executor_parsing.{find_simple_binary, build_child_args, make_result_fro
 use app.io.file_ops.{file_exists, file_delete}
 use app.io.time_ops.{time_now_unix_micros}
 use app.io.process_ops.{process_run_timeout}
-use app.build.baremetal.{BaremetalBuilder, baremetal_config_riscv, baremetal_config_riscv32}
+use app.build.baremetal.{BaremetalBuilder, baremetal_config_riscv, baremetal_config_riscv32, baremetal_config_arm, baremetal_config_stm32h7, baremetal_config_stm32wb}
 
 # =========================================================================
 # Composite Platform Execution
@@ -29,6 +29,10 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
     # Dispatch to platform-specific runner
     if platform == "baremetal":
         return run_test_file_baremetal(file_path, options, base, arch)
+    if platform == "container":
+        return run_test_file_container(file_path, options, base, arch)
+    if platform == "t32":
+        return run_test_file_t32(file_path, options, base, arch)
     if platform == "remote":
         return run_test_file_remote(file_path, options, base, arch)
 
@@ -55,6 +59,8 @@ fn extract_platform_layer(spec: text) -> text:
 
 fn extract_arch_from_spec(spec: text) -> text:
     """Extract target architecture from composite spec."""
+    if spec.contains("stm32h7"): return "stm32h7"
+    if spec.contains("stm32wb"): return "stm32wb"
     if spec.contains("riscv32"): return "riscv32"
     if spec.contains("riscv64"): return "riscv64"
     if spec.contains("arm32"): return "arm32"
@@ -125,6 +131,8 @@ fn qemu_binary_for_arch(arch: text) -> text:
     if arch == "riscv32": return "qemu-system-riscv32"
     if arch == "riscv64": return "qemu-system-riscv64"
     if arch == "arm32": return "qemu-system-arm"
+    if arch == "stm32h7": return "qemu-system-arm"
+    if arch == "stm32wb": return "qemu-system-arm"
     if arch == "aarch64": return "qemu-system-aarch64"
     if arch == "x86": return "qemu-system-i386"
     if arch == "x86_64": return "qemu-system-x86_64"
@@ -135,6 +143,8 @@ fn qemu_machine_for_arch(arch: text) -> text:
     if arch == "riscv32": return "virt"
     if arch == "riscv64": return "virt"
     if arch == "arm32": return "virt"
+    if arch == "stm32h7": return "netduinoplus2"
+    if arch == "stm32wb": return "netduinoplus2"
     if arch == "aarch64": return "virt"
     if arch == "x86": return "pc"
     if arch == "x86_64": return "q35"
@@ -179,13 +189,19 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
 # Baremetal Compile-and-Run Pipeline
 # =========================================================================
 
+fn baremetal_config_for_arch(arch: text) -> BaremetalConfig:
+    """Get BaremetalConfig for target architecture."""
+    if arch == "riscv32": return baremetal_config_riscv32()
+    if arch == "riscv64": return baremetal_config_riscv()
+    if arch == "stm32h7": return baremetal_config_stm32h7()
+    if arch == "stm32wb": return baremetal_config_stm32wb()
+    if arch == "arm32": return baremetal_config_arm()
+    baremetal_config_arm()
+
 fn compile_spl_to_baremetal_elf(file_path: text, arch: text) -> (text, text):
     """Compile a .spl file to a baremetal ELF via the BaremetalBuilder pipeline.
     Returns (elf_path, error_msg). On success error_msg is empty."""
-    var config = if arch == "riscv32":
-        baremetal_config_riscv32()
-    else:
-        baremetal_config_riscv()
+    var config = baremetal_config_for_arch(arch)
 
     # Use a test-specific output dir to avoid collisions
     var base_name = file_path
@@ -228,6 +244,254 @@ fn run_test_file_baremetal_compile_and_run(file_path: text, options: TestOptions
     var result = run_test_file_baremetal_qemu(file_path, options, arch, elf_path)
     result.setup_ms = setup_ms
     result
+
+# =========================================================================
+# Container Platform Execution (QEMU in Docker/Podman)
+# =========================================================================
+
+fn run_test_file_container(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
+    """Execute test in containerized QEMU.
+
+    Compiles .spl to baremetal ELF, then runs QEMU inside a container.
+    Useful for ARM targets without real hardware.
+    """
+    val setup_start = time_now_unix_micros()
+
+    if not file_path.ends_with(".spl") and not file_path.ends_with(".elf"):
+        return run_test_file_baremetal_via_interpreter(file_path, options, arch)
+
+    # For .elf files, run directly in container QEMU
+    var elf_path = file_path
+    var compile_ms: i64 = 0
+
+    # For .spl files, compile to ELF first
+    if file_path.ends_with(".spl"):
+        val (compiled_elf, compile_error) = compile_spl_to_baremetal_elf(file_path, arch)
+        val compile_end = time_now_unix_micros()
+        compile_ms = (compile_end - setup_start) / 1000
+        if compile_error != "":
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: compile_ms,
+                error: "Container compilation failed: {compile_error}",
+                timed_out: false
+            )
+        elf_path = compiled_elf
+
+    # Run QEMU inside container
+    val qemu_bin = qemu_binary_for_arch(arch)
+    val machine = qemu_machine_for_arch(arch)
+    val container_bin = find_container_binary()
+
+    if container_bin == "":
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: compile_ms,
+            error: "No container runtime found (podman or docker)",
+            timed_out: false
+        )
+
+    var container_args: [text] = [
+        "run", "--rm", "-v", ".:/workspace:ro",
+        "simple-qemu:latest",
+        qemu_bin, "-M", machine, "-bios", "none",
+        "-kernel", "/workspace/{elf_path}",
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ]
+
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+    val timeout_ms = options.timeout * 1000
+
+    val test_start = time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(container_bin, container_args, timeout_ms)
+    val test_end = time_now_unix_micros()
+    val duration_ms = (test_end - test_start) / 1000
+
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    result.setup_ms = setup_ms
+    result
+
+fn find_container_binary() -> text:
+    """Find podman or docker."""
+    val (out_p, _, rc_p) = process_run_timeout("which", ["podman"], 2000)
+    if rc_p == 0 and out_p.trim() != "":
+        return "podman"
+    val (out_d, _, rc_d) = process_run_timeout("which", ["docker"], 2000)
+    if rc_d == 0 and out_d.trim() != "":
+        return "docker"
+    ""
+
+# =========================================================================
+# TRACE32 Platform Execution (real STM32 hardware)
+# =========================================================================
+
+fn run_test_file_t32(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
+    """Execute test on real STM32 hardware via TRACE32.
+
+    Flow:
+    1. Compile .spl to ARM ELF (baremetal builder)
+    2. Flash ELF to STM32 via T32 (t32rem)
+    3. Configure semihosting capture
+    4. Run program on target
+    5. Collect semihosting output
+    6. Parse SSpec-format results
+    """
+    val setup_start = time_now_unix_micros()
+
+    if not file_path.ends_with(".spl") and not file_path.ends_with(".elf"):
+        return run_test_file_baremetal_via_interpreter(file_path, options, arch)
+
+    var elf_path = file_path
+
+    # Compile .spl to ELF
+    if file_path.ends_with(".spl"):
+        val (compiled_elf, compile_error) = compile_spl_to_baremetal_elf(file_path, arch)
+        if compile_error != "":
+            val setup_end = time_now_unix_micros()
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (setup_end - setup_start) / 1000,
+                error: "T32 compilation failed: {compile_error}",
+                timed_out: false
+            )
+        elf_path = compiled_elf
+
+    # Find t32rem
+    val t32rem = find_t32rem_binary()
+    if t32rem == "":
+        val setup_end = time_now_unix_micros()
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (setup_end - setup_start) / 1000,
+            error: "t32rem not found - install TRACE32 or set T32_PATH",
+            timed_out: false
+        )
+
+    val t32_host = "localhost"
+    val t32_port = "20000"
+
+    # Flash ELF via T32
+    val flash_result = t32_flash_and_run(t32rem, t32_host, t32_port, elf_path)
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    if flash_result.0 != "":
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "T32 flash failed: {flash_result.0}",
+            timed_out: false
+        )
+
+    # Collect semihosting output via T32 AREA window
+    val timeout_ms = options.timeout * 1000
+    val test_start = time_now_unix_micros()
+    val (stdout, collect_error) = t32_collect_semihost_output(t32rem, t32_host, t32_port, timeout_ms)
+    val test_end = time_now_unix_micros()
+    val duration_ms = (test_end - test_start) / 1000
+
+    if collect_error != "":
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: setup_ms,
+            error: "T32 output capture failed: {collect_error}",
+            timed_out: false
+        )
+
+    var result = make_result_from_output(file_path, stdout, "", 0, duration_ms, options.timeout)
+    result.setup_ms = setup_ms
+    result
+
+fn find_t32rem_binary() -> text:
+    """Find t32rem binary."""
+    val (out, _, rc) = process_run_timeout("which", ["t32rem"], 2000)
+    if rc == 0 and out.trim() != "":
+        return "t32rem"
+    # Check T32_PATH environment
+    val (t32_path, _, _) = process_run_timeout("sh", ["-c", "echo $T32_PATH"], 2000)
+    val path = t32_path.trim()
+    if path != "":
+        val candidate = "{path}/bin/pc_linux64/t32rem"
+        if file_exists(candidate):
+            return candidate
+    ""
+
+fn t32_cmd(t32rem: text, host: text, port: text, cmd: text) -> (text, text, i32):
+    """Execute a single t32rem command."""
+    process_run_timeout(t32rem, [host, "port={port}", cmd], 10000)
+
+fn t32_flash_and_run(t32rem: text, host: text, port: text, elf_path: text) -> (text, text):
+    """Flash ELF to STM32 via T32 and start execution.
+    Returns (error_msg, ""). On success error_msg is empty."""
+    # Reset and connect
+    val (_, err1, rc1) = t32_cmd(t32rem, host, port, "SYStem.Up")
+    if rc1 != 0:
+        return ("SYStem.Up failed: {err1}", "")
+
+    # Flash program
+    val (_, err2, rc2) = t32_cmd(t32rem, host, port, "FLASH.ReProgram ALL")
+    if rc2 != 0:
+        return ("FLASH.ReProgram failed: {err2}", "")
+
+    val (_, err3, rc3) = t32_cmd(t32rem, host, port, "Data.LOAD.Elf {elf_path}")
+    if rc3 != 0:
+        return ("Data.LOAD.Elf failed: {err3}", "")
+
+    val (_, err4, rc4) = t32_cmd(t32rem, host, port, "FLASH.ReProgram OFF")
+    if rc4 != 0:
+        return ("FLASH.ReProgram OFF failed: {err4}", "")
+
+    # Setup semihosting capture via AREA window
+    t32_cmd(t32rem, host, port, "AREA.Create A000")
+    t32_cmd(t32rem, host, port, "AREA.Select A000")
+    t32_cmd(t32rem, host, port, "TERM.METHOD ANALYZER")
+    t32_cmd(t32rem, host, port, "TERM.GATE")
+
+    # Start execution
+    val (_, err5, rc5) = t32_cmd(t32rem, host, port, "Go")
+    if rc5 != 0:
+        return ("Go failed: {err5}", "")
+
+    ("", "")
+
+fn t32_collect_semihost_output(t32rem: text, host: text, port: text, timeout_ms: i64) -> (text, text):
+    """Collect semihosting output from T32 AREA window.
+    Polls until program stops or timeout. Returns (output, error)."""
+    var elapsed: i64 = 0
+    val poll_interval: i64 = 500
+
+    # Poll until program stops running
+    while elapsed < timeout_ms:
+        val (state, _, rc) = t32_cmd(t32rem, host, port, "STATE.RUN()")
+        if rc == 0 and state.trim() == "FALSE":
+            # Program stopped — collect output
+            val (output, _, orc) = t32_cmd(t32rem, host, port, "AREA.String A000")
+            if orc == 0:
+                return (output, "")
+            return ("", "Failed to read AREA window")
+
+        val (_, _, _) = process_run_timeout("sleep", ["0.5"], 2000)
+        elapsed = elapsed + poll_interval
+
+    # Timeout — stop target and collect what we have
+    t32_cmd(t32rem, host, port, "Break")
+    val (output, _, orc) = t32_cmd(t32rem, host, port, "AREA.String A000")
+    if orc == 0:
+        return (output, "")
+    ("", "T32 semihosting capture timed out after {timeout_ms}ms")
+
+# =========================================================================
+# Fail-Fast Support
+# =========================================================================
+
+fn check_fail_fast(result: TestFileResult, options: TestOptions) -> bool:
+    """Check if we should stop on this result (fail_fast mode).
+    Returns true if execution should stop."""
+    if not options.fail_fast:
+        return false
+    not result.is_ok()
 
 fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
     """Execute test on remote target via QEMU.

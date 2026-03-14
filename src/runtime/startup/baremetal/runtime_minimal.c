@@ -14,6 +14,11 @@ extern long long __simple_main(void);
 extern char __bss_start[];
 extern char __bss_end[];
 
+/* Forward declarations */
+void __spl_exit(int status) __attribute__((noreturn));
+void *rt_alloc(int64_t size);
+void *rt_array_new(int64_t cap);
+
 static void zero_bss(void) {
     for (char *p = __bss_start; p < __bss_end; p++) {
         *p = 0;
