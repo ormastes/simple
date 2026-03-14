@@ -292,6 +292,7 @@ class CompilerDriver:
         self.ctx.logger_port.debug_fn("phase 3: HIR lowering + type check...")
         val _t3_start = rt_time_ms()
         val analyze_ok = self.lower_and_check_impl()
+        print "[debug-bootstrap] after lower_and_check_impl: hir_modules={self.ctx.hir_module_count()}, ok={analyze_ok}"
         val _t3_elapsed = rt_time_ms() - _t3_start
         self.ctx.metrics_port.record_timing_fn("hir_lower_ms", _t3_elapsed)
         if not analyze_ok:
@@ -303,7 +304,7 @@ class CompilerDriver:
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
         # Phase 1: Fire event — HIR complete
-        self.ctx.event_port.on_hir_complete_fn(self.ctx.hir_modules.keys().len())
+        self.ctx.event_port.on_hir_complete_fn(self.ctx.hir_module_count())
         self.ctx.logger_port.debug_fn("phase 3 done ({_t3_elapsed}ms)")
 
         # Evict AST modules (no longer needed after HIR lowering)
@@ -519,9 +520,10 @@ class CompilerDriver:
                 for trait_err in infer_ctx.trait_solver.errors:
                     self.ctx.add_error(_format_trait_error(trait_err))
 
-            # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
-            self.ctx.hir_modules[name] = resolved_module
-            log_trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
+            # Store via helper method (single-level field access avoids nested chain mutation bug)
+            self.ctx.store_hir_module(name, resolved_module)
+            print "[debug-bootstrap] stored HIR module '{name}', total={self.ctx.hir_module_count()}"
+            log_trace("stored HIR module '{name}', total={self.ctx.hir_module_count()}")
 
         # Step 3b: Trait coherence checking (Check mode only)
         # Trait coherence errors (orphan rules, overlapping impls, blanket conflicts)
@@ -536,7 +538,8 @@ class CompilerDriver:
         val effect_warnings: [text] = []
         log_debug("effect inference done, {effect_warnings.len()} warnings")
 
-        log_debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
+        print "[debug-bootstrap] HIR lowering complete: {self.ctx.hir_module_count()} modules"
+        log_debug("HIR lowering complete: {self.ctx.hir_module_count()} modules")
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
@@ -551,7 +554,7 @@ class CompilerDriver:
         for name in module_names:
             val module = ctx.modules[name]
             val hir_module = lowering.lower_module(module)
-            ctx.hir_modules[name] = hir_module
+            ctx.store_hir_module(name, hir_module)
         (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
@@ -561,12 +564,12 @@ class CompilerDriver:
     fn resolve_methods_impl() -> (CompileContext, bool):
         var ctx = self.ctx
 
-        for name in ctx.hir_modules.keys():
-            val hir_module = ctx.hir_modules[name]
+        for name in ctx.hir_module_keys():
+            val hir_module = ctx.get_hir_module(name)
             val (resolved_module, resolve_errors) = resolve_methods(hir_module)
 
-            # Update the module with resolved method calls (direct mutation)
-            ctx.hir_modules[name] = resolved_module
+            # Update the module with resolved method calls (single-level access)
+            ctx.store_hir_module(name, resolved_module)
 
             # Collect errors
             for err in resolve_errors:
@@ -595,7 +598,8 @@ class CompilerDriver:
         classes by substituting concrete type arguments. Call sites are
         rewritten to use the mangled names of specialized definitions.
         """
-        log_debug("running monomorphization on {self.ctx.hir_modules.keys().len()} modules")
+        print "[debug-bootstrap] monomorphize: hir_modules={self.ctx.hir_module_count()}"
+        log_debug("running monomorphization on {self.ctx.hir_module_count()} modules")
         # TODO: enable monomorphization once the Monomorphizer method surface is available
         self.ctx.errors.len() == 0
 
@@ -607,8 +611,8 @@ class CompilerDriver:
         val backend_port = self.ctx.backend
         val results: Dict<text, Any> = {}
 
-        for name in self.ctx.hir_modules.keys():
-            val hir_module = self.ctx.hir_modules[name]
+        for name in self.ctx.hir_module_keys():
+            val hir_module = self.ctx.get_hir_module(name)
             match backend_port.run_fn(hir_module):
                 case Ok(value):
                     results[name] = value
@@ -639,7 +643,7 @@ class CompilerDriver:
         while src_idx < self.ctx.sources.len():
             val source = self.ctx.sources[src_idx]
             val name = source.module_name
-            val hir_module = self.ctx.hir_modules[name]
+            val hir_module = self.ctx.get_hir_module(name)
             if hir_module == nil:
                 src_idx = src_idx + 1
                 continue
@@ -695,8 +699,8 @@ class CompilerDriver:
         var pipeline = CodegenPipeline.jit()
         var last_compiled: CompiledModule? = nil
 
-        for name in self.ctx.mir_modules.keys():
-            val mir_module = self.ctx.mir_modules[name]
+        for name in self.ctx.mir_module_keys():
+            val mir_module = self.ctx.get_mir_module(name)
             match pipeline.compile_module(mir_module):
                 case Ok(compiled):
                     last_compiled = Some(compiled)
@@ -813,19 +817,22 @@ class CompilerDriver:
             field_map: {}
         )
 
-        val hir_keys = self.ctx.hir_modules.keys()
+        val hir_keys = self.ctx.hir_module_keys()
+        print "[debug-bootstrap] lower_to_mir: hir_modules.keys().len()={hir_keys.len()}"
         for name in hir_keys:
-            val hir_module = self.ctx.hir_modules[name]
+            print "[debug-bootstrap] lower_to_mir: processing HIR module '{name}'"
+            val hir_module = self.ctx.get_hir_module(name)
             var mir_module = lowering.lower_module(hir_module)
             # Ensure module name is set
             mir_module.name = name
-            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
-            self.ctx.mir_modules[name] = mir_module
+            # Store via helper method (single-level field access)
+            self.ctx.store_mir_module(name, mir_module)
 
         val _mir_elapsed = rt_time_ms() - _mir_start
         self.ctx.metrics_port.record_timing_fn("mir_lower_ms", _mir_elapsed)
         # Phase 1: Fire event — MIR complete
-        self.ctx.event_port.on_mir_complete_fn(self.ctx.mir_modules.keys().len())
+        print "[debug-bootstrap] lower_to_mir: mir_modules={self.ctx.mir_module_count()}"
+        self.ctx.event_port.on_mir_complete_fn(self.ctx.mir_module_count())
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
@@ -844,10 +851,10 @@ class CompilerDriver:
         if self.ctx.options.no_borrow_check:
             log_debug("borrow checking skipped (--no-borrow-check)")
             return true
-        log_debug("running borrow check on {self.ctx.mir_modules.keys().len()} modules")
+        log_debug("running borrow check on {self.ctx.mir_module_count()} modules")
         var checker = BorrowChecker.create()
-        for name in self.ctx.mir_modules.keys():
-            val mir_module = self.ctx.mir_modules[name]
+        for name in self.ctx.mir_module_keys():
+            val mir_module = self.ctx.get_mir_module(name)
             val all_errors = check_mir_module(mir_module)
             for err in all_errors:
                 self.ctx.add_error(_format_nll_error(err))
@@ -868,9 +875,9 @@ class CompilerDriver:
         State machines are used by codegen for async execution.
         """
         val log = self.ctx.logger
-        log_debug("processing async functions in {self.ctx.mir_modules.keys().len()} modules")
+        log_debug("processing async functions in {self.ctx.mir_module_count()} modules")
 
-        val state_machines = process_async_mir(self.ctx.mir_modules)
+        val state_machines = process_async_mir(self.ctx.mir_modules)  # pass dict directly for now
 
         log_debug("generated {state_machines.keys().len()} async state machines")
         state_machines
@@ -883,10 +890,10 @@ class CompilerDriver:
         """Apply AOP weaving to all MIR functions if weaving is enabled."""
         if not self.ctx.aop.config.enabled:
             return
-        log_debug("weaving AOP advice into {self.ctx.mir_modules.keys().len()} MIR modules")
+        log_debug("weaving AOP advice into {self.ctx.mir_module_count()} MIR modules")
         var total_woven = 0
-        for mod_name in self.ctx.mir_modules.keys():
-            val mir_module = self.ctx.mir_modules[mod_name]
+        for mod_name in self.ctx.mir_module_keys():
+            val mir_module = self.ctx.get_mir_module(mod_name)
             for func_name in mir_module.functions.keys():
                 val func = mir_module.functions[func_name]
                 # Build MIR block info for join point detection
@@ -918,13 +925,13 @@ class CompilerDriver:
     me optimize_mir(config: OptimizationConfig):
         """Apply MIR optimization passes to all modules."""
         val log = self.ctx.logger
-        log_debug("optimizing {self.ctx.mir_modules.keys().len()} MIR modules")
+        log_debug("optimizing {self.ctx.mir_module_count()} MIR modules")
 
-        for name in self.ctx.mir_modules.keys():
-            val mir_module = self.ctx.mir_modules[name]
+        for name in self.ctx.mir_module_keys():
+            val mir_module = self.ctx.get_mir_module(name)
             val optimized = optimize_mir_module(mir_module, config)
-            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
-            self.ctx.mir_modules[name] = optimized
+            # Store via helper method (single-level field access)
+            self.ctx.store_mir_module(name, optimized)
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""
