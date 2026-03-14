@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# External Agent Loop Wrapper — most portable, works with any CLI
+# Usage: scripts/agent-loop-external.shs [max_iterations] [prompt]
+#
+# Works with Codex CLI or any MCP-capable client.
+# Drives the loop externally via bash, checking .build/agent_loop/ state.
+
+set -euo pipefail
+
+MAX="${1:-5}"
+PROMPT="${2:-Execute the task and report results}"
+ITERATION=0
+ACTIVE_LOOP_FILE=".build/agent_loop/active_loop.id"
+
+echo "=== Agent Loop External Wrapper ==="
+echo "Max iterations: $MAX"
+echo "Prompt: $PROMPT"
+echo ""
+
+while [ "$ITERATION" -lt "$MAX" ]; do
+    ITERATION=$((ITERATION + 1))
+    echo "--- Iteration $ITERATION/$MAX ---"
+
+    # Run the AI client with MCP enabled
+    # Adjust the command for your client (codex, claude, etc.)
+    if command -v codex &>/dev/null; then
+        codex --prompt "$PROMPT (iteration $ITERATION/$MAX). When done, call agent_loop_step with your result." --mcp 2>&1 || true
+    elif command -v claude &>/dev/null; then
+        echo "$PROMPT (iteration $ITERATION/$MAX). When done, call agent_loop_step with your result." | claude --dangerously-skip-permissions 2>&1 || true
+    else
+        echo "ERROR: No supported AI CLI found (codex, claude)"
+        exit 1
+    fi
+
+    # Check if loop was completed via MCP state
+    if [ -f "$ACTIVE_LOOP_FILE" ]; then
+        LOOP_ID=$(cat "$ACTIVE_LOOP_FILE" 2>/dev/null)
+        if [ -z "$LOOP_ID" ]; then
+            echo "Loop completed (active loop cleared)."
+            break
+        fi
+
+        STATE_FILE=".build/agent_loop/loops/${LOOP_ID}.state"
+        if [ -f "$STATE_FILE" ]; then
+            STATUS=$(grep "^status=" "$STATE_FILE" | cut -d= -f2-)
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "stopped" ]; then
+                echo "Loop $STATUS after iteration $ITERATION."
+                break
+            fi
+        fi
+    fi
+
+    echo "Iteration $ITERATION complete, continuing..."
+    echo ""
+done
+
+echo ""
+echo "=== Agent Loop Finished ==="
+echo "Total iterations: $ITERATION"

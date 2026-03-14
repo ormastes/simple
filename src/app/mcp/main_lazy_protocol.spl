@@ -50,7 +50,7 @@ fn make_init_response(id: text) -> text:
     val server_info = jo3(
         jp("name", js(SERVER_NAME)),
         jp("version", js(SERVER_VERSION)),
-        jp("instructions", js("Full-featured MCP server with inline tool handlers. All 69 tools available with zero-import fast execution. Long-running tools return task handles for async polling."))
+        jp("instructions", js("Full-featured MCP server with inline tool handlers. All 75 tools available with zero-import fast execution. Long-running tools return task handles for async polling. Agent loop and team tools enable iterative AI-driven workflows."))
     )
     val result = jo3(
         jp("protocolVersion", js("2025-06-18")),
@@ -161,6 +161,16 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_tool_schema("test_daemon_clean", "Force-run test bypassing cache"))
     tool_parts.push(make_tool_schema("test_daemon_status", "Get test daemon status and queue info"))
     tool_parts.push(make_tool_schema("test_daemon_stop", "Shut down test daemon"))
+
+    # Agent loop tools (4)
+    tool_parts.push(make_tool_schema("agent_loop_start", "Start iterative agent loop with prompt and completion conditions"))
+    tool_parts.push(make_tool_schema("agent_loop_status", "Get agent loop iteration count and status"))
+    tool_parts.push(make_tool_schema("agent_loop_step", "Submit iteration result and get next prompt or completed"))
+    tool_parts.push(make_tool_schema("agent_loop_stop", "Stop agent loop and get summary"))
+
+    # Agent team tools (2)
+    tool_parts.push(make_tool_schema("agent_team_create", "Create multi-agent team with coordination strategy"))
+    tool_parts.push(make_tool_schema("agent_team_run", "Execute prompt with agent team and get next agent instruction"))
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
@@ -458,6 +468,43 @@ fn make_tool_schema(name: text, description: text) -> text:
     elif name == "test_daemon_stop":
         props = LB() + RB()
 
+    # --- Agent loop tools ---
+    elif name == "agent_loop_start":
+        var p = LB()
+        p = p + jp("prompt", jo2(jp("type", js("string")), jp("description", js("Task prompt to iterate on"))))
+        p = p + "," + jp("max_iterations", jo2(jp("type", js("integer")), jp("description", js("Max iterations before auto-complete (default: 10)"))))
+        p = p + "," + jp("completion_condition", jo2(jp("type", js("string")), jp("description", js("String to match in result to auto-complete"))))
+        p = p + "," + jp("agent", jo2(jp("type", js("string")), jp("description", js("Agent name/role for context"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("prompt") + "]"
+    elif name == "agent_loop_status":
+        props = jo1(jp("loop_id", jo2(jp("type", js("string")), jp("description", js("Loop ID to check")))))
+        req = "[" + js("loop_id") + "]"
+    elif name == "agent_loop_step":
+        props = jo2(
+            jp("loop_id", jo2(jp("type", js("string")), jp("description", js("Loop ID to advance")))),
+            jp("result", jo2(jp("type", js("string")), jp("description", js("Result from current iteration"))))
+        )
+        req = "[" + js("loop_id") + "]"
+    elif name == "agent_loop_stop":
+        props = jo1(jp("loop_id", jo2(jp("type", js("string")), jp("description", js("Loop ID to stop")))))
+        req = "[" + js("loop_id") + "]"
+    elif name == "agent_team_create":
+        var p = LB()
+        p = p + jp("name", jo2(jp("type", js("string")), jp("description", js("Team name"))))
+        p = p + "," + jp("agents", jo2(jp("type", js("string")), jp("description", js("Comma-separated agent names"))))
+        p = p + "," + jp("coordination", jo2(jp("type", js("string")), jp("description", js("Strategy: sequential, parallel, round_robin"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("name") + "," + js("agents") + "]"
+    elif name == "agent_team_run":
+        props = jo2(
+            jp("team_id", jo2(jp("type", js("string")), jp("description", js("Team ID to run")))),
+            jp("prompt", jo2(jp("type", js("string")), jp("description", js("Task prompt for team"))))
+        )
+        req = "[" + js("team_id") + "," + js("prompt") + "]"
+
     var schema = LB()
     schema = schema + jp("type", js("object"))
     schema = schema + "," + jp("properties", props)
@@ -473,11 +520,12 @@ fn make_tool_schema(name: text, description: text) -> text:
         name == "debug_list_sessions" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_evaluate" or name == "debug_get_source" or name == "debug_log_query" or name == "debug_log_tree" or name == "debug_log_status" or name == "debug_list_data_breakpoints" or name == "debug_trace_capture" or name == "debug_coverage_collect" or
         name == "simple_ast_query" or name == "simple_sem_query" or name == "simple_query_schema" or
         name == "task_status" or name == "task_list" or
-        name == "test_daemon_status"):
+        name == "test_daemon_status" or
+        name == "agent_loop_status"):
         read_only = "true"
-    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "task_cancel" or name == "test_daemon_stop":
+    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "task_cancel" or name == "test_daemon_stop" or name == "agent_loop_stop":
         destructive = "true"
-    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "debug_practice_script" or name == "debug_openocd_monitor" or name == "simple_test" or name == "test_daemon_run" or name == "test_daemon_clean":
+    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "simple_commit" or name == "simple_push" or name == "simple_rebase" or name == "simple_pull" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "debug_flash_program" or name == "debug_system_reset" or name == "debug_practice_script" or name == "debug_openocd_monitor" or name == "simple_test" or name == "test_daemon_run" or name == "test_daemon_clean" or name == "agent_loop_start" or name == "agent_loop_step" or name == "agent_team_run":
         idempotent = "false"
 
     var annotations = LB()

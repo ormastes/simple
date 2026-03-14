@@ -1,0 +1,384 @@
+#![allow(unnamed_duplicate_typed_args)]
+# MCP Lazy Server - Agent Loop & Team tool handlers
+# Handles: agent_loop_start, agent_loop_status, agent_loop_step, agent_loop_stop,
+#           agent_team_create, agent_team_run
+#
+# Uses file-based state in .build/agent_loop/ — no stdlib imports.
+# AI client drives the loop by calling agent_loop_step repeatedly.
+# MCP tools are bookkeeping only — MCP cannot invoke AI.
+
+fn _al_mkdir_p(path: text):
+    var _out = ""
+    var _code: i64 = 0
+    (_out, _code) = shell_cmd("mkdir -p " + path)
+
+fn _al_timestamp() -> i64:
+    rt_time_now_unix_micros()
+
+fn _al_gen_id(prefix: text) -> text:
+    val ts = _al_timestamp()
+    "{prefix}_{ts}"
+
+fn _al_read_state(path: text) -> text:
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path) ?? ""
+
+fn _al_write_state(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn _al_extract_state_field(content: text, key: text) -> text:
+    val search = key + "="
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(search):
+            return mcp_substr(line, search.len(), line.len())
+        i = i + 1
+    ""
+
+fn _al_set_state_field(content: text, key: text, value: text) -> text:
+    val search = key + "="
+    val lines = content.split("\n")
+    var result_parts: [text] = []
+    var found = false
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(search):
+            result_parts.push(key + "=" + value)
+            found = true
+        elif line != "":
+            result_parts.push(line)
+        i = i + 1
+    if not found:
+        result_parts.push(key + "=" + value)
+    result_parts.join("\n") + "\n"
+
+fn _al_loops_dir() -> text:
+    ".build/agent_loop/loops"
+
+fn _al_teams_dir() -> text:
+    ".build/agent_loop/teams"
+
+fn _al_active_loop_path() -> text:
+    ".build/agent_loop/active_loop.id"
+
+# ============================================================================
+# agent_loop_start — Create and start a new iteration loop
+# ============================================================================
+
+fn handle_agent_loop_start(id: text, body: text) -> text:
+    val prompt = extract_field(body, "prompt")
+    if prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: prompt")
+
+    val max_iter_str = extract_field(body, "max_iterations")
+    var max_iterations = 10
+    if max_iter_str != "":
+        max_iterations = int(max_iter_str)
+        if max_iterations <= 0:
+            max_iterations = 10
+
+    val completion_condition = extract_field(body, "completion_condition")
+    val agent = extract_field(body, "agent")
+
+    val loops_dir = _al_loops_dir()
+    _al_mkdir_p(loops_dir)
+
+    val loop_id = _al_gen_id("loop")
+
+    var state = "id=" + loop_id + "\n"
+    state = state + "prompt=" + prompt + "\n"
+    state = state + "max_iterations=" + str(max_iterations) + "\n"
+    state = state + "completion_condition=" + completion_condition + "\n"
+    state = state + "agent=" + agent + "\n"
+    state = state + "iteration=0\n"
+    state = state + "status=active\n"
+    state = state + "last_result=\n"
+
+    val state_path = loops_dir + "/" + loop_id + ".state"
+    if not _al_write_state(state_path, state):
+        return make_tool_error(id, -32603, "Failed to write loop state")
+
+    # Mark as active loop for hook integration
+    _al_mkdir_p(".build/agent_loop")
+    _al_write_state(_al_active_loop_path(), loop_id)
+
+    val result = jo3(
+        jp("loop_id", js(loop_id)),
+        jp("status", js("active")),
+        jp("next_prompt", js(prompt))
+    )
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# agent_loop_status — Get current loop status
+# ============================================================================
+
+fn handle_agent_loop_status(id: text, body: text) -> text:
+    val loop_id = extract_field(body, "loop_id")
+    if loop_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: loop_id")
+
+    val state_path = _al_loops_dir() + "/" + loop_id + ".state"
+    val content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Loop not found: " + loop_id)
+
+    val iteration = _al_extract_state_field(content, "iteration")
+    val status = _al_extract_state_field(content, "status")
+    val last_result = _al_extract_state_field(content, "last_result")
+    val max_iter = _al_extract_state_field(content, "max_iterations")
+    val prompt = _al_extract_state_field(content, "prompt")
+    val agent = _al_extract_state_field(content, "agent")
+
+    var result = LB()
+    result = result + jp("loop_id", js(loop_id))
+    result = result + "," + jp("iteration", iteration)
+    result = result + "," + jp("max_iterations", max_iter)
+    result = result + "," + jp("status", js(status))
+    result = result + "," + jp("prompt", js(escape_json(prompt)))
+    if agent != "":
+        result = result + "," + jp("agent", js(agent))
+    if last_result != "":
+        result = result + "," + jp("last_result", js(escape_json(last_result)))
+    result = result + RB()
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# agent_loop_step — Record result and get next prompt (or "completed")
+# ============================================================================
+
+fn handle_agent_loop_step(id: text, body: text) -> text:
+    val loop_id = extract_field(body, "loop_id")
+    if loop_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: loop_id")
+
+    val result_text = extract_field(body, "result")
+
+    val state_path = _al_loops_dir() + "/" + loop_id + ".state"
+    var content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Loop not found: " + loop_id)
+
+    val status = _al_extract_state_field(content, "status")
+    if status != "active":
+        val done_result = jo2(
+            jp("status", js(status)),
+            jp("message", js("Loop is not active (status: " + status + ")"))
+        )
+        return make_tool_result_json(id, done_result)
+
+    # Increment iteration
+    val iter_str = _al_extract_state_field(content, "iteration")
+    var iteration = int(iter_str)
+    iteration = iteration + 1
+
+    val max_iter_str = _al_extract_state_field(content, "max_iterations")
+    val max_iterations = int(max_iter_str)
+
+    val completion_condition = _al_extract_state_field(content, "completion_condition")
+    val prompt = _al_extract_state_field(content, "prompt")
+
+    # Check completion conditions
+    var completed = false
+    var completion_reason = ""
+
+    # 1. Max iterations reached
+    if iteration >= max_iterations:
+        completed = true
+        completion_reason = "max_iterations_reached"
+
+    # 2. Completion condition matched in result
+    if not completed and completion_condition != "" and result_text != "":
+        if result_text.contains(completion_condition):
+            completed = true
+            completion_reason = "completion_condition_matched"
+
+    # Update state
+    content = _al_set_state_field(content, "iteration", str(iteration))
+    content = _al_set_state_field(content, "last_result", result_text)
+
+    if completed:
+        content = _al_set_state_field(content, "status", "completed")
+        _al_write_state(state_path, content)
+        # Clear active loop
+        _al_write_state(_al_active_loop_path(), "")
+
+        var done = LB()
+        done = done + jp("status", js("completed"))
+        done = done + "," + jp("iteration", str(iteration))
+        done = done + "," + jp("reason", js(completion_reason))
+        if result_text != "":
+            done = done + "," + jp("last_result", js(escape_json(result_text)))
+        done = done + RB()
+        return make_tool_result_json(id, done)
+
+    # Continue — return next prompt
+    _al_write_state(state_path, content)
+
+    var next = LB()
+    next = next + jp("status", js("active"))
+    next = next + "," + jp("iteration", str(iteration))
+    next = next + "," + jp("max_iterations", str(max_iterations))
+    next = next + "," + jp("next_prompt", js(escape_json(prompt)))
+    if result_text != "":
+        next = next + "," + jp("last_result", js(escape_json(result_text)))
+    next = next + RB()
+    make_tool_result_json(id, next)
+
+# ============================================================================
+# agent_loop_stop — Stop loop and return summary
+# ============================================================================
+
+fn handle_agent_loop_stop(id: text, body: text) -> text:
+    val loop_id = extract_field(body, "loop_id")
+    if loop_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: loop_id")
+
+    val state_path = _al_loops_dir() + "/" + loop_id + ".state"
+    var content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Loop not found: " + loop_id)
+
+    val iteration = _al_extract_state_field(content, "iteration")
+    val last_result = _al_extract_state_field(content, "last_result")
+    val prompt = _al_extract_state_field(content, "prompt")
+
+    content = _al_set_state_field(content, "status", "stopped")
+    _al_write_state(state_path, content)
+
+    # Clear active loop
+    _al_write_state(_al_active_loop_path(), "")
+
+    var result = LB()
+    result = result + jp("status", js("stopped"))
+    result = result + "," + jp("loop_id", js(loop_id))
+    result = result + "," + jp("iterations_completed", iteration)
+    result = result + "," + jp("prompt", js(escape_json(prompt)))
+    if last_result != "":
+        result = result + "," + jp("last_result", js(escape_json(last_result)))
+    result = result + RB()
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# agent_team_create — Create agent team with coordination strategy
+# ============================================================================
+
+fn handle_agent_team_create(id: text, body: text) -> text:
+    val name = extract_field(body, "name")
+    if name == "":
+        return make_tool_error(id, -32602, "Missing required parameter: name")
+
+    val agents = extract_field(body, "agents")
+    if agents == "":
+        return make_tool_error(id, -32602, "Missing required parameter: agents")
+
+    var coordination = extract_field(body, "coordination")
+    if coordination == "":
+        coordination = "sequential"
+
+    val teams_dir = _al_teams_dir()
+    _al_mkdir_p(teams_dir)
+
+    val team_id = _al_gen_id("team")
+
+    var state = "id=" + team_id + "\n"
+    state = state + "name=" + name + "\n"
+    state = state + "agents=" + agents + "\n"
+    state = state + "coordination=" + coordination + "\n"
+    state = state + "current_agent_index=0\n"
+    state = state + "status=active\n"
+
+    val state_path = teams_dir + "/" + team_id + ".state"
+    if not _al_write_state(state_path, state):
+        return make_tool_error(id, -32603, "Failed to write team state")
+
+    val result = jo3(
+        jp("team_id", js(team_id)),
+        jp("name", js(name)),
+        jp("agents", js(agents))
+    )
+    var result_ext = mcp_substr(result, 0, result.len() - 1)
+    result_ext = result_ext + "," + jp("coordination", js(coordination))
+    result_ext = result_ext + "," + jp("status", js("active"))
+    result_ext = result_ext + RB()
+    make_tool_result_json(id, result_ext)
+
+# ============================================================================
+# agent_team_run — Execute prompt with team, return first agent instruction
+# ============================================================================
+
+fn handle_agent_team_run(id: text, body: text) -> text:
+    val team_id = extract_field(body, "team_id")
+    if team_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: team_id")
+
+    val prompt = extract_field(body, "prompt")
+    if prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: prompt")
+
+    val state_path = _al_teams_dir() + "/" + team_id + ".state"
+    var content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Team not found: " + team_id)
+
+    val status = _al_extract_state_field(content, "status")
+    if status != "active":
+        return make_tool_error(id, -32602, "Team is not active (status: " + status + ")")
+
+    val agents_str = _al_extract_state_field(content, "agents")
+    val coordination = _al_extract_state_field(content, "coordination")
+    val name = _al_extract_state_field(content, "name")
+
+    # Parse agents list (comma-separated)
+    val agent_list = agents_str.split(",")
+    if agent_list.len() == 0:
+        return make_tool_error(id, -32603, "Team has no agents")
+
+    val current_idx_str = _al_extract_state_field(content, "current_agent_index")
+    var current_idx = int(current_idx_str)
+    if current_idx >= agent_list.len():
+        current_idx = 0
+
+    val current_agent = agent_list[current_idx].trim()
+
+    # Advance index for next call (round-robin / sequential)
+    var next_idx = current_idx + 1
+    if next_idx >= agent_list.len():
+        next_idx = 0
+    content = _al_set_state_field(content, "current_agent_index", str(next_idx))
+    _al_write_state(state_path, content)
+
+    # Build instruction for the current agent
+    var instruction = ""
+    if coordination == "parallel":
+        instruction = "Execute as agent '" + current_agent + "' in team '" + name + "'. All agents receive the same prompt. Prompt: " + prompt
+    elif coordination == "round_robin":
+        instruction = "Execute as agent '" + current_agent + "' in team '" + name + "' (round-robin turn). Prompt: " + prompt
+    else:
+        instruction = "Execute as agent '" + current_agent + "' in team '" + name + "' (step " + str(current_idx + 1) + "/" + str(agent_list.len()) + "). Prompt: " + prompt
+
+    var result = LB()
+    result = result + jp("team_id", js(team_id))
+    result = result + "," + jp("agent", js(current_agent))
+    result = result + "," + jp("agent_index", str(current_idx))
+    result = result + "," + jp("total_agents", str(agent_list.len()))
+    result = result + "," + jp("coordination", js(coordination))
+    result = result + "," + jp("instruction", js(escape_json(instruction)))
+    result = result + RB()
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# Helper — return JSON result as tool content
+# ============================================================================
+
+fn make_tool_result_json(id: text, json_body: text) -> text:
+    var content = LB()
+    content = content + jp("type", js("text"))
+    content = content + "," + jp("text", js(escape_json(json_body)))
+    content = content + RB()
+    val result = jo2(jp("content", "[" + content + "]"), jp("isError", "false"))
+    make_json_result(id, result)
