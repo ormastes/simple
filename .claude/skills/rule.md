@@ -26,7 +26,7 @@ Reference for the project's mandatory engineering, architectural, testing, and o
 - NEVER skip/ignore failing tests without user approval
 - NEVER use `#[ignore]` without user approval
 - Fix root cause — not symptoms
-- Built-in matchers only (see `/sspec` skill)
+- Built-in matchers only (see `/test` skill)
 - Every `*_spec.spl` must have a module-level docstring
 
 ### Documentation
@@ -77,6 +77,6 @@ No ad-hoc exceptions without documented rationale.
 - `doc/rule/README.md` — Full rules document
 - `doc/adr/README.md` — ADR format and when to write one
 - `doc/requirement/README.md` — Requirement format
-- `/sspec` skill — Test writing rules and docstring metadata
+- `/test` skill — Test writing rules, SSpec BDD framework, and docstring metadata
 - `/architecture` skill — Compiler layer structure
-- `/versioning` skill — Jujutsu workflow
+- `/vcs` skill — Jujutsu workflow

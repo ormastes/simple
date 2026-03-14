@@ -1,7 +1,7 @@
 # Test Agent - Writing and Running Tests
 
 **Use when:** Writing new tests, fixing failing tests, running test suite, analyzing test results.
-**Skills:** `/test`, `/sspec`
+**Skills:** `/test`
 
 ## Quick Start
 
@@ -94,6 +94,5 @@ bin/simple test --only-slow              # Slow tests only
 
 ## See Also
 
-- `/sspec` - Full SSpec BDD framework guide
-- `/test` - Test methodology and coverage
+- `/test` - Test methodology, SSpec BDD framework, and coverage
 - `.claude/templates/sspec_template.spl` - Template for new specs

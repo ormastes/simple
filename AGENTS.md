@@ -24,9 +24,8 @@ See [CLAUDE.md - Agents Section](CLAUDE.md#agents-task-tool) for:
 
 ### Skills Reference
 See [CLAUDE.md - Skills Section](CLAUDE.md#skills-reference) for:
-- `/versioning` - Jujutsu workflow
-- `/test` - Testing methodology
-- `/sspec` - SSpec framework
+- `/vcs` - Jujutsu workflow
+- `/test` - Testing & SSpec framework
 - `/coding` - Language rules
 - `/design` - Design patterns
 - And 10+ more skills

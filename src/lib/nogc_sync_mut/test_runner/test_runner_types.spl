@@ -11,6 +11,7 @@ enum TestExecutionMode:
     Smf
     Native
     Composite(spec: text)
+    AllModes
 
 # =========================================================================
 # Test Level Filter
@@ -160,6 +161,8 @@ fn execution_mode_from_string(mode: text) -> TestExecutionMode:
     val trimmed = mode.trim()
     if trimmed.contains("("):
         return TestExecutionMode.Composite(trimmed)
+    if trimmed == "all" or trimmed == "all-modes":
+        return TestExecutionMode.AllModes
     match trimmed.lower():
         case "interpreter": TestExecutionMode.Interpreter
         case "smf": TestExecutionMode.Smf
@@ -223,6 +226,52 @@ fn execution_mode_to_string(mode: TestExecutionMode) -> text:
         case Smf: "smf"
         case Native: "native"
         case Composite(spec): spec
+        case AllModes: "all-modes"
+
+# =========================================================================
+# Multi-mode test runner types
+# =========================================================================
+
+# Per-mode result for --all-modes runs
+class TestModeResult:
+    mode: TestExecutionMode
+    result: TestRunResult
+    duration_ms: i64
+
+impl TestModeResult:
+    fn is_ok() -> bool:
+        self.result.is_ok()
+
+# Aggregate result when running all three modes
+class TestAllModesResult:
+    mode_results: List<TestModeResult>
+    all_passed: bool
+
+impl TestAllModesResult:
+    fn summary() -> text:
+        var lines: List<text> = []
+        for mr in self.mode_results:
+            val mode_name = execution_mode_to_string(mr.mode)
+            val status = if mr.is_ok(): "PASS" else: "FAIL"
+            val p = mr.result.total_passed
+            val f = mr.result.total_failed
+            lines.push("  {mode_name}: {p} passed, {f} failed ({mr.duration_ms}ms) [{status}]")
+        lines.join("\n")
+
+# Configuration for pre-loaded initialization
+class TestInitConfig:
+    init_fn: Option<Fn()>
+    init_module: Option<text>
+    timeout_ms: i64
+
+fn test_init_config_default() -> TestInitConfig:
+    TestInitConfig(init_fn: nil, init_module: nil, timeout_ms: 30000)
+
+fn test_init_config_with_fn(f: Fn()) -> TestInitConfig:
+    TestInitConfig(init_fn: some(f), init_module: nil, timeout_ms: 30000)
+
+fn test_init_config_with_module(path: text) -> TestInitConfig:
+    TestInitConfig(init_fn: nil, init_module: some(path), timeout_ms: 30000)
 
 # =========================================================================
 # Exports

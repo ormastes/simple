@@ -1,7 +1,7 @@
 # VCS Agent - Version Control (JJ / Git)
 
 **Use when:** Committing, pushing, viewing history, managing changes.
-**Skills:** `/versioning`
+**Skills:** `/vcs`
 
 ## Quick Reference
 
@@ -99,4 +99,4 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`
 
 ## See Also
 
-- `/versioning` - Full JJ + git workflow guide
+- `/vcs` - Full JJ + git workflow guide

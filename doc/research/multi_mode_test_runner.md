@@ -2,7 +2,11 @@
 
 **Date:** 2026-03-14
 **Status:** Research
-**Related:** `doc/requirement/multi_mode_test_runner.md`
+**Related:**
+- Requirement: [`doc/requirement/multi_mode_test_runner.md`](../requirement/multi_mode_test_runner.md)
+- Plan: [`doc/plan/multi_mode_test_runner.md`](../plan/multi_mode_test_runner.md)
+- Design: [`doc/design/multi_mode_test_runner.md`](../design/multi_mode_test_runner.md)
+- System Tests: [`test/system/multi_mode_test_runner_spec.spl`](../../test/system/multi_mode_test_runner_spec.spl)
 
 ## Executive Summary
 
@@ -160,7 +164,7 @@ This function would be:
 ```
 bin/simple test --mode=interpreter path/to/spec.spl
 bin/simple test --mode=native path/to/spec.spl
-bin/simple test --mode=smf path/to/spec.spl
+bin/simple test --mode=loader path/to/spec.spl
 bin/simple test --all-modes path/to/spec.spl
 ```
 
@@ -241,7 +245,10 @@ Zig's test runner is the closest analogue: it supports cross-compilation to bare
 
 ### 6.2 Internal References
 
-- `doc/requirement/multi_mode_test_runner.md` -- Requirements specification (cross-reference)
+- `doc/requirement/multi_mode_test_runner.md` -- Requirements specification
+- `doc/plan/multi_mode_test_runner.md` -- Implementation plan
+- `doc/design/multi_mode_test_runner.md` -- Design document
+- `test/system/multi_mode_test_runner_spec.spl` -- System tests
 - `doc/research/testing_infrastructure_comprehensive_2026.md` -- Broader testing infrastructure analysis
 - `doc/research/execution_strategy_comparison.md` -- Execution strategy trade-offs
 - `doc/research/fuzzing_mutation_testing_2026.md` -- Advanced testing techniques

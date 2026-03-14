@@ -39,7 +39,7 @@ RULES → enforced by CI + review
 - ❌ **NEVER write spec.md files** - write `*_spec.spl` instead
 - ✅ Specifications are executable tests in `src/lib/test/features/`
 - ✅ Use SSpec framework to generate documentation from tests
-- ✅ See `/sspec` skill for test writing guidelines
+- ✅ See `/test` skill for test writing guidelines
 
 ### Research Documents
 - ✅ Write in `doc/research/` for investigation and analysis
@@ -509,7 +509,7 @@ users |id, name, role|
 
 ### Cross-References
 - **Relative links** - Use relative paths: `doc/design/feature.md`
-- **Skill references** - Link skills: "See `/sspec` skill"
+- **Skill references** - Link skills: "See `/test` skill"
 - **Feature references** - Link specs: "Feature #193"
 
 ## Documentation Workflow
@@ -604,8 +604,7 @@ bin/simple src/lib/test/features/generate_docs.spl
 
 ## See Also
 
-- `/sspec` - SSpec test writing (BDD tests + doc-link validation)
-- `/test` - Test writing guidelines
+- `/test` - Test writing, SSpec BDD framework, and doc-link validation
 - `/research` - Codebase exploration
 - `/rule` - Engineering rules + doc folder map
 - `doc/FILE.md` - Complete document relationship model

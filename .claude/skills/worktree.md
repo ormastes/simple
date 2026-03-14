@@ -172,7 +172,7 @@ If squashing a workspace change creates conflicts:
 # Check which files conflict
 jj st
 
-# Resolve (same rules as /git-jj-sync)
+# Resolve (same rules as /vcs)
 # .sdn files: jj resolve --tool=internal:ours <file>
 # .spl files: manual resolution
 ```

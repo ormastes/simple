@@ -1,7 +1,7 @@
 # Debug Agent - Debugging and Troubleshooting
 
 **Use when:** Investigating bugs, analyzing errors, profiling, debugging runtime behavior.
-**Skills:** `/debug`, `/mcp-failure-analysis`
+**Skills:** `/debug`, `/mcp`
 
 ## Quick Debugging
 
@@ -92,6 +92,6 @@ See `/debug-lsp` for full chain patterns.
 
 - `/debug` - Full debugging guide with all techniques
 - `/debug-lsp` - DAP+LSP chaining patterns for active session analysis
-- `/mcp-failure-analysis` - MCP tools for failure analysis
+- `/mcp` - MCP tools including failure analysis
 - Use `debug-analyst` agent for interactive session debugging with LSP enrichment
 - `doc/bug/bug_db.sdn` - Bug tracking database

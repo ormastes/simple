@@ -87,7 +87,7 @@ jj commit -m "test"
 4. **Simpler mental model**: Working copy is just another commit
 5. **Powerful rewriting**: Amending and rebasing are first-class operations
 
-See the `/versioning` skill (`.claude/skills/versioning.md`) for complete jj documentation.
+See the `/vcs` skill (`.claude/skills/vcs.md`) for complete jj documentation.
 
 ---
 
@@ -395,7 +395,7 @@ cp .claude/templates/sspec_template.spl test/path/to/new_spec.spl
 cat doc/guide/sspec_complete_example.md
 
 # Or use skill
-# /sspec
+# /test
 ```
 
 **Key features:**

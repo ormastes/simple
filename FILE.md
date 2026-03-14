@@ -30,7 +30,7 @@
 
 **Complete development reference:**
 - ✅ Agent definitions for Task tool
-- ✅ Skills reference (/versioning, /test, /coding, etc.)
+- ✅ Skills reference (/vcs, /test, /coding, etc.)
 - ✅ Critical rules (jj not git, no git branches, etc.)
 - ✅ Quick commands (build, test, run)
 - ✅ Syntax essentials
@@ -481,7 +481,7 @@ jj git push --bookmark main
 # Never use: git add, git commit, git push
 ```
 
-**See:** `.claude/skills/versioning.md` for complete jj workflow
+**See:** `.claude/skills/vcs.md` for complete jj workflow
 
 ---
 

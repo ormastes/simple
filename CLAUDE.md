@@ -33,10 +33,10 @@ Located in `.claude/agents/`. Usage: `Read .claude/agents/<name>.md and use its 
 
 Invoke with `/skill-name`. Located in `.claude/skills/`. Key skills:
 
-`versioning` `test` `sspec` `coding` `design` `architecture` `research` `debug` `debug-lsp` `stdlib` `todo` `doc` `deeplearning` `sffi` `database` `mcp` `release` `cuda` `t32` `rule` `git-jj-sync` `worktree` `impl` `refactor` `agent-loop` `agent-team`
+`vcs` `test` `coding` `design` `architecture` `research` `debug` `debug-lsp` `stdlib` `todo` `doc` `deeplearning` `sffi` `database` `mcp` `release` `cuda` `t32` `rule` `worktree` `impl` `refactor` `agents`
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
-**SSpec Template:** `.claude/templates/sspec_template.spl`
+**Test Template:** `.claude/templates/sspec_template.spl`
 
 ---
 

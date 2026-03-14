@@ -1,21 +1,60 @@
-# Test Writing Skill
+# Test & SSpec Skill
+
+SSpec is Simple's BDD testing framework that generates documentation from tests.
 
 ## Critical Rules
 
-**NEVER ignore tests without explicit user approval:**
-- Do NOT comment out test code
-- Do NOT skip failing tests as a "fix"
+- NEVER add `#[ignore]` without user approval
+- NEVER skip failing tests as a "fix"
+- NEVER comment out test code
 - ALWAYS fix root cause or ask user
+- One assertion concept per test
+- Clear test names: `it "adds two positive numbers":` not `it "works":`
+
+## Quick Start
+
+`describe`, `it`, and `expect` are **built-in** to the runtime -- no import needed.
+
+```simple
+describe "Calculator":
+    context "addition":
+        it "adds two numbers":
+            expect(2 + 2).to_equal(4)
+```
+
+Run: `bin/simple test` or `bin/simple test path/to/spec.spl`
 
 ## Running Tests
 
 ```bash
-bin/simple test                          # All tests
-bin/simple test path/to/spec.spl         # Single test file
-bin/simple test --list                   # List tests without running
-bin/simple test --only-slow              # Run slow tests
-bin/simple test --tag=integration        # Filter by tag
+# All tests
+bin/simple test
+
+# Specific file
+bin/simple test test/my_feature_spec.spl
+
+# List tests without running
+bin/simple test --list
+
+# Filter by tag
+bin/simple test --tag=integration
+
+# Run only slow tests
+bin/simple test --only-slow
+
+# Match by name
+bin/simple test --match "Stack when empty"
+
+# Fail fast
+bin/simple test --fail-fast
+
+# Run tracking
+bin/simple test --list-runs
+bin/simple test --cleanup-runs
+bin/simple test --prune-runs=50
 ```
+
+Reports are generated at `doc/test/test_result.md` after every test run.
 
 ## Container Testing (Safe / Isolated)
 
@@ -80,69 +119,191 @@ docker system prune -a              # Remove all containers/images
 
 **Full Guide:** `doc/guide/testing/container_testing.md` | **Test Config:** `simple.test.sdn`
 
-## Writing Simple BDD Tests
+## Built-in Matchers Reference
 
-Tests go in `test/` directory. Use `*_spec.spl` naming.
+The runtime provides these matchers on `expect(value)`:
+
+| Matcher | Usage | Description |
+|---------|-------|-------------|
+| `.to_equal(expected)` | `expect(x).to_equal(42)` | Equality check |
+| `.to_be(expected)` | `expect(x).to_be(42)` | Identity/equality check |
+| `.to_be_nil` | `expect(x).to_be_nil` | Nil check |
+| `.to_contain(item)` | `expect(list).to_contain(3)` | Collection/string contains |
+| `.to_start_with(prefix)` | `expect(s).to_start_with("he")` | String prefix |
+| `.to_end_with(suffix)` | `expect(s).to_end_with("lo")` | String suffix |
+| `.to_be_greater_than(n)` | `expect(10).to_be_greater_than(5)` | Numeric comparison |
+| `.to_be_less_than(n)` | `expect(5).to_be_less_than(10)` | Numeric comparison |
+
+**Important:** Use `.to_equal()` style, NOT `.to(eq())` style. The runtime does not support the `to(matcher())` pattern.
+
+**Boolean checks:** Use `.to_equal(true)` and `.to_equal(false)` -- there are no `.to_be_true()` or `.to_be_false()` matchers.
+
+## Test Types
+
+| Type | Keyword | Behavior |
+|------|---------|----------|
+| Regular | `it "..."` | Runs by default |
+| Slow | `slow_it "..."` | Auto-ignored, run with `--only-slow` |
+| Skipped | `skip_it "..."` | Skipped in interpreter, runs in compiled mode |
+| Pending | `pending "reason"` | Marked as pending |
+
+## BDD Syntax
+
+### Groups & Tests
+
+```simple
+describe "Feature":
+    """Optional docstring for generated docs."""
+
+    context "when empty":
+        it "returns zero":
+            expect([].len()).to_equal(0)
+
+    context "when populated":
+        it "has items":
+            expect([1, 2, 3].len()).to_equal(3)
+```
+
+### Hooks
+
+| Hook | Scope | Order |
+|------|-------|-------|
+| `before_each:` | per test | outer -> inner |
+| `after_each:` | per test | inner -> outer |
+
+```simple
+context "with setup":
+    before_each:
+        setup()
+    after_each:
+        cleanup()
+    it "test":
+        expect(true).to_equal(true)
+```
+
+### Fixtures
+
+```simple
+# Lazy (memoized per test)
+given_lazy :user, \:
+    { name: "Alice" }
+
+# Eager setup
+given:
+    setup_db()
+
+# Named eager
+given :db_connect, \:
+    database.connect()
+```
+
+### Shared Contexts
+
+```simple
+context_def :as_admin:
+    given_lazy :user, \:
+        create(:user, :admin)
+
+describe "Dashboard":
+    context :as_admin:
+        it "shows admin panel":
+            expect(user.admin).to_equal(true)
+```
+
+## Complete Workflow: Test -> Documentation
+
+### 1. Create Spec File from Template
+
+```bash
+# Copy template to your feature directory
+cp .claude/templates/sspec_template.spl test/my_feature_spec.spl
+```
+
+### 2. Write Module-Level Documentation
+
+**REQUIRED format** at the top of every spec file:
+
+```simple
+"""
+# Feature Name Specification
+
+**Feature IDs:** #100-110
+**Category:** Language | Syntax | Stdlib | Runtime | Testing | Tooling
+**Difficulty:** 1-5/5
+**Status:** Draft | In Progress | Implemented | Complete
+
+## Overview
+
+High-level description of what this feature does and why it exists.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Term1   | Definition |
+
+## Related Specifications
+
+- [Types](types.md) - Related spec
+- [Memory](memory.md) - Related spec
+
+## Examples
+
+Basic usage examples.
+"""
+```
+
+**Metadata Fields:**
+
+| Field | Required | Values | Purpose |
+|-------|----------|--------|---------|
+| Feature IDs | Yes | `#100-110` | Tracking & cross-reference |
+| Category | Yes | `Infrastructure`, `Language`, `Syntax`, `Stdlib`, `Runtime`, `Testing`, `Tooling` | Index organization |
+| Difficulty | No | `1-5/5` | Complexity indicator |
+| Status | Yes | `Draft`, `In Progress`, `Implemented`, `Complete` | Development stage |
+| Requirements | Recommended | `doc/requirement/xxx.md` | Link to requirement document |
+| Plan | Recommended | `doc/plan/xxx.md` | Link to plan document |
+| Design | Recommended | `doc/design/xxx.md` | Link to design/architecture document |
+| Research | Recommended | `doc/research/xxx.md` | Link to research document |
+
+**Doc-link validation:** `sspec-docgen` performs two checks for each link field:
+1. **Missing** -- field absent -> warning with recommended path
+2. **Not found** -- field set but file doesn't exist -> warning with exact path
+
+Use `N/A` to suppress a warning when the link is genuinely not applicable:
+```
+**Requirements:** N/A
+```
+
+### 3. Write Tests with Documentation
 
 **CRITICAL: Use docstring markdown, NOT println() for test documentation!**
 
 ```simple
-# feature_spec.spl
+# No import needed -- describe/it/expect are built-in
 
-describe "Feature":
+describe "MyFeature":
     """
-    # Feature Module
+    ## Basic Usage
 
-    Provides core functionality for X, Y, Z.
-
-    ## Overview
-    - Feature A does X
-    - Feature B does Y
-
-    ## Usage
-    ```simple
-    val f = Feature(value: 10)
-    f.increment()
-    ```
+    Description of test group.
     """
 
-    context "when initialized":
+    context "when condition":
         """
-        Tests default initialization behavior.
-        Ensures all fields start with correct values.
+        ### Scenario: Specific Case
+
+        Detailed scenario description.
         """
 
-        it "should have default value":
+        it "does expected behavior":
             """
             Default constructor should initialize value to 0.
 
             **Expected:** value = 0
             **Actual:** Verified via expect() assertion
             """
-            val f = Feature(value: 0)
-            expect(f.value).to_equal(0)
-
-    context "with operations":
-        """
-        Tests arithmetic operations on Feature.
-
-        ## Tested Operations
-        - increment(): adds 1
-        - decrement(): subtracts 1
-        - add(n): adds n
-        """
-
-        it "should increment":
-            """
-            Increment operation should add 1 to current value.
-
-            Given: Feature with value 10
-            When: increment() is called
-            Then: value should be 11
-            """
-            val f = Feature(value: 10)
-            f.increment()
-            expect(f.value).to_equal(11)
+            expect(actual).to_equal(expected)
 ```
 
 **Documentation Guidelines:**
@@ -153,52 +314,191 @@ describe "Feature":
 - **NO println()**: All explanations go in docstrings, not print statements
 - **Auto-generate docs**: SSpec uses docstrings for spec documentation
 
-## Test File Naming
-
-- Simple: `*_spec.spl` or `*_test.spl`
-- Tests directory: `test/`
-- Feature specs: `src/lib/test/features/`
-
-## Test Types
-
-| Type | Syntax | Behavior |
-|------|--------|----------|
-| Regular | `it "..."` | Runs by default |
-| Slow | `slow_it "..."` | Auto-ignored, run with `--only-slow` |
-| Skipped | `skip("name", "reason")` | Not yet implemented |
-
-## Matchers Reference
-
-Built-in runtime matchers only:
-
-| Matcher | Usage |
-|---------|-------|
-| `to_equal(val)` | `expect(x).to_equal(5)` |
-| `to_be(val)` | `expect(x).to_be(5)` |
-| `to_be_nil()` | `expect(x).to_be_nil()` |
-| `to_contain(item)` | `expect(list).to_contain(5)` |
-| `to_start_with(s)` | `expect(text).to_start_with("he")` |
-| `to_end_with(s)` | `expect(text).to_end_with("lo")` |
-| `to_be_greater_than(n)` | `expect(x).to_be_greater_than(5)` |
-| `to_be_less_than(n)` | `expect(x).to_be_less_than(10)` |
-
-**Note:** `to_be_true`/`to_be_false` are NOT built-in. Use `to_equal(true)` / `to_equal(false)` instead.
-
-## Run Tracking
-
-Test results are automatically tracked in `doc/test/test_db.sdn`.
+### 4. Run Tests
 
 ```bash
-bin/simple test --list-runs              # View run history
-bin/simple test --cleanup-runs           # Clean stale runs
-bin/simple test --prune-runs=50          # Keep 50 most recent
+bin/simple test test/my_feature_spec.spl
 ```
 
-Reports are generated at `doc/test/test_result.md` after every test run.
+### 5. Generate Documentation
+
+```bash
+# Generate docs for feature specs
+bin/simple doc-gen
+
+# Output: doc/spec/language/
+```
+
+### 6. Review Generated Docs
+
+```bash
+# View generated docs
+cat doc/spec/language/README.md
+cat doc/spec/language/my_feature_spec.md
+```
+
+The generator:
+- Extracts `"""..."""` docstrings as markdown
+- Preserves all markdown formatting (tables, code blocks, lists)
+- Adds metadata (Feature IDs, source file, timestamp)
+- Creates navigable index by category
+- Validates completeness and warns about issues
+
+### Making Links
+
+Standard markdown link syntax works inside docstrings:
+
+```simple
+"""
+## Links in Documentation
+
+### Internal Links (relative)
+- [Types Specification](types.md)
+- [Functions](functions.md#pattern-matching)
+- [See Overview](#overview)
+
+### External Links
+- [Simple Language](https://github.com/org/simple)
+
+### Anchor Links
+Use `{#anchor-name}` for custom anchors:
+
+## Section Name {#custom-anchor}
+
+Then link: [Go to section](#custom-anchor)
+"""
+```
+
+### Generated Output Location
+
+```
+doc/spec/language/
+  README.md           # Index with links to all specs
+  syntax.md           # Generated from syntax_spec.spl
+  types.md            # Generated from types_spec.spl
+  ...
+```
+
+### Generated README Structure
+
+The generator creates an index with:
+- Quick navigation by category
+- Links to each spec: `[Syntax Specification](syntax.md)`
+- Status badges, test counts, feature IDs
+- Symbol references with anchor links
+
+## Test File Structure
+
+### Location
+```
+test/
+  lib/           # Library tests
+  compiler/      # Compiler tests
+  app/           # Application tests
+src/lib/test/
+  unit/          # Fast, isolated (branch/condition coverage)
+  integration/   # Public function touch (100%)
+  system/        # Public type touch (100%)
+```
+
+### Naming
+- Files: `*_spec.spl` or `*_test.spl`
+- Describe: `describe "ClassName":`
+- Context: `context "when condition":`
+- Test: `it "does something":`
+
+## Coverage Measurement
+
+```bash
+# Generate coverage
+bin/simple build coverage
+
+# Coverage data location: .coverage/coverage.sdn
+```
+
+## Lean Verification Integration
+
+SSpec tests can reference formal verification in docstrings:
+
+```simple
+"""
+### Lean Verification
+
+This feature is verified in:
+- `verification/TypeInference.lean` - Soundness proof
+- `verification/MixinSubstitution.lean` - Type safety
+
+**Properties Verified:**
+1. Type substitution preserves well-typedness
+2. Mixin application is associative
+
+See [architecture skill](/architecture) for verification workflow.
+"""
+```
+
+Generate Lean from verified code:
+```bash
+bin/simple gen-lean compare           # Check alignment
+bin/simple gen-lean write --force     # Regenerate Lean files
+```
+
+## Quick Reference
+
+### Starting a New Spec
+
+1. **Copy template:**
+   ```bash
+   cp .claude/templates/sspec_template.spl test/my_feature_spec.spl
+   ```
+
+2. **Fill in required metadata:**
+   - Feature IDs
+   - Category
+   - Status
+   - Overview
+
+3. **Write tests with docstrings**
+
+4. **Run tests:**
+   ```bash
+   bin/simple test test/my_feature_spec.spl
+   ```
+
+5. **Generate docs:**
+   ```bash
+   bin/simple doc-gen
+   ```
+
+### Common Mistakes to Avoid
+
+- **Don't:** Skip module-level docstring -- Generator will warn "No documentation"
+- **Do:** Always start with `"""# Feature Name Specification..."""`
+
+- **Don't:** Use single-line `#` comments for docs -- Not extracted
+- **Do:** Use triple-quoted `"""..."""` docstrings
+
+- **Don't:** Use `.to(eq(...))` matcher style -- Not supported
+- **Do:** Use `.to_equal(...)` directly on the expect result
+
+- **Don't:** Use `.to_be_true()` or `.to_be_false()` -- Not in built-in matchers
+- **Do:** Use `.to_equal(true)` and `.to_equal(false)`
+
+- **Don't:** Mix test code with helpers -- Hard to read
+- **Do:** Put helpers at the end under `# Helper Code` comment
+
+- **Don't:** Write specs without running tests -- May have syntax errors
+- **Do:** Test -> Document -> Generate workflow
 
 ## See Also
 
-- `/sspec` skill - Full SSpec BDD framework details
-- `.claude/templates/sspec_template.spl` - Template for new specs
+- **[Template](../../.claude/templates/sspec_template.spl)** - Spec file template
+- `doc/spec/sspec_format.md` - Format details
 - `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
-- `doc/spec/testing/` - Testing framework specs
+- `doc/guide/testing/container_testing.md` - Container testing guide
+- `doc/spec/sspec_manual.md` - User manual
+- `doc/test.md` - Test policy
+- `doc/FILE.md` - Document relationship model (PLAN -> REQ -> FEATURE -> TESTS)
+- `doc/requirement/README.md` - Requirement doc format
+- `doc/feature/README.md` - Feature specification format
+- `/rule` skill - Engineering rules and doc folder map
+- `/architecture` skill - Lean codegen, dependency analysis

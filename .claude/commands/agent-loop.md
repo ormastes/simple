@@ -1,3 +1,3 @@
-Read `.claude/skills/agent-loop.md` and follow the agent loop patterns described there.
+Read `.claude/skills/agents.md` and follow the agent loop patterns described there.
 
 $ARGUMENTS

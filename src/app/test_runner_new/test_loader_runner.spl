@@ -1,0 +1,74 @@
+# =========================================================================
+# Loader (SMF) mode test runner: compile to SMF, load via JIT, execute
+#
+# Flow:
+#   test_spec.spl
+#     -> bin/simple compile --format=smf (generate .smf file)
+#     -> bin/simple run test_spec.smf (JIT load + execute)
+#     -> parse stdout for test results
+#     -> clean up .smf artifact
+#
+# Future enhancement: directly call test_main() export from JIT
+# instantiator without subprocess, returning TestRunResult in-process.
+# =========================================================================
+
+use test_runner_types.*
+use test_executor_parsing.{find_simple_binary, make_result_from_output}
+use app.io.file_ops.{file_exists, file_delete}
+use app.io.time_ops.{time_now_unix_micros}
+use app.io.process_ops.{process_run_timeout}
+
+class SmfCompileResult:
+    success: bool
+    error_msg: text
+
+fn run_test_loader(file_path: text, options: TestOptions) -> TestFileResult:
+    val start = time_now_unix_micros()
+    val timeout_ms = options.timeout * 1000
+    val binary = find_simple_binary()
+    val smf_path = file_path.replace(".spl", ".smf")
+
+    # Step 1: Compile to SMF (or use existing if not stale)
+    if not file_exists(smf_path) or options.force_rebuild:
+        val compile_result = compile_to_smf(binary, file_path, smf_path, timeout_ms, options.verbose)
+        if not compile_result.success:
+            val end = time_now_unix_micros()
+            val duration_ms = (end - start) / 1000
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: duration_ms, setup_ms: 0,
+                error: "SMF compilation failed: {compile_result.error_msg}",
+                timed_out: false
+            )
+
+    # Step 2: Run .smf via simple binary (JIT instantiator loads internally)
+    var run_args: List<text> = ["run", smf_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+
+    val run_result = process_run_timeout(binary, run_args, timeout_ms)
+    val stdout = run_result.0
+    val stderr = run_result.1
+    val exit_code = run_result.2
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+
+    # Step 3: Clean up .smf artifact
+    if not options.keep_artifacts and file_exists(smf_path):
+        file_delete(smf_path)
+
+    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+
+
+fn compile_to_smf(binary: text, source: text, smf_path: text, timeout_ms: i64, verbose: bool) -> SmfCompileResult:
+    var compile_args: List<text> = ["compile", source, "-o", smf_path, "--format=smf"]
+    if verbose:
+        compile_args.push("--verbose")
+        print "[loader] Compiling {source} -> {smf_path}"
+
+    val result = process_run_timeout(binary, compile_args, timeout_ms)
+    if result.2 != 0:
+        return SmfCompileResult(success: false, error_msg: result.1)
+    SmfCompileResult(success: true, error_msg: "")

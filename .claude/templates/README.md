@@ -109,6 +109,6 @@ describe "MyFeature":
 
 ## See Also
 
-- `/sspec` skill - Quick reference
+- `/test` skill - Quick reference (includes SSpec BDD framework)
 - `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
 - `doc/spec/sspec_format.md` - Format specification

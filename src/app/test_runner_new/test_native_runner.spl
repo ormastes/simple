@@ -1,0 +1,98 @@
+# =========================================================================
+# Native mode test runner: AOT compile test file to binary, execute
+#
+# Flow:
+#   test_spec.spl
+#     -> preprocess_sspec_file() (wrap describe/it in fn main)
+#     -> bin/simple compile --backend=c (generate .c file)
+#     -> clang -o test.bin (compile to native binary)
+#     -> execute native binary
+#     -> parse stdout for test results
+#     -> clean up artifacts
+# =========================================================================
+
+use test_runner_types.*
+use test_runner_execute.{preprocess_sspec_file}
+use test_executor_parsing.{find_simple_binary, make_result_from_output}
+use app.io.file_ops.{file_exists, file_delete}
+use app.io.time_ops.{time_now_unix_micros}
+use app.io.process_ops.{process_run_timeout}
+
+class NativeCompileResult:
+    success: bool
+    error_msg: text
+
+fn run_test_native(file_path: text, options: TestOptions) -> TestFileResult:
+    val start = time_now_unix_micros()
+    val timeout_ms = options.timeout * 1000
+    val binary = find_simple_binary()
+
+    # Step 1: Preprocess SSpec file (wrap describe/it in main)
+    val wrapped_path = if file_path.ends_with("_spec.spl"):
+        preprocess_sspec_file(file_path)
+    else:
+        file_path
+
+    # Step 2: AOT compile to C, then to native binary
+    val out_binary = file_path.replace(".spl", ".test_bin")
+    val compile_result = aot_compile_test(binary, wrapped_path, out_binary, timeout_ms, options.verbose)
+
+    if not compile_result.success:
+        cleanup_native_artifacts(wrapped_path, out_binary, file_path, options)
+        val end = time_now_unix_micros()
+        val duration_ms = (end - start) / 1000
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "Native compilation failed: {compile_result.error_msg}",
+            timed_out: false
+        )
+
+    # Step 3: Execute the compiled binary
+    val run_result = process_run_timeout(out_binary, [], timeout_ms)
+    val stdout = run_result.0
+    val stderr = run_result.1
+    val exit_code = run_result.2
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+
+    # Step 4: Clean up artifacts
+    cleanup_native_artifacts(wrapped_path, out_binary, file_path, options)
+
+    # Step 5: Parse output and return result
+    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+
+
+fn aot_compile_test(binary: text, source: text, out_binary: text, timeout_ms: i64, verbose: bool) -> NativeCompileResult:
+    # Step 1: Compile .spl to .c via AOT C backend
+    val c_file = source.replace(".spl", ".c")
+    var compile_args: List<text> = ["compile", source, "--backend=c", "-o", c_file]
+    if verbose:
+        compile_args.push("--verbose")
+        print "[native] AOT compiling {source} -> {c_file}"
+
+    val compile_out = process_run_timeout(binary, compile_args, timeout_ms)
+    if compile_out.2 != 0:
+        return NativeCompileResult(success: false, error_msg: compile_out.1)
+
+    # Step 2: Compile .c to native binary via clang
+    val link_args = ["-o", out_binary, c_file, "-lm"]
+    if verbose:
+        print "[native] Linking {c_file} -> {out_binary}"
+    val link_out = process_run_timeout("clang", link_args, timeout_ms)
+    if link_out.2 != 0:
+        return NativeCompileResult(success: false, error_msg: link_out.1)
+
+    NativeCompileResult(success: true, error_msg: "")
+
+
+fn cleanup_native_artifacts(wrapped_path: text, out_binary: text, original_path: text, options: TestOptions):
+    if options.keep_artifacts:
+        return
+    val c_file = wrapped_path.replace(".spl", ".c")
+    if wrapped_path != original_path and file_exists(wrapped_path):
+        file_delete(wrapped_path)
+    if file_exists(c_file):
+        file_delete(c_file)
+    if file_exists(out_binary):
+        file_delete(out_binary)

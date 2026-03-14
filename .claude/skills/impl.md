@@ -25,7 +25,7 @@
 | 12 | Duplication Check | review-agent | jscpd + semantic check |
 | 13 | Refactoring | code-agent | Files >800 lines split |
 | 14 | Full Test Suite | test-agent | All tests pass |
-| 15 | VCS Sync | main | Invoke `/git-jj-sync` |
+| 15 | VCS Sync | main | Invoke `/vcs` |
 
 ---
 
@@ -230,7 +230,7 @@ Assign model per task based on difficulty:
            ...
    ```
 5. Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
-6. See `/sspec` skill for template and conventions
+6. See `/test` skill for template and conventions
 
 ### Phase 6v: Test Verification
 
@@ -403,7 +403,7 @@ All tests must pass before proceeding to Phase 15. If failures occur, loop back 
 
 **Agent:** main
 
-1. Invoke `/git-jj-sync` workflow
+1. Invoke `/vcs` workflow
 2. Generate completion report: `doc/report/<feature>_complete_<date>.md`
 
 ---

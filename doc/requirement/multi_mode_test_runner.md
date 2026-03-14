@@ -133,7 +133,7 @@ fn main():
 - `src/compiler/70.backend/` — backends (C, LLVM, etc.)
 
 ## Cross-References
-- Research: `doc/research/multi_mode_test_runner.md`
-- Plan: `doc/plan/multi_mode_test_runner.md`
-- Design: `doc/design/multi_mode_test_runner.md`
-- System Tests: `test/system/multi_mode_test_runner_spec.spl`
+- Research: [`doc/research/multi_mode_test_runner.md`](../research/multi_mode_test_runner.md)
+- Plan: [`doc/plan/multi_mode_test_runner.md`](../plan/multi_mode_test_runner.md)
+- Design: [`doc/design/multi_mode_test_runner.md`](../design/multi_mode_test_runner.md)
+- System Tests: [`test/system/multi_mode_test_runner_spec.spl`](../../test/system/multi_mode_test_runner_spec.spl)

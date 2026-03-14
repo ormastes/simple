@@ -555,4 +555,4 @@ riscv64-unknown-elf-ld prog.o -o prog.elf -Ttext=0x80000000
 
 - Backend overview: `doc/guide/backend/backends.md`
 - GPU programming: `doc/guide/backend/gpu_programming.md`
-- SSpec framework: See `/sspec` skill
+- SSpec framework: See `/test` skill

@@ -1,7 +1,7 @@
 # Docs Agent - Documentation Writing
 
 **Use when:** Writing research docs, design docs, requirement docs, feature specs, guides, reports, updating TODO tracking.
-**Skills:** `/doc`, `/todo`, `/rule`, `/sspec`
+**Skills:** `/doc`, `/todo`, `/rule`, `/test`
 
 ## Documentation Types
 
