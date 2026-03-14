@@ -59,15 +59,28 @@ pub enum TestExecutionMode {
     Smf,
     /// Native binary mode (compile to ELF, run as subprocess)
     Native,
+    /// Composite platform mode (baremetal/remote targets)
+    /// Spec string stored in TestOptions::composite_spec
+    Composite,
 }
 
 impl TestExecutionMode {
     /// Parse from string (for CLI)
-    pub fn parse_str(s: &str) -> Option<Self> {
+    /// Returns (mode, optional_composite_spec)
+    pub fn parse_str(s: &str) -> Option<(Self, Option<String>)> {
         match s {
-            "interpreter" | "interp" => Some(Self::Interpreter),
-            "smf" | "loader" => Some(Self::Smf),
-            "native" | "binary" => Some(Self::Native),
+            "interpreter" | "interp" => Some((Self::Interpreter, None)),
+            "smf" | "loader" => Some((Self::Smf, None)),
+            "native" | "binary" => Some((Self::Native, None)),
+            s if s.contains("baremetal") || s.contains("remote") || s.contains("container") => {
+                // Composite platform spec like "native(baremetal(riscv32))"
+                let spec = if !s.starts_with("interpreter(") && !s.starts_with("smf(") && !s.starts_with("native(") {
+                    format!("interpreter({})", s)
+                } else {
+                    s.to_string()
+                };
+                Some((Self::Composite, Some(spec)))
+            }
             _ => None,
         }
     }
@@ -78,6 +91,7 @@ impl TestExecutionMode {
             Self::Interpreter => "interpreter",
             Self::Smf => "smf",
             Self::Native => "native",
+            Self::Composite => "composite",
         }
     }
 }
@@ -173,8 +187,10 @@ pub struct TestOptions {
     pub skip_features_planned_only: bool,
     /// Show tags in test output
     pub show_tags: bool,
-    /// Test execution mode (interpreter, smf, native)
+    /// Test execution mode (interpreter, smf, native, composite)
     pub execution_mode: TestExecutionMode,
+    /// Composite platform spec (e.g. "native(baremetal(riscv32))")
+    pub composite_spec: Option<String>,
     /// Force rebuild of cached test artifacts
     pub force_rebuild: bool,
     /// Keep compiled test artifacts after run
@@ -253,6 +269,7 @@ impl Default for TestOptions {
             skip_features_planned_only: false,
             show_tags: false,
             execution_mode: TestExecutionMode::Interpreter,
+            composite_spec: None,
             force_rebuild: false,
             keep_artifacts: false,
             safe_mode: false,

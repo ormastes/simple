@@ -661,6 +661,9 @@ fn execute_test_files(
                     }
                 }
             }
+            TestExecutionMode::Composite => {
+                super::execution::run_test_file_composite_mode(path, options)
+            }
             TestExecutionMode::Interpreter => {
                 // run_test_file_with_options handles both safe and normal mode.
                 // In normal mode, a fresh Runner is created per test to prevent memory leaks.

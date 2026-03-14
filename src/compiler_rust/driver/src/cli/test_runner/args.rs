@@ -141,9 +141,10 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             "--mode" => {
                 i += 1;
                 if i < args.len() {
-                    if let Some(mode) = TestExecutionMode::parse_str(&args[i]) {
+                    if let Some((mode, spec)) = TestExecutionMode::parse_str(&args[i]) {
                         options.execution_mode = mode;
-                        // SMF and native modes require safe mode (subprocess execution)
+                        options.composite_spec = spec;
+                        // Non-interpreter modes require safe mode (subprocess execution)
                         if mode != TestExecutionMode::Interpreter {
                             options.safe_mode = true;
                         }
@@ -154,8 +155,9 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             }
             arg if arg.starts_with("--mode=") => {
                 let mode_str = arg.trim_start_matches("--mode=");
-                if let Some(mode) = TestExecutionMode::parse_str(mode_str) {
+                if let Some((mode, spec)) = TestExecutionMode::parse_str(mode_str) {
                     options.execution_mode = mode;
+                    options.composite_spec = spec;
                     if mode != TestExecutionMode::Interpreter {
                         options.safe_mode = true;
                     }

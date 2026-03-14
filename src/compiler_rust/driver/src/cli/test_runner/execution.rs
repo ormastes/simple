@@ -629,6 +629,108 @@ pub fn run_test_file_native_mode(
     run_test_file_safe_mode(path, options)
 }
 
+/// Run a test file in composite mode (baremetal/remote targets).
+///
+/// Spawns a subprocess that invokes the Simple test runner entry point,
+/// which handles baremetal compilation → QEMU execution → output parsing.
+pub fn run_test_file_composite_mode(
+    path: &Path,
+    options: &super::types::TestOptions,
+) -> TestFileResult {
+    let start = Instant::now();
+
+    let spec = match &options.composite_spec {
+        Some(s) => s.clone(),
+        None => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: 0,
+                error: Some("Composite mode requires --mode=<spec> (e.g. native(baremetal(riscv32)))".to_string()),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let simple_binary = find_simple_binary();
+
+    // Run the composite test runner entry script
+    let entry_script = "src/app/composite_test_entry.spl";
+
+    let mut cmd = Command::new(&simple_binary);
+    cmd.arg(entry_script)
+        .arg(path)
+        .arg("--mode")
+        .arg(&spec)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if options.keep_artifacts {
+        cmd.arg("--keep-artifacts");
+    }
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Failed to spawn composite test runner: {}", e)),
+                individual_results: vec![],
+            };
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(options.safe_mode_timeout);
+    let wait_result = wait_with_timeout(child, timeout_duration);
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match wait_result {
+        Ok((exit_code, stdout, stderr)) => {
+            let combined_output = format!("{}\n{}", stdout, stderr);
+            let (passed, failed) = parse_test_output(&combined_output);
+            let error = if exit_code != 0 && failed == 0 {
+                Some(format!("Composite test exited with code {}: {}", exit_code,
+                    stderr.lines().last().unwrap_or("unknown error")))
+            } else if failed > 0 {
+                Some(stderr.lines().last().unwrap_or("test failure").to_string())
+            } else {
+                None
+            };
+
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error,
+                individual_results: vec![],
+            }
+        }
+        Err(_) => {
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(format!("Composite test timed out after {}s", options.safe_mode_timeout)),
+                individual_results: vec![],
+            }
+        }
+    }
+}
+
 /// Create a Runner for test execution with appropriate GC settings.
 fn create_test_runner(options: &super::types::TestOptions) -> Runner {
     if options.gc_off {
