@@ -105,7 +105,7 @@ jj describe -m "Migrate generic syntax from [] to <>"
 
 **Issue with Migration?**
 1. Run with dry-run first: `simple migrate --fix-generics --dry-run .`
-2. Check the troubleshooting guide in `GENERIC_SYNTAX_MIGRATION_SUMMARY.md`
+2. Check the troubleshooting guide in `generic_syntax_migration_summary.md`
 3. Report issues on GitHub with:
    - Source code that fails
    - Expected vs actual behavior

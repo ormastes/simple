@@ -5,7 +5,7 @@
 **Related Documents:**
 - [vulkan_dsl.md](../research/vulkan_dsl.md) - Vulkan DSL design
 - [gpu_simd/README.md](../spec/gpu_simd/README.md) - GPU/SIMD specification
-- [VULKAN_BACKEND_PLAN.md](../plans/VULKAN_BACKEND_PLAN.md) - Vulkan backend implementation
+- [vulkan_backend_plan.md](../plan/vulkan_backend_plan.md) - Vulkan backend implementation
 - [ui_framework_unified.md](../research/ui_framework_unified.md) - UI framework integration
 
 ## Executive Summary

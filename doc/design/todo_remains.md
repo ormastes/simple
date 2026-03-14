@@ -126,7 +126,7 @@ Add to GitHub Actions or Makefile CI:
 
 **12. Document in Team Chat**
 - Announce new TODO system
-- Link to `TODO_QUICKSTART.md`
+- Link to `todo_quickstart.md`
 - Explain workflow
 
 **Time:** 15-30 minutes
@@ -264,12 +264,12 @@ Everything else is optional future enhancements.
 - ✅ `simple todo-gen` command
 
 **Copy-paste ready:**
-- ✅ `TODO_MAKEFILE_INTEGRATION.md` → Makefile
-- ✅ `TODO_CONTRIBUTING_UPDATE.md` → CONTRIBUTING.md
+- ✅ `todo_makefile_integration.md` → Makefile
+- ✅ `todo_contributing_update.md` → CONTRIBUTING.md
 
 **Read first:**
-- ✅ `TODO_QUICKSTART.md` - How to use
-- ✅ `TODO_SYSTEM_COMPLETE.md` - Full status
+- ✅ `todo_quickstart.md` - How to use
+- ✅ `todo_system_complete.md` - Full status
 
 **Reference:**
 - ✅ `.claude/skills/todo.md` - Format spec

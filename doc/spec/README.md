@@ -43,7 +43,7 @@ These specs remain as architectural reference documentation. Test cases have bee
 **Totals:** 8 specs extracted, 157 examples
 
 **See Also:**
-- [Spec Quick Reference](SPEC_QUICK_REF.md) - How to write _spec.spl files
+- [Spec Quick Reference](spec_quick_ref.md) - How to write _spec.spl files
 
 ---
 

@@ -141,4 +141,4 @@ simple/
 
 - [startup_optimization.md](../research/startup_optimization.md) - Research document
 - [settlement_and_executable_packaging.md](settlement_and_executable_packaging.md) - Binary format design
-- [VULKAN_BACKEND_PLAN.md](VULKAN_BACKEND_PLAN.md) - GPU initialization
+- [vulkan_backend_plan.md](vulkan_backend_plan.md) - GPU initialization

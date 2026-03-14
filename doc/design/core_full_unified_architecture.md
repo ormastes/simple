@@ -160,7 +160,7 @@ instead of maintaining parallel implementations.
 
 ### LLVM Shared Infrastructure
 
-~1,300 lines of LLVM code duplicated between core and full (37% overlap per `LLVM_BACKEND_ARCHITECTURE.md`).
+~1,300 lines of LLVM code duplicated between core and full (37% overlap per `llvm_backend_architecture.md`).
 Move shared LLVM infra to `src/compiler_shared/llvm/`:
 
 | Shared Module | Content |

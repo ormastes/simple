@@ -228,8 +228,8 @@ Scales efficiently with codebase size:
 ### 📝 Documentation
 
 - [x] This document
-- [ ] Update `TODO_QUICKSTART.md` with parallel flag
-- [ ] Update `TODO_MAKEFILE_INTEGRATION.md` with fast targets
+- [ ] Update `todo_quickstart.md` with parallel flag
+- [ ] Update `todo_makefile_integration.md` with fast targets
 
 ---
 

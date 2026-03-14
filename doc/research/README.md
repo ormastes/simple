@@ -48,7 +48,7 @@ This directory contains in-depth research documents exploring:
 
 | Document | Topic | Status |
 |----------|-------|--------|
-| [3D_GAME_ENGINE_INTEGRATION_RESEARCH.md](3D_GAME_ENGINE_INTEGRATION_RESEARCH.md) | Godot/Unreal integration research | Research |
+| [3d_game_engine_integration_research.md](3d_game_engine_integration_research.md) | Godot/Unreal integration research | Research |
 | [game_engine_3d_integration.md](game_engine_3d_integration.md) | 3D engine architecture | Design |
 | [game_engine_architecture.md](game_engine_architecture.md) | Entity-component-system design | Design |
 | [game_engine_scene_graph.md](game_engine_scene_graph.md) | Scene hierarchy and transforms | Design |
@@ -59,9 +59,9 @@ This directory contains in-depth research documents exploring:
 |----------|-------|--------|
 | [async_ui_architecture.md](async_ui_architecture.md) | Async UI event handling | Design |
 | [electron_vscode_testing_2025.md](electron_vscode_testing_2025.md) | VSCode extension architecture | Research |
-| [REPL_BACKSPACE_LIMITATION.md](REPL_BACKSPACE_LIMITATION.md) | Terminal REPL input handling | Analysis |
-| [BACKSPACE_FIX_RESEARCH.md](BACKSPACE_FIX_RESEARCH.md) | Crossterm/ratatui backspace fixes | Research |
-| [TERMINAL_SEQUENCE_CAPTURE.md](TERMINAL_SEQUENCE_CAPTURE.md) | Raw terminal sequence capture | Research |
+| [repl_backspace_limitation.md](repl_backspace_limitation.md) | Terminal REPL input handling | Analysis |
+| [backspace_fix_research.md](backspace_fix_research.md) | Crossterm/ratatui backspace fixes | Research |
+| [terminal_sequence_capture.md](terminal_sequence_capture.md) | Raw terminal sequence capture | Research |
 
 ### API Design (4 documents + subdirectory)
 

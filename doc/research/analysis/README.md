@@ -12,7 +12,7 @@ This directory contains comprehensive duplication analysis for the Simple langua
 ### Phase 2.4: App Layer Analysis - COMPREHENSIVE (Feb 2026) ⭐ LATEST
 
 **Primary Files:**
-- [`PHASE2_SUMMARY.md`](PHASE2_SUMMARY.md) - Executive summary (352 lines) **START HERE**
+- [`phase2_summary.md`](phase2_summary.md) - Executive summary (352 lines) **START HERE**
 - [`phase2_app_duplicates.md`](phase2_app_duplicates.md) - Full analysis (791 lines)
 - [`phase2_duplication_examples.md`](phase2_duplication_examples.md) - Code examples (688 lines)
 
@@ -34,7 +34,7 @@ This directory contains comprehensive duplication analysis for the Simple langua
 
 **Files:**
 - [`phase2_std_duplicates.md`](phase2_std_duplicates.md) - Full analysis (583 lines)
-- [`DUPLICATION_QUICK_REFERENCE.md`](DUPLICATION_QUICK_REFERENCE.md) - Quick lookup table (214 lines)
+- [`duplication_quick_reference.md`](duplication_quick_reference.md) - Quick lookup table (214 lines)
 
 **Scope:** src/lib/ directory (899 files, 184,679 lines)
 

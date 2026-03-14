@@ -780,4 +780,4 @@ severity:{level}       # Warning severity
 - `doc/guide/doc_coverage_user_guide.md` - User-facing guide with examples
 - `src/app/doc_coverage/types/doc_item.spl` - DocItem struct definition
 - `src/app/doc_coverage/tagging/tag_generator.spl` - Tag generation implementation (to be created)
-- `DOC_COVERAGE_ENHANCEMENT_PLAN.md` - Overall enhancement plan
+- `doc_coverage_enhancement_plan.md` - Overall enhancement plan

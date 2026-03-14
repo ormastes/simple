@@ -305,6 +305,6 @@ In `@simd` kernels:
 
 ## Related Implementation Documentation
 
-- [Vulkan Backend Implementation Report](../report/VULKAN_BACKEND_IMPLEMENTATION_2025-12-26.md) - Vulkan/SPIR-V backend details
+- [Vulkan Backend Implementation Report](../report/vulkan_backend_implementation_2025-12-26.md) - Vulkan/SPIR-V backend details
 - [CPU SIMD Scheduling](../research/cpu_simd_scheduling.md) - CPU parallel backend with Rayon
 - [CUDA vs TBB Comparison](../research/cuda_tbb_entry_compare.md) - CUDA vs TBB comparison

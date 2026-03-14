@@ -45,16 +45,16 @@ The TODO database system is **fully implemented and ready to deploy**. All code 
 
 | Document | Purpose | Lines | Audience |
 |----------|---------|-------|----------|
-| `TODO_QUICKSTART.md` | Quick start guide | 500 | Users |
+| `todo_quickstart.md` | Quick start guide | 500 | Users |
 | `todo_db_plan.md` | Implementation plan | 450 | Developers |
 | `dual_language_todo_parsing.md` | Technical guide | 400 | Developers |
 | `todo_db_investigation_report.md` | System analysis | 400 | Developers |
-| `IMPLEMENTATION_SUMMARY.md` | Executive summary | 400 | Management |
+| `implementation_summary.md` | Executive summary | 400 | Management |
 | `todo_db_implementation_complete.md` | Completion report | 500 | Developers |
 | `todo_db_remaining_work.md` | Remaining tasks | 300 | Developers |
 | `dual_language_parsing_summary.md` | Quick reference | 200 | Users |
-| `TODO_MAKEFILE_INTEGRATION.md` | Makefile guide | 300 | DevOps |
-| `TODO_CONTRIBUTING_UPDATE.md` | Contributor guide | 400 | Contributors |
+| `todo_makefile_integration.md` | Makefile guide | 300 | DevOps |
+| `todo_contributing_update.md` | Contributor guide | 400 | Contributors |
 
 **Total:** 10 comprehensive documents covering all aspects.
 
@@ -65,7 +65,7 @@ The TODO database system is **fully implemented and ready to deploy**. All code 
 
 **Integration:**
 - `doc/design/TODO_MAKEFILE_INTEGRATION.md` - Ready-to-paste Makefile targets
-- `doc/design/TODO_CONTRIBUTING_UPDATE.md` - Ready-to-paste CONTRIBUTING.md section
+- `doc/design/todo_contributing_update.md` - Ready-to-paste CONTRIBUTING.md section
 
 **Reference:**
 - `.claude/skills/todo.md` - TODO format specification (already exists)
@@ -249,7 +249,7 @@ cat doc/TODO.md
 # Copy from: doc/design/TODO_MAKEFILE_INTEGRATION.md
 
 # 7. Update CONTRIBUTING.md
-# Copy from: doc/design/TODO_CONTRIBUTING_UPDATE.md
+# Copy from: doc/design/todo_contributing_update.md
 
 # 8. Test integration
 make check-todos
@@ -275,7 +275,7 @@ make gen-todos
 
 **Integration:**
 2. `doc/design/TODO_MAKEFILE_INTEGRATION.md` - Add to Makefile
-3. `doc/design/TODO_CONTRIBUTING_UPDATE.md` - Update contributor guide
+3. `doc/design/todo_contributing_update.md` - Update contributor guide
 
 **Planning:**
 4. `doc/design/todo_db_plan.md` - Master implementation plan
