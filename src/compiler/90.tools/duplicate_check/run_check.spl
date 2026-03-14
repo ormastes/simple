@@ -65,6 +65,23 @@ fn is_alnum(ch: i64) -> bool:
 fn is_whitespace(ch: i64) -> bool:
     ch == 32 or ch == 9 or ch == 10 or ch == 13
 
+# ── Character extraction ─────────────────────────────────────────────────────
+# Split source into individual character strings (avoids destructive substring)
+fn split_chars(source: text) -> [text]:
+    var chars = []
+    for ch in source:
+        chars.push(ch)
+    chars
+
+# Extract text from character array between positions [start, end)
+fn chars_slice(chars: [text], start_pos: i64, end_pos: i64) -> text:
+    var result = ""
+    var ci = start_pos
+    while ci < end_pos and ci < chars.len():
+        result = result + chars[ci]
+        ci = ci + 1
+    result
+
 # ── Token representation ─────────────────────────────────────────────────────
 # Parallel arrays for token data:
 #   tok_types:  [i64]   — 0=keyword, 1=identifier, 2=operator, 3=literal, 4=punctuation
@@ -74,14 +91,15 @@ fn is_whitespace(ch: i64) -> bool:
 # ── Inline tokenizer ─────────────────────────────────────────────────────────
 # Returns number of tokens produced; populates the parallel arrays passed in.
 fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]) -> i64:
-    val bytes = rt_text_to_bytes(source)
+    var bytes = rt_text_to_bytes(source)
+    var chars = split_chars(source)
     var pos = 0
     var line_num = 1
     var count = 0
-    val src_len = bytes.len()
+    var src_len = bytes.len()
 
     while pos < src_len:
-        val ch = bytes[pos]
+        var ch = bytes[pos]
 
         # ── Newline ──────────────────────────────────────────────────────
         if ch == 10:
@@ -112,12 +130,6 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
                     str_end = str_end + 1
             if str_end < src_len:
                 str_end = str_end + 1
-            var lit_text = ""
-            var li = pos
-            while li < str_end and li < src_len:
-                val lc = bytes[li]
-                # Build string char by char from bytes
-                li = li + 1
             out_types.push(3)
             out_values.push("_STR_")
             out_lines.push(line_num)
@@ -130,11 +142,6 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
             var num_end = pos + 1
             while num_end < src_len and (is_digit(bytes[num_end]) or bytes[num_end] == 46):
                 num_end = num_end + 1
-            # Collect the numeric text
-            var num_text = ""
-            var ni = pos
-            while ni < num_end:
-                ni = ni + 1
             out_types.push(3)
             out_values.push("_NUM_")
             out_lines.push(line_num)
@@ -147,8 +154,8 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
             var id_end = pos + 1
             while id_end < src_len and is_alnum(bytes[id_end]):
                 id_end = id_end + 1
-            # Extract identifier text via source substring
-            val id_text = source.substring(pos, id_end)
+            # Extract identifier text from char array (avoids destructive substring)
+            var id_text = chars_slice(chars, pos, id_end)
             if is_keyword(id_text):
                 out_types.push(0)
                 out_values.push(id_text)
@@ -195,7 +202,7 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
             is_two_char_op = true
 
         if is_two_char_op:
-            val op_text = source.substring(pos, pos + 2)
+            var op_text = chars_slice(chars, pos, pos + 2)
             out_types.push(2)
             out_values.push(op_text)
             out_lines.push(line_num)
@@ -213,9 +220,8 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
             is_op = true
 
         if is_op:
-            val sop_text = source.substring(pos, pos + 1)
             out_types.push(2)
-            out_values.push(sop_text)
+            out_values.push(chars[pos])
             out_lines.push(line_num)
             count = count + 1
             pos = pos + 1
@@ -229,9 +235,8 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
             is_punct = true
 
         if is_punct:
-            val punc_text = source.substring(pos, pos + 1)
             out_types.push(4)
-            out_values.push(punc_text)
+            out_values.push(chars[pos])
             out_lines.push(line_num)
             count = count + 1
             pos = pos + 1
@@ -245,7 +250,7 @@ fn tokenize(source: text, out_types: [i64], out_values: [text], out_lines: [i64]
 # ── Karp-Rabin token hash ────────────────────────────────────────────────────
 # Hash a single token value to a number for use in rolling hash
 fn hash_token_value(token_val: text) -> i64:
-    val codes = rt_text_to_bytes(token_val)
+    var codes = rt_text_to_bytes(token_val)
     var h = 0
     var ci = 0
     while ci < codes.len():
@@ -302,13 +307,13 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
     var file_idx = 0
     var total_tokens = 0
     for file_path in files:
-        val content = file_read(file_path)
+        var content = file_read(file_path)
         file_contents.push(content)
 
         var cur_types = []
         var cur_values = []
         var cur_lines = []
-        val tok_count = tokenize(content, cur_types, cur_values, cur_lines)
+        var tok_count = tokenize(content, cur_types, cur_values, cur_lines)
         total_tokens = total_tokens + tok_count
 
         # Store raw values for content verification
@@ -324,7 +329,8 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
         all_tok_lines.push(cur_lines)
 
         # Build token windows with Karp-Rabin rolling hash
-        if tok_count >= min_tokens:
+        # Guard: verify arrays were actually populated (interpreter param mutation bug)
+        if tok_count >= min_tokens and cur_lines.len() >= min_tokens:
             # Pre-hash all token values for this file
             var token_hashes = []
             var thi = 0
