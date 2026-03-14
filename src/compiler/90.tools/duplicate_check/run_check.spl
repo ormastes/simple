@@ -339,7 +339,7 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
                 thi = thi + 1
 
             # Compute base^(min_tokens-1) mod M for rolling removal
-            val base_power = pow_mod(31, min_tokens - 1, 1000000007)
+            var base_power = pow_mod(31, min_tokens - 1, 1000000007)
 
             # Compute hash of first window
             var rolling = 0
@@ -358,10 +358,14 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
             # Slide the window using Karp-Rabin rolling update
             var slide_pos = 1
             while slide_pos <= tok_count - min_tokens:
-                val old_tok = token_hashes[slide_pos - 1]
-                val new_tok = token_hashes[slide_pos + min_tokens - 1]
+                var old_tok_h = token_hashes[slide_pos - 1]
+                var new_tok_h = token_hashes[slide_pos + min_tokens - 1]
 
-                rolling = ((rolling - old_tok * base_power % 1000000007 + 1000000007) * 31 + new_tok) % 1000000007
+                # Rolling hash: remove leading token, add trailing token
+                # new = ((old - leading * base^(w-1)) * base + trailing) mod M
+                var remove_part = (old_tok_h * base_power) % 1000000007
+                rolling = rolling - remove_part + 1000000007
+                rolling = (rolling * 31 + new_tok_h) % 1000000007
                 if rolling < 0:
                     rolling = rolling + 1000000007
 
@@ -374,8 +378,17 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
 
         file_idx = file_idx + 1
 
-    val n = w_hashes.len()
+    var n = w_hashes.len()
     print "Tokenized {total_tokens} tokens, computed {n} windows from {files.len()} files"
+
+    if n == 0:
+        print ""
+        print "=== Summary ==="
+        print "Files scanned: {files.len()}"
+        print "Total tokens: {total_tokens}"
+        print "Duplicate groups: 0"
+        print "Total duplicated tokens: 0"
+        return
 
     # Phase 2: Sort indices by hash for O(n log n) grouping
     var indices = []
@@ -392,14 +405,14 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
     var i = 0
 
     while i < n:
-        val current_hash = w_hashes[indices[i]]
+        var current_hash = w_hashes[indices[i]]
 
         # Find end of group with same hash
         var group_end = i + 1
         while group_end < n and w_hashes[indices[group_end]] == current_hash:
             group_end = group_end + 1
 
-        val group_size = group_end - i
+        var group_size = group_end - i
 
         # Only process groups with 2+ entries (potential duplicates)
         if group_size >= 2 and group_size <= 100:
@@ -408,25 +421,25 @@ fn find_duplicates(files: [text], min_tokens: i64, do_normalize: bool):
             while gi < group_end:
                 var gj = gi + 1
                 while gj < group_end:
-                    val idx_a = indices[gi]
-                    val idx_b = indices[gj]
-                    val file_a = w_file_idx[idx_a]
-                    val file_b = w_file_idx[idx_b]
-                    val tok_start_a = w_tok_starts[idx_a]
-                    val tok_start_b = w_tok_starts[idx_b]
+                    var idx_a = indices[gi]
+                    var idx_b = indices[gj]
+                    var file_a = w_file_idx[idx_a]
+                    var file_b = w_file_idx[idx_b]
+                    var tok_start_a = w_tok_starts[idx_a]
+                    var tok_start_b = w_tok_starts[idx_b]
 
                     # Skip same-file overlapping windows
                     var should_skip = false
                     if file_a == file_b:
-                        val diff = tok_start_b - tok_start_a
+                        var diff = tok_start_b - tok_start_a
                         if diff < min_tokens and diff > (0 - min_tokens):
                             should_skip = true
 
                     if not should_skip:
                         # Verify actual content match (not just hash collision)
                         # Use the effective (possibly normalized) values
-                        val vals_a = all_tok_values[file_a]
-                        val vals_b = all_tok_values[file_b]
+                        var vals_a = all_tok_values[file_a]
+                        var vals_b = all_tok_values[file_b]
                         var is_match = true
                         var mk = 0
                         while mk < min_tokens:
