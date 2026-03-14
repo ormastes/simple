@@ -1,0 +1,168 @@
+# feature/cli/parser_setup — CLI parser structs and parsing
+
+struct ArgDef:
+    name: text
+    short: text
+    description: text
+    is_required: bool
+    default_value: text?
+    arg_kind: text
+
+struct SubcommandDef:
+    name: text
+    description: text
+    aliases: [text]
+
+struct ParsedResult:
+    flags: Dict<text, bool>
+    options: Dict<text, text>
+    positionals: [text]
+    subcommand: text?
+    subcommand_args: [text]
+
+impl ParsedResult:
+    fn get_flag(name: text) -> bool:
+        self.flags.get(name) ?? false
+
+    fn get_option(name: text) -> text?:
+        self.options.get(name)
+
+    fn get_option_or(name: text, default: text) -> text:
+        self.options.get(name) ?? default
+
+    fn has_subcommand() -> bool:
+        self.subcommand.?
+
+    fn get_subcommand() -> text?:
+        self.subcommand
+
+    fn get_subcommand_args() -> [text]:
+        self.subcommand_args
+
+struct SimpleParser:
+    program_name: text
+    description: text
+    args: [ArgDef]
+    subcommands: [SubcommandDef]
+    auto_stage: bool
+
+impl SimpleParser:
+    fn flag(name: text, short: text, description: text) -> SimpleParser:
+        var new_args = self.args
+        new_args.push(ArgDef(
+            name: name, short: short, description: description,
+            is_required: false, default_value: nil, arg_kind: "flag"
+        ))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: new_args, subcommands: self.subcommands, auto_stage: self.auto_stage
+        )
+
+    fn option(name: text, short: text, description: text, required: bool, default_value: text?) -> SimpleParser:
+        var new_args = self.args
+        new_args.push(ArgDef(
+            name: name, short: short, description: description,
+            is_required: required, default_value: default_value, arg_kind: "option"
+        ))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: new_args, subcommands: self.subcommands, auto_stage: self.auto_stage
+        )
+
+    fn subcommand(name: text, description: text) -> SimpleParser:
+        var new_subs = self.subcommands
+        new_subs.push(SubcommandDef(name: name, description: description, aliases: []))
+        SimpleParser(
+            program_name: self.program_name, description: self.description,
+            args: self.args, subcommands: new_subs, auto_stage: self.auto_stage
+        )
+
+    fn parse(input_args: [text]) -> Result<ParsedResult, text>:
+        var flags: Dict<text, bool> = {}
+        var options: Dict<text, text> = {}
+        var positionals: [text] = []
+        var subcommand: text? = nil
+        var subcommand_args: [text] = []
+
+        for a in self.args:
+            if a.arg_kind == "flag":
+                flags[a.name] = false
+            if a.arg_kind == "option" and a.default_value.?:
+                options[a.name] = a.default_value.unwrap()
+
+        var i = 0
+        while i < input_args.len():
+            val arg = input_args[i]
+
+            if not arg.starts_with("-") and subcommand == nil and self.subcommands.len() > 0:
+                var found = false
+                for s in self.subcommands:
+                    if s.name == arg:
+                        subcommand = Some(s.name)
+                        found = true
+                        break
+                if found:
+                    var j = i + 1
+                    while j < input_args.len():
+                        subcommand_args.push(input_args[j])
+                        j = j + 1
+                    break
+
+            if arg.starts_with("--"):
+                val rest = arg[2:arg.len()]
+                if rest.contains("="):
+                    val eq_pos = rest.index_of("=") ?? 0
+                    val name = rest[0:eq_pos]
+                    val value = rest[eq_pos + 1:rest.len()]
+                    options[name] = value
+                else:
+                    var is_flag = false
+                    for a in self.args:
+                        if a.arg_kind == "flag" and a.name == rest:
+                            flags[rest] = true
+                            is_flag = true
+                            break
+                    if not is_flag:
+                        if i + 1 < input_args.len():
+                            i = i + 1
+                            options[rest] = input_args[i]
+                        else:
+                            return Err("Option --" + rest + " requires a value")
+            elif arg.starts_with("-") and arg.len() > 1:
+                val ch = arg[1:2]
+                var is_flag = false
+                for a in self.args:
+                    if a.arg_kind == "flag" and a.short == ch:
+                        flags[a.name] = true
+                        is_flag = true
+                        break
+                if not is_flag:
+                    if i + 1 < input_args.len():
+                        i = i + 1
+                        var opt_name = ch
+                        for a in self.args:
+                            if a.arg_kind == "option" and a.short == ch:
+                                opt_name = a.name
+                                break
+                        options[opt_name] = input_args[i]
+            else:
+                positionals.push(arg)
+
+            i = i + 1
+
+        Ok(ParsedResult(
+            flags: flags,
+            options: options,
+            positionals: positionals,
+            subcommand: subcommand,
+            subcommand_args: subcommand_args
+        ))
+
+fn simple_parser(name: text, description: text) -> SimpleParser:
+    SimpleParser(
+        program_name: name,
+        description: description,
+        args: [],
+        subcommands: [],
+        auto_stage: true
+    )

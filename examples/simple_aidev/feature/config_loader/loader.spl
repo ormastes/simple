@@ -1,0 +1,88 @@
+# feature/config_loader — SDN config file parser
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+fn _load_config(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return false
+    var current_section = ""
+    var current_agent_id = ""
+    _parse_lines_with_indent(content)
+    var line_idx = 0
+    while line_idx < _PARSED_COUNT:
+        val trimmed = _PARSED_LINES[line_idx]
+        val indent = _PARSED_INDENTS[line_idx]
+        line_idx = line_idx + 1
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed[0:colon_pos].trim()
+        var value = ""
+        val tlen = trimmed.len()
+        if colon_pos + 1 < tlen:
+            value = trimmed[colon_pos + 1:tlen].trim()
+        value = _resolve_env(value)
+        if indent == 0:
+            current_section = key
+            current_agent_id = ""
+            continue
+        if current_section == "project":
+            if key == "name":
+                CFG_PROJECT_NAME = value
+            elif key == "version":
+                CFG_PROJECT_VERSION = value
+        elif current_section == "routing":
+            if key == "default_agent":
+                CFG_DEFAULT_AGENT = value
+            elif key == "fallback_agent":
+                CFG_FALLBACK_AGENT = value
+            elif key == "strategy":
+                CFG_STRATEGY = value
+        elif current_section == "task_queue":
+            if key == "persistence_path":
+                CFG_TASK_PERSISTENCE_PATH = value
+            elif key == "max_items":
+                CFG_TASK_MAX_ITEMS = int(value)
+        elif current_section == "themes":
+            if key == "directory":
+                CFG_THEMES_DIR = value
+        elif current_section == "agents":
+            if indent <= 4 and value == "":
+                current_agent_id = key
+                REG_IDS = REG_IDS + [current_agent_id]
+                REG_PROVIDERS = REG_PROVIDERS + [""]
+                REG_CLI_PATHS = REG_CLI_PATHS + [""]
+                REG_MODELS = REG_MODELS + [""]
+                REG_BASE_URLS = REG_BASE_URLS + [""]
+                REG_SYSTEM_PROMPTS = REG_SYSTEM_PROMPTS + [""]
+                REG_CAPABILITIES = REG_CAPABILITIES + [""]
+                REG_API_KEYS = REG_API_KEYS + [""]
+                REG_COUNT = REG_COUNT + 1
+            elif current_agent_id != "":
+                val idx = REG_COUNT - 1
+                if key == "provider":
+                    REG_PROVIDERS[idx] = value
+                elif key == "cli_path":
+                    REG_CLI_PATHS[idx] = value
+                elif key == "model":
+                    REG_MODELS[idx] = value
+                elif key == "base_url":
+                    REG_BASE_URLS[idx] = value
+                elif key == "system_prompt":
+                    REG_SYSTEM_PROMPTS[idx] = value
+                elif key == "capabilities":
+                    var caps = value
+                    if caps.starts_with("["):
+                        val clen1 = caps.len()
+                        caps = caps[1:clen1]
+                    if caps.ends_with("]"):
+                        val clen2 = caps.len()
+                        caps = caps[0:clen2 - 1]
+                    REG_CAPABILITIES[idx] = caps.replace(" ", "")
+    true

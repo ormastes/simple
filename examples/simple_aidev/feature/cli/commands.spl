@@ -1,0 +1,186 @@
+# feature/cli/commands — All command handlers
+
+fn _handle_chat(args: [text]) -> text:
+    var agent_id = ""
+    var room_name = ""
+    var message_parts: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--agent" and i + 1 < args.len():
+            i = i + 1
+            agent_id = args[i]
+        elif arg == "--room" and i + 1 < args.len():
+            i = i + 1
+            room_name = args[i]
+        else:
+            message_parts.push(arg)
+        i = i + 1
+    if message_parts.len() == 0:
+        return "Usage: simple-aidev chat [--agent <id>] <message>"
+    val message = message_parts.join(" ")
+    if agent_id == "":
+        agent_id = CFG_DEFAULT_AGENT
+    if room_name != "":
+        return _handle_room_chat(room_name, message)
+    CHAT_AGENT_ID = agent_id
+    val result = _dispatch_send(agent_id, message)
+    if result.1 != "":
+        return "Error: " + result.1
+    result.0
+
+fn _handle_room_chat(room_name: text, message: text) -> text:
+    var responses: [text] = []
+    var i = 0
+    while i < REG_COUNT:
+        val agent_id = REG_IDS[i]
+        val result = _dispatch_send(agent_id, message)
+        if result.1 != "":
+            responses = responses + ["[" + agent_id + "] Error: " + result.1]
+        else:
+            responses = responses + ["[" + agent_id + "] " + result.0]
+        i = i + 1
+    "Room: " + room_name + "\n\n" + responses.join("\n\n")
+
+fn _handle_agent(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev agent <list|test <id>>"
+    val sub = args[0]
+    if sub == "list":
+        var parts: [text] = []
+        parts.push("Registered Agents:")
+        var i = 0
+        while i < REG_COUNT:
+            val caps = REG_CAPABILITIES[i]
+            parts.push("  " + REG_IDS[i] + " (" + REG_PROVIDERS[i] + ", model=" + REG_MODELS[i] + ", caps=[" + caps + "])")
+            i = i + 1
+        if REG_COUNT == 0:
+            parts.push("  (no agents registered)")
+        return parts.join("\n")
+    elif sub == "test":
+        if args.len() < 2:
+            return "Usage: simple-aidev agent test <id>"
+        val id = args[1]
+        val idx = _registry_find_index(id)
+        if idx < 0:
+            return "Agent not found: " + id
+        val provider = REG_PROVIDERS[idx]
+        if provider == "claude_cli":
+            val cli = REG_CLI_PATHS[idx]
+            var cmd = cli
+            if cmd == "":
+                cmd = "claude"
+            val result = rt_process_run(cmd, ["--version"])
+            val exit_code = result.2
+            if exit_code != 0:
+                return "FAIL: " + id + " - claude CLI not available"
+            return "OK: " + id + " - " + (result.0 ?? "").trim()
+        elif provider == "gemini_cli":
+            val cli = REG_CLI_PATHS[idx]
+            var cmd = cli
+            if cmd == "":
+                cmd = "gemini"
+            val result = rt_process_run(cmd, ["--version"])
+            val exit_code = result.2
+            if exit_code != 0:
+                return "FAIL: " + id + " - gemini CLI not available"
+            return "OK: " + id + " - " + (result.0 ?? "").trim()
+        elif provider == "openai_compat":
+            return "OK: " + id + " - openai_compat (connectivity test not implemented)"
+        return "Unknown provider: " + provider
+    "Unknown agent command: " + sub
+
+fn _handle_task(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev task <add|list|run>"
+    val sub = args[0]
+    if sub == "add":
+        if args.len() < 2:
+            return "Usage: simple-aidev task add <content>"
+        var content_parts: [text] = []
+        var priority = 0
+        var i = 1
+        while i < args.len():
+            if args[i] == "--priority" and i + 1 < args.len():
+                i = i + 1
+                priority = int(args[i])
+            else:
+                content_parts.push(args[i])
+            i = i + 1
+        val content = content_parts.join(" ")
+        val id = _task_add(content, priority)
+        return "Added task: " + id + " (priority=" + priority.to_text() + ")"
+    elif sub == "list":
+        return "Tasks:\n" + _task_list_text()
+    elif sub == "run":
+        var run_all = false
+        if args.len() > 1 and args[1] == "--all":
+            run_all = true
+        if run_all:
+            return _task_run_all()
+        return _task_run_one()
+    "Unknown task command: " + sub
+
+fn _handle_theme(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: simple-aidev theme <list|create <name>>"
+    val sub = args[0]
+    if sub == "list":
+        return "Themes:\n" + _theme_list_text()
+    elif sub == "create":
+        if args.len() < 2:
+            return "Usage: simple-aidev theme create <name>"
+        return _theme_create(args[1])
+    "Unknown theme command: " + sub
+
+fn _handle_config(args: [text]) -> text:
+    var parts: [text] = []
+    parts.push("Configuration:")
+    parts.push("  Project: " + CFG_PROJECT_NAME + " v" + CFG_PROJECT_VERSION)
+    parts.push("  Default Agent: " + CFG_DEFAULT_AGENT)
+    parts.push("  Fallback Agent: " + CFG_FALLBACK_AGENT)
+    parts.push("  Strategy: " + CFG_STRATEGY)
+    var tmp_max = CFG_TASK_MAX_ITEMS
+    parts.push("  Task Queue: " + CFG_TASK_PERSISTENCE_PATH + " (max " + tmp_max.to_text() + ")")
+    parts.push("  Themes Dir: " + CFG_THEMES_DIR)
+    parts.push("")
+    parts.push("  Agents:")
+    var i = 0
+    while i < REG_COUNT:
+        parts.push("    " + REG_IDS[i] + " (" + REG_PROVIDERS[i] + ")")
+        i = i + 1
+    parts.join("\n")
+
+fn _handle_init(args: [text]) -> text:
+    var name = "my-aidev-project"
+    if args.len() > 0:
+        name = args[0]
+    rt_dir_create_all(name)
+    rt_dir_create_all(name + "/themes")
+    rt_dir_create_all(name + "/data")
+    var cfg_parts: [text] = []
+    cfg_parts.push("project:")
+    cfg_parts.push("  name: " + name)
+    cfg_parts.push("  version: 1.0.0")
+    cfg_parts.push("")
+    cfg_parts.push("agents:")
+    cfg_parts.push("  claude:")
+    cfg_parts.push("    provider: claude_cli")
+    cfg_parts.push("    cli_path: claude")
+    cfg_parts.push("    model: claude-sonnet-4-20250514")
+    cfg_parts.push("    system_prompt: You are a helpful coding assistant.")
+    cfg_parts.push("    capabilities: [code, review, research, test]")
+    cfg_parts.push("")
+    cfg_parts.push("routing:")
+    cfg_parts.push("  default_agent: claude")
+    cfg_parts.push("  strategy: capability")
+    cfg_parts.push("")
+    cfg_parts.push("task_queue:")
+    cfg_parts.push("  persistence_path: data/task_queue.sdn")
+    cfg_parts.push("  max_items: 100")
+    cfg_parts.push("")
+    cfg_parts.push("themes:")
+    cfg_parts.push("  directory: themes")
+    cfg_parts.push("  auto_load: true")
+    rt_file_write_text(name + "/config.sdn", cfg_parts.join("\n") + "\n")
+    "Initialized project: " + name + "/\n  config.sdn\n  themes/\n  data/"

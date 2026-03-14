@@ -1,14 +1,745 @@
 # simple-aidev - AI Development Platform
 #
 # Multi-LLM agent coordination with theme-based architecture.
-# Implements chat, task queue, agent management, and theme discovery.
+# MDSOC Architecture: entity/ feature/ transform/ shared/
+#
+# This file is self-contained for interpreter mode.
+# Canonical source modules are in the MDSOC directory structure.
 
+# All extern declarations (consolidated, no duplicates)
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
-# ============================================================================
-# CLI Parser Setup
-# ============================================================================
+# === entity/config/config_state.spl ===
+
+struct RoutingRule:
+    pattern: text
+    agent: text
+
+fn routing_rule(pattern: text, agent: text) -> RoutingRule:
+    RoutingRule(pattern: pattern, agent: agent)
+
+# Module-level config state
+var CFG_PROJECT_NAME = "simple-aidev"
+var CFG_PROJECT_VERSION = "1.0.0"
+var CFG_DEFAULT_AGENT = "claude"
+var CFG_FALLBACK_AGENT = "ollama"
+var CFG_STRATEGY = "capability"
+var CFG_TASK_PERSISTENCE_PATH = "data/task_queue.sdn"
+var CFG_TASK_MAX_ITEMS = 100
+var CFG_THEMES_DIR = "themes"
+var CFG_THEMES_AUTO_LOAD = true
+
+# Agent registry (parallel arrays + manual counter)
+var REG_IDS: [text] = []
+var REG_PROVIDERS: [text] = []
+var REG_CLI_PATHS: [text] = []
+var REG_MODELS: [text] = []
+var REG_BASE_URLS: [text] = []
+var REG_SYSTEM_PROMPTS: [text] = []
+var REG_CAPABILITIES: [text] = []
+var REG_API_KEYS: [text] = []
+var REG_COUNT = 0  # manual counter (.len() bug workaround)
+
+# Task queue state (parallel arrays + manual counter)
+var TQ_IDS: [text] = []
+var TQ_CONTENTS: [text] = []
+var TQ_PRIORITIES: [i64] = []
+var TQ_STATUSES: [text] = []
+var TQ_AGENT_IDS: [text] = []
+var TQ_RESULTS: [text] = []
+var TQ_ERRORS: [text] = []
+var TQ_NEXT_ID = 1
+var TQ_COUNT = 0  # manual counter
+
+# Chat session state
+var CHAT_SESSION_ID = ""
+var CHAT_AGENT_ID = ""
+
+# Routing rules
+var CFG_RULE_PATTERNS: [text] = []
+var CFG_RULE_AGENTS: [text] = []
+
+# Config loaded flag
+var APP_CONFIG_LOADED = false
+var APP_BASE_DIR = ""
+
+# === entity/agent/agent_config.spl ===
+
+struct AgentConfig:
+    id: text
+    provider: text       # "claude_cli", "openai_compat", "gemini_cli"
+    cli_path: text
+    model: text
+    base_url: text
+    system_prompt: text
+    capabilities: [text]
+    api_key: text
+
+fn agent_config(id: text, provider: text) -> AgentConfig:
+    AgentConfig(
+        id: id,
+        provider: provider,
+        cli_path: "",
+        model: "",
+        base_url: "",
+        system_prompt: "",
+        capabilities: [],
+        api_key: ""
+    )
+
+fn agent_config_full(id: text, provider: text, cli_path: text, model: text,
+                     base_url: text, system_prompt: text,
+                     capabilities: [text]) -> AgentConfig:
+    AgentConfig(
+        id: id,
+        provider: provider,
+        cli_path: cli_path,
+        model: model,
+        base_url: base_url,
+        system_prompt: system_prompt,
+        capabilities: capabilities,
+        api_key: ""
+    )
+
+impl AgentConfig:
+    fn has_capability(cap: text) -> bool:
+        for c in self.capabilities:
+            if c == cap:
+                return true
+        false
+
+    fn to_text() -> text:
+        "Agent(" + self.id + ", " + self.provider + ", model=" + self.model + ")"
+
+# === entity/task/task.spl ===
+
+struct Task:
+    id: text
+    content: text
+    priority: i64
+    status: text         # "pending", "running", "completed", "failed"
+    agent_id: text
+    capability: text
+    result: text
+    error: text
+    created_at: text
+
+fn task_new(id: text, content: text) -> Task:
+    Task(
+        id: id,
+        content: content,
+        priority: 0,
+        status: "pending",
+        agent_id: "",
+        capability: "",
+        result: "",
+        error: "",
+        created_at: ""
+    )
+
+fn task_with_priority(id: text, content: text, priority: i64) -> Task:
+    Task(
+        id: id,
+        content: content,
+        priority: priority,
+        status: "pending",
+        agent_id: "",
+        capability: "",
+        result: "",
+        error: "",
+        created_at: ""
+    )
+
+impl Task:
+    fn is_pending() -> bool:
+        self.status == "pending"
+
+    fn is_completed() -> bool:
+        self.status == "completed"
+
+    fn is_failed() -> bool:
+        self.status == "failed"
+
+    fn to_text() -> text:
+        "Task(" + self.id + ", " + self.status + ", p=" + self.priority.to_text() + ")"
+
+struct TaskResult:
+    task_id: text
+    agent_id: text
+    content: text
+    error: text
+    success: bool
+
+fn task_result_ok(task_id: text, agent_id: text, content: text) -> TaskResult:
+    TaskResult(
+        task_id: task_id,
+        agent_id: agent_id,
+        content: content,
+        error: "",
+        success: true
+    )
+
+fn task_result_err(task_id: text, agent_id: text, error: text) -> TaskResult:
+    TaskResult(
+        task_id: task_id,
+        agent_id: agent_id,
+        content: "",
+        error: error,
+        success: false
+    )
+
+# === entity/theme/theme_manifest.spl ===
+
+struct ThemeManifest:
+    name: text
+    description: text
+    version: text
+    directory: text
+    default_agent: text
+    capabilities: [text]
+
+fn theme_manifest(name: text, description: text, directory: text) -> ThemeManifest:
+    ThemeManifest(
+        name: name,
+        description: description,
+        version: "1.0.0",
+        directory: directory,
+        default_agent: "",
+        capabilities: []
+    )
+
+impl ThemeManifest:
+    fn to_text() -> text:
+        "Theme(" + self.name + ", v" + self.version + ")"
+
+# === shared/json_helpers.spl ===
+
+fn _extract_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json[start:json.len()].trim()
+    if not after.starts_with(quote):
+        return ""
+    val rest = after[1:after.len()]
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest[0:end]
+        end = end + 1
+    ""
+
+fn _extract_bool(json: text, key: text) -> bool:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return false
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val after = json[start:json.len()].trim()
+    after.starts_with("true")
+
+# === shared/env_resolver.spl ===
+
+fn _resolve_env(value: text) -> text:
+    if not value.contains("$"):
+        return value
+    var out_parts: [text] = []
+    var i = 0
+    while i < value.len():
+        if value[i:i + 1] == "$":
+            var j = i + 1
+            var has_brace = false
+            if j < value.len() and value[j:j + 1] == "{":
+                has_brace = true
+                j = j + 1
+            var name_start = j
+            while j < value.len():
+                val ch = value[j:j + 1]
+                if has_brace and ch == "}":
+                    break
+                if not has_brace:
+                    val is_alnum = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+                    if not is_alnum:
+                        break
+                j = j + 1
+            val var_name = value[name_start:j]
+            if has_brace and j < value.len():
+                j = j + 1
+            val env_val = rt_env_get(var_name) ?? ""
+            out_parts.push(env_val)
+            i = j
+        else:
+            out_parts.push(value[i:i + 1])
+            i = i + 1
+    out_parts.join("")
+
+# === shared/sdn_parser.spl ===
+
+# Parsed line storage
+var _PARSED_LINES: [text] = []
+var _PARSED_INDENTS: [i64] = []
+var _PARSED_COUNT = 0
+
+fn _parse_lines_with_indent(content: text):
+    _PARSED_LINES = []
+    _PARSED_INDENTS = []
+    _PARSED_COUNT = 0
+    var line_starts: [i64] = []
+    var line_ends: [i64] = []
+    var start = 0
+    var pos = 0
+    val clen = content.len()
+    while pos < clen:
+        val ch = content[pos:pos + 1]
+        if ch == "\n":
+            line_starts = line_starts + [start]
+            line_ends = line_ends + [pos]
+            start = pos + 1
+        pos = pos + 1
+    if start < clen:
+        line_starts = line_starts + [start]
+        line_ends = line_ends + [clen]
+    var li = 0
+    for ls in line_starts:
+        val le = line_ends[li]
+        var spaces = 0
+        var sp = ls
+        while sp < le:
+            val sc = content[sp:sp + 1]
+            if sc == " ":
+                spaces = spaces + 1
+            else:
+                break
+            sp = sp + 1
+        val trimmed_start = ls + spaces
+        if trimmed_start < le:
+            val line_text = content[trimmed_start:le]
+            val final_text = line_text.trim()
+            if final_text != "":
+                _PARSED_LINES = _PARSED_LINES + [final_text]
+                _PARSED_INDENTS = _PARSED_INDENTS + [spaces]
+                _PARSED_COUNT = _PARSED_COUNT + 1
+        li = li + 1
+
+# === transform/provider/claude.spl ===
+
+fn _send_claude(idx: i64, prompt: text) -> (text, text):
+    var cmd = REG_CLI_PATHS[idx]
+    if cmd == "":
+        cmd = "claude"
+    var args: [text] = []
+    args = args + ["--dangerously-skip-permissions"]
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    val model = REG_MODELS[idx]
+    if model != "":
+        args = args + ["--model", model]
+    val sys_prompt = REG_SYSTEM_PROMPTS[idx]
+    if sys_prompt != "":
+        args = args + ["--system-prompt", sys_prompt]
+    if CHAT_SESSION_ID != "":
+        args = args + ["--resume", CHAT_SESSION_ID]
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "claude CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    val content = _extract_string(stdout, "result")
+    val sess = _extract_string(stdout, "session_id")
+    val is_err = _extract_bool(stdout, "is_error")
+    if sess != "":
+        CHAT_SESSION_ID = sess
+    if is_err:
+        return ("", content)
+    (content, "")
+
+# === transform/provider/gemini.spl ===
+
+fn _send_gemini(idx: i64, prompt: text) -> (text, text):
+    var cmd = REG_CLI_PATHS[idx]
+    if cmd == "":
+        cmd = "gemini"
+    var args: [text] = []
+    args = args + ["--sandbox", "off"]
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    val model = REG_MODELS[idx]
+    if model != "":
+        args = args + ["--model", model]
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err = "gemini CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return ("", err)
+    val content = _extract_string(stdout, "response")
+    val error_val = _extract_string(stdout, "error")
+    if error_val != "":
+        return ("", error_val)
+    (content, "")
+
+# === transform/provider/ollama.spl ===
+
+fn _send_openai_compat(idx: i64, prompt: text) -> (text, text):
+    var base_url = REG_BASE_URLS[idx]
+    if base_url == "":
+        base_url = "http://localhost:11434"
+    val url = base_url + "/v1/chat/completions"
+    var model = REG_MODELS[idx]
+    if model == "":
+        model = "llama3"
+    val q = "\""
+    val body = "{" + q + "model" + q + ":" + q + model + q + "," + q + "messages" + q + ":[{" + q + "role" + q + ":" + q + "user" + q + "," + q + "content" + q + ":" + q + prompt + q + "}]}"
+    val headers = "Content-Type: application/json"
+    val result = rt_http_request("POST", url, headers, body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return ("", "HTTP error: " + http_error)
+    val content = _extract_string(resp_body, "content")
+    (content, "")
+
+# === transform/provider/bridge.spl ===
+
+fn _registry_find_index(id: text) -> i64:
+    var i = 0
+    while i < REG_COUNT:
+        if REG_IDS[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _registry_find_by_capability(capability: text) -> [text]:
+    var matches: [text] = []
+    var i = 0
+    while i < REG_COUNT:
+        val caps = REG_CAPABILITIES[i].split(",")
+        for cap in caps:
+            if cap.trim() == capability:
+                matches = matches + [REG_IDS[i]]
+                break
+        i = i + 1
+    matches
+
+fn _dispatch_send(agent_id: text, prompt: text) -> (text, text):
+    val idx = _registry_find_index(agent_id)
+    if idx < 0:
+        return ("", "Agent not found: " + agent_id)
+    val provider = REG_PROVIDERS[idx]
+    if provider == "claude_cli":
+        return _send_claude(idx, prompt)
+    elif provider == "gemini_cli":
+        return _send_gemini(idx, prompt)
+    elif provider == "openai_compat":
+        return _send_openai_compat(idx, prompt)
+    ("", "Unsupported provider: " + provider)
+
+# === feature/config_loader/loader.spl ===
+
+fn _load_config(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return false
+    var current_section = ""
+    var current_agent_id = ""
+    _parse_lines_with_indent(content)
+    var line_idx = 0
+    while line_idx < _PARSED_COUNT:
+        val trimmed = _PARSED_LINES[line_idx]
+        val indent = _PARSED_INDENTS[line_idx]
+        line_idx = line_idx + 1
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed[0:colon_pos].trim()
+        var value = ""
+        val tlen = trimmed.len()
+        if colon_pos + 1 < tlen:
+            value = trimmed[colon_pos + 1:tlen].trim()
+        value = _resolve_env(value)
+        if indent == 0:
+            current_section = key
+            current_agent_id = ""
+            continue
+        if current_section == "project":
+            if key == "name":
+                CFG_PROJECT_NAME = value
+            elif key == "version":
+                CFG_PROJECT_VERSION = value
+        elif current_section == "routing":
+            if key == "default_agent":
+                CFG_DEFAULT_AGENT = value
+            elif key == "fallback_agent":
+                CFG_FALLBACK_AGENT = value
+            elif key == "strategy":
+                CFG_STRATEGY = value
+        elif current_section == "task_queue":
+            if key == "persistence_path":
+                CFG_TASK_PERSISTENCE_PATH = value
+            elif key == "max_items":
+                CFG_TASK_MAX_ITEMS = int(value)
+        elif current_section == "themes":
+            if key == "directory":
+                CFG_THEMES_DIR = value
+        elif current_section == "agents":
+            if indent <= 4 and value == "":
+                current_agent_id = key
+                REG_IDS = REG_IDS + [current_agent_id]
+                REG_PROVIDERS = REG_PROVIDERS + [""]
+                REG_CLI_PATHS = REG_CLI_PATHS + [""]
+                REG_MODELS = REG_MODELS + [""]
+                REG_BASE_URLS = REG_BASE_URLS + [""]
+                REG_SYSTEM_PROMPTS = REG_SYSTEM_PROMPTS + [""]
+                REG_CAPABILITIES = REG_CAPABILITIES + [""]
+                REG_API_KEYS = REG_API_KEYS + [""]
+                REG_COUNT = REG_COUNT + 1
+            elif current_agent_id != "":
+                val idx = REG_COUNT - 1
+                if key == "provider":
+                    REG_PROVIDERS[idx] = value
+                elif key == "cli_path":
+                    REG_CLI_PATHS[idx] = value
+                elif key == "model":
+                    REG_MODELS[idx] = value
+                elif key == "base_url":
+                    REG_BASE_URLS[idx] = value
+                elif key == "system_prompt":
+                    REG_SYSTEM_PROMPTS[idx] = value
+                elif key == "capabilities":
+                    var caps = value
+                    if caps.starts_with("["):
+                        val clen1 = caps.len()
+                        caps = caps[1:clen1]
+                    if caps.ends_with("]"):
+                        val clen2 = caps.len()
+                        caps = caps[0:clen2 - 1]
+                    REG_CAPABILITIES[idx] = caps.replace(" ", "")
+    true
+
+# === feature/chat/session.spl ===
+
+var SESSION_AGENT_ID = ""
+var SESSION_ID = ""
+var SESSION_ROLES: [text] = []
+var SESSION_CONTENTS: [text] = []
+
+fn session_start(agent_id: text):
+    SESSION_AGENT_ID = agent_id
+    SESSION_ID = ""
+    SESSION_ROLES = []
+    SESSION_CONTENTS = []
+
+fn session_clear():
+    SESSION_AGENT_ID = ""
+    SESSION_ID = ""
+    SESSION_ROLES = []
+    SESSION_CONTENTS = []
+
+fn session_agent() -> text:
+    SESSION_AGENT_ID
+
+fn session_id() -> text:
+    SESSION_ID
+
+fn session_set_id(id: text):
+    SESSION_ID = id
+
+fn session_history_len() -> i64:
+    SESSION_ROLES.len()
+
+fn session_add_user(message: text):
+    SESSION_ROLES.push("user")
+    SESSION_CONTENTS.push(message)
+
+fn session_add_assistant(response: text):
+    SESSION_ROLES.push("assistant")
+    SESSION_CONTENTS.push(response)
+
+fn session_history_text() -> text:
+    if SESSION_ROLES.len() == 0:
+        return "  (no messages)"
+    var parts: [text] = []
+    var i = 0
+    while i < SESSION_ROLES.len():
+        parts.push("[" + SESSION_ROLES[i] + "] " + SESSION_CONTENTS[i])
+        i = i + 1
+    parts.join("\n\n")
+
+# === feature/chat/room.spl ===
+
+var ROOM_NAME = ""
+var ROOM_AGENT_IDS: [text] = []
+var ROOM_MESSAGES: [text] = []
+var ROOM_SENDERS: [text] = []
+
+fn room_create(name: text, agent_ids: [text]):
+    ROOM_NAME = name
+    ROOM_AGENT_IDS = agent_ids
+    ROOM_MESSAGES = []
+    ROOM_SENDERS = []
+
+fn room_name() -> text:
+    ROOM_NAME
+
+fn room_agent_count() -> i64:
+    ROOM_AGENT_IDS.len()
+
+fn room_add_message(sender: text, message: text):
+    ROOM_SENDERS.push(sender)
+    ROOM_MESSAGES.push(message)
+
+fn room_history_text() -> text:
+    if ROOM_MESSAGES.len() == 0:
+        return "  (no messages)"
+    var parts: [text] = []
+    var i = 0
+    while i < ROOM_MESSAGES.len():
+        parts.push("[" + ROOM_SENDERS[i] + "] " + ROOM_MESSAGES[i])
+        i = i + 1
+    parts.join("\n\n")
+
+fn room_get_agent_ids() -> [text]:
+    ROOM_AGENT_IDS
+
+# === feature/task_runner/queue.spl ===
+
+fn _task_add(content: text, priority: i64) -> text:
+    var tmp_id = TQ_NEXT_ID
+    val id = "task-" + tmp_id.to_text()
+    TQ_NEXT_ID = TQ_NEXT_ID + 1
+    TQ_IDS = TQ_IDS + [id]
+    TQ_CONTENTS = TQ_CONTENTS + [content]
+    TQ_PRIORITIES = TQ_PRIORITIES + [priority]
+    TQ_STATUSES = TQ_STATUSES + ["pending"]
+    TQ_AGENT_IDS = TQ_AGENT_IDS + [""]
+    TQ_RESULTS = TQ_RESULTS + [""]
+    TQ_ERRORS = TQ_ERRORS + [""]
+    TQ_COUNT = TQ_COUNT + 1
+    id
+
+fn _task_list_text() -> text:
+    if TQ_COUNT == 0:
+        return "  (no tasks)"
+    var parts: [text] = []
+    var i = 0
+    while i < TQ_COUNT:
+        var tmp_p = TQ_PRIORITIES[i]
+        val line = "  " + TQ_IDS[i] + " [" + TQ_STATUSES[i] + "] (p=" + tmp_p.to_text() + ") " + TQ_CONTENTS[i]
+        parts = parts + [line]
+        i = i + 1
+    parts.join("\n")
+
+fn _task_find_next_pending() -> i64:
+    var best_idx = -1
+    var best_priority = -1
+    var i = 0
+    while i < TQ_COUNT:
+        if TQ_STATUSES[i] == "pending" and TQ_PRIORITIES[i] > best_priority:
+            best_priority = TQ_PRIORITIES[i]
+            best_idx = i
+        i = i + 1
+    best_idx
+
+# === feature/task_runner/runner.spl ===
+
+fn _task_run_one() -> text:
+    val idx = _task_find_next_pending()
+    if idx < 0:
+        return "No pending tasks."
+    TQ_STATUSES[idx] = "running"
+    val content = TQ_CONTENTS[idx]
+    var agent_id = TQ_AGENT_IDS[idx]
+    if agent_id == "":
+        agent_id = CFG_DEFAULT_AGENT
+    val result = _dispatch_send(agent_id, content)
+    if result.1 != "":
+        TQ_STATUSES[idx] = "failed"
+        TQ_ERRORS[idx] = result.1
+        return "Task " + TQ_IDS[idx] + " FAILED: " + result.1
+    TQ_STATUSES[idx] = "completed"
+    TQ_RESULTS[idx] = result.0
+    TQ_AGENT_IDS[idx] = agent_id
+    "Task " + TQ_IDS[idx] + " completed by " + agent_id + ":\n" + result.0
+
+fn _task_run_all() -> text:
+    var results: [text] = []
+    var ran = 0
+    while true:
+        val idx = _task_find_next_pending()
+        if idx < 0:
+            break
+        val r = _task_run_one()
+        results = results + [r]
+        ran = ran + 1
+    if ran == 0:
+        return "No pending tasks."
+    results.join("\n\n")
+
+# === feature/theme_manager/discovery.spl ===
+
+fn _discover_themes() -> [text]:
+    var themes: [text] = []
+    if not rt_file_exists(CFG_THEMES_DIR):
+        return themes
+    val entries = rt_dir_list(CFG_THEMES_DIR)
+    for entry in entries:
+        val manifest_path = CFG_THEMES_DIR + "/" + entry + "/theme.sdn"
+        if rt_file_exists(manifest_path):
+            themes = themes + [entry]
+    themes
+
+fn _theme_list_text() -> text:
+    val themes = _discover_themes()
+    if themes.len() == 0:
+        return "  (no themes found in " + CFG_THEMES_DIR + "/)"
+    var parts: [text] = []
+    for t in themes:
+        parts = parts + ["  " + t]
+    parts.join("\n")
+
+# === feature/theme_manager/scaffold.spl ===
+
+fn _theme_create(name: text) -> text:
+    val dir = CFG_THEMES_DIR + "/" + name
+    if rt_file_exists(dir):
+        return "Theme directory already exists: " + dir
+    rt_dir_create_all(dir)
+    val manifest = "name: " + name + "\ndescription: A new theme\nversion: 1.0.0\ndefault_agent: claude\ncapabilities: [code, research]\n"
+    rt_file_write_text(dir + "/theme.sdn", manifest)
+    "Created theme: " + dir
+
+# === feature/cli/parser_setup.spl ===
 
 struct ArgDef:
     name: text
@@ -119,11 +850,11 @@ impl SimpleParser:
                     break
 
             if arg.starts_with("--"):
-                val rest = arg.substring(2)
+                val rest = arg[2:arg.len()]
                 if rest.contains("="):
                     val eq_pos = rest.index_of("=") ?? 0
-                    val name = rest.substring(0, eq_pos)
-                    val value = rest.substring(eq_pos + 1)
+                    val name = rest[0:eq_pos]
+                    val value = rest[eq_pos + 1:rest.len()]
                     options[name] = value
                 else:
                     var is_flag = false
@@ -139,7 +870,7 @@ impl SimpleParser:
                         else:
                             return Err("Option --" + rest + " requires a value")
             elif arg.starts_with("-") and arg.len() > 1:
-                val ch = arg.substring(1, 2)
+                val ch = arg[1:2]
                 var is_flag = false
                 for a in self.args:
                     if a.arg_kind == "flag" and a.short == ch:
@@ -149,7 +880,6 @@ impl SimpleParser:
                 if not is_flag:
                     if i + 1 < input_args.len():
                         i = i + 1
-                        # Find option by short name
                         var opt_name = ch
                         for a in self.args:
                             if a.arg_kind == "option" and a.short == ch:
@@ -178,538 +908,9 @@ fn simple_parser(name: text, description: text) -> SimpleParser:
         auto_stage: true
     )
 
-# ============================================================================
-# Forward declarations for command handlers (defined in commands.spl-like sections below)
-# ============================================================================
-
-# Config state
-var APP_CONFIG_LOADED = false
-var APP_BASE_DIR = ""
-
-# ============================================================================
-# Agent Registry state (module-level parallel arrays)
-# ============================================================================
-
-var REG_IDS: [text] = []
-var REG_PROVIDERS: [text] = []
-var REG_CLI_PATHS: [text] = []
-var REG_MODELS: [text] = []
-var REG_BASE_URLS: [text] = []
-var REG_SYSTEM_PROMPTS: [text] = []
-var REG_CAPABILITIES: [text] = []
-var REG_API_KEYS: [text] = []
-var REG_COUNT = 0  # manual counter (module-level .len() bug workaround)
-
-# Config state
-var CFG_PROJECT_NAME = "simple-aidev"
-var CFG_PROJECT_VERSION = "1.0.0"
-var CFG_DEFAULT_AGENT = "claude"
-var CFG_FALLBACK_AGENT = "ollama"
-var CFG_STRATEGY = "capability"
-var CFG_TASK_PERSISTENCE_PATH = "data/task_queue.sdn"
-var CFG_TASK_MAX_ITEMS = 100
-var CFG_THEMES_DIR = "themes"
-
-# Task queue state
-var TQ_IDS: [text] = []
-var TQ_CONTENTS: [text] = []
-var TQ_PRIORITIES: [i64] = []
-var TQ_STATUSES: [text] = []
-var TQ_AGENT_IDS: [text] = []
-var TQ_RESULTS: [text] = []
-var TQ_ERRORS: [text] = []
-var TQ_NEXT_ID = 1
-var TQ_COUNT = 0  # manual counter
-
-# Chat session state
-var CHAT_SESSION_ID = ""
-var CHAT_AGENT_ID = ""
-var MAIN_EXECUTED = false
-
-# ============================================================================
-# JSON helpers
-# ============================================================================
-
-fn _extract_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx_opt = json.index_of(search)
-    if not idx_opt.?:
-        return ""
-    val idx = idx_opt.unwrap()
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if not after.starts_with(quote):
-        return ""
-    val rest = after.substring(1)
-    var end = 0
-    var escaped = false
-    while end < rest.len():
-        val ch = rest[end:end + 1]
-        if escaped:
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == "\"":
-            return rest.substring(0, end)
-        end = end + 1
-    ""
-
-fn _extract_bool(json: text, key: text) -> bool:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx_opt = json.index_of(search)
-    if not idx_opt.?:
-        return false
-    val idx = idx_opt.unwrap()
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    after.starts_with("true")
-
-# ============================================================================
-# Env var resolution
-# ============================================================================
-
-extern fn rt_env_get(key: text) -> text
-
-fn _resolve_env(value: text) -> text:
-    if not value.contains("$"):
-        return value
-    var out_parts: [text] = []
-    var i = 0
-    while i < value.len():
-        if value[i:i + 1] == "$":
-            var j = i + 1
-            var has_brace = false
-            if j < value.len() and value[j:j + 1] == "{":
-                has_brace = true
-                j = j + 1
-            var name_start = j
-            while j < value.len():
-                val ch = value[j:j + 1]
-                if has_brace and ch == "}":
-                    break
-                if not has_brace:
-                    val is_alnum = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
-                    if not is_alnum:
-                        break
-                j = j + 1
-            val var_name = value[name_start:j]
-            if has_brace and j < value.len():
-                j = j + 1
-            val env_val = rt_env_get(var_name) ?? ""
-            out_parts.push(env_val)
-            i = j
-        else:
-            out_parts.push(value[i:i + 1])
-            i = i + 1
-    out_parts.join("")
-
-# ============================================================================
-# Config loading
-# ============================================================================
-
-extern fn rt_file_read_text(path: text) -> text
-
-# Parallel arrays for parsed lines (set by _parse_lines_with_indent)
-var _PARSED_LINES: [text] = []
-var _PARSED_INDENTS: [i64] = []
-var _PARSED_COUNT = 0
-
-fn _parse_lines_with_indent(content: text):
-    # Split text into lines preserving indent info.
-    # Results stored in _PARSED_LINES / _PARSED_INDENTS / _PARSED_COUNT.
-    _PARSED_LINES = []
-    _PARSED_INDENTS = []
-    _PARSED_COUNT = 0
-    # First, split raw content by scanning for \n using slices
-    var line_starts: [i64] = []
-    var line_ends: [i64] = []
-    var start = 0
-    var pos = 0
-    # We need content length but can't call .len() safely on module-level
-    # content is a local param so .len() should be safe
-    val clen = content.len()
-    while pos < clen:
-        val ch = content[pos:pos + 1]
-        if ch == "\n":
-            line_starts.push(start)
-            line_ends.push(pos)
-            start = pos + 1
-        pos = pos + 1
-    # Last line (no trailing newline)
-    if start < clen:
-        line_starts.push(start)
-        line_ends.push(clen)
-    # Process each line
-    var li = 0
-    for ls in line_starts:
-        val le = line_ends[li]
-        # Count leading spaces using slices
-        var spaces = 0
-        var sp = ls
-        while sp < le:
-            val sc = content[sp:sp + 1]
-            if sc == " ":
-                spaces = spaces + 1
-            else:
-                break
-            sp = sp + 1
-        # Get trimmed line content
-        val trimmed_start = ls + spaces
-        if trimmed_start < le:
-            val line_text = content[trimmed_start:le]
-            # Further trim trailing whitespace
-            val final_text = line_text.trim()
-            if final_text != "":
-                _PARSED_LINES = _PARSED_LINES + [final_text]
-                _PARSED_INDENTS = _PARSED_INDENTS + [spaces]
-                _PARSED_COUNT = _PARSED_COUNT + 1
-        li = li + 1
-
-fn _load_config(path: text) -> bool:
-    if not rt_file_exists(path):
-        return false
-    val content = rt_file_read_text(path) ?? ""
-    if content == "":
-        return false
-    var current_section = ""
-    var current_agent_id = ""
-    _parse_lines_with_indent(content)
-    var line_idx = 0
-    while line_idx < _PARSED_COUNT:
-        val trimmed = _PARSED_LINES[line_idx]
-        val indent = _PARSED_INDENTS[line_idx]
-        line_idx = line_idx + 1
-        if trimmed == "" or trimmed.starts_with("#"):
-            continue
-        if not trimmed.contains(":"):
-            continue
-        val colon_pos = trimmed.index_of(":") ?? 0
-        val key = trimmed[0:colon_pos].trim()
-        var value = ""
-        val tlen = trimmed.len()
-        if colon_pos + 1 < tlen:
-            value = trimmed[colon_pos + 1:tlen].trim()
-        value = _resolve_env(value)
-        if indent == 0:
-            current_section = key
-            current_agent_id = ""
-            continue
-        if current_section == "project":
-            if key == "name":
-                CFG_PROJECT_NAME = value
-            elif key == "version":
-                CFG_PROJECT_VERSION = value
-        elif current_section == "routing":
-            if key == "default_agent":
-                CFG_DEFAULT_AGENT = value
-            elif key == "fallback_agent":
-                CFG_FALLBACK_AGENT = value
-            elif key == "strategy":
-                CFG_STRATEGY = value
-        elif current_section == "task_queue":
-            if key == "persistence_path":
-                CFG_TASK_PERSISTENCE_PATH = value
-            elif key == "max_items":
-                CFG_TASK_MAX_ITEMS = int(value)
-        elif current_section == "themes":
-            if key == "directory":
-                CFG_THEMES_DIR = value
-        elif current_section == "agents":
-            if indent <= 4 and value == "":
-                current_agent_id = key
-                REG_IDS = REG_IDS + [current_agent_id]
-                REG_PROVIDERS = REG_PROVIDERS + [""]
-                REG_CLI_PATHS = REG_CLI_PATHS + [""]
-                REG_MODELS = REG_MODELS + [""]
-                REG_BASE_URLS = REG_BASE_URLS + [""]
-                REG_SYSTEM_PROMPTS = REG_SYSTEM_PROMPTS + [""]
-                REG_CAPABILITIES = REG_CAPABILITIES + [""]
-                REG_API_KEYS = REG_API_KEYS + [""]
-                REG_COUNT = REG_COUNT + 1
-            elif current_agent_id != "":
-                val idx = REG_COUNT - 1
-                if key == "provider":
-                    REG_PROVIDERS[idx] = value
-                elif key == "cli_path":
-                    REG_CLI_PATHS[idx] = value
-                elif key == "model":
-                    REG_MODELS[idx] = value
-                elif key == "base_url":
-                    REG_BASE_URLS[idx] = value
-                elif key == "system_prompt":
-                    REG_SYSTEM_PROMPTS[idx] = value
-                elif key == "capabilities":
-                    var caps = value
-                    if caps.starts_with("["):
-                        val clen1 = caps.len()
-                        caps = caps[1:clen1]
-                    if caps.ends_with("]"):
-                        val clen2 = caps.len()
-                        caps = caps[0:clen2 - 1]
-                    REG_CAPABILITIES[idx] = caps.replace(" ", "")
-    true
-
-# ============================================================================
-# Registry helpers
-# ============================================================================
-
-fn _registry_find_index(id: text) -> i64:
-    var i = 0
-    while i < REG_COUNT:
-        if REG_IDS[i] == id:
-            return i
-        i = i + 1
-    -1
-
-fn _registry_find_by_capability(capability: text) -> [text]:
-    var matches: [text] = []
-    var i = 0
-    while i < REG_COUNT:
-        val caps = REG_CAPABILITIES[i].split(",")
-        for cap in caps:
-            if cap.trim() == capability:
-                matches.push(REG_IDS[i])
-                break
-        i = i + 1
-    matches
-
-# ============================================================================
-# Provider: Claude CLI
-# ============================================================================
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-fn _send_claude(idx: i64, prompt: text) -> (text, text):
-    var cmd = REG_CLI_PATHS[idx]
-    if cmd == "":
-        cmd = "claude"
-    var args: [text] = []
-    args = args + ["--dangerously-skip-permissions"]
-    args = args + ["-p", prompt]
-    args = args + ["--output-format", "json"]
-    val model = REG_MODELS[idx]
-    if model != "":
-        args = args + ["--model", model]
-    val sys_prompt = REG_SYSTEM_PROMPTS[idx]
-    if sys_prompt != "":
-        args = args + ["--system-prompt", sys_prompt]
-    if CHAT_SESSION_ID != "":
-        args = args + ["--resume", CHAT_SESSION_ID]
-    val result = rt_process_run(cmd, args)
-    val stdout = result.0 ?? ""
-    val stderr = result.1 ?? ""
-    val exit_code = result.2
-    if exit_code != 0:
-        var err = "claude CLI error (code " + exit_code.to_text() + ")"
-        if stderr != "":
-            err = err + ": " + stderr
-        return ("", err)
-    val content = _extract_string(stdout, "result")
-    val sess = _extract_string(stdout, "session_id")
-    val is_err = _extract_bool(stdout, "is_error")
-    if sess != "":
-        CHAT_SESSION_ID = sess
-    if is_err:
-        return ("", content)
-    (content, "")
-
-# ============================================================================
-# Provider: Gemini CLI
-# ============================================================================
-
-fn _send_gemini(idx: i64, prompt: text) -> (text, text):
-    var cmd = REG_CLI_PATHS[idx]
-    if cmd == "":
-        cmd = "gemini"
-    var args: [text] = []
-    args = args + ["--sandbox", "off"]
-    args = args + ["-p", prompt]
-    args = args + ["--output-format", "json"]
-    val model = REG_MODELS[idx]
-    if model != "":
-        args = args + ["--model", model]
-    val result = rt_process_run(cmd, args)
-    val stdout = result.0 ?? ""
-    val stderr = result.1 ?? ""
-    val exit_code = result.2
-    if exit_code != 0:
-        var err = "gemini CLI error (code " + exit_code.to_text() + ")"
-        if stderr != "":
-            err = err + ": " + stderr
-        return ("", err)
-    val content = _extract_string(stdout, "response")
-    val error_val = _extract_string(stdout, "error")
-    if error_val != "":
-        return ("", error_val)
-    (content, "")
-
-# ============================================================================
-# Provider: OpenAI-compatible (Ollama)
-# ============================================================================
-
-extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
-
-fn _send_openai_compat(idx: i64, prompt: text) -> (text, text):
-    var base_url = REG_BASE_URLS[idx]
-    if base_url == "":
-        base_url = "http://localhost:11434"
-    val url = base_url + "/v1/chat/completions"
-    var model = REG_MODELS[idx]
-    if model == "":
-        model = "llama3"
-    val q = "\""
-    val body = "{" + q + "model" + q + ":" + q + model + q + "," + q + "messages" + q + ":[{" + q + "role" + q + ":" + q + "user" + q + "," + q + "content" + q + ":" + q + prompt + q + "}]}"
-    val headers = "Content-Type: application/json"
-    val result = rt_http_request("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
-    if http_error != "":
-        return ("", "HTTP error: " + http_error)
-    val content = _extract_string(resp_body, "content")
-    (content, "")
-
-# ============================================================================
-# Dispatch to provider
-# ============================================================================
-
-fn _dispatch_send(agent_id: text, prompt: text) -> (text, text):
-    val idx = _registry_find_index(agent_id)
-    if idx < 0:
-        return ("", "Agent not found: " + agent_id)
-    val provider = REG_PROVIDERS[idx]
-    if provider == "claude_cli":
-        return _send_claude(idx, prompt)
-    elif provider == "gemini_cli":
-        return _send_gemini(idx, prompt)
-    elif provider == "openai_compat":
-        return _send_openai_compat(idx, prompt)
-    ("", "Unsupported provider: " + provider)
-
-# ============================================================================
-# Task queue operations
-# ============================================================================
-
-fn _task_add(content: text, priority: i64) -> text:
-    var tmp_id = TQ_NEXT_ID
-    val id = "task-" + tmp_id.to_text()
-    TQ_NEXT_ID = TQ_NEXT_ID + 1
-    TQ_IDS = TQ_IDS + [id]
-    TQ_CONTENTS = TQ_CONTENTS + [content]
-    TQ_PRIORITIES = TQ_PRIORITIES + [priority]
-    TQ_STATUSES = TQ_STATUSES + ["pending"]
-    TQ_AGENT_IDS = TQ_AGENT_IDS + [""]
-    TQ_RESULTS = TQ_RESULTS + [""]
-    TQ_ERRORS = TQ_ERRORS + [""]
-    TQ_COUNT = TQ_COUNT + 1
-    id
-
-fn _task_list_text() -> text:
-    if TQ_COUNT == 0:
-        return "  (no tasks)"
-    var parts: [text] = []
-    var i = 0
-    while i < TQ_COUNT:
-        var tmp_p = TQ_PRIORITIES[i]
-        val line = "  " + TQ_IDS[i] + " [" + TQ_STATUSES[i] + "] (p=" + tmp_p.to_text() + ") " + TQ_CONTENTS[i]
-        parts.push(line)
-        i = i + 1
-    parts.join("\n")
-
-fn _task_find_next_pending() -> i64:
-    var best_idx = -1
-    var best_priority = -1
-    var i = 0
-    while i < TQ_COUNT:
-        if TQ_STATUSES[i] == "pending" and TQ_PRIORITIES[i] > best_priority:
-            best_priority = TQ_PRIORITIES[i]
-            best_idx = i
-        i = i + 1
-    best_idx
-
-fn _task_run_one() -> text:
-    val idx = _task_find_next_pending()
-    if idx < 0:
-        return "No pending tasks."
-    TQ_STATUSES[idx] = "running"
-    val content = TQ_CONTENTS[idx]
-    # Route to agent
-    var agent_id = TQ_AGENT_IDS[idx]
-    if agent_id == "":
-        agent_id = CFG_DEFAULT_AGENT
-    val result = _dispatch_send(agent_id, content)
-    if result.1 != "":
-        TQ_STATUSES[idx] = "failed"
-        TQ_ERRORS[idx] = result.1
-        return "Task " + TQ_IDS[idx] + " FAILED: " + result.1
-    TQ_STATUSES[idx] = "completed"
-    TQ_RESULTS[idx] = result.0
-    TQ_AGENT_IDS[idx] = agent_id
-    "Task " + TQ_IDS[idx] + " completed by " + agent_id + ":\n" + result.0
-
-fn _task_run_all() -> text:
-    var results: [text] = []
-    var ran = 0
-    while true:
-        val idx = _task_find_next_pending()
-        if idx < 0:
-            break
-        val r = _task_run_one()
-        results.push(r)
-        ran = ran + 1
-    if ran == 0:
-        return "No pending tasks."
-    results.join("\n\n")
-
-# ============================================================================
-# Theme discovery
-# ============================================================================
-
-extern fn rt_dir_list(path: text) -> [text]
-
-fn _discover_themes() -> [text]:
-    var themes: [text] = []
-    if not rt_file_exists(CFG_THEMES_DIR):
-        return themes
-    val entries = rt_dir_list(CFG_THEMES_DIR)
-    for entry in entries:
-        val manifest_path = CFG_THEMES_DIR + "/" + entry + "/theme.sdn"
-        if rt_file_exists(manifest_path):
-            themes.push(entry)
-    themes
-
-fn _theme_list_text() -> text:
-    val themes = _discover_themes()
-    if themes.len() == 0:
-        return "  (no themes found in " + CFG_THEMES_DIR + "/)"
-    var parts: [text] = []
-    for t in themes:
-        parts.push("  " + t)
-    parts.join("\n")
-
-# ============================================================================
-# Theme scaffold
-# ============================================================================
-
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
-fn _theme_create(name: text) -> text:
-    val dir = CFG_THEMES_DIR + "/" + name
-    if rt_file_exists(dir):
-        return "Theme directory already exists: " + dir
-    rt_dir_create_all(dir)
-    val manifest = "name: " + name + "\ndescription: A new theme\nversion: 1.0.0\ndefault_agent: claude\ncapabilities: [code, research]\n"
-    rt_file_write_text(dir + "/theme.sdn", manifest)
-    "Created theme: " + dir
-
-# ============================================================================
-# Chat commands
-# ============================================================================
+# === feature/cli/commands.spl ===
 
 fn _handle_chat(args: [text]) -> text:
-    # Parse chat subcommand args: [--agent <id>] [--room <name>] <message...>
     var agent_id = ""
     var room_name = ""
     var message_parts: [text] = []
@@ -738,27 +939,18 @@ fn _handle_chat(args: [text]) -> text:
         return "Error: " + result.1
     result.0
 
-# ============================================================================
-# Multi-agent room chat
-# ============================================================================
-
 fn _handle_room_chat(room_name: text, message: text) -> text:
-    # Simple round-robin: send to all agents, collect responses
     var responses: [text] = []
     var i = 0
     while i < REG_COUNT:
         val agent_id = REG_IDS[i]
         val result = _dispatch_send(agent_id, message)
         if result.1 != "":
-            responses.push("[" + agent_id + "] Error: " + result.1)
+            responses = responses + ["[" + agent_id + "] Error: " + result.1]
         else:
-            responses.push("[" + agent_id + "] " + result.0)
+            responses = responses + ["[" + agent_id + "] " + result.0]
         i = i + 1
     "Room: " + room_name + "\n\n" + responses.join("\n\n")
-
-# ============================================================================
-# Agent commands
-# ============================================================================
 
 fn _handle_agent(args: [text]) -> text:
     if args.len() == 0:
@@ -808,10 +1000,6 @@ fn _handle_agent(args: [text]) -> text:
         return "Unknown provider: " + provider
     "Unknown agent command: " + sub
 
-# ============================================================================
-# Task commands
-# ============================================================================
-
 fn _handle_task(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: simple-aidev task <add|list|run>"
@@ -843,10 +1031,6 @@ fn _handle_task(args: [text]) -> text:
         return _task_run_one()
     "Unknown task command: " + sub
 
-# ============================================================================
-# Theme commands
-# ============================================================================
-
 fn _handle_theme(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: simple-aidev theme <list|create <name>>"
@@ -858,10 +1042,6 @@ fn _handle_theme(args: [text]) -> text:
             return "Usage: simple-aidev theme create <name>"
         return _theme_create(args[1])
     "Unknown theme command: " + sub
-
-# ============================================================================
-# Config command
-# ============================================================================
 
 fn _handle_config(args: [text]) -> text:
     var parts: [text] = []
@@ -881,19 +1061,13 @@ fn _handle_config(args: [text]) -> text:
         i = i + 1
     parts.join("\n")
 
-# ============================================================================
-# Init command
-# ============================================================================
-
 fn _handle_init(args: [text]) -> text:
     var name = "my-aidev-project"
     if args.len() > 0:
         name = args[0]
-    # Create project directory structure
     rt_dir_create_all(name)
     rt_dir_create_all(name + "/themes")
     rt_dir_create_all(name + "/data")
-    # Write default config
     var cfg_parts: [text] = []
     cfg_parts.push("project:")
     cfg_parts.push("  name: " + name)
@@ -921,11 +1095,9 @@ fn _handle_init(args: [text]) -> text:
     rt_file_write_text(name + "/config.sdn", cfg_parts.join("\n") + "\n")
     "Initialized project: " + name + "/\n  config.sdn\n  themes/\n  data/"
 
-# ============================================================================
-# Help
-# ============================================================================
+# === feature/cli/help.spl ===
 
-fn _show_help() -> text:
+fn help_full() -> text:
     var parts: [text] = []
     parts.push("simple-aidev - AI Development Platform")
     parts.push("")
@@ -956,14 +1128,56 @@ fn _show_help() -> text:
     parts.push("  --verbose, -v               Verbose output")
     parts.join("\n")
 
-# ============================================================================
-# Main
-# ============================================================================
+fn help_chat() -> text:
+    var parts: [text] = []
+    parts.push("Usage: simple-aidev chat [options] <message>")
+    parts.push("")
+    parts.push("Options:")
+    parts.push("  --agent <id>    Use specific agent")
+    parts.push("  --room <name>   Use multi-agent room")
+    parts.join("\n")
+
+fn help_task() -> text:
+    var parts: [text] = []
+    parts.push("Usage: simple-aidev task <subcommand>")
+    parts.push("")
+    parts.push("Subcommands:")
+    parts.push("  add <content>     Add a task (--priority <n>)")
+    parts.push("  list              List all tasks")
+    parts.push("  run               Run next pending task")
+    parts.push("  run --all         Run all pending tasks")
+    parts.join("\n")
+
+fn help_agent() -> text:
+    var parts: [text] = []
+    parts.push("Usage: simple-aidev agent <subcommand>")
+    parts.push("")
+    parts.push("Subcommands:")
+    parts.push("  list              List registered agents")
+    parts.push("  test <id>         Test agent connectivity")
+    parts.join("\n")
+
+fn help_theme() -> text:
+    var parts: [text] = []
+    parts.push("Usage: simple-aidev theme <subcommand>")
+    parts.push("")
+    parts.push("Subcommands:")
+    parts.push("  list              List discovered themes")
+    parts.push("  create <name>     Create new theme directory")
+    parts.join("\n")
+
+# === Main entry point ===
+
+var MAIN_EXECUTED = false
+
+fn _show_help() -> text:
+    help_full()
 
 fn main():
     if MAIN_EXECUTED:
         return
     MAIN_EXECUTED = true
+
     val parser = simple_parser("simple-aidev", "AI Development Platform")
     var p = parser
     p = p.flag("verbose", "v", "Verbose output")
@@ -976,8 +1190,8 @@ fn main():
     p = p.subcommand("init", "Initialize new project")
     p = p.subcommand("help", "Show help")
 
+    # Strip runtime args (rt_cli_get_args bug workaround)
     val raw_args = rt_cli_get_args()
-    # Strip leading args up to and including the .spl script path
     var args: [text] = []
     var found_script = false
     for a in raw_args:
@@ -985,6 +1199,7 @@ fn main():
             args.push(a)
         elif a.ends_with(".spl"):
             found_script = true
+
     val result = p.parse(args)
     match result:
         case Err(e):
@@ -992,7 +1207,6 @@ fn main():
             print(_show_help())
             return
         case Ok(parsed):
-            # Load config
             val config_path = parsed.get_option("config") ?? "config.sdn"
             _load_config(config_path)
 
