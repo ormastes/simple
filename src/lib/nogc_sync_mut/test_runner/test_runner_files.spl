@@ -142,6 +142,81 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
             spec.contains(tag) or tag == "composite"
 
 # =========================================================================
+# Mode Tag Functions
+# =========================================================================
+
+fn execution_mode_name(mode: TestExecutionMode) -> text:
+    """Get the simple name of a mode for tag matching."""
+    match mode:
+        case TestExecutionMode.Interpreter: "interpreter"
+        case TestExecutionMode.Smf: "smf"
+        case TestExecutionMode.Native: "native"
+        case TestExecutionMode.Composite(spec): "composite"
+        case TestExecutionMode.AllModes: "all-modes"
+
+fn file_get_mode_tags(content: text) -> [text]:
+    """Extract # @mode: and # @skip_mode: tags from file content."""
+    val lines = content.split("\n")
+    var tags: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @mode:"):
+            val tag = trimmed[8:].trim()
+            if tag != "":
+                val parts = tag.split(",")
+                for part in parts:
+                    val p = part.trim()
+                    if p != "":
+                        tags.push(p)
+        elif trimmed.starts_with("# @skip_mode:"):
+            val tag = trimmed[13:].trim()
+            if tag != "":
+                val parts = tag.split(",")
+                for part in parts:
+                    val p = part.trim()
+                    if p != "":
+                        tags.push("!{p}")
+    tags
+
+fn file_mode_matches(mode_tags: text, mode: TestExecutionMode) -> bool:
+    """Check if a file's mode tags allow it to run in the given mode.
+    Empty mode_tags means no restriction (runs in all modes).
+    AllModes always matches."""
+    if mode_tags == "":
+        return true
+    match mode:
+        case TestExecutionMode.AllModes:
+            return true
+        case _:
+            pass_do_nothing
+    val current_mode = execution_mode_name(mode)
+    val tags = mode_tags.split(",")
+    var has_positive = false
+    var has_skip = false
+    for tag in tags:
+        val t = tag.trim()
+        if t == "":
+            continue
+        if t.starts_with("!"):
+            # Skip mode: if current mode matches, exclude
+            val skip_name = t[1:]
+            if skip_name == current_mode:
+                return false
+            has_skip = true
+        else:
+            # Positive mode: collect
+            has_positive = true
+            if t == current_mode:
+                return true
+    # If only skip tags were present and none matched, allow
+    if has_skip and not has_positive:
+        return true
+    # If positive tags were present but none matched, deny
+    if has_positive:
+        return false
+    true
+
+# =========================================================================
 # Fast Test File Discovery (manifest-based)
 # =========================================================================
 

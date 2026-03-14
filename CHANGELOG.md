@@ -2,6 +2,17 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.0] - 2026-03-14
+
+### Changed
+- **Unified version management** — root `VERSION` file is now the single source of truth for all tools
+  - Rust driver: `build.rs` reads `VERSION` and injects `SIMPLE_VERSION` env var at compile time
+  - Simple CLI: `get_version()` reads `VERSION` file, falls back to env var
+  - Self-hosting compiler: `get_compiler_version()` reads `VERSION` file, falls back to env var
+  - Test runner: reads `VERSION` file for banner display
+- **Version bump to 0.9.0** across all manifests (VERSION, 5x simple.sdn, 2x Cargo.toml)
+- **Updated release skill** with VERSION file checklist and all version locations
+
 ## [0.8.8c] - 2026-03-09
 
 ### Added

@@ -24,6 +24,19 @@ fn main() {
         .and_then(|p| p.parent()) // project root
         .unwrap();
 
+    // Read VERSION file as single source of truth for version string
+    let version_file = project_root.join("VERSION");
+    let version = if version_file.exists() {
+        fs::read_to_string(&version_file)
+            .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").unwrap())
+            .trim()
+            .to_string()
+    } else {
+        env::var("CARGO_PKG_VERSION").unwrap()
+    };
+    println!("cargo:rustc-env=SIMPLE_VERSION={}", version);
+    println!("cargo:rerun-if-changed={}", version_file.display());
+
     // Generate tests for stdlib
     let stdlib_test_root = project_root.join("test/lib/std");
     let stdlib_dest = Path::new(&out_dir).join("simple_stdlib_tests.rs");

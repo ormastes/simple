@@ -1,7 +1,7 @@
 //! Help and version information for the Simple CLI.
 
-/// Version from Cargo.toml (updated automatically at compile time)
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version from root VERSION file (injected by build.rs at compile time)
+const VERSION: &str = env!("SIMPLE_VERSION");
 
 pub fn print_help() {
     eprintln!("Simple Language v{}", VERSION);

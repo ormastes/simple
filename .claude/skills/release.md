@@ -37,15 +37,49 @@
 
 ---
 
+## VERSION File Rule
+
+The root `VERSION` file is the **single source of truth** for the project version.
+All tools read from it at runtime or compile time. Never hardcode version strings.
+
+### All Locations to Update (checklist)
+
+When bumping a version, update ALL of these:
+
+- [ ] `VERSION` (root file — single source of truth)
+- [ ] `simple.sdn` (root project manifest)
+- [ ] `src/app/simple.sdn`
+- [ ] `src/compiler/simple.sdn`
+- [ ] `src/lib/simple.sdn`
+- [ ] `src/compiler_rust/simple.sdn`
+- [ ] `src/compiler_rust/driver/Cargo.toml` (package version)
+- [ ] `src/compiler_rust/Cargo.toml` (workspace version)
+- [ ] `CHANGELOG.md` (add new section with date)
+- [ ] Fallback strings in `src/app/cli/main.spl` (`get_version()`)
+- [ ] Fallback strings in `src/compiler/80.driver/main.spl` (`get_compiler_version()`)
+
+### How Version Flows
+
+| Component | Source | Mechanism |
+|-----------|--------|-----------|
+| Rust driver | `VERSION` | `build.rs` reads file, emits `SIMPLE_VERSION` env var |
+| Simple CLI | `VERSION` | `rt_file_read_text("VERSION")` at runtime |
+| Self-hosting compiler | `VERSION` | `rt_file_read_text("VERSION")` at runtime |
+| Test runner | `VERSION` | `file_read("VERSION")` at runtime |
+
+---
+
+## CHANGELOG.md Requirement
+
+**Every release MUST update CHANGELOG.md** before tagging. Use [Keep a Changelog](https://keepachangelog.com/) format with Added/Changed/Fixed/Security sections.
+
+---
+
 ## Release Process
 
 ### Step 1: Update Version
 
-**For RC release:**
-```bash
-# Edit simple.sdn
-# Change version: 0.5.0-alpha to 0.5.0-rc.1
-```
+Update ALL locations listed in the VERSION File Rule checklist above.
 
 **Version format:**
 - Stable: `0.5.0`
@@ -257,7 +291,7 @@ v0.5.0          → Stable release
 
 ```bash
 # Check current version
-grep "version:" simple.sdn
+cat VERSION
 
 # Update version (edit file)
 # Then commit
