@@ -302,8 +302,8 @@ As features are implemented, remove `#[skip]` attributes from relevant scenarios
 
 - **LSP Spec:** `simple/std_lib/test/system/tools/lsp_spec.spl` (~600 lines)
 - **DAP Spec:** `simple/std_lib/test/system/tools/dap_spec.spl` (~750 lines)
-- **Feature Plan:** `doc/plans/LSP_DAP_SPEC_FEATURES_PLAN.md`
-- **This Index:** `doc/plans/LSP_DAP_SPEC_FEATURE_INDEX.md`
+- **Feature Plan:** `doc/plan/lsp_dap_spec_features_plan.md`
+- **This Index:** `doc/plan/lsp_dap_spec_feature_index.md`
 
 ## Summary Statistics
 

@@ -278,8 +278,8 @@ EOF
 - **App README:** `simple/app/README.md`
 - **LSP Status:** `doc/status/lsp_implementation.md`
 - **DAP Status:** `doc/status/dap_implementation.md`
-- **Tooling Plan:** `doc/plans/MULTI_LANGUAGE_TOOLING_PLAN.md`
-- **VSCode Plan:** `doc/plans/VSCODE_LSP_SEMANTIC_TOKENS_PLAN.md`
+- **Tooling Plan:** `doc/plan/multi_language_tooling_plan.md`
+- **VSCode Plan:** `doc/plan/vscode_lsp_semantic_tokens_plan.md`
 
 ---
 

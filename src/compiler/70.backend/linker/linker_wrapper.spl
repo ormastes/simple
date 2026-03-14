@@ -23,6 +23,7 @@ use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.platform_defaults.{platform_defaults, elf_emulation}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
@@ -147,12 +148,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 
     # Emulation mode
     if os == "linux":
-        if arch == "x86_64":
+        val emulation = elf_emulation(arch)
+        if emulation != "":
             args.push("-m")
-            args.push("elf_x86_64")
-        elif arch == "aarch64":
-            args.push("-m")
-            args.push("aarch64linux")
+            args.push(emulation)
 
     # Dynamic linker
     if crt.dynamic_linker != "":
@@ -204,20 +203,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push(runtime_dir)
 
     # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
-    if os == "linux":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-ldl")
-        args.push("-lm")
-    elif os == "macos":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-lm")
-        args.push("-lSystem")
-    elif os == "freebsd":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-lm")
+    val defaults = platform_defaults(os, arch)
+    for lib in defaults.libraries:
+        args.push("-l{lib}")
 
     # Libraries from config
     for lib in config.libraries:
@@ -365,8 +353,9 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
     link_to_self_contained(data, output, sc_config)
 
 fn create_default_provider(verbose: bool) -> ObjectProvider:
+    val defaults = platform_defaults(host_os(), host_arch())
     ObjectProvider.new(ObjectProviderConfig(
-        search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+        search_paths: defaults.library_dirs,
         libraries: [],
         enable_cache: true,
         verbose: verbose,
@@ -417,15 +406,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         sb.push(" -Wl,-rpath,{runtime_dir}")
 
     # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
-    val (uname_out, uname_err, uname_code) = shell("uname -s")
-    var os_name = uname_out
-    os_name = os_name.trim()
-    if os_name == "Darwin":
-        sb.push(" -lc -lpthread -lm -lSystem")
-    elif os_name == "FreeBSD":
-        sb.push(" -lc -lpthread -lm")
-    else:
-        sb.push(" -lc -lpthread -ldl -lm")
+    val cc_defaults = platform_defaults(host_os(), host_arch())
+    for lib in cc_defaults.libraries:
+        sb.push(" -l{lib}")
 
     # Libraries from config
     for lib in config.libraries:

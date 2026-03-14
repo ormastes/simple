@@ -228,10 +228,10 @@ Rust/Simple code:
 
 Markdown documentation:
 - `.claude/skills/todo.md`
-- `doc/design/IMPLEMENTATION_SUMMARY.md`
-- `doc/design/TODO_CONTRIBUTING_UPDATE.md`
-- `doc/design/TODO_QUICKSTART.md`
-- `doc/design/TODO_SYSTEM_COMPLETE.md`
+- `doc/design/implementation_summary.md`
+- `doc/design/todo_contributing_update.md`
+- `doc/design/todo_quickstart.md`
+- `doc/design/todo_system_complete.md`
 - `doc/design/dual_language_parsing_summary.md`
 - `doc/design/dual_language_todo_parsing.md`
 

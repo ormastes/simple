@@ -44,9 +44,9 @@
 - `src/app/io/vhdl_ffi.spl` — GHDL/Yosys SFFI wrappers
 
 ### M7: Documentation
-- `doc/research/VHDL_SUPPORT_RESEARCH.md` — Constraint system research, CDC/latch/comb loop sections
-- `doc/design/VHDL_BACKEND_DESIGN.md` — Full restructure matching GPU design pattern
-- `doc/plan/VHDL_BACKEND_PLAN.md` — This file, updated milestones
+- `doc/research/vhdl_support_research.md` — Constraint system research, CDC/latch/comb loop sections
+- `doc/design/vhdl_backend_design.md` — Full restructure matching GPU design pattern
+- `doc/plan/vhdl_backend_plan.md` — This file, updated milestones
 
 ## Work Breakdown
 

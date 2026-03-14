@@ -97,7 +97,7 @@ A complete TODO database management system with dual-language support (Rust + Si
 - Known issues
 - Next steps
 
-**12. `doc/design/IMPLEMENTATION_SUMMARY.md`** (this file)
+**12. `doc/design/implementation_summary.md`** (this file)
 - Executive summary
 - Quick stats
 - Usage guide
@@ -467,7 +467,7 @@ generate_todo_docs(&db, Path::new("doc"))?;
 
 **Status:**
 5. `doc/design/todo_db_implementation_complete.md` - Completion report
-6. `doc/design/IMPLEMENTATION_SUMMARY.md` - This summary
+6. `doc/design/implementation_summary.md` - This summary
 
 **Reference:**
 7. `.claude/skills/todo.md` - TODO format specification

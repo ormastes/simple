@@ -121,7 +121,7 @@ This binding is already implemented in `DedentHandler` (though it has the same l
 - `src/driver/src/cli/repl.rs` - Backspace handler (documented limitation)
 - `src/driver/tests/repl_backspace_pty_test.rs` - PTY integration test
 - `src/driver/Cargo.toml` - Added `portable-pty` dev-dependency
-- `doc/research/TERMINAL_SEQUENCE_CAPTURE.md` - PTY testing guide
+- `doc/research/terminal_sequence_capture.md` - PTY testing guide
 
 ## References
 

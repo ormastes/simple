@@ -52,17 +52,17 @@ Coverage and completion reports:
 
 Design documents:
 
-- `COVERAGE_CHECK_API_DESIGN.md`
-- `MCDC_COVERAGE_DESIGN.md`
-- `TEST_RUNNER_TAG_DESIGN.md`
+- `coverage_check_api_design.md`
+- `mcdc_coverage_design.md`
+- `test_runner_tag_design.md`
 
 ### → `doc/release/`
 
 Production readiness and release docs:
 
-- `PRODUCTION_READINESS.md`
-- `PRODUCTION_READY_SUMMARY.md`
-- `RELEASE_2026-02-14.md`
+- `production_readiness.md`
+- `production_ready_summary.md`
+- `release_2026-02-14.md`
 - `RELEASE_CHECKLIST_DL_2026-02-16.md`
 
 ### → `doc/todo/`
@@ -79,8 +79,8 @@ TODO tracking (keep root TODO.md as auto-generated):
 
 Test status and analysis:
 
-- `TEST_STATUS_AUDIT.md`
-- `TEST_STATUS_PARTIAL.md`
+- `test_status_audit.md`
+- `test_status_partial.md`
 
 ### → `doc/bug/`
 
@@ -103,7 +103,7 @@ Feature requests and analysis:
 - `needed_feature.md`
 - `needed_feature_OLD.md` (or DELETE as obsolete)
 - `improve_request.md`
-- `FEATURES_THAT_WORK.md`
+- `features_that_work.md`
 
 ### → `doc/report/`
 
@@ -205,14 +205,14 @@ mv doc/STDLIB_COVERAGE_IMPROVEMENT.md doc/coverage/
 mv doc/TEST_COVERAGE_ACHIEVEMENT.md doc/coverage/
 
 # Move design docs
-mv doc/COVERAGE_CHECK_API_DESIGN.md doc/design/
-mv doc/MCDC_COVERAGE_DESIGN.md doc/design/
-mv doc/TEST_RUNNER_TAG_DESIGN.md doc/design/
+mv doc/coverage_check_api_design.md doc/design/
+mv doc/mcdc_coverage_design.md doc/design/
+mv doc/test_runner_tag_design.md doc/design/
 
 # Move release docs
-mv doc/PRODUCTION_READINESS.md doc/release/
-mv doc/PRODUCTION_READY_SUMMARY.md doc/release/
-mv doc/RELEASE_2026-02-14.md doc/release/
+mv doc/production_readiness.md doc/release/
+mv doc/production_ready_summary.md doc/release/
+mv doc/release_2026-02-14.md doc/release/
 mv doc/RELEASE_CHECKLIST_DL_2026-02-16.md doc/release/
 
 # Move TODO files
@@ -223,8 +223,8 @@ mv doc/COMPILER_TODOS_SUMMARY.md doc/todo/
 mv doc/REMAINING_WORK.md doc/todo/
 
 # Move test docs
-mv doc/TEST_STATUS_AUDIT.md doc/test/
-mv doc/TEST_STATUS_PARTIAL.md doc/test/
+mv doc/test_status_audit.md doc/test/
+mv doc/test_status_partial.md doc/test/
 
 # Move bug reports
 mv doc/bug_report.md doc/bug/
@@ -237,7 +237,7 @@ mv doc/IMPLEMENTATION_PLAN_5_PHASE.md doc/implementation/
 # Move feature docs
 mv doc/needed_feature.md doc/feature/
 mv doc/improve_request.md doc/feature/
-mv doc/FEATURES_THAT_WORK.md doc/feature/
+mv doc/features_that_work.md doc/feature/
 
 # Move reports
 mv doc/import_errors_summary.md doc/report/

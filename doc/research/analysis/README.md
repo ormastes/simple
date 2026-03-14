@@ -74,7 +74,7 @@ This directory contains comprehensive duplication analysis for the Simple langua
 - Impact: Reduced maintenance burden, fewer bugs per fix
 
 ### For Developers
-- See **DUPLICATION_QUICK_REFERENCE.md** for:
+- See **duplication_quick_reference.md** for:
   - Which functions are duplicated
   - Current location of canonical versions
   - What to do about each duplication

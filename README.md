@@ -908,6 +908,30 @@ See [doc/spec/README.md](doc/spec/README.md) for the complete specification inde
 
 ---
 
+## Codebase Statistics
+
+**As of 2026-03-14 (v0.6.1)** — 100% Pure Simple, self-hosting compiler
+
+| Metric | Value |
+|--------|-------|
+| **Total .spl lines** | **1,245,587** |
+| **Total .spl files** | **6,231** |
+| **Production code** | 791,038 lines (3,893 files) |
+| **Test code** | 399,549 lines (2,181 files) |
+| **Average file size** | 204 lines |
+
+| Component | Lines | Files |
+|-----------|------:|------:|
+| `src/lib/` (stdlib) | 327,727 | 1,670 |
+| `src/compiler/` | 227,022 | 1,057 |
+| `src/app/` (CLI/tools) | 91,521 | 577 |
+| `test/` | 364,203 | 1,999 |
+| `examples/` | 26,851 | 120 |
+
+**Growth:** 910K lines (v0.4.0, Feb 2026) → 1.25M lines (v0.6.1, Mar 2026), **+37% in 5 weeks**
+
+---
+
 ## Project Structure
 
 ```
@@ -917,39 +941,52 @@ simple/
 │   └── release/             # Pre-built release binaries
 │       └── simple           # Pre-built runtime (33 MB)
 │
-├── src/                      # Simple source code (100% Simple)
-│   ├── app/                  # Applications
+├── src/                      # Simple source code (826K lines, 100% Simple)
+│   ├── compiler/             # Compiler infrastructure (227K lines)
+│   │   ├── 00.common/      # Error types, config, diagnostics
+│   │   ├── 10.frontend/    # Lexer, parser, AST, treesitter
+│   │   ├── 20.hir/         # HIR types, definitions, lowering
+│   │   ├── 25.traits/      # Trait def, impl, solver, coherence
+│   │   ├── 30.types/       # Type inference, type system
+│   │   ├── 35.semantics/   # Semantic analysis, lint, resolve
+│   │   ├── 50.mir/         # MIR types, lowering, serialization
+│   │   ├── 60.mir_opt/     # MIR optimization passes
+│   │   ├── 70.backend/     # Backends (LLVM, C, Cranelift, WASM, CUDA, Vulkan)
+│   │   ├── 80.driver/      # Driver, pipeline, build mode
+│   │   ├── 90.tools/       # API surface, coverage, symbol analyzer
+│   │   ├── 95.interp/      # Interpreter, MIR interpreter
+│   │   └── 99.loader/      # Module resolver, loader
+│   ├── lib/                  # Standard library (328K lines)
+│   │   ├── common/          # Pure functions (text, math, json, crypto)
+│   │   ├── nogc_sync_mut/   # Sync mutable (ffi, fs, net, http, spec)
+│   │   ├── nogc_async_mut/  # Async mutable (actors, async, threads)
+│   │   ├── gc_async_mut/    # GC + async (gpu, cuda, torch, ML)
+│   │   └── nogc_async_mut_noalloc/  # Baremetal, execution, memory
+│   ├── app/                  # Applications & tools (92K lines)
 │   │   ├── cli/             # Main CLI dispatcher
 │   │   ├── build/           # Self-hosting build system
 │   │   ├── mcp/             # MCP server (Model Context Protocol)
-│   │   ├── lsp/             # Language server protocol
 │   │   ├── io/              # SFFI wrappers (file, process, etc.)
 │   │   └── ...              # 50+ tool modules
-│   ├── lib/                  # Libraries
-│   │   ├── database/        # Unified database (BugDB, TestDB, etc.)
-│   │   └── pure/            # Pure Simple DL (tensor, autograd, nn)
-│   ├── std/                  # Standard library
-│   │   ├── src/             # Library source
-│   │   └── test/            # Library tests
-│   └── compiler/             # Compiler infrastructure
-│       ├── backend/         # Code generation
-│       ├── inference/       # Type inference
-│       └── parser/          # Parser and treesitter
+│   └── i18n/                 # Internationalization
 │
-├── examples/                 # Example programs
+├── examples/                 # Example programs (27K lines)
 │   ├── pure_nn/             # Deep learning examples
-│   └── gpu/vulkan/          # GPU computing examples
+│   ├── cuda/                # CUDA programming examples
+│   └── 10_tooling/          # TRACE32 tools, CMM LSP
 │
-├── test/                     # Test suites
+├── test/                     # Test suites (364K lines)
+│   ├── unit/                # Unit tests
 │   ├── integration/         # Integration tests
 │   ├── system/              # System tests
-│   └── intensive/           # Intensive feature tests
+│   └── feature/             # Feature/BDD tests
 │
-├── doc/                      # Documentation
+├── doc/                      # Documentation (4,282 .md files)
 │   ├── spec/                # Language specifications
 │   ├── guide/               # User guides
 │   ├── design/              # Design documents
-│   └── report/              # Session reports
+│   ├── research/            # Research & analysis
+│   └── plan/                # Implementation roadmaps
 │
 └── verification/             # Lean 4 formal verification
 ```

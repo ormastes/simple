@@ -1,86 +1,102 @@
 # Simple Language Code Statistics
 
-**Generated:** 2026-02-05
-**Version:** 0.4.0 (Pure Simple Edition)
+**Generated:** 2026-03-14
+**Version:** 0.6.1
 **Status:** 100% Pure Simple Architecture
 
 ---
 
 ## Executive Summary
 
-Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting Pure Simple architecture**:
+Simple is a **100% self-hosting Pure Simple** compiler and ecosystem:
 
 - **Historical Rust codebase:** 467,846 lines (deleted 2026-02-05)
-- **Current Simple codebase:** 910,229 lines (195% of original Rust)
-- **Architecture:** 100% Pure Simple (zero Rust files)
-- **Code expansion ratio:** 1.95x (Simple vs Rust)
+- **Current Simple codebase:** 1,245,587 lines (266% of original Rust)
+- **Architecture:** 100% Pure Simple (zero Rust source)
+- **Code expansion ratio:** 2.66x (Simple vs Rust)
+- **Growth since v0.4.0:** +335,358 lines (+37%) in 5 weeks
 
 ---
 
-## Current Simple Codebase (v0.4.0)
+## Current Simple Codebase (v0.6.1)
 
 ### Overall Statistics
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Total Lines** | 910,229 | All .spl files |
-| **Total Files** | 3,879 | .spl files only |
-| **Production Code** | 508,302 lines | 2,045 files (55.8%) |
-| **Test Code** | 401,927 lines | 1,834 files (44.2%) |
-| **Test Coverage** | 44.2% | Test lines / total lines |
-| **Rust Files** | 0 | 100% Pure Simple |
+| **Total Lines** | 1,245,587 | All .spl files |
+| **Total Files** | 6,231 | .spl files only |
+| **Production Code** | 791,038 lines | 3,893 files (63.5%) |
+| **Test Code** | 399,549 lines | 2,181 files (32.1%) |
+| **Examples** | 26,851 lines | 120 files (2.2%) |
+| **Avg File Size** | 204 lines | |
+| **Rust Source** | 0 | 100% Pure Simple |
 
-### Production Code Breakdown
-
-**Total Production Lines: 508,302** (excluding `*_spec.spl` and `*test*.spl`)
-
-| Directory | Lines | Files | % of Total | Purpose |
-|-----------|-------|-------|------------|---------|
-| **src/** | 208,724 | 779 | 41.1% | Core implementation |
-| **release/** | 186,996 | 733 | 36.8% | Release artifacts |
-| **build/** | 93,621 | 381 | 18.4% | Build system |
-| **src/i18n/** | 4,756 | 29 | 0.9% | Internationalization |
-| **test/** | 4,347 | 70 | 0.9% | Non-test support files |
-| **examples/** | 2,080 | 17 | 0.4% | Example programs |
-| **doc/** | 827 | 5 | 0.2% | Documentation code |
-| **scripts/** | 230 | 4 | 0.0% | Utility scripts |
-| **lib/** | 137 | 1 | 0.0% | Library code |
-| **Other** | 6,584 | 26 | 1.3% | Miscellaneous |
-
-### Source Directory Breakdown (`src/`)
-
-**Total: 208,724 lines across 779 files**
-
-| Subdirectory | Lines | Purpose |
-|--------------|-------|---------|
-| **src/compiler/** | 83,250 | Compiler infrastructure (lexer, parser, HIR, MIR, codegen) |
-| **src/app/** | 82,292 | Applications (CLI, build, MCP, LSP, formatter, linter) |
-| **src/lib/** | 30,581 | Standard library |
-| **src/lib/** | 5,614 | Libraries (database, pure DL) |
-| **Other** | 6,987 | Test modules, utilities |
-
-### Test Code Breakdown
-
-**Total Test Lines: 401,927** (`*_spec.spl` and `*test*.spl` files)
+### By Top-Level Directory
 
 | Directory | Lines | Files | Purpose |
 |-----------|-------|-------|---------|
-| **test/** | 194,106 | ~950 | Main test suite |
-| **src/app/** | 6,067 | ~180 | App tests |
-| **src/lib/** | 2,274 | ~40 | Library tests |
-| **src/compiler/** | 1,907 | ~30 | Compiler tests |
-| **src/lib/** | 153 | ~5 | Stdlib tests |
-| **Other** | 197,420 | ~629 | Other test locations |
+| **src/** | 826,384 | 4,075 | Core implementation |
+| **test/** | 364,203 | 1,999 | Test suites |
+| **examples/** | 26,851 | 120 | Example programs |
+| **doc/** | 27,711 | 29 | Documentation code |
+| **bin/** | 239 | 4 | CLI entry points |
+
+### Source Directory Breakdown (`src/`)
+
+**Total: 826,384 lines across 4,075 files**
+
+| Subdirectory | Lines | Files | Purpose |
+|--------------|-------|-------|---------|
+| **src/lib/** | 327,727 | 1,670 | Standard library |
+| **src/compiler/** | 227,022 | 1,057 | Compiler infrastructure (lexer, parser, HIR, MIR, codegen) |
+| **src/app/** | 91,521 | 577 | Applications (CLI, build, MCP, LSP, formatter, linter) |
+| **src/i18n/** | 4,811 | 29 | Internationalization |
+
+### Compiler Layers (`src/compiler/`)
+
+**Total: 227,022 lines across 1,057 files**
+
+| Layer | Lines | Files | Purpose |
+|-------|-------|-------|---------|
+| **70.backend/** | 53,087 | 205 | Backends (LLVM, C, Cranelift, WASM, CUDA, Vulkan) |
+| **90.tools/** | 35,690 | 192 | API surface, coverage, symbol analyzer |
+| **10.frontend/** | 35,004 | 101 | Lexer, parser, AST, treesitter |
+| **80.driver/** | 19,792 | 91 | Driver, pipeline, build mode |
+| **30.types/** | 18,970 | 56 | Type inference, type system |
+| **35.semantics/** | 11,654 | 47 | Semantic analysis, lint, resolve |
+| **60.mir_opt/** | 7,213 | 23 | MIR optimization passes |
+| **99.loader/** | 6,827 | 23 | Module resolver, loader |
+| **40.mono/** | 6,417 | 22 | Monomorphization |
+| **00.common/** | 5,876 | 37 | Error types, config, diagnostics |
+| **85.mdsoc/** | 5,227 | 151 | Virtual capsules, AOP |
+| **20.hir/** | 4,975 | 19 | HIR types, definitions, lowering |
+| **50.mir/** | 4,667 | 17 | MIR types, lowering, serialization |
+| **15.blocks/** | 4,447 | 26 | Block definition system |
+| **55.borrow/** | 2,844 | 10 | Borrow checking, GC analysis |
+| **25.traits/** | 1,947 | 9 | Trait def, impl, solver |
+| **95.interp/** | 1,829 | 14 | Interpreter, MIR interpreter |
+
+### Standard Library (`src/lib/`)
+
+**Total: 327,727 lines across 1,670 files**
+
+| Category | Lines | Files | Purpose |
+|----------|-------|-------|---------|
+| **common/** | 146,275 | 713 | Pure functions (text, math, json, crypto) |
+| **nogc_sync_mut/** | 126,495 | 639 | Sync mutable (ffi, fs, net, http, spec) |
+| **nogc_async_mut/** | 30,986 | 153 | Async mutable (actors, async, threads) |
+| **nogc_async_mut_noalloc/** | 13,138 | 89 | Baremetal, execution, memory |
+| **nogc_async_immut/** | 5,214 | 22 | Async immutable |
+| **gc_async_mut/** | 4,985 | 23 | GC + async (gpu, cuda, torch, ML) |
 
 ### Test Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Test Files** | 1,834 |
-| **Total Tests** | 631+ |
-| **Test Frameworks** | Rust tests + Simple/SSpec |
-| **Test Coverage** | 44.2% (by line count) |
-| **Test Pass Rate** | ~98% (as of last run) |
+| **Total Test Files** | 2,181 |
+| **Test Lines** | 399,549 |
+| **Test Ratio** | 33.5% of total lines |
 
 ---
 
@@ -170,34 +186,27 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 
 ## Code Quality Metrics
 
-### Test Coverage
+### File Size Distribution
 
-| Category | Tests | Status |
-|----------|-------|--------|
-| **Total Tests** | 631+ | ~98% passing |
-| **SSpec Tests** | 290+ | BDD framework |
-| **Rust Tests** | 0 | All migrated to Simple |
-| **Integration Tests** | 80+ | Database, build system |
-| **Feature Tests** | 21+ | Executable specs |
-
-### Documentation
-
-| Type | Count | Location |
-|------|-------|----------|
-| **Auto-generated docs** | 12 files | `doc/feature/`, `doc/test/`, `doc/build/` |
-| **Design docs** | 50+ | `doc/design/` |
-| **Research docs** | 80+ | `doc/research/` |
-| **Guides** | 30+ | `doc/guide/` |
-| **Reports** | 200+ | `doc/report/` |
+| Range | Count |
+|-------|------:|
+| > 2000 lines | 2 |
+| 1000-1499 | 13 |
+| 800-999 | 20 |
+| 500-799 | 447 |
+| 200-499 | 1,936 |
+| < 200 lines | 3,678 |
 
 ### Code Organization
 
 | Metric | Value |
 |--------|-------|
-| **Average file size** | 235 lines |
-| **Largest file** | ~2,000 lines (compiler modules) |
-| **Total directories** | ~150 |
-| **Module organization** | Hierarchical by feature |
+| **Average file size** | 204 lines |
+| **Largest file** | 2,415 lines (`src/app/cli/query_rich.spl`) |
+| **Total .spl files** | 6,231 |
+| **Documentation files** | 4,282 .md files |
+| **SDN data files** | 336 .sdn files |
+| **Module organization** | Hierarchical by feature, numbered compiler layers |
 
 ---
 
@@ -231,22 +240,23 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 
 ### By Extension
 
-| Extension | Files | Lines | Purpose |
-|-----------|-------|-------|---------|
-| **.spl** | 3,879 | 910,229 | Simple source code |
-| **.sdn** | 50+ | ~5,000 | Data files (SDN format) |
-| **.md** | 300+ | ~100,000 | Documentation |
-| **.toml** | 10+ | ~500 | Legacy config (being phased out) |
-| **.rs** | 0 | 0 | ✅ All removed |
+| Extension | Files | Purpose |
+|-----------|-------|---------|
+| **.spl** | 6,231 | Simple source code (1,245,587 lines) |
+| **.sdn** | 336 | Data files (SDN format) |
+| **.md** | 4,282 | Documentation |
+| **.shs** | 15 | Shell scripts (Simple) |
+| **.c/.h** | 5,276 | Generated C bootstrap |
+| **.rs** | 1,908 | Legacy/generated artifacts |
 
 ### By Purpose
 
 | Type | Files | Lines | % |
 |------|-------|-------|---|
-| **Implementation** | 2,045 | 508,302 | 55.8% |
-| **Tests** | 1,834 | 401,927 | 44.2% |
-| **Examples** | 17 | 2,080 | 0.2% |
-| **Build scripts** | 4 | 230 | 0.0% |
+| **Production** | 3,893 | 791,038 | 63.5% |
+| **Tests** | 2,181 | 399,549 | 32.1% |
+| **Examples** | 120 | 26,851 | 2.2% |
+| **Other** | 37 | 28,149 | 2.3% |
 
 ---
 
@@ -259,14 +269,15 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 | **0.1.x** | 2025-Q4 | ~50,000 | 400,000 | Rust-based |
 | **0.2.x** | 2025-Q4 | ~150,000 | 450,000 | Hybrid |
 | **0.3.x** | 2026-Q1 | ~400,000 | 467,846 | Self-hosting |
-| **0.4.0** | 2026-02-05 | **910,229** | **0** ✅ | **100% Pure Simple** |
+| **0.4.0** | 2026-02-05 | 910,229 | 0 | 100% Pure Simple |
+| **0.6.1** | 2026-03-14 | **1,245,587** | **0** ✅ | **100% Pure Simple** |
 
 ### Line Count Growth
 
 ```
-Rust decline:    467K → 0      (-467K, -100%)
-Simple growth:   50K → 910K    (+860K, +1720%)
-Total codebase:  517K → 910K   (+393K, +76%)
+Rust decline:    467K → 0        (-467K, -100%)
+Simple growth:   50K → 1,246K    (+1,196K, +2392%)
+Total codebase:  517K → 1,246K   (+729K, +141%)
 ```
 
 ### Monthly Growth (2026)
@@ -275,32 +286,33 @@ Total codebase:  517K → 910K   (+393K, +76%)
 |-------|-------------------|-----------------|
 | **January** | +300,000 | Self-hosting build system, database library |
 | **February** | +510,000 | Pure Simple transition, Rust deletion |
+| **March** | +335,000 | Stdlib expansion, compiler layers, examples |
 
 ---
 
 ## Architecture Breakdown
 
-### Current Architecture (v0.4.0)
+### Current Architecture (v0.6.1)
 
 ```
-100% Pure Simple
-├── Compiler (83K lines)
-│   ├── Lexer, Parser, AST
-│   ├── HIR, MIR generation
-│   ├── Type inference
-│   └── Codegen (hybrid: Cranelift + Interpreter)
+100% Pure Simple (1,246K lines)
+├── Compiler (227K lines, 17 layers)
+│   ├── 00.common → 10.frontend → 15.blocks → 20.hir
+│   ├── 25.traits → 30.types → 35.semantics → 40.mono
+│   ├── 50.mir → 55.borrow → 60.mir_opt
+│   ├── 70.backend (LLVM, C, Cranelift, WASM, CUDA, Vulkan)
+│   ├── 80.driver → 85.mdsoc → 90.tools
+│   └── 95.interp → 99.loader
 │
-├── Runtime (via Pure Simple)
-│   ├── Shell-based I/O
-│   ├── Pure Simple memory management
-│   └── Math/string/list operations
+├── Standard Library (328K lines)
+│   ├── common/ (146K) - Pure functions
+│   ├── nogc_sync_mut/ (126K) - Sync mutable
+│   ├── nogc_async_mut/ (31K) - Async mutable
+│   ├── nogc_async_mut_noalloc/ (13K) - Baremetal
+│   ├── nogc_async_immut/ (5K) - Async immutable
+│   └── gc_async_mut/ (5K) - GC + async (GPU, ML)
 │
-├── Standard Library (31K lines)
-│   ├── Collections, iterators
-│   ├── String, file I/O
-│   └── Math, utilities
-│
-├── Applications (82K lines)
+├── Applications (92K lines)
 │   ├── CLI dispatcher
 │   ├── Build system (self-hosting)
 │   ├── MCP server
@@ -308,14 +320,13 @@ Total codebase:  517K → 910K   (+393K, +76%)
 │   ├── Formatter, linter
 │   └── Package manager
 │
-├── Libraries (6K lines)
-│   ├── Database (unified)
-│   └── Pure DL (deep learning)
+├── Tests (364K lines)
+│   ├── Unit, integration, system, feature tests
+│   └── 2,181 test files
 │
-└── Build System (94K lines)
-    ├── 8 build phases
-    ├── 290+ tests
-    └── Self-hosting infrastructure
+└── Examples (27K lines)
+    ├── Deep learning, CUDA, GPU
+    └── TRACE32 tools, CMM LSP
 ```
 
 ---
@@ -397,39 +408,37 @@ Total codebase:  517K → 910K   (+393K, +76%)
 
 ## Key Achievements
 
-### v0.4.0 Milestones
+### v0.6.1 Milestones (2026-03-14)
 
-- ✅ **100% Pure Simple** - Zero Rust files, 467K lines deleted
-- ✅ **Self-hosting build system** - 8 phases, 4,440 lines
-- ✅ **Unified database library** - Atomic ops, query builder
-- ✅ **MCP server** - Full JSON-RPC 2.0 implementation
-- ✅ **910K lines of Simple code** - 1.95x Rust codebase
-- ✅ **631+ tests** - 44.2% test coverage
-- ✅ **3,879 source files** - Organized, modular codebase
+- ✅ **1.25M lines of Simple code** - 2.66x original Rust codebase
+- ✅ **6,231 source files** - Well-organized, modular codebase
+- ✅ **17-layer compiler** - Numbered layers (00-99) for clear dependency order
+- ✅ **328K stdlib** - Comprehensive standard library across 6 categories
+- ✅ **92K app code** - CLI, build system, MCP, LSP, formatter, linter
+- ✅ **27K examples** - Deep learning, CUDA, TRACE32, GPU
 
-### Notable Statistics
+### Growth Milestones
 
-- **Largest crate migration:** Compiler (187K → 83K Rust lines, -56%)
-- **Most expanded:** Tests (50K → 402K, +704%)
-- **Fastest migration:** Parser (29K Rust → integrated in compiler)
-- **Code quality:** 44.2% test coverage, ~98% pass rate
+- **v0.4.0 → v0.6.1:** +335K lines (+37%) in 5 weeks
+- **Rust → Simple:** 467K Rust deleted, replaced by 1.25M Simple
+- **Compiler growth:** 83K → 227K lines (+173%)
+- **Stdlib growth:** 31K → 328K lines (+958%)
+- **Average file size:** 204 lines (well within maintainability target)
 
 ---
 
 ## Summary
 
-Simple v0.4.0 represents a **complete architectural transformation**:
+Simple v0.6.1 is a **1.25 million line self-hosting compiler ecosystem**:
 
 - **From:** 467K lines of Rust (16 crates)
-- **To:** 910K lines of Simple (100% self-hosting)
-- **Change:** +443K lines (+95%), 0 Rust files remaining
+- **To:** 1,245,587 lines of Simple (100% self-hosting)
+- **Change:** +778K lines (+166%), 0 Rust source files remaining
+- **Architecture:** 17-layer compiler, 6-category stdlib, 50+ app modules
 
-The project successfully demonstrated that a **self-hosting compiler** can be written entirely in its own language, with comprehensive testing, robust tooling, and production-ready infrastructure.
-
-**Next milestone (v0.5.0):** Grammar refinement, enhanced tooling, and ecosystem growth.
+The project demonstrates that a **self-hosting compiler** can be written entirely in its own language, with comprehensive testing (400K test lines), robust tooling, and production-ready infrastructure — built with LLM-assisted development.
 
 ---
 
-**Last Updated:** 2026-02-05
+**Last Updated:** 2026-03-14
 **Generated by:** Simple Code Statistics Tool
-**Repository:** https://github.com/anthropics/simple

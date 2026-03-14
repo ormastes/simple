@@ -208,7 +208,7 @@ bin/simple run program.spl
 - **Quick Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 - **Development Guide:** `CLAUDE.md`
 - **Feature Status:** `doc/needed_feature.md`
-- **Release Notes:** `doc/RELEASE_2026-02-14.md`
+- **Release Notes:** `doc/release_2026-02-14.md`
 - **Session Reports:** `doc/session/*_2026-02-14.md`
 
 ---

@@ -22,8 +22,8 @@
 | README.md | 19 | 19 | 0 | 0 | 117ms |
 | CLAUDE.md | 2 | 2 | 0 | 0 | 11ms |
 | doc/analysis/compiler_duplicates_quick_ref.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/analysis/COMPILER_DUPLICATION_INDEX.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/analysis/DUPLICATION_QUICK_REFERENCE.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/analysis/compiler_duplication_index.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/analysis/duplication_quick_reference.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/analysis/pattern_analysis.txt | 0 | 0 | 0 | 0 | 0ms |
 | doc/analysis/phase1_app_duplicates.md | 20 | 20 | 0 | 0 | 131ms |
 | doc/analysis/phase1_backend_duplicates.md | 23 | 23 | 0 | 0 | 117ms |
@@ -40,7 +40,7 @@
 | doc/analysis/phase2_quick_reference.md | 3 | 3 | 0 | 0 | 16ms |
 | doc/analysis/phase2_shared_library_plan.md | 7 | 7 | 0 | 0 | 29ms |
 | doc/analysis/phase2_std_duplicates.md | 22 | 22 | 0 | 0 | 128ms |
-| doc/analysis/PHASE2_SUMMARY.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/analysis/phase2_summary.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/analysis/README.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/analysis/stdlib_utils_concatenated.spl | 0 | 0 | 0 | 0 | 0ms |
 | doc/analysis/stdlib_utils_files.txt | 0 | 0 | 0 | 0 | 0ms |
@@ -68,7 +68,7 @@
 | doc/architecture/flows.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/architecture/interpreter_missing_features.md | 40 | 40 | 0 | 0 | 229ms |
 | doc/architecture/jit_interpreter_integration.md | 18 | 18 | 0 | 0 | 121ms |
-| doc/architecture/LLVM_BACKEND_ARCHITECTURE.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/architecture/llvm_backend_architecture.md | 1 | 1 | 0 | 0 | 5ms |
 | doc/architecture/memory_model_implementation.md | 6 | 6 | 0 | 0 | 24ms |
 | doc/architecture/modules.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/architecture/overview.md | 0 | 0 | 0 | 0 | 0ms |
@@ -153,7 +153,7 @@
 | doc/feature/category/Uncategorized.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/feature/feature_db.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/feature/feature.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/feature/FEATURES_THAT_WORK.md | 12 | 12 | 0 | 0 | 64ms |
+| doc/feature/features_that_work.md | 12 | 12 | 0 | 0 | 64ms |
 | doc/feature/ffi_wrapper_migration_progress.md | 2 | 2 | 0 | 0 | 11ms |
 | doc/feature/ffi_wrapper_migration_week1_summary.md | 5 | 5 | 0 | 0 | 21ms |
 | doc/feature/got_plt_support.md | 1 | 1 | 0 | 0 | 5ms |
@@ -636,10 +636,10 @@
 | doc/refactoring/phase7_env_process_complete.md | 4 | 4 | 0 | 0 | 18ms |
 | doc/refactoring/phase8_atomic_complete.md | 7 | 7 | 0 | 0 | 31ms |
 | doc/refactoring/phase9_sync_complete.md | 4 | 4 | 0 | 0 | 20ms |
-| doc/release/PRODUCTION_READINESS.md | 1 | 1 | 0 | 0 | 6ms |
-| doc/release/PRODUCTION_READY_SUMMARY.md | 4 | 4 | 0 | 0 | 23ms |
-| doc/release/RELEASE_2026-02-14.md | 5 | 5 | 0 | 0 | 28ms |
-| doc/release/RELEASE_CHECKLIST_DL_2026-02-16.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/release/production_readiness.md | 1 | 1 | 0 | 0 | 6ms |
+| doc/release/production_ready_summary.md | 4 | 4 | 0 | 0 | 23ms |
+| doc/release/release_2026-02-14.md | 5 | 5 | 0 | 0 | 28ms |
+| doc/release/release_checklist_dl_2026-02-16.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/release/v0.5.0-rc.1-release-notes.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/release/v0.6.0-release-notes.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/runtime/monoio_limitations.md | 3 | 3 | 0 | 0 | 18ms |
@@ -677,7 +677,7 @@
 | doc/test/feature_test_index.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/grouped_test_db.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/grouped_test_report.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/test/HANG_ANALYSIS.md | 6 | 6 | 0 | 0 | 26ms |
+| doc/test/hang_analysis.md | 6 | 6 | 0 | 0 | 26ms |
 | doc/test/LATEST_TEST_RUN_2026-01-30.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/llm_integration_testing.md | 2 | 2 | 0 | 0 | 11ms |
 | doc/test/logs/batch2_20260128_043550.log | 0 | 0 | 0 | 0 | 0ms |
@@ -699,8 +699,8 @@
 | doc/test/test_failures_grouped.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/test_failures_summary.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/test_result.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/test/TEST_STATUS_AUDIT.md | 0 | 0 | 0 | 0 | 0ms |
-| doc/test/TEST_STATUS_PARTIAL.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/test_status_audit.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/test_status_partial.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/test/uncovered_branches_analysis.md | 18 | 18 | 0 | 0 | 82ms |
 | doc/todo/COMPILER_TODOS_SUMMARY.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/todo/import_path_migration.md | 4 | 4 | 0 | 0 | 16ms |

@@ -517,9 +517,9 @@ fn get_level(): rt_env_get("LOG")  # Lazy evaluation
 - doc/guide/sync_async/async/async_guide.md (1,220 lines)
 - doc/guide/lsp_integration.md (1,100 lines)
 - doc/guide/backend_capabilities.md (1,410 lines)
-- doc/FEATURES_THAT_WORK.md (510 lines)
-- doc/test/HANG_ANALYSIS.md (comprehensive)
-- doc/TEST_STATUS_AUDIT.md (complete audit)
+- doc/feature/features_that_work.md (510 lines)
+- doc/test/hang_analysis.md (comprehensive)
+- doc/test/test_status_audit.md (complete audit)
 
 **All documentation is evidence-based with test results and performance data.**
 
@@ -540,7 +540,7 @@ fn get_level(): rt_env_get("LOG")  # Lazy evaluation
 - Package management tests (5 files)
 - Many more...
 
-See doc/TEST_STATUS_AUDIT.md for complete list.
+See doc/test/test_status_audit.md for complete list.
 
 ---
 
@@ -597,8 +597,8 @@ The Simple Language Compiler is production ready NOW. All remaining items are op
 
 **Release Documentation:**
 - PRODUCTION_READY.md - Executive summary (root)
-- doc/RELEASE_2026-02-14.md - Full release notes
-- doc/PRODUCTION_READY_SUMMARY.md - Quick reference
+- doc/release/release_2026-02-14.md - Full release notes
+- doc/release/production_ready_summary.md - Quick reference
 
 **Session Reports (8 files, 2,500+ lines):**
 - doc/session/test_runner_bug_fixes_2026-02-14.md (264 lines)

@@ -74,7 +74,7 @@ jj git push --bookmark main
 
 **7. Add to Makefile**
 
-Copy targets from `doc/design/TODO_MAKEFILE_INTEGRATION.md`:
+Copy targets from `doc/design/todo_makefile_integration.md`:
 
 ```make
 .PHONY: check-todos
@@ -91,7 +91,7 @@ check-full: check-todos ...
 
 **8. Update CONTRIBUTING.md**
 
-Copy section from `doc/design/TODO_CONTRIBUTING_UPDATE.md`:
+Copy section from `doc/design/todo_contributing_update.md`:
 - TODO format specification
 - Examples
 - Validation instructions

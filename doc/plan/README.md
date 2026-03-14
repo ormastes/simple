@@ -65,7 +65,7 @@ Two major cleanup initiatives:
 
 ## Active Plans
 
-### 1. REFACTOR_PHASES.md
+### 1. refactor_phases.md
 **Goal:** Refactor stdlib utils files into modular subdirectories
 
 - **Scope:** 114 files (~103k lines)
@@ -77,12 +77,12 @@ Two major cleanup initiatives:
 ```bash
 cd src/lib
 # Work on current phase
-cat ../../doc/plan/REFACTOR_PHASES.md
+cat ../../doc/plan/refactor_phases.md
 ```
 
 ---
 
-### 2. TODO_PHASES.md
+### 2. todo_phases.md
 **Goal:** Implement and remove all TODO items
 
 - **Scope:** 806 TODOs in source code
@@ -97,7 +97,7 @@ bin/simple todo-scan
 cat doc/TODO.md
 
 # Work on current phase
-cat doc/plan/TODO_PHASES.md
+cat doc/plan/todo_phases.md
 ```
 
 ---

@@ -191,7 +191,7 @@ make todos-stats
 
 - **Complete specification:** `.claude/skills/todo.md`
 - **Technical documentation:** `doc/design/dual_language_todo_parsing.md`
-- **Quick start guide:** `doc/design/TODO_QUICKSTART.md`
+- **Quick start guide:** `doc/design/todo_quickstart.md`
 
 ---
 
@@ -264,7 +264,7 @@ If CONTRIBUTING.md has a table of contents, add:
 Verify all internal links work:
 - `.claude/skills/todo.md`
 - `doc/design/dual_language_todo_parsing.md`
-- `doc/design/TODO_QUICKSTART.md`
+- `doc/design/todo_quickstart.md`
 
 ### Step 6: Commit
 

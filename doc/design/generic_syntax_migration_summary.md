@@ -170,7 +170,7 @@ cargo test --package simple-driver --bin simple cli::migrate::tests
    - Phase-by-phase rollout
    - Community communication templates
 
-6. **`doc/design/GENERIC_SYNTAX_MIGRATION_SUMMARY.md`** (THIS FILE)
+6. **`doc/design/generic_syntax_migration_summary.md`** (THIS FILE)
 
 ---
 

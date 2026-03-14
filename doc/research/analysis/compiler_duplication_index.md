@@ -124,7 +124,7 @@
 - `phase1_summary.md` - Executive summary of Phase 1 findings
 - `phase1_app_duplicates.md` - App directory analysis
 - `phase1_stdlib_utils_duplicates.md` - Standard library utilities
-- `DUPLICATION_QUICK_REFERENCE.md` - Phase 1 quick reference
+- `duplication_quick_reference.md` - Phase 1 quick reference
 
 ---
 

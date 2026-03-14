@@ -232,7 +232,7 @@ Mixins are expanded at the HIR level, meaning by the time code reaches MIR:
 ### Documentation (New)
 - `doc/plans/mixin_completion_plan_2026_01_08.md` - 25-hour completion roadmap
 - `doc/plans/mixin_completion_status_2026_01_08.md` - Current status report
-- `doc/plans/MIXIN_COMPLETE_SUMMARY.md` - This comprehensive summary
+- `doc/plan/mixin_complete_summary.md` - This comprehensive summary
 
 ### Documentation (Existing)
 - `doc/research/typed_mixins_research.md` - Research and design

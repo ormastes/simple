@@ -375,8 +375,8 @@ simple migrate --fix-generics .
 
 ### Related Documents
 
-- [Link to GENERIC_SYNTAX_MIGRATION_SUMMARY.md]
-- [Link to COMMUNITY_ANNOUNCEMENT.md]
+- [Link to generic_syntax_migration_summary.md]
+- [Link to community_announcement_template.md]
 - [Link to project-specific documentation]
 
 ---

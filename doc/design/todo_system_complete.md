@@ -61,10 +61,10 @@ The TODO database system is **fully implemented and ready to deploy**. All code 
 ### ✅ Ready-to-Use Resources
 
 **Quick Start:**
-- `doc/design/TODO_QUICKSTART.md` - Complete user guide with examples
+- `doc/design/todo_quickstart.md` - Complete user guide with examples
 
 **Integration:**
-- `doc/design/TODO_MAKEFILE_INTEGRATION.md` - Ready-to-paste Makefile targets
+- `doc/design/todo_makefile_integration.md` - Ready-to-paste Makefile targets
 - `doc/design/todo_contributing_update.md` - Ready-to-paste CONTRIBUTING.md section
 
 **Reference:**
@@ -246,7 +246,7 @@ cat doc/TODO.md
 ./target/release/simple todo-scan --validate
 
 # 6. Add to Makefile
-# Copy from: doc/design/TODO_MAKEFILE_INTEGRATION.md
+# Copy from: doc/design/todo_makefile_integration.md
 
 # 7. Update CONTRIBUTING.md
 # Copy from: doc/design/todo_contributing_update.md
@@ -271,10 +271,10 @@ make gen-todos
 ## 📚 Documentation Index
 
 **Getting Started:**
-1. `doc/design/TODO_QUICKSTART.md` - **START HERE** - Complete user guide
+1. `doc/design/todo_quickstart.md` - **START HERE** - Complete user guide
 
 **Integration:**
-2. `doc/design/TODO_MAKEFILE_INTEGRATION.md` - Add to Makefile
+2. `doc/design/todo_makefile_integration.md` - Add to Makefile
 3. `doc/design/todo_contributing_update.md` - Update contributor guide
 
 **Planning:**
@@ -286,9 +286,9 @@ make gen-todos
 7. `doc/design/dual_language_parsing_summary.md` - Quick reference
 
 **Status:**
-8. `doc/design/IMPLEMENTATION_SUMMARY.md` - Executive summary
+8. `doc/design/implementation_summary.md` - Executive summary
 9. `doc/design/todo_db_implementation_complete.md` - Completion report
-10. `doc/design/TODO_SYSTEM_COMPLETE.md` - **THIS FILE** - Final status
+10. `doc/design/todo_system_complete.md` - **THIS FILE** - Final status
 
 **Reference:**
 11. `.claude/skills/todo.md` - TODO format specification
@@ -440,7 +440,7 @@ make check-full      # All checks
 ## 📞 Support
 
 **Questions?** See the documentation:
-- Quick start: `doc/design/TODO_QUICKSTART.md`
+- Quick start: `doc/design/todo_quickstart.md`
 - Technical: `doc/design/dual_language_todo_parsing.md`
 - Format spec: `.claude/skills/todo.md`
 

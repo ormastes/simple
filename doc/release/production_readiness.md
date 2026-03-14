@@ -238,7 +238,7 @@ fn get_level(): rt_env_get("LOG")
    - Capability detection, testing
    - **Status:** Production ready
 
-4. **FEATURES_THAT_WORK.md** (510 lines)
+4. **features_that_work.md** (510 lines)
    - Catalog of working features
    - Test evidence, usage guides
    - **Status:** Complete
@@ -455,13 +455,13 @@ With 95%+ of features fully functional and comprehensive documentation complete,
 ## Appendices
 
 ### A. Complete Test Results
-See: `doc/TEST_STATUS_AUDIT.md`
+See: `doc/test_status_audit.md`
 
 ### B. Updated Feature List
 See: `doc/needed_feature_UPDATED.md`
 
 ### C. Known Issues Detail
-See: `doc/test/HANG_ANALYSIS.md`
+See: `doc/test/hang_analysis.md`
 
 ### D. Documentation Index
 See: `doc/guide/README.md`

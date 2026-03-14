@@ -4,7 +4,7 @@
 **Goal:** Implement comprehensive CUDA support with streams, async operations, and unified API
 **Status:** Planning
 **Based On:**
-- `doc/plan/UNIFIED_GPU_INTERFACE_PLAN.md`
+- `doc/plan/unified_gpu_interface_plan.md`
 - `doc/guide/gpu_configuration.md`
 - `doc/api/gpu_api.md`
 
@@ -1016,7 +1016,7 @@ fn cuda(device_id: i32) -> TorchTensorWrapper
 
 ## Related Documents
 
-- `doc/plan/UNIFIED_GPU_INTERFACE_PLAN.md` - Full unified API spec
+- `doc/plan/unified_gpu_interface_plan.md` - Full unified API spec
 - `doc/guide/gpu_configuration.md` - Config file guide
 - `doc/api/gpu_api.md` - Complete API reference
 - `doc/design/gpu_backend_design.md` - Backend architecture

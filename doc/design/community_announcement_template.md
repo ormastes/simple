@@ -95,7 +95,7 @@ jj describe -m "Migrate generic syntax from [] to <>"
 
 ## 📚 Resources
 
-- **Migration Guide**: `doc/design/GENERIC_SYNTAX_MIGRATION_SUMMARY.md`
+- **Migration Guide**: `doc/design/generic_syntax_migration_summary.md`
 - **Deprecation Plan**: `doc/design/generic_syntax_deprecation_plan.md`
 - **Syntax Reference**: `CLAUDE.md`
 

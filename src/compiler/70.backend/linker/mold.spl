@@ -16,6 +16,7 @@ use std.string_builder.{StringBuilder}
 use std.path.{join2}
 
 use .obj_taker (SymbolType)
+use compiler.backend.linker.platform_defaults.{platform_defaults, elf_emulation}
 
 # ============================================================================
 # Linker Detection (Pure Simple)
@@ -203,39 +204,10 @@ fn mold_cc_print_file(name: text) -> text:
 fn mold_find_dynamic_linker() -> text:
     val os = host_os()
     val arch = host_arch()
-    if os == "linux":
-        if arch == "x86_64":
-            if file_exists("/lib64/ld-linux-x86-64.so.2"):
-                return "/lib64/ld-linux-x86-64.so.2"
-            if file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
-                return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
-        elif arch == "aarch64":
-            if file_exists("/lib/ld-linux-aarch64.so.1"):
-                return "/lib/ld-linux-aarch64.so.1"
-            if file_exists("/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"):
-                return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
-        elif arch == "i686" or arch == "i386":
-            if file_exists("/lib/ld-linux.so.2"):
-                return "/lib/ld-linux.so.2"
-            if file_exists("/lib/i386-linux-gnu/ld-linux.so.2"):
-                return "/lib/i386-linux-gnu/ld-linux.so.2"
-        elif arch == "armv7" or arch == "arm":
-            if file_exists("/lib/ld-linux-armhf.so.3"):
-                return "/lib/ld-linux-armhf.so.3"
-            if file_exists("/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"):
-                return "/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
-        elif arch == "riscv64":
-            if file_exists("/lib/ld-linux-riscv64-lp64d.so.1"):
-                return "/lib/ld-linux-riscv64-lp64d.so.1"
-            if file_exists("/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"):
-                return "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
-        elif arch == "riscv32":
-            if file_exists("/lib/ld-linux-riscv32-ilp32d.so.1"):
-                return "/lib/ld-linux-riscv32-ilp32d.so.1"
-            if file_exists("/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"):
-                return "/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"
-    elif os == "freebsd":
-        return "/libexec/ld-elf.so.1"
+    val defaults = platform_defaults(os, arch)
+    for path in defaults.dynamic_linker_candidates:
+        if file_exists(path):
+            return path
     ""
 
 fn mold_path_dirname(path: text) -> text:
@@ -366,26 +338,13 @@ impl MoldBackend:
         # Emulation mode and dynamic linker (if CRT found)
         val os = host_os()
         val arch = host_arch()
+        val defaults = platform_defaults(os, arch)
         if crt.found:
             if os == "linux":
-                if arch == "x86_64":
+                val emulation = elf_emulation(arch)
+                if emulation != "":
                     args = args.push("-m")
-                    args = args.push("elf_x86_64")
-                elif arch == "aarch64":
-                    args = args.push("-m")
-                    args = args.push("aarch64linux")
-                elif arch == "i686" or arch == "i386":
-                    args = args.push("-m")
-                    args = args.push("elf_i386")
-                elif arch == "armv7" or arch == "arm":
-                    args = args.push("-m")
-                    args = args.push("armelf_linux_eabi")
-                elif arch == "riscv64":
-                    args = args.push("-m")
-                    args = args.push("elf64lriscv")
-                elif arch == "riscv32":
-                    args = args.push("-m")
-                    args = args.push("elf32lriscv")
+                    args = args.push(emulation)
 
             if crt.dynamic_linker != "":
                 args = args.push("-dynamic-linker")
@@ -432,11 +391,9 @@ impl MoldBackend:
 
         # Standard libraries (when CRT found, we need these)
         # No -lgcc/-lgcc_s — clang provides compiler-rt builtins
-        if crt.found and os == "linux":
-            args = args.push("-lc")
-            args = args.push("-lpthread")
-            args = args.push("-ldl")
-            args = args.push("-lm")
+        if crt.found:
+            for lib in defaults.libraries:
+                args = args.push("-l{lib}")
 
         # Debug info
         if self.config.debug:

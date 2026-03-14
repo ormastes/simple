@@ -2,7 +2,7 @@
 
 **Date:** 2026-01-31
 **Status:** Planning → Implementation
-**Quick Start:** `doc/plan/BACKEND_COMPLETENESS_QUICKSTART.md`
+**Quick Start:** `doc/plan/backend_completeness_quickstart.md`
 **Full Plan:** `doc/plan/backend_completeness_full_implementation.md`
 
 ---

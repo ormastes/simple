@@ -136,8 +136,8 @@ test/
 doc/
 ├── Status Reports
 │   ├── EXECUTIVE_SUMMARY.md
-│   ├── PRODUCTION_READINESS.md
-│   └── FEATURES_THAT_WORK.md
+│   ├── production_readiness.md
+│   └── features_that_work.md
 │
 ├── User Guides (guide/)
 │   ├── quick_reference/    # Quick reference guides

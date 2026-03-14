@@ -519,7 +519,7 @@ Exact dates to be announced.
 **A:** Multiple resources:
 
 1. **Documentation**:
-   - `doc/design/GENERIC_SYNTAX_MIGRATION_SUMMARY.md`
+   - `doc/design/generic_syntax_migration_summary.md`
    - `doc/design/generic_syntax_deprecation_plan.md`
    - This FAQ
 

@@ -186,7 +186,7 @@ The following test categories are consistently passing and should not regress:
 ## Related Documents
 
 - `doc/test/test_failures_summary.md` — 2026-02-06 failure breakdown by error type (355 failing files)
-- `doc/test/HANG_ANALYSIS.md` — Root cause analysis for 8 timeout tests (2026-02-14)
+- `doc/test/hang_analysis.md` — Root cause analysis for 8 timeout tests (2026-02-14)
 - `doc/test/FAILURE_ANALYSIS_2026-01-30.md` — 786 failures across 129 files (2026-01-30)
 - `doc/test/LATEST_TEST_RUN_2026-01-30.md` — 6,436/7,222 passing (89.1%) with 0 parse errors
-- `doc/test/TEST_STATUS_AUDIT.md` — (this file, replaces the 2026-02-14 @skip/@pending audit)
+- `doc/test/test_status_audit.md` — (this file, replaces the 2026-02-14 @skip/@pending audit)

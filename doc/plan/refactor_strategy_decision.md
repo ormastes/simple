@@ -133,7 +133,7 @@
 
 ### Next Priority: TODO Implementation
 
-See `doc/plan/TODO_PHASES.md` for:
+See `doc/plan/todo_phases.md` for:
 - 806 TODOs across codebase
 - Critical SMF loader stubs
 - FFI function implementations
@@ -161,7 +161,7 @@ See `doc/plan/TODO_PHASES.md` for:
 
 ## Documentation Updates
 
-1. ✅ Updated `REFACTOR_PHASES.md` with decision
+1. ✅ Updated `refactor_phases.md` with decision
 2. ✅ Created `refactor_strategy_decision.md` (this file)
 3. 📋 Next: Update `README.md` to shift focus
 4. 📋 Next: Begin TODO implementation planning
