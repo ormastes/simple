@@ -9,12 +9,7 @@ All SDN databases in the project. Managed by `src/lib/nogc_sync_mut/database/`.
 | BugDB | `doc/bug/bug_db.sdn` | `std.nogc_sync_mut.database.bug` | `create_bug_database()` | `bin/simple bug-add`, `bin/simple bug-gen` |
 | FeatureDB | `doc/feature/feature_db.sdn` | `std.nogc_sync_mut.database.feature` | `create_feature_database()` | Auto-updated by test runner |
 | TestDB | `doc/test/test_db.sdn` | `std.nogc_sync_mut.database.test` | `create_test_database()` | Auto-updated by test runner |
-
-## Planned Databases
-
-| Database | SDN File | Module | Status |
-|----------|----------|--------|--------|
-| RequirementDB | `doc/requirement/requirement_db.sdn` | `std.nogc_sync_mut.database.requirement` | Planned |
+| RequirementDB | `doc/requirement/requirement_db.sdn` | `std.nogc_sync_mut.database.requirement` | `create_requirement_database()` | `bin/simple` requirement tracking |
 
 ## Rules
 

@@ -1,0 +1,202 @@
+# RequirementDB — SDN-backed requirement tracking database
+#
+# Stores requirements with unique IDs (REQ-001, REQ-002, ...),
+# linked to plan/design/test docs via relative paths.
+#
+# SDN file: doc/requirement/requirement_db.sdn
+# See doc/db_lists.md for the full database registry.
+
+use nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct Requirement:
+    id: text              # REQ-001, REQ-002, ...
+    title: text           # Short title
+    category: text        # feature, improvement, bugfix, refactor
+    status: text          # draft, approved, implemented, verified
+    priority: text        # critical, high, medium, low
+    doc_path: text        # Relative path from doc/requirement/
+    plan_path: text       # Linked plan doc path
+    design_path: text     # Linked design doc path
+    system_test: text     # Linked system test path
+    created_at: text      # ISO date
+    updated_at: text      # ISO date
+    valid: bool           # Soft-delete flag
+
+# ============================================================================
+# Database
+# ============================================================================
+
+val REQ_DB_PATH = "doc/requirement/requirement_db.sdn"
+val REQ_TABLE = "requirements"
+val REQ_COLUMNS = ["id", "title", "category", "status", "priority", "doc_path", "plan_path", "design_path", "system_test", "created_at", "updated_at", "valid"]
+
+# Description table for multiline content
+val REQ_DESC_TABLE = "requirement_descriptions"
+val REQ_DESC_COLUMNS = ["req_id", "line_num", "content"]
+
+class RequirementDatabase:
+    db: SdnDatabase
+
+    static fn create() -> RequirementDatabase:
+        """Create or load the requirement database."""
+        var db = SdnDatabase.load(REQ_DB_PATH)
+        if db == nil:
+            db = SdnDatabase.new(REQ_DB_PATH)
+
+        # Ensure tables exist
+        val existing = db.get_table(REQ_TABLE)
+        if existing == nil:
+            val table = SdnTable.new(REQ_TABLE, REQ_COLUMNS)
+            db.set_table(REQ_TABLE, table)
+
+        val desc_existing = db.get_table(REQ_DESC_TABLE)
+        if desc_existing == nil:
+            val desc_table = SdnTable.new(REQ_DESC_TABLE, REQ_DESC_COLUMNS)
+            db.set_table(REQ_DESC_TABLE, desc_table)
+
+        RequirementDatabase(db: db)
+
+    fn req_to_row(req: Requirement) -> SdnRow:
+        var row = SdnRow.empty()
+        row.set("id", req.id)
+        row.set("title", req.title)
+        row.set("category", req.category)
+        row.set("status", req.status)
+        row.set("priority", req.priority)
+        row.set("doc_path", req.doc_path)
+        row.set("plan_path", req.plan_path)
+        row.set("design_path", req.design_path)
+        row.set("system_test", req.system_test)
+        row.set("created_at", req.created_at)
+        row.set("updated_at", req.updated_at)
+        val valid_str = if req.valid: "true" else: "false"
+        row.set("valid", valid_str)
+        row
+
+    fn row_to_req(row: SdnRow) -> Requirement:
+        Requirement(
+            id: row.get("id") ?? "",
+            title: row.get("title") ?? "",
+            category: row.get("category") ?? "",
+            status: row.get("status") ?? "",
+            priority: row.get("priority") ?? "",
+            doc_path: row.get("doc_path") ?? "",
+            plan_path: row.get("plan_path") ?? "",
+            design_path: row.get("design_path") ?? "",
+            system_test: row.get("system_test") ?? "",
+            created_at: row.get("created_at") ?? "",
+            updated_at: row.get("updated_at") ?? "",
+            valid: (row.get("valid") ?? "true") == "true"
+        )
+
+    me add_requirement(req: Requirement):
+        """Add a new requirement to the database."""
+        val row = self.req_to_row(req)
+        self.db.add_row_to_table(REQ_TABLE, row)
+
+    fn get_requirement(id: text) -> Requirement:
+        """Get a requirement by ID. Returns empty Requirement if not found."""
+        val table = self.db.get_table(REQ_TABLE)
+        if table == nil:
+            return Requirement(id: "", title: "", category: "", status: "", priority: "", doc_path: "", plan_path: "", design_path: "", system_test: "", created_at: "", updated_at: "", valid: false)
+        for row in table.valid_rows():
+            val row_id = row.get("id") ?? ""
+            if row_id == id:
+                return self.row_to_req(row)
+        Requirement(id: "", title: "", category: "", status: "", priority: "", doc_path: "", plan_path: "", design_path: "", system_test: "", created_at: "", updated_at: "", valid: false)
+
+    fn all_requirements() -> [Requirement]:
+        """Get all valid requirements."""
+        val table = self.db.get_table(REQ_TABLE)
+        if table == nil:
+            return []
+        var results: [Requirement] = []
+        for row in table.valid_rows():
+            results.append(self.row_to_req(row))
+        results
+
+    fn requirements_by_status(status: text) -> [Requirement]:
+        """Get requirements filtered by status."""
+        var results: [Requirement] = []
+        for req in self.all_requirements():
+            if req.status == status:
+                results.append(req)
+        results
+
+    fn requirements_by_category(category: text) -> [Requirement]:
+        """Get requirements filtered by category."""
+        var results: [Requirement] = []
+        for req in self.all_requirements():
+            if req.category == category:
+                results.append(req)
+        results
+
+    fn next_id() -> text:
+        """Generate the next requirement ID (REQ-001, REQ-002, ...)."""
+        val table = self.db.get_table(REQ_TABLE)
+        if table == nil:
+            return "REQ-001"
+        var max_num = 0
+        for row in table.rows:
+            val id = row.get("id") ?? ""
+            if id.starts_with("REQ-"):
+                val num_str = id.split("-")
+                if num_str.len() >= 2:
+                    val num = num_str[1].to_int() ?? 0
+                    if num > max_num:
+                        max_num = num
+        val next = max_num + 1
+        if next < 10:
+            "REQ-00{next}"
+        elif next < 100:
+            "REQ-0{next}"
+        else:
+            "REQ-{next}"
+
+    me add_description(req_id: text, description: text):
+        """Add multiline description for a requirement."""
+        val lines = description.split("\n")
+        var line_num = 0
+        for line in lines:
+            var row = SdnRow.empty()
+            row.set("req_id", req_id)
+            row.set("line_num", "{line_num}")
+            row.set("content", line)
+            self.db.add_row_to_table(REQ_DESC_TABLE, row)
+            line_num = line_num + 1
+
+    fn get_description(req_id: text) -> text:
+        """Get the full description for a requirement."""
+        val table = self.db.get_table(REQ_DESC_TABLE)
+        if table == nil:
+            return ""
+        var lines: [text] = []
+        for row in table.rows:
+            val rid = row.get("req_id") ?? ""
+            if rid == req_id:
+                lines.append(row.get("content") ?? "")
+        var result = ""
+        var first = true
+        for line in lines:
+            if first:
+                result = line
+                first = false
+            else:
+                result = "{result}\n{line}"
+        result
+
+    me save() -> bool:
+        """Save database to disk (atomic write)."""
+        self.db.save()
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn create_requirement_database() -> RequirementDatabase:
+    """Create or load the requirement database at the default path."""
+    RequirementDatabase.create()
