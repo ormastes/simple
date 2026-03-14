@@ -97,6 +97,22 @@ for f in $(jj st | grep '\.sdn' | awk '{print $2}'); do
 done
 ```
 
+### Post-Rebase SDN Regeneration
+
+After resolving SDN conflicts (or after any merge that touched `.sdn` files),
+regenerate databases to incorporate changes from the other branch:
+
+```bash
+bin/simple test              # Regenerates FeatureDB, TestDB, feature.md, test_result.md
+bin/simple bug-gen           # Regenerates BugDB, bug_report.md
+bin/simple todo-scan         # Regenerates TODO.md
+```
+
+**Git note:** `.gitattributes` sets `*.sdn merge=ours` — git silently keeps the
+current branch version on conflict (requires `git config merge.ours.driver true`).
+jj does NOT support this (issues #5264, #8071), so jj conflicts require manual
+`jj resolve` followed by regeneration. See `doc/db_lists.md` for the full registry.
+
 ---
 
 ## Undo and Recovery

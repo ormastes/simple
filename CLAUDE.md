@@ -106,6 +106,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **`?` is operator only** - never in names. Use `.?` over `is_*` predicates
 - **NO inheritance** - `class Child(Parent)` is NOT supported. Use composition, alias forwarding, traits, or mixins instead
 - **SDN format** for all config/data files, not JSON/YAML
+- **NEVER directly edit `.sdn` database files** — use the database API (`BugDB`, `FeatureDB`, `TestDB`, `RequirementDB`). SDN files use atomic writes with file locking; direct edits cause race conditions and will be overwritten. See `doc/db_lists.md` for the full registry and API.
 
 ### Tests
 - **NEVER skip/ignore** failing tests without user approval
