@@ -78,6 +78,9 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
 | `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
 | `rule` | Engineering rules, doc folder map, ADR process |
+| `git-jj-sync` | One-step commit-fetch-rebase-push with SDN conflict auto-resolution |
+| `worktree` | JJ workspace isolation for parallel development |
+| `impl` | 15-phase implementation lifecycle with agent teams, BDD, duplication checks |
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`
