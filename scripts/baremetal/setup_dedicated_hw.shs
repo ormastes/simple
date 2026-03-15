@@ -1,0 +1,63 @@
+#!/bin/sh
+# Baremetal Dedicated HW UART Adapter Setup Script
+# Detect FTDI/CP2102/CH340 adapters, udev rules, test UART.
+
+set -e
+
+echo "=== Baremetal Dedicated HW UART Adapter Setup ==="
+
+# Detect USB-UART adapters
+echo ""
+echo "--- Detecting USB-UART adapters ---"
+FOUND=0
+for dev in /dev/ttyUSB* /dev/ttyACM*; do
+    if [ -c "$dev" ]; then
+        INFO=$(udevadm info --query=all --name="$dev" 2>/dev/null || true)
+        VENDOR=""
+        if echo "$INFO" | grep -q "FTDI"; then
+            VENDOR="FTDI"
+        elif echo "$INFO" | grep -q "CP210"; then
+            VENDOR="CP2102"
+        elif echo "$INFO" | grep -q "CH34"; then
+            VENDOR="CH340/CH341"
+        elif echo "$INFO" | grep -q "PL2303"; then
+            VENDOR="PL2303"
+        else
+            VENDOR="Unknown"
+        fi
+        echo "  $dev — $VENDOR"
+        FOUND=1
+    fi
+done
+
+if [ "$FOUND" -eq 0 ]; then
+    echo "  No USB-UART adapters found."
+    echo "  Plug in an FTDI, CP2102, or CH340 adapter."
+    exit 1
+fi
+
+# udev rules
+echo ""
+echo "--- udev rules ---"
+UDEV_FILE="/etc/udev/rules.d/99-uart-adapters.rules"
+if [ -f "$UDEV_FILE" ]; then
+    echo "  udev rules exist: $UDEV_FILE"
+else
+    echo "  Creating udev rules is recommended for stable device naming."
+    echo "  Example for $UDEV_FILE:"
+    echo '    SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", SYMLINK+="ttyFTDI"'
+    echo '    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", SYMLINK+="ttySILABS"'
+    echo '    SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", SYMLINK+="ttyCH340"'
+fi
+
+# Test
+echo ""
+echo "--- Test UART ---"
+DEVICE=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | head -1)
+BAUD="${1:-115200}"
+if [ -n "$DEVICE" ]; then
+    echo "  Test with: stty -F $DEVICE $BAUD raw -echo && cat $DEVICE"
+fi
+
+echo ""
+echo "Setup complete."
