@@ -1,0 +1,101 @@
+# Game3D Game Loop - WASM exported entry points
+#
+# These functions are called by the engine bridge. Game code registers
+# callbacks to receive lifecycle events.
+#
+# Exports (called by engine):
+#   game_init() -> i32
+#   game_shutdown()
+#   game_update(dt: f32)
+#   game_fixed_update(dt: f32)
+#   on_input_event(type: i32, key: i32, value: f32)
+#   on_collision(a: i32, b: i32, nx: f32, ny: f32, nz: f32)
+#   on_trigger(a: i32, b: i32, entered: i32)
+#   wasm_alloc(size: i32) -> i32
+
+use .event.{EventQueue, GameEvent, GameEventType}
+
+# ============================================================================
+# Game Callbacks (set by game code)
+# ============================================================================
+
+# Game code sets these to receive lifecycle events
+var _on_init: fn() -> i32 = nil
+var _on_shutdown: fn() = nil
+var _on_update: fn(f32) = nil
+var _on_fixed_update: fn(f32) = nil
+var _on_input: fn(i32, i32, f32) = nil
+
+# Shared event queue for collision/trigger events
+var _event_queue: EventQueue = EventQueue.create(256)
+
+# ============================================================================
+# Registration API (called by game code)
+# ============================================================================
+
+fn set_init_callback(callback: fn() -> i32):
+    _on_init = callback
+
+fn set_shutdown_callback(callback: fn()):
+    _on_shutdown = callback
+
+fn set_update_callback(callback: fn(f32)):
+    _on_update = callback
+
+fn set_fixed_update_callback(callback: fn(f32)):
+    _on_fixed_update = callback
+
+fn set_input_callback(callback: fn(i32, i32, f32)):
+    _on_input = callback
+
+fn get_event_queue() -> EventQueue:
+    """Get the shared event queue for reading collision/trigger events."""
+    _event_queue
+
+# ============================================================================
+# WASM Exports (called by engine bridge)
+# ============================================================================
+
+export fn game_init() -> i32:
+    """Called once when the WASM module is loaded."""
+    if _on_init.?:
+        return _on_init()
+    0
+
+export fn game_shutdown():
+    """Called when the game is shutting down."""
+    if _on_shutdown.?:
+        _on_shutdown()
+
+export fn game_update(dt: f32):
+    """Called every frame with delta time in seconds."""
+    _event_queue.clear()
+    if _on_update.?:
+        _on_update(dt)
+
+export fn game_fixed_update(dt: f32):
+    """Called at fixed physics intervals."""
+    if _on_fixed_update.?:
+        _on_fixed_update(dt)
+
+export fn on_input_event(event_type: i32, key: i32, value: f32):
+    """Called by engine on input events."""
+    if _on_input.?:
+        _on_input(event_type, key, value)
+
+export fn on_collision(a: i32, b: i32, nx: f32, ny: f32, nz: f32):
+    """Called by engine on collision events."""
+    val event = GameEvent.collision(a, b, nx, ny, nz)
+    _event_queue.push(event)
+
+export fn on_trigger(a: i32, b: i32, entered: i32):
+    """Called by engine on trigger events."""
+    val event = GameEvent.trigger(a, b, entered != 0)
+    _event_queue.push(event)
+
+export fn wasm_alloc(size: i32) -> i32:
+    """Allocate memory in WASM linear memory for engine-to-game data transfer."""
+    # Uses the built-in bump allocator from the WASM runtime
+    var buf = [0; size]
+    buf.ptr()
+

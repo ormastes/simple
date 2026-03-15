@@ -47,6 +47,9 @@ pub struct MirInterpreterEmitter {
     pub globals: HashMap<String, i64>,
     /// Local variable storage (index → value)
     pub locals: Vec<i64>,
+    /// Track collection sizes so that builtin methods like `.len()` return
+    /// correct values instead of the default stub `0`.
+    collection_sizes: HashMap<VReg, i64>,
 }
 
 impl Default for MirInterpreterEmitter {
@@ -61,6 +64,7 @@ impl MirInterpreterEmitter {
             values: HashMap::new(),
             globals: HashMap::new(),
             locals: Vec::new(),
+            collection_sizes: HashMap::new(),
         }
     }
 
@@ -114,6 +118,10 @@ impl CodegenEmitter for MirInterpreterEmitter {
     // =========================================================================
     fn emit_copy(&mut self, dest: VReg, src: VReg) -> Result<(), Self::Error> {
         self.set(dest, self.get(src));
+        // Propagate collection size tracking through copies
+        if let Some(&size) = self.collection_sizes.get(&src) {
+            self.collection_sizes.insert(dest, size);
+        }
         Ok(())
     }
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), Self::Error> {
@@ -269,20 +277,24 @@ impl CodegenEmitter for MirInterpreterEmitter {
     // =========================================================================
     // Collections (stubs — need runtime)
     // =========================================================================
-    fn emit_array_lit(&mut self, dest: VReg, _elements: &[VReg]) -> Result<(), Self::Error> {
+    fn emit_array_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), Self::Error> {
         self.set(dest, 0);
+        self.collection_sizes.insert(dest, elements.len() as i64);
         Ok(())
     }
-    fn emit_tuple_lit(&mut self, dest: VReg, _elements: &[VReg]) -> Result<(), Self::Error> {
+    fn emit_tuple_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), Self::Error> {
         self.set(dest, 0);
+        self.collection_sizes.insert(dest, elements.len() as i64);
         Ok(())
     }
-    fn emit_vec_lit(&mut self, dest: VReg, _elements: &[VReg]) -> Result<(), Self::Error> {
+    fn emit_vec_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), Self::Error> {
         self.set(dest, 0);
+        self.collection_sizes.insert(dest, elements.len() as i64);
         Ok(())
     }
-    fn emit_dict_lit(&mut self, dest: VReg, _keys: &[VReg], _values: &[VReg]) -> Result<(), Self::Error> {
+    fn emit_dict_lit(&mut self, dest: VReg, keys: &[VReg], _values: &[VReg]) -> Result<(), Self::Error> {
         self.set(dest, 0);
+        self.collection_sizes.insert(dest, keys.len() as i64);
         Ok(())
     }
     fn emit_index_get(&mut self, dest: VReg, _collection: VReg, _index: VReg) -> Result<(), Self::Error> {
@@ -484,13 +496,51 @@ impl CodegenEmitter for MirInterpreterEmitter {
     fn emit_builtin_method(
         &mut self,
         dest: &Option<VReg>,
-        _receiver: VReg,
+        receiver: VReg,
         _receiver_type: &str,
-        _method: &str,
+        method: &str,
         _args: &[VReg],
     ) -> Result<(), Self::Error> {
-        if let Some(d) = dest {
-            self.set(*d, 0);
+        match method {
+            "len" | "length" => {
+                if let Some(d) = dest {
+                    let size = self.collection_sizes.get(&receiver).copied().unwrap_or(0);
+                    self.set(*d, size);
+                }
+            }
+            "is_empty" => {
+                if let Some(d) = dest {
+                    let size = self.collection_sizes.get(&receiver).copied().unwrap_or(0);
+                    self.set(*d, (size == 0) as i64);
+                }
+            }
+            "push" | "append" => {
+                // Mutating: size increases by 1
+                let size = self.collection_sizes.get(&receiver).copied().unwrap_or(0);
+                self.collection_sizes.insert(receiver, size + 1);
+                if let Some(d) = dest {
+                    self.set(*d, 0);
+                }
+            }
+            "pop" => {
+                // Mutating: size decreases by 1 (min 0)
+                let size = self.collection_sizes.get(&receiver).copied().unwrap_or(0);
+                self.collection_sizes.insert(receiver, (size - 1).max(0));
+                if let Some(d) = dest {
+                    self.set(*d, 0);
+                }
+            }
+            "clear" => {
+                self.collection_sizes.insert(receiver, 0);
+                if let Some(d) = dest {
+                    self.set(*d, 0);
+                }
+            }
+            _ => {
+                if let Some(d) = dest {
+                    self.set(*d, 0);
+                }
+            }
         }
         Ok(())
     }
@@ -1074,5 +1124,167 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn interp_array_len_returns_correct_size() {
+        let mut e = MirInterpreterEmitter::new();
+        let e0 = VReg(0);
+        let e1 = VReg(1);
+        let e2 = VReg(2);
+        let arr = VReg(3);
+        let len_dest = VReg(4);
+        // Create array with 3 elements
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e0, value: 10 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e1, value: 20 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e2, value: 30 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ArrayLit {
+                dest: arr,
+                elements: vec![e0, e1, e2],
+            },
+        )
+        .unwrap();
+        // Call .len() — should return 3, not 0
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BuiltinMethod {
+                dest: Some(len_dest),
+                receiver: arr,
+                receiver_type: "Array".to_string(),
+                method: "len".to_string(),
+                args: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(e.get(len_dest), 3);
+    }
+
+    #[test]
+    fn interp_array_len_stable_in_loop() {
+        // Regression test: .len() must return the same value on repeated calls
+        // (simulates the while-loop corruption bug)
+        let mut e = MirInterpreterEmitter::new();
+        let e0 = VReg(0);
+        let e1 = VReg(1);
+        let e2 = VReg(2);
+        let e3 = VReg(3);
+        let e4 = VReg(4);
+        let arr = VReg(5);
+        let len_dest = VReg(6);
+        // Create array with 5 elements
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e0, value: 1 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e1, value: 2 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e2, value: 3 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e3, value: 4 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e4, value: 5 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ArrayLit {
+                dest: arr,
+                elements: vec![e0, e1, e2, e3, e4],
+            },
+        )
+        .unwrap();
+        // Call .len() 5 times — each should return 5
+        let mut total: i64 = 0;
+        for _ in 0..5 {
+            dispatch_instruction(
+                &mut e,
+                &MirInst::BuiltinMethod {
+                    dest: Some(len_dest),
+                    receiver: arr,
+                    receiver_type: "Array".to_string(),
+                    method: "len".to_string(),
+                    args: vec![],
+                },
+            )
+            .unwrap();
+            total += e.get(len_dest);
+        }
+        assert_eq!(total, 25); // 5 * 5 = 25, not 0
+    }
+
+    #[test]
+    fn interp_array_push_updates_len() {
+        let mut e = MirInterpreterEmitter::new();
+        let e0 = VReg(0);
+        let arr = VReg(1);
+        let new_elem = VReg(2);
+        let len_dest = VReg(3);
+        // Create array with 1 element
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e0, value: 10 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ArrayLit {
+                dest: arr,
+                elements: vec![e0],
+            },
+        )
+        .unwrap();
+        assert_eq!(e.collection_sizes.get(&arr).copied(), Some(1));
+        // Push an element
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: new_elem, value: 20 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BuiltinMethod {
+                dest: None,
+                receiver: arr,
+                receiver_type: "Array".to_string(),
+                method: "push".to_string(),
+                args: vec![new_elem],
+            },
+        )
+        .unwrap();
+        // .len() should now return 2
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BuiltinMethod {
+                dest: Some(len_dest),
+                receiver: arr,
+                receiver_type: "Array".to_string(),
+                method: "len".to_string(),
+                args: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(e.get(len_dest), 2);
+    }
+
+    #[test]
+    fn interp_copy_preserves_collection_size() {
+        let mut e = MirInterpreterEmitter::new();
+        let e0 = VReg(0);
+        let e1 = VReg(1);
+        let arr = VReg(2);
+        let arr_copy = VReg(3);
+        let len_dest = VReg(4);
+        // Create array with 2 elements
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e0, value: 1 }).unwrap();
+        dispatch_instruction(&mut e, &MirInst::ConstInt { dest: e1, value: 2 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ArrayLit {
+                dest: arr,
+                elements: vec![e0, e1],
+            },
+        )
+        .unwrap();
+        // Copy the array register
+        dispatch_instruction(&mut e, &MirInst::Copy { dest: arr_copy, src: arr }).unwrap();
+        // .len() on the copy should also return 2
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BuiltinMethod {
+                dest: Some(len_dest),
+                receiver: arr_copy,
+                receiver_type: "Array".to_string(),
+                method: "len".to_string(),
+                args: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(e.get(len_dest), 2);
     }
 }
