@@ -1,0 +1,81 @@
+# feature/server/routes — HTTP route handlers
+
+fn handle_api_health() -> text:
+    "{\"status\":\"ok\",\"service\":\"hair-changer\"}"
+
+fn handle_api_gallery(lang: text) -> text:
+    gallery_to_json(lang)
+
+fn handle_api_generate(body: text) -> text:
+    # Parse request body for face_path, hair_ref_path, options
+    val q = "\""
+    val face_path = _extract_json_string(body, "face_path")
+    val hair_ref_path = _extract_json_string(body, "hair_ref_path")
+    val options = _extract_json_string(body, "options")
+    val lang = _extract_json_string(body, "lang")
+
+    var actual_lang = lang
+    if actual_lang == "":
+        actual_lang = HC_DEFAULT_LANG
+
+    # Check feasibility
+    val current_len = _extract_option(options, "current_length")
+    val target_len = _extract_option(options, "target_length")
+    if current_len != "" and target_len != "":
+        val feasibility = check_feasibility(current_len, target_len)
+        if feasibility != "ok":
+            val msg = feasibility_message(feasibility, actual_lang)
+            return "{" + q + "success" + q + ":false," + q + "warning" + q + ":" + q + msg + q + "," + q + "feasibility" + q + ":" + q + feasibility + q + "}"
+
+    # Build prompt
+    val prompt = build_hair_prompt(options, actual_lang)
+
+    # Call Gemini
+    val result = gemini_generate_hair(face_path, hair_ref_path, prompt, "")
+    val success = result.0
+    val output = result.1
+
+    if not success:
+        return "{" + q + "success" + q + ":false," + q + "error" + q + ":" + q + output + q + "}"
+
+    "{" + q + "success" + q + ":true," + q + "result" + q + ":" + q + output + q + "}"
+
+fn _extract_json_string(json: text, key: text) -> text:
+    val q = "\""
+    val search = q + key + q + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val jlen = json.len()
+    val after = json[start:jlen].trim()
+    if not after.starts_with(q):
+        return ""
+    val rest = after[1:after.len()]
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest[0:end]
+        end = end + 1
+    ""
+
+fn _extract_option(options: text, key: text) -> text:
+    val search = key + "="
+    val idx_opt = options.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val olen = options.len()
+    val rest = options[start:olen]
+    val comma_opt = rest.index_of(",")
+    if val comma_pos = comma_opt.?:
+        return rest[0:comma_pos]
+    rest

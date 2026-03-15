@@ -1,0 +1,566 @@
+# hair-changer — AI Hair Style Try-On
+#
+# Beautiful web UI with Korean-first multi-language support.
+# Uses Gemini 2.5 Flash Image for hair style transfer.
+#
+# MDSOC Architecture: entity/ feature/ transform/ shared/
+# This file is self-contained for interpreter mode.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
+# === entity/hair_options.spl ===
+
+struct HairOptions:
+    current_length: text
+    target_length: text
+    hair_type: text
+    color: text
+    dye: bool
+    treatment: text
+    bangs: text
+    volume: text
+    perm: bool
+
+fn hair_options_default() -> HairOptions:
+    HairOptions(
+        current_length: "medium",
+        target_length: "medium",
+        hair_type: "straight",
+        color: "natural",
+        dye: false,
+        treatment: "none",
+        bangs: "none",
+        volume: "normal",
+        perm: false
+    )
+
+# === entity/generation_request.spl ===
+
+struct GenerationRequest:
+    face_image_path: text
+    hair_ref_path: text
+    options_json: text
+    output_path: text
+    lang: text
+
+fn generation_request(face: text, hair: text, opts: text, out: text) -> GenerationRequest:
+    GenerationRequest(
+        face_image_path: face,
+        hair_ref_path: hair,
+        options_json: opts,
+        output_path: out,
+        lang: "ko"
+    )
+
+# === entity/style_preset.spl ===
+
+struct StylePreset:
+    id: text
+    name_ko: text
+    name_en: text
+    name_ja: text
+    category: text
+    thumbnail: text
+    default_options: text
+
+# === shared/config_loader.spl ===
+
+var HC_PORT = 8080
+var HC_GEMINI_MODEL = "gemini-2.5-flash-preview-image-generation"
+var HC_GEMINI_CLI = "gemini"
+var HC_UPLOAD_DIR = ".build/hair_changer/uploads"
+var HC_RESULT_DIR = ".build/hair_changer/results"
+var HC_DEFAULT_LANG = "ko"
+
+fn hc_load_config(path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return false
+    var current_section = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed[0:colon_pos].trim()
+        var value = ""
+        val tlen = trimmed.len()
+        if colon_pos + 1 < tlen:
+            value = trimmed[colon_pos + 1:tlen].trim()
+        # Detect indent
+        var indent = 0
+        var k = 0
+        while k < line.len():
+            if line[k:k + 1] == " ":
+                indent = indent + 1
+            else:
+                break
+            k = k + 1
+        if indent == 0:
+            current_section = key
+            continue
+        if current_section == "server":
+            if key == "port":
+                HC_PORT = int(value)
+            elif key == "default_lang":
+                HC_DEFAULT_LANG = value
+        elif current_section == "gemini":
+            if key == "model":
+                HC_GEMINI_MODEL = value
+            elif key == "cli_path":
+                HC_GEMINI_CLI = value
+        elif current_section == "storage":
+            if key == "upload_dir":
+                HC_UPLOAD_DIR = value
+            elif key == "result_dir":
+                HC_RESULT_DIR = value
+    true
+
+# === shared/file_utils.spl ===
+
+fn ensure_dirs():
+    rt_dir_create_all(HC_UPLOAD_DIR)
+    rt_dir_create_all(HC_RESULT_DIR)
+
+fn is_valid_image_ext(filename: text) -> bool:
+    if filename.ends_with(".jpg") or filename.ends_with(".jpeg"):
+        return true
+    if filename.ends_with(".png"):
+        return true
+    if filename.ends_with(".webp"):
+        return true
+    false
+
+fn generate_result_path(request_id: text) -> text:
+    HC_RESULT_DIR + "/" + request_id + ".png"
+
+# === feature/gallery/categories.spl ===
+
+fn category_names_ko() -> [text]:
+    var cats: [text] = []
+    cats.push("숏컷")
+    cats.push("미디엄")
+    cats.push("롱")
+    cats.push("염색")
+    cats.push("펌")
+    cats
+
+fn category_names_en() -> [text]:
+    var cats: [text] = []
+    cats.push("Short")
+    cats.push("Medium")
+    cats.push("Long")
+    cats.push("Color")
+    cats.push("Perm")
+    cats
+
+fn category_names_ja() -> [text]:
+    var cats: [text] = []
+    cats.push("ショート")
+    cats.push("ミディアム")
+    cats.push("ロング")
+    cats.push("カラー")
+    cats.push("パーマ")
+    cats
+
+fn category_ids() -> [text]:
+    var ids: [text] = []
+    ids.push("short")
+    ids.push("medium")
+    ids.push("long")
+    ids.push("color")
+    ids.push("perm")
+    ids
+
+# === feature/gallery/presets.spl ===
+
+var GALLERY_IDS: [text] = []
+var GALLERY_NAMES_KO: [text] = []
+var GALLERY_NAMES_EN: [text] = []
+var GALLERY_NAMES_JA: [text] = []
+var GALLERY_CATEGORIES: [text] = []
+var GALLERY_THUMBNAILS: [text] = []
+var GALLERY_OPTIONS: [text] = []
+var GALLERY_COUNT = 0
+
+fn gallery_init():
+    GALLERY_IDS = []
+    GALLERY_NAMES_KO = []
+    GALLERY_NAMES_EN = []
+    GALLERY_NAMES_JA = []
+    GALLERY_CATEGORIES = []
+    GALLERY_THUMBNAILS = []
+    GALLERY_OPTIONS = []
+    GALLERY_COUNT = 0
+
+fn gallery_add(id: text, name_ko: text, name_en: text, name_ja: text,
+               category: text, thumbnail: text, options: text):
+    GALLERY_IDS = GALLERY_IDS + [id]
+    GALLERY_NAMES_KO = GALLERY_NAMES_KO + [name_ko]
+    GALLERY_NAMES_EN = GALLERY_NAMES_EN + [name_en]
+    GALLERY_NAMES_JA = GALLERY_NAMES_JA + [name_ja]
+    GALLERY_CATEGORIES = GALLERY_CATEGORIES + [category]
+    GALLERY_THUMBNAILS = GALLERY_THUMBNAILS + [thumbnail]
+    GALLERY_OPTIONS = GALLERY_OPTIONS + [options]
+    GALLERY_COUNT = GALLERY_COUNT + 1
+
+fn gallery_load_defaults():
+    gallery_init()
+    gallery_add("short_bob", "단발 보브", "Short Bob", "ショートボブ", "short", "gallery/short_bob.jpg", "target_length=short,hair_type=straight,bangs=none")
+    gallery_add("korean_bangs", "커튼뱅", "Curtain Bangs", "カーテンバング", "medium", "gallery/korean_bangs.jpg", "target_length=medium,hair_type=straight,bangs=curtain")
+    gallery_add("long_waves", "롱 웨이브", "Long Waves", "ロングウェーブ", "long", "gallery/long_waves.jpg", "target_length=long,hair_type=wavy,bangs=none")
+    gallery_add("pixie_cut", "픽시컷", "Pixie Cut", "ピクシーカット", "short", "gallery/pixie_cut.jpg", "target_length=short,hair_type=straight,volume=thin")
+    gallery_add("layered_medium", "레이어드 미디엄", "Layered Medium", "レイヤードミディアム", "medium", "gallery/layered_medium.jpg", "target_length=medium,hair_type=straight,volume=thick")
+    gallery_add("curtain_bangs_long", "롱 커튼뱅", "Long Curtain Bangs", "ロングカーテンバング", "long", "gallery/curtain_bangs_long.jpg", "target_length=long,bangs=curtain")
+    gallery_add("platinum_blonde", "플래티넘 블론드", "Platinum Blonde", "プラチナブロンド", "color", "gallery/platinum_blonde.jpg", "color=platinum,dye=true")
+    gallery_add("ash_brown", "애쉬 브라운", "Ash Brown", "アッシュブラウン", "color", "gallery/ash_brown.jpg", "color=ash_brown,dye=true")
+    gallery_add("red_highlights", "레드 하이라이트", "Red Highlights", "レッドハイライト", "color", "gallery/red_highlights.jpg", "color=red,treatment=highlights,dye=true")
+    gallery_add("natural_perm", "내추럴 펌", "Natural Perm", "ナチュラルパーマ", "perm", "gallery/natural_perm.jpg", "hair_type=wavy,perm=true")
+    gallery_add("digital_perm", "디지털 펌", "Digital Perm", "デジタルパーマ", "perm", "gallery/digital_perm.jpg", "hair_type=curly,perm=true,volume=thick")
+    gallery_add("two_block", "투블럭", "Two Block", "ツーブロック", "short", "gallery/two_block.jpg", "target_length=short,volume=thick")
+
+fn gallery_to_json(lang: text) -> text:
+    var q = "\""
+    var items: [text] = []
+    var i = 0
+    while i < GALLERY_COUNT:
+        var name = GALLERY_NAMES_EN[i]
+        if lang == "ko":
+            name = GALLERY_NAMES_KO[i]
+        elif lang == "ja":
+            name = GALLERY_NAMES_JA[i]
+        val item = "{" + q + "id" + q + ":" + q + GALLERY_IDS[i] + q + "," + q + "name" + q + ":" + q + name + q + "," + q + "category" + q + ":" + q + GALLERY_CATEGORIES[i] + q + "," + q + "thumbnail" + q + ":" + q + GALLERY_THUMBNAILS[i] + q + "," + q + "options" + q + ":" + q + GALLERY_OPTIONS[i] + q + "}"
+        items.push(item)
+        i = i + 1
+    "[" + items.join(",") + "]"
+
+# === feature/feasibility/checker.spl ===
+
+fn _length_rank(length: text) -> i64:
+    if length == "shaved":
+        return 0
+    elif length == "short":
+        return 1
+    elif length == "medium":
+        return 2
+    elif length == "long":
+        return 3
+    1
+
+fn check_feasibility(current: text, target: text) -> text:
+    # Returns: "ok", "warning", "impossible"
+    val current_rank = _length_rank(current)
+    val target_rank = _length_rank(target)
+    if target_rank <= current_rank:
+        return "ok"
+    val diff = target_rank - current_rank
+    if diff == 1:
+        return "ok"
+    elif diff == 2:
+        return "warning"
+    "impossible"
+
+fn feasibility_message(status: text, lang: text) -> text:
+    if status == "ok":
+        return ""
+    if lang == "ko":
+        if status == "warning":
+            return "현재 머리 길이로는 이 스타일이 다소 어려울 수 있습니다. 익스텐션을 고려해보세요."
+        return "현재 머리 길이로는 이 스타일이 어렵습니다. 가발이나 익스텐션이 필요합니다."
+    elif lang == "ja":
+        if status == "warning":
+            return "現在の髪の長さでは、このスタイルは難しいかもしれません。エクステンションをご検討ください。"
+        return "現在の髪の長さでは、このスタイルは困難です。ウィッグまたはエクステンションが必要です。"
+    # English
+    if status == "warning":
+        return "This style may be difficult with your current hair length. Consider extensions."
+    "This style is not achievable with your current hair length. A wig or extensions are needed."
+
+# === transform/gemini/prompt_builder.spl ===
+
+fn build_hair_prompt(options_json: text, lang: text) -> text:
+    # Parse simple key=value,key=value format
+    var parts: [text] = []
+    parts.push("Apply the hairstyle from the second reference image to the person in the first image.")
+    parts.push("Keep the person's face, skin tone, and facial features completely identical.")
+    parts.push("Only change the hairstyle.")
+
+    if options_json.contains("target_length=short"):
+        parts.push("The target hairstyle should be short length.")
+    elif options_json.contains("target_length=medium"):
+        parts.push("The target hairstyle should be medium length.")
+    elif options_json.contains("target_length=long"):
+        parts.push("The target hairstyle should be long length.")
+
+    if options_json.contains("hair_type=straight"):
+        parts.push("The hair should be straight.")
+    elif options_json.contains("hair_type=wavy"):
+        parts.push("The hair should have gentle waves.")
+    elif options_json.contains("hair_type=curly"):
+        parts.push("The hair should be curly.")
+
+    if options_json.contains("dye=true"):
+        if options_json.contains("color=platinum"):
+            parts.push("Change the hair color to platinum blonde.")
+        elif options_json.contains("color=ash_brown"):
+            parts.push("Change the hair color to ash brown.")
+        elif options_json.contains("color=red"):
+            parts.push("Change the hair color to red.")
+        elif options_json.contains("color=blonde"):
+            parts.push("Change the hair color to blonde.")
+
+    if options_json.contains("treatment=highlights"):
+        parts.push("Add subtle highlights to the hair.")
+    elif options_json.contains("treatment=balayage"):
+        parts.push("Apply a balayage coloring technique.")
+    elif options_json.contains("treatment=ombre"):
+        parts.push("Apply an ombre gradient effect.")
+
+    if options_json.contains("bangs=curtain"):
+        parts.push("Add Korean-style curtain bangs (커튼뱅).")
+    elif options_json.contains("bangs=side"):
+        parts.push("Add side-swept bangs.")
+    elif options_json.contains("bangs=blunt"):
+        parts.push("Add blunt-cut straight bangs.")
+
+    if options_json.contains("perm=true"):
+        parts.push("The hair should have a natural perm texture.")
+
+    if options_json.contains("volume=thin"):
+        parts.push("The hair should appear thin and sleek.")
+    elif options_json.contains("volume=thick"):
+        parts.push("The hair should appear thick and voluminous.")
+
+    parts.push("Produce a photorealistic result with natural lighting.")
+    parts.join(" ")
+
+# === transform/gemini/image_handler.spl ===
+
+var GEMINI_MODEL = "gemini-2.5-flash-preview-image-generation"
+var GEMINI_CLI_PATH = "gemini"
+
+fn gemini_set_model(model: text):
+    GEMINI_MODEL = model
+
+fn gemini_set_cli(path: text):
+    GEMINI_CLI_PATH = path
+
+fn gemini_generate_hair(face_path: text, hair_ref_path: text,
+                        prompt: text, output_path: text) -> (bool, text):
+    # Call gemini CLI with images
+    if not rt_file_exists(face_path):
+        return (false, "Face image not found: " + face_path)
+    if not rt_file_exists(hair_ref_path):
+        return (false, "Hair reference image not found: " + hair_ref_path)
+
+    var cmd = GEMINI_CLI_PATH
+    var args: [text] = []
+    args = args + ["--sandbox", "off"]
+    args = args + ["-p", prompt]
+    args = args + ["--model", GEMINI_MODEL]
+
+    # Pass image files as arguments
+    args = args + ["--file", face_path]
+    args = args + ["--file", hair_ref_path]
+
+    val result = rt_process_run(cmd, args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+
+    if exit_code != 0:
+        var err = "Gemini CLI error (code " + exit_code.to_text() + ")"
+        if stderr != "":
+            err = err + ": " + stderr
+        return (false, err)
+
+    # The output should contain the generated image data or path
+    (true, stdout)
+
+# === feature/server/routes.spl ===
+
+fn handle_api_health() -> text:
+    "{\"status\":\"ok\",\"service\":\"hair-changer\"}"
+
+fn handle_api_gallery(lang: text) -> text:
+    gallery_to_json(lang)
+
+fn handle_api_generate(body: text) -> text:
+    # Parse request body for face_path, hair_ref_path, options
+    val q = "\""
+    val face_path = _extract_json_string(body, "face_path")
+    val hair_ref_path = _extract_json_string(body, "hair_ref_path")
+    val options = _extract_json_string(body, "options")
+    val lang = _extract_json_string(body, "lang")
+
+    var actual_lang = lang
+    if actual_lang == "":
+        actual_lang = HC_DEFAULT_LANG
+
+    # Check feasibility
+    val current_len = _extract_option(options, "current_length")
+    val target_len = _extract_option(options, "target_length")
+    if current_len != "" and target_len != "":
+        val feasibility = check_feasibility(current_len, target_len)
+        if feasibility != "ok":
+            val msg = feasibility_message(feasibility, actual_lang)
+            return "{" + q + "success" + q + ":false," + q + "warning" + q + ":" + q + msg + q + "," + q + "feasibility" + q + ":" + q + feasibility + q + "}"
+
+    # Build prompt
+    val prompt = build_hair_prompt(options, actual_lang)
+
+    # Call Gemini
+    val result = gemini_generate_hair(face_path, hair_ref_path, prompt, "")
+    val success = result.0
+    val output = result.1
+
+    if not success:
+        return "{" + q + "success" + q + ":false," + q + "error" + q + ":" + q + output + q + "}"
+
+    "{" + q + "success" + q + ":true," + q + "result" + q + ":" + q + output + q + "}"
+
+fn _extract_json_string(json: text, key: text) -> text:
+    val q = "\""
+    val search = q + key + q + ":"
+    val idx_opt = json.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val jlen = json.len()
+    val after = json[start:jlen].trim()
+    if not after.starts_with(q):
+        return ""
+    val rest = after[1:after.len()]
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end:end + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return rest[0:end]
+        end = end + 1
+    ""
+
+fn _extract_option(options: text, key: text) -> text:
+    val search = key + "="
+    val idx_opt = options.index_of(search)
+    if not idx_opt.?:
+        return ""
+    val idx = idx_opt.unwrap()
+    val start = idx + search.len()
+    val olen = options.len()
+    val rest = options[start:olen]
+    val comma_opt = rest.index_of(",")
+    if val comma_pos = comma_opt.?:
+        return rest[0:comma_pos]
+    rest
+
+# === Main entry point ===
+
+var MAIN_EXECUTED = false
+
+fn _show_help() -> text:
+    var parts: [text] = []
+    parts.push("hair-changer - AI Hair Style Try-On")
+    parts.push("")
+    parts.push("Usage:")
+    parts.push("  hair-changer serve [--port N]     Start web server (default: 8080)")
+    parts.push("  hair-changer gallery              List style presets")
+    parts.push("  hair-changer generate <face> <hair_ref> [--options opts]")
+    parts.push("  hair-changer help                 Show this help")
+    parts.push("")
+    parts.push("Web UI: http://localhost:8080")
+    parts.join("\n")
+
+fn main():
+    if MAIN_EXECUTED:
+        return
+    MAIN_EXECUTED = true
+
+    # Load config
+    hc_load_config("config.sdn")
+    ensure_dirs()
+    gallery_load_defaults()
+
+    # Strip runtime args
+    val raw_args = rt_cli_get_args()
+    var args: [text] = []
+    var found_script = false
+    for a in raw_args:
+        if found_script:
+            args.push(a)
+        elif a.ends_with(".spl"):
+            found_script = true
+
+    if args.len() == 0:
+        print(_show_help())
+        return
+
+    val cmd = args[0]
+
+    if cmd == "help":
+        print(_show_help())
+    elif cmd == "gallery":
+        var lang = HC_DEFAULT_LANG
+        if args.len() > 1:
+            lang = args[1]
+        print("Style Gallery:")
+        var i = 0
+        while i < GALLERY_COUNT:
+            var name = GALLERY_NAMES_KO[i]
+            if lang == "en":
+                name = GALLERY_NAMES_EN[i]
+            elif lang == "ja":
+                name = GALLERY_NAMES_JA[i]
+            print("  " + GALLERY_IDS[i] + " - " + name + " [" + GALLERY_CATEGORIES[i] + "]")
+            i = i + 1
+    elif cmd == "generate":
+        if args.len() < 3:
+            print("Usage: hair-changer generate <face.jpg> <hair_ref.jpg> [--options key=val,key=val]")
+            return
+        val face = args[1]
+        val hair_ref = args[2]
+        var options = ""
+        if args.len() > 4 and args[3] == "--options":
+            options = args[4]
+        val prompt = build_hair_prompt(options, HC_DEFAULT_LANG)
+        print("Generating hair transfer...")
+        print("Face: " + face)
+        print("Reference: " + hair_ref)
+        print("Prompt: " + prompt)
+        val result = gemini_generate_hair(face, hair_ref, prompt, "")
+        if result.0:
+            print("Success!")
+            print(result.1)
+        else:
+            print("Error: " + result.1)
+    elif cmd == "serve":
+        var tmp_port = HC_PORT
+        print("Starting hair-changer web server on port " + tmp_port.to_text())
+        print("Open http://localhost:" + tmp_port.to_text() + " in your browser")
+        print("Press Ctrl+C to stop")
+        # Note: Full HTTP server requires rt_http_server_* which may not be available
+        # in interpreter mode. For now, print instructions.
+        print("")
+        print("To serve the web UI, run:")
+        print("  cd examples/hair_changer && python3 -m http.server " + tmp_port.to_text() + " --directory web")
+    else:
+        print("Unknown command: " + cmd)
+        print(_show_help())
+
+main()
