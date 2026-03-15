@@ -1,0 +1,245 @@
+# VHDL Backend Integration Specification
+#
+# Tests VhdlBackend compilation pipeline via VhdlBuilder integration.
+# Verifies that generated VHDL is structurally valid for common patterns.
+#
+# **Feature IDs:** #vhdl-backend
+# **Category:** Backend
+# **Difficulty:** 3/5
+
+use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.backend.common.type_mapper.PrimitiveType
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+# ============================================================================
+# Simple Function (Entity + Architecture)
+# ============================================================================
+
+describe "VHDL Backend - simple function compilation":
+    """
+    ## Simple Function → Entity + Architecture
+
+    Verifies that a simple add function compiles to a valid
+    VHDL entity with input ports, output port, and architecture body
+    with signal assignment.
+    """
+
+    it "generates entity with input/output ports for add function":
+        var builder = VhdlBuilder.create("add")
+        builder.emit_library_header()
+        builder.emit_entity_begin("add")
+        builder.emit_port_begin()
+        builder.emit_port("a", "in", "signed(31 downto 0)", false)
+        builder.emit_port("b", "in", "signed(31 downto 0)", false)
+        builder.emit_port("result_out", "out", "signed(31 downto 0)", true)
+        builder.emit_port_end()
+        builder.emit_entity_end("add")
+        builder.emit_architecture_begin("add", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("result_out", "a + b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        # Verify structural VHDL validity
+        check(vhdl.contains("library ieee;"))
+        check(vhdl.contains("use ieee.std_logic_1164.all;"))
+        check(vhdl.contains("use ieee.numeric_std.all;"))
+        check(vhdl.contains("entity add is"))
+        check(vhdl.contains("a : in signed(31 downto 0);"))
+        check(vhdl.contains("b : in signed(31 downto 0);"))
+        check(vhdl.contains("result_out : out signed(31 downto 0)"))
+        check(vhdl.contains("end entity add;"))
+        check(vhdl.contains("architecture rtl of add is"))
+        check(vhdl.contains("result_out <= a + b;"))
+        check(vhdl.contains("end architecture rtl;"))
+
+# ============================================================================
+# Type Declarations (Package)
+# ============================================================================
+
+describe "VHDL Backend - type declaration package":
+    """
+    ## Type Declarations → VHDL Package
+
+    Verifies that struct and enum type declarations compile to a valid
+    VHDL package with record and enumeration type definitions.
+    """
+
+    it "generates package with record and enum types":
+        val mapper = VhdlTypeMapper.create()
+        var builder = VhdlBuilder.create("types_mod")
+        builder.emit_library_header()
+        builder.emit_package_begin("types_mod")
+
+        # Enum type
+        val enum_def = mapper.map_enum_type(["Idle", "Running", "Done"])
+        builder.emit_type_decl("state_t", enum_def)
+
+        # Record type
+        val record_def = mapper.map_record([("x", "signed(31 downto 0)"), ("y", "signed(31 downto 0)")])
+        builder.emit_type_decl("point_t", record_def)
+
+        # Constant
+        builder.emit_constant_decl("MAX_COUNT", "integer", "255")
+        builder.emit_package_end("types_mod")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("package types_mod_pkg is"))
+        check(vhdl.contains("type state_t is (Idle, Running, Done);"))
+        check(vhdl.contains("type point_t is record"))
+        check(vhdl.contains("x : signed(31 downto 0);"))
+        check(vhdl.contains("constant MAX_COUNT : integer := 255;"))
+        check(vhdl.contains("end package types_mod_pkg;"))
+
+# ============================================================================
+# Signal Assignments
+# ============================================================================
+
+describe "VHDL Backend - signal assignments":
+    """
+    ## Signal Assignments
+
+    Verifies basic arithmetic and bitwise operations map to VHDL correctly.
+    """
+
+    it "generates arithmetic signal assignments":
+        var builder = VhdlBuilder.create("arith")
+        builder.emit_architecture_begin("arith", "rtl")
+        builder.emit_signal_decl("sum", "signed(31 downto 0)", nil)
+        builder.emit_signal_decl("diff", "signed(31 downto 0)", nil)
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("sum", "a + b")
+        builder.emit_signal_assign("diff", "a - b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("signal sum : signed(31 downto 0);"))
+        check(vhdl.contains("signal diff : signed(31 downto 0);"))
+        check(vhdl.contains("sum <= a + b;"))
+        check(vhdl.contains("diff <= a - b;"))
+
+    it "generates bitwise signal assignments":
+        var builder = VhdlBuilder.create("bitwise")
+        builder.emit_architecture_begin("bitwise", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("result", "a and b")
+        builder.emit_signal_assign("result2", "a or b")
+        builder.emit_signal_assign("result3", "a xor b")
+        builder.emit_architecture_end("rtl")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("result <= a and b;"))
+        check(vhdl.contains("result2 <= a or b;"))
+        check(vhdl.contains("result3 <= a xor b;"))
+
+# ============================================================================
+# Type Mapper Integration
+# ============================================================================
+
+describe "VHDL Backend - type mapper integration":
+    """
+    ## Type Mapper with Builder
+
+    Verifies that VhdlTypeMapper produces correct type strings
+    that are used consistently in entity port declarations.
+    """
+
+    it "maps all integer types for port declarations":
+        val mapper = VhdlTypeMapper.create()
+        var builder = VhdlBuilder.create("typed")
+        builder.emit_entity_begin("typed")
+        builder.emit_port_begin()
+        builder.emit_port("a8", "in", mapper.map_primitive(PrimitiveType.I8), false)
+        builder.emit_port("a16", "in", mapper.map_primitive(PrimitiveType.I16), false)
+        builder.emit_port("a32", "in", mapper.map_primitive(PrimitiveType.I32), false)
+        builder.emit_port("a64", "in", mapper.map_primitive(PrimitiveType.I64), false)
+        builder.emit_port("u8", "in", mapper.map_primitive(PrimitiveType.U8), false)
+        builder.emit_port("flag", "in", mapper.map_primitive(PrimitiveType.Bool), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("typed")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("a8 : in signed(7 downto 0);"))
+        check(vhdl.contains("a16 : in signed(15 downto 0);"))
+        check(vhdl.contains("a32 : in signed(31 downto 0);"))
+        check(vhdl.contains("a64 : in signed(63 downto 0);"))
+        check(vhdl.contains("u8 : in unsigned(7 downto 0);"))
+        check(vhdl.contains("flag : in bit"))
+
+    it "maps resolved types for std_logic ports":
+        val mapper = VhdlTypeMapper.create_resolved()
+        var builder = VhdlBuilder.create("resolved")
+        builder.emit_entity_begin("resolved")
+        builder.emit_port_begin()
+        builder.emit_port("clk", "in", mapper.map_primitive(PrimitiveType.Bool), false)
+        builder.emit_port("data", "in", mapper.bit_vector_type(8), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("resolved")
+        val vhdl = builder.build()
+
+        check(vhdl.contains("clk : in std_logic;"))
+        check(vhdl.contains("data : in std_logic_vector(7 downto 0)"))
+
+# ============================================================================
+# Complete Module (Package + Entity + Architecture)
+# ============================================================================
+
+describe "VHDL Backend - complete module compilation":
+    """
+    ## Complete Module
+
+    Simulates full VhdlBackend.compile_module() by generating package,
+    entity, and architecture together — verifying the complete output
+    is structurally valid VHDL-2008.
+    """
+
+    it "generates complete ALU module with package":
+        val mapper = VhdlTypeMapper.create()
+
+        # Package
+        var pkg = VhdlBuilder.create("alu")
+        pkg.emit_library_header()
+        pkg.emit_package_begin("alu")
+        val op_enum = mapper.map_enum_type(["OpAdd", "OpSub", "OpAnd", "OpOr"])
+        pkg.emit_type_decl("alu_op_t", op_enum)
+        pkg.emit_constant_decl("WIDTH", "integer", "32")
+        pkg.emit_package_end("alu")
+
+        # Entity
+        var ent = VhdlBuilder.create("alu")
+        ent.emit_library_header()
+        ent.emit_use_package("work", "alu_pkg")
+        ent.emit_entity_begin("alu")
+        ent.emit_port_begin()
+        ent.emit_port("op", "in", "alu_op_t", false)
+        ent.emit_port("a", "in", "signed(31 downto 0)", false)
+        ent.emit_port("b", "in", "signed(31 downto 0)", false)
+        ent.emit_port("result_out", "out", "signed(31 downto 0)", true)
+        ent.emit_port_end()
+        ent.emit_entity_end("alu")
+        ent.emit_architecture_begin("alu", "rtl")
+        ent.emit_architecture_body_begin()
+        ent.emit_process_begin(Some("alu_proc"), ["op", "a", "b"])
+        ent.emit_process_body_begin()
+        ent.emit_comment("ALU operation selection")
+        ent.emit_signal_assign("result_out", "a + b")
+        ent.emit_process_end(Some("alu_proc"))
+        ent.emit_architecture_end("rtl")
+
+        val pkg_vhdl = pkg.build()
+        val ent_vhdl = ent.build()
+
+        # Verify package
+        check(pkg_vhdl.contains("package alu_pkg is"))
+        check(pkg_vhdl.contains("type alu_op_t is (OpAdd, OpSub, OpAnd, OpOr);"))
+        check(pkg_vhdl.contains("constant WIDTH : integer := 32;"))
+
+        # Verify entity
+        check(ent_vhdl.contains("use work.alu_pkg.all;"))
+        check(ent_vhdl.contains("entity alu is"))
+        check(ent_vhdl.contains("alu_proc: process(op, a, b)"))
+        check(ent_vhdl.contains("end process alu_proc;"))
+        check(ent_vhdl.contains("end architecture rtl;"))

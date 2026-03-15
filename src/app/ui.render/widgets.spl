@@ -1,0 +1,331 @@
+# UI Widget Renderers
+#
+# Renders widgets to both TUI (ANSI) and HTML formats.
+# TUI rendering writes to a Screen buffer using WidgetRect positions.
+# HTML rendering produces HTML string fragments.
+
+use dashboard.render.colors.{RESET, BOLD, DIM, CYAN, WHITE, BLUE, YELLOW, GREEN, RED,
+    BRIGHT_WHITE, BRIGHT_CYAN, BRIGHT_BLUE}
+use dashboard.render.table.{pad_right, pad_left, center}
+use dashboard.render.progress.{render_progress_bar}
+use app.ui.core.types.{WidgetNode, WidgetKind, WidgetRect, UIState}
+use app.ui.tui.screen.{Screen}
+
+# =========================================================================
+# TUI Widget Rendering
+# =========================================================================
+
+fn render_tui_widget(screen: Screen, node: WidgetNode, rect: WidgetRect, state: UIState) -> Screen:
+    """Render a single widget to the TUI screen buffer."""
+    val is_focused = node.id == state.focused_id
+
+    match node.kind:
+        WidgetKind.Panel =>
+            return render_tui_panel(screen, node, rect, is_focused)
+        WidgetKind.Text =>
+            return render_tui_text(screen, node, rect, is_focused)
+        WidgetKind.List =>
+            return render_tui_list(screen, node, rect, is_focused)
+        WidgetKind.Table =>
+            return render_tui_table(screen, node, rect, is_focused)
+        WidgetKind.Progress =>
+            return render_tui_progress(screen, node, rect)
+        WidgetKind.MenuBar =>
+            return render_tui_menubar(screen, node, rect)
+        WidgetKind.StatusBar =>
+            return render_tui_statusbar(screen, node, rect, state)
+        WidgetKind.Input =>
+            return render_tui_input(screen, node, rect, is_focused)
+        WidgetKind.Tabs =>
+            return render_tui_tabs(screen, node, rect, is_focused)
+
+fn render_tui_panel(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    val title = node.get_prop("title")
+    var s = screen
+    val border_style = if focused: BRIGHT_CYAN else: DIM
+    # Draw box border
+    s = s.draw_box(rect.y, rect.x, rect.w, rect.h, title)
+    return s
+
+fn render_tui_text(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    val content = node.get_prop("content")
+    val label = node.get_prop("label")
+    val display = if content != "": content else: label
+    if display == "":
+        return screen
+    var s = screen
+    val style = if focused: BRIGHT_WHITE else: WHITE
+    s = s.put_styled(rect.y, rect.x, display, style)
+    return s
+
+fn render_tui_list(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    var s = screen
+    var row = rect.y
+    var idx = 0
+    for child in node.children:
+        if row >= rect.y + rect.h:
+            break
+        val label = child.get_prop("label")
+        if label != "":
+            val prefix = if focused and idx == 0: "> " else: "  "
+            s = s.put_text(row, rect.x, "{prefix}{label}")
+            row = row + 1
+        idx = idx + 1
+    return s
+
+fn render_tui_table(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    # Tables render as simple text rows for now
+    var s = screen
+    var row = rect.y
+    for child in node.children:
+        if row >= rect.y + rect.h:
+            break
+        val label = child.get_prop("label")
+        if label != "":
+            s = s.put_text(row, rect.x, label)
+            row = row + 1
+    return s
+
+fn render_tui_progress(screen: Screen, node: WidgetNode, rect: WidgetRect) -> Screen:
+    val value_str = node.get_prop("value")
+    val value = if value_str != "": value_str.to_int() else: 0
+    val bar_width = rect.w - 10
+    if bar_width <= 0:
+        return screen
+    val bar = render_progress_bar((value as f64), bar_width)
+    return screen.put_text(rect.y, rect.x, bar)
+
+fn render_tui_menubar(screen: Screen, node: WidgetNode, rect: WidgetRect) -> Screen:
+    var s = screen
+    # Fill background
+    s = s.fill_row(rect.y, " ")
+    var col = rect.x
+    for child in node.children:
+        val label = child.get_prop("label")
+        if label != "":
+            val menu_text = " {label} "
+            s = s.put_styled(rect.y, col, menu_text, BOLD)
+            col = col + menu_text.len() + 1
+    return s
+
+fn render_tui_statusbar(screen: Screen, node: WidgetNode, rect: WidgetRect, state: UIState) -> Screen:
+    var s = screen
+    # Build status bar content
+    val left_template = node.get_prop("left")
+    val right_template = node.get_prop("right")
+
+    val left_text = expand_template(left_template, state)
+    val right_text = expand_template(right_template, state)
+
+    # Fill row with dim background
+    s = s.fill_row(rect.y, " ")
+    s = s.put_styled(rect.y, rect.x, left_text, BOLD)
+
+    val right_col = rect.x + rect.w - right_text.len() - 1
+    if right_col > 0:
+        s = s.put_styled(rect.y, right_col, right_text, DIM)
+
+    return s
+
+fn render_tui_input(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    val placeholder = node.get_prop("placeholder")
+    val display = if placeholder != "": placeholder else: ""
+    var s = screen
+    val style = if focused: BRIGHT_WHITE else: DIM
+    s = s.put_styled(rect.y, rect.x, "> {display}", style)
+    return s
+
+fn render_tui_tabs(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool) -> Screen:
+    var s = screen
+    var col = rect.x
+    var idx = 0
+    for child in node.children:
+        val label = child.get_prop("label")
+        if label != "":
+            val style = if idx == 0: BOLD else: DIM
+            val tab_text = " {label} "
+            s = s.put_styled(rect.y, col, tab_text, style)
+            col = col + tab_text.len() + 1
+        idx = idx + 1
+    return s
+
+# =========================================================================
+# Template Expansion
+# =========================================================================
+
+fn expand_template(template: text, state: UIState) -> text:
+    """Expand {app.mode} and {app.title} placeholders."""
+    if template == "":
+        return ""
+    var result = template
+    # Manual replacement since no regex
+    if result.contains("{app.mode}"):
+        val mode_name = state.mode_name()
+        result = replace_placeholder(result, "{app.mode}", mode_name)
+    if result.contains("{app.title}"):
+        result = replace_placeholder(result, "{app.title}", state.tree.title)
+    return result
+
+fn replace_placeholder(text_val: text, placeholder: text, replacement: text) -> text:
+    """Simple string replacement."""
+    var result = ""
+    var i = 0
+    val text_len = text_val.len()
+    val ph_len = placeholder.len()
+
+    while i < text_len:
+        if i + ph_len <= text_len:
+            var match_found = true
+            var j = 0
+            while j < ph_len:
+                if text_val[i + j] != placeholder[j]:
+                    match_found = false
+                    break
+                j = j + 1
+
+            if match_found:
+                result = "{result}{replacement}"
+                i = i + ph_len
+            else:
+                result = "{result}{text_val[i]}"
+                i = i + 1
+        else:
+            result = "{result}{text_val[i]}"
+            i = i + 1
+
+    return result
+
+# =========================================================================
+# Full TUI Tree Render
+# =========================================================================
+
+fn render_tui_tree(screen: Screen, node: WidgetNode, rects: [WidgetRect], state: UIState) -> Screen:
+    """Render an entire widget tree to the screen."""
+    var s = screen
+
+    # Find rect for this node
+    var node_rect: WidgetRect? = nil
+    for rect in rects:
+        if rect.id == node.id:
+            node_rect = rect
+            break
+
+    if node_rect != nil:
+        s = render_tui_widget(s, node, node_rect, state)
+
+    # Render children
+    for child in node.children:
+        if child.visible:
+            s = render_tui_tree(s, child, rects, state)
+
+    return s
+
+# =========================================================================
+# HTML Widget Rendering
+# =========================================================================
+
+fn render_html_widget(node: WidgetNode, state: UIState) -> text:
+    """Render a widget to an HTML string."""
+    val is_focused = node.id == state.focused_id
+    val focus_class = if is_focused: " focused" else: ""
+
+    match node.kind:
+        WidgetKind.Panel =>
+            return render_html_panel(node, state, focus_class)
+        WidgetKind.Text =>
+            return render_html_text(node, focus_class)
+        WidgetKind.List =>
+            return render_html_list(node, state, focus_class)
+        WidgetKind.Table =>
+            return render_html_table(node, state, focus_class)
+        WidgetKind.Progress =>
+            return render_html_progress(node, focus_class)
+        WidgetKind.MenuBar =>
+            return render_html_menubar(node, state)
+        WidgetKind.StatusBar =>
+            return render_html_statusbar(node, state)
+        WidgetKind.Input =>
+            return render_html_input(node, focus_class)
+        WidgetKind.Tabs =>
+            return render_html_tabs(node, focus_class)
+
+fn render_html_panel(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    val title = node.get_prop("title")
+    var children_html = ""
+    for child in node.children:
+        children_html = "{children_html}{render_html_widget(child, state)}"
+
+    val flex_prop = node.get_prop("flex")
+    val width_prop = node.get_prop("width")
+    val style = if flex_prop != "":
+        "flex: {flex_prop};"
+    elif width_prop != "":
+        "width: {width_prop}px;"
+    else:
+        "flex: 1;"
+
+    val layout_class = match node.layout:
+        LayoutKind.VBox => "layout-vbox"
+        LayoutKind.HBox => "layout-hbox"
+        _ => "layout-vbox"
+
+    return "<div class=\"widget-panel {layout_class}{focus_class}\" id=\"{node.id}\" style=\"{style}\"><div class=\"panel-title\">{title}</div><div class=\"panel-content\">{children_html}</div></div>"
+
+fn render_html_text(node: WidgetNode, focus_class: text) -> text:
+    val content = node.get_prop("content")
+    val label = node.get_prop("label")
+    val display = if content != "": content else: label
+    return "<div class=\"widget-text{focus_class}\" id=\"{node.id}\">{display}</div>"
+
+fn render_html_list(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    var items_html = ""
+    for child in node.children:
+        val label = child.get_prop("label")
+        items_html = "{items_html}<li>{label}</li>"
+    return "<ul class=\"widget-list{focus_class}\" id=\"{node.id}\">{items_html}</ul>"
+
+fn render_html_table(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    var rows_html = ""
+    for child in node.children:
+        val label = child.get_prop("label")
+        rows_html = "{rows_html}<tr><td>{label}</td></tr>"
+    return "<table class=\"widget-table{focus_class}\" id=\"{node.id}\">{rows_html}</table>"
+
+fn render_html_progress(node: WidgetNode, focus_class: text) -> text:
+    val value_str = node.get_prop("value")
+    val value = if value_str != "": value_str else: "0"
+    return "<div class=\"widget-progress{focus_class}\" id=\"{node.id}\"><div class=\"progress-bar\" style=\"width: {value}%\"></div><span>{value}%</span></div>"
+
+fn render_html_menubar(node: WidgetNode, state: UIState) -> text:
+    var items_html = ""
+    for child in node.children:
+        val label = child.get_prop("label")
+        items_html = "{items_html}<span class=\"menu-item\">{label}</span>"
+    return "<div class=\"widget-menubar\" id=\"{node.id}\">{items_html}</div>"
+
+fn render_html_statusbar(node: WidgetNode, state: UIState) -> text:
+    val left_text = expand_template(node.get_prop("left"), state)
+    val right_text = expand_template(node.get_prop("right"), state)
+    return "<div class=\"widget-statusbar\" id=\"{node.id}\"><span class=\"status-left\">{left_text}</span><span class=\"status-right\">{right_text}</span></div>"
+
+fn render_html_input(node: WidgetNode, focus_class: text) -> text:
+    val placeholder = node.get_prop("placeholder")
+    return "<input class=\"widget-input{focus_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\" />"
+
+fn render_html_tabs(node: WidgetNode, focus_class: text) -> text:
+    var tabs_html = ""
+    var idx = 0
+    for child in node.children:
+        val label = child.get_prop("label")
+        val active_class = if idx == 0: " active" else: ""
+        tabs_html = "{tabs_html}<span class=\"tab-item{active_class}\">{label}</span>"
+        idx = idx + 1
+    return "<div class=\"widget-tabs{focus_class}\" id=\"{node.id}\">{tabs_html}</div>"
+
+# =========================================================================
+# Full HTML Tree Render
+# =========================================================================
+
+fn render_html_tree(node: WidgetNode, state: UIState) -> text:
+    """Render the entire widget tree to HTML."""
+    return render_html_widget(node, state)

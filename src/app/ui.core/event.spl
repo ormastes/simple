@@ -1,0 +1,174 @@
+# UI Event Dispatch
+#
+# Processes UIEvents against the current UIState and produces
+# a new UIState (immutable state transitions).
+
+use app.ui.core.types.{UIMode, UIEvent, UIState, UITree, WidgetNode}
+use app.ui.core.mode.{switch_mode, resolve_keybinding}
+
+# =========================================================================
+# Event Processing
+# =========================================================================
+
+fn process_event(state: UIState, event: UIEvent) -> UIState:
+    """Process a UIEvent and return the updated state."""
+    match event:
+        UIEvent.Quit =>
+            return state
+        UIEvent.FocusNext =>
+            return focus_next(state)
+        UIEvent.FocusPrev =>
+            return focus_prev(state)
+        UIEvent.CommandMode =>
+            return switch_mode(state, UIMode.Command)
+        UIEvent.NormalMode =>
+            return switch_mode(state, UIMode.Normal)
+        UIEvent.InsertMode =>
+            return switch_mode(state, UIMode.Insert)
+        UIEvent.KeyPress(key) =>
+            return handle_keypress(state, key)
+        UIEvent.Action(name) =>
+            return handle_action(state, name)
+        UIEvent.FileChanged =>
+            return state
+        UIEvent.Resize(width, height) =>
+            return state
+
+fn handle_keypress(state: UIState, key: text) -> UIState:
+    """Handle a key press by checking keybindings first."""
+    # Check keybindings
+    val bound_event = resolve_keybinding(state, key)
+    if bound_event != nil:
+        return process_event(state, bound_event)
+
+    # Mode-specific key handling
+    match state.mode:
+        UIMode.Command =>
+            return handle_command_key(state, key)
+        UIMode.Insert =>
+            return handle_insert_key(state, key)
+        UIMode.Normal =>
+            return handle_normal_key(state, key)
+        UIMode.Menu =>
+            return handle_menu_key(state, key)
+
+fn handle_normal_key(state: UIState, key: text) -> UIState:
+    """Handle keys in normal mode."""
+    match key:
+        "j" =>
+            return focus_next(state)
+        "k" =>
+            return focus_prev(state)
+        ":" =>
+            return switch_mode(state, UIMode.Command)
+        "i" =>
+            return switch_mode(state, UIMode.Insert)
+        _ =>
+            return state
+
+fn handle_command_key(state: UIState, key: text) -> UIState:
+    """Handle keys in command mode (accumulate command buffer)."""
+    if key == "enter":
+        # Execute command
+        return execute_command(state)
+    elif key == "escape":
+        return switch_mode(state, UIMode.Normal)
+    else:
+        # Append to command buffer
+        return UIState(
+            tree: state.tree,
+            mode: state.mode,
+            focused_id: state.focused_id,
+            command_buffer: "{state.command_buffer}{key}"
+        )
+
+fn handle_insert_key(state: UIState, key: text) -> UIState:
+    """Handle keys in insert mode."""
+    if key == "escape":
+        return switch_mode(state, UIMode.Normal)
+    return state
+
+fn handle_menu_key(state: UIState, key: text) -> UIState:
+    """Handle keys in menu mode."""
+    if key == "escape":
+        return switch_mode(state, UIMode.Normal)
+    return state
+
+# =========================================================================
+# Command Execution
+# =========================================================================
+
+fn execute_command(state: UIState) -> UIState:
+    """Execute the command buffer and return to normal mode."""
+    val cmd = state.command_buffer
+    var new_state = switch_mode(state, UIMode.Normal)
+
+    match cmd:
+        "q" | "quit" =>
+            return new_state
+        _ =>
+            return new_state
+
+# =========================================================================
+# Focus Management
+# =========================================================================
+
+fn focus_next(state: UIState) -> UIState:
+    """Move focus to the next widget."""
+    val ids = state.tree.all_widget_ids()
+    val focusable = get_focusable_ids(ids)
+    if focusable.len() == 0:
+        return state
+
+    val next_id = get_next_id(focusable, state.focused_id)
+    return UIState(
+        tree: state.tree,
+        mode: state.mode,
+        focused_id: next_id,
+        command_buffer: state.command_buffer
+    )
+
+fn focus_prev(state: UIState) -> UIState:
+    """Move focus to the previous widget."""
+    val ids = state.tree.all_widget_ids()
+    val focusable = get_focusable_ids(ids)
+    if focusable.len() == 0:
+        return state
+
+    val prev_id = get_prev_id(focusable, state.focused_id)
+    return UIState(
+        tree: state.tree,
+        mode: state.mode,
+        focused_id: prev_id,
+        command_buffer: state.command_buffer
+    )
+
+fn get_focusable_ids(ids: [text]) -> [text]:
+    """Filter to only focusable widget IDs (non-empty)."""
+    var result: [text] = []
+    for id in ids:
+        if id != "":
+            result.push(id)
+    return result
+
+fn get_next_id(ids: [text], current: text) -> text:
+    """Get the next ID in the list after current, wrapping around."""
+    var found = false
+    for id in ids:
+        if found:
+            return id
+        if id == current:
+            found = true
+    # Wrap to first
+    if ids.len() > 0:
+        return ids[0]
+    return current
+
+fn get_prev_id(ids: [text], current: text) -> text:
+    """Get the previous ID in the list before current, wrapping around."""
+    var prev = ids[ids.len() - 1]
+    for id in ids:
+        if id == current:
+            return prev
+        prev = id
+    return prev
