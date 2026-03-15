@@ -1,0 +1,107 @@
+# Hardware Debugger Environment
+#
+# Factory for creating hardware-debugger-based execution environments.
+# Wraps TRACE32 container from config/t32/ for on-target execution.
+#
+# Uses TRACE32 PRACTICE scripting for command execution on embedded targets.
+
+use lib.environment.{Environment, ExecResult}
+
+# ============================================================================
+# HW Debugger Environment Factory
+# ============================================================================
+
+fn create_hw_debugger_environment(config: Dict<text, text>) -> Result<Environment, text>:
+    """Create a hardware debugger execution environment.
+
+    Config keys:
+        debugger: Debugger type (default: "trace32")
+        container_image: Docker image for debugger (required)
+        target_device: Target device name (e.g., "STM32F407")
+        connection: Connection type (e.g., "USB", "JTAG")
+        t32_config: Path to TRACE32 config file (optional)
+        runtime: Container runtime (default: auto-detect)
+    """
+    val debugger = config.get("debugger", "trace32")
+    val container_image = config.get("container_image", "")
+    if container_image == "":
+        return Err("hw_debugger config requires 'container_image' key")
+
+    val target_device = config.get("target_device", "")
+    val connection = config.get("connection", "USB")
+    val t32_config = config.get("t32_config", "")
+
+    var runtime = config.get("runtime", "")
+    if runtime == "":
+        val docker_check = shell_output("which docker 2>/dev/null || true")
+        if docker_check != "":
+            runtime = "docker"
+        else:
+            val podman_check = shell_output("which podman 2>/dev/null || true")
+            if podman_check != "":
+                runtime = "podman"
+    if runtime == "":
+        return Err("no container runtime found for hw_debugger environment")
+
+    val id_file = "/tmp/.simple_env_hwdbg_{debugger}.id"
+
+    var env_config = Dict<text, text>()
+    env_config.set("debugger", debugger)
+    env_config.set("target_device", target_device)
+
+    Ok(Environment(
+        name: config.get("name", "hw-{debugger}"),
+        env_type: "hw_debugger",
+        config: env_config,
+        start_fn: fn() -> Result<nil, text>:
+            var cmd = "{runtime} run -d --privileged"
+            if t32_config != "":
+                cmd = "{cmd} -v {t32_config}:/opt/t32/config"
+            cmd = "{cmd} {container_image}"
+            val output = shell_output(cmd)
+            val container_id = output.trim()
+            if container_id == "":
+                return Err("failed to start hw_debugger container")
+            shell("echo '{container_id}' > {id_file}")
+            Ok(nil),
+
+        stop_fn: fn() -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id != "":
+                shell("{runtime} rm -f {container_id} 2>/dev/null || true")
+                shell("rm -f {id_file}")
+            Ok(nil),
+
+        exec_fn: fn(cmd: text) -> Result<ExecResult, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("hw_debugger container not running")
+            # Execute via TRACE32 PRACTICE script wrapper
+            val stdout = shell_output("{runtime} exec {container_id} t32rem localhost cmd '{cmd}' 2>/tmp/.simple_env_hwdbg_stderr || true")
+            val stderr = shell_output("cat /tmp/.simple_env_hwdbg_stderr 2>/dev/null || true")
+            var exit_code = 0
+            if stderr != "":
+                exit_code = 1
+            Ok(ExecResult(stdout: stdout, stderr: stderr, exit_code: exit_code)),
+
+        copy_to_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("hw_debugger container not running")
+            shell("{runtime} cp {src} {container_id}:{dst}")
+            Ok(nil),
+
+        copy_from_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("hw_debugger container not running")
+            shell("{runtime} cp {container_id}:{src} {dst}")
+            Ok(nil),
+
+        is_running_fn: fn() -> bool:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return false
+            val status = shell_output("{runtime} inspect --format='{{{{.State.Running}}}}' {container_id} 2>/dev/null || echo 'false'").trim()
+            status == "true"
+    ))

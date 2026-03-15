@@ -1,0 +1,73 @@
+# Environment SDN Config Loader
+#
+# Parses config/environments/*.sdn files to create Environment configurations.
+# Follows test_config.spl pattern: line-by-line key:value, 3-level merge.
+
+use lib.environment.{Environment}
+
+# ============================================================================
+# Config Loading
+# ============================================================================
+
+fn load_environment_config(name: text) -> Result<Dict<text, text>, text>:
+    """Load environment config from config/environments/<name>.sdn.
+
+    SDN format (key: value pairs, one per line):
+        type: container
+        image: ubuntu:24.04
+        memory: 2g
+        # comments are ignored
+        # blank lines are ignored
+    """
+    val path = "config/environments/{name}.sdn"
+    val content = file_read(path)
+    if content == "":
+        return Err("environment config not found: {path}")
+    parse_sdn_config(content)
+
+fn parse_sdn_config(content: text) -> Result<Dict<text, text>, text>:
+    """Parse SDN key:value content into a dictionary."""
+    var config = Dict<text, text>()
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        i = i + 1
+        # Skip empty lines and comments
+        if line == "" or line.starts_with("#"):
+            continue
+        # Parse key: value
+        val colon_pos = line.index_of(":")
+        if colon_pos < 0:
+            continue
+        val key = line.substring(0, colon_pos).trim()
+        val value = line.substring(colon_pos + 1).trim()
+        if key != "":
+            config.set(key, value)
+    Ok(config)
+
+fn merge_configs(base: Dict<text, text>, overlay: Dict<text, text>) -> Dict<text, text>:
+    """Merge overlay config onto base (overlay wins)."""
+    var result = Dict<text, text>()
+    # Copy base
+    val base_keys = base.keys()
+    var i = 0
+    while i < base_keys.len():
+        val k = base_keys[i]
+        result.set(k, base.get(k, ""))
+        i = i + 1
+    # Apply overlay
+    val overlay_keys = overlay.keys()
+    i = 0
+    while i < overlay_keys.len():
+        val k = overlay_keys[i]
+        result.set(k, overlay.get(k, ""))
+        i = i + 1
+    result
+
+fn list_available_environments() -> [text]:
+    """List available environment config names from config/environments/."""
+    val output = shell_output("ls config/environments/*.sdn 2>/dev/null | sed 's|.*/||;s|\\.sdn$||' || true")
+    if output.trim() == "":
+        return []
+    output.trim().split("\n")

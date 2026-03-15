@@ -1,0 +1,53 @@
+# Environment Registry
+#
+# Factory function that loads SDN config and creates the appropriate
+# Environment based on the "type" field.
+
+use lib.environment.{Environment, create_native_environment}
+use lib.environment.config.{load_environment_config}
+use lib.environment.container.{create_container_environment}
+use lib.environment.qemu.{create_qemu_environment}
+use lib.environment.hw_debugger.{create_hw_debugger_environment}
+
+# ============================================================================
+# Registry
+# ============================================================================
+
+fn environment_from_name(name: text) -> Result<Environment, text>:
+    """Create an environment from a named SDN config.
+
+    Loads config/environments/<name>.sdn, reads the 'type' field,
+    and delegates to the appropriate factory.
+
+    Supported types: native, container, qemu, hw_debugger
+    """
+    if name == "native" or name == "":
+        return Ok(create_native_environment())
+
+    val config_result = load_environment_config(name)
+    match config_result:
+        case Err(e):
+            return Err(e)
+        case Ok(config):
+            val env_type = config.get("type", "")
+            config.set("name", name)
+            match env_type:
+                case "container":
+                    create_container_environment(config)
+                case "qemu":
+                    create_qemu_environment(config)
+                case "hw_debugger":
+                    create_hw_debugger_environment(config)
+                case "native":
+                    Ok(create_native_environment())
+                case _:
+                    Err("unknown environment type '{env_type}' in config for '{name}'")
+
+fn environment_available(name: text) -> bool:
+    """Check if a named environment can be created (config exists + runtime available)."""
+    if name == "native" or name == "":
+        return true
+    val result = environment_from_name(name)
+    match result:
+        case Ok(_): true
+        case Err(_): false

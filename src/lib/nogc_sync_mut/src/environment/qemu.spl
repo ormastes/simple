@@ -1,0 +1,111 @@
+# QEMU Environment
+#
+# Factory for creating QEMU VM-based execution environments.
+# Wraps existing qemu_manager.spl patterns (vm_start/vm_stop/vm_exec/vm_copy_to).
+#
+# Uses SSH for command execution and file transfer inside the VM.
+
+use lib.environment.{Environment, ExecResult}
+
+# ============================================================================
+# QEMU Environment Factory
+# ============================================================================
+
+fn create_qemu_environment(config: Dict<text, text>) -> Result<Environment, text>:
+    """Create a QEMU VM-based execution environment.
+
+    Config keys:
+        image: VM disk image path (required)
+        arch: Target architecture (default: "x86_64")
+        memory: VM memory (default: "2G")
+        cpus: Number of CPUs (default: "2")
+        ssh_port: SSH forwarding port (default: "2222")
+        ssh_user: SSH username (default: "root")
+        ssh_key: SSH key path (optional)
+        display: Display mode (default: "none")
+        extra_args: Extra QEMU arguments (optional)
+    """
+    val image = config.get("image", "")
+    if image == "":
+        return Err("QEMU config requires 'image' key")
+
+    val arch = config.get("arch", "x86_64")
+    val memory = config.get("memory", "2G")
+    val cpus = config.get("cpus", "2")
+    val ssh_port = config.get("ssh_port", "2222")
+    val ssh_user = config.get("ssh_user", "root")
+    val ssh_key = config.get("ssh_key", "")
+    val display = config.get("display", "none")
+    val extra_args = config.get("extra_args", "")
+
+    val pid_file = "/tmp/.simple_env_qemu_{ssh_port}.pid"
+    val ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+
+    var ssh_key_arg = ""
+    if ssh_key != "":
+        ssh_key_arg = "-i {ssh_key}"
+
+    var env_config = Dict<text, text>()
+    env_config.set("image", image)
+    env_config.set("arch", arch)
+    env_config.set("ssh_port", ssh_port)
+
+    Ok(Environment(
+        name: config.get("name", "qemu-{arch}"),
+        env_type: "qemu",
+        config: env_config,
+        start_fn: fn() -> Result<nil, text>:
+            val qemu_bin = "qemu-system-{arch}"
+            var cmd = "{qemu_bin} -m {memory} -smp {cpus}"
+            cmd = "{cmd} -display {display}"
+            cmd = "{cmd} -drive file={image},format=qcow2"
+            cmd = "{cmd} -netdev user,id=net0,hostfwd=tcp::{ssh_port}-:22"
+            cmd = "{cmd} -device virtio-net-pci,netdev=net0"
+            if extra_args != "":
+                cmd = "{cmd} {extra_args}"
+            cmd = "{cmd} -daemonize -pidfile {pid_file}"
+            shell(cmd)
+            # Wait for SSH to become available
+            var attempts = 0
+            var connected = false
+            while attempts < 30 and not connected:
+                val check = shell_output("ssh {ssh_opts} {ssh_key_arg} -p {ssh_port} {ssh_user}@localhost echo ok 2>/dev/null || true").trim()
+                if check == "ok":
+                    connected = true
+                else:
+                    shell("sleep 2")
+                    attempts = attempts + 1
+            if not connected:
+                return Err("QEMU VM failed to become reachable via SSH after 60s")
+            Ok(nil),
+
+        stop_fn: fn() -> Result<nil, text>:
+            val pid = shell_output("cat {pid_file} 2>/dev/null || true").trim()
+            if pid != "":
+                shell("kill {pid} 2>/dev/null || true")
+                shell("rm -f {pid_file}")
+            Ok(nil),
+
+        exec_fn: fn(cmd: text) -> Result<ExecResult, text>:
+            val stdout = shell_output("ssh {ssh_opts} {ssh_key_arg} -p {ssh_port} {ssh_user}@localhost '{cmd}' 2>/tmp/.simple_env_qemu_stderr || true")
+            val stderr = shell_output("cat /tmp/.simple_env_qemu_stderr 2>/dev/null || true")
+            var exit_code = 0
+            if stderr != "":
+                exit_code = 1
+            Ok(ExecResult(stdout: stdout, stderr: stderr, exit_code: exit_code)),
+
+        copy_to_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            shell("scp {ssh_opts} {ssh_key_arg} -P {ssh_port} -r {src} {ssh_user}@localhost:{dst}")
+            Ok(nil),
+
+        copy_from_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            shell("scp {ssh_opts} {ssh_key_arg} -P {ssh_port} -r {ssh_user}@localhost:{src} {dst}")
+            Ok(nil),
+
+        is_running_fn: fn() -> bool:
+            val pid = shell_output("cat {pid_file} 2>/dev/null || true").trim()
+            if pid == "":
+                return false
+            val check = shell_output("kill -0 {pid} 2>/dev/null && echo 'running' || true").trim()
+            check == "running"
+    ))

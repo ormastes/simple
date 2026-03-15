@@ -1,0 +1,89 @@
+# Environment Abstraction Library
+#
+# Unified API for execution environments: containers, QEMU VMs,
+# hardware debuggers, and native execution.
+#
+# Provides:
+# - Environment: Core abstraction with start/stop/exec/copy operations
+# - ExecResult: Command execution result (stdout, stderr, exit_code)
+# - Container/QEMU/HW debugger factories
+# - SDN-based configuration loading
+# - Environment registry for name-based lookup
+
+# ============================================================================
+# Core Types
+# ============================================================================
+
+class ExecResult:
+    """Result of executing a command in an environment."""
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn exec_result_ok(stdout: text) -> ExecResult:
+    ExecResult(stdout: stdout, stderr: "", exit_code: 0)
+
+fn exec_result_error(stderr: text, code: i64) -> ExecResult:
+    ExecResult(stdout: "", stderr: stderr, exit_code: code)
+
+fn exec_result_success(result: ExecResult) -> bool:
+    result.exit_code == 0
+
+class Environment:
+    """Unified execution environment abstraction.
+
+    Wraps containers, VMs, hardware debuggers, or native execution
+    behind a common interface for test routing and compilation.
+    """
+    name: text
+    env_type: text  # "container", "qemu", "hw_debugger", "remote", "native"
+    config: Dict<text, text>
+    start_fn: fn() -> Result<nil, text>
+    stop_fn: fn() -> Result<nil, text>
+    exec_fn: fn(cmd: text) -> Result<ExecResult, text>
+    copy_to_fn: fn(src: text, dst: text) -> Result<nil, text>
+    copy_from_fn: fn(src: text, dst: text) -> Result<nil, text>
+    is_running_fn: fn() -> bool
+
+fn env_start(env: Environment) -> Result<nil, text>:
+    env.start_fn()
+
+fn env_stop(env: Environment) -> Result<nil, text>:
+    env.stop_fn()
+
+fn env_exec(env: Environment, cmd: text) -> Result<ExecResult, text>:
+    env.exec_fn(cmd)
+
+fn env_copy_to(env: Environment, src: text, dst: text) -> Result<nil, text>:
+    env.copy_to_fn(src, dst)
+
+fn env_copy_from(env: Environment, src: text, dst: text) -> Result<nil, text>:
+    env.copy_from_fn(src, dst)
+
+fn env_is_running(env: Environment) -> bool:
+    env.is_running_fn()
+
+# ============================================================================
+# Native Environment (passthrough to host shell)
+# ============================================================================
+
+fn create_native_environment() -> Environment:
+    """Create an environment that runs commands on the host directly."""
+    var config = Dict<text, text>()
+    Environment(
+        name: "native",
+        env_type: "native",
+        config: config,
+        start_fn: fn() -> Result<nil, text>: Ok(nil),
+        stop_fn: fn() -> Result<nil, text>: Ok(nil),
+        exec_fn: fn(cmd: text) -> Result<ExecResult, text>:
+            val output = shell_output(cmd)
+            Ok(ExecResult(stdout: output, stderr: "", exit_code: 0)),
+        copy_to_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            shell("cp -r {src} {dst}")
+            Ok(nil),
+        copy_from_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            shell("cp -r {src} {dst}")
+            Ok(nil),
+        is_running_fn: fn() -> bool: true
+    )

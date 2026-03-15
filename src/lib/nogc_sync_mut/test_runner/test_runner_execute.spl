@@ -17,6 +17,7 @@ use test_runner_files.{strip_ansi, read_file_content}
 use app.io.file_ops.{file_exists, file_write, file_delete}
 use app.io.time_ops.{time_now_unix_micros}
 use app.io.process_ops.{process_run_timeout, process_run_with_limits}
+use lib.environment.registry.{environment_from_name}
 
 # Import from split-out files (same directory, but need use for re-export)
 use test_executor_parsing.{
@@ -421,6 +422,105 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
         )
 
     make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
+
+# =========================================================================
+# Environment-aware execution
+# =========================================================================
+
+fn run_test_file_environment(file_path: text, options: TestOptions, env_name: text) -> TestFileResult:
+    """Execute a test file inside a named environment.
+
+    Creates the environment, starts it, copies the test file,
+    executes the test runner inside, and parses results from stdout.
+    Falls back to skip if the environment is unavailable.
+    """
+    val start = time_now_unix_micros()
+
+    val env_result = environment_from_name(env_name)
+    match env_result:
+        case Err(e):
+            # Environment unavailable — skip, don't fail
+            val end = time_now_unix_micros()
+            val dur = (end - start) / 1000
+            return TestFileResult(
+                path: file_path,
+                passed: 0,
+                failed: 0,
+                skipped: 1,
+                pending: 0,
+                duration_ms: dur,
+                setup_ms: 0,
+                error: "environment '{env_name}' unavailable: {e}",
+                timed_out: false
+            )
+        case Ok(env):
+            # Start environment
+            val start_result = env.start_fn()
+            match start_result:
+                case Err(e):
+                    val end = time_now_unix_micros()
+                    val dur = (end - start) / 1000
+                    return TestFileResult(
+                        path: file_path,
+                        passed: 0,
+                        failed: 0,
+                        skipped: 1,
+                        pending: 0,
+                        duration_ms: dur,
+                        setup_ms: 0,
+                        error: "environment '{env_name}' start failed: {e}",
+                        timed_out: false
+                    )
+                case Ok(_):
+                    pass_do_nothing
+
+            val setup_end = time_now_unix_micros()
+            val setup_ms = (setup_end - start) / 1000
+
+            # Copy test file into environment
+            val copy_result = env.copy_to_fn(file_path, "/workspace/{file_path}")
+            match copy_result:
+                case Err(e):
+                    env.stop_fn()
+                    val end = time_now_unix_micros()
+                    val dur = (end - start) / 1000
+                    return TestFileResult(
+                        path: file_path,
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        pending: 0,
+                        duration_ms: dur,
+                        setup_ms: setup_ms,
+                        error: "failed to copy test into environment: {e}",
+                        timed_out: false
+                    )
+                case Ok(_):
+                    pass_do_nothing
+
+            # Execute test inside environment
+            val cmd = "cd /workspace && bin/simple test /workspace/{file_path}"
+            val exec_result = env.exec_fn(cmd)
+            env.stop_fn()
+
+            val end = time_now_unix_micros()
+            val duration_ms = (end - start) / 1000
+
+            match exec_result:
+                case Err(e):
+                    TestFileResult(
+                        path: file_path,
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        pending: 0,
+                        duration_ms: duration_ms,
+                        setup_ms: setup_ms,
+                        error: "environment exec failed: {e}",
+                        timed_out: false
+                    )
+                case Ok(result):
+                    make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
 
 # =========================================================================
 # Exports - includes re-exports from split-out files for backward compat

@@ -1,0 +1,133 @@
+# Container Environment
+#
+# Factory for creating container-based execution environments.
+# Supports both Docker and Podman runtimes with auto-detection.
+#
+# Pattern: Wraps docker/podman CLI via shell() following docker_runner.spl.
+# Limitation: Container ID stored in file due to closure capture restrictions.
+
+use lib.environment.{Environment, ExecResult}
+
+# ============================================================================
+# Runtime Detection
+# ============================================================================
+
+fn detect_container_runtime() -> text:
+    """Detect available container runtime (docker or podman)."""
+    val docker_check = shell_output("which docker 2>/dev/null || true")
+    if docker_check != "":
+        return "docker"
+    val podman_check = shell_output("which podman 2>/dev/null || true")
+    if podman_check != "":
+        return "podman"
+    ""
+
+fn container_runtime_available() -> bool:
+    detect_container_runtime() != ""
+
+# ============================================================================
+# Container Environment Factory
+# ============================================================================
+
+fn create_container_environment(config: Dict<text, text>) -> Result<Environment, text>:
+    """Create a container-based execution environment.
+
+    Config keys:
+        image: Container image name (required)
+        runtime: "docker" or "podman" (auto-detected if omitted)
+        memory: Memory limit (e.g., "1g")
+        cpus: CPU limit (e.g., "2")
+        network: Network mode (e.g., "none", "host")
+        workdir: Working directory inside container
+        volumes: Volume mounts, semicolon-separated (e.g., "/src:/app;/data:/data")
+    """
+    val image = config.get("image", "")
+    if image == "":
+        return Err("container config requires 'image' key")
+
+    var runtime = config.get("runtime", "")
+    if runtime == "":
+        runtime = detect_container_runtime()
+    if runtime == "":
+        return Err("no container runtime found (docker/podman)")
+
+    val memory = config.get("memory", "2g")
+    val cpus = config.get("cpus", "2")
+    val network = config.get("network", "")
+    val workdir = config.get("workdir", "/workspace")
+    val volumes = config.get("volumes", "")
+
+    # Use a temp file to store container ID (closure capture limitation)
+    val id_file = "/tmp/.simple_env_container_id_{image.replace('/', '_').replace(':', '_')}"
+
+    var env_config = Dict<text, text>()
+    env_config.set("image", image)
+    env_config.set("runtime", runtime)
+    env_config.set("id_file", id_file)
+
+    Ok(Environment(
+        name: config.get("name", "container-{image}"),
+        env_type: "container",
+        config: env_config,
+        start_fn: fn() -> Result<nil, text>:
+            var cmd = "{runtime} run -d"
+            cmd = "{cmd} --memory={memory} --cpus={cpus}"
+            cmd = "{cmd} -w {workdir}"
+            if network != "":
+                cmd = "{cmd} --network={network}"
+            if volumes != "":
+                val parts = volumes.split(";")
+                var i = 0
+                while i < parts.len():
+                    val v = parts[i]
+                    if v != "":
+                        cmd = "{cmd} -v {v}"
+                    i = i + 1
+            cmd = "{cmd} {image} sleep infinity"
+            val output = shell_output(cmd)
+            val container_id = output.trim()
+            if container_id == "":
+                return Err("failed to start container from image {image}")
+            shell("echo '{container_id}' > {id_file}")
+            Ok(nil),
+
+        stop_fn: fn() -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id != "":
+                shell("{runtime} rm -f {container_id} 2>/dev/null || true")
+                shell("rm -f {id_file}")
+            Ok(nil),
+
+        exec_fn: fn(cmd: text) -> Result<ExecResult, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("container not running")
+            val stdout = shell_output("{runtime} exec {container_id} sh -c '{cmd}' 2>/tmp/.simple_env_stderr || true")
+            val stderr = shell_output("cat /tmp/.simple_env_stderr 2>/dev/null || true")
+            val exit_str = shell_output("{runtime} inspect --format='{{{{.State.ExitCode}}}}' {container_id} 2>/dev/null || echo '1'").trim()
+            var exit_code = 0
+            if exit_str != "0":
+                exit_code = 1
+            Ok(ExecResult(stdout: stdout, stderr: stderr, exit_code: exit_code)),
+
+        copy_to_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("container not running")
+            shell("{runtime} cp {src} {container_id}:{dst}")
+            Ok(nil),
+
+        copy_from_fn: fn(src: text, dst: text) -> Result<nil, text>:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return Err("container not running")
+            shell("{runtime} cp {container_id}:{src} {dst}")
+            Ok(nil),
+
+        is_running_fn: fn() -> bool:
+            val container_id = shell_output("cat {id_file} 2>/dev/null || true").trim()
+            if container_id == "":
+                return false
+            val status = shell_output("{runtime} inspect --format='{{{{.State.Running}}}}' {container_id} 2>/dev/null || echo 'false'").trim()
+            status == "true"
+    ))

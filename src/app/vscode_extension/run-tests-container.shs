@@ -1,0 +1,54 @@
+#!/bin/sh
+# Run VSCode extension tests inside a Docker container with Xvfb.
+#
+# Usage: sh run-tests-container.shs [--build] [--podman]
+#
+# Options:
+#   --build   Rebuild the container image before running
+#   --podman  Use podman instead of docker
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+IMAGE_NAME="simple-vscode-test:latest"
+RUNTIME="docker"
+BUILD=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --build)  BUILD=1 ;;
+        --podman) RUNTIME="podman" ;;
+    esac
+done
+
+# Auto-detect runtime if docker not available
+if ! command -v "$RUNTIME" >/dev/null 2>&1; then
+    if command -v podman >/dev/null 2>&1; then
+        RUNTIME="podman"
+    elif command -v docker >/dev/null 2>&1; then
+        RUNTIME="docker"
+    else
+        echo "ERROR: No container runtime found (docker/podman)"
+        exit 1
+    fi
+fi
+
+echo "Using container runtime: $RUNTIME"
+
+# Build if requested or image doesn't exist
+if [ "$BUILD" -eq 1 ] || ! $RUNTIME image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "Building VSCode test container..."
+    $RUNTIME build \
+        -t "$IMAGE_NAME" \
+        -f "$PROJECT_ROOT/tools/docker/Dockerfile.vscode-test" \
+        "$PROJECT_ROOT"
+fi
+
+echo "Running VSCode extension tests in container..."
+$RUNTIME run --rm \
+    --memory=4g \
+    --cpus=4.0 \
+    "$IMAGE_NAME"
+
+echo "VSCode extension tests completed."

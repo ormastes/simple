@@ -1,0 +1,180 @@
+# Environment Pool
+#
+# Manages a pool of reusable environments to avoid start/stop overhead
+# when running multiple tests against the same environment type.
+#
+# Follows qemu_broker.spl pattern: acquire/release/cleanup_idle/evict.
+# Container IDs stored in files due to closure capture limitations.
+
+use lib.environment.{Environment, ExecResult, env_start, env_stop, env_is_running}
+use lib.environment.registry.{environment_from_name}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Pool Entry Status
+# ============================================================================
+
+val ENV_IDLE: i64 = 0
+val ENV_IN_USE: i64 = 1
+
+# ============================================================================
+# Pool Entry
+# ============================================================================
+
+struct PoolEntry:
+    env_name: text
+    env: Environment
+    status: i64
+    use_count: i64
+    last_used: i64
+
+# ============================================================================
+# Environment Pool
+# ============================================================================
+
+class EnvironmentPool:
+    entries: [PoolEntry]
+    max_size: i64
+
+fn environment_pool_new(max_size: i64) -> EnvironmentPool:
+    EnvironmentPool(entries: [], max_size: max_size)
+
+impl EnvironmentPool:
+    me acquire(env_name: text) -> Result<Environment, text>:
+        """Acquire an environment from the pool.
+
+        Returns an existing idle environment if available,
+        otherwise creates a new one. Evicts oldest idle if at capacity.
+        """
+        # Look for existing idle environment with same name
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.env_name == env_name and entry.status == ENV_IDLE:
+                # Check if still running
+                if env_is_running(entry.env):
+                    self.entries[i] = PoolEntry(
+                        env_name: entry.env_name,
+                        env: entry.env,
+                        status: ENV_IN_USE,
+                        use_count: entry.use_count + 1,
+                        last_used: rt_time_now_unix_micros()
+                    )
+                    return Ok(entry.env)
+                else:
+                    # Dead environment — remove and create fresh
+                    self.remove_at(i)
+                    break
+            i = i + 1
+
+        # No existing idle environment — create new
+        if self.entries.len() >= self.max_size:
+            self.evict_oldest_idle()
+
+        val env_result = environment_from_name(env_name)
+        match env_result:
+            case Err(e):
+                return Err(e)
+            case Ok(env):
+                val start_result = env_start(env)
+                match start_result:
+                    case Err(e):
+                        return Err("failed to start environment '{env_name}': {e}")
+                    case Ok(_):
+                        pass_do_nothing
+
+                val entry = PoolEntry(
+                    env_name: env_name,
+                    env: env,
+                    status: ENV_IN_USE,
+                    use_count: 1,
+                    last_used: rt_time_now_unix_micros()
+                )
+                self.entries.push(entry)
+                Ok(env)
+
+    me release(env_name: text):
+        """Release an environment back to the pool for reuse."""
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].env_name == env_name and self.entries[i].status == ENV_IN_USE:
+                self.entries[i] = PoolEntry(
+                    env_name: self.entries[i].env_name,
+                    env: self.entries[i].env,
+                    status: ENV_IDLE,
+                    use_count: self.entries[i].use_count,
+                    last_used: rt_time_now_unix_micros()
+                )
+                return
+            i = i + 1
+
+    me cleanup_idle(timeout_ms: i64):
+        """Stop and remove environments idle longer than timeout_ms."""
+        val now = rt_time_now_unix_micros()
+        val timeout_us = timeout_ms * 1000
+        var new_entries: [PoolEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.status == ENV_IDLE and (now - entry.last_used) > timeout_us:
+                # Expired — stop and discard
+                env_stop(entry.env)
+            else:
+                new_entries.push(entry)
+            i = i + 1
+        self.entries = new_entries
+
+    me shutdown_all():
+        """Stop all environments and clear the pool."""
+        var i = 0
+        while i < self.entries.len():
+            env_stop(self.entries[i].env)
+            i = i + 1
+        self.entries = []
+
+    fn active_count() -> i64:
+        var count: i64 = 0
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].status == ENV_IN_USE:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn idle_count() -> i64:
+        var count: i64 = 0
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].status == ENV_IDLE:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn total_count() -> i64:
+        self.entries.len()
+
+    # --- Private ---
+
+    me evict_oldest_idle():
+        var oldest_idx = -1
+        var oldest_time: i64 = 9999999999999999
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.status == ENV_IDLE and entry.last_used < oldest_time:
+                oldest_idx = i
+                oldest_time = entry.last_used
+            i = i + 1
+        if oldest_idx >= 0:
+            env_stop(self.entries[oldest_idx].env)
+            self.remove_at(oldest_idx)
+
+    me remove_at(idx: i64):
+        var new_entries: [PoolEntry] = []
+        var j = 0
+        while j < self.entries.len():
+            if j != idx:
+                new_entries.push(self.entries[j])
+            j = j + 1
+        self.entries = new_entries
