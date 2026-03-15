@@ -1,0 +1,66 @@
+#!/bin/bash
+# Pre-commit hook: prevent secrets from being committed.
+# Generic patterns are checked by default.
+# Project-specific partial patterns are loaded from secrets.patterns (gitignored).
+
+set -e
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATTERNS_FILE="${HOOK_DIR}/secrets.patterns"
+
+# Built-in generic patterns (always checked)
+GENERIC_PATTERNS=(
+  'sk-ant-api0'        # Anthropic API key prefix
+  'npm_[A-Za-z0-9]'    # npm token prefix
+  'ghp_[A-Za-z0-9]'    # GitHub PAT prefix
+  'ghs_[A-Za-z0-9]'    # GitHub App token prefix
+  'AKIA[A-Z0-9]'       # AWS access key prefix
+  'AIzaSy[A-Za-z0-9]'  # Google API key prefix
+  'xoxb-'              # Slack bot token
+  'xoxp-'              # Slack user token
+  'sk-[A-Za-z0-9]{20}' # OpenAI-style key prefix
+  'PRIVATE KEY-----'   # PEM private keys
+  'password\s*[:=]\s*["\x27][^\s]' # password assignments
+)
+
+FAILED=0
+
+check_pattern() {
+  local pattern="$1"
+  local label="$2"
+  # Check staged files only (git diff --cached)
+  if git diff --cached --diff-filter=ACMR -U0 -- ':(exclude)scripts/hooks/' ':(exclude)*.lock' ':(exclude)*.sdn' | grep -qE "$pattern"; then
+    echo "BLOCKED: Potential secret detected matching: ${label}"
+    echo "  Pattern: ${pattern}"
+    git diff --cached --diff-filter=ACMR -U0 -- ':(exclude)scripts/hooks/' ':(exclude)*.lock' ':(exclude)*.sdn' | grep -nE "$pattern" | head -5
+    echo ""
+    FAILED=1
+  fi
+}
+
+echo "Checking for secrets in staged files..."
+
+# Check generic patterns
+for pattern in "${GENERIC_PATTERNS[@]}"; do
+  check_pattern "$pattern" "generic"
+done
+
+# Load project-specific partial patterns from gitignored file
+if [ -f "$PATTERNS_FILE" ]; then
+  while IFS= read -r line; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    check_pattern "$line" "project-specific"
+  done < "$PATTERNS_FILE"
+fi
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "========================================="
+  echo "COMMIT BLOCKED: Secrets detected in staged files."
+  echo "Remove the secrets and try again."
+  echo "To bypass (emergency only): git commit --no-verify"
+  echo "========================================="
+  exit 1
+fi
+
+echo "No secrets detected."
