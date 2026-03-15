@@ -1,0 +1,427 @@
+#!/usr/bin/env simple
+# Phase 5: Korean Translation (Note.md Phase 4)
+#
+# Goal: Train Korean translation capability with front/back layers
+#
+# Progressive training:
+#   1. Duplicate front/back layers from L1 and L3
+#   2. Freeze base model
+#   3. Add LoRA_4 to layers 1 and 2
+#   4. Sub-phase A: Korean text training (front/back + embeddings + LoRA)
+#   5. Sub-phase B: Korean->English translation training
+#   6. English retention check per epoch
+#   7. Merge LoRA_4 into base
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase5.spl
+
+use model.{TextModel, compute_mse_loss, check_gpu, sgd_update_tensor}
+use shared_logic.{
+    TrainConfig, TrainState,
+    make_randn_batch_on_cuda, compute_ce_loss,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use validation.{
+    validate_model, check_english_retention,
+    validate_extended_model, validate_per_layer_retention
+}
+use embedding_utils.{
+    KorEngEmbedding, RoPECache,
+    make_embedding_batch,
+    embedding_sgd_step, embedding_zero_grads
+}
+use layer_utils.{
+    ExtendedModel,
+    extended_lora_forward,
+    extended_zero_grads
+}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter,
+    merge_lora_weight
+}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+use train_phase2.{run_phase2}
+use train_phase3.{run_phase3}
+use train_phase4.{run_phase4}
+
+use src.torch_dyn.{
+    torch_available,
+    tensor_randn_2d,
+    tensor_zeros_1d,
+    t_mul_scalar,
+    t_cuda,
+    t_free,
+    t_mean,
+    t_clone,
+    autograd_backward,
+    autograd_set_requires_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end,
+    cuda_empty_cache
+}
+
+export run_phase5
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn run_phase5(ext_model: ExtendedModel) -> ExtendedModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 5: KOREAN TRANSLATION (Note.md Phase 4)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    val SUBPHASE_A_EPOCHS = 3
+    val SUBPHASE_B_EPOCHS = 2
+
+    val config = TrainConfig.phase5()
+    config.print_config("Phase 5 - Korean Translation")
+
+    # Duplicate front/back layers (correct shapes: input_dim x input_dim, output_dim x output_dim)
+    print("Duplicating front/back layers:")
+    val in_dim = ext_model.base.config.input_dim
+    val out_dim = ext_model.base.config.output_dim
+    # Front: [input_dim, input_dim] -> preserves input shape for L1
+    val w_front_cpu = tensor_randn_2d(in_dim, in_dim)
+    val w_front_scaled = t_mul_scalar(w_front_cpu, 0.02)
+    t_free(w_front_cpu)
+    val w_front_g = t_cuda(w_front_scaled, 0)
+    t_free(w_front_scaled)
+    autograd_set_requires_grad(w_front_g, true)
+    val b_front_cpu = tensor_zeros_1d(in_dim)
+    val b_front_g = t_cuda(b_front_cpu, 0)
+    t_free(b_front_cpu)
+    autograd_set_requires_grad(b_front_g, true)
+    print("  Front layer: [{in_dim}, {in_dim}] (identity-like)")
+    # Back: [output_dim, output_dim] -> preserves output shape from L3
+    val w_back_cpu = tensor_randn_2d(out_dim, out_dim)
+    val w_back_scaled = t_mul_scalar(w_back_cpu, 0.02)
+    t_free(w_back_cpu)
+    val w_back_g = t_cuda(w_back_scaled, 0)
+    t_free(w_back_scaled)
+    autograd_set_requires_grad(w_back_g, true)
+    val b_back_cpu = tensor_zeros_1d(out_dim)
+    val b_back_g = t_cuda(b_back_cpu, 0)
+    t_free(b_back_cpu)
+    autograd_set_requires_grad(b_back_g, true)
+    print("  Back layer: [{out_dim}, {out_dim}] (identity-like)")
+    ext_model.w_front = w_front_g
+    ext_model.b_front = b_front_g
+    ext_model.w_back = w_back_g
+    ext_model.b_back = b_back_g
+    ext_model.has_front_back = true
+    print("  Front/back layers: ACTIVE")
+    print("")
+
+    # Freeze base model
+    ext_model.base.freeze()
+    print("Base model weights: FROZEN")
+    print("")
+
+    # Add LoRA_4
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    print("Adding LoRA_4 adapters (Progressive LoRA):")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    print("")
+
+    # ================================================================
+    # Sub-Phase A: Korean Text Training (with front/back layers)
+    # ================================================================
+    print("")
+    print("  --- Sub-Phase A: Korean Text (with front/back layers) ---")
+    var state_a = TrainState.create()
+    for epoch in 0..SUBPHASE_A_EPOCHS:
+        state_a.reset_epoch()
+        print("  Sub-A Epoch {epoch + 1}/{SUBPHASE_A_EPOCHS}")
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state_a.global_step, config.warmup_steps, config.learning_rate)
+            val batch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = t_mean(loss_h)
+            autograd_backward(loss_h)
+
+            # SGD step - direct me method calls on local vars
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
+            # Inline embedding SGD (field reassignment on ext_model)
+            autograd_no_grad_begin()
+            var old_kor = ext_model.emb.kor_weight
+            ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, lr)
+            t_free(old_kor)
+            var old_eng = ext_model.emb.eng_weight
+            ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, lr)
+            t_free(old_eng)
+            # Front/back SGD
+            var old_wf = ext_model.w_front
+            ext_model.w_front = sgd_update_tensor(ext_model.w_front, lr)
+            t_free(old_wf)
+            var old_bf = ext_model.b_front
+            ext_model.b_front = sgd_update_tensor(ext_model.b_front, lr)
+            t_free(old_bf)
+            var old_wb = ext_model.w_back
+            ext_model.w_back = sgd_update_tensor(ext_model.w_back, lr)
+            t_free(old_wb)
+            var old_bb = ext_model.b_back
+            ext_model.b_back = sgd_update_tensor(ext_model.b_back, lr)
+            t_free(old_bb)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+            autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+            autograd_set_requires_grad(ext_model.w_front, true)
+            autograd_set_requires_grad(ext_model.b_front, true)
+            autograd_set_requires_grad(ext_model.w_back, true)
+            autograd_set_requires_grad(ext_model.b_back, true)
+
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
+            state_a.add_loss(loss_val)
+            report_training_step(state_a, config)
+        state_a.update_best()
+        report_epoch_end(epoch, SUBPHASE_A_EPOCHS, state_a)
+        val retained_a = validate_per_layer_retention(ext_model, config)
+        if not retained_a:
+            print("  WARNING: English retention dropping in Sub-A! Running recovery...")
+            val half_lr = config.learning_rate * 0.5
+            for _ri in 0..5:
+                val rbatch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
+                val rkor = rbatch[0]
+                val reng = rbatch[1]
+                val rmask = rbatch[2]
+                val rtgt = rbatch[3]
+                val rlogits = extended_lora_forward(ext_model, rkor, reng, rmask, lora_l1, lora_l2)
+                val rloss = compute_mse_loss(rlogits, rtgt)
+                autograd_backward(rloss)
+                lora_l1.sgd_step(half_lr)
+                lora_l2.sgd_step(half_lr)
+                autograd_no_grad_begin()
+                var old_kor_r = ext_model.emb.kor_weight
+                ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, half_lr)
+                t_free(old_kor_r)
+                var old_eng_r = ext_model.emb.eng_weight
+                ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, half_lr)
+                t_free(old_eng_r)
+                var old_wf_r = ext_model.w_front
+                ext_model.w_front = sgd_update_tensor(ext_model.w_front, half_lr)
+                t_free(old_wf_r)
+                var old_bf_r = ext_model.b_front
+                ext_model.b_front = sgd_update_tensor(ext_model.b_front, half_lr)
+                t_free(old_bf_r)
+                var old_wb_r = ext_model.w_back
+                ext_model.w_back = sgd_update_tensor(ext_model.w_back, half_lr)
+                t_free(old_wb_r)
+                var old_bb_r = ext_model.b_back
+                ext_model.b_back = sgd_update_tensor(ext_model.b_back, half_lr)
+                t_free(old_bb_r)
+                autograd_no_grad_end()
+                autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+                autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+                autograd_set_requires_grad(ext_model.w_front, true)
+                autograd_set_requires_grad(ext_model.b_front, true)
+                autograd_set_requires_grad(ext_model.w_back, true)
+                autograd_set_requires_grad(ext_model.b_back, true)
+                extended_zero_grads(ext_model, lora_l1, lora_l2)
+                t_free(rkor)
+                t_free(reng)
+                t_free(rmask)
+                t_free(rtgt)
+                t_free(rlogits)
+                t_free(rloss)
+            print("  Sub-A recovery complete (5 batches at half lr)")
+        print("")
+    print("  Sub-Phase A complete. Best loss: {state_a.best_loss}")
+
+    # ================================================================
+    # Sub-Phase B: Korean->English Translation Training
+    # ================================================================
+    print("")
+    print("  --- Sub-Phase B: Korean->English Translation ---")
+    var state_b = TrainState.create()
+    for epoch in 0..SUBPHASE_B_EPOCHS:
+        state_b.reset_epoch()
+        print("  Sub-B Epoch {epoch + 1}/{SUBPHASE_B_EPOCHS}")
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state_b.global_step, config.warmup_steps, config.learning_rate)
+            # Korean source tokens
+            val batch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+            # Forward: Korean input -> model -> CE loss vs English target
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = t_mean(loss_h)
+            autograd_backward(loss_h)
+
+            # SGD step - direct me method calls on local vars
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
+            # Inline embedding SGD
+            autograd_no_grad_begin()
+            var old_kor_b = ext_model.emb.kor_weight
+            ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, lr)
+            t_free(old_kor_b)
+            var old_eng_b = ext_model.emb.eng_weight
+            ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, lr)
+            t_free(old_eng_b)
+            # Front/back SGD
+            var old_wf_b = ext_model.w_front
+            ext_model.w_front = sgd_update_tensor(ext_model.w_front, lr)
+            t_free(old_wf_b)
+            var old_bf_b = ext_model.b_front
+            ext_model.b_front = sgd_update_tensor(ext_model.b_front, lr)
+            t_free(old_bf_b)
+            var old_wb_b = ext_model.w_back
+            ext_model.w_back = sgd_update_tensor(ext_model.w_back, lr)
+            t_free(old_wb_b)
+            var old_bb_b = ext_model.b_back
+            ext_model.b_back = sgd_update_tensor(ext_model.b_back, lr)
+            t_free(old_bb_b)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+            autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+            autograd_set_requires_grad(ext_model.w_front, true)
+            autograd_set_requires_grad(ext_model.b_front, true)
+            autograd_set_requires_grad(ext_model.w_back, true)
+            autograd_set_requires_grad(ext_model.b_back, true)
+
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
+            state_b.add_loss(loss_val)
+            report_training_step(state_b, config)
+        state_b.update_best()
+        report_epoch_end(epoch, SUBPHASE_B_EPOCHS, state_b)
+        val retained_b = validate_per_layer_retention(ext_model, config)
+        if not retained_b:
+            print("  WARNING: English retention dropping in Sub-B! Running recovery...")
+            val half_lr_b = config.learning_rate * 0.5
+            for _ri in 0..5:
+                val rbatch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
+                val rkor = rbatch[0]
+                val reng = rbatch[1]
+                val rmask = rbatch[2]
+                val rtgt = rbatch[3]
+                val rlogits = extended_lora_forward(ext_model, rkor, reng, rmask, lora_l1, lora_l2)
+                val rloss = compute_mse_loss(rlogits, rtgt)
+                autograd_backward(rloss)
+                lora_l1.sgd_step(half_lr_b)
+                lora_l2.sgd_step(half_lr_b)
+                autograd_no_grad_begin()
+                var old_kor_rb = ext_model.emb.kor_weight
+                ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, half_lr_b)
+                t_free(old_kor_rb)
+                var old_eng_rb = ext_model.emb.eng_weight
+                ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, half_lr_b)
+                t_free(old_eng_rb)
+                var old_wf_rb = ext_model.w_front
+                ext_model.w_front = sgd_update_tensor(ext_model.w_front, half_lr_b)
+                t_free(old_wf_rb)
+                var old_bf_rb = ext_model.b_front
+                ext_model.b_front = sgd_update_tensor(ext_model.b_front, half_lr_b)
+                t_free(old_bf_rb)
+                var old_wb_rb = ext_model.w_back
+                ext_model.w_back = sgd_update_tensor(ext_model.w_back, half_lr_b)
+                t_free(old_wb_rb)
+                var old_bb_rb = ext_model.b_back
+                ext_model.b_back = sgd_update_tensor(ext_model.b_back, half_lr_b)
+                t_free(old_bb_rb)
+                autograd_no_grad_end()
+                autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+                autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+                autograd_set_requires_grad(ext_model.w_front, true)
+                autograd_set_requires_grad(ext_model.b_front, true)
+                autograd_set_requires_grad(ext_model.w_back, true)
+                autograd_set_requires_grad(ext_model.b_back, true)
+                extended_zero_grads(ext_model, lora_l1, lora_l2)
+                t_free(rkor)
+                t_free(reng)
+                t_free(rmask)
+                t_free(rtgt)
+                t_free(rlogits)
+                t_free(rloss)
+            print("  Sub-B recovery complete (5 batches at half lr)")
+        print("")
+    print("  Sub-Phase B complete. Best loss: {state_b.best_loss}")
+
+    print("")
+    print("=" * 70)
+    print("PHASE 5 TRAINING COMPLETE")
+    print("  Front/back layers: TRAINED")
+    print("  LoRA_4: Korean translation (TRAINED)")
+    print("  Embeddings: Updated")
+    print("=" * 70)
+
+    # Merge LoRA_4 into base weights (inline to avoid copy-semantics issue)
+    print("Merging LoRA into base model weights...")
+    var old_w1 = ext_model.base.w1
+    ext_model.base.w1 = merge_lora_weight(ext_model.base.w1, lora_l1)
+    t_free(old_w1)
+    var old_w2 = ext_model.base.w2
+    ext_model.base.w2 = merge_lora_weight(ext_model.base.w2, lora_l2)
+    t_free(old_w2)
+    print("  LoRA merged into base weights")
+
+    report_gpu_memory()
+    ext_model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    # Run all prerequisite phases
+    print("Running Phase 0 (prerequisite)...")
+    var model = run_phase0()
+    print("")
+    print("Running Phase 1 (prerequisite)...")
+    model = run_phase1(model)
+    print("")
+    print("Running Phase 2 (prerequisite)...")
+    model = run_phase2(model)
+    print("")
+    print("Running Phase 3 (prerequisite)...")
+    var ext_model = run_phase3(model)
+    print("")
+    print("Running Phase 4 (prerequisite)...")
+    ext_model = run_phase4(ext_model)
+    print("")
+
+    ext_model = run_phase5(ext_model)
+    ext_model.print_summary()
+    print("")
+    print("Phase 5 complete. Korean translation capability added.")
+    cuda_empty_cache()
+
+
+# main()  # Standalone entry point — run via run_all.spl instead

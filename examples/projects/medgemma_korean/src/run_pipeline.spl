@@ -1,0 +1,115 @@
+# Full Pipeline - 7-Phase Progressive LoRA Training
+#
+# Runs all phases in sequence, passing models through return values.
+# Each phase does its own internal validation (retention checks, loss reporting).
+
+use model.{TextModel, check_gpu}
+use shared_logic.{TrainConfig, report_gpu_memory, set_selected_hidden_dim}
+use lora_utils.{LoRAConfig, LoRAAdapter, create_lora_adapter}
+use embedding_utils.{KorEngEmbedding, RoPECache, create_kor_eng_embedding, create_rope_cache}
+use layer_utils.{ExtendedModel, create_extended_model}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+use train_phase2.{run_phase2}
+use train_phase3.{run_phase3}
+use train_phase4.{run_phase4}
+use train_phase5.{run_phase5}
+use train_phase6.{run_phase6}
+
+use src.torch_dyn.{torch_available, cuda_available, cuda_max_memory_allocated, cuda_empty_cache}
+
+export run_full_pipeline
+
+
+fn run_full_pipeline():
+    print("")
+    print("=" * 70)
+    print("  MEDGEMMA KOREAN - FULL 7-PHASE PIPELINE (REAL CUDA)")
+    print("  Model Selection: Small(128) -> Large(256) -> LoRA fallback")
+    print("=" * 70)
+    print("")
+
+    if not torch_available():
+        print("ERROR: libtorch not available.")
+        return
+
+    if not cuda_available():
+        print("ERROR: CUDA not available. GPU required.")
+        return
+
+    check_gpu()
+    print("")
+
+    # Initialize model size selection (small=128, may switch to 256 in Phase 1)
+    set_selected_hidden_dim(128)
+
+    print("Pipeline: Progressive LoRA training (Note.md Phases 0-5)")
+    print("  Phase 0: English medical baseline (prevent forgetting)")
+    print("  Phase 1: Evaluate + train English medical knowledge")
+    print("  Phase 2: MCQ medical reasoning")
+    print("  Phase 3: Korean/English embeddings + RoPE")
+    print("  Phase 4: Korean text + per-layer CE loss")
+    print("  Phase 5: Korean translation + front/back layers")
+    print("  Phase 6: Korean medical exam reasoning")
+    print("")
+
+    # Phase 0: English Medical Baseline
+    var model = run_phase0()
+    cuda_empty_cache()
+    print("")
+
+    # Phase 1: Evaluate + Train (97% threshold check)
+    model = run_phase1(model)
+    cuda_empty_cache()
+    print("")
+
+    # Phase 2: MCQ (Medical Reasoning)
+    model = run_phase2(model)
+    cuda_empty_cache()
+    print("")
+
+    # Phase 3: Create Embeddings (Note.md Phase 2)
+    var ext_model = run_phase3(model)
+    cuda_empty_cache()
+    print("")
+
+    # Phase 4: Korean Text Training (Note.md Phase 3)
+    ext_model = run_phase4(ext_model)
+    cuda_empty_cache()
+    print("")
+
+    # Phase 5: Korean Translation (Note.md Phase 4)
+    ext_model = run_phase5(ext_model)
+    cuda_empty_cache()
+    print("")
+
+    # Phase 6: Korean Medical Exam Reasoning (Note.md Phase 5)
+    ext_model = run_phase6(ext_model)
+
+    # Pipeline Complete
+    print("")
+    print("=" * 70)
+    print("  PIPELINE COMPLETE - ALL 7 PHASES TRAINED ON CUDA")
+    print("=" * 70)
+    print("")
+
+    print("Final model capabilities (all merged into base weights):")
+    print("  Phase 0: English medical baseline")
+    print("  Phase 1: English medical LoRA (if needed)")
+    print("  Phase 2: Medical reasoning (MCQ)")
+    print("  Phase 3: Korean/English dual embeddings + RoPE")
+    print("  Phase 4: Korean text knowledge")
+    print("  Phase 5: Korean translation (front/back layers)")
+    print("  Phase 6: Korean medical exam reasoning")
+    print("")
+
+    ext_model.print_summary()
+    report_gpu_memory()
+
+    val peak_mem = cuda_max_memory_allocated(0)
+    val peak_mb = peak_mem / (1024 * 1024)
+    print("Peak GPU memory: {peak_mb}MB")
+
+    cuda_empty_cache()
+    print("")
+    print("Training complete. Full 7-phase Korean medical reasoning pipeline finished.")

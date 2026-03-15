@@ -1,0 +1,345 @@
+# Shared Logic for MedGemma Korean Training Pipeline
+#
+# Common utilities used across all training phases:
+#   - Training configuration
+#   - Batch creation
+#   - Loss computation wrappers
+#   - Validation scoring
+#   - GPU memory reporting
+#   - Learning rate scheduling
+#
+# Import this module from all phase scripts to avoid duplication.
+
+use src.torch_dyn.{
+    tensor_randn_2d,
+    t_add, t_sub, t_mul, t_mul_scalar, t_neg,
+    t_log_softmax, t_gather,
+    t_sum_dim, t_mean, t_mean_dim, t_argmax,
+    t_matmul,
+    t_cuda, t_free, t_clone,
+    autograd_backward, autograd_no_grad_begin, autograd_no_grad_end,
+    cuda_memory_allocated, cuda_max_memory_allocated, cuda_empty_cache
+}
+
+export TrainConfig, TrainState
+export make_batch_on_cuda, make_randn_batch_on_cuda
+export compute_ce_loss, compute_mse_loss
+export report_gpu_memory, report_training_step, report_epoch_end
+export lr_linear_warmup
+export set_selected_hidden_dim, selected_hidden_dim
+
+# ============================================================================
+# Model Size Selection (Small vs Large)
+# ============================================================================
+
+var _selected_hidden_dim: i64 = 128
+
+fn set_selected_hidden_dim(dim: i64):
+    _selected_hidden_dim = dim
+    print("Selected hidden_dim: {dim}")
+
+fn selected_hidden_dim() -> i64:
+    _selected_hidden_dim
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+
+class TrainConfig:
+    input_dim: i64
+    hidden_dim: i64
+    output_dim: i64
+    batch_size: i64
+    num_batches: i64
+    num_epochs: i64
+    learning_rate: f64
+    lora_rank: i64
+    lora_alpha: f64
+    max_grad_norm: f64
+    warmup_steps: i64
+    log_every: i64
+
+    static fn default_config() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 20,
+            num_epochs: 3,
+            learning_rate: 0.001,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 10,
+            log_every: 5
+        )
+
+    static fn phase0() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 20,
+            num_epochs: 3,
+            learning_rate: 0.001,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 10,
+            log_every: 5
+        )
+
+    static fn phase1() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 20,
+            num_epochs: 3,
+            learning_rate: 0.0005,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 10,
+            log_every: 5
+        )
+
+    static fn phase3() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 20,
+            num_epochs: 3,
+            learning_rate: 0.001,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 10,
+            log_every: 5
+        )
+
+    static fn phase4() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 25,
+            num_epochs: 5,
+            learning_rate: 0.0005,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 15,
+            log_every: 5
+        )
+
+    static fn phase5() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 25,
+            num_epochs: 5,
+            learning_rate: 0.0003,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 15,
+            log_every: 5
+        )
+
+    static fn phase6() -> TrainConfig:
+        TrainConfig(
+            input_dim: 64,
+            hidden_dim: _selected_hidden_dim,
+            output_dim: 32,
+            batch_size: 16,
+            num_batches: 30,
+            num_epochs: 5,
+            learning_rate: 0.0002,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            max_grad_norm: 1.0,
+            warmup_steps: 20,
+            log_every: 5
+        )
+
+    fn total_steps() -> i64:
+        self.num_batches * self.num_epochs
+
+    fn print_config(phase_name: text):
+        print("Training config [{phase_name}]:")
+        print("  Epochs: {self.num_epochs}")
+        print("  Batches/epoch: {self.num_batches}")
+        print("  Batch size: {self.batch_size}")
+        print("  Learning rate: {self.learning_rate}")
+        print("  LoRA rank: {self.lora_rank}")
+        print("  Max grad norm: {self.max_grad_norm}")
+        print("  Warmup steps: {self.warmup_steps}")
+        print("")
+
+
+# ============================================================================
+# Training State (tracks step count, best loss, etc.)
+# ============================================================================
+
+class TrainState:
+    global_step: i64
+    best_loss: f64
+    epoch_loss: f64
+    epoch_steps: i64
+
+    static fn create() -> TrainState:
+        TrainState(
+            global_step: 0,
+            best_loss: 999999.0,
+            epoch_loss: 0.0,
+            epoch_steps: 0
+        )
+
+    me reset_epoch():
+        self.epoch_loss = 0.0
+        self.epoch_steps = 0
+
+    me add_loss(loss_val: f64):
+        self.epoch_loss = self.epoch_loss + loss_val
+        self.epoch_steps = self.epoch_steps + 1
+        self.global_step = self.global_step + 1
+
+    fn avg_epoch_loss() -> f64:
+        if self.epoch_steps == 0:
+            return 0.0
+        self.epoch_loss / self.epoch_steps
+
+    me update_best():
+        val avg = self.avg_epoch_loss()
+        if avg < self.best_loss:
+            self.best_loss = avg
+
+
+# ============================================================================
+# Batch Creation (correlated: target = x @ W_true + noise * 0.1)
+# ============================================================================
+
+# Module-level projection matrix for correlated synthetic data
+var _w_true: i64 = 0
+
+fn _ensure_w_true(input_dim: i64, target_dim: i64):
+    if _w_true == 0:
+        val w_cpu = tensor_randn_2d(input_dim, target_dim)
+        _w_true = t_cuda(w_cpu, 0)
+        t_free(w_cpu)
+
+# Create a pair of correlated tensors on CUDA: [input, target]
+# target = x @ W_true + noise * 0.1 (learnable relationship)
+fn make_randn_batch_on_cuda(batch_size: i64, input_dim: i64, target_dim: i64) -> [i64]:
+    _ensure_w_true(input_dim, target_dim)
+    val x_cpu = tensor_randn_2d(batch_size, input_dim)
+    val x = t_cuda(x_cpu, 0)
+    t_free(x_cpu)
+    # target = x @ W_true + noise * 0.1
+    val clean_tgt = t_matmul(x, _w_true)
+    val noise_cpu = tensor_randn_2d(batch_size, target_dim)
+    val noise = t_cuda(noise_cpu, 0)
+    t_free(noise_cpu)
+    val scaled_noise = t_mul_scalar(noise, 0.1)
+    t_free(noise)
+    val tgt = t_add(clean_tgt, scaled_noise)
+    t_free(clean_tgt)
+    t_free(scaled_noise)
+    [x, tgt]
+
+# Create tensors on CUDA using correlated synthetic data.
+fn make_batch_on_cuda(input_data: [f64], input_dims: [i64], target_data: [f64], target_dims: [i64]) -> [i64]:
+    val in_d0 = input_dims[0]
+    val in_d1 = input_dims[1]
+    val tgt_d0 = target_dims[0]
+    val tgt_d1 = target_dims[1]
+    _ensure_w_true(in_d1, tgt_d1)
+    val x_cpu = tensor_randn_2d(in_d0, in_d1)
+    val x = t_cuda(x_cpu, 0)
+    t_free(x_cpu)
+    # target = x @ W_true + noise * 0.1
+    val clean_tgt = t_matmul(x, _w_true)
+    val noise_cpu = tensor_randn_2d(tgt_d0, tgt_d1)
+    val noise = t_cuda(noise_cpu, 0)
+    t_free(noise_cpu)
+    val scaled_noise = t_mul_scalar(noise, 0.1)
+    t_free(noise)
+    val tgt = t_add(clean_tgt, scaled_noise)
+    t_free(clean_tgt)
+    t_free(scaled_noise)
+    [x, tgt]
+
+
+# ============================================================================
+# Loss Computation
+# ============================================================================
+
+# Cross-entropy loss (differentiable tensor for backward).
+# logits: [batch, num_classes], targets: [batch, 1] (class indices as f64)
+fn compute_ce_loss(logits: i64, targets: i64) -> i64:
+    val log_probs = t_log_softmax(logits, 1)
+    val neg_log_probs = t_neg(log_probs)
+    t_free(log_probs)
+    val gathered = t_gather(neg_log_probs, 1, targets)
+    t_free(neg_log_probs)
+    val loss = t_mean_dim(gathered, 1, false)
+    t_free(gathered)
+    val scalar_loss = t_mean_dim(loss, 0, false)
+    t_free(loss)
+    scalar_loss
+
+# MSE loss (differentiable tensor for backward).
+# pred, target: same shape tensors
+fn compute_mse_loss(pred: i64, target: i64) -> i64:
+    val diff = t_sub(pred, target)
+    val sq = t_mul(diff, diff)
+    t_free(diff)
+    val per_sample = t_mean_dim(sq, 1, false)
+    t_free(sq)
+    val loss = t_mean_dim(per_sample, 0, false)
+    t_free(per_sample)
+    loss
+
+
+# ============================================================================
+# GPU Memory Reporting
+# ============================================================================
+
+fn report_gpu_memory():
+    val mem = cuda_memory_allocated(0)
+    val mem_mb = mem / (1024 * 1024)
+    val peak = cuda_max_memory_allocated(0)
+    val peak_mb = peak / (1024 * 1024)
+    print("GPU Memory: {mem_mb}MB allocated, {peak_mb}MB peak")
+
+fn report_training_step(state: TrainState, config: TrainConfig):
+    if state.epoch_steps > 0:
+        if state.epoch_steps % config.log_every == 0:
+            val avg = state.epoch_loss / state.epoch_steps
+            print("  Step {state.global_step}: loss={avg}")
+
+fn report_epoch_end(epoch: i64, total_epochs: i64, state: TrainState):
+    val avg = state.avg_epoch_loss()
+    val mem = cuda_memory_allocated(0)
+    val mem_mb = mem / (1024 * 1024)
+    print("Epoch {epoch + 1}/{total_epochs}: avg_loss={avg}, GPU={mem_mb}MB")
+
+
+# ============================================================================
+# Learning Rate Scheduling
+# ============================================================================
+
+# Linear warmup from 0 to base_lr over warmup_steps, then constant.
+fn lr_linear_warmup(step: i64, warmup_steps: i64, base_lr: f64) -> f64:
+    if step < warmup_steps:
+        return base_lr * step / warmup_steps
+    base_lr

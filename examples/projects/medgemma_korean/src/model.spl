@@ -1,0 +1,343 @@
+# TextModel - Real Neural Network for MedGemma Korean Training
+#
+# A feed-forward language model that runs on CUDA via libtorch FFI.
+# Used across all progressive LoRA training phases.
+#
+# Architecture:
+#   Input [batch, input_dim]
+#   -> Linear(input_dim, hidden_dim) -> GELU
+#   -> Linear(hidden_dim, hidden_dim) -> GELU
+#   -> Linear(hidden_dim, output_dim)
+#   -> Output [batch, output_dim]
+#
+# Requirements:
+#   - libspl_torch.so must be built and loaded
+#   - CUDA GPU required
+
+use src.torch_dyn.{
+    torch_available,
+    cuda_available,
+    tensor_randn_2d,
+    tensor_zeros_1d,
+    t_add,
+    t_sub,
+    t_mul,
+    t_mul_scalar,
+    t_matmul,
+    t_gelu,
+    t_transpose,
+    t_sum_dim,
+    t_mean_dim,
+    t_clone,
+    t_free,
+    t_cuda,
+    t_is_cuda,
+    autograd_set_requires_grad,
+    autograd_grad,
+    autograd_zero_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end,
+    cuda_memory_allocated
+}
+
+export ModelConfig, TextModel, compute_mse_loss, sgd_update_tensor, check_gpu, free_model_params
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+
+class ModelConfig:
+    input_dim: i64
+    hidden_dim: i64
+    output_dim: i64
+    init_scale: f64
+    num_layers: i64
+
+    static fn default_config() -> ModelConfig:
+        ModelConfig(
+            input_dim: 64,
+            hidden_dim: 128,
+            output_dim: 32,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    static fn small_config() -> ModelConfig:
+        ModelConfig(
+            input_dim: 64,
+            hidden_dim: 128,
+            output_dim: 32,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    static fn large_config() -> ModelConfig:
+        ModelConfig(
+            input_dim: 64,
+            hidden_dim: 256,
+            output_dim: 32,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    static fn from_dims(input_dim: i64, hidden_dim: i64, output_dim: i64) -> ModelConfig:
+        ModelConfig(
+            input_dim: input_dim,
+            hidden_dim: hidden_dim,
+            output_dim: output_dim,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    fn total_params() -> i64:
+        val l1 = self.input_dim * self.hidden_dim + self.hidden_dim
+        val l2 = self.hidden_dim * self.hidden_dim + self.hidden_dim
+        val l3 = self.hidden_dim * self.output_dim + self.output_dim
+        l1 + l2 + l3
+
+    fn print_config():
+        print("ModelConfig:")
+        print("  Input dim:  {self.input_dim}")
+        print("  Hidden dim: {self.hidden_dim}")
+        print("  Output dim: {self.output_dim}")
+        print("  Layers: {self.num_layers}")
+        print("  Total params: {self.total_params()}")
+
+
+# ============================================================================
+# GPU Check
+# ============================================================================
+
+fn check_gpu():
+    if not torch_available():
+        print("ERROR: libtorch not available. Build with:")
+        print("  bash scripts/build/build-torch-ffi.sh")
+        print("Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <script>")
+        return
+    if not cuda_available():
+        print("ERROR: CUDA not available. GPU required for training.")
+        return
+    print("GPU: CUDA available")
+
+# ============================================================================
+# Utility: move tensor handle to CUDA
+# ============================================================================
+
+fn to_cuda(h: i64) -> i64:
+    t_cuda(h, 0)
+
+fn make_param(rows: i64, cols: i64, init_scale: f64) -> i64:
+    val h = tensor_randn_2d(rows, cols)
+    val h_gpu = to_cuda(h)
+    t_free(h)
+    val h_scaled = t_mul_scalar(h_gpu, init_scale)
+    t_free(h_gpu)
+    autograd_set_requires_grad(h_scaled, true)
+    h_scaled
+
+fn make_zeros_param(dim: i64) -> i64:
+    val h = tensor_zeros_1d(dim)
+    val h_gpu = to_cuda(h)
+    t_free(h)
+    autograd_set_requires_grad(h_gpu, true)
+    h_gpu
+
+# ============================================================================
+# TextModel - 3-layer feed-forward network
+# ============================================================================
+
+class TextModel:
+    # Layer 1 weights
+    w1: i64
+    b1: i64
+    # Layer 2 weights
+    w2: i64
+    b2: i64
+    # Output layer weights
+    w3: i64
+    b3: i64
+    # Configuration
+    config: ModelConfig
+
+    static fn create(in_dim: i64, hid_dim: i64, out_dim: i64) -> TextModel:
+        val cfg = ModelConfig.from_dims(in_dim, hid_dim, out_dim)
+        TextModel.create_from_config(cfg)
+
+    static fn create_from_config(cfg: ModelConfig) -> TextModel:
+        print("Creating TextModel({cfg.input_dim} -> {cfg.hidden_dim} -> {cfg.hidden_dim} -> {cfg.output_dim}) on CUDA")
+        val w1 = make_param(cfg.hidden_dim, cfg.input_dim, cfg.init_scale)
+        val b1 = make_zeros_param(cfg.hidden_dim)
+        val w2 = make_param(cfg.hidden_dim, cfg.hidden_dim, cfg.init_scale)
+        val b2 = make_zeros_param(cfg.hidden_dim)
+        val w3 = make_param(cfg.output_dim, cfg.hidden_dim, cfg.init_scale)
+        val b3 = make_zeros_param(cfg.output_dim)
+        print("  Total parameters: {cfg.total_params()}")
+        TextModel(
+            w1: w1, b1: b1,
+            w2: w2, b2: b2,
+            w3: w3, b3: b3,
+            config: cfg
+        )
+
+    fn forward(x: i64) -> i64:
+        # Layer 1: x @ W1^T + b1 -> GELU
+        val w1t = t_transpose(self.w1, 0, 1)
+        val xw1 = t_matmul(x, w1t)
+        t_free(w1t)
+        val h1_pre = t_add(xw1, self.b1)
+        t_free(xw1)
+        val h1 = t_gelu(h1_pre)
+        t_free(h1_pre)
+
+        # Layer 2: h1 @ W2^T + b2 -> GELU
+        val w2t = t_transpose(self.w2, 0, 1)
+        val hw2 = t_matmul(h1, w2t)
+        t_free(w2t)
+        t_free(h1)
+        val h2_pre = t_add(hw2, self.b2)
+        t_free(hw2)
+        val h2 = t_gelu(h2_pre)
+        t_free(h2_pre)
+
+        # Output layer: h2 @ W3^T + b3
+        val w3t = t_transpose(self.w3, 0, 1)
+        val hw3 = t_matmul(h2, w3t)
+        t_free(w3t)
+        t_free(h2)
+        val out = t_add(hw3, self.b3)
+        t_free(hw3)
+        out
+
+    fn param_handles() -> [i64]:
+        [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
+
+    fn param_count() -> i64:
+        self.config.total_params()
+
+    me sgd_step(lr: f64):
+        autograd_no_grad_begin()
+        var old_w1 = self.w1
+        self.w1 = sgd_update_tensor(self.w1, lr)
+        t_free(old_w1)
+        var old_b1 = self.b1
+        self.b1 = sgd_update_tensor(self.b1, lr)
+        t_free(old_b1)
+        var old_w2 = self.w2
+        self.w2 = sgd_update_tensor(self.w2, lr)
+        t_free(old_w2)
+        var old_b2 = self.b2
+        self.b2 = sgd_update_tensor(self.b2, lr)
+        t_free(old_b2)
+        var old_w3 = self.w3
+        self.w3 = sgd_update_tensor(self.w3, lr)
+        t_free(old_w3)
+        var old_b3 = self.b3
+        self.b3 = sgd_update_tensor(self.b3, lr)
+        t_free(old_b3)
+        autograd_no_grad_end()
+        autograd_set_requires_grad(self.w1, true)
+        autograd_set_requires_grad(self.b1, true)
+        autograd_set_requires_grad(self.w2, true)
+        autograd_set_requires_grad(self.b2, true)
+        autograd_set_requires_grad(self.w3, true)
+        autograd_set_requires_grad(self.b3, true)
+
+    fn zero_grads():
+        autograd_zero_grad(self.w1)
+        autograd_zero_grad(self.b1)
+        autograd_zero_grad(self.w2)
+        autograd_zero_grad(self.b2)
+        autograd_zero_grad(self.w3)
+        autograd_zero_grad(self.b3)
+
+    me freeze():
+        autograd_set_requires_grad(self.w1, false)
+        autograd_set_requires_grad(self.b1, false)
+        autograd_set_requires_grad(self.w2, false)
+        autograd_set_requires_grad(self.b2, false)
+        autograd_set_requires_grad(self.w3, false)
+        autograd_set_requires_grad(self.b3, false)
+
+    me unfreeze():
+        autograd_set_requires_grad(self.w1, true)
+        autograd_set_requires_grad(self.b1, true)
+        autograd_set_requires_grad(self.w2, true)
+        autograd_set_requires_grad(self.b2, true)
+        autograd_set_requires_grad(self.w3, true)
+        autograd_set_requires_grad(self.b3, true)
+
+    fn print_summary():
+        print("TextModel Summary:")
+        print("  Architecture: {self.config.input_dim} -> {self.config.hidden_dim} -> {self.config.hidden_dim} -> {self.config.output_dim}")
+        print("  Parameters: {self.config.total_params()}")
+        val on_gpu = t_is_cuda(self.w1)
+        if on_gpu:
+            print("  Device: CUDA")
+        else:
+            print("  Device: CPU")
+
+
+# ============================================================================
+# Checkpoint Stubs
+# ============================================================================
+
+# Save model checkpoint (stub - requires tensor serialization FFI).
+# For now, just logs the action.
+fn save_checkpoint(model: TextModel, path: text):
+    print("CHECKPOINT: Would save model to {path}")
+    print("  (Tensor serialization not yet available in FFI)")
+    print("  Model config: {model.config.input_dim}x{model.config.hidden_dim}x{model.config.output_dim}")
+    print("  Params: {model.config.total_params()}")
+
+# Load model checkpoint (stub - requires tensor deserialization FFI).
+fn load_checkpoint(path: text, config: ModelConfig) -> TextModel:
+    print("CHECKPOINT: Would load model from {path}")
+    print("  (Tensor deserialization not yet available in FFI)")
+    print("  Creating fresh model instead")
+    TextModel.create_from_config(config)
+
+
+# ============================================================================
+# Loss: Differentiable MSE (returns tensor handle for backward)
+# ============================================================================
+
+fn compute_mse_loss(pred: i64, target: i64) -> i64:
+    val diff = t_sub(pred, target)
+    val sq = t_mul(diff, diff)
+    t_free(diff)
+    val per_sample = t_mean_dim(sq, 1, false)
+    t_free(sq)
+    val loss = t_mean_dim(per_sample, 0, false)
+    t_free(per_sample)
+    loss
+
+
+# ============================================================================
+# SGD: Update a single tensor parameter
+# ============================================================================
+
+fn sgd_update_tensor(param_h: i64, lr: f64) -> i64:
+    val grad_h = autograd_grad(param_h)
+    if grad_h == 0:
+        return t_clone(param_h)
+    val scaled = t_mul_scalar(grad_h, lr)
+    val updated = t_sub(param_h, scaled)
+    t_free(scaled)
+    # NOTE: caller must free old param_h if needed
+    updated
+
+
+# ============================================================================
+# Free all model parameter tensors (GPU memory release)
+# ============================================================================
+
+fn free_model_params(model: TextModel):
+    print("Freeing model GPU memory ({model.config.total_params()} params)...")
+    t_free(model.w1)
+    t_free(model.b1)
+    t_free(model.w2)
+    t_free(model.b2)
+    t_free(model.w3)
+    t_free(model.b3)
+    print("  Model GPU memory freed")
