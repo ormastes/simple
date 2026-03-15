@@ -1,4 +1,4 @@
-# How I Wrote 1 Million Lines of Code with LLMs
+# How I Wrote Million Lines of Code with LLMs
 
 I started this project at the end of November 2025, with a week of pre-interpreter work. By mid-March 2026 — roughly three and a half months — the compiler was fully working. Along the way, 1M lines of code became 400K lines of test code and 100K lines of logic, all by relentlessly removing duplication and deleting the old Rust implementation.
 
