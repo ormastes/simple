@@ -517,10 +517,17 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
                 if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
                     continue
 
-        # Skip slow tests by default (unless --all or --only-slow)
+        # Skip slow tests by default (unless --all or --only-slow or contextual override)
         if not options.run_all and not options.only_slow:
             if content.contains("slow_it "):
-                continue
+                if options.context != "":
+                    val ctx_speed = _resolve_speed_from_content(content, f, options.context)
+                    if ctx_speed == "short" or ctx_speed == "medium":
+                        pass_do_nothing
+                    else:
+                        continue
+                else:
+                    continue
 
         test_files.push(f)
 
@@ -529,6 +536,101 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
         test_files = shuffle_files(test_files, options.seed)
 
     test_files
+
+# =========================================================================
+# Slow-Path Category/Speed Helpers
+# =========================================================================
+
+fn _extract_category_from_content(content: text, path: text) -> text:
+    """Extract or auto-detect category from file content (slow path)."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @category:"):
+            val cat = trimmed[12:].trim()
+            if cat != "":
+                return cat
+    # Auto-detect
+    if (path.contains("/baremetal/") or path.contains("/qemu/") or
+        path.contains("/cuda/") or path.contains("/gpu/")):
+        return "platform"
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @platform:"):
+            val tag = trimmed[12:].trim()
+            if tag != "" and tag != "all" and tag != "host":
+                return "platform"
+    var has_use = false
+    var only_spec = true
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use "):
+            has_use = true
+            val module = trimmed[4:].trim()
+            val is_spec = module.starts_with("std.spec") or module.starts_with("nogc_sync_mut.spec")
+            if not is_spec:
+                only_spec = false
+    if not has_use or only_spec:
+        return "standalone"
+    if has_use and not only_spec:
+        return "lib"
+    "other"
+
+fn _resolve_speed_from_content(content: text, path: text, context: text) -> text:
+    """Resolve speed from file content (slow path)."""
+    var speed_default = ""
+    var speed_contexts: {text: text} = {}
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @speed("):
+            val rest = trimmed[9:]
+            val paren_end = rest.index_of(")")
+            if paren_end > 0:
+                val ctx = rest[0:paren_end].trim()
+                val after = rest[paren_end + 1:]
+                if after.starts_with(":"):
+                    val spd = after[1:].trim()
+                    if ctx != "" and spd != "":
+                        speed_contexts[ctx] = spd
+        elif trimmed.starts_with("# @speed:"):
+            speed_default = trimmed[9:].trim()
+    if context != "":
+        val ctx_val = speed_contexts[context] ?? ""
+        if ctx_val != "":
+            return ctx_val
+    if speed_default != "":
+        return speed_default
+    if content.contains("slow_it "):
+        return "long"
+    "unknown"
+
+fn _extract_speed_default_from_content(content: text) -> text:
+    """Extract # @speed: (no context) from content."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @speed:"):
+            return trimmed[9:].trim()
+    ""
+
+fn _extract_speed_contexts_from_content(content: text) -> text:
+    """Extract # @speed(ctx): val annotations, return 'ctx=val,...'."""
+    val lines = content.split("\n")
+    var pairs: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @speed("):
+            val rest = trimmed[9:]
+            val pe = rest.index_of(")")
+            if pe > 0:
+                val ctx = rest[0:pe].trim()
+                val after = rest[pe + 1:]
+                if after.starts_with(":"):
+                    val spd = after[1:].trim()
+                    if ctx != "" and spd != "":
+                        pairs.push("{ctx}={spd}")
+    pairs.join(",")
 
 # =========================================================================
 # Deterministic Shuffle (hash-based, matches Rust runner)
@@ -683,6 +785,21 @@ fn print_discovery_summary(files: [text], options: TestOptions):
             if mode_tags_list.len() > 0:
                 val mode_str = mode_tags_list.join(",")
                 tags.push("mode: {mode_str}")
+            # Category display
+            val cat = _extract_category_from_content(content, f)
+            if cat != "":
+                tags.push(cat)
+            # Speed display
+            val spd_default = _extract_speed_default_from_content(content)
+            if spd_default != "":
+                tags.push("speed: {spd_default}")
+            val spd_ctxs = _extract_speed_contexts_from_content(content)
+            if spd_ctxs != "":
+                val ctx_pairs = spd_ctxs.split(",")
+                for pair in ctx_pairs:
+                    val kv = pair.split("=")
+                    if kv.len() == 2:
+                        tags.push("speed({kv[0]}): {kv[1]}")
             if tags.len() > 0:
                 val tag_str = tags.join(", ")
                 print "  {f}  [{tag_str}]"

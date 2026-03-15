@@ -1,0 +1,261 @@
+# Dungeon Crawl — Shared Game Logic
+#
+# A simple turn-based dungeon game that works across all platforms.
+# Implements AppLifecycle for common startup via the App Interface Library.
+#
+# The player explores rooms, fights monsters, collects loot, and tries
+# to reach the exit. All game state is pure data — no graphics needed.
+
+use nogc_sync_mut.src.app.config.{AppConfig}
+use nogc_sync_mut.src.app.lifecycle.{AppLifecycle}
+
+# ============================================================================
+# Game Data Types
+# ============================================================================
+
+enum RoomType:
+    Empty
+    Monster
+    Treasure
+    Trap
+    Exit
+
+impl RoomType:
+    fn name() -> text:
+        match self:
+            RoomType.Empty: "Empty Room"
+            RoomType.Monster: "Monster Den"
+            RoomType.Treasure: "Treasure Chamber"
+            RoomType.Trap: "Trapped Corridor"
+            RoomType.Exit: "Dungeon Exit"
+
+    fn to_i32() -> i32:
+        match self:
+            RoomType.Empty: 0
+            RoomType.Monster: 1
+            RoomType.Treasure: 2
+            RoomType.Trap: 3
+            RoomType.Exit: 4
+
+struct Room:
+    id: i32
+    room_type: RoomType
+    visited: bool
+    north: i32    # Room ID or -1
+    south: i32
+    east: i32
+    west: i32
+
+struct Player:
+    hp: i32
+    max_hp: i32
+    attack: i32
+    gold: i32
+    rooms_explored: i32
+    current_room: i32
+
+# ============================================================================
+# DungeonGame — Implements AppLifecycle
+# ============================================================================
+
+struct DungeonGame:
+    player: Player
+    rooms: [Room]
+    turn: i32
+    max_turns: i32
+    game_over: bool
+    platform_name: text
+
+impl DungeonGame:
+    static fn create() -> DungeonGame:
+        DungeonGame(
+            player: Player(
+                hp: 100,
+                max_hp: 100,
+                attack: 15,
+                gold: 0,
+                rooms_explored: 0,
+                current_room: 0
+            ),
+            rooms: [],
+            turn: 0,
+            max_turns: 20,
+            game_over: false,
+            platform_name: "unknown"
+        )
+
+    fn name() -> text:
+        "Dungeon Crawl"
+
+    me init(config: AppConfig) -> Result<Nil, text>:
+        self.platform_name = config.platform
+        self.rooms = build_dungeon()
+
+        print("=== Dungeon Crawl ===")
+        print("Platform: {config.platform} ({config.arch})")
+        print("Version: {config.version}")
+        print("")
+        print("You descend into the dungeon...")
+        print("HP: {self.player.hp}/{self.player.max_hp}  Gold: {self.player.gold}")
+        print("")
+
+        Ok(nil)
+
+    me update() -> bool:
+        if self.game_over:
+            return false
+
+        self.turn = self.turn + 1
+        if self.turn > self.max_turns:
+            print("")
+            print("The dungeon collapses! You ran out of turns.")
+            print("Final score: {self.player.gold} gold, {self.player.rooms_explored} rooms explored")
+            self.game_over = true
+            return false
+
+        # Auto-play: move to a random unvisited adjacent room
+        val room = self.rooms[self.player.current_room]
+        val next_room_id = pick_next_room(room, self.rooms)
+
+        if next_room_id < 0:
+            print("No more rooms to explore. You are stuck!")
+            self.game_over = true
+            return false
+
+        self.player.current_room = next_room_id
+        var next_room = self.rooms[next_room_id]
+        next_room.visited = true
+        self.rooms[next_room_id] = next_room
+        self.player.rooms_explored = self.player.rooms_explored + 1
+
+        # Process the room
+        val room_type = next_room.room_type
+        print("Turn {self.turn}: You enter {room_type.name()} (room {next_room_id})")
+
+        if room_type.to_i32() == RoomType.Monster.to_i32():
+            val damage = 10 + (self.turn * 2)
+            self.player.hp = self.player.hp - damage
+            val reward = 20 + (self.turn * 5)
+            self.player.gold = self.player.gold + reward
+            print("  A monster attacks! You take {damage} damage but earn {reward} gold.")
+            if self.player.hp <= 0:
+                print("  You have been defeated!")
+                self.game_over = true
+                return false
+
+        if room_type.to_i32() == RoomType.Treasure.to_i32():
+            val loot = 50 + (self.turn * 10)
+            self.player.gold = self.player.gold + loot
+            print("  You find {loot} gold!")
+
+        if room_type.to_i32() == RoomType.Trap.to_i32():
+            val trap_damage = 15
+            self.player.hp = self.player.hp - trap_damage
+            print("  A trap springs! You take {trap_damage} damage.")
+            if self.player.hp <= 0:
+                print("  The trap was fatal!")
+                self.game_over = true
+                return false
+
+        if room_type.to_i32() == RoomType.Exit.to_i32():
+            print("  You found the exit! You escape the dungeon!")
+            print("")
+            print("=== VICTORY ===")
+            print("Gold: {self.player.gold}  Rooms: {self.player.rooms_explored}  HP: {self.player.hp}/{self.player.max_hp}")
+            self.game_over = true
+            return false
+
+        if room_type.to_i32() == RoomType.Empty.to_i32():
+            val heal = 5
+            self.player.hp = self.player.hp + heal
+            if self.player.hp > self.player.max_hp:
+                self.player.hp = self.player.max_hp
+            print("  A quiet room. You rest and recover {heal} HP.")
+
+        print("  HP: {self.player.hp}/{self.player.max_hp}  Gold: {self.player.gold}")
+
+        not self.game_over
+
+    me shutdown():
+        print("")
+        print("=== Game Over ===")
+        print("Platform: {self.platform_name}")
+        print("Final Stats: {self.player.gold} gold, {self.player.rooms_explored} rooms, {self.turn} turns")
+        print("Thanks for playing Dungeon Crawl!")
+
+# ============================================================================
+# Dungeon Builder
+# ============================================================================
+
+fn build_dungeon() -> [Room]:
+    # Build a 10-room linear dungeon with branches
+    var rooms: [Room] = []
+
+    # Room 0: Start (Empty)
+    rooms.push(Room(id: 0, room_type: RoomType.Empty, visited: true,
+        north: 1, south: -1, east: 2, west: -1))
+
+    # Room 1: Monster
+    rooms.push(Room(id: 1, room_type: RoomType.Monster, visited: false,
+        north: 3, south: 0, east: -1, west: -1))
+
+    # Room 2: Treasure
+    rooms.push(Room(id: 2, room_type: RoomType.Treasure, visited: false,
+        north: 4, south: -1, east: -1, west: 0))
+
+    # Room 3: Trap
+    rooms.push(Room(id: 3, room_type: RoomType.Trap, visited: false,
+        north: 5, south: 1, east: 4, west: -1))
+
+    # Room 4: Empty
+    rooms.push(Room(id: 4, room_type: RoomType.Empty, visited: false,
+        north: 6, south: 2, east: -1, west: 3))
+
+    # Room 5: Monster
+    rooms.push(Room(id: 5, room_type: RoomType.Monster, visited: false,
+        north: 7, south: 3, east: 6, west: -1))
+
+    # Room 6: Treasure
+    rooms.push(Room(id: 6, room_type: RoomType.Treasure, visited: false,
+        north: 8, south: 4, east: -1, west: 5))
+
+    # Room 7: Trap
+    rooms.push(Room(id: 7, room_type: RoomType.Trap, visited: false,
+        north: -1, south: 5, east: 8, west: -1))
+
+    # Room 8: Monster
+    rooms.push(Room(id: 8, room_type: RoomType.Monster, visited: false,
+        north: 9, south: 6, east: -1, west: 7))
+
+    # Room 9: Exit
+    rooms.push(Room(id: 9, room_type: RoomType.Exit, visited: false,
+        north: -1, south: 8, east: -1, west: -1))
+
+    rooms
+
+fn pick_next_room(room: Room, rooms: [Room]) -> i32:
+    # Pick first unvisited adjacent room (priority: north, east, south, west)
+    if room.north >= 0:
+        if not rooms[room.north].visited:
+            return room.north
+    if room.east >= 0:
+        if not rooms[room.east].visited:
+            return room.east
+    if room.south >= 0:
+        if not rooms[room.south].visited:
+            return room.south
+    if room.west >= 0:
+        if not rooms[room.west].visited:
+            return room.west
+
+    # All adjacent visited — try any connection
+    if room.north >= 0:
+        return room.north
+    if room.east >= 0:
+        return room.east
+    if room.south >= 0:
+        return room.south
+    if room.west >= 0:
+        return room.west
+
+    -1

@@ -836,6 +836,8 @@ Generated docs appear in `doc/features/{category}/` folders with living document
 
 ## Grammar & Specification
 
+> **Grammar Stability:** The language grammar is now solid. Some minor changes may occur before version 1.0.0, but the grammar is unlikely to change significantly, if at all.
+
 ### Language Grammar
 
 The Simple language grammar is formally specified in the parser documentation:
