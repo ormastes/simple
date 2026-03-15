@@ -1,0 +1,116 @@
+# Hello UART - VHDL UART Transmitter Example
+#
+# A simple UART transmitter that sends a fixed message on reset release.
+# Compiles through VhdlBackend to synthesizable VHDL-2008.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+fn generate_uart_tx_vhdl(clock_freq_mhz: i64, baud_rate: i64) -> text:
+    """Generate VHDL for a simple UART transmitter."""
+    val clk_per_bit = (clock_freq_mhz * 1000000) / baud_rate
+
+    var b = VhdlBuilder.create("uart_tx")
+    b.emit_library_header()
+
+    b.emit_entity_begin("uart_tx")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_port("tx_start", "in", "std_logic", false)
+    b.emit_port("tx_data", "in", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("tx_out", "out", "std_logic", false)
+    b.emit_port("tx_busy", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("uart_tx")
+
+    b.emit_architecture_begin("uart_tx", "rtl")
+
+    # State type and signals
+    b.emit_type_decl("tx_state_t", "(IDLE, START_BIT, DATA_BITS, STOP_BIT)")
+    b.emit_signal_decl("state", "tx_state_t", Some("IDLE"))
+    b.emit_signal_decl("baud_counter", "unsigned(15 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("bit_index", "unsigned(2 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("shift_reg", "std_logic_vector(7 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("tx_reg", "std_logic", Some("'1'"))
+    b.emit_constant_decl("CLK_PER_BIT", "unsigned(15 downto 0)", "to_unsigned({clk_per_bit}, 16)")
+
+    b.emit_architecture_body_begin()
+
+    # TX state machine
+    b.emit_clocked_process_begin(Some("tx_fsm"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("state", "IDLE")
+    b.emit_signal_assign("tx_reg", "'1'")
+    b.emit_signal_assign("baud_counter", "(others => '0')")
+    b.emit_signal_assign("bit_index", "(others => '0')")
+    b.emit_elsif("rising_edge(clk)")
+
+    # IDLE state
+    b.emit_comment("State machine")
+    b.emit_line("case state is")
+    b.emit_line("  when IDLE =>")
+    b.emit_line("    tx_reg <= '1';")
+    b.emit_line("    baud_counter <= (others => '0');")
+    b.emit_line("    bit_index <= (others => '0');")
+    b.emit_line("    if tx_start = '1' then")
+    b.emit_line("      shift_reg <= tx_data;")
+    b.emit_line("      state <= START_BIT;")
+    b.emit_line("    end if;")
+
+    # START_BIT state
+    b.emit_line("  when START_BIT =>")
+    b.emit_line("    tx_reg <= '0';")
+    b.emit_line("    if baud_counter = CLK_PER_BIT then")
+    b.emit_line("      baud_counter <= (others => '0');")
+    b.emit_line("      state <= DATA_BITS;")
+    b.emit_line("    else")
+    b.emit_line("      baud_counter <= baud_counter + 1;")
+    b.emit_line("    end if;")
+
+    # DATA_BITS state
+    b.emit_line("  when DATA_BITS =>")
+    b.emit_line("    tx_reg <= shift_reg(to_integer(bit_index));")
+    b.emit_line("    if baud_counter = CLK_PER_BIT then")
+    b.emit_line("      baud_counter <= (others => '0');")
+    b.emit_line("      if bit_index = 7 then")
+    b.emit_line("        state <= STOP_BIT;")
+    b.emit_line("      else")
+    b.emit_line("        bit_index <= bit_index + 1;")
+    b.emit_line("      end if;")
+    b.emit_line("    else")
+    b.emit_line("      baud_counter <= baud_counter + 1;")
+    b.emit_line("    end if;")
+
+    # STOP_BIT state
+    b.emit_line("  when STOP_BIT =>")
+    b.emit_line("    tx_reg <= '1';")
+    b.emit_line("    if baud_counter = CLK_PER_BIT then")
+    b.emit_line("      state <= IDLE;")
+    b.emit_line("    else")
+    b.emit_line("      baud_counter <= baud_counter + 1;")
+    b.emit_line("    end if;")
+    b.emit_line("end case;")
+
+    b.emit_if_end()
+    b.emit_process_end(Some("tx_fsm"))
+    b.emit_raw("")
+
+    b.emit_signal_assign("tx_out", "tx_reg")
+    b.emit_signal_assign("tx_busy", "'0' when state = IDLE else '1'")
+
+    b.emit_architecture_end("rtl")
+    b.build()
+
+fn uart_tx_ports() -> [(text, text, text)]:
+    """Port list for the UART TX entity."""
+    [
+        ("clk", "in", "std_logic"),
+        ("rst", "in", "std_logic"),
+        ("tx_start", "in", "std_logic"),
+        ("tx_data", "in", "std_logic_vector(7 downto 0)"),
+        ("tx_out", "out", "std_logic"),
+        ("tx_busy", "out", "std_logic")
+    ]

@@ -1,0 +1,281 @@
+# Scheduler - Fixed-priority round-robin
+#
+# 256 priority levels (0 = lowest, 255 = highest).  Threads at the same
+# priority level are served in round-robin order.  The scheduler always
+# picks the highest-priority Ready thread.
+#
+# Each priority level maintains a doubly-linked ready queue using the
+# intrusive queue_next / queue_prev fields inside the TCB.  This gives
+# O(1) enqueue/dequeue and O(NUM_PRIORITIES) pick-next (scanning from
+# the top priority down).
+#
+# Timer interrupts call `scheduler_tick()` which decrements the current
+# thread's time slice and triggers a reschedule when it expires.
+
+use kernel.core.tcb.{Tcb, ThreadState, MAX_THREADS, TCB_NONE, tcb_create}
+
+val NUM_PRIORITIES: u32 = 256
+val DEFAULT_TIME_SLICE: u32 = 10    # Ticks per quantum
+val IDLE_THREAD_ID: u32 = 0         # Thread 0 is always the idle thread
+
+# ---------------------------------------------------------------------------
+# Per-priority ready queue
+# ---------------------------------------------------------------------------
+struct ReadyQueue:
+    head: u32       # First TCB id in the queue, or TCB_NONE
+    tail: u32       # Last TCB id in the queue, or TCB_NONE
+    count: u32      # Number of threads at this priority
+
+# ---------------------------------------------------------------------------
+# Scheduler state
+# ---------------------------------------------------------------------------
+struct Scheduler:
+    queues: [ReadyQueue; 256]       # One queue per priority level
+    current_thread: u32             # ID of the currently Running thread
+    thread_pool: [Tcb; 256]         # All TCBs indexed by id
+    thread_count: u32               # Number of allocated threads
+    idle_thread_id: u32             # ID of the idle thread (always 0)
+    need_reschedule: bool           # Set when a scheduling decision is pending
+    total_ticks: u64                # Monotonically increasing tick counter
+
+# ---------------------------------------------------------------------------
+# Create a new scheduler with an idle thread at priority 0.
+# ---------------------------------------------------------------------------
+fn scheduler_create() -> Scheduler:
+    var empty_queue = ReadyQueue(head: TCB_NONE, tail: TCB_NONE, count: 0)
+    var idle_tcb = tcb_create(IDLE_THREAD_ID, 0)
+    idle_tcb.state = ThreadState.Ready
+    idle_tcb.time_slice = DEFAULT_TIME_SLICE
+    idle_tcb.name = "idle"
+
+    var default_tcb = tcb_create(0, 0)
+
+    var sched = Scheduler(
+        queues: [empty_queue; 256],
+        current_thread: IDLE_THREAD_ID,
+        thread_pool: [default_tcb; 256],
+        thread_count: 1,
+        idle_thread_id: IDLE_THREAD_ID,
+        need_reschedule: false,
+        total_ticks: 0
+    )
+    sched.thread_pool[IDLE_THREAD_ID] = idle_tcb
+    sched
+
+# ---------------------------------------------------------------------------
+# Register a new thread in the pool. Returns its id.
+# The thread is NOT automatically enqueued — call scheduler_enqueue after.
+# ---------------------------------------------------------------------------
+fn scheduler_add_thread(sched: var Scheduler, tcb: Tcb) -> u32:
+    val id = tcb.id
+    if id >= MAX_THREADS:
+        return TCB_NONE
+    sched.thread_pool[id] = tcb
+    if id >= sched.thread_count:
+        sched.thread_count = id + 1
+    id
+
+# ---------------------------------------------------------------------------
+# Enqueue a thread into its priority-level ready queue.
+# Sets the thread state to Ready.
+# ---------------------------------------------------------------------------
+fn scheduler_enqueue(sched: var Scheduler, thread_id: u32):
+    if thread_id >= MAX_THREADS:
+        return
+    sched.thread_pool[thread_id].state = ThreadState.Ready
+    sched.thread_pool[thread_id].time_slice = DEFAULT_TIME_SLICE
+
+    val prio = sched.thread_pool[thread_id].priority
+    val tail = sched.queues[prio].tail
+
+    # Link at the tail of the queue
+    sched.thread_pool[thread_id].queue_prev = tail
+    sched.thread_pool[thread_id].queue_next = TCB_NONE
+
+    if tail != TCB_NONE:
+        sched.thread_pool[tail].queue_next = thread_id
+    else:
+        # Queue was empty — this thread is also the head
+        sched.queues[prio].head = thread_id
+
+    sched.queues[prio].tail = thread_id
+    sched.queues[prio].count = sched.queues[prio].count + 1
+
+# ---------------------------------------------------------------------------
+# Dequeue a specific thread from its priority-level ready queue.
+# ---------------------------------------------------------------------------
+fn scheduler_dequeue(sched: var Scheduler, thread_id: u32):
+    if thread_id >= MAX_THREADS:
+        return
+    val prio = sched.thread_pool[thread_id].priority
+    if sched.queues[prio].count == 0:
+        return
+
+    val prev = sched.thread_pool[thread_id].queue_prev
+    val next = sched.thread_pool[thread_id].queue_next
+
+    # Patch the previous node (or update head)
+    if prev != TCB_NONE:
+        sched.thread_pool[prev].queue_next = next
+    else:
+        sched.queues[prio].head = next
+
+    # Patch the next node (or update tail)
+    if next != TCB_NONE:
+        sched.thread_pool[next].queue_prev = prev
+    else:
+        sched.queues[prio].tail = prev
+
+    sched.thread_pool[thread_id].queue_next = TCB_NONE
+    sched.thread_pool[thread_id].queue_prev = TCB_NONE
+    sched.queues[prio].count = sched.queues[prio].count - 1
+
+# ---------------------------------------------------------------------------
+# Pick the highest-priority Ready thread.
+# Scans from priority 255 down to 0.  Returns None only if no thread is ready
+# (which should never happen because the idle thread is always ready).
+# ---------------------------------------------------------------------------
+fn scheduler_pick_next(sched: Scheduler) -> Option<u32>:
+    # Scan from highest to lowest priority
+    var prio: u32 = NUM_PRIORITIES
+    while prio > 0:
+        prio = prio - 1
+        if sched.queues[prio].count > 0:
+            return Option<u32>.Some(sched.queues[prio].head)
+    # Fallback to idle thread
+    Option<u32>.Some(sched.idle_thread_id)
+
+# ---------------------------------------------------------------------------
+# Core scheduling decision.
+# Picks the next thread and performs the conceptual context switch.
+# In a real kernel this would save/restore register state via assembly;
+# here we just update the thread states.
+# ---------------------------------------------------------------------------
+fn scheduler_schedule(sched: var Scheduler):
+    sched.need_reschedule = false
+
+    if val next_id = scheduler_pick_next(sched):
+        val cur = sched.current_thread
+
+        # If the same thread stays, nothing to do
+        if next_id == cur:
+            sched.thread_pool[cur].state = ThreadState.Running
+            return
+
+        # Context switch out: move current thread back to Ready if still runnable
+        if sched.thread_pool[cur].state == ThreadState.Running:
+            sched.thread_pool[cur].state = ThreadState.Ready
+            # Re-enqueue at the tail of its priority queue (round-robin)
+            scheduler_enqueue(sched, cur)
+
+        # Context switch in
+        scheduler_dequeue(sched, next_id)
+        sched.thread_pool[next_id].state = ThreadState.Running
+        sched.current_thread = next_id
+
+# ---------------------------------------------------------------------------
+# Timer tick handler.
+# Called from the timer interrupt.  Decrements the running thread's time
+# slice and sets need_reschedule when it expires.
+# ---------------------------------------------------------------------------
+fn scheduler_tick(sched: var Scheduler):
+    sched.total_ticks = sched.total_ticks + 1
+
+    val cur = sched.current_thread
+    if cur >= MAX_THREADS:
+        return
+
+    if sched.thread_pool[cur].time_slice > 0:
+        sched.thread_pool[cur].time_slice = sched.thread_pool[cur].time_slice - 1
+
+    if sched.thread_pool[cur].time_slice == 0:
+        sched.need_reschedule = true
+
+# ---------------------------------------------------------------------------
+# Voluntary yield.
+# The current thread gives up its remaining time slice and goes to the
+# back of its priority queue.
+# ---------------------------------------------------------------------------
+fn scheduler_yield(sched: var Scheduler):
+    val cur = sched.current_thread
+    if cur >= MAX_THREADS:
+        return
+
+    sched.thread_pool[cur].time_slice = 0
+    sched.need_reschedule = true
+
+# ---------------------------------------------------------------------------
+# Block a thread.
+# Removes it from the ready queue and sets its state to the given blocked state.
+# ---------------------------------------------------------------------------
+fn scheduler_block(sched: var Scheduler, thread_id: u32, new_state: ThreadState):
+    if thread_id >= MAX_THREADS:
+        return
+
+    # If the thread is currently running, we need a reschedule
+    if thread_id == sched.current_thread:
+        sched.need_reschedule = true
+    else:
+        # Remove from the ready queue
+        scheduler_dequeue(sched, thread_id)
+
+    sched.thread_pool[thread_id].state = new_state
+
+# ---------------------------------------------------------------------------
+# Unblock a thread.
+# Sets it to Ready and enqueues it.  If the unblocked thread has higher
+# priority than the current thread, a reschedule is triggered.
+# ---------------------------------------------------------------------------
+fn scheduler_unblock(sched: var Scheduler, thread_id: u32):
+    if thread_id >= MAX_THREADS:
+        return
+
+    sched.thread_pool[thread_id].state = ThreadState.Ready
+    scheduler_enqueue(sched, thread_id)
+
+    # Check if preemption is needed
+    val cur = sched.current_thread
+    if sched.thread_pool[thread_id].priority > sched.thread_pool[cur].priority:
+        sched.need_reschedule = true
+
+# ---------------------------------------------------------------------------
+# Set a thread's priority.  If the thread is in a ready queue, it is moved
+# to the correct queue.  May trigger a reschedule.
+# ---------------------------------------------------------------------------
+fn scheduler_set_priority(sched: var Scheduler, thread_id: u32, new_priority: u32):
+    if thread_id >= MAX_THREADS:
+        return
+    val prio = if new_priority > 255: 255 else: new_priority
+    val old_prio = sched.thread_pool[thread_id].priority
+
+    if prio == old_prio:
+        return
+
+    # If the thread is in a queue, move it
+    val is_ready = sched.thread_pool[thread_id].state == ThreadState.Ready
+    if is_ready:
+        scheduler_dequeue(sched, thread_id)
+
+    sched.thread_pool[thread_id].priority = prio
+
+    if is_ready:
+        scheduler_enqueue(sched, thread_id)
+
+    # Higher-priority thread may preempt current
+    if prio > sched.thread_pool[sched.current_thread].priority:
+        sched.need_reschedule = true
+
+# ---------------------------------------------------------------------------
+# Get the currently running thread's TCB (read-only).
+# ---------------------------------------------------------------------------
+fn scheduler_current(sched: Scheduler) -> Tcb:
+    sched.thread_pool[sched.current_thread]
+
+# ---------------------------------------------------------------------------
+# Get the total number of ready threads across all priority levels.
+# ---------------------------------------------------------------------------
+fn scheduler_ready_count(sched: Scheduler) -> u32:
+    var total: u32 = 0
+    for p in 0..NUM_PRIORITIES:
+        total = total + sched.queues[p].count
+    total

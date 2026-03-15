@@ -4,7 +4,7 @@
 **Date:** 2026-03-15
 **Severity:** P2 (workaround available, affects ergonomics)
 **Component:** Interpreter
-**Status:** Confirmed
+**Status:** Confirmed (compiled runtime — requires re-bootstrap to fix)
 
 ## Summary
 
@@ -56,7 +56,19 @@ val td = result.unwrap()
 td.to_text()
 ```
 
+## Root Cause (Updated)
+
+The bug exists in the **compiled runtime** method dispatch, not the Rust bootstrap interpreter.
+The Rust interpreter has been fixed (enum dispatch added to `call_method_on_value` in
+`src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs`), but the self-hosted
+binary uses its own compiled method dispatcher. A re-bootstrap is required to propagate the fix.
+
+**Rust interpreter fix:** Added `Value::Enum` handler for user-defined enums (non-Option/non-Result)
+in `call_method_on_value`, mirroring the dispatch logic in `evaluate_method_call`.
+
 ## Environment
 
-- Simple compiler: interpreter mode
+- Simple compiler: compiled runtime (self-hosted binary)
+- Rust bootstrap interpreter: FIXED
 - Discovered in: `test/unit/compiler/config/type_inference_config_spec.spl`
+- Regression tests: `test/unit/compiler/config/chained_enum_method_spec.spl`

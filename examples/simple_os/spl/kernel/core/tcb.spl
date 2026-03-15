@@ -1,0 +1,242 @@
+# Thread Control Block
+# Represents a schedulable thread of execution in the microkernel.
+#
+# Each thread has:
+#   - Saved register state (restored on context switch)
+#   - A capability space root (for accessing kernel objects)
+#   - An address space root (page directory)
+#   - IPC buffer configuration
+#   - Scheduling parameters (priority, time slice)
+#   - Queue linkage for the scheduler and IPC wait queues
+#
+# Threads transition between states as they run, block on IPC, or are
+# explicitly suspended by a higher-authority thread.
+
+use kernel.core.capability_types.{CapType}
+
+val MAX_THREADS: u32 = 256
+val THREAD_NAME_MAX: u32 = 32
+
+# Sentinel value meaning "no thread" in queue linkage fields.
+val TCB_NONE: u32 = 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Thread states
+# ---------------------------------------------------------------------------
+enum ThreadState:
+    Inactive        # Created but not yet configured / started
+    Running         # Currently executing on a CPU core
+    Ready           # Runnable, sitting in the scheduler ready queue
+    BlockedSend     # Blocked on a synchronous IPC send
+    BlockedRecv     # Blocked on a synchronous IPC receive
+    BlockedNotify   # Blocked waiting for a notification word
+    Suspended       # Explicitly suspended (not schedulable)
+
+# ---------------------------------------------------------------------------
+# Thread Control Block
+# ---------------------------------------------------------------------------
+struct Tcb:
+    id: u32
+    name: text
+    state: ThreadState
+    priority: u32               # 0-255, higher number = higher priority
+    time_slice: u32             # Remaining ticks in the current quantum
+
+    # Saved register state (populated on context switch out)
+    saved_sp: u32               # Stack pointer
+    saved_ip: u32               # Instruction pointer / program counter
+    saved_flags: u32            # CPU flags register
+    saved_r0: u32               # General-purpose register 0 (return value)
+    saved_r1: u32               # General-purpose register 1
+    saved_r2: u32               # General-purpose register 2
+    saved_r3: u32               # General-purpose register 3
+
+    # Address space
+    page_dir_phys: u32          # Physical address of the page directory
+
+    # Capability space
+    cspace_root: u32            # Root CNode capability index
+
+    # IPC configuration
+    ipc_buffer_addr: u32        # Virtual address of the thread's IPC buffer
+    fault_endpoint: u32         # Cap index for delivering faults
+    bound_notification: u32     # Cap index of bound notification object (0 = none)
+
+    # IPC state (populated when blocked on send/recv)
+    ipc_endpoint: u32           # Endpoint the thread is blocked on
+    ipc_badge: u32              # Badge to deliver with the message
+
+    # Scheduling
+    sched_context_ptr: u32      # Index of associated SchedContext (0 = none)
+
+    # Intrusive queue linkage (used by scheduler & IPC wait queues)
+    queue_next: u32             # Next TCB id, or TCB_NONE
+    queue_prev: u32             # Previous TCB id, or TCB_NONE
+
+# ---------------------------------------------------------------------------
+# Create a new TCB in the Inactive state.
+# The thread must be configured (registers, address space, CSpace) and then
+# resumed before it will be scheduled.
+# ---------------------------------------------------------------------------
+fn tcb_create(id: u32, priority: u32) -> Tcb:
+    val prio = if priority > 255: 255 else: priority
+    Tcb(
+        id: id,
+        name: "",
+        state: ThreadState.Inactive,
+        priority: prio,
+        time_slice: 0,
+        saved_sp: 0,
+        saved_ip: 0,
+        saved_flags: 0,
+        saved_r0: 0,
+        saved_r1: 0,
+        saved_r2: 0,
+        saved_r3: 0,
+        page_dir_phys: 0,
+        cspace_root: 0,
+        ipc_buffer_addr: 0,
+        fault_endpoint: 0,
+        bound_notification: 0,
+        ipc_endpoint: 0,
+        ipc_badge: 0,
+        sched_context_ptr: 0,
+        queue_next: TCB_NONE,
+        queue_prev: TCB_NONE
+    )
+
+# ---------------------------------------------------------------------------
+# Create a named TCB.
+# ---------------------------------------------------------------------------
+fn tcb_create_named(id: u32, name: text, priority: u32) -> Tcb:
+    var tcb = tcb_create(id, priority)
+    tcb.name = name
+    tcb
+
+# ---------------------------------------------------------------------------
+# Set the saved instruction pointer and stack pointer.
+# Typically called before the first resume to set the thread's entry point.
+# ---------------------------------------------------------------------------
+fn tcb_set_registers(tcb: var Tcb, ip: u32, sp: u32):
+    tcb.saved_ip = ip
+    tcb.saved_sp = sp
+
+# ---------------------------------------------------------------------------
+# Set all four general-purpose saved registers.
+# ---------------------------------------------------------------------------
+fn tcb_set_gp_registers(tcb: var Tcb, r0: u32, r1: u32, r2: u32, r3: u32):
+    tcb.saved_r0 = r0
+    tcb.saved_r1 = r1
+    tcb.saved_r2 = r2
+    tcb.saved_r3 = r3
+
+# ---------------------------------------------------------------------------
+# Configure the thread's address space and capability space roots.
+# ---------------------------------------------------------------------------
+fn tcb_set_space(tcb: var Tcb, page_dir: u32, cspace_root: u32):
+    tcb.page_dir_phys = page_dir
+    tcb.cspace_root = cspace_root
+
+# ---------------------------------------------------------------------------
+# Set the IPC buffer virtual address.
+# ---------------------------------------------------------------------------
+fn tcb_set_ipc_buffer(tcb: var Tcb, addr: u32):
+    tcb.ipc_buffer_addr = addr
+
+# ---------------------------------------------------------------------------
+# Set the fault endpoint capability index.
+# ---------------------------------------------------------------------------
+fn tcb_set_fault_endpoint(tcb: var Tcb, ep: u32):
+    tcb.fault_endpoint = ep
+
+# ---------------------------------------------------------------------------
+# Bind a notification object to this thread.
+# When the thread is blocked on receive and a notification arrives on the
+# bound object, the thread is woken with the notification word.
+# ---------------------------------------------------------------------------
+fn tcb_bind_notification(tcb: var Tcb, notif_cap: u32):
+    tcb.bound_notification = notif_cap
+
+# ---------------------------------------------------------------------------
+# Unbind any bound notification object.
+# ---------------------------------------------------------------------------
+fn tcb_unbind_notification(tcb: var Tcb):
+    tcb.bound_notification = 0
+
+# ---------------------------------------------------------------------------
+# Suspend the thread.  A suspended thread is removed from the scheduler
+# and will not run until explicitly resumed.
+# ---------------------------------------------------------------------------
+fn tcb_suspend(tcb: var Tcb):
+    tcb.state = ThreadState.Suspended
+
+# ---------------------------------------------------------------------------
+# Resume a suspended or inactive thread, making it Ready for scheduling.
+# Does nothing if the thread is already in a runnable state.
+# ---------------------------------------------------------------------------
+fn tcb_resume(tcb: var Tcb):
+    if tcb.state == ThreadState.Suspended or tcb.state == ThreadState.Inactive:
+        tcb.state = ThreadState.Ready
+
+# ---------------------------------------------------------------------------
+# Returns true if the thread is in a schedulable state (Ready or Running).
+# ---------------------------------------------------------------------------
+fn tcb_is_runnable(tcb: Tcb) -> bool:
+    tcb.state == ThreadState.Ready or tcb.state == ThreadState.Running
+
+# ---------------------------------------------------------------------------
+# Returns true if the thread is blocked on any IPC operation.
+# ---------------------------------------------------------------------------
+fn tcb_is_blocked(tcb: Tcb) -> bool:
+    (tcb.state == ThreadState.BlockedSend or
+        tcb.state == ThreadState.BlockedRecv or
+        tcb.state == ThreadState.BlockedNotify)
+
+# ---------------------------------------------------------------------------
+# Transition the thread into BlockedSend state on the given endpoint.
+# ---------------------------------------------------------------------------
+fn tcb_block_on_send(tcb: var Tcb, endpoint: u32, badge: u32):
+    tcb.state = ThreadState.BlockedSend
+    tcb.ipc_endpoint = endpoint
+    tcb.ipc_badge = badge
+
+# ---------------------------------------------------------------------------
+# Transition the thread into BlockedRecv state on the given endpoint.
+# ---------------------------------------------------------------------------
+fn tcb_block_on_recv(tcb: var Tcb, endpoint: u32):
+    tcb.state = ThreadState.BlockedRecv
+    tcb.ipc_endpoint = endpoint
+
+# ---------------------------------------------------------------------------
+# Transition the thread into BlockedNotify state.
+# ---------------------------------------------------------------------------
+fn tcb_block_on_notify(tcb: var Tcb):
+    tcb.state = ThreadState.BlockedNotify
+
+# ---------------------------------------------------------------------------
+# Unblock the thread and put it back into the Ready state.
+# Clears IPC-related transient state.
+# ---------------------------------------------------------------------------
+fn tcb_unblock(tcb: var Tcb):
+    tcb.state = ThreadState.Ready
+    tcb.ipc_endpoint = 0
+    tcb.ipc_badge = 0
+
+# ---------------------------------------------------------------------------
+# Reset queue linkage to unlinked.
+# ---------------------------------------------------------------------------
+fn tcb_unlink(tcb: var Tcb):
+    tcb.queue_next = TCB_NONE
+    tcb.queue_prev = TCB_NONE
+
+# ---------------------------------------------------------------------------
+# Set the thread's time slice (in ticks).
+# ---------------------------------------------------------------------------
+fn tcb_set_time_slice(tcb: var Tcb, ticks: u32):
+    tcb.time_slice = ticks
+
+# ---------------------------------------------------------------------------
+# Set the scheduling context for this thread.
+# ---------------------------------------------------------------------------
+fn tcb_set_sched_context(tcb: var Tcb, sc_idx: u32):
+    tcb.sched_context_ptr = sc_idx

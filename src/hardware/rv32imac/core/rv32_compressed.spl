@@ -1,0 +1,200 @@
+# RV32 Compressed Instruction Decompressor (C Extension)
+#
+# Expands 16-bit RVC instructions to their 32-bit RV32I equivalents.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+# ============================================================================
+# RVC Detection
+# ============================================================================
+
+fn is_compressed(instr: i64) -> bool:
+    """Check if instruction is a 16-bit compressed instruction."""
+    (instr and 0x3) != 0x3
+
+fn rvc_quadrant(instr: i64) -> i64:
+    """Extract RVC quadrant (bits 1:0)."""
+    instr and 0x3
+
+fn rvc_funct3(instr: i64) -> i64:
+    """Extract RVC funct3 (bits 15:13)."""
+    (instr >> 13) and 0x7
+
+# ============================================================================
+# RVC Register Mapping
+# ============================================================================
+
+fn rvc_reg(r: i64) -> i64:
+    """Map 3-bit compressed register to full 5-bit register (x8-x15)."""
+    (r and 0x7) + 8
+
+# ============================================================================
+# RVC Decompression
+# ============================================================================
+
+fn decompress_rvc(instr16: i64) -> i64:
+    """
+    Decompress a 16-bit RVC instruction to 32-bit RV32I.
+
+    Returns the original instruction if it cannot be decompressed
+    (illegal or unrecognized format).
+    """
+    val quadrant = rvc_quadrant(instr16)
+    val funct3 = rvc_funct3(instr16)
+
+    if quadrant == RVC_Q0:
+        return _decompress_q0(instr16, funct3)
+    elif quadrant == RVC_Q1:
+        return _decompress_q1(instr16, funct3)
+    elif quadrant == RVC_Q2:
+        return _decompress_q2(instr16, funct3)
+
+    # Invalid quadrant 3 (32-bit instruction marker)
+    instr16
+
+fn _decompress_q0(instr16: i64, funct3: i64) -> i64:
+    """Decompress Quadrant 0 instructions."""
+    if funct3 == 0x0:
+        # C.ADDI4SPN: addi rd', x2, nzuimm
+        val rd = rvc_reg((instr16 >> 2) and 0x7)
+        val nzuimm = (((instr16 >> 5) and 0x1) << 3) or
+                     (((instr16 >> 6) and 0x1) << 2) or
+                     (((instr16 >> 7) and 0xF) << 6) or
+                     (((instr16 >> 11) and 0x3) << 4)
+        return _encode_i_type(nzuimm, 2, 0, rd, OP_OP_IMM)
+    elif funct3 == 0x2:
+        # C.LW: lw rd', offset(rs1')
+        val rd = rvc_reg((instr16 >> 2) and 0x7)
+        val rs1 = rvc_reg((instr16 >> 7) and 0x7)
+        val offset = (((instr16 >> 5) and 0x1) << 6) or
+                     (((instr16 >> 6) and 0x1) << 2) or
+                     (((instr16 >> 10) and 0x7) << 3)
+        return _encode_i_type(offset, rs1, F3_LW, rd, OP_LOAD)
+    elif funct3 == 0x6:
+        # C.SW: sw rs2', offset(rs1')
+        val rs2 = rvc_reg((instr16 >> 2) and 0x7)
+        val rs1 = rvc_reg((instr16 >> 7) and 0x7)
+        val offset = (((instr16 >> 5) and 0x1) << 6) or
+                     (((instr16 >> 6) and 0x1) << 2) or
+                     (((instr16 >> 10) and 0x7) << 3)
+        return _encode_s_type(offset, rs2, rs1, F3_SW, OP_STORE)
+    instr16
+
+fn _decompress_q1(instr16: i64, funct3: i64) -> i64:
+    """Decompress Quadrant 1 instructions."""
+    if funct3 == 0x0:
+        # C.ADDI / C.NOP
+        val rd = (instr16 >> 7) and 0x1F
+        val imm = (((instr16 >> 12) and 0x1) << 5) or ((instr16 >> 2) and 0x1F)
+        val sign_ext = if (imm and 0x20) != 0: imm or 0xFFFFFFC0 else: imm
+        return _encode_i_type(sign_ext and 0xFFF, rd, 0, rd, OP_OP_IMM)
+    elif funct3 == 0x1:
+        # C.JAL: jal x1, offset
+        return instr16  # Complex encoding, placeholder
+    elif funct3 == 0x2:
+        # C.LI: addi rd, x0, imm
+        val rd = (instr16 >> 7) and 0x1F
+        val imm = (((instr16 >> 12) and 0x1) << 5) or ((instr16 >> 2) and 0x1F)
+        val sign_ext = if (imm and 0x20) != 0: imm or 0xFFFFFFC0 else: imm
+        return _encode_i_type(sign_ext and 0xFFF, 0, 0, rd, OP_OP_IMM)
+    elif funct3 == 0x3:
+        # C.LUI or C.ADDI16SP
+        val rd = (instr16 >> 7) and 0x1F
+        if rd == 2:
+            # C.ADDI16SP: addi x2, x2, nzimm
+            val nzimm = (((instr16 >> 12) and 0x1) << 9) or
+                        (((instr16 >> 2) and 0x1) << 5) or
+                        (((instr16 >> 3) and 0x3) << 7) or
+                        (((instr16 >> 5) and 0x1) << 6) or
+                        (((instr16 >> 6) and 0x1) << 4)
+            val sign_ext = if (nzimm and 0x200) != 0: nzimm or 0xFFFFFC00 else: nzimm
+            return _encode_i_type(sign_ext and 0xFFF, 2, 0, 2, OP_OP_IMM)
+        else:
+            # C.LUI: lui rd, nzimm
+            val nzimm = (((instr16 >> 12) and 0x1) << 17) or (((instr16 >> 2) and 0x1F) << 12)
+            return _encode_u_type(nzimm, rd, OP_LUI)
+    elif funct3 == 0x5:
+        # C.J: jal x0, offset
+        return instr16  # Complex encoding, placeholder
+    elif funct3 == 0x6:
+        # C.BEQZ: beq rs1', x0, offset
+        val rs1 = rvc_reg((instr16 >> 7) and 0x7)
+        return _encode_b_stub(rs1, 0, F3_BEQ, OP_BRANCH)
+    elif funct3 == 0x7:
+        # C.BNEZ: bne rs1', x0, offset
+        val rs1 = rvc_reg((instr16 >> 7) and 0x7)
+        return _encode_b_stub(rs1, 0, F3_BNE, OP_BRANCH)
+    instr16
+
+fn _decompress_q2(instr16: i64, funct3: i64) -> i64:
+    """Decompress Quadrant 2 instructions."""
+    if funct3 == 0x0:
+        # C.SLLI: slli rd, rd, shamt
+        val rd = (instr16 >> 7) and 0x1F
+        val shamt = ((instr16 >> 2) and 0x1F)
+        return _encode_i_type(shamt, rd, F3_SLL, rd, OP_OP_IMM)
+    elif funct3 == 0x2:
+        # C.LWSP: lw rd, offset(x2)
+        val rd = (instr16 >> 7) and 0x1F
+        val offset = (((instr16 >> 2) and 0x3) << 6) or
+                     (((instr16 >> 4) and 0x7) << 2) or
+                     (((instr16 >> 12) and 0x1) << 5)
+        return _encode_i_type(offset, 2, F3_LW, rd, OP_LOAD)
+    elif funct3 == 0x4:
+        val bit12 = (instr16 >> 12) and 0x1
+        val rs1 = (instr16 >> 7) and 0x1F
+        val rs2 = (instr16 >> 2) and 0x1F
+        if bit12 == 0:
+            if rs2 == 0:
+                # C.JR: jalr x0, rs1, 0
+                return _encode_i_type(0, rs1, 0, 0, OP_JALR)
+            else:
+                # C.MV: add rd, x0, rs2
+                return _encode_r_type(0, rs2, 0, 0, rs1, OP_OP)
+        else:
+            if rs2 == 0:
+                if rs1 == 0:
+                    # C.EBREAK
+                    return _encode_i_type(F12_EBREAK, 0, 0, 0, OP_SYSTEM)
+                else:
+                    # C.JALR: jalr x1, rs1, 0
+                    return _encode_i_type(0, rs1, 0, 1, OP_JALR)
+            else:
+                # C.ADD: add rd, rd, rs2
+                return _encode_r_type(0, rs2, rs1, 0, rs1, OP_OP)
+    elif funct3 == 0x6:
+        # C.SWSP: sw rs2, offset(x2)
+        val rs2 = (instr16 >> 2) and 0x1F
+        val offset = (((instr16 >> 7) and 0x3) << 6) or (((instr16 >> 9) and 0xF) << 2)
+        return _encode_s_type(offset, rs2, 2, F3_SW, OP_STORE)
+    instr16
+
+# ============================================================================
+# Encoding Helpers
+# ============================================================================
+
+fn _encode_r_type(funct7: i64, rs2: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> i64:
+    ((funct7 and 0x7F) << 25) or ((rs2 and 0x1F) << 20) or
+    ((rs1 and 0x1F) << 15) or ((funct3 and 0x7) << 12) or
+    ((rd and 0x1F) << 7) or (opcode and 0x7F)
+
+fn _encode_i_type(imm: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> i64:
+    ((imm and 0xFFF) << 20) or ((rs1 and 0x1F) << 15) or
+    ((funct3 and 0x7) << 12) or ((rd and 0x1F) << 7) or (opcode and 0x7F)
+
+fn _encode_s_type(imm: i64, rs2: i64, rs1: i64, funct3: i64, opcode: i64) -> i64:
+    val hi = (imm >> 5) and 0x7F
+    val lo = imm and 0x1F
+    (hi << 25) or ((rs2 and 0x1F) << 20) or ((rs1 and 0x1F) << 15) or
+    ((funct3 and 0x7) << 12) or (lo << 7) or (opcode and 0x7F)
+
+fn _encode_u_type(imm: i64, rd: i64, opcode: i64) -> i64:
+    (imm and 0xFFFFF000) or ((rd and 0x1F) << 7) or (opcode and 0x7F)
+
+fn _encode_b_stub(rs1: i64, rs2: i64, funct3: i64, opcode: i64) -> i64:
+    """Encode B-type with zero offset (stub for simple decompression)."""
+    ((rs2 and 0x1F) << 20) or ((rs1 and 0x1F) << 15) or
+    ((funct3 and 0x7) << 12) or (opcode and 0x7F)

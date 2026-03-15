@@ -1,0 +1,109 @@
+# Spinlock Implementation
+# Simple busy-wait lock for kernel synchronization on x86.
+# Uses atomic compare-and-swap (lock cmpxchg) via inline assembly.
+# Includes interrupt-safe variants that save/restore EFLAGS.
+
+struct SpinLock:
+    locked: u32       # 0 = unlocked, 1 = locked
+    saved_flags: u32  # Saved EFLAGS for irqsave/irqrestore
+
+# Create a new unlocked spinlock.
+fn spin_lock_create() -> SpinLock:
+    SpinLock(locked: 0, saved_flags: 0)
+
+# Try to acquire the lock without blocking.
+# Returns true if the lock was acquired, false if already held.
+fn spin_lock_try_acquire(lock: var SpinLock) -> bool:
+    var old: u32 = 0
+    unsafe:
+        # Atomic compare-and-swap: if lock.locked == 0, set it to 1.
+        # old receives the previous value.
+        asm """
+            mov eax, 0
+            mov ecx, 1
+            lock cmpxchg [{lock.locked}], ecx
+            mov [{old}], eax
+        """
+    old == 0
+
+# Acquire the lock, spinning until it becomes available.
+# This is a simple test-and-test-and-set (TTAS) spinlock:
+# first read without locking the bus, then try atomic swap.
+fn spin_lock_acquire(lock: var SpinLock):
+    while true:
+        # Spin-read: wait until the lock appears free.
+        # Reading without `lock` prefix avoids unnecessary bus traffic.
+        while lock.locked != 0:
+            unsafe:
+                asm """
+                    pause
+                """
+
+        # Attempt atomic acquisition.
+        if spin_lock_try_acquire(lock):
+            break
+
+# Release the lock.
+fn spin_lock_release(lock: var SpinLock):
+    unsafe:
+        # A simple store with a memory barrier is sufficient on x86
+        # because stores are not reordered past other stores.
+        asm """
+            mov dword [{lock.locked}], 0
+            mfence
+        """
+
+# Check whether the lock is currently held (non-atomic, advisory only).
+fn spin_lock_is_locked(lock: SpinLock) -> bool:
+    lock.locked != 0
+
+# --- Interrupt-safe variants ---
+
+# Read the current EFLAGS register.
+fn read_eflags() -> u32:
+    var flags: u32 = 0
+    unsafe:
+        asm """
+            pushfd
+            pop [{flags}]
+        """
+    flags
+
+# Disable hardware interrupts.
+fn disable_interrupts():
+    unsafe:
+        asm """
+            cli
+        """
+
+# Restore EFLAGS (which may re-enable interrupts if they were enabled).
+fn restore_eflags(flags: u32):
+    unsafe:
+        asm """
+            push [{flags}]
+            popfd
+        """
+
+# Acquire the lock with interrupts disabled. Saves previous interrupt
+# state so it can be restored on unlock. Prevents deadlocks caused by
+# an interrupt handler trying to acquire the same lock.
+fn spin_lock_irqsave(lock: var SpinLock):
+    val flags = read_eflags()
+    disable_interrupts()
+    spin_lock_acquire(lock)
+    lock.saved_flags = flags
+
+# Release the lock and restore the interrupt state that was saved
+# during the matching irqsave call.
+fn spin_lock_irqrestore(lock: var SpinLock):
+    val flags = lock.saved_flags
+    spin_lock_release(lock)
+    restore_eflags(flags)
+
+# Convenience: execute a closure while holding the lock with IRQs disabled.
+# The lock is always released, even if the body returns early.
+fn spin_lock_with_irq(lock: var SpinLock, body: fn() -> u32) -> u32:
+    spin_lock_irqsave(lock)
+    val result = body()
+    spin_lock_irqrestore(lock)
+    result

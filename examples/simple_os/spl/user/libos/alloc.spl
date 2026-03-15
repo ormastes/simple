@@ -1,0 +1,175 @@
+# User-Space Bump Allocator
+#
+# A simple bump allocator for user processes. Memory is allocated linearly
+# from a base address upward. There is no free operation -- once allocated,
+# memory remains in use until the process exits and the kernel reclaims
+# the entire address space.
+#
+# This is appropriate for microkernel user tasks that allocate a small,
+# bounded number of objects during initialization and then run forever.
+#
+# Usage:
+#   var heap = bump_alloc_create(0x10000, 0x4000)  # 16KB heap at 0x10000
+#   if val ptr = bump_alloc(heap, 128):
+#       # use ptr as a 128-byte region
+#   else:
+#       sys_debug_print("Out of memory")
+
+# ---------------------------------------------------------------------------
+# BumpAllocator state
+# ---------------------------------------------------------------------------
+struct BumpAllocator:
+    base: u32       # Start of the heap region (fixed)
+    current: u32    # Next free address (moves upward)
+    limit: u32      # One past the last usable byte
+    total: u32      # Total size in bytes (limit - base)
+    alloc_count: u32  # Number of allocations made
+
+# ---------------------------------------------------------------------------
+# Create a bump allocator over a memory region.
+#
+# base: start address of the heap (must be page-aligned for best results)
+# size: total size of the heap in bytes
+# ---------------------------------------------------------------------------
+fn bump_alloc_create(base: u32, size: u32) -> BumpAllocator:
+    BumpAllocator(
+        base: base,
+        current: base,
+        limit: base + size,
+        total: size,
+        alloc_count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Allocate `size` bytes with no alignment guarantee beyond natural word
+# alignment. Returns the start address, or None if out of memory.
+# ---------------------------------------------------------------------------
+fn bump_alloc(alloc: var BumpAllocator, size: u32) -> Option<u32>:
+    if size == 0:
+        return Option<u32>.None
+
+    # Word-align the size (round up to multiple of 4)
+    val aligned_size = (size + 3) & 0xFFFFFFFC
+
+    # Check for overflow
+    val new_current = alloc.current + aligned_size
+    if new_current > alloc.limit:
+        return Option<u32>.None
+    if new_current < alloc.current:
+        # Integer overflow
+        return Option<u32>.None
+
+    val ptr = alloc.current
+    alloc.current = new_current
+    alloc.alloc_count = alloc.alloc_count + 1
+    Option<u32>.Some(ptr)
+
+# ---------------------------------------------------------------------------
+# Allocate `size` bytes aligned to `align` boundary.
+#
+# align: must be a power of two (4, 8, 16, 32, ...).
+#        No validation is performed; caller must ensure this.
+# ---------------------------------------------------------------------------
+fn bump_alloc_aligned(alloc: var BumpAllocator, size: u32, align: u32) -> Option<u32>:
+    if size == 0:
+        return Option<u32>.None
+    if align == 0:
+        return Option<u32>.None
+
+    # Round current up to the next aligned address
+    val mask = align - 1
+    val aligned_start = (alloc.current + mask) & (!mask)
+
+    # Calculate end address
+    val aligned_size = (size + 3) & 0xFFFFFFFC
+    val new_current = aligned_start + aligned_size
+    if new_current > alloc.limit:
+        return Option<u32>.None
+    if new_current < aligned_start:
+        return Option<u32>.None
+
+    alloc.current = new_current
+    alloc.alloc_count = alloc.alloc_count + 1
+    Option<u32>.Some(aligned_start)
+
+# ---------------------------------------------------------------------------
+# Allocate memory for `count` objects each of `obj_size` bytes.
+# Returns the base address of the array, or None if out of memory.
+# ---------------------------------------------------------------------------
+fn bump_alloc_array(alloc: var BumpAllocator, obj_size: u32, count: u32) -> Option<u32>:
+    val total_size = obj_size * count
+    # Check for multiplication overflow
+    if count > 0 and (total_size / count) != obj_size:
+        return Option<u32>.None
+    bump_alloc(alloc, total_size)
+
+# ---------------------------------------------------------------------------
+# Allocate a page-aligned region (4096-byte alignment).
+# Useful for allocating page tables, IPC buffers, etc.
+# ---------------------------------------------------------------------------
+fn bump_alloc_page(alloc: var BumpAllocator) -> Option<u32>:
+    bump_alloc_aligned(alloc, 4096, 4096)
+
+# ---------------------------------------------------------------------------
+# Allocate `n` contiguous pages (each 4096 bytes, page-aligned).
+# ---------------------------------------------------------------------------
+fn bump_alloc_pages(alloc: var BumpAllocator, n: u32) -> Option<u32>:
+    bump_alloc_aligned(alloc, n * 4096, 4096)
+
+# ---------------------------------------------------------------------------
+# Reset the allocator, reclaiming all memory.
+# WARNING: All previously returned pointers become invalid.
+# Only use this during reinitialization of a subsystem.
+# ---------------------------------------------------------------------------
+fn bump_alloc_reset(alloc: var BumpAllocator):
+    alloc.current = alloc.base
+    alloc.alloc_count = 0
+
+# ---------------------------------------------------------------------------
+# Query functions
+# ---------------------------------------------------------------------------
+
+# Returns the number of bytes still available.
+fn bump_alloc_remaining(alloc: BumpAllocator) -> u32:
+    if alloc.current >= alloc.limit:
+        return 0
+    alloc.limit - alloc.current
+
+# Returns the number of bytes already allocated.
+fn bump_alloc_used(alloc: BumpAllocator) -> u32:
+    alloc.current - alloc.base
+
+# Returns the total number of allocations performed.
+fn bump_alloc_count(alloc: BumpAllocator) -> u32:
+    alloc.alloc_count
+
+# Returns true if the allocator has no remaining space.
+fn bump_alloc_is_full(alloc: BumpAllocator) -> bool:
+    alloc.current >= alloc.limit
+
+# Returns true if a given address falls within this allocator's region.
+fn bump_alloc_contains(alloc: BumpAllocator, addr: u32) -> bool:
+    addr >= alloc.base and addr < alloc.limit
+
+# ---------------------------------------------------------------------------
+# Zero-fill helper
+# ---------------------------------------------------------------------------
+
+# Write zeros to a memory region. Used to clear freshly allocated buffers.
+fn mem_zero(addr: u32, size: u32):
+    var offset: u32 = 0
+    while offset < size:
+        # Write a zero word at addr + offset
+        var target = addr + offset
+        asm """
+            mov edi, {target}
+            mov dword [edi], 0
+        """
+        offset = offset + 4
+
+# Allocate and zero-fill a region.
+fn bump_alloc_zeroed(alloc: var BumpAllocator, size: u32) -> Option<u32>:
+    if val ptr = bump_alloc(alloc, size):
+        mem_zero(ptr, (size + 3) & 0xFFFFFFFC)
+        return Option<u32>.Some(ptr)
+    Option<u32>.None

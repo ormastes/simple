@@ -1,0 +1,115 @@
+# RV32 Fetch Stage (IF)
+#
+# PC generation, instruction memory read, next-PC mux.
+# Supports branch target injection and stall signals.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# Fetch Stage Model
+# ============================================================================
+
+class Rv32Fetch:
+    """
+    Instruction Fetch stage.
+
+    Manages the Program Counter and fetches instructions from memory.
+    Handles branch target injection and pipeline stalls.
+    """
+
+    pc: i64
+    boot_addr: i64
+
+    static fn create(boot_addr: i64) -> Rv32Fetch:
+        Rv32Fetch(pc: boot_addr, boot_addr: boot_addr)
+
+    me reset():
+        """Reset PC to boot address."""
+        self.pc = self.boot_addr
+
+    me advance(branch_taken: bool, branch_target: i64, stall: bool, compressed: bool):
+        """Advance PC for next cycle."""
+        if stall:
+            return
+        if branch_taken:
+            self.pc = branch_target and 0xFFFFFFFF
+        elif compressed:
+            self.pc = (self.pc + 2) and 0xFFFFFFFF
+        else:
+            self.pc = (self.pc + 4) and 0xFFFFFFFF
+
+    fn current_pc() -> i64:
+        self.pc
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_fetch_vhdl() -> text:
+    """Generate VHDL for fetch stage."""
+    var b = VhdlBuilder.create("rv32_fetch")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_fetch")
+    b.emit_generic_begin()
+    b.emit_generic_param("BOOT_ADDR", "word_t", Some("x\"00000000\""), true)
+    b.emit_generic_end()
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_port("stall", "in", "std_logic", false)
+    b.emit_port("flush", "in", "std_logic", false)
+    b.emit_port("branch_taken", "in", "std_logic", false)
+    b.emit_port("branch_target", "in", "word_t", false)
+    b.emit_comment("Instruction memory interface")
+    b.emit_port("imem_addr", "out", "word_t", false)
+    b.emit_port("imem_data", "in", "word_t", false)
+    b.emit_port("imem_valid", "in", "std_logic", false)
+    b.emit_comment("Output to ID stage")
+    b.emit_port("if_pc", "out", "word_t", false)
+    b.emit_port("if_instr", "out", "word_t", false)
+    b.emit_port("if_valid", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_fetch")
+
+    b.emit_architecture_begin("rv32_fetch", "rtl")
+    b.emit_signal_decl("pc_reg", "word_t", Some("BOOT_ADDR"))
+    b.emit_signal_decl("pc_next", "word_t", nil)
+    b.emit_architecture_body_begin()
+
+    # Next PC mux
+    b.emit_comment("Next PC mux: branch target or PC+4")
+    b.emit_process_begin(Some("next_pc_mux"), ["pc_reg", "branch_taken", "branch_target"])
+    b.emit_process_body_begin()
+    b.emit_if_begin("branch_taken = '1'")
+    b.emit_signal_assign("pc_next", "branch_target")
+    b.emit_else()
+    b.emit_signal_assign("pc_next", "std_logic_vector(unsigned(pc_reg) + 4)")
+    b.emit_if_end()
+    b.emit_process_end(Some("next_pc_mux"))
+    b.emit_raw("")
+
+    # PC register
+    b.emit_clocked_process_begin(Some("pc_update"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("pc_reg", "BOOT_ADDR")
+    b.emit_elsif("rising_edge(clk)")
+    b.emit_if_begin("stall = '0'")
+    b.emit_signal_assign("pc_reg", "pc_next")
+    b.emit_if_end()
+    b.emit_if_end()
+    b.emit_process_end(Some("pc_update"))
+    b.emit_raw("")
+
+    # Output assignments
+    b.emit_signal_assign("imem_addr", "pc_reg")
+    b.emit_signal_assign("if_pc", "pc_reg")
+    b.emit_signal_assign("if_instr", "imem_data")
+    b.emit_signal_assign("if_valid", "imem_valid and not flush")
+
+    b.emit_architecture_end("rtl")
+    b.build()

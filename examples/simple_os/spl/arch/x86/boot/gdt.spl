@@ -1,0 +1,194 @@
+# x86 Global Descriptor Table (GDT)
+#
+# Sets up a flat-memory-model GDT with six entries:
+#   0 - Null descriptor
+#   1 - Kernel Code  (Ring 0, execute/read, base=0, limit=4GB)
+#   2 - Kernel Data  (Ring 0, read/write, base=0, limit=4GB)
+#   3 - User Code    (Ring 3, execute/read, base=0, limit=4GB)
+#   4 - User Data    (Ring 3, read/write, base=0, limit=4GB)
+#   5 - TSS          (for ring transitions)
+#
+# Each entry is encoded as a u64.
+
+# ---------- segment selector constants ----------
+
+val GDT_KERNEL_CODE: u16 = 0x08   # index 1, RPL 0
+val GDT_KERNEL_DATA: u16 = 0x10   # index 2, RPL 0
+val GDT_USER_CODE: u16 = 0x18     # index 3, RPL 3
+val GDT_USER_DATA: u16 = 0x20     # index 4, RPL 3
+val GDT_TSS_SEL: u16 = 0x28       # index 5
+
+# Number of GDT entries
+val GDT_ENTRY_COUNT: i32 = 6
+
+# ---------- access byte bits ----------
+
+val ACCESS_PRESENT: u32 = 0x80
+val ACCESS_RING0: u32 = 0x00
+val ACCESS_RING3: u32 = 0x60
+val ACCESS_SEGMENT: u32 = 0x10
+val ACCESS_EXECUTABLE: u32 = 0x08
+val ACCESS_READ_WRITE: u32 = 0x02
+val ACCESS_ACCESSED: u32 = 0x01
+val ACCESS_TSS_32: u32 = 0x09     # 32-bit TSS (Available)
+
+# ---------- flags nibble (upper 4 bits of limit_hi/flags byte) ----------
+
+val FLAG_GRANULARITY_4K: u32 = 0x80  # limit in 4KB pages
+val FLAG_SIZE_32: u32 = 0x40         # 32-bit protected mode
+
+# ---------- GDT table storage ----------
+
+# Raw u64 array for 6 descriptors
+var gdt_entries: [u64; 6] = [0; 6]
+
+# GDT pointer structure: 2-byte limit + 4-byte base
+# Stored as a u64 so we can load it with lgdt
+var gdt_pointer_limit: u16 = 0
+var gdt_pointer_base: u32 = 0
+
+# ---------- TSS ----------
+
+# Minimal TSS - only need esp0/ss0 for ring transitions
+# TSS is 104 bytes; we store it as an array of u32 (26 entries)
+var tss_block: [u32; 26] = [0; 26]
+
+# ---------- encoding ----------
+
+# Encode a GDT descriptor from components.
+# Returns a u64 packed descriptor.
+#
+# Layout of a segment descriptor (8 bytes / 64 bits):
+#   Bits  0..15  : limit bits 0..15
+#   Bits 16..31  : base  bits 0..15
+#   Bits 32..39  : base  bits 16..23
+#   Bits 40..47  : access byte
+#   Bits 48..51  : limit bits 16..19
+#   Bits 52..55  : flags nibble
+#   Bits 56..63  : base  bits 24..31
+fn gdt_encode_entry(base: u32, limit: u32, access: u32, flags: u32) -> u64:
+    var desc: u64 = 0
+
+    # Limit low 16 bits
+    desc = desc | ((limit & 0xFFFF) as u64)
+
+    # Base low 16 bits -> bits 16..31
+    desc = desc | (((base & 0xFFFF) as u64) << 16)
+
+    # Base mid 8 bits -> bits 32..39
+    desc = desc | ((((base >> 16) & 0xFF) as u64) << 32)
+
+    # Access byte -> bits 40..47
+    desc = desc | (((access & 0xFF) as u64) << 40)
+
+    # Limit high 4 bits -> bits 48..51
+    desc = desc | ((((limit >> 16) & 0x0F) as u64) << 48)
+
+    # Flags nibble -> bits 52..55
+    desc = desc | ((((flags >> 4) & 0x0F) as u64) << 52)
+
+    # Base high 8 bits -> bits 56..63
+    desc = desc | ((((base >> 24) & 0xFF) as u64) << 56)
+
+    desc
+
+# ---------- TSS helpers ----------
+
+# Set the kernel stack for ring transitions
+fn tss_set_kernel_stack(esp0: u32, ss0: u32):
+    # TSS layout offsets (in u32 indices):
+    # index 1 = esp0, index 2 = ss0
+    tss_block[1] = esp0
+    tss_block[2] = ss0
+
+# Get the physical address of the TSS block
+fn tss_get_address() -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            lea eax, {tss_block}
+            mov {addr}, eax
+        """
+    addr
+
+# ---------- public API ----------
+
+# Build GDT entries, set up TSS, and load with lgdt + segment reload
+fn gdt_init():
+    val limit_4gb: u32 = 0xFFFFF  # 4GB in 4KB pages
+
+    # 0: Null descriptor
+    gdt_entries[0] = 0
+
+    # 1: Kernel Code - Ring 0, execute/read
+    val kcode_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_SEGMENT | ACCESS_EXECUTABLE | ACCESS_READ_WRITE
+    val kcode_flags = FLAG_GRANULARITY_4K | FLAG_SIZE_32
+    gdt_entries[1] = gdt_encode_entry(0, limit_4gb, kcode_access, kcode_flags)
+
+    # 2: Kernel Data - Ring 0, read/write
+    val kdata_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_SEGMENT | ACCESS_READ_WRITE
+    val kdata_flags = FLAG_GRANULARITY_4K | FLAG_SIZE_32
+    gdt_entries[2] = gdt_encode_entry(0, limit_4gb, kdata_access, kdata_flags)
+
+    # 3: User Code - Ring 3, execute/read
+    val ucode_access = ACCESS_PRESENT | ACCESS_RING3 | ACCESS_SEGMENT | ACCESS_EXECUTABLE | ACCESS_READ_WRITE
+    val ucode_flags = FLAG_GRANULARITY_4K | FLAG_SIZE_32
+    gdt_entries[3] = gdt_encode_entry(0, limit_4gb, ucode_access, ucode_flags)
+
+    # 4: User Data - Ring 3, read/write
+    val udata_access = ACCESS_PRESENT | ACCESS_RING3 | ACCESS_SEGMENT | ACCESS_READ_WRITE
+    val udata_flags = FLAG_GRANULARITY_4K | FLAG_SIZE_32
+    gdt_entries[4] = gdt_encode_entry(0, limit_4gb, udata_access, udata_flags)
+
+    # 5: TSS descriptor
+    val tss_base = tss_get_address()
+    val tss_limit: u32 = 103   # TSS is 104 bytes
+    val tss_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_TSS_32
+    val tss_flags: u32 = FLAG_SIZE_32  # byte granularity for TSS
+    gdt_entries[5] = gdt_encode_entry(tss_base, tss_limit, tss_access, tss_flags)
+
+    # Set IOPB offset to size of TSS (no IOPB)
+    tss_block[25] = 104 << 16   # IOPB offset in upper 16 bits of last dword
+
+    # Build GDT pointer
+    gdt_pointer_limit = ((GDT_ENTRY_COUNT * 8) - 1) as u16
+    var gdt_base_addr: u32 = 0
+    unsafe:
+        asm """
+            lea eax, {gdt_entries}
+            mov {gdt_base_addr}, eax
+        """
+    gdt_pointer_base = gdt_base_addr
+
+    # Load GDT register and reload segments
+    gdt_load()
+
+# Load the GDT register and flush segment selectors
+fn gdt_load():
+    asm """
+        # Build a 6-byte GDT pointer on the stack
+        sub esp, 8
+        mov ax, {gdt_pointer_limit}
+        mov [esp], ax
+        mov eax, {gdt_pointer_base}
+        mov [esp+2], eax
+        lgdt [esp]
+        add esp, 8
+
+        # Reload CS via far jump
+        jmp 0x08:.gdt_reload_cs
+    .gdt_reload_cs:
+        # Reload data segment selectors
+        mov ax, 0x10
+        mov ds, ax
+        mov es, ax
+        mov fs, ax
+        mov gs, ax
+        mov ss, ax
+    """
+
+    # Load TSS register
+    asm """
+        mov ax, 0x28
+        ltr ax
+    """

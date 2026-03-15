@@ -1,0 +1,285 @@
+# VHDL Testbench Generator
+#
+# Generates VHDL-2008 testbench code using VhdlBuilder.
+# Supports clock generation, reset sequencing, and stimulus application.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# Stimulus Definition
+# ============================================================================
+
+struct VhdlStimulus:
+    signal: text
+    value: text
+    delay_ns: i64
+
+# ============================================================================
+# Testbench Generator
+# ============================================================================
+
+class VhdlTestbenchGenerator:
+    """
+    Generates VHDL testbench code for simulation.
+
+    Produces complete testbench entities with:
+    - Clock generation process
+    - Reset sequencing
+    - Stimulus application
+    - Optional UART monitoring
+
+    Usage:
+        val gen = VhdlTestbenchGenerator.create()
+        val vhdl = gen.generate_basic("my_entity", ports)
+    """
+
+    clock_period_ns: i64
+    reset_active_high: bool
+    reset_duration_ns: i64
+
+    static fn create() -> VhdlTestbenchGenerator:
+        """Create testbench generator with default settings."""
+        VhdlTestbenchGenerator(
+            clock_period_ns: 10,
+            reset_active_high: true,
+            reset_duration_ns: 50
+        )
+
+    static fn with_config(period_ns: i64, active_high: bool, reset_ns: i64) -> VhdlTestbenchGenerator:
+        """Create testbench generator with custom settings."""
+        VhdlTestbenchGenerator(
+            clock_period_ns: period_ns,
+            reset_active_high: active_high,
+            reset_duration_ns: reset_ns
+        )
+
+    fn generate_basic(entity: text, ports: [(text, text, text)]) -> text:
+        """
+        Generate a basic testbench for the given entity.
+
+        `ports` is a list of (name, direction, type) tuples.
+        Direction is "in", "out", or "inout".
+        """
+        var b = VhdlBuilder.create("{entity}_tb")
+        b.emit_library_header()
+
+        # Testbench entity (no ports)
+        b.emit_entity_begin("{entity}_tb")
+        b.emit_entity_end("{entity}_tb")
+
+        # Architecture
+        b.emit_architecture_begin("{entity}_tb", "sim")
+
+        # Declare signals for each port
+        b.emit_comment("Clock and reset")
+        b.emit_signal_decl("clk", "std_logic", Some("'0'"))
+        val rst_init = if self.reset_active_high: "'1'" else: "'0'"
+        b.emit_signal_decl("rst", "std_logic", Some(rst_init))
+        b.emit_raw("")
+
+        b.emit_comment("DUT port signals")
+        for port in ports:
+            val pname = port.0
+            val ptype = port.2
+            if pname != "clk" and pname != "rst":
+                b.emit_signal_decl("s_{pname}", ptype, nil)
+        b.emit_raw("")
+
+        val half_period = self.clock_period_ns / 2
+        b.emit_constant_decl("CLK_PERIOD", "time", "{self.clock_period_ns} ns")
+
+        b.emit_architecture_body_begin()
+
+        # DUT instantiation
+        b.emit_comment("Device Under Test")
+        b.emit_instance_begin("dut", entity)
+        b.emit_port_map_begin()
+        var port_idx = 0
+        val port_count = ports.len()
+        for port in ports:
+            val pname = port.0
+            val is_last = port_idx == port_count - 1
+            if pname == "clk":
+                b.emit_port_map_entry("clk", "clk", is_last)
+            elif pname == "rst":
+                b.emit_port_map_entry("rst", "rst", is_last)
+            else:
+                b.emit_port_map_entry(pname, "s_{pname}", is_last)
+            port_idx = port_idx + 1
+        b.emit_port_map_end()
+        b.emit_raw("")
+
+        # Clock process
+        b.emit_comment("Clock generation")
+        b.emit_process_begin(Some("clk_gen"), [])
+        b.emit_process_body_begin()
+        b.emit_signal_assign("clk", "'0'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_signal_assign("clk", "'1'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_process_end(Some("clk_gen"))
+        b.emit_raw("")
+
+        # Stimulus process
+        b.emit_comment("Stimulus process")
+        b.emit_process_begin(Some("stim"), [])
+        b.emit_process_body_begin()
+        b.emit_comment("Apply reset")
+        val rst_active = if self.reset_active_high: "'1'" else: "'0'"
+        val rst_inactive = if self.reset_active_high: "'0'" else: "'1'"
+        b.emit_signal_assign("rst", rst_active)
+        b.emit_line("wait for {self.reset_duration_ns} ns;")
+        b.emit_signal_assign("rst", rst_inactive)
+        b.emit_line("wait for CLK_PERIOD * 2;")
+        b.emit_raw("")
+        b.emit_comment("Add stimulus here")
+        b.emit_line("wait for CLK_PERIOD * 100;")
+        b.emit_raw("")
+        b.emit_comment("End simulation")
+        b.emit_assert("false", "Simulation complete", "note")
+        b.emit_line("wait;")
+        b.emit_process_end(Some("stim"))
+
+        b.emit_architecture_end("sim")
+        b.build()
+
+    fn generate_uart_tb(entity: text, baud_rate: i64) -> text:
+        """Generate a testbench with UART monitoring."""
+        val bit_period_ns = 1000000000 / baud_rate
+        var b = VhdlBuilder.create("{entity}_uart_tb")
+        b.emit_library_header()
+
+        b.emit_entity_begin("{entity}_uart_tb")
+        b.emit_entity_end("{entity}_uart_tb")
+
+        b.emit_architecture_begin("{entity}_uart_tb", "sim")
+        b.emit_signal_decl("clk", "std_logic", Some("'0'"))
+        val rst_init = if self.reset_active_high: "'1'" else: "'0'"
+        b.emit_signal_decl("rst", "std_logic", Some(rst_init))
+        b.emit_signal_decl("uart_tx", "std_logic", Some("'1'"))
+        b.emit_signal_decl("uart_rx", "std_logic", Some("'1'"))
+        b.emit_raw("")
+        b.emit_constant_decl("CLK_PERIOD", "time", "{self.clock_period_ns} ns")
+        b.emit_constant_decl("BIT_PERIOD", "time", "{bit_period_ns} ns")
+
+        b.emit_architecture_body_begin()
+
+        # DUT
+        b.emit_instance_begin("dut", entity)
+        b.emit_port_map_begin()
+        b.emit_port_map_entry("clk", "clk", false)
+        b.emit_port_map_entry("rst", "rst", false)
+        b.emit_port_map_entry("uart_tx", "uart_tx", false)
+        b.emit_port_map_entry("uart_rx", "uart_rx", true)
+        b.emit_port_map_end()
+        b.emit_raw("")
+
+        # Clock
+        b.emit_process_begin(Some("clk_gen"), [])
+        b.emit_process_body_begin()
+        b.emit_signal_assign("clk", "'0'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_signal_assign("clk", "'1'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_process_end(Some("clk_gen"))
+        b.emit_raw("")
+
+        # UART monitor process
+        b.emit_comment("UART TX monitor - captures and reports received bytes")
+        b.emit_process_begin(Some("uart_monitor"), ["uart_tx"])
+        b.emit_process_var("rx_byte", "std_logic_vector(7 downto 0)", nil)
+        b.emit_process_var("bit_idx", "integer", Some("0"))
+        b.emit_process_body_begin()
+        b.emit_if_begin("uart_tx = '0'")
+        b.emit_comment("Start bit detected, sample data bits")
+        b.emit_line("wait for BIT_PERIOD * 3 / 2;")
+        b.emit_for_loop_begin("i", 0, 7)
+        b.emit_var_assign("rx_byte(i)", "uart_tx")
+        b.emit_line("wait for BIT_PERIOD;")
+        b.emit_for_loop_end()
+        b.emit_line("report \"UART RX: \" & integer'image(to_integer(unsigned(rx_byte)));")
+        b.emit_if_end()
+        b.emit_process_end(Some("uart_monitor"))
+        b.emit_raw("")
+
+        # Stimulus
+        b.emit_process_begin(Some("stim"), [])
+        b.emit_process_body_begin()
+        val rst_active = if self.reset_active_high: "'1'" else: "'0'"
+        val rst_inactive = if self.reset_active_high: "'0'" else: "'1'"
+        b.emit_signal_assign("rst", rst_active)
+        b.emit_line("wait for {self.reset_duration_ns} ns;")
+        b.emit_signal_assign("rst", rst_inactive)
+        b.emit_line("wait for CLK_PERIOD * 10000;")
+        b.emit_assert("false", "UART testbench complete", "note")
+        b.emit_line("wait;")
+        b.emit_process_end(Some("stim"))
+
+        b.emit_architecture_end("sim")
+        b.build()
+
+    fn generate_with_stimuli(entity: text, ports: [(text, text, text)], stimuli: [VhdlStimulus]) -> text:
+        """Generate testbench with explicit stimulus sequence."""
+        var b = VhdlBuilder.create("{entity}_stim_tb")
+        b.emit_library_header()
+
+        b.emit_entity_begin("{entity}_stim_tb")
+        b.emit_entity_end("{entity}_stim_tb")
+
+        b.emit_architecture_begin("{entity}_stim_tb", "sim")
+        b.emit_signal_decl("clk", "std_logic", Some("'0'"))
+        val rst_init = if self.reset_active_high: "'1'" else: "'0'"
+        b.emit_signal_decl("rst", "std_logic", Some(rst_init))
+        for port in ports:
+            if port.0 != "clk" and port.0 != "rst":
+                b.emit_signal_decl("s_{port.0}", port.2, nil)
+        b.emit_constant_decl("CLK_PERIOD", "time", "{self.clock_period_ns} ns")
+
+        b.emit_architecture_body_begin()
+
+        # DUT instantiation
+        b.emit_instance_begin("dut", entity)
+        b.emit_port_map_begin()
+        var idx = 0
+        for port in ports:
+            val is_last = idx == ports.len() - 1
+            if port.0 == "clk":
+                b.emit_port_map_entry("clk", "clk", is_last)
+            elif port.0 == "rst":
+                b.emit_port_map_entry("rst", "rst", is_last)
+            else:
+                b.emit_port_map_entry(port.0, "s_{port.0}", is_last)
+            idx = idx + 1
+        b.emit_port_map_end()
+        b.emit_raw("")
+
+        # Clock
+        b.emit_process_begin(Some("clk_gen"), [])
+        b.emit_process_body_begin()
+        b.emit_signal_assign("clk", "'0'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_signal_assign("clk", "'1'")
+        b.emit_line("wait for CLK_PERIOD / 2;")
+        b.emit_process_end(Some("clk_gen"))
+        b.emit_raw("")
+
+        # Stimulus process with explicit sequence
+        b.emit_process_begin(Some("stim"), [])
+        b.emit_process_body_begin()
+        val rst_active = if self.reset_active_high: "'1'" else: "'0'"
+        val rst_inactive = if self.reset_active_high: "'0'" else: "'1'"
+        b.emit_signal_assign("rst", rst_active)
+        b.emit_line("wait for {self.reset_duration_ns} ns;")
+        b.emit_signal_assign("rst", rst_inactive)
+        b.emit_line("wait for CLK_PERIOD * 2;")
+        b.emit_raw("")
+        for stim in stimuli:
+            b.emit_signal_assign("s_{stim.signal}", stim.value)
+            b.emit_line("wait for {stim.delay_ns} ns;")
+        b.emit_raw("")
+        b.emit_assert("false", "Stimulus sequence complete", "note")
+        b.emit_line("wait;")
+        b.emit_process_end(Some("stim"))
+
+        b.emit_architecture_end("sim")
+        b.build()

@@ -1,0 +1,186 @@
+# x86 Two-Level Paging (Page Directory + Page Tables)
+#
+# 32-bit x86 uses a two-level page table:
+#   Page Directory (PD): 1024 entries, each u32, indexed by vaddr[31:22]
+#   Page Table (PT):     1024 entries, each u32, indexed by vaddr[21:12]
+#
+# Each entry: [phys_addr:20 | flags:12]
+# Page size: 4 KB (4096 bytes)
+
+# ---------- constants ----------
+
+val PAGE_SIZE: u32 = 4096
+val ENTRIES_PER_TABLE: i32 = 1024
+
+# Page entry flags (lower 12 bits)
+val PAGE_PRESENT: u32 = 0x001
+val PAGE_WRITABLE: u32 = 0x002
+val PAGE_USER: u32 = 0x004
+val PAGE_WRITE_THROUGH: u32 = 0x008
+val PAGE_CACHE_DISABLE: u32 = 0x010
+val PAGE_ACCESSED: u32 = 0x020
+val PAGE_DIRTY: u32 = 0x040
+val PAGE_SIZE_4MB: u32 = 0x080     # PSE - 4MB page (PD entry only)
+val PAGE_GLOBAL: u32 = 0x100
+
+# Masks
+val PAGE_ADDR_MASK: u32 = 0xFFFFF000
+val PAGE_FLAGS_MASK: u32 = 0x00000FFF
+
+# ---------- structs ----------
+
+# A page directory containing 1024 entries
+struct PageDirectory:
+    entries: [u32; 1024]
+
+# A page table containing 1024 entries
+struct PageTable:
+    entries: [u32; 1024]
+
+# ---------- static page table pool ----------
+# Statically allocate a pool of page tables to avoid needing a heap allocator.
+# 16 page tables = ability to map 64 MB of virtual address space.
+
+val PT_POOL_SIZE: i32 = 16
+var pt_pool: [PageTable; 16]
+var pt_pool_used: [bool; 16] = [false; 16]
+
+# Allocate a page table from the static pool.  Returns the index, or -1 if exhausted.
+fn pt_pool_alloc() -> i32:
+    for i in 0..PT_POOL_SIZE:
+        if not pt_pool_used[i]:
+            pt_pool_used[i] = true
+            # Zero out the table
+            for j in 0..ENTRIES_PER_TABLE:
+                pt_pool[i].entries[j] = 0
+            return i
+    -1   # pool exhausted
+
+# Free a page table back to the pool
+fn pt_pool_free(index: i32):
+    if index >= 0 and index < PT_POOL_SIZE:
+        pt_pool_used[index] = false
+
+# Get the physical address of a pooled page table (needed for PD entries)
+fn pt_pool_addr(index: i32) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        # Compute address: base of pt_pool + index * sizeof(PageTable)
+        # sizeof(PageTable) = 1024 * 4 = 4096
+        asm """
+            lea eax, {pt_pool}
+            mov {addr}, eax
+        """
+    addr + (index as u32 * PAGE_SIZE)
+
+# ---------- helpers ----------
+
+# Extract page directory index from virtual address (bits 31:22)
+fn pd_index(vaddr: u32) -> i32:
+    ((vaddr >> 22) & 0x3FF) as i32
+
+# Extract page table index from virtual address (bits 21:12)
+fn pt_index(vaddr: u32) -> i32:
+    ((vaddr >> 12) & 0x3FF) as i32
+
+# Build a page entry from a physical address and flags
+fn page_entry(paddr: u32, flags: u32) -> u32:
+    (paddr & PAGE_ADDR_MASK) | (flags & PAGE_FLAGS_MASK)
+
+# Extract physical address from a page entry
+fn page_entry_addr(entry: u32) -> u32:
+    entry & PAGE_ADDR_MASK
+
+# Check if an entry is present
+fn page_entry_present(entry: u32) -> bool:
+    (entry & PAGE_PRESENT) != 0
+
+# ---------- public API ----------
+
+# Create a new zeroed page directory
+fn page_dir_create() -> PageDirectory:
+    var pd = PageDirectory(entries: [0; 1024])
+    pd
+
+# Map a single 4KB page: vaddr -> paddr with given flags.
+# Allocates a page table from the pool if the PD entry is not present.
+# Returns true on success, false if page table pool exhausted.
+fn page_dir_map(pd: PageDirectory, vaddr: u32, paddr: u32, flags: u32) -> bool:
+    val pdi = pd_index(vaddr)
+    val pti = pt_index(vaddr)
+
+    # Ensure a page table exists for this PD entry
+    if not page_entry_present(pd.entries[pdi]):
+        val pool_idx = pt_pool_alloc()
+        if pool_idx < 0:
+            return false
+        val pt_addr = pt_pool_addr(pool_idx)
+        # PD entry flags: present + writable + user (permissive, PT entry refines)
+        pd.entries[pdi] = page_entry(pt_addr, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER)
+
+    # Get the page table physical address from the PD entry
+    val pt_phys = page_entry_addr(pd.entries[pdi])
+
+    # Write the page table entry
+    unsafe:
+        val entry_addr = (pt_phys + (pti as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = page_entry(paddr, flags | PAGE_PRESENT)
+
+    true
+
+# Unmap a page: clear the page table entry for vaddr
+fn page_dir_unmap(pd: PageDirectory, vaddr: u32):
+    val pdi = pd_index(vaddr)
+    if not page_entry_present(pd.entries[pdi]):
+        return
+
+    val pti = pt_index(vaddr)
+    val pt_phys = page_entry_addr(pd.entries[pdi])
+
+    unsafe:
+        val entry_addr = (pt_phys + (pti as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = 0
+
+# Translate a virtual address to a physical address.
+# Returns the physical address, or 0 if not mapped.
+# (Returning 0 is safe because physical address 0 is never a valid mapping.)
+fn page_dir_translate(pd: PageDirectory, vaddr: u32) -> u32:
+    val pdi = pd_index(vaddr)
+    if not page_entry_present(pd.entries[pdi]):
+        return 0
+
+    val pti = pt_index(vaddr)
+    val pt_phys = page_entry_addr(pd.entries[pdi])
+
+    var pte: u32 = 0
+    unsafe:
+        val entry_addr = (pt_phys + (pti as u32 * 4)) as u64
+        @address(entry_addr) @volatile var entry: u32
+        pte = entry
+
+    if not page_entry_present(pte):
+        return 0
+
+    val page_phys = page_entry_addr(pte)
+    val offset = vaddr & 0xFFF
+    page_phys | offset
+
+# Identity-map a range of physical addresses [start, start+size) with given flags
+fn page_dir_identity_map(pd: PageDirectory, start: u32, size: u32, flags: u32):
+    var addr = start & PAGE_ADDR_MASK   # align down
+    val end = start + size
+    while addr < end:
+        page_dir_map(pd, addr, addr, flags)
+        addr = addr + PAGE_SIZE
+
+# Get the physical address of the page directory (for loading into CR3)
+fn page_dir_phys_addr(pd: PageDirectory) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            lea eax, {pd}
+            mov {addr}, eax
+        """
+    addr

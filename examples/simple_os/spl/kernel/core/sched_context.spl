@@ -1,0 +1,207 @@
+# MCS Scheduling Context
+# Provides temporal isolation through budget/period enforcement.
+#
+# Each SchedContext represents a "right to execute for B ticks every P ticks".
+# Threads must be bound to a SchedContext to be schedulable.  When the budget
+# is exhausted the thread is descheduled until the next replenishment point.
+#
+# This is modelled after the seL4 MCS (Mixed-Criticality Systems) extensions
+# which replace the fixed-timeslice scheduler with explicit time budgets.
+
+val MAX_SCHED_CONTEXTS: u32 = 128
+
+# Default budget and period for best-effort threads (generous defaults).
+val DEFAULT_SC_BUDGET: u64 = 100
+val DEFAULT_SC_PERIOD: u64 = 1000
+
+# ---------------------------------------------------------------------------
+# Scheduling Context
+# ---------------------------------------------------------------------------
+struct SchedContext:
+    id: u32
+    budget: u64             # Time budget per period (in ticks)
+    period: u64             # Replenishment period (in ticks)
+    remaining: u64          # Remaining budget in the current period
+    next_replenish: u64     # Absolute tick at which the budget refills
+    is_active: bool         # Whether this context is currently active
+    bound_tcb: u32          # ID of the bound thread (0xFFFFFFFF = unbound)
+
+# Sentinel for "no bound thread"
+val SC_UNBOUND: u32 = 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Scheduling Context Pool
+# ---------------------------------------------------------------------------
+struct SchedContextPool:
+    contexts: [SchedContext; 128]
+    count: u32
+
+# ---------------------------------------------------------------------------
+# Create a new scheduling context with the given budget and period.
+# The budget is fully available immediately (remaining == budget).
+# ---------------------------------------------------------------------------
+fn sched_ctx_create(id: u32, budget: u64, period: u64) -> SchedContext:
+    # Period must be >= budget; clamp if necessary
+    val actual_period = if period < budget: budget else: period
+    SchedContext(
+        id: id,
+        budget: budget,
+        period: actual_period,
+        remaining: budget,
+        next_replenish: actual_period,
+        is_active: true,
+        bound_tcb: SC_UNBOUND
+    )
+
+# ---------------------------------------------------------------------------
+# Create a best-effort scheduling context with default budget/period.
+# ---------------------------------------------------------------------------
+fn sched_ctx_create_default(id: u32) -> SchedContext:
+    sched_ctx_create(id, DEFAULT_SC_BUDGET, DEFAULT_SC_PERIOD)
+
+# ---------------------------------------------------------------------------
+# Charge (consume) ticks from the remaining budget.
+# Returns true if budget is still positive after the charge.
+# Returns false if the budget is now exhausted (thread should be descheduled).
+# ---------------------------------------------------------------------------
+fn sched_ctx_charge(ctx: var SchedContext, ticks: u64) -> bool:
+    if !ctx.is_active:
+        return false
+
+    if ticks >= ctx.remaining:
+        ctx.remaining = 0
+        return false
+
+    ctx.remaining = ctx.remaining - ticks
+    true
+
+# ---------------------------------------------------------------------------
+# Attempt to replenish the budget if the replenishment point has been reached.
+# Should be called periodically (e.g., on each timer tick or when a thread
+# is about to be scheduled).
+# ---------------------------------------------------------------------------
+fn sched_ctx_replenish(ctx: var SchedContext, current_tick: u64):
+    if !ctx.is_active:
+        return
+
+    if current_tick >= ctx.next_replenish:
+        ctx.remaining = ctx.budget
+        # Schedule the next replenishment
+        ctx.next_replenish = current_tick + ctx.period
+
+# ---------------------------------------------------------------------------
+# Check all contexts for replenishment at the current tick.
+# Returns the number of contexts that were replenished.
+# ---------------------------------------------------------------------------
+fn sched_ctx_replenish_all(pool: var SchedContextPool, current_tick: u64) -> u32:
+    var count: u32 = 0
+    for i in 0..pool.count:
+        if pool.contexts[i].is_active and current_tick >= pool.contexts[i].next_replenish:
+            sched_ctx_replenish(pool.contexts[i], current_tick)
+            count = count + 1
+    count
+
+# ---------------------------------------------------------------------------
+# Bind a thread to this scheduling context.
+# A thread can only be bound to one SchedContext at a time.
+# ---------------------------------------------------------------------------
+fn sched_ctx_bind(ctx: var SchedContext, tcb_id: u32):
+    ctx.bound_tcb = tcb_id
+
+# ---------------------------------------------------------------------------
+# Unbind the currently bound thread.
+# ---------------------------------------------------------------------------
+fn sched_ctx_unbind(ctx: var SchedContext):
+    ctx.bound_tcb = SC_UNBOUND
+
+# ---------------------------------------------------------------------------
+# Check whether this scheduling context has remaining budget and is active.
+# A thread bound to a non-runnable context should be descheduled.
+# ---------------------------------------------------------------------------
+fn sched_ctx_is_runnable(ctx: SchedContext) -> bool:
+    ctx.is_active and ctx.remaining > 0
+
+# ---------------------------------------------------------------------------
+# Deactivate a scheduling context.  Its bound thread will be descheduled.
+# ---------------------------------------------------------------------------
+fn sched_ctx_deactivate(ctx: var SchedContext):
+    ctx.is_active = false
+    ctx.remaining = 0
+
+# ---------------------------------------------------------------------------
+# Reactivate a previously deactivated scheduling context.
+# Grants a full budget and schedules the next replenishment.
+# ---------------------------------------------------------------------------
+fn sched_ctx_activate(ctx: var SchedContext, current_tick: u64):
+    ctx.is_active = true
+    ctx.remaining = ctx.budget
+    ctx.next_replenish = current_tick + ctx.period
+
+# ---------------------------------------------------------------------------
+# Update the budget and period of a scheduling context.
+# The remaining budget is clamped to the new budget value.
+# ---------------------------------------------------------------------------
+fn sched_ctx_configure(ctx: var SchedContext, budget: u64, period: u64):
+    val actual_period = if period < budget: budget else: period
+    ctx.budget = budget
+    ctx.period = actual_period
+    # Clamp remaining to new budget
+    if ctx.remaining > budget:
+        ctx.remaining = budget
+
+# ---------------------------------------------------------------------------
+# Check whether a scheduling context has a bound thread.
+# ---------------------------------------------------------------------------
+fn sched_ctx_is_bound(ctx: SchedContext) -> bool:
+    ctx.bound_tcb != SC_UNBOUND
+
+# ---------------------------------------------------------------------------
+# Create an empty scheduling context pool.
+# ---------------------------------------------------------------------------
+fn sched_ctx_pool_create() -> SchedContextPool:
+    var default_ctx = SchedContext(
+        id: 0,
+        budget: 0,
+        period: 0,
+        remaining: 0,
+        next_replenish: 0,
+        is_active: false,
+        bound_tcb: SC_UNBOUND
+    )
+    SchedContextPool(
+        contexts: [default_ctx; 128],
+        count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Allocate a scheduling context from the pool.
+# Returns the pool index, or None if the pool is full.
+# ---------------------------------------------------------------------------
+fn sched_ctx_pool_alloc(pool: var SchedContextPool, budget: u64, period: u64) -> Option<u32>:
+    if pool.count >= MAX_SCHED_CONTEXTS:
+        return Option<u32>.None
+
+    val id = pool.count
+    pool.contexts[id] = sched_ctx_create(id, budget, period)
+    pool.count = pool.count + 1
+    Option<u32>.Some(id)
+
+# ---------------------------------------------------------------------------
+# Look up a scheduling context by pool index.
+# ---------------------------------------------------------------------------
+fn sched_ctx_pool_get(pool: SchedContextPool, index: u32) -> Option<SchedContext>:
+    if index >= pool.count:
+        return Option<SchedContext>.None
+    if !pool.contexts[index].is_active:
+        return Option<SchedContext>.None
+    Option<SchedContext>.Some(pool.contexts[index])
+
+# ---------------------------------------------------------------------------
+# Get the utilization ratio (used / total) as a percentage (0-100).
+# ---------------------------------------------------------------------------
+fn sched_ctx_utilization_pct(ctx: SchedContext) -> u32:
+    if ctx.budget == 0:
+        return 0
+    val used = ctx.budget - ctx.remaining
+    val pct = (used * 100) / ctx.budget
+    pct as u32

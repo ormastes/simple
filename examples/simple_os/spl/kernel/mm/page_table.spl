@@ -1,0 +1,189 @@
+# Architecture-Independent Page Table Interface
+# Defines the abstract interface for virtual memory management.
+# Architecture-specific backends (x86, ARM) implement the PageMapper trait.
+
+val PAGE_SIZE: u32 = 4096
+
+# Individual page permission and caching flags.
+# Stored as a bitmask in a u32 for efficient manipulation.
+enum PageFlag:
+    Present         # 0x001 — page is mapped and valid
+    Writable        # 0x002 — page can be written
+    UserAccessible  # 0x004 — accessible from user mode (ring 3)
+    WriteThrough    # 0x008 — write-through caching
+    CacheDisable    # 0x010 — disable caching (for MMIO)
+    Accessed        # 0x020 — set by CPU on read
+    Dirty           # 0x040 — set by CPU on write
+    Global          # 0x100 — not flushed on CR3 reload (TLB)
+
+# Combines multiple page flags into a single bitmask value.
+struct PageFlags:
+    bits: u32
+
+# Create an empty flags set (no permissions).
+fn page_flags_none() -> PageFlags:
+    PageFlags(bits: 0)
+
+# Create flags for a typical kernel page: present, writable, global.
+fn page_flags_kernel() -> PageFlags:
+    PageFlags(bits: 0x001 | 0x002 | 0x100)
+
+# Create flags for a typical user-space read-only page.
+fn page_flags_user_ro() -> PageFlags:
+    PageFlags(bits: 0x001 | 0x004)
+
+# Create flags for a typical user-space read-write page.
+fn page_flags_user_rw() -> PageFlags:
+    PageFlags(bits: 0x001 | 0x002 | 0x004)
+
+# Create flags for an MMIO mapping: present, writable, cache-disabled.
+fn page_flags_mmio() -> PageFlags:
+    PageFlags(bits: 0x001 | 0x002 | 0x010)
+
+# Test whether a specific flag bit is set.
+fn page_flags_has(flags: PageFlags, flag_bit: u32) -> bool:
+    (flags.bits & flag_bit) != 0
+
+# Set a flag bit.
+fn page_flags_set(flags: var PageFlags, flag_bit: u32):
+    flags.bits = flags.bits | flag_bit
+
+# Clear a flag bit.
+fn page_flags_clear(flags: var PageFlags, flag_bit: u32):
+    flags.bits = flags.bits & ~flag_bit
+
+# Merge two flag sets (OR).
+fn page_flags_merge(a: PageFlags, b: PageFlags) -> PageFlags:
+    PageFlags(bits: a.bits | b.bits)
+
+# Result of a virtual-to-physical translation.
+struct TranslateResult:
+    phys_addr: u32
+    flags: PageFlags
+
+# A mapping request describing one virtual-to-physical mapping.
+struct MapRequest:
+    virt_addr: u32
+    phys_addr: u32
+    flags: PageFlags
+
+# The abstract page table interface.
+# Architecture backends provide concrete implementations.
+trait PageMapper:
+    # Map a virtual address to a physical address with the given flags.
+    fn map(self: var Self, vaddr: u32, paddr: u32, flags: PageFlags) -> Result<u32, text>
+
+    # Remove the mapping for a virtual address.
+    fn unmap(self: var Self, vaddr: u32) -> Result<u32, text>
+
+    # Translate a virtual address to its physical address and flags.
+    fn translate(self: Self, vaddr: u32) -> Option<TranslateResult>
+
+    # Check whether a virtual address is currently mapped.
+    fn is_mapped(self: Self, vaddr: u32) -> bool
+
+# --- Static page table for testing and simple configurations ---
+# Stores up to 1024 explicit mappings in an array. Not intended for
+# production use but useful for unit testing and early boot.
+
+struct StaticPageEntry:
+    vaddr: u32
+    paddr: u32
+    flags: PageFlags
+    valid: bool
+
+struct StaticPageTable:
+    entries: [StaticPageEntry; 1024]
+    count: u32
+    capacity: u32
+
+# Create an empty static page table.
+fn static_page_table_create() -> StaticPageTable:
+    var default_entry = StaticPageEntry(
+        vaddr: 0, paddr: 0,
+        flags: page_flags_none(),
+        valid: false
+    )
+    StaticPageTable(
+        entries: [default_entry; 1024],
+        count: 0,
+        capacity: 1024
+    )
+
+# Find the index of an existing mapping for vaddr, or None.
+fn static_page_table_find(pt: StaticPageTable, vaddr: u32) -> Option<u32>:
+    val aligned = vaddr & ~(PAGE_SIZE - 1)
+    for i in 0..pt.count:
+        if pt.entries[i].valid and pt.entries[i].vaddr == aligned:
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+# Map a virtual address to a physical address.
+fn static_page_table_map(
+    pt: var StaticPageTable,
+    vaddr: u32,
+    paddr: u32,
+    flags: PageFlags
+) -> Result<u32, text>:
+    val aligned_v = vaddr & ~(PAGE_SIZE - 1)
+    val aligned_p = paddr & ~(PAGE_SIZE - 1)
+
+    # Check for existing mapping — update in place.
+    if val idx = static_page_table_find(pt, aligned_v):
+        pt.entries[idx].paddr = aligned_p
+        pt.entries[idx].flags = flags
+        return Result<u32, text>.Ok(aligned_v)
+
+    # Insert new mapping.
+    if pt.count >= pt.capacity:
+        return Result<u32, text>.Err("page table full")
+
+    val slot = pt.count
+    pt.entries[slot].vaddr = aligned_v
+    pt.entries[slot].paddr = aligned_p
+    pt.entries[slot].flags = flags
+    pt.entries[slot].valid = true
+    pt.count = pt.count + 1
+    Result<u32, text>.Ok(aligned_v)
+
+# Remove a mapping.
+fn static_page_table_unmap(pt: var StaticPageTable, vaddr: u32) -> Result<u32, text>:
+    val aligned = vaddr & ~(PAGE_SIZE - 1)
+    if val idx = static_page_table_find(pt, aligned):
+        pt.entries[idx].valid = false
+        return Result<u32, text>.Ok(aligned)
+    Result<u32, text>.Err("page not mapped")
+
+# Translate a virtual address.
+fn static_page_table_translate(pt: StaticPageTable, vaddr: u32) -> Option<TranslateResult>:
+    val aligned = vaddr & ~(PAGE_SIZE - 1)
+    val offset = vaddr & (PAGE_SIZE - 1)
+    if val idx = static_page_table_find(pt, aligned):
+        return Option<TranslateResult>.Some(TranslateResult(
+            phys_addr: pt.entries[idx].paddr + offset,
+            flags: pt.entries[idx].flags
+        ))
+    Option<TranslateResult>.None
+
+# Check if a virtual address is mapped.
+fn static_page_table_is_mapped(pt: StaticPageTable, vaddr: u32) -> bool:
+    val aligned = vaddr & ~(PAGE_SIZE - 1)
+    if val idx = static_page_table_find(pt, aligned):
+        return true
+    false
+
+# Map a contiguous range of pages (vaddr and paddr both contiguous).
+fn static_page_table_map_range(
+    pt: var StaticPageTable,
+    vaddr: u32,
+    paddr: u32,
+    num_pages: u32,
+    flags: PageFlags
+) -> Result<u32, text>:
+    for i in 0..num_pages:
+        val v = vaddr + i * PAGE_SIZE
+        val p = paddr + i * PAGE_SIZE
+        val res = static_page_table_map(pt, v, p, flags)
+        if val err = res.err():
+            return Result<u32, text>.Err(err)
+    Result<u32, text>.Ok(vaddr)

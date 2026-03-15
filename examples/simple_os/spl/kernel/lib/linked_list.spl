@@ -1,0 +1,168 @@
+# Intrusive Doubly-Linked List
+# Index-based (not pointer-based) for use in fixed-size arrays.
+# Used by the scheduler for ready queues and by IPC for wait queues.
+
+val LIST_NONE: u32 = 0xFFFFFFFF  # Sentinel: no node
+
+# A node in the linked list. Stores prev/next as indices into an
+# external backing array rather than raw pointers.
+struct ListNode:
+    prev: u32    # Index of previous node, or LIST_NONE
+    next: u32    # Index of next node, or LIST_NONE
+    active: bool # Whether this node is currently in a list
+
+# The list header. Tracks head, tail, and element count.
+struct LinkedList:
+    head: u32        # Index of first node, or LIST_NONE
+    tail: u32        # Index of last node, or LIST_NONE
+    len: u32         # Number of nodes in the list
+    nodes: [ListNode; 256]  # Backing storage for nodes
+    capacity: u32    # Maximum number of nodes
+
+# Create an empty linked list with a given capacity (max 256).
+fn linked_list_create(capacity: u32) -> LinkedList:
+    val cap = if capacity > 256: 256 else: capacity
+    var default_node = ListNode(prev: LIST_NONE, next: LIST_NONE, active: false)
+    var list = LinkedList(
+        head: LIST_NONE,
+        tail: LIST_NONE,
+        len: 0,
+        nodes: [default_node; 256],
+        capacity: cap
+    )
+    list
+
+# Returns true if the list contains no elements.
+fn linked_list_is_empty(list: LinkedList) -> bool:
+    list.len == 0
+
+# Returns the number of elements in the list.
+fn linked_list_count(list: LinkedList) -> u32:
+    list.len
+
+# Push a node index to the back of the list (enqueue).
+fn linked_list_push_back(list: var LinkedList, index: u32):
+    if index >= list.capacity:
+        return
+    if list.nodes[index].active:
+        return  # Already in list — avoid corruption
+
+    list.nodes[index].prev = list.tail
+    list.nodes[index].next = LIST_NONE
+    list.nodes[index].active = true
+
+    if list.tail != LIST_NONE:
+        list.nodes[list.tail].next = index
+    else:
+        # List was empty — this node is also the head.
+        list.head = index
+
+    list.tail = index
+    list.len = list.len + 1
+
+# Push a node index to the front of the list.
+fn linked_list_push_front(list: var LinkedList, index: u32):
+    if index >= list.capacity:
+        return
+    if list.nodes[index].active:
+        return
+
+    list.nodes[index].prev = LIST_NONE
+    list.nodes[index].next = list.head
+    list.nodes[index].active = true
+
+    if list.head != LIST_NONE:
+        list.nodes[list.head].prev = index
+    else:
+        list.tail = index
+
+    list.head = index
+    list.len = list.len + 1
+
+# Pop and return the front node index. Returns None if empty.
+fn linked_list_pop_front(list: var LinkedList) -> Option<u32>:
+    if list.head == LIST_NONE:
+        return Option<u32>.None
+
+    val index = list.head
+    val next = list.nodes[index].next
+
+    if next != LIST_NONE:
+        list.nodes[next].prev = LIST_NONE
+    else:
+        # List is now empty.
+        list.tail = LIST_NONE
+
+    list.head = next
+    list.nodes[index].prev = LIST_NONE
+    list.nodes[index].next = LIST_NONE
+    list.nodes[index].active = false
+    list.len = list.len - 1
+
+    Option<u32>.Some(index)
+
+# Pop and return the back node index. Returns None if empty.
+fn linked_list_pop_back(list: var LinkedList) -> Option<u32>:
+    if list.tail == LIST_NONE:
+        return Option<u32>.None
+
+    val index = list.tail
+    val prev = list.nodes[index].prev
+
+    if prev != LIST_NONE:
+        list.nodes[prev].next = LIST_NONE
+    else:
+        list.head = LIST_NONE
+
+    list.tail = prev
+    list.nodes[index].prev = LIST_NONE
+    list.nodes[index].next = LIST_NONE
+    list.nodes[index].active = false
+    list.len = list.len - 1
+
+    Option<u32>.Some(index)
+
+# Remove a node by index from anywhere in the list.
+fn linked_list_remove(list: var LinkedList, index: u32):
+    if index >= list.capacity:
+        return
+    if !list.nodes[index].active:
+        return
+
+    val prev = list.nodes[index].prev
+    val next = list.nodes[index].next
+
+    # Patch the previous node's next pointer (or update head).
+    if prev != LIST_NONE:
+        list.nodes[prev].next = next
+    else:
+        list.head = next
+
+    # Patch the next node's prev pointer (or update tail).
+    if next != LIST_NONE:
+        list.nodes[next].prev = prev
+    else:
+        list.tail = prev
+
+    list.nodes[index].prev = LIST_NONE
+    list.nodes[index].next = LIST_NONE
+    list.nodes[index].active = false
+    list.len = list.len - 1
+
+# Peek at the front node index without removing it.
+fn linked_list_peek_front(list: LinkedList) -> Option<u32>:
+    if list.head == LIST_NONE:
+        return Option<u32>.None
+    Option<u32>.Some(list.head)
+
+# Peek at the back node index without removing it.
+fn linked_list_peek_back(list: LinkedList) -> Option<u32>:
+    if list.tail == LIST_NONE:
+        return Option<u32>.None
+    Option<u32>.Some(list.tail)
+
+# Check whether a given node index is currently in the list.
+fn linked_list_contains(list: LinkedList, index: u32) -> bool:
+    if index >= list.capacity:
+        return false
+    list.nodes[index].active

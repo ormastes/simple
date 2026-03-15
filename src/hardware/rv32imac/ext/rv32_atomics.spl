@@ -1,0 +1,151 @@
+# RV32 A Extension - Atomic Operations
+#
+# Implements LR.W, SC.W, and AMO operations.
+# Tracks reservation set for LR/SC pairs.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+# ============================================================================
+# Atomic Operation Types
+# ============================================================================
+
+enum AmoOp:
+    LrW
+    ScW
+    AmoSwap
+    AmoAdd
+    AmoXor
+    AmoAnd
+    AmoOr
+    AmoMin
+    AmoMax
+    AmoMinU
+    AmoMaxU
+
+# ============================================================================
+# Reservation Set
+# ============================================================================
+
+class ReservationSet:
+    """Tracks LR/SC reservation for atomic operations."""
+    valid: bool
+    addr: i64
+
+    static fn create() -> ReservationSet:
+        ReservationSet(valid: false, addr: 0)
+
+    me reserve(addr: i64):
+        """Set reservation on address."""
+        self.valid = true
+        self.addr = addr and 0xFFFFFFFC
+
+    me invalidate():
+        """Invalidate reservation."""
+        self.valid = false
+
+    me check_and_clear(addr: i64) -> bool:
+        """Check reservation and clear. Returns true if SC succeeds."""
+        if self.valid and self.addr == (addr and 0xFFFFFFFC):
+            self.valid = false
+            return true
+        self.valid = false
+        false
+
+    me invalidate_if_match(addr: i64):
+        """Invalidate if address matches (for intervening stores)."""
+        if self.valid and self.addr == (addr and 0xFFFFFFFC):
+            self.valid = false
+
+# ============================================================================
+# AMO Execute
+# ============================================================================
+
+fn amo_execute(op: AmoOp, mem_val: i64, rs2_val: i64) -> i64:
+    """Compute new value for AMO operation. Returns value to store."""
+    val mask = 0xFFFFFFFF
+    if op == AmoOp.AmoSwap: return rs2_val and mask
+    elif op == AmoOp.AmoAdd: return (mem_val + rs2_val) and mask
+    elif op == AmoOp.AmoXor: return (mem_val xor rs2_val) and mask
+    elif op == AmoOp.AmoAnd: return mem_val and rs2_val
+    elif op == AmoOp.AmoOr: return mem_val or rs2_val
+    elif op == AmoOp.AmoMin:
+        val sm = _to_signed(mem_val)
+        val sr = _to_signed(rs2_val)
+        return (if sm < sr: mem_val else: rs2_val) and mask
+    elif op == AmoOp.AmoMax:
+        val sm = _to_signed(mem_val)
+        val sr = _to_signed(rs2_val)
+        return (if sm > sr: mem_val else: rs2_val) and mask
+    elif op == AmoOp.AmoMinU:
+        return (if (mem_val and mask) < (rs2_val and mask): mem_val else: rs2_val) and mask
+    elif op == AmoOp.AmoMaxU:
+        return (if (mem_val and mask) > (rs2_val and mask): mem_val else: rs2_val) and mask
+    mem_val
+
+fn _to_signed(v: i64) -> i64:
+    val u = v and 0xFFFFFFFF
+    if u >= 0x80000000: u - 0x100000000 else: u
+
+fn decode_amo_op(funct5: i64) -> AmoOp:
+    """Decode AMO operation from funct5 field."""
+    if funct5 == F5_LR: return AmoOp.LrW
+    elif funct5 == F5_SC: return AmoOp.ScW
+    elif funct5 == F5_AMOSWAP: return AmoOp.AmoSwap
+    elif funct5 == F5_AMOADD: return AmoOp.AmoAdd
+    elif funct5 == F5_AMOXOR: return AmoOp.AmoXor
+    elif funct5 == F5_AMOAND: return AmoOp.AmoAnd
+    elif funct5 == F5_AMOOR: return AmoOp.AmoOr
+    elif funct5 == F5_AMOMIN: return AmoOp.AmoMin
+    elif funct5 == F5_AMOMAX: return AmoOp.AmoMax
+    elif funct5 == F5_AMOMINU: return AmoOp.AmoMinU
+    elif funct5 == F5_AMOMAXU: return AmoOp.AmoMaxU
+    AmoOp.AmoAdd
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_atomics_vhdl() -> text:
+    """Generate VHDL for atomic operations unit."""
+    var b = VhdlBuilder.create("rv32_atomics")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_atomics")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_port("start", "in", "std_logic", false)
+    b.emit_port("funct5", "in", "std_logic_vector(4 downto 0)", false)
+    b.emit_port("aq", "in", "std_logic", false)
+    b.emit_port("rl", "in", "std_logic", false)
+    b.emit_port("addr", "in", "word_t", false)
+    b.emit_port("rs2_data", "in", "word_t", false)
+    b.emit_comment("Memory interface")
+    b.emit_port("mem_rdata", "in", "word_t", false)
+    b.emit_port("mem_addr", "out", "word_t", false)
+    b.emit_port("mem_wdata", "out", "word_t", false)
+    b.emit_port("mem_we", "out", "std_logic", false)
+    b.emit_comment("Result")
+    b.emit_port("result", "out", "word_t", false)
+    b.emit_port("ready", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_atomics")
+
+    b.emit_architecture_begin("rv32_atomics", "rtl")
+    b.emit_signal_decl("reservation_valid", "std_logic", Some("'0'"))
+    b.emit_signal_decl("reservation_addr", "word_t", Some("(others => '0')"))
+    b.emit_architecture_body_begin()
+
+    b.emit_comment("Atomic operations - simplified combinational for simulation")
+    b.emit_signal_assign("mem_addr", "addr")
+    b.emit_signal_assign("ready", "'1'")
+    b.emit_signal_assign("result", "mem_rdata")
+    b.emit_signal_assign("mem_wdata", "rs2_data")
+    b.emit_signal_assign("mem_we", "'0'")
+
+    b.emit_architecture_end("rtl")
+    b.build()

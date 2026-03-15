@@ -1,0 +1,193 @@
+# IPC Echo Demo
+#
+# Two-role IPC demonstration: an echo server and an echo client.
+# The server waits for messages on an endpoint and echoes them back.
+# The client sends a test message, verifies the reply, and signals
+# the root task that the IPC test passed.
+#
+# This is the primary validation test for the microkernel's IPC path.
+#
+# Capability slot assignments (set up by root task):
+#   10 = Echo IPC endpoint (shared between server and client)
+#   20 = Root task notification (client signals test result)
+
+use user.libos.syscall.{
+    sys_send, sys_recv, sys_call, sys_reply, sys_debug_print, sys_yield,
+    msg_info_new, msg_info_label, msg_info_length
+}
+use user.libos.ipc.{
+    ipc_buffer_create, IpcBuffer, MessageInfo,
+    message_info_decode, message_info_create, message_info_encode,
+    ipc_pack_string, ipc_unpack_string,
+    LABEL_STRING_MSG, LABEL_ACK
+}
+
+# ---------------------------------------------------------------------------
+# Capability slots
+# ---------------------------------------------------------------------------
+val CAP_ECHO_EP: i32 = 10
+val CAP_ROOT_NOTIF: i32 = 20
+
+# Echo-specific message labels
+val LABEL_ECHO_REQUEST: i32 = 50
+val LABEL_ECHO_REPLY: i32 = 51
+val LABEL_ECHO_DONE: i32 = 52
+
+# Number of echo rounds to perform
+val ECHO_ROUNDS: i32 = 3
+
+# ---------------------------------------------------------------------------
+# Echo Server
+#
+# Waits for messages on the echo endpoint, reads the payload, and
+# replies with the same payload. Runs forever.
+# ---------------------------------------------------------------------------
+fn echo_server(endpoint_cap: i32):
+    sys_debug_print("[ECHO-SRV] Echo server started")
+    sys_debug_print("[ECHO-SRV] Listening on endpoint cap {endpoint_cap}")
+
+    var buf = ipc_buffer_create()
+    var messages_handled = 0
+
+    while true:
+        # Block until a message arrives
+        val raw_info = sys_recv(endpoint_cap)
+        buf.tag = raw_info
+        val info = message_info_decode(raw_info)
+        messages_handled = messages_handled + 1
+
+        sys_debug_print("[ECHO-SRV] Received message #{messages_handled}, label={info.label}")
+
+        if info.label == LABEL_ECHO_REQUEST:
+            # Echo back the same registers
+            # The payload is already in buf.registers from the recv
+            val reply_info = message_info_create(LABEL_ECHO_REPLY, info.length, 0)
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+            sys_debug_print("[ECHO-SRV] Echoed message #{messages_handled}")
+
+        else if info.label == LABEL_STRING_MSG:
+            # String echo: unpack, log, and echo back
+            val received_text = ipc_unpack_string(buf, 0)
+            sys_debug_print("[ECHO-SRV] Received string: {received_text}")
+
+            # Reply with the same string
+            val _regs_used = ipc_pack_string(buf, 0, received_text)
+            val reply_info = message_info_create(LABEL_STRING_MSG, _regs_used, 0)
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+            sys_debug_print("[ECHO-SRV] Echoed string back")
+
+        else:
+            # Unknown label -- reply with the raw payload anyway
+            val reply_info = message_info_create(info.label, info.length, 0)
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+
+# ---------------------------------------------------------------------------
+# Echo Client
+#
+# Sends test messages to the echo server and verifies the replies.
+# After all rounds complete, signals the root task with the result.
+# ---------------------------------------------------------------------------
+fn echo_client(endpoint_cap: i32):
+    sys_debug_print("[ECHO-CLI] Echo client started")
+
+    var buf = ipc_buffer_create()
+    var pass_count = 0
+    var fail_count = 0
+
+    # ------------------------------------------------------------------
+    # Test 1: Simple integer echo
+    # ------------------------------------------------------------------
+    sys_debug_print("[ECHO-CLI] --- Test 1: Integer echo ---")
+    for round in 0..ECHO_ROUNDS:
+        val test_value = 42 + round
+        buf.registers[0] = test_value
+        val send_info = message_info_create(LABEL_ECHO_REQUEST, 1, 0)
+        buf.tag = message_info_encode(send_info)
+
+        sys_debug_print("[ECHO-CLI] Sending value: {test_value}")
+        val reply_raw = sys_call(endpoint_cap, buf.tag)
+        buf.tag = reply_raw
+        val reply_info = message_info_decode(reply_raw)
+
+        if reply_info.label == LABEL_ECHO_REPLY and buf.registers[0] == test_value:
+            sys_debug_print("[ECHO-CLI] PASS: Got {buf.registers[0]} (expected {test_value})")
+            pass_count = pass_count + 1
+        else:
+            sys_debug_print("[ECHO-CLI] FAIL: Got {buf.registers[0]} (expected {test_value})")
+            fail_count = fail_count + 1
+
+    # ------------------------------------------------------------------
+    # Test 2: Multi-word echo
+    # ------------------------------------------------------------------
+    sys_debug_print("[ECHO-CLI] --- Test 2: Multi-word echo ---")
+    buf.registers[0] = 0xDEAD
+    buf.registers[1] = 0xBEEF
+    buf.registers[2] = 0xCAFE
+    val multi_info = message_info_create(LABEL_ECHO_REQUEST, 3, 0)
+    buf.tag = message_info_encode(multi_info)
+
+    val multi_reply = sys_call(endpoint_cap, buf.tag)
+    buf.tag = multi_reply
+    val multi_reply_info = message_info_decode(multi_reply)
+
+    if (multi_reply_info.label == LABEL_ECHO_REPLY and
+        buf.registers[0] == 0xDEAD and
+        buf.registers[1] == 0xBEEF and
+        buf.registers[2] == 0xCAFE):
+        sys_debug_print("[ECHO-CLI] PASS: Multi-word echo verified")
+        pass_count = pass_count + 1
+    else:
+        sys_debug_print("[ECHO-CLI] FAIL: Multi-word echo mismatch")
+        fail_count = fail_count + 1
+
+    # ------------------------------------------------------------------
+    # Test 3: String echo
+    # ------------------------------------------------------------------
+    sys_debug_print("[ECHO-CLI] --- Test 3: String echo ---")
+    val test_string = "Hello, microkernel!"
+    val _regs = ipc_pack_string(buf, 0, test_string)
+    val str_info = message_info_create(LABEL_STRING_MSG, _regs, 0)
+    buf.tag = message_info_encode(str_info)
+
+    val str_reply = sys_call(endpoint_cap, buf.tag)
+    buf.tag = str_reply
+    val str_reply_info = message_info_decode(str_reply)
+
+    if str_reply_info.label == LABEL_STRING_MSG:
+        val echo_text = ipc_unpack_string(buf, 0)
+        if echo_text == test_string:
+            sys_debug_print("[ECHO-CLI] PASS: String echo verified")
+            pass_count = pass_count + 1
+        else:
+            sys_debug_print("[ECHO-CLI] FAIL: String mismatch: got '{echo_text}'")
+            fail_count = fail_count + 1
+    else:
+        sys_debug_print("[ECHO-CLI] FAIL: Unexpected reply label for string test")
+        fail_count = fail_count + 1
+
+    # ------------------------------------------------------------------
+    # Report results
+    # ------------------------------------------------------------------
+    val total = pass_count + fail_count
+    sys_debug_print("[ECHO-CLI] Results: {pass_count}/{total} passed")
+
+    if fail_count == 0:
+        sys_debug_print("[ECHO-CLI] [IPC_TEST_PASS] All echo tests passed")
+    else:
+        sys_debug_print("[ECHO-CLI] [IPC_TEST_FAIL] {fail_count} tests failed")
+
+    # Signal root task with the result
+    val done_label = if fail_count == 0: LABEL_ECHO_DONE else: -1
+    val done_info = message_info_create(done_label, 1, 0)
+    buf.registers[0] = pass_count
+    buf.tag = message_info_encode(done_info)
+    val _r = sys_send(CAP_ROOT_NOTIF, buf.tag)
+
+    sys_debug_print("[ECHO-CLI] Echo client finished, entering idle")
+
+    # Idle forever
+    while true:
+        sys_yield()

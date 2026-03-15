@@ -1,0 +1,210 @@
+# Name Server - IPC-Based Service Discovery
+#
+# A simple service registry that allows user-space tasks to find each
+# other by name. Services register themselves with a (name, endpoint_cap)
+# pair. Clients look up services by name and receive the endpoint
+# capability needed to communicate with that service.
+#
+# Protocol:
+#   Register: label=LABEL_REGISTER, reg[0]=name_len, reg[1..]=name, cap[0]=ep_cap
+#   Lookup:   label=LABEL_LOOKUP, reg[0]=name_len, reg[1..]=name
+#   Reply:    label=LABEL_FOUND + cap[0]=ep_cap, or label=LABEL_NOT_FOUND
+#
+# Capability slot assignments (set up by root task):
+#   13 = Name server IPC endpoint (we are the server)
+
+use user.libos.syscall.{
+    sys_recv, sys_reply, sys_debug_print, sys_yield,
+    msg_info_new, msg_info_label
+}
+use user.libos.ipc.{
+    ipc_buffer_create, ipc_unpack_string, ipc_pack_string,
+    IpcBuffer, MessageInfo,
+    message_info_decode, message_info_create, message_info_encode,
+    LABEL_REGISTER, LABEL_LOOKUP, LABEL_FOUND, LABEL_NOT_FOUND,
+    LABEL_ACK, LABEL_ERROR
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+val CAP_NAME_EP: i32 = 13
+val MAX_SERVICES: i32 = 64
+val MAX_NAME_LEN: i32 = 32
+
+# ---------------------------------------------------------------------------
+# Service entry
+# ---------------------------------------------------------------------------
+struct ServiceEntry:
+    active: bool
+    name: text
+    endpoint_cap: i32       # Capability slot index for the service endpoint
+    badge: i32              # Badge value for sender discrimination
+
+# ---------------------------------------------------------------------------
+# Service registry
+# ---------------------------------------------------------------------------
+struct ServiceRegistry:
+    entries: [ServiceEntry; 64]
+    count: i32
+
+fn registry_create() -> ServiceRegistry:
+    val empty = ServiceEntry(active: false, name: "", endpoint_cap: 0, badge: 0)
+    ServiceRegistry(
+        entries: [empty; 64],
+        count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Register a service in the registry.
+# Returns the index on success, or -1 if the registry is full or the
+# name is already taken.
+# ---------------------------------------------------------------------------
+fn registry_register(reg: var ServiceRegistry, name: text, ep_cap: i32, badge: i32) -> i32:
+    # Check for duplicate name
+    for i in 0..MAX_SERVICES:
+        if reg.entries[i].active and reg.entries[i].name == name:
+            # Already registered -- update the endpoint
+            reg.entries[i].endpoint_cap = ep_cap
+            reg.entries[i].badge = badge
+            return i
+
+    # Find a free slot
+    if reg.count >= MAX_SERVICES:
+        return -1
+
+    for i in 0..MAX_SERVICES:
+        if not reg.entries[i].active:
+            reg.entries[i] = ServiceEntry(
+                active: true,
+                name: name,
+                endpoint_cap: ep_cap,
+                badge: badge
+            )
+            reg.count = reg.count + 1
+            return i
+
+    -1
+
+# ---------------------------------------------------------------------------
+# Look up a service by name.
+# Returns the endpoint capability slot, or -1 if not found.
+# ---------------------------------------------------------------------------
+fn registry_lookup(reg: ServiceRegistry, name: text) -> i32:
+    for i in 0..MAX_SERVICES:
+        if reg.entries[i].active and reg.entries[i].name == name:
+            return reg.entries[i].endpoint_cap
+    -1
+
+# ---------------------------------------------------------------------------
+# Unregister a service by name.
+# Returns true if the service was found and removed.
+# ---------------------------------------------------------------------------
+fn registry_unregister(reg: var ServiceRegistry, name: text) -> bool:
+    for i in 0..MAX_SERVICES:
+        if reg.entries[i].active and reg.entries[i].name == name:
+            reg.entries[i].active = false
+            reg.entries[i].name = ""
+            reg.entries[i].endpoint_cap = 0
+            reg.entries[i].badge = 0
+            reg.count = reg.count - 1
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# List all registered services (for debugging).
+# ---------------------------------------------------------------------------
+fn registry_dump(reg: ServiceRegistry):
+    sys_debug_print("[NAMESERV] --- Service Registry ---")
+    var listed = 0
+    for i in 0..MAX_SERVICES:
+        if reg.entries[i].active:
+            sys_debug_print("[NAMESERV]   {reg.entries[i].name} -> cap {reg.entries[i].endpoint_cap}")
+            listed = listed + 1
+    sys_debug_print("[NAMESERV] --- {listed} services registered ---")
+
+# ---------------------------------------------------------------------------
+# Handle a registration request
+# ---------------------------------------------------------------------------
+fn handle_register(reg: var ServiceRegistry, buf: var IpcBuffer, info: MessageInfo):
+    # Extract service name from message registers
+    val name = ipc_unpack_string(buf, 0)
+    if name.len() == 0:
+        val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+        buf.registers[0] = -1
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+        return
+
+    # The endpoint capability is passed in the caps transfer list
+    val ep_cap = buf.caps[0]
+    val badge = buf.recv_badge
+
+    val idx = registry_register(reg, name, ep_cap, badge)
+    if idx >= 0:
+        sys_debug_print("[NAMESERV] Registered: {name} -> cap {ep_cap}")
+        val reply_info = message_info_create(LABEL_ACK, 1, 0)
+        buf.registers[0] = idx
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+    else:
+        sys_debug_print("[NAMESERV] Registration failed: {name} (registry full)")
+        val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+        buf.registers[0] = -1
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+# ---------------------------------------------------------------------------
+# Handle a lookup request
+# ---------------------------------------------------------------------------
+fn handle_lookup(reg: ServiceRegistry, buf: var IpcBuffer, info: MessageInfo):
+    val name = ipc_unpack_string(buf, 0)
+    if name.len() == 0:
+        val reply_info = message_info_create(LABEL_NOT_FOUND, 0, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+        return
+
+    val ep_cap = registry_lookup(reg, name)
+    if ep_cap >= 0:
+        # Found -- reply with the endpoint cap
+        buf.caps[0] = ep_cap
+        val reply_info = message_info_create(LABEL_FOUND, 0, 1)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+    else:
+        # Not found
+        val reply_info = message_info_create(LABEL_NOT_FOUND, 0, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+fn main():
+    sys_debug_print("[NAMESERV] Name server starting")
+
+    var registry = registry_create()
+    var buf = ipc_buffer_create()
+
+    sys_debug_print("[NAMESERV] Name server ready, listening on endpoint")
+
+    # Main service loop
+    while true:
+        val raw_info = sys_recv(CAP_NAME_EP)
+        buf.tag = raw_info
+        val info = message_info_decode(raw_info)
+
+        if info.label == LABEL_REGISTER:
+            handle_register(registry, buf, info)
+
+        else if info.label == LABEL_LOOKUP:
+            handle_lookup(registry, buf, info)
+
+        else:
+            # Unknown request label
+            sys_debug_print("[NAMESERV] Unknown request label: {info.label}")
+            val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+            buf.registers[0] = -1
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)

@@ -1,0 +1,168 @@
+# x86 CPU Register State / Thread Context
+#
+# Defines the saved register state for context switching between threads.
+# Used by the context switch assembly (switch.S) and the scheduler.
+
+# ---------- segment selector constants ----------
+
+val SEL_KERNEL_CS: u32 = 0x08
+val SEL_KERNEL_DS: u32 = 0x10
+val SEL_USER_CS: u32 = 0x1B   # 0x18 | RPL 3
+val SEL_USER_DS: u32 = 0x23   # 0x20 | RPL 3
+
+# EFLAGS bits
+val EFLAGS_IF: u32 = 0x0200       # Interrupt enable flag
+val EFLAGS_IOPL0: u32 = 0x0000    # I/O privilege level 0
+val EFLAGS_IOPL3: u32 = 0x3000    # I/O privilege level 3
+val EFLAGS_RESERVED: u32 = 0x0002 # Bit 1 always set
+
+# ---------- register state ----------
+
+# Full saved register set for a thread / context switch.
+# Layout matches what pusha/popa + iret expect.
+@repr(C)
+struct RegisterState:
+    # General-purpose registers
+    eax: u32
+    ebx: u32
+    ecx: u32
+    edx: u32
+    esi: u32
+    edi: u32
+    ebp: u32
+    esp: u32
+
+    # Instruction pointer
+    eip: u32
+
+    # Flags
+    eflags: u32
+
+    # Segment selectors
+    cs: u32
+    ds: u32
+    es: u32
+    fs: u32
+    gs: u32
+    ss: u32
+
+# ---------- public API ----------
+
+# Create an initial register state for a new kernel thread.
+# entry_point: address of the function to start executing
+# stack_top:   top of the thread's kernel stack
+fn context_create_kernel(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        eax: 0,
+        ebx: 0,
+        ecx: 0,
+        edx: 0,
+        esi: 0,
+        edi: 0,
+        ebp: stack_top,
+        esp: stack_top,
+        eip: entry_point,
+        eflags: EFLAGS_IF | EFLAGS_RESERVED,
+        cs: SEL_KERNEL_CS,
+        ds: SEL_KERNEL_DS,
+        es: SEL_KERNEL_DS,
+        fs: SEL_KERNEL_DS,
+        gs: SEL_KERNEL_DS,
+        ss: SEL_KERNEL_DS
+    )
+
+# Create an initial register state for a new user-mode thread.
+# entry_point: user-space entry address
+# stack_top:   top of the user-space stack
+fn context_create_user(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        eax: 0,
+        ebx: 0,
+        ecx: 0,
+        edx: 0,
+        esi: 0,
+        edi: 0,
+        ebp: stack_top,
+        esp: stack_top,
+        eip: entry_point,
+        eflags: EFLAGS_IF | EFLAGS_RESERVED,
+        cs: SEL_USER_CS,
+        ds: SEL_USER_DS,
+        es: SEL_USER_DS,
+        fs: SEL_USER_DS,
+        gs: SEL_USER_DS,
+        ss: SEL_USER_DS
+    )
+
+# Create a register state for either kernel or user mode
+fn context_create(entry_point: u32, stack_top: u32, is_user: bool) -> RegisterState:
+    if is_user:
+        return context_create_user(entry_point, stack_top)
+    context_create_kernel(entry_point, stack_top)
+
+# Set the instruction pointer in a register state
+fn context_set_eip(regs: RegisterState, eip: u32) -> RegisterState:
+    RegisterState(
+        eax: regs.eax,
+        ebx: regs.ebx,
+        ecx: regs.ecx,
+        edx: regs.edx,
+        esi: regs.esi,
+        edi: regs.edi,
+        ebp: regs.ebp,
+        esp: regs.esp,
+        eip: eip,
+        eflags: regs.eflags,
+        cs: regs.cs,
+        ds: regs.ds,
+        es: regs.es,
+        fs: regs.fs,
+        gs: regs.gs,
+        ss: regs.ss
+    )
+
+# Set the stack pointer in a register state
+fn context_set_esp(regs: RegisterState, esp: u32) -> RegisterState:
+    RegisterState(
+        eax: regs.eax,
+        ebx: regs.ebx,
+        ecx: regs.ecx,
+        edx: regs.edx,
+        esi: regs.esi,
+        edi: regs.edi,
+        ebp: regs.ebp,
+        esp: esp,
+        eip: regs.eip,
+        eflags: regs.eflags,
+        cs: regs.cs,
+        ds: regs.ds,
+        es: regs.es,
+        fs: regs.fs,
+        gs: regs.gs,
+        ss: regs.ss
+    )
+
+# Set argument registers (eax, ebx, ecx) for passing data to a new context
+fn context_set_args(regs: RegisterState, arg0: u32, arg1: u32, arg2: u32) -> RegisterState:
+    RegisterState(
+        eax: arg0,
+        ebx: arg1,
+        ecx: arg2,
+        edx: regs.edx,
+        esi: regs.esi,
+        edi: regs.edi,
+        ebp: regs.ebp,
+        esp: regs.esp,
+        eip: regs.eip,
+        eflags: regs.eflags,
+        cs: regs.cs,
+        ds: regs.ds,
+        es: regs.es,
+        fs: regs.fs,
+        gs: regs.gs,
+        ss: regs.ss
+    )
+
+# Check if a register state is for user mode
+fn context_is_user(regs: RegisterState) -> bool:
+    (regs.cs & 0x03) == 3

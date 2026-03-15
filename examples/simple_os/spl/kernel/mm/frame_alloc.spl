@@ -1,0 +1,141 @@
+# Bitmap-based Physical Frame Allocator
+# Manages allocation and deallocation of 4KB physical memory frames.
+# Uses the Bitmap data structure to track which frames are free/used.
+# Integrates with the FrameTable for metadata tracking.
+
+use kernel.lib.bitmap.{
+    Bitmap, bitmap_create, bitmap_set, bitmap_clear, bitmap_test,
+    bitmap_find_first_clear, bitmap_count_set, bitmap_count_clear,
+    bitmap_find_contiguous_clear, bitmap_set_range, bitmap_clear_range
+}
+use kernel.mm.frame_table.{FRAME_SIZE}
+
+val FRAME_ALLOC_MAX_FRAMES: u32 = 32768  # Max frames the bitmap supports
+
+# The frame allocator. Each bit in the bitmap represents one 4KB frame:
+# 0 = free, 1 = allocated.
+struct BitmapFrameAllocator:
+    base: u32          # Physical address of the first manageable frame
+    num_frames: u32    # Total number of frames under management
+    bitmap: Bitmap     # Allocation bitmap
+
+# Create a new frame allocator starting at physical address `base`,
+# managing `num_frames` consecutive 4KB frames. All frames start free.
+fn frame_alloc_create(base: u32, num_frames: u32) -> BitmapFrameAllocator:
+    val capped = if num_frames > FRAME_ALLOC_MAX_FRAMES:
+        FRAME_ALLOC_MAX_FRAMES
+    else:
+        num_frames
+    var alloc = BitmapFrameAllocator(
+        base: base,
+        num_frames: capped,
+        bitmap: bitmap_create(capped)
+    )
+    alloc
+
+# Allocate a single 4KB frame.
+# Returns the physical address of the allocated frame, or None if OOM.
+fn frame_alloc_alloc(alloc: var BitmapFrameAllocator) -> Option<u32>:
+    if val bit = bitmap_find_first_clear(alloc.bitmap):
+        bitmap_set(alloc.bitmap, bit)
+        val addr = alloc.base + bit * FRAME_SIZE
+        return Option<u32>.Some(addr)
+    Option<u32>.None
+
+# Free a previously allocated frame by its physical address.
+fn frame_alloc_free(alloc: var BitmapFrameAllocator, addr: u32):
+    if addr < alloc.base:
+        return
+    val frame_index = (addr - alloc.base) / FRAME_SIZE
+    if frame_index >= alloc.num_frames:
+        return
+    bitmap_clear(alloc.bitmap, frame_index)
+
+# Allocate `count` physically contiguous frames.
+# Returns the physical address of the first frame, or None if unavailable.
+fn frame_alloc_alloc_contiguous(alloc: var BitmapFrameAllocator, count: u32) -> Option<u32>:
+    if count == 0:
+        return Option<u32>.None
+    if count == 1:
+        return frame_alloc_alloc(alloc)
+
+    if val start_bit = bitmap_find_contiguous_clear(alloc.bitmap, count):
+        bitmap_set_range(alloc.bitmap, start_bit, count)
+        val addr = alloc.base + start_bit * FRAME_SIZE
+        return Option<u32>.Some(addr)
+    Option<u32>.None
+
+# Free `count` contiguous frames starting at `addr`.
+fn frame_alloc_free_contiguous(alloc: var BitmapFrameAllocator, addr: u32, count: u32):
+    if addr < alloc.base:
+        return
+    val start_index = (addr - alloc.base) / FRAME_SIZE
+    if start_index + count > alloc.num_frames:
+        return
+    bitmap_clear_range(alloc.bitmap, start_index, count)
+
+# Mark a specific frame as used (e.g., kernel image, page tables).
+# Used during initialization to reserve frames that are already occupied.
+fn frame_alloc_mark_used(alloc: var BitmapFrameAllocator, addr: u32):
+    if addr < alloc.base:
+        return
+    val frame_index = (addr - alloc.base) / FRAME_SIZE
+    if frame_index >= alloc.num_frames:
+        return
+    bitmap_set(alloc.bitmap, frame_index)
+
+# Mark a range of frames as used.
+fn frame_alloc_mark_range_used(alloc: var BitmapFrameAllocator, start_addr: u32, size: u32):
+    val start_frame = (start_addr - alloc.base) / FRAME_SIZE
+    val num_frames = (size + FRAME_SIZE - 1) / FRAME_SIZE
+    bitmap_set_range(alloc.bitmap, start_frame, num_frames)
+
+# Check whether a specific physical address is currently allocated.
+fn frame_alloc_is_allocated(alloc: BitmapFrameAllocator, addr: u32) -> bool:
+    if addr < alloc.base:
+        return false
+    val frame_index = (addr - alloc.base) / FRAME_SIZE
+    if frame_index >= alloc.num_frames:
+        return false
+    bitmap_test(alloc.bitmap, frame_index)
+
+# Return the number of free frames.
+fn frame_alloc_free_count(alloc: BitmapFrameAllocator) -> u32:
+    bitmap_count_clear(alloc.bitmap)
+
+# Return the number of used frames.
+fn frame_alloc_used_count(alloc: BitmapFrameAllocator) -> u32:
+    bitmap_count_set(alloc.bitmap)
+
+# Return the total number of managed frames.
+fn frame_alloc_total_count(alloc: BitmapFrameAllocator) -> u32:
+    alloc.num_frames
+
+# Return free memory in bytes.
+fn frame_alloc_free_bytes(alloc: BitmapFrameAllocator) -> u32:
+    frame_alloc_free_count(alloc) * FRAME_SIZE
+
+# Return used memory in bytes.
+fn frame_alloc_used_bytes(alloc: BitmapFrameAllocator) -> u32:
+    frame_alloc_used_count(alloc) * FRAME_SIZE
+
+# --- Method-style wrappers for BitmapFrameAllocator ---
+# These allow the test to call alloc.alloc(), alloc.free(addr), etc.
+
+fn BitmapFrameAllocator.alloc(self: var BitmapFrameAllocator) -> Option<u32>:
+    frame_alloc_alloc(self)
+
+fn BitmapFrameAllocator.free(self: var BitmapFrameAllocator, addr: u32):
+    frame_alloc_free(self, addr)
+
+fn BitmapFrameAllocator.alloc_contiguous(self: var BitmapFrameAllocator, count: u32) -> Option<u32>:
+    frame_alloc_alloc_contiguous(self, count)
+
+fn BitmapFrameAllocator.free_count(self: BitmapFrameAllocator) -> u32:
+    frame_alloc_free_count(self)
+
+fn BitmapFrameAllocator.used_count(self: BitmapFrameAllocator) -> u32:
+    frame_alloc_used_count(self)
+
+fn BitmapFrameAllocator.is_allocated(self: BitmapFrameAllocator, addr: u32) -> bool:
+    frame_alloc_is_allocated(self, addr)

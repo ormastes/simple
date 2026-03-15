@@ -1,0 +1,222 @@
+# Root Task - System Constructor
+#
+# The first user-space process. The kernel starts it with full authority:
+# all untyped memory capabilities, IRQ control, and the initial CNode.
+# The root task's job is to construct the rest of the system from these
+# raw capabilities: create IPC endpoints, spawn driver and server tasks,
+# wire them together, and then go idle.
+#
+# Capability slot assignments (pre-populated by kernel bootstrap):
+#   0 = Root CNode (self)
+#   1 = Root VSpace (page directory)
+#   2 = Root TCB (self)
+#   3 = IRQ Control
+#   4 = Untyped memory pool (large region)
+#   5 = MMIO region for COM1 (0x3F8, 8 bytes)
+#   6 = IRQ handler for timer (IRQ 0)
+#
+# Slots 10+ are free for the root task to use.
+
+use user.libos.syscall.{
+    sys_send, sys_recv, sys_call, sys_yield, sys_debug_print,
+    sys_retype, sys_cnode_copy, sys_cnode_mint,
+    sys_tcb_configure, sys_tcb_resume, sys_tcb_set_priority,
+    sys_irq_set_handler,
+    msg_info_new, msg_info_label
+}
+use user.libos.ipc.{ipc_buffer_create, IpcBuffer}
+use user.libos.alloc.{BumpAllocator, bump_alloc_create, bump_alloc, bump_alloc_page}
+
+# ---------------------------------------------------------------------------
+# Well-known capability slot indices
+# ---------------------------------------------------------------------------
+val CAP_ROOT_CNODE: i32 = 0
+val CAP_ROOT_VSPACE: i32 = 1
+val CAP_ROOT_TCB: i32 = 2
+val CAP_IRQ_CONTROL: i32 = 3
+val CAP_UNTYPED: i32 = 4
+val CAP_COM1_MMIO: i32 = 5
+val CAP_TIMER_IRQ: i32 = 6
+
+# Slots for dynamically created objects (10+)
+val SLOT_ECHO_EP: i32 = 10
+val SLOT_SERIAL_EP: i32 = 11
+val SLOT_TIMER_EP: i32 = 12
+val SLOT_NAME_EP: i32 = 13
+val SLOT_ECHO_SERVER_TCB: i32 = 14
+val SLOT_ECHO_CLIENT_TCB: i32 = 15
+val SLOT_SERIAL_DRIVER_TCB: i32 = 16
+val SLOT_TIMER_DRIVER_TCB: i32 = 17
+val SLOT_NAME_SERVER_TCB: i32 = 18
+val SLOT_HELLO_TCB: i32 = 19
+val SLOT_NOTIFY_DONE: i32 = 20
+
+# KObject type ordinals (must match kernel/core/kobject.spl KObjectType)
+val KOBJ_ENDPOINT: i32 = 1
+val KOBJ_NOTIFICATION: i32 = 2
+val KOBJ_TCB: i32 = 4
+
+# Object size bits
+val EP_SIZE_BITS: i32 = 4       # 16 bytes for an endpoint
+val NOTIF_SIZE_BITS: i32 = 4    # 16 bytes for a notification
+val TCB_SIZE_BITS: i32 = 10     # 1024 bytes for a TCB
+
+# ---------------------------------------------------------------------------
+# Helper: create an endpoint in a destination slot
+# ---------------------------------------------------------------------------
+fn create_endpoint(dest_slot: i32) -> i32:
+    sys_retype(CAP_UNTYPED, KOBJ_ENDPOINT, EP_SIZE_BITS, dest_slot)
+
+# ---------------------------------------------------------------------------
+# Helper: create a notification object in a destination slot
+# ---------------------------------------------------------------------------
+fn create_notification(dest_slot: i32) -> i32:
+    sys_retype(CAP_UNTYPED, KOBJ_NOTIFICATION, NOTIF_SIZE_BITS, dest_slot)
+
+# ---------------------------------------------------------------------------
+# Helper: create a TCB in a destination slot and configure it
+# ---------------------------------------------------------------------------
+fn create_task(tcb_slot: i32, priority: i32) -> i32:
+    val result = sys_retype(CAP_UNTYPED, KOBJ_TCB, TCB_SIZE_BITS, tcb_slot)
+    if result < 0:
+        return result
+
+    # Configure: share our CSpace and VSpace with the child
+    val cfg_result = sys_tcb_configure(tcb_slot, CAP_ROOT_CNODE, CAP_ROOT_VSPACE, 0)
+    if cfg_result < 0:
+        return cfg_result
+
+    # Set priority
+    sys_tcb_set_priority(tcb_slot, priority)
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+fn main():
+    sys_debug_print("[ROOT] Root task started")
+    sys_debug_print("[ROOT] Constructing system from capabilities")
+
+    # ------------------------------------------------------------------
+    # Step 1: Create IPC endpoints for inter-task communication
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Creating IPC endpoints")
+
+    val ep_result = create_endpoint(SLOT_ECHO_EP)
+    if ep_result < 0:
+        sys_debug_print("[ROOT] ERROR: Failed to create echo endpoint")
+        return
+    sys_debug_print("[ROOT]   Echo endpoint created (slot 10)")
+
+    val serial_ep_result = create_endpoint(SLOT_SERIAL_EP)
+    if serial_ep_result < 0:
+        sys_debug_print("[ROOT] ERROR: Failed to create serial endpoint")
+        return
+    sys_debug_print("[ROOT]   Serial endpoint created (slot 11)")
+
+    val timer_ep_result = create_endpoint(SLOT_TIMER_EP)
+    if timer_ep_result < 0:
+        sys_debug_print("[ROOT] ERROR: Failed to create timer endpoint")
+        return
+    sys_debug_print("[ROOT]   Timer endpoint created (slot 12)")
+
+    val name_ep_result = create_endpoint(SLOT_NAME_EP)
+    if name_ep_result < 0:
+        sys_debug_print("[ROOT] ERROR: Failed to create name endpoint")
+        return
+    sys_debug_print("[ROOT]   Name server endpoint created (slot 13)")
+
+    # Create a notification for done signaling
+    val notif_result = create_notification(SLOT_NOTIFY_DONE)
+    if notif_result < 0:
+        sys_debug_print("[ROOT] ERROR: Failed to create notification")
+        return
+
+    # ------------------------------------------------------------------
+    # Step 2: Create driver tasks
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Creating driver tasks")
+
+    val serial_result = create_task(SLOT_SERIAL_DRIVER_TCB, 200)
+    if serial_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create serial driver")
+    else:
+        sys_debug_print("[ROOT]   Serial driver task created")
+
+    val timer_result = create_task(SLOT_TIMER_DRIVER_TCB, 200)
+    if timer_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create timer driver")
+    else:
+        sys_debug_print("[ROOT]   Timer driver task created")
+
+    # ------------------------------------------------------------------
+    # Step 3: Create server tasks
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Creating server tasks")
+
+    val name_result = create_task(SLOT_NAME_SERVER_TCB, 150)
+    if name_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create name server")
+    else:
+        sys_debug_print("[ROOT]   Name server task created")
+
+    # ------------------------------------------------------------------
+    # Step 4: Create application tasks
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Creating application tasks")
+
+    val hello_result = create_task(SLOT_HELLO_TCB, 100)
+    if hello_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create hello task")
+    else:
+        sys_debug_print("[ROOT]   Hello task created")
+
+    val echo_server_result = create_task(SLOT_ECHO_SERVER_TCB, 128)
+    if echo_server_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create echo server")
+    else:
+        sys_debug_print("[ROOT]   Echo server task created")
+
+    val echo_client_result = create_task(SLOT_ECHO_CLIENT_TCB, 128)
+    if echo_client_result < 0:
+        sys_debug_print("[ROOT] WARNING: Failed to create echo client")
+    else:
+        sys_debug_print("[ROOT]   Echo client task created")
+
+    # ------------------------------------------------------------------
+    # Step 5: Resume all tasks
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Starting all tasks")
+
+    # Start drivers first (highest priority)
+    val _r1 = sys_tcb_resume(SLOT_SERIAL_DRIVER_TCB)
+    val _r2 = sys_tcb_resume(SLOT_TIMER_DRIVER_TCB)
+
+    # Then servers
+    val _r3 = sys_tcb_resume(SLOT_NAME_SERVER_TCB)
+
+    # Then applications
+    val _r4 = sys_tcb_resume(SLOT_HELLO_TCB)
+    val _r5 = sys_tcb_resume(SLOT_ECHO_SERVER_TCB)
+    val _r6 = sys_tcb_resume(SLOT_ECHO_CLIENT_TCB)
+
+    sys_debug_print("[ROOT] All tasks started")
+
+    # ------------------------------------------------------------------
+    # Step 6: Wait for IPC echo test completion
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] Waiting for IPC echo test to complete...")
+
+    val done_msg = sys_recv(SLOT_NOTIFY_DONE)
+    val done_label = msg_info_label(done_msg)
+
+    if done_label >= 0:
+        sys_debug_print("[ROOT] [IPC_TEST_PASS] Echo test completed successfully")
+    else:
+        sys_debug_print("[ROOT] [IPC_TEST_FAIL] Echo test failed")
+
+    # ------------------------------------------------------------------
+    # Step 7: Idle loop - root task remains alive to hold capabilities
+    # ------------------------------------------------------------------
+    sys_debug_print("[ROOT] System construction complete, entering idle loop")
+    while true:
+        sys_yield()

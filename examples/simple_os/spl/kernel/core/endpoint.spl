@@ -1,0 +1,210 @@
+# IPC Endpoints (L4-style Synchronous Rendezvous)
+#
+# An endpoint is a kernel object through which threads perform synchronous
+# message passing.  When a sender calls endpoint_send and no receiver is
+# waiting, the sender blocks on the endpoint's sender_queue.  Conversely,
+# when a receiver calls endpoint_recv and no sender is waiting, it blocks
+# on the receiver_queue.
+#
+# When both sides are present, the message is transferred directly from
+# the sender's IPC buffer to the receiver's IPC buffer (zero-copy rendezvous).
+#
+# Endpoints also support one-shot reply capabilities: after a receiver
+# picks up a message via endpoint_recv, it can issue endpoint_reply to
+# send a response back to the original caller without needing a second
+# endpoint.
+
+use kernel.lib.linked_list.{LinkedList, linked_list_create,
+    linked_list_push_back, linked_list_pop_front, linked_list_is_empty,
+    linked_list_remove, linked_list_contains, linked_list_count}
+use kernel.core.ipc_buffer.{IpcBuffer, ipc_buffer_transfer, MAX_MSG_REGS}
+
+# ---------------------------------------------------------------------------
+# Endpoint states
+# ---------------------------------------------------------------------------
+enum EndpointState:
+    Idle            # No threads waiting on either side
+    SendBlocked     # One or more senders waiting for a receiver
+    RecvBlocked     # One or more receivers waiting for a sender
+
+# ---------------------------------------------------------------------------
+# Maximum threads that can block on a single endpoint
+# ---------------------------------------------------------------------------
+val EP_MAX_WAITERS: u32 = 64
+
+# ---------------------------------------------------------------------------
+# Endpoint structure
+# ---------------------------------------------------------------------------
+struct Endpoint:
+    state: EndpointState
+    sender_queue: LinkedList      # Queue of blocked sender TCB ids
+    receiver_queue: LinkedList    # Queue of blocked receiver TCB ids
+    badge: u32                    # Badge value for sender identification
+    reply_to: u32                 # TCB id of the thread awaiting a reply (0 = none)
+    reply_pending: bool           # Whether a reply capability is active
+
+# ---------------------------------------------------------------------------
+# Create a new endpoint in the Idle state with empty queues.
+# ---------------------------------------------------------------------------
+fn endpoint_create() -> Endpoint:
+    Endpoint(
+        state: EndpointState.Idle,
+        sender_queue: linked_list_create(EP_MAX_WAITERS),
+        receiver_queue: linked_list_create(EP_MAX_WAITERS),
+        badge: 0,
+        reply_to: 0,
+        reply_pending: false
+    )
+
+# ---------------------------------------------------------------------------
+# Update the endpoint state based on current queue occupancy.
+# Called after every enqueue/dequeue to keep state consistent.
+# ---------------------------------------------------------------------------
+fn endpoint_update_state(ep: var Endpoint):
+    val has_senders = !linked_list_is_empty(ep.sender_queue)
+    val has_receivers = !linked_list_is_empty(ep.receiver_queue)
+
+    if has_senders and !has_receivers:
+        ep.state = EndpointState.SendBlocked
+    else if has_receivers and !has_senders:
+        ep.state = EndpointState.RecvBlocked
+    else:
+        ep.state = EndpointState.Idle
+
+# ---------------------------------------------------------------------------
+# Synchronous send on an endpoint.
+#
+# If a receiver is already blocked, we dequeue it and perform the message
+# transfer immediately (rendezvous).  Returns the receiver's TCB id so
+# the scheduler can wake it.
+#
+# If no receiver is waiting, the sender is enqueued and must be suspended
+# by the caller (the scheduler).  Returns Err to signal blocking.
+#
+# msg_info is the packed message info word (label | length).
+# ---------------------------------------------------------------------------
+fn endpoint_send(ep: var Endpoint, sender_id: u32, msg_info: u32) -> Result<u32, text>:
+    # Check if a receiver is already waiting
+    if !linked_list_is_empty(ep.receiver_queue):
+        # Dequeue the first waiting receiver — rendezvous happens
+        if val receiver_id = linked_list_pop_front(ep.receiver_queue):
+            # Record the reply target so the receiver can reply later
+            ep.reply_to = sender_id
+            ep.reply_pending = true
+
+            endpoint_update_state(ep)
+            return Result<u32, text>.Ok(receiver_id)
+        else:
+            return Result<u32, text>.Err("receiver dequeue failed")
+
+    # No receiver available — block the sender
+    if sender_id < EP_MAX_WAITERS:
+        linked_list_push_back(ep.sender_queue, sender_id)
+        endpoint_update_state(ep)
+    return Result<u32, text>.Err("send blocked: no receiver")
+
+# ---------------------------------------------------------------------------
+# Synchronous receive on an endpoint.
+#
+# If a sender is already blocked, we dequeue it and the caller should
+# transfer the message from the sender's IPC buffer.  Returns the
+# sender's TCB id.
+#
+# If no sender is waiting, the receiver is enqueued and must be
+# suspended.  Returns Err to signal blocking.
+# ---------------------------------------------------------------------------
+fn endpoint_recv(ep: var Endpoint, receiver_id: u32) -> Result<u32, text>:
+    # Check if a sender is already waiting
+    if !linked_list_is_empty(ep.sender_queue):
+        if val sender_id = linked_list_pop_front(ep.sender_queue):
+            # Record reply target
+            ep.reply_to = sender_id
+            ep.reply_pending = true
+
+            endpoint_update_state(ep)
+            return Result<u32, text>.Ok(sender_id)
+        else:
+            return Result<u32, text>.Err("sender dequeue failed")
+
+    # No sender available — block the receiver
+    if receiver_id < EP_MAX_WAITERS:
+        linked_list_push_back(ep.receiver_queue, receiver_id)
+        endpoint_update_state(ep)
+    return Result<u32, text>.Err("recv blocked: no sender")
+
+# ---------------------------------------------------------------------------
+# One-shot reply on an endpoint.
+#
+# Sends a response back to the thread that originally called send (or call).
+# The reply capability is consumed: calling reply twice is an error.
+#
+# Returns the original caller's TCB id so the scheduler can wake it.
+# ---------------------------------------------------------------------------
+fn endpoint_reply(ep: var Endpoint, replier_id: u32, msg_info: u32) -> Result<u32, text>:
+    if !ep.reply_pending:
+        return Result<u32, text>.Err("no pending reply")
+
+    val caller_id = ep.reply_to
+
+    # Consume the reply capability
+    ep.reply_pending = false
+    ep.reply_to = 0
+
+    Result<u32, text>.Ok(caller_id)
+
+# ---------------------------------------------------------------------------
+# Cancel a blocked thread's wait on this endpoint.
+# Used when a thread is deleted or its timeout expires.
+# ---------------------------------------------------------------------------
+fn endpoint_cancel(ep: var Endpoint, thread_id: u32):
+    if linked_list_contains(ep.sender_queue, thread_id):
+        linked_list_remove(ep.sender_queue, thread_id)
+    if linked_list_contains(ep.receiver_queue, thread_id):
+        linked_list_remove(ep.receiver_queue, thread_id)
+    endpoint_update_state(ep)
+
+# ---------------------------------------------------------------------------
+# Check if the endpoint has any blocked threads.
+# ---------------------------------------------------------------------------
+fn endpoint_has_waiters(ep: Endpoint) -> bool:
+    !linked_list_is_empty(ep.sender_queue) or !linked_list_is_empty(ep.receiver_queue)
+
+# ---------------------------------------------------------------------------
+# Get the number of blocked senders.
+# ---------------------------------------------------------------------------
+fn endpoint_sender_count(ep: Endpoint) -> u32:
+    linked_list_count(ep.sender_queue)
+
+# ---------------------------------------------------------------------------
+# Get the number of blocked receivers.
+# ---------------------------------------------------------------------------
+fn endpoint_receiver_count(ep: Endpoint) -> u32:
+    linked_list_count(ep.receiver_queue)
+
+# ---------------------------------------------------------------------------
+# Set the badge value for this endpoint.
+# The badge is copied into the receiver's badge register on IPC delivery.
+# ---------------------------------------------------------------------------
+fn endpoint_set_badge(ep: var Endpoint, badge: u32):
+    ep.badge = badge
+
+# ---------------------------------------------------------------------------
+# Get the badge value.
+# ---------------------------------------------------------------------------
+fn endpoint_get_badge(ep: Endpoint) -> u32:
+    ep.badge
+
+# ---------------------------------------------------------------------------
+# Check whether a reply capability is currently active.
+# ---------------------------------------------------------------------------
+fn endpoint_has_reply(ep: Endpoint) -> bool:
+    ep.reply_pending
+
+# ---------------------------------------------------------------------------
+# Get the TCB id of the thread waiting for a reply.
+# Returns 0 if no reply is pending.
+# ---------------------------------------------------------------------------
+fn endpoint_get_reply_target(ep: Endpoint) -> u32:
+    if ep.reply_pending:
+        return ep.reply_to
+    0

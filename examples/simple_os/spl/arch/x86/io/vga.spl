@@ -1,0 +1,218 @@
+# x86 VGA Text-Mode Driver
+#
+# 80x25 colour text output at physical address 0xB8000.
+# Each cell is 2 bytes: [ASCII char][attribute byte].
+# Attribute byte: [blink:1 | bg:3 | fg:4]
+#
+# Usage:
+#   vga_init()
+#   vga_write_string(0, 0, "Hello", VGA_WHITE)
+
+# ---------- local port I/O ----------
+
+fn outb(port: i32, value: i32):
+    asm """
+        mov dx, {port}
+        mov al, {value}
+        out dx, al
+    """
+
+fn inb(port: i32) -> i32:
+    var result = 0
+    asm """
+        mov dx, {port}
+        in al, dx
+        movzx eax, al
+        mov {result}, eax
+    """
+    result
+
+# ---------- constants ----------
+
+val VGA_BASE: u32 = 0xB8000
+val VGA_WIDTH: i32 = 80
+val VGA_HEIGHT: i32 = 25
+val VGA_SIZE: i32 = 2000  # 80 * 25
+
+# Foreground / background colour values (4-bit)
+val VGA_BLACK: u8 = 0
+val VGA_BLUE: u8 = 1
+val VGA_GREEN: u8 = 2
+val VGA_CYAN: u8 = 3
+val VGA_RED: u8 = 4
+val VGA_MAGENTA: u8 = 5
+val VGA_BROWN: u8 = 6
+val VGA_LIGHT_GREY: u8 = 7
+val VGA_DARK_GREY: u8 = 8
+val VGA_LIGHT_BLUE: u8 = 9
+val VGA_LIGHT_GREEN: u8 = 10
+val VGA_LIGHT_CYAN: u8 = 11
+val VGA_LIGHT_RED: u8 = 12
+val VGA_LIGHT_MAGENTA: u8 = 13
+val VGA_YELLOW: u8 = 14
+val VGA_WHITE: u8 = 15
+
+# CRT controller ports
+val VGA_CRTC_INDEX: i32 = 0x3D4
+val VGA_CRTC_DATA: i32 = 0x3D5
+
+# ---------- global state ----------
+
+var g_cursor_x: i32 = 0
+var g_cursor_y: i32 = 0
+var g_color: u8 = VGA_WHITE    # default foreground
+var g_bg_color: u8 = VGA_BLACK # default background
+
+# ---------- helpers ----------
+
+# Compose an attribute byte from fg + bg colours
+fn vga_make_attr(fg: u8, bg: u8) -> u8:
+    (bg << 4) | (fg & 0x0F)
+
+# Compute byte offset into VGA buffer for (x, y)
+fn vga_offset(x: i32, y: i32) -> u32:
+    val idx = (y * VGA_WIDTH + x) * 2
+    VGA_BASE + idx as u32
+
+# Write a character + attribute at a byte offset
+fn vga_put(offset: u32, ch: u8, attr: u8):
+    unsafe:
+        @address(offset as u64) @volatile var cell_ch: u8
+        cell_ch = ch
+        @address((offset + 1) as u64) @volatile var cell_attr: u8
+        cell_attr = attr
+
+# Update the hardware cursor position
+fn vga_update_cursor(x: i32, y: i32):
+    val pos = y * VGA_WIDTH + x
+    outb(VGA_CRTC_INDEX, 14)
+    outb(VGA_CRTC_DATA, (pos >> 8) & 0xFF)
+    outb(VGA_CRTC_INDEX, 15)
+    outb(VGA_CRTC_DATA, pos & 0xFF)
+
+# ---------- scrolling ----------
+
+# Scroll the screen up by one row
+fn vga_scroll():
+    # Move rows 1..24 up to 0..23
+    for row in 1..VGA_HEIGHT:
+        for col in 0..VGA_WIDTH:
+            val src = vga_offset(col, row)
+            val dst = vga_offset(col, row - 1)
+            unsafe:
+                @address(src as u64) @volatile var src_ch: u8
+                @address((src + 1) as u64) @volatile var src_attr: u8
+                val ch_val = src_ch
+                val attr_val = src_attr
+            unsafe:
+                @address(dst as u64) @volatile var dst_ch: u8
+                @address((dst + 1) as u64) @volatile var dst_attr: u8
+                dst_ch = ch_val
+                dst_attr = attr_val
+
+    # Clear the last row
+    val blank_attr = vga_make_attr(g_color, g_bg_color)
+    for col in 0..VGA_WIDTH:
+        val off = vga_offset(col, VGA_HEIGHT - 1)
+        vga_put(off, 0x20, blank_attr)
+
+# ---------- public API ----------
+
+# Initialise VGA text mode, clear screen, reset cursor
+fn vga_init():
+    g_cursor_x = 0
+    g_cursor_y = 0
+    g_color = VGA_WHITE
+    g_bg_color = VGA_BLACK
+    vga_clear()
+
+# Clear entire screen with current background colour
+fn vga_clear():
+    val attr = vga_make_attr(g_color, g_bg_color)
+    for y in 0..VGA_HEIGHT:
+        for x in 0..VGA_WIDTH:
+            val off = vga_offset(x, y)
+            vga_put(off, 0x20, attr)
+    g_cursor_x = 0
+    g_cursor_y = 0
+    vga_update_cursor(0, 0)
+
+# Write a single character at (x, y) with a given colour
+fn vga_write_char(x: i32, y: i32, ch: i32, color: u8):
+    if x < 0 or x >= VGA_WIDTH:
+        return
+    if y < 0 or y >= VGA_HEIGHT:
+        return
+    val attr = vga_make_attr(color, g_bg_color)
+    val off = vga_offset(x, y)
+    vga_put(off, ch as u8, attr)
+
+# Write a string starting at (x, y) with a given colour
+fn vga_write_string(x: i32, y: i32, s: text, color: u8):
+    var cx = x
+    var cy = y
+    val attr = vga_make_attr(color, g_bg_color)
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch == 0x0A:  # newline
+            cx = 0
+            cy = cy + 1
+            if cy >= VGA_HEIGHT:
+                vga_scroll()
+                cy = VGA_HEIGHT - 1
+        else:
+            val off = vga_offset(cx, cy)
+            vga_put(off, ch as u8, attr)
+            cx = cx + 1
+            if cx >= VGA_WIDTH:
+                cx = 0
+                cy = cy + 1
+                if cy >= VGA_HEIGHT:
+                    vga_scroll()
+                    cy = VGA_HEIGHT - 1
+
+# Write a character at current cursor position and advance
+fn vga_putchar(ch: i32):
+    val attr = vga_make_attr(g_color, g_bg_color)
+    if ch == 0x0A:
+        g_cursor_x = 0
+        g_cursor_y = g_cursor_y + 1
+    elif ch == 0x0D:
+        g_cursor_x = 0
+    elif ch == 0x08:  # backspace
+        if g_cursor_x > 0:
+            g_cursor_x = g_cursor_x - 1
+            val off = vga_offset(g_cursor_x, g_cursor_y)
+            vga_put(off, 0x20, attr)
+    else:
+        val off = vga_offset(g_cursor_x, g_cursor_y)
+        vga_put(off, ch as u8, attr)
+        g_cursor_x = g_cursor_x + 1
+        if g_cursor_x >= VGA_WIDTH:
+            g_cursor_x = 0
+            g_cursor_y = g_cursor_y + 1
+
+    if g_cursor_y >= VGA_HEIGHT:
+        vga_scroll()
+        g_cursor_y = VGA_HEIGHT - 1
+
+    vga_update_cursor(g_cursor_x, g_cursor_y)
+
+# Print a string at the current cursor position
+fn vga_print(s: text):
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        vga_putchar(ch)
+
+# Print a string followed by a newline
+fn vga_println(s: text):
+    vga_print(s)
+    vga_putchar(0x0A)
+
+# Set the default foreground colour
+fn vga_set_color(fg: u8):
+    g_color = fg
+
+# Set the default background colour
+fn vga_set_bg_color(bg: u8):
+    g_bg_color = bg

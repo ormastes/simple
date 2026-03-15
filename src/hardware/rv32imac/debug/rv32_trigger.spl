@@ -1,0 +1,95 @@
+# RV32 Trigger Module
+#
+# Hardware breakpoint/watchpoint unit.
+# Implements tselect, tdata1, tdata2, tdata3 CSRs.
+#
+# @hardware
+
+use hardware.rv32imac.pkg.rv32_debug_pkg.*
+
+# ============================================================================
+# Trigger Entry
+# ============================================================================
+
+struct TriggerEntry:
+    tdata1: i64
+    tdata2: i64
+    tdata3: i64
+
+    static fn empty() -> TriggerEntry:
+        TriggerEntry(tdata1: 0, tdata2: 0, tdata3: 0)
+
+    fn is_enabled() -> bool:
+        """Check if trigger is enabled (type != 0)."""
+        val ttype = (self.tdata1 >> 28) and 0xF
+        ttype != TRIGGER_NONE
+
+    fn trigger_type() -> i64:
+        (self.tdata1 >> 28) and 0xF
+
+    fn match_addr(pc: i64) -> bool:
+        """Check if PC matches this trigger's address (mcontrol type)."""
+        if self.trigger_type() != TRIGGER_MCONTROL: return false
+        val execute = (self.tdata1 >> 2) and 1
+        if execute == 0: return false
+        pc == self.tdata2
+
+# ============================================================================
+# Trigger Module
+# ============================================================================
+
+class Rv32TriggerModule:
+    """
+    Hardware trigger/breakpoint unit.
+
+    Supports up to 4 trigger entries with address match.
+    """
+
+    triggers: [TriggerEntry]
+    tselect: i64
+    num_triggers: i64
+
+    static fn create(num: i64) -> Rv32TriggerModule:
+        var trigs = [TriggerEntry.empty() for _ in 0..4]
+        Rv32TriggerModule(triggers: trigs, tselect: 0, num_triggers: num)
+
+    fn check_breakpoint(pc: i64) -> bool:
+        """Check if any trigger matches the given PC."""
+        var i = 0
+        while i < self.num_triggers:
+            if self.triggers[i].match_addr(pc):
+                return true
+            i = i + 1
+        false
+
+    fn read_csr(addr: i64) -> i64:
+        if addr == CSR_TSELECT: return self.tselect
+        elif addr == CSR_TDATA1:
+            if self.tselect < self.num_triggers:
+                return self.triggers[self.tselect].tdata1
+        elif addr == CSR_TDATA2:
+            if self.tselect < self.num_triggers:
+                return self.triggers[self.tselect].tdata2
+        elif addr == CSR_TDATA3:
+            if self.tselect < self.num_triggers:
+                return self.triggers[self.tselect].tdata3
+        0
+
+    me write_csr(addr: i64, value: i64):
+        if addr == CSR_TSELECT:
+            if value < self.num_triggers:
+                self.tselect = value
+        elif addr == CSR_TDATA1:
+            if self.tselect < self.num_triggers:
+                self.triggers[self.tselect] = TriggerEntry(
+                    tdata1: value,
+                    tdata2: self.triggers[self.tselect].tdata2,
+                    tdata3: self.triggers[self.tselect].tdata3
+                )
+        elif addr == CSR_TDATA2:
+            if self.tselect < self.num_triggers:
+                self.triggers[self.tselect] = TriggerEntry(
+                    tdata1: self.triggers[self.tselect].tdata1,
+                    tdata2: value,
+                    tdata3: self.triggers[self.tselect].tdata3
+                )

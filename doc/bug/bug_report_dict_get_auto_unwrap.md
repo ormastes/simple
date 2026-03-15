@@ -4,7 +4,7 @@
 **Date:** 2026-03-15
 **Severity:** P2 (workaround available, type safety concern)
 **Component:** Interpreter
-**Status:** Confirmed
+**Status:** Confirmed (compiled runtime — requires re-bootstrap to fix)
 
 ## Summary
 
@@ -73,7 +73,17 @@ if result.?:
     expect(result).to_equal("expected_value")
 ```
 
+## Root Cause (Updated)
+
+The bug exists in the **compiled runtime** Dict.get() implementation, not the Rust bootstrap
+interpreter. The Rust interpreter has been fixed (`handle_dict_methods` in
+`src/compiler_rust/compiler/src/interpreter_method/collections.rs` now wraps return values
+in `Value::some()`/`Value::none()`), but the self-hosted binary uses its own compiled
+Dict.get() which returns raw values. A re-bootstrap is required to propagate the fix.
+
 ## Environment
 
-- Simple compiler: interpreter mode
+- Simple compiler: compiled runtime (self-hosted binary)
+- Rust bootstrap interpreter: FIXED
 - Discovered in: `test/unit/compiler/config/compiler_config_spec.spl`
+- Regression tests: `test/unit/compiler/config/dict_get_optional_spec.spl`

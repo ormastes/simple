@@ -1,0 +1,88 @@
+# RV32 SRAM Controller
+#
+# Simple synchronous SRAM with byte-enable support.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# SRAM Model
+# ============================================================================
+
+class Rv32Sram:
+    """Simple SRAM model for simulation."""
+    data: [i64]
+    size_words: i64
+
+    static fn create(size_kb: i64) -> Rv32Sram:
+        val num_words = (size_kb * 1024) / 4
+        Rv32Sram(
+            data: [0 for _ in 0..num_words],
+            size_words: num_words
+        )
+
+    fn read_word(addr: i64) -> i64:
+        val word_addr = (addr / 4) % self.size_words
+        self.data[word_addr]
+
+    me write_word(addr: i64, data: i64, be: i64):
+        val word_addr = (addr / 4) % self.size_words
+        var current = self.data[word_addr]
+        if (be and 0x1) != 0:
+            current = (current and 0xFFFFFF00) or (data and 0xFF)
+        if (be and 0x2) != 0:
+            current = (current and 0xFFFF00FF) or (data and 0xFF00)
+        if (be and 0x4) != 0:
+            current = (current and 0xFF00FFFF) or (data and 0xFF0000)
+        if (be and 0x8) != 0:
+            current = (current and 0x00FFFFFF) or (data and 0xFF000000)
+        self.data[word_addr] = current
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_sram_vhdl() -> text:
+    """Generate VHDL for SRAM."""
+    var b = VhdlBuilder.create("rv32_sram")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_sram")
+    b.emit_generic_begin()
+    b.emit_generic_param("SIZE_KB", "integer", Some("64"), true)
+    b.emit_generic_end()
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("addr", "in", "word_t", false)
+    b.emit_port("wdata", "in", "word_t", false)
+    b.emit_port("rdata", "out", "word_t", false)
+    b.emit_port("we", "in", "std_logic", false)
+    b.emit_port("be", "in", "std_logic_vector(3 downto 0)", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_sram")
+
+    b.emit_architecture_begin("rv32_sram", "rtl")
+    b.emit_constant_decl("NUM_WORDS", "integer", "SIZE_KB * 256")
+    b.emit_type_decl("mem_array_t", "array(0 to NUM_WORDS - 1) of word_t")
+    b.emit_signal_decl("mem", "mem_array_t", Some("(others => (others => '0'))"))
+    b.emit_architecture_body_begin()
+
+    b.emit_clocked_process_begin(Some("sram_proc"), "clk", nil)
+    b.emit_process_body_begin()
+    b.emit_if_begin("rising_edge(clk)")
+    b.emit_if_begin("we = '1'")
+    b.emit_comment("Byte-enable write")
+    b.emit_for_loop_begin("i", 0, 3)
+    b.emit_if_begin("be(i) = '1'")
+    b.emit_signal_assign("mem(to_integer(unsigned(addr(17 downto 2))))(i*8+7 downto i*8)", "wdata(i*8+7 downto i*8)")
+    b.emit_if_end()
+    b.emit_for_loop_end()
+    b.emit_if_end()
+    b.emit_signal_assign("rdata", "mem(to_integer(unsigned(addr(17 downto 2))))")
+    b.emit_if_end()
+    b.emit_process_end(Some("sram_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

@@ -1,0 +1,246 @@
+# RV32 Decode Stage (ID)
+#
+# Instruction decode, register file read, immediate generation.
+# Decodes all RV32IMAC instruction formats.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+
+# ============================================================================
+# Immediate Generation
+# ============================================================================
+
+fn sign_extend(value: i64, bits: i64) -> i64:
+    """Sign-extend a value from `bits` width to 32 bits."""
+    val mask = 1 << (bits - 1)
+    if (value and mask) != 0:
+        return value or (0xFFFFFFFF << bits)
+    value and 0xFFFFFFFF
+
+fn decode_imm_i(instr: i64) -> i64:
+    """Decode I-type immediate [31:20]."""
+    sign_extend((instr >> 20) and 0xFFF, 12)
+
+fn decode_imm_s(instr: i64) -> i64:
+    """Decode S-type immediate [31:25|11:7]."""
+    val hi = (instr >> 25) and 0x7F
+    val lo = (instr >> 7) and 0x1F
+    sign_extend((hi << 5) or lo, 12)
+
+fn decode_imm_b(instr: i64) -> i64:
+    """Decode B-type immediate [31|7|30:25|11:8] (even byte offset)."""
+    val bit12 = (instr >> 31) and 0x1
+    val bit11 = (instr >> 7) and 0x1
+    val bits_10_5 = (instr >> 25) and 0x3F
+    val bits_4_1 = (instr >> 8) and 0xF
+    val imm = (bit12 << 12) or (bit11 << 11) or (bits_10_5 << 5) or (bits_4_1 << 1)
+    sign_extend(imm, 13)
+
+fn decode_imm_u(instr: i64) -> i64:
+    """Decode U-type immediate [31:12] << 12."""
+    instr and 0xFFFFF000
+
+fn decode_imm_j(instr: i64) -> i64:
+    """Decode J-type immediate [31|19:12|20|30:21] (even byte offset)."""
+    val bit20 = (instr >> 31) and 0x1
+    val bits_19_12 = (instr >> 12) and 0xFF
+    val bit11 = (instr >> 20) and 0x1
+    val bits_10_1 = (instr >> 21) and 0x3FF
+    val imm = (bit20 << 20) or (bits_19_12 << 12) or (bit11 << 11) or (bits_10_1 << 1)
+    sign_extend(imm, 21)
+
+# ============================================================================
+# Instruction Field Extraction
+# ============================================================================
+
+fn decode_opcode(instr: i64) -> i64:
+    instr and 0x7F
+
+fn decode_rd(instr: i64) -> i64:
+    (instr >> 7) and 0x1F
+
+fn decode_funct3(instr: i64) -> i64:
+    (instr >> 12) and 0x7
+
+fn decode_rs1(instr: i64) -> i64:
+    (instr >> 15) and 0x1F
+
+fn decode_rs2(instr: i64) -> i64:
+    (instr >> 20) and 0x1F
+
+fn decode_funct7(instr: i64) -> i64:
+    (instr >> 25) and 0x7F
+
+fn decode_funct12(instr: i64) -> i64:
+    (instr >> 20) and 0xFFF
+
+# ============================================================================
+# ALU Operation Decode
+# ============================================================================
+
+fn decode_alu_op(opcode: i64, funct3: i64, funct7: i64) -> AluOp:
+    """Determine ALU operation from instruction fields."""
+    if opcode == OP_OP and funct7 == F7_MULDIV:
+        # M extension
+        if funct3 == F3_MUL: return AluOp.Mul
+        elif funct3 == F3_MULH: return AluOp.Mulh
+        elif funct3 == F3_MULHSU: return AluOp.Mulhsu
+        elif funct3 == F3_MULHU: return AluOp.Mulhu
+        elif funct3 == F3_DIV: return AluOp.Div
+        elif funct3 == F3_DIVU: return AluOp.Divu
+        elif funct3 == F3_REM: return AluOp.Rem
+        elif funct3 == F3_REMU: return AluOp.Remu
+
+    if funct3 == F3_ADD_SUB:
+        if opcode == OP_OP and funct7 == F7_SUB_SRA:
+            return AluOp.Sub
+        return AluOp.Add
+    elif funct3 == F3_SLL: return AluOp.Sll
+    elif funct3 == F3_SLT: return AluOp.Slt
+    elif funct3 == F3_SLTU: return AluOp.Sltu
+    elif funct3 == F3_XOR: return AluOp.Xor
+    elif funct3 == F3_SRL_SRA:
+        if funct7 == F7_SUB_SRA:
+            return AluOp.Sra
+        return AluOp.Srl
+    elif funct3 == F3_OR: return AluOp.Or
+    elif funct3 == F3_AND: return AluOp.And
+    AluOp.Add
+
+# ============================================================================
+# Branch Operation Decode
+# ============================================================================
+
+fn decode_branch_op(opcode: i64, funct3: i64) -> BranchOp:
+    """Determine branch operation from instruction fields."""
+    if opcode == OP_JAL: return BranchOp.Jal
+    if opcode == OP_JALR: return BranchOp.Jalr
+    if opcode != OP_BRANCH: return BranchOp.None
+    if funct3 == F3_BEQ: return BranchOp.Beq
+    elif funct3 == F3_BNE: return BranchOp.Bne
+    elif funct3 == F3_BLT: return BranchOp.Blt
+    elif funct3 == F3_BGE: return BranchOp.Bge
+    elif funct3 == F3_BLTU: return BranchOp.Bltu
+    elif funct3 == F3_BGEU: return BranchOp.Bgeu
+    BranchOp.None
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_decode_vhdl() -> text:
+    """Generate VHDL for decode stage."""
+    var b = VhdlBuilder.create("rv32_decode")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+    b.emit_use_package("work", "rv32_isa_pkg")
+
+    b.emit_entity_begin("rv32_decode")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_port("stall", "in", "std_logic", false)
+    b.emit_port("flush", "in", "std_logic", false)
+    b.emit_comment("From IF stage")
+    b.emit_port("if_pc", "in", "word_t", false)
+    b.emit_port("if_instr", "in", "word_t", false)
+    b.emit_port("if_valid", "in", "std_logic", false)
+    b.emit_comment("Register file read")
+    b.emit_port("rs1_addr", "out", "reg_addr_t", false)
+    b.emit_port("rs2_addr", "out", "reg_addr_t", false)
+    b.emit_port("rs1_data", "in", "word_t", false)
+    b.emit_port("rs2_data", "in", "word_t", false)
+    b.emit_comment("Output to EX stage")
+    b.emit_port("id_pc", "out", "word_t", false)
+    b.emit_port("id_rs1_data", "out", "word_t", false)
+    b.emit_port("id_rs2_data", "out", "word_t", false)
+    b.emit_port("id_rd", "out", "reg_addr_t", false)
+    b.emit_port("id_imm", "out", "word_t", false)
+    b.emit_port("id_alu_op", "out", "alu_op_t", false)
+    b.emit_port("id_branch_op", "out", "branch_op_t", false)
+    b.emit_port("id_mem_op", "out", "mem_op_t", false)
+    b.emit_port("id_mem_width", "out", "mem_width_t", false)
+    b.emit_port("id_reg_write", "out", "std_logic", false)
+    b.emit_port("id_use_imm", "out", "std_logic", false)
+    b.emit_port("id_valid", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_decode")
+
+    b.emit_architecture_begin("rv32_decode", "rtl")
+    b.emit_signal_decl("opcode", "std_logic_vector(6 downto 0)", nil)
+    b.emit_signal_decl("funct3", "std_logic_vector(2 downto 0)", nil)
+    b.emit_signal_decl("funct7", "std_logic_vector(6 downto 0)", nil)
+    b.emit_architecture_body_begin()
+
+    # Field extraction
+    b.emit_comment("Instruction field extraction")
+    b.emit_signal_assign("opcode", "if_instr(6 downto 0)")
+    b.emit_signal_assign("funct3", "if_instr(14 downto 12)")
+    b.emit_signal_assign("funct7", "if_instr(31 downto 25)")
+    b.emit_signal_assign("rs1_addr", "if_instr(19 downto 15)")
+    b.emit_signal_assign("rs2_addr", "if_instr(24 downto 20)")
+    b.emit_raw("")
+
+    # Decode process
+    b.emit_comment("Main decode process")
+    b.emit_process_begin(Some("decode_proc"), ["if_instr", "if_pc", "if_valid", "rs1_data", "rs2_data", "opcode", "funct3", "funct7", "stall", "flush"])
+    b.emit_process_body_begin()
+
+    b.emit_comment("Defaults")
+    b.emit_signal_assign("id_pc", "if_pc")
+    b.emit_signal_assign("id_rs1_data", "rs1_data")
+    b.emit_signal_assign("id_rs2_data", "rs2_data")
+    b.emit_signal_assign("id_rd", "if_instr(11 downto 7)")
+    b.emit_signal_assign("id_imm", "ZERO_WORD")
+    b.emit_signal_assign("id_alu_op", "ALU_ADD")
+    b.emit_signal_assign("id_branch_op", "BR_NONE")
+    b.emit_signal_assign("id_mem_op", "MEM_NONE")
+    b.emit_signal_assign("id_mem_width", "MW_WORD")
+    b.emit_signal_assign("id_reg_write", "'0'")
+    b.emit_signal_assign("id_use_imm", "'0'")
+    b.emit_signal_assign("id_valid", "if_valid and not flush and not stall")
+    b.emit_raw("")
+
+    b.emit_comment("Opcode-based decode")
+    b.emit_line("case opcode is")
+    b.emit_line("  when OP_LUI =>")
+    b.emit_line("    id_imm <= if_instr(31 downto 12) & x\"000\";")
+    b.emit_line("    id_alu_op <= ALU_PASS_B;")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_AUIPC =>")
+    b.emit_line("    id_imm <= if_instr(31 downto 12) & x\"000\";")
+    b.emit_line("    id_alu_op <= ALU_ADD;")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_JAL =>")
+    b.emit_line("    id_branch_op <= BR_JAL;")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_JALR =>")
+    b.emit_line("    id_branch_op <= BR_JALR;")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_BRANCH =>")
+    b.emit_line("    id_use_imm <= '0';")
+    b.emit_line("  when OP_LOAD =>")
+    b.emit_line("    id_mem_op <= MEM_LOAD;")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_STORE =>")
+    b.emit_line("    id_mem_op <= MEM_STORE;")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("  when OP_OP_IMM =>")
+    b.emit_line("    id_use_imm <= '1';")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when OP_OP =>")
+    b.emit_line("    id_reg_write <= '1';")
+    b.emit_line("  when others =>")
+    b.emit_line("    null;")
+    b.emit_line("end case;")
+
+    b.emit_process_end(Some("decode_proc"))
+    b.emit_architecture_end("rtl")
+    b.build()

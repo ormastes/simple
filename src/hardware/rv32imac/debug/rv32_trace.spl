@@ -1,0 +1,110 @@
+# RV32 Instruction Trace Port
+#
+# Retire-order trace: captures PC + instruction + exception per retired instruction.
+# Used for verification and debug.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# Trace Record
+# ============================================================================
+
+struct TraceRecord:
+    valid: bool
+    pc: i64
+    instruction: i64
+    exception: bool
+    interrupt: bool
+    cause: i64
+
+    static fn empty() -> TraceRecord:
+        TraceRecord(valid: false, pc: 0, instruction: 0, exception: false, interrupt: false, cause: 0)
+
+    static fn retire(pc: i64, instr: i64) -> TraceRecord:
+        TraceRecord(valid: true, pc: pc, instruction: instr, exception: false, interrupt: false, cause: 0)
+
+    static fn trap(pc: i64, instr: i64, cause: i64, is_interrupt: bool) -> TraceRecord:
+        TraceRecord(valid: true, pc: pc, instruction: instr, exception: not is_interrupt, interrupt: is_interrupt, cause: cause)
+
+# ============================================================================
+# Trace Buffer
+# ============================================================================
+
+class TraceBuffer:
+    """Circular trace buffer for debug/verification."""
+
+    records: [TraceRecord]
+    write_idx: i64
+    capacity: i64
+    count: i64
+
+    static fn create(capacity: i64) -> TraceBuffer:
+        TraceBuffer(
+            records: [TraceRecord.empty() for _ in 0..capacity],
+            write_idx: 0,
+            capacity: capacity,
+            count: 0
+        )
+
+    me push(record: TraceRecord):
+        """Add a trace record to the buffer."""
+        self.records[self.write_idx] = record
+        self.write_idx = (self.write_idx + 1) % self.capacity
+        if self.count < self.capacity:
+            self.count = self.count + 1
+
+    fn last() -> TraceRecord:
+        """Get the most recent trace record."""
+        if self.count == 0:
+            return TraceRecord.empty()
+        val idx = (self.write_idx - 1 + self.capacity) % self.capacity
+        self.records[idx]
+
+    fn get(idx: i64) -> TraceRecord:
+        """Get trace record at index (0 = oldest)."""
+        if idx >= self.count:
+            return TraceRecord.empty()
+        val start = if self.count < self.capacity: 0 else: self.write_idx
+        val actual = (start + idx) % self.capacity
+        self.records[actual]
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_trace_vhdl() -> text:
+    """Generate VHDL for trace port."""
+    var b = VhdlBuilder.create("rv32_trace")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_trace")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("Retire port from WB stage")
+    b.emit_port("retire_valid", "in", "std_logic", false)
+    b.emit_port("retire_pc", "in", "word_t", false)
+    b.emit_port("retire_instr", "in", "word_t", false)
+    b.emit_port("retire_exception", "in", "std_logic", false)
+    b.emit_port("retire_interrupt", "in", "std_logic", false)
+    b.emit_port("retire_cause", "in", "word_t", false)
+    b.emit_comment("Trace output")
+    b.emit_port("trace_valid", "out", "std_logic", false)
+    b.emit_port("trace_pc", "out", "word_t", false)
+    b.emit_port("trace_instr", "out", "word_t", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_trace")
+
+    b.emit_architecture_begin("rv32_trace", "rtl")
+    b.emit_architecture_body_begin()
+
+    b.emit_comment("Pass through retire signals as trace output")
+    b.emit_signal_assign("trace_valid", "retire_valid")
+    b.emit_signal_assign("trace_pc", "retire_pc")
+    b.emit_signal_assign("trace_instr", "retire_instr")
+
+    b.emit_architecture_end("rtl")
+    b.build()

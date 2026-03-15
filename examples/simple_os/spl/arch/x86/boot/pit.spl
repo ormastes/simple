@@ -1,0 +1,113 @@
+# x86 Programmable Interval Timer (8253/8254 PIT)
+#
+# Channel 0 is wired to IRQ0. We configure it in rate-generator
+# mode (mode 2) to produce periodic interrupts at a desired frequency.
+#
+# Base oscillator frequency: 1,193,182 Hz
+
+# ---------- local port I/O ----------
+
+fn outb(port: i32, value: i32):
+    asm """
+        mov dx, {port}
+        mov al, {value}
+        out dx, al
+    """
+
+fn inb(port: i32) -> i32:
+    var result = 0
+    asm """
+        mov dx, {port}
+        in al, dx
+        movzx eax, al
+        mov {result}, eax
+    """
+    result
+
+# ---------- constants ----------
+
+# PIT I/O ports
+val PIT_CHANNEL0: i32 = 0x40
+val PIT_CHANNEL1: i32 = 0x41
+val PIT_CHANNEL2: i32 = 0x42
+val PIT_CMD: i32 = 0x43
+
+# PIT base frequency in Hz
+val PIT_BASE_FREQ: u32 = 1193182
+
+# Command byte bits
+# Channel 0, lobyte/hibyte access, rate generator (mode 2), binary
+val PIT_CMD_CHANNEL0: i32 = 0x00
+val PIT_CMD_ACCESS_LOHI: i32 = 0x30
+val PIT_CMD_MODE2: i32 = 0x04      # Rate generator
+val PIT_CMD_MODE3: i32 = 0x06      # Square wave generator
+val PIT_CMD_BINARY: i32 = 0x00
+
+# ---------- global state ----------
+
+# Monotonic tick counter, incremented by IRQ0 handler
+var g_ticks: u64 = 0
+
+# Configured frequency (for time calculations)
+var g_frequency_hz: u32 = 0
+
+# Divisor currently loaded
+var g_divisor: u32 = 0
+
+# ---------- public API ----------
+
+# Set PIT channel 0 to fire at the requested frequency (Hz).
+# The actual frequency may differ slightly due to integer division.
+fn pit_init(frequency_hz: u32):
+    g_frequency_hz = frequency_hz
+    g_ticks = 0
+
+    # Calculate divisor: base_freq / desired_freq
+    var divisor = PIT_BASE_FREQ / frequency_hz
+    if divisor == 0:
+        divisor = 1
+    if divisor > 65535:
+        divisor = 65535
+    g_divisor = divisor
+
+    # Send command byte: channel 0, lo/hi access, mode 2, binary
+    val cmd = PIT_CMD_CHANNEL0 | PIT_CMD_ACCESS_LOHI | PIT_CMD_MODE2 | PIT_CMD_BINARY
+    outb(PIT_CMD, cmd)
+
+    # Send divisor (low byte first, then high byte)
+    outb(PIT_CHANNEL0, (divisor & 0xFF) as i32)
+    outb(PIT_CHANNEL0, ((divisor >> 8) & 0xFF) as i32)
+
+# Called from the IRQ0 handler to advance the tick counter
+fn pit_tick():
+    g_ticks = g_ticks + 1
+
+# Return the current monotonic tick count
+fn pit_get_ticks() -> u64:
+    g_ticks
+
+# Return the configured frequency
+fn pit_get_frequency() -> u32:
+    g_frequency_hz
+
+# Return elapsed time in milliseconds (approximate)
+fn pit_get_millis() -> u64:
+    if g_frequency_hz == 0:
+        return 0
+    (g_ticks * 1000) / g_frequency_hz as u64
+
+# Busy-wait for a given number of milliseconds
+fn pit_wait_ms(ms: u32):
+    val target = g_ticks + ((ms as u64 * g_frequency_hz as u64) / 1000)
+    while g_ticks < target:
+        asm """
+            hlt
+        """
+
+# Read the current count value from channel 0
+fn pit_read_count() -> u16:
+    # Latch command: channel 0 latch (bits 7-6 = 00, bits 5-4 = 00)
+    outb(PIT_CMD, 0x00)
+    val lo = inb(PIT_CHANNEL0) as u16
+    val hi = inb(PIT_CHANNEL0) as u16
+    (hi << 8) | lo

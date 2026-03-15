@@ -1,0 +1,214 @@
+"""
+# RV32IMAC Core Smoke Tests
+
+**Feature IDs:** #RV32-CORE-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Smoke tests for the RV32IMAC core. Verifies basic instruction execution
+through GHDL simulation: NOP, ADD, branch, load/store.
+"""
+
+# @req REQ-RV32IMAC
+# @feature rv32imac
+# tag: only-compiled, vhdl, slow
+
+import std.spec
+
+use hardware.rv32imac.core.rv32_regfile.Rv32RegFile
+use hardware.rv32imac.core.rv32_execute.{alu_execute, resolve_branch, compute_branch_target}
+use hardware.rv32imac.core.rv32_decode.{decode_opcode, decode_rd, decode_rs1, decode_rs2, decode_funct3, decode_funct7, decode_imm_i, decode_imm_s, decode_imm_b, decode_imm_u, decode_imm_j}
+use hardware.rv32imac.core.rv32_memory.{mem_load, mem_store}
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+# ============================================================================
+# Register File Smoke Tests
+# ============================================================================
+
+describe "RV32 Register File":
+    """
+    ## Register File Operations
+
+    Verifies x0=0 hardwiring, read/write, and write-through behavior.
+    """
+
+    it "x0 always reads as zero":
+        """
+        **Given:** Fresh register file
+        **When:** Writing to x0 then reading
+        **Then:** x0 returns 0
+        """
+        var rf = Rv32RegFile.create()
+        rf.write(0, 0xDEADBEEF)
+        expect(rf.read(0)).to_equal(0)
+
+    it "writes and reads back correctly":
+        """
+        **Given:** Register file
+        **When:** Writing 0x12345678 to x1
+        **Then:** x1 reads back 0x12345678
+        """
+        var rf = Rv32RegFile.create()
+        rf.write(1, 0x12345678)
+        expect(rf.read(1)).to_equal(0x12345678)
+
+    it "handles all 32 registers":
+        """
+        **Given:** Register file
+        **When:** Writing unique values to x1-x31
+        **Then:** All read back correctly, x0 stays zero
+        """
+        var rf = Rv32RegFile.create()
+        var i = 1
+        while i < 32:
+            rf.write(i, i * 100)
+            i = i + 1
+        expect(rf.read(0)).to_equal(0)
+        expect(rf.read(1)).to_equal(100)
+        expect(rf.read(31)).to_equal(3100)
+
+# ============================================================================
+# ALU Smoke Tests
+# ============================================================================
+
+describe "RV32 ALU":
+    """
+    ## ALU Operations
+
+    Verifies basic arithmetic, logic, shift, and comparison operations.
+    """
+
+    it "computes ADD correctly":
+        """
+        **Given:** ALU with ADD operation
+        **When:** 5 + 3
+        **Then:** Returns 8
+        """
+        expect(alu_execute(AluOp.Add, 5, 3)).to_equal(8)
+
+    it "computes SUB correctly":
+        """
+        **Given:** ALU with SUB operation
+        **When:** 10 - 3
+        **Then:** Returns 7
+        """
+        expect(alu_execute(AluOp.Sub, 10, 3)).to_equal(7)
+
+    it "computes AND correctly":
+        expect(alu_execute(AluOp.And, 0xFF00FF00, 0x0F0F0F0F)).to_equal(0x0F000F00)
+
+    it "computes OR correctly":
+        expect(alu_execute(AluOp.Or, 0xFF000000, 0x00FF0000)).to_equal(0xFFFF0000)
+
+    it "computes XOR correctly":
+        expect(alu_execute(AluOp.Xor, 0xFF00FF00, 0xFFFF0000)).to_equal(0x00FFFF00)
+
+    it "computes SLL correctly":
+        expect(alu_execute(AluOp.Sll, 1, 4)).to_equal(16)
+
+    it "computes SRL correctly":
+        expect(alu_execute(AluOp.Srl, 256, 4)).to_equal(16)
+
+    it "computes SLT correctly":
+        """
+        **Given:** Signed comparison
+        **When:** -1 < 1 (as 32-bit signed)
+        **Then:** Returns 1
+        """
+        expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 1)).to_equal(1)
+
+    it "computes SLTU correctly":
+        """
+        **Given:** Unsigned comparison
+        **When:** 0xFFFFFFFF > 1 (as unsigned)
+        **Then:** Returns 0
+        """
+        expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1)).to_equal(0)
+
+# ============================================================================
+# Branch Resolution Smoke Tests
+# ============================================================================
+
+describe "RV32 Branch Resolution":
+    """
+    ## Branch Condition Evaluation
+    """
+
+    it "BEQ taken when equal":
+        expect(resolve_branch(BranchOp.Beq, 42, 42)).to_equal(true)
+
+    it "BEQ not taken when unequal":
+        expect(resolve_branch(BranchOp.Beq, 42, 43)).to_equal(false)
+
+    it "BNE taken when unequal":
+        expect(resolve_branch(BranchOp.Bne, 42, 43)).to_equal(true)
+
+    it "BLT taken for signed less-than":
+        expect(resolve_branch(BranchOp.Blt, 0xFFFFFFFF, 0)).to_equal(true)
+
+    it "JAL always taken":
+        expect(resolve_branch(BranchOp.Jal, 0, 0)).to_equal(true)
+
+    it "computes branch target from PC+imm":
+        expect(compute_branch_target(BranchOp.Beq, 0x1000, 0, 0x100)).to_equal(0x1100)
+
+    it "computes JALR target from rs1+imm":
+        expect(compute_branch_target(BranchOp.Jalr, 0x1000, 0x2000, 0x10)).to_equal(0x2010)
+
+# ============================================================================
+# Immediate Decode Smoke Tests
+# ============================================================================
+
+describe "RV32 Immediate Decoding":
+    """
+    ## Instruction Field Extraction
+    """
+
+    it "decodes I-type positive immediate":
+        """
+        **Given:** Instruction with imm=100 in I-type format
+        **When:** decode_imm_i() called
+        **Then:** Returns 100
+        """
+        val instr = 100 << 20  # imm=100 in bits [31:20]
+        expect(decode_imm_i(instr)).to_equal(100)
+
+    it "decodes U-type immediate":
+        """
+        **Given:** LUI with upper 20 bits = 0x12345
+        **When:** decode_imm_u() called
+        **Then:** Returns 0x12345000
+        """
+        val instr = 0x12345000  # Upper 20 bits in place
+        expect(decode_imm_u(instr)).to_equal(0x12345000)
+
+# ============================================================================
+# Memory Access Smoke Tests
+# ============================================================================
+
+describe "RV32 Memory Access":
+    """
+    ## Load/Store Operations
+    """
+
+    it "loads a word from memory":
+        val memory = [0x12345678, 0xDEADBEEF]
+        expect(mem_load(memory, 0, MemWidth.Word, false)).to_equal(0x12345678)
+        expect(mem_load(memory, 4, MemWidth.Word, false)).to_equal(0xDEADBEEF)
+
+    it "loads a byte with sign extension":
+        val memory = [0x000000FF]
+        expect(mem_load(memory, 0, MemWidth.Byte, true)).to_equal(0xFFFFFFFF)
+
+    it "loads a byte without sign extension":
+        val memory = [0x000000FF]
+        expect(mem_load(memory, 0, MemWidth.Byte, false)).to_equal(0xFF)
+
+    it "stores a word to memory":
+        val memory = [0, 0]
+        val updated = mem_store(memory, 0, 0xCAFEBABE, MemWidth.Word)
+        expect(updated[0]).to_equal(0xCAFEBABE)

@@ -1,0 +1,158 @@
+# RV32 Pipeline Control
+#
+# Hazard detection, data forwarding, stall/flush generation.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+
+# ============================================================================
+# Hazard Detection
+# ============================================================================
+
+fn detect_load_use_hazard(id_rs1: i64, id_rs2: i64, ex_rd: i64, ex_mem_op: MemOp, ex_valid: bool) -> bool:
+    """Detect load-use hazard (1-cycle stall needed)."""
+    if not ex_valid: return false
+    if ex_mem_op != MemOp.Load: return false
+    if ex_rd == 0: return false
+    (id_rs1 == ex_rd) or (id_rs2 == ex_rd)
+
+# ============================================================================
+# Data Forwarding
+# ============================================================================
+
+enum ForwardSrc:
+    RegFile
+    ExStage
+    MemStage
+
+fn resolve_forward_rs1(rs1: i64, ex_rd: i64, ex_we: bool, mem_rd: i64, mem_we: bool) -> ForwardSrc:
+    """Determine forwarding source for rs1."""
+    if rs1 == 0: return ForwardSrc.RegFile
+    if ex_we and ex_rd == rs1: return ForwardSrc.ExStage
+    if mem_we and mem_rd == rs1: return ForwardSrc.MemStage
+    ForwardSrc.RegFile
+
+fn resolve_forward_rs2(rs2: i64, ex_rd: i64, ex_we: bool, mem_rd: i64, mem_we: bool) -> ForwardSrc:
+    """Determine forwarding source for rs2."""
+    if rs2 == 0: return ForwardSrc.RegFile
+    if ex_we and ex_rd == rs2: return ForwardSrc.ExStage
+    if mem_we and mem_rd == rs2: return ForwardSrc.MemStage
+    ForwardSrc.RegFile
+
+# ============================================================================
+# Pipeline Control Signals
+# ============================================================================
+
+struct PipelineControl:
+    stall_if: bool
+    stall_id: bool
+    flush_if: bool
+    flush_id: bool
+    flush_ex: bool
+
+    static fn normal() -> PipelineControl:
+        PipelineControl(
+            stall_if: false, stall_id: false,
+            flush_if: false, flush_id: false, flush_ex: false
+        )
+
+fn compute_pipeline_control(
+    load_use: bool,
+    branch_taken: bool,
+    trap_taken: bool
+) -> PipelineControl:
+    """Compute pipeline control signals."""
+    if trap_taken:
+        return PipelineControl(
+            stall_if: false, stall_id: false,
+            flush_if: true, flush_id: true, flush_ex: true
+        )
+    if branch_taken:
+        return PipelineControl(
+            stall_if: false, stall_id: false,
+            flush_if: true, flush_id: true, flush_ex: false
+        )
+    if load_use:
+        return PipelineControl(
+            stall_if: true, stall_id: true,
+            flush_if: false, flush_id: false, flush_ex: true
+        )
+    PipelineControl.normal()
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_pipeline_ctrl_vhdl() -> text:
+    """Generate VHDL for pipeline control unit."""
+    var b = VhdlBuilder.create("rv32_pipeline_ctrl")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_pipeline_ctrl")
+    b.emit_port_begin()
+    b.emit_comment("Hazard detection inputs")
+    b.emit_port("id_rs1", "in", "reg_addr_t", false)
+    b.emit_port("id_rs2", "in", "reg_addr_t", false)
+    b.emit_port("ex_rd", "in", "reg_addr_t", false)
+    b.emit_port("ex_mem_op", "in", "mem_op_t", false)
+    b.emit_port("ex_reg_write", "in", "std_logic", false)
+    b.emit_port("ex_valid", "in", "std_logic", false)
+    b.emit_comment("Branch/trap inputs")
+    b.emit_port("branch_taken", "in", "std_logic", false)
+    b.emit_port("trap_taken", "in", "std_logic", false)
+    b.emit_comment("MEM stage forwarding info")
+    b.emit_port("mem_rd", "in", "reg_addr_t", false)
+    b.emit_port("mem_reg_write", "in", "std_logic", false)
+    b.emit_comment("Control outputs")
+    b.emit_port("stall_if", "out", "std_logic", false)
+    b.emit_port("stall_id", "out", "std_logic", false)
+    b.emit_port("flush_if", "out", "std_logic", false)
+    b.emit_port("flush_id", "out", "std_logic", false)
+    b.emit_port("flush_ex", "out", "std_logic", false)
+    b.emit_comment("Forwarding control")
+    b.emit_port("fwd_rs1_sel", "out", "std_logic_vector(1 downto 0)", false)
+    b.emit_port("fwd_rs2_sel", "out", "std_logic_vector(1 downto 0)", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_pipeline_ctrl")
+
+    b.emit_architecture_begin("rv32_pipeline_ctrl", "rtl")
+    b.emit_signal_decl("load_use_hazard", "std_logic", nil)
+    b.emit_architecture_body_begin()
+
+    # Load-use detection
+    b.emit_comment("Load-use hazard detection")
+    b.emit_signal_assign("load_use_hazard", "'1' when ex_mem_op = MEM_LOAD and ex_valid = '1' and unsigned(ex_rd) /= 0 and (id_rs1 = ex_rd or id_rs2 = ex_rd) else '0'")
+    b.emit_raw("")
+
+    # Control signal generation
+    b.emit_comment("Pipeline control")
+    b.emit_signal_assign("stall_if", "load_use_hazard and not branch_taken and not trap_taken")
+    b.emit_signal_assign("stall_id", "load_use_hazard and not branch_taken and not trap_taken")
+    b.emit_signal_assign("flush_if", "branch_taken or trap_taken")
+    b.emit_signal_assign("flush_id", "branch_taken or trap_taken")
+    b.emit_signal_assign("flush_ex", "load_use_hazard or trap_taken")
+    b.emit_raw("")
+
+    # Forwarding mux select
+    b.emit_comment("Forwarding: 00=regfile, 01=EX, 10=MEM")
+    b.emit_process_begin(Some("fwd_proc"), ["id_rs1", "id_rs2", "ex_rd", "ex_reg_write", "ex_valid", "mem_rd", "mem_reg_write"])
+    b.emit_process_body_begin()
+    b.emit_signal_assign("fwd_rs1_sel", "\"00\"")
+    b.emit_signal_assign("fwd_rs2_sel", "\"00\"")
+    b.emit_if_begin("ex_reg_write = '1' and ex_valid = '1' and unsigned(ex_rd) /= 0 and ex_rd = id_rs1")
+    b.emit_signal_assign("fwd_rs1_sel", "\"01\"")
+    b.emit_elsif("mem_reg_write = '1' and unsigned(mem_rd) /= 0 and mem_rd = id_rs1")
+    b.emit_signal_assign("fwd_rs1_sel", "\"10\"")
+    b.emit_if_end()
+    b.emit_if_begin("ex_reg_write = '1' and ex_valid = '1' and unsigned(ex_rd) /= 0 and ex_rd = id_rs2")
+    b.emit_signal_assign("fwd_rs2_sel", "\"01\"")
+    b.emit_elsif("mem_reg_write = '1' and unsigned(mem_rd) /= 0 and mem_rd = id_rs2")
+    b.emit_signal_assign("fwd_rs2_sel", "\"10\"")
+    b.emit_if_end()
+    b.emit_process_end(Some("fwd_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

@@ -855,7 +855,10 @@ pub fn handle_dict_methods(
         }
         "get" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
-            map.get(&key).cloned().unwrap_or(Value::Nil)
+            match map.get(&key) {
+                Some(val) => Value::some(val.clone()),
+                None => Value::none(),
+            }
         }
         "keys" => {
             let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();

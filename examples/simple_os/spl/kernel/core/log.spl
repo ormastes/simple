@@ -1,0 +1,230 @@
+# Kernel Debug Log
+# Structured logging over UART serial for kernel diagnostics.
+# All output goes to COM1 via the arch-specific serial driver.
+#
+# Log levels follow severity ordering:
+#   Debug < Info < Warn < Error < Panic
+#
+# The global log level filters messages: only messages at or above
+# the configured level are emitted.  Panic always prints and halts.
+
+use arch.x86.io.uart.{serial_init, serial_print, serial_println, serial_write}
+
+# ---------------------------------------------------------------------------
+# Log levels
+# ---------------------------------------------------------------------------
+enum LogLevel:
+    Debug       # Verbose development traces
+    Info        # Normal operational messages
+    Warn        # Unexpected but recoverable situations
+    Error       # Failures that affect functionality
+    Panic       # Unrecoverable errors — halts the system
+
+# ---------------------------------------------------------------------------
+# Global log state
+# ---------------------------------------------------------------------------
+var g_log_level: LogLevel = LogLevel.Debug
+var g_log_initialized: bool = false
+
+# ---------------------------------------------------------------------------
+# Initialize the logging subsystem.
+# Sets up UART and sets the default log level.
+# ---------------------------------------------------------------------------
+fn log_init():
+    if g_log_initialized:
+        return
+    serial_init()
+    g_log_initialized = true
+    log_info("[LOG] Kernel log initialized")
+
+# ---------------------------------------------------------------------------
+# Set the minimum log level. Messages below this level are discarded.
+# ---------------------------------------------------------------------------
+fn log_set_level(level: LogLevel):
+    g_log_level = level
+
+# ---------------------------------------------------------------------------
+# Convert a log level to its numeric severity for comparison.
+# Higher number = more severe.
+# ---------------------------------------------------------------------------
+fn log_level_to_u32(level: LogLevel) -> u32:
+    if level == LogLevel.Debug:
+        return 0
+    if level == LogLevel.Info:
+        return 1
+    if level == LogLevel.Warn:
+        return 2
+    if level == LogLevel.Error:
+        return 3
+    # Panic
+    4
+
+# ---------------------------------------------------------------------------
+# Check whether a message at the given level should be emitted.
+# ---------------------------------------------------------------------------
+fn log_level_enabled(level: LogLevel) -> bool:
+    log_level_to_u32(level) >= log_level_to_u32(g_log_level)
+
+# ---------------------------------------------------------------------------
+# Get the prefix string for a log level.
+# ---------------------------------------------------------------------------
+fn log_level_prefix(level: LogLevel) -> text:
+    if level == LogLevel.Debug:
+        return "[DEBUG] "
+    if level == LogLevel.Info:
+        return "[INFO]  "
+    if level == LogLevel.Warn:
+        return "[WARN]  "
+    if level == LogLevel.Error:
+        return "[ERROR] "
+    # Panic
+    "[PANIC] "
+
+# ---------------------------------------------------------------------------
+# Core log function. Prints the level prefix followed by the message.
+# Auto-initializes UART if needed.
+# ---------------------------------------------------------------------------
+fn log(level: LogLevel, msg: text):
+    if !g_log_initialized:
+        serial_init()
+        g_log_initialized = true
+
+    if !log_level_enabled(level):
+        return
+
+    val prefix = log_level_prefix(level)
+    serial_print(prefix)
+    serial_println(msg)
+
+# ---------------------------------------------------------------------------
+# Convenience functions for each log level
+# ---------------------------------------------------------------------------
+
+fn log_debug(msg: text):
+    log(LogLevel.Debug, msg)
+
+fn log_info(msg: text):
+    log(LogLevel.Info, msg)
+
+fn log_warn(msg: text):
+    log(LogLevel.Warn, msg)
+
+fn log_error(msg: text):
+    log(LogLevel.Error, msg)
+
+# ---------------------------------------------------------------------------
+# Kernel panic: log the message at Panic level, then halt the CPU.
+# This function never returns.
+# ---------------------------------------------------------------------------
+fn kpanic(msg: text):
+    # Always print, regardless of log level
+    if !g_log_initialized:
+        serial_init()
+        g_log_initialized = true
+
+    serial_print("[PANIC] ")
+    serial_println(msg)
+    serial_println("*** KERNEL HALTED ***")
+
+    # Disable interrupts and halt
+    unsafe:
+        asm """
+            cli
+        .kpanic_halt_loop:
+            hlt
+            jmp .kpanic_halt_loop
+        """
+
+# ---------------------------------------------------------------------------
+# Log a message with a u32 value appended (for debugging addresses, etc.).
+# Converts the value to hexadecimal text representation.
+# ---------------------------------------------------------------------------
+fn log_debug_hex(msg: text, value: u32):
+    if !log_level_enabled(LogLevel.Debug):
+        return
+    val hex = u32_to_hex(value)
+    serial_print("[DEBUG] ")
+    serial_print(msg)
+    serial_print("0x")
+    serial_println(hex)
+
+fn log_info_hex(msg: text, value: u32):
+    if !log_level_enabled(LogLevel.Info):
+        return
+    val hex = u32_to_hex(value)
+    serial_print("[INFO]  ")
+    serial_print(msg)
+    serial_print("0x")
+    serial_println(hex)
+
+fn log_error_hex(msg: text, value: u32):
+    val hex = u32_to_hex(value)
+    serial_print("[ERROR] ")
+    serial_print(msg)
+    serial_print("0x")
+    serial_println(hex)
+
+# ---------------------------------------------------------------------------
+# Convert a u32 to an 8-character hexadecimal string.
+# ---------------------------------------------------------------------------
+fn u32_to_hex(value: u32) -> text:
+    val hex_chars = "0123456789ABCDEF"
+    var result = "00000000"
+    var v = value
+    for i in 0..8:
+        val nibble_pos = 7 - i
+        val nibble = (v >> (nibble_pos * 4)) & 0xF
+        # Build the hex string character by character
+        val ch = hex_chars.char_at(nibble as i32)
+        result = result.replace_at(i as i32, ch)
+    result
+
+# ---------------------------------------------------------------------------
+# Log a u32 value in decimal.
+# ---------------------------------------------------------------------------
+fn log_debug_dec(msg: text, value: u32):
+    if !log_level_enabled(LogLevel.Debug):
+        return
+    val dec = u32_to_dec(value)
+    serial_print("[DEBUG] ")
+    serial_print(msg)
+    serial_println(dec)
+
+# ---------------------------------------------------------------------------
+# Convert a u32 to decimal text. Handles zero correctly.
+# ---------------------------------------------------------------------------
+fn u32_to_dec(value: u32) -> text:
+    if value == 0:
+        return "0"
+    var digits = ""
+    var v = value
+    while v > 0:
+        val d = v % 10
+        val ch = "0123456789".char_at(d as i32)
+        # Prepend digit
+        var new_digits = ""
+        new_digits = new_digits.push_char(ch)
+        new_digits = new_digits.concat(digits)
+        digits = new_digits
+        v = v / 10
+    digits
+
+# ---------------------------------------------------------------------------
+# Print a raw string to serial without any prefix or newline.
+# Useful for building custom output formats.
+# ---------------------------------------------------------------------------
+fn log_raw(msg: text):
+    serial_print(msg)
+
+# ---------------------------------------------------------------------------
+# Print a newline to serial.
+# ---------------------------------------------------------------------------
+fn log_newline():
+    serial_write(0x0D)
+    serial_write(0x0A)
+
+# ---------------------------------------------------------------------------
+# Log a separator line for visual clarity in serial output.
+# ---------------------------------------------------------------------------
+fn log_separator():
+    serial_println("----------------------------------------")

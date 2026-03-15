@@ -1,0 +1,219 @@
+# User-Space Timer Driver
+#
+# A user-space process that manages the PIT timer interrupt. It receives
+# an IRQ capability for timer interrupts and provides a tick-counting
+# service via IPC. Other tasks can query the current tick count or
+# request a notification after a delay.
+#
+# Architecture:
+#   - Binds IRQ handler capability to a notification endpoint
+#   - On each IRQ notification, increments tick counter and acknowledges
+#   - Serves tick queries and sleep requests via IPC endpoint
+#   - Manages a waiters list for timed wakeups
+#
+# Capability slot assignments (set up by root task):
+#   6  = Timer IRQ handler capability
+#   12 = Timer service IPC endpoint (we are the server)
+
+use user.libos.syscall.{
+    sys_recv, sys_reply, sys_nbrecv, sys_debug_print, sys_yield,
+    sys_irq_set_handler, sys_irq_ack,
+    msg_info_new, msg_info_label, msg_info_length
+}
+use user.libos.ipc.{
+    ipc_buffer_create, IpcBuffer, MessageInfo,
+    message_info_decode, message_info_create, message_info_encode,
+    LABEL_ACK, LABEL_ERROR
+}
+
+# ---------------------------------------------------------------------------
+# Capability slots
+# ---------------------------------------------------------------------------
+val CAP_TIMER_IRQ: i32 = 6
+val CAP_TIMER_EP: i32 = 12
+val CAP_TIMER_NOTIF: i32 = 25     # Notification for IRQ delivery
+
+# ---------------------------------------------------------------------------
+# Request labels
+# ---------------------------------------------------------------------------
+val LABEL_TIMER_GET_TICKS: i32 = 200
+val LABEL_TIMER_GET_MILLIS: i32 = 201
+val LABEL_TIMER_SLEEP: i32 = 202
+val LABEL_TIMER_GET_FREQ: i32 = 203
+
+# ---------------------------------------------------------------------------
+# Timer configuration
+# ---------------------------------------------------------------------------
+val TIMER_FREQUENCY_HZ: u32 = 100   # 100 Hz = 10ms per tick
+
+# ---------------------------------------------------------------------------
+# Waiter entry - a task waiting for a timed wakeup
+# ---------------------------------------------------------------------------
+struct Waiter:
+    active: bool        # Is this waiter slot in use?
+    reply_cap: i32      # Reply capability to wake the task
+    wake_tick: u64      # Tick count at which to wake
+
+val MAX_WAITERS: i32 = 16
+
+# ---------------------------------------------------------------------------
+# Timer driver state
+# ---------------------------------------------------------------------------
+struct TimerState:
+    ticks: u64              # Monotonic tick counter
+    frequency_hz: u32       # Configured frequency
+    waiters: [Waiter; 16]   # Pending sleep requests
+    waiter_count: i32       # Number of active waiters
+
+fn timer_state_create() -> TimerState:
+    val empty_waiter = Waiter(active: false, reply_cap: 0, wake_tick: 0)
+    TimerState(
+        ticks: 0,
+        frequency_hz: TIMER_FREQUENCY_HZ,
+        waiters: [empty_waiter; 16],
+        waiter_count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Convert ticks to milliseconds
+# ---------------------------------------------------------------------------
+fn ticks_to_millis(state: TimerState) -> u64:
+    if state.frequency_hz == 0:
+        return 0
+    (state.ticks * 1000) / state.frequency_hz as u64
+
+# Convert milliseconds to ticks
+fn millis_to_ticks(state: TimerState, ms: u32) -> u64:
+    (ms as u64 * state.frequency_hz as u64) / 1000
+
+# ---------------------------------------------------------------------------
+# Add a waiter to the sleep queue
+# ---------------------------------------------------------------------------
+fn add_waiter(state: var TimerState, reply_cap: i32, wake_tick: u64) -> bool:
+    for i in 0..MAX_WAITERS:
+        if not state.waiters[i].active:
+            state.waiters[i] = Waiter(
+                active: true,
+                reply_cap: reply_cap,
+                wake_tick: wake_tick
+            )
+            state.waiter_count = state.waiter_count + 1
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Check and wake any waiters whose deadline has passed
+# ---------------------------------------------------------------------------
+fn check_waiters(state: var TimerState, buf: var IpcBuffer):
+    for i in 0..MAX_WAITERS:
+        if state.waiters[i].active:
+            if state.ticks >= state.waiters[i].wake_tick:
+                # Wake this waiter by replying to their blocked call
+                val reply_info = message_info_create(LABEL_ACK, 1, 0)
+                buf.registers[0] = state.ticks as i32
+                buf.tag = message_info_encode(reply_info)
+                val _r = sys_reply(buf.tag)
+
+                # Mark slot as free
+                state.waiters[i].active = false
+                state.waiter_count = state.waiter_count - 1
+
+# ---------------------------------------------------------------------------
+# Handle an IRQ notification (timer tick)
+# ---------------------------------------------------------------------------
+fn handle_tick(state: var TimerState, buf: var IpcBuffer):
+    state.ticks = state.ticks + 1
+
+    # Acknowledge the IRQ so the hardware can fire again
+    val _r = sys_irq_ack(CAP_TIMER_IRQ)
+
+    # Check if any sleeping tasks need to be woken
+    if state.waiter_count > 0:
+        check_waiters(state, buf)
+
+# ---------------------------------------------------------------------------
+# Handle an IPC service request
+# ---------------------------------------------------------------------------
+fn handle_request(state: var TimerState, buf: var IpcBuffer, info: MessageInfo):
+    if info.label == LABEL_TIMER_GET_TICKS:
+        # Return current tick count (low 32 bits)
+        buf.registers[0] = state.ticks as i32
+        buf.registers[1] = (state.ticks >> 32) as i32
+        val reply_info = message_info_create(LABEL_ACK, 2, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+    else if info.label == LABEL_TIMER_GET_MILLIS:
+        # Return elapsed milliseconds (low 32 bits)
+        val ms = ticks_to_millis(state)
+        buf.registers[0] = ms as i32
+        buf.registers[1] = (ms >> 32) as i32
+        val reply_info = message_info_create(LABEL_ACK, 2, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+    else if info.label == LABEL_TIMER_SLEEP:
+        # Sleep for N milliseconds (arg in register 0)
+        val sleep_ms = buf.registers[0] as u32
+        val wake_tick = state.ticks + millis_to_ticks(state, sleep_ms)
+        # Try to add a waiter; if full, reply immediately with error
+        val added = add_waiter(state, 0, wake_tick)
+        if not added:
+            val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+            buf.registers[0] = -1
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+        # If added, we do NOT reply now; the reply is deferred until wake_tick
+
+    else if info.label == LABEL_TIMER_GET_FREQ:
+        # Return configured frequency
+        buf.registers[0] = state.frequency_hz as i32
+        val reply_info = message_info_create(LABEL_ACK, 1, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+    else:
+        # Unknown request
+        val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+        buf.registers[0] = -1
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+fn main():
+    sys_debug_print("[TIMER] Timer driver starting")
+
+    # Bind our IRQ handler to a notification endpoint
+    val bind_result = sys_irq_set_handler(CAP_TIMER_IRQ, CAP_TIMER_NOTIF)
+    if bind_result < 0:
+        sys_debug_print("[TIMER] ERROR: Failed to bind IRQ handler")
+        return
+
+    sys_debug_print("[TIMER] IRQ handler bound, frequency = 100 Hz")
+
+    # Initialize state
+    var state = timer_state_create()
+    var buf = ipc_buffer_create()
+
+    sys_debug_print("[TIMER] Timer driver ready, entering service loop")
+
+    # Main loop: alternate between checking for IRQ notifications and
+    # servicing IPC requests
+    while true:
+        # Check for IRQ notification (non-blocking)
+        val irq_msg = sys_nbrecv(CAP_TIMER_NOTIF)
+        if irq_msg >= 0:
+            handle_tick(state, buf)
+
+        # Check for IPC service request (non-blocking)
+        val ipc_msg = sys_nbrecv(CAP_TIMER_EP)
+        if ipc_msg >= 0:
+            buf.tag = ipc_msg
+            val info = message_info_decode(ipc_msg)
+            handle_request(state, buf, info)
+
+        # If nothing to do, yield to let other tasks run
+        if irq_msg < 0 and ipc_msg < 0:
+            sys_yield()

@@ -1,0 +1,194 @@
+# RV32 Control and Status Registers (CSR)
+#
+# M-mode CSRs: mstatus, mtvec, mepc, mcause, mtval, mie, mip, etc.
+# Supports CSRRW, CSRRS, CSRRC and immediate variants.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+
+# ============================================================================
+# CSR File Model
+# ============================================================================
+
+class Rv32CsrFile:
+    """
+    M-mode CSR register file.
+
+    Supports read/write via CSRRW/CSRRS/CSRRC operations.
+    Handles trap entry (mstatus.MIE save) and return (mret).
+    """
+
+    mstatus: i64
+    misa: i64
+    mie: i64
+    mtvec: i64
+    mscratch: i64
+    mepc: i64
+    mcause: i64
+    mtval: i64
+    mip: i64
+    mcycle: i64
+    minstret: i64
+
+    static fn create() -> Rv32CsrFile:
+        Rv32CsrFile(
+            mstatus: 0,
+            misa: 0x40101104,  # RV32IMAC, M-mode
+            mie: 0,
+            mtvec: 0,
+            mscratch: 0,
+            mepc: 0,
+            mcause: 0,
+            mtval: 0,
+            mip: 0,
+            mcycle: 0,
+            minstret: 0
+        )
+
+    fn read(addr: i64) -> i64:
+        """Read CSR by address."""
+        if addr == CSR_MSTATUS: return self.mstatus
+        elif addr == CSR_MISA: return self.misa
+        elif addr == CSR_MIE: return self.mie
+        elif addr == CSR_MTVEC: return self.mtvec
+        elif addr == CSR_MSCRATCH: return self.mscratch
+        elif addr == CSR_MEPC: return self.mepc
+        elif addr == CSR_MCAUSE: return self.mcause
+        elif addr == CSR_MTVAL: return self.mtval
+        elif addr == CSR_MIP: return self.mip
+        elif addr == CSR_MCYCLE: return self.mcycle
+        elif addr == CSR_MINSTRET: return self.minstret
+        0
+
+    me write(addr: i64, value: i64):
+        """Write CSR by address."""
+        if addr == CSR_MSTATUS: self.mstatus = value and 0x000019FF
+        elif addr == CSR_MIE: self.mie = value
+        elif addr == CSR_MTVEC: self.mtvec = value
+        elif addr == CSR_MSCRATCH: self.mscratch = value
+        elif addr == CSR_MEPC: self.mepc = value and 0xFFFFFFFC
+        elif addr == CSR_MCAUSE: self.mcause = value
+        elif addr == CSR_MTVAL: self.mtval = value
+
+    me csrrw(addr: i64, rs1_data: i64) -> i64:
+        """CSRRW: Atomic read/write. Returns old value."""
+        val old = self.read(addr)
+        self.write(addr, rs1_data)
+        old
+
+    me csrrs(addr: i64, rs1_data: i64) -> i64:
+        """CSRRS: Atomic read and set bits. Returns old value."""
+        val old = self.read(addr)
+        if rs1_data != 0:
+            self.write(addr, old or rs1_data)
+        old
+
+    me csrrc(addr: i64, rs1_data: i64) -> i64:
+        """CSRRC: Atomic read and clear bits. Returns old value."""
+        val old = self.read(addr)
+        if rs1_data != 0:
+            self.write(addr, old and (0xFFFFFFFF xor rs1_data))
+        old
+
+    me trap_enter(cause: i64, pc: i64, tval: i64):
+        """Enter trap: save state, jump to mtvec."""
+        self.mepc = pc and 0xFFFFFFFC
+        self.mcause = cause
+        self.mtval = tval
+        # Save MIE to MPIE, clear MIE
+        val mie_bit = (self.mstatus >> 3) and 1
+        self.mstatus = (self.mstatus and 0xFFFFFF77) or (mie_bit << 7)
+
+    me trap_return() -> i64:
+        """MRET: restore state, return to mepc."""
+        # Restore MIE from MPIE
+        val mpie_bit = (self.mstatus >> 7) and 1
+        self.mstatus = (self.mstatus and 0xFFFFFF77) or (mpie_bit << 3) or (1 << 7)
+        self.mepc
+
+    fn trap_vector() -> i64:
+        """Get trap handler address from mtvec."""
+        self.mtvec and 0xFFFFFFFC
+
+    me tick():
+        """Increment cycle counter."""
+        self.mcycle = self.mcycle + 1
+
+    me retire():
+        """Increment instruction retired counter."""
+        self.minstret = self.minstret + 1
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_csr_vhdl() -> text:
+    """Generate VHDL for CSR file."""
+    var b = VhdlBuilder.create("rv32_csr")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+    b.emit_use_package("work", "rv32_isa_pkg")
+
+    b.emit_entity_begin("rv32_csr")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("CSR read/write")
+    b.emit_port("csr_addr", "in", "std_logic_vector(11 downto 0)", false)
+    b.emit_port("csr_wdata", "in", "word_t", false)
+    b.emit_port("csr_rdata", "out", "word_t", false)
+    b.emit_port("csr_we", "in", "std_logic", false)
+    b.emit_port("csr_op", "in", "std_logic_vector(1 downto 0)", false)
+    b.emit_comment("Trap interface")
+    b.emit_port("trap_enter", "in", "std_logic", false)
+    b.emit_port("trap_cause", "in", "word_t", false)
+    b.emit_port("trap_pc", "in", "word_t", false)
+    b.emit_port("trap_val", "in", "word_t", false)
+    b.emit_port("trap_mret", "in", "std_logic", false)
+    b.emit_port("trap_vector", "out", "word_t", false)
+    b.emit_port("mepc_out", "out", "word_t", false)
+    b.emit_comment("Counters")
+    b.emit_port("retire_valid", "in", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_csr")
+
+    b.emit_architecture_begin("rv32_csr", "rtl")
+    b.emit_signal_decl("mstatus_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mie_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mtvec_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mscratch_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mepc_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mcause_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mtval_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("mcycle_r", "unsigned(63 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("minstret_r", "unsigned(63 downto 0)", Some("(others => '0')"))
+    b.emit_architecture_body_begin()
+
+    b.emit_signal_assign("trap_vector", "mtvec_r(31 downto 2) & \"00\"")
+    b.emit_signal_assign("mepc_out", "mepc_r")
+
+    b.emit_comment("CSR read/write and trap logic in clocked process")
+    b.emit_clocked_process_begin(Some("csr_proc"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("mstatus_r", "(others => '0')")
+    b.emit_signal_assign("mie_r", "(others => '0')")
+    b.emit_signal_assign("mtvec_r", "(others => '0')")
+    b.emit_signal_assign("mepc_r", "(others => '0')")
+    b.emit_signal_assign("mcause_r", "(others => '0')")
+    b.emit_signal_assign("mcycle_r", "(others => '0')")
+    b.emit_signal_assign("minstret_r", "(others => '0')")
+    b.emit_elsif("rising_edge(clk)")
+    b.emit_comment("Cycle counter always increments")
+    b.emit_signal_assign("mcycle_r", "mcycle_r + 1")
+    b.emit_if_begin("retire_valid = '1'")
+    b.emit_signal_assign("minstret_r", "minstret_r + 1")
+    b.emit_if_end()
+    b.emit_if_end()
+    b.emit_process_end(Some("csr_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

@@ -1,0 +1,174 @@
+# RV32 UART Peripheral
+#
+# 16550-compatible UART with transmit and receive.
+# Register-mapped at base address with 4 registers:
+#   +0x0  THR/RBR  (TX hold / RX buffer)
+#   +0x4  IER      (Interrupt enable)
+#   +0x8  LSR      (Line status)
+#   +0xC  CTRL     (Control/baud divisor)
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# UART Model
+# ============================================================================
+
+class Rv32UartModel:
+    """Simple UART model for simulation testing."""
+
+    tx_buffer: [i64]
+    rx_buffer: [i64]
+    tx_busy: bool
+    baud_div: i64
+
+    static fn create(baud_div: i64) -> Rv32UartModel:
+        Rv32UartModel(tx_buffer: [], rx_buffer: [], tx_busy: false, baud_div: baud_div)
+
+    me write_thr(data: i64):
+        """Write to transmit hold register."""
+        self.tx_buffer = self.tx_buffer.push(data and 0xFF)
+
+    fn read_rbr() -> i64:
+        """Read from receive buffer register."""
+        if self.rx_buffer.len() > 0:
+            return self.rx_buffer[0]
+        0
+
+    fn read_lsr() -> i64:
+        """Read line status register. Bit 0=RX ready, Bit 5=TX empty, Bit 6=TX idle."""
+        var status = 0
+        if self.rx_buffer.len() > 0:
+            status = status or 0x01
+        if not self.tx_busy:
+            status = status or 0x60
+        status
+
+    fn get_tx_output() -> [i64]:
+        """Get all transmitted bytes."""
+        self.tx_buffer
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_uart_vhdl() -> text:
+    """Generate VHDL for 16550-compatible UART."""
+    var b = VhdlBuilder.create("rv32_uart")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_uart")
+    b.emit_generic_begin()
+    b.emit_generic_param("CLK_FREQ_HZ", "integer", Some("100000000"), false)
+    b.emit_generic_param("BAUD_RATE", "integer", Some("115200"), true)
+    b.emit_generic_end()
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("Register interface")
+    b.emit_port("addr", "in", "std_logic_vector(3 downto 0)", false)
+    b.emit_port("wdata", "in", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("rdata", "out", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("we", "in", "std_logic", false)
+    b.emit_comment("Serial pins")
+    b.emit_port("tx", "out", "std_logic", false)
+    b.emit_port("rx", "in", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_uart")
+
+    b.emit_architecture_begin("rv32_uart", "rtl")
+    b.emit_constant_decl("BAUD_DIV", "integer", "CLK_FREQ_HZ / BAUD_RATE")
+    b.emit_type_decl("tx_state_t", "(TX_IDLE, TX_START, TX_DATA, TX_STOP)")
+    b.emit_signal_decl("tx_state", "tx_state_t", Some("TX_IDLE"))
+    b.emit_signal_decl("tx_shift", "std_logic_vector(7 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("tx_counter", "integer range 0 to 65535", Some("0"))
+    b.emit_signal_decl("tx_bit_idx", "integer range 0 to 7", Some("0"))
+    b.emit_signal_decl("tx_reg", "std_logic", Some("'1'"))
+    b.emit_signal_decl("tx_busy_i", "std_logic", Some("'0'"))
+    b.emit_signal_decl("thr", "std_logic_vector(7 downto 0)", Some("(others => '0')"))
+    b.emit_signal_decl("thr_valid", "std_logic", Some("'0'"))
+    b.emit_architecture_body_begin()
+
+    b.emit_signal_assign("tx", "tx_reg")
+    b.emit_raw("")
+
+    # Register read
+    b.emit_comment("Register read mux")
+    b.emit_process_begin(Some("reg_read"), ["addr", "thr", "tx_busy_i"])
+    b.emit_process_body_begin()
+    b.emit_signal_assign("rdata", "(others => '0')")
+    b.emit_line("case addr is")
+    b.emit_line("  when x\"0\" => rdata <= (others => '0');")
+    b.emit_line("  when x\"8\" => rdata <= \"01\" & not tx_busy_i & \"00000\";")
+    b.emit_line("  when others => null;")
+    b.emit_line("end case;")
+    b.emit_process_end(Some("reg_read"))
+    b.emit_raw("")
+
+    # Register write
+    b.emit_comment("Register write + TX FSM")
+    b.emit_clocked_process_begin(Some("uart_proc"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("tx_state", "TX_IDLE")
+    b.emit_signal_assign("tx_reg", "'1'")
+    b.emit_signal_assign("tx_busy_i", "'0'")
+    b.emit_signal_assign("thr_valid", "'0'")
+    b.emit_elsif("rising_edge(clk)")
+
+    b.emit_comment("Handle register writes")
+    b.emit_if_begin("we = '1' and addr = x\"0\"")
+    b.emit_signal_assign("thr", "wdata")
+    b.emit_signal_assign("thr_valid", "'1'")
+    b.emit_if_end()
+    b.emit_raw("")
+
+    b.emit_comment("TX state machine")
+    b.emit_line("case tx_state is")
+    b.emit_line("  when TX_IDLE =>")
+    b.emit_line("    tx_reg <= '1';")
+    b.emit_line("    tx_busy_i <= '0';")
+    b.emit_line("    if thr_valid = '1' then")
+    b.emit_line("      tx_shift <= thr;")
+    b.emit_line("      thr_valid <= '0';")
+    b.emit_line("      tx_state <= TX_START;")
+    b.emit_line("      tx_busy_i <= '1';")
+    b.emit_line("      tx_counter <= 0;")
+    b.emit_line("    end if;")
+    b.emit_line("  when TX_START =>")
+    b.emit_line("    tx_reg <= '0';")
+    b.emit_line("    if tx_counter = BAUD_DIV - 1 then")
+    b.emit_line("      tx_counter <= 0;")
+    b.emit_line("      tx_bit_idx <= 0;")
+    b.emit_line("      tx_state <= TX_DATA;")
+    b.emit_line("    else")
+    b.emit_line("      tx_counter <= tx_counter + 1;")
+    b.emit_line("    end if;")
+    b.emit_line("  when TX_DATA =>")
+    b.emit_line("    tx_reg <= tx_shift(tx_bit_idx);")
+    b.emit_line("    if tx_counter = BAUD_DIV - 1 then")
+    b.emit_line("      tx_counter <= 0;")
+    b.emit_line("      if tx_bit_idx = 7 then")
+    b.emit_line("        tx_state <= TX_STOP;")
+    b.emit_line("      else")
+    b.emit_line("        tx_bit_idx <= tx_bit_idx + 1;")
+    b.emit_line("      end if;")
+    b.emit_line("    else")
+    b.emit_line("      tx_counter <= tx_counter + 1;")
+    b.emit_line("    end if;")
+    b.emit_line("  when TX_STOP =>")
+    b.emit_line("    tx_reg <= '1';")
+    b.emit_line("    if tx_counter = BAUD_DIV - 1 then")
+    b.emit_line("      tx_state <= TX_IDLE;")
+    b.emit_line("    else")
+    b.emit_line("      tx_counter <= tx_counter + 1;")
+    b.emit_line("    end if;")
+    b.emit_line("end case;")
+
+    b.emit_if_end()
+    b.emit_process_end(Some("uart_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

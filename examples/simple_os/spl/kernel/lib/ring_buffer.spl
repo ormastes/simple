@@ -1,0 +1,102 @@
+# Ring Buffer (Circular Buffer)
+# Fixed-size FIFO queue of u32 values for lock-free IPC message passing.
+# Uses head/tail indices that wrap around the buffer. The buffer holds
+# up to (capacity - 1) elements to distinguish full from empty.
+
+val RING_MAX_CAPACITY: u32 = 256
+
+struct RingBuffer:
+    data: [u32; 256]
+    head: u32        # Index of next slot to read
+    tail: u32        # Index of next slot to write
+    capacity: u32    # Total number of slots (actual usable = capacity - 1)
+
+# Create an empty ring buffer with the given capacity (max 256).
+fn ring_buffer_create(capacity: u32) -> RingBuffer:
+    val cap = if capacity > RING_MAX_CAPACITY: RING_MAX_CAPACITY
+              else if capacity < 2: 2  # Minimum 2 to hold at least 1 element
+              else: capacity
+    var rb = RingBuffer(
+        data: [0 as u32; 256],
+        head: 0,
+        tail: 0,
+        capacity: cap
+    )
+    rb
+
+# Returns true if the buffer contains no elements.
+fn ring_buffer_is_empty(rb: RingBuffer) -> bool:
+    rb.head == rb.tail
+
+# Returns true if the buffer is full (no more room to push).
+fn ring_buffer_is_full(rb: RingBuffer) -> bool:
+    ((rb.tail + 1) % rb.capacity) == rb.head
+
+# Returns the number of elements currently stored.
+fn ring_buffer_count(rb: RingBuffer) -> u32:
+    if rb.tail >= rb.head:
+        rb.tail - rb.head
+    else:
+        rb.capacity - rb.head + rb.tail
+
+# Returns the number of free slots remaining.
+fn ring_buffer_free_count(rb: RingBuffer) -> u32:
+    # Usable capacity is (capacity - 1) since one slot is always unused.
+    (rb.capacity - 1) - ring_buffer_count(rb)
+
+# Push a value onto the tail of the buffer.
+# Returns true on success, false if the buffer is full.
+fn ring_buffer_push(rb: var RingBuffer, value: u32) -> bool:
+    if ring_buffer_is_full(rb):
+        return false
+    rb.data[rb.tail] = value
+    rb.tail = (rb.tail + 1) % rb.capacity
+    true
+
+# Pop a value from the head of the buffer.
+# Returns None if the buffer is empty.
+fn ring_buffer_pop(rb: var RingBuffer) -> Option<u32>:
+    if ring_buffer_is_empty(rb):
+        return Option<u32>.None
+    val value = rb.data[rb.head]
+    rb.head = (rb.head + 1) % rb.capacity
+    Option<u32>.Some(value)
+
+# Peek at the value at the head without removing it.
+fn ring_buffer_peek(rb: RingBuffer) -> Option<u32>:
+    if ring_buffer_is_empty(rb):
+        return Option<u32>.None
+    Option<u32>.Some(rb.data[rb.head])
+
+# Peek at the value at a specific offset from head (0 = head).
+fn ring_buffer_peek_at(rb: RingBuffer, offset: u32) -> Option<u32>:
+    if offset >= ring_buffer_count(rb):
+        return Option<u32>.None
+    val idx = (rb.head + offset) % rb.capacity
+    Option<u32>.Some(rb.data[idx])
+
+# Discard all elements, resetting the buffer to empty.
+fn ring_buffer_clear(rb: var RingBuffer):
+    rb.head = 0
+    rb.tail = 0
+
+# Try to push multiple values. Returns the number actually pushed.
+fn ring_buffer_push_batch(rb: var RingBuffer, values: [u32; 256], count: u32) -> u32:
+    var pushed: u32 = 0
+    for i in 0..count:
+        if !ring_buffer_push(rb, values[i]):
+            break
+        pushed = pushed + 1
+    pushed
+
+# Try to pop multiple values into a caller-supplied array.
+# Returns the number actually popped.
+fn ring_buffer_pop_batch(rb: var RingBuffer, out: var [u32; 256], max_count: u32) -> u32:
+    var popped: u32 = 0
+    for i in 0..max_count:
+        if val v = ring_buffer_pop(rb):
+            out[i] = v
+            popped = popped + 1
+        else:
+            break
+    popped

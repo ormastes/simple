@@ -1,0 +1,216 @@
+# VHDL Simulator Abstraction Layer
+#
+# Provides a unified interface to GHDL, ModelSim, and Questa simulators.
+# Dispatches to vhdl_ffi functions based on selected simulator.
+
+use lib.io.vhdl_ffi.*
+
+# ============================================================================
+# Simulator Selection
+# ============================================================================
+
+enum VhdlSimulator:
+    Ghdl
+    ModelSim
+    Questa
+
+# ============================================================================
+# Simulator Configuration
+# ============================================================================
+
+struct VhdlSimConfig:
+    simulator: VhdlSimulator
+    std_version: text
+    work_dir: text
+    waveform_format: text?
+    waveform_path: text?
+    stop_time: text?
+    extra_args: [text]
+
+    static fn ghdl_default() -> VhdlSimConfig:
+        """Default GHDL configuration."""
+        VhdlSimConfig(
+            simulator: VhdlSimulator.Ghdl,
+            std_version: "08",
+            work_dir: "build/vhdl",
+            waveform_format: nil,
+            waveform_path: nil,
+            stop_time: nil,
+            extra_args: []
+        )
+
+    static fn modelsim_default() -> VhdlSimConfig:
+        """Default ModelSim configuration."""
+        VhdlSimConfig(
+            simulator: VhdlSimulator.ModelSim,
+            std_version: "08",
+            work_dir: "build/vhdl",
+            waveform_format: nil,
+            waveform_path: nil,
+            stop_time: nil,
+            extra_args: []
+        )
+
+# ============================================================================
+# Simulation Result
+# ============================================================================
+
+struct VhdlSimResult:
+    success: bool
+    exit_code: i64
+    stdout: text
+    stderr: text
+    waveform_file: text?
+
+    static fn from_tool_result(r: VhdlToolResult, wave: text?) -> VhdlSimResult:
+        VhdlSimResult(
+            success: r.success,
+            exit_code: r.exit_code,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            waveform_file: wave
+        )
+
+    static fn error(msg: text) -> VhdlSimResult:
+        VhdlSimResult(
+            success: false,
+            exit_code: -1,
+            stdout: "",
+            stderr: msg,
+            waveform_file: nil
+        )
+
+# ============================================================================
+# Simulator Runner
+# ============================================================================
+
+class VhdlSimulatorRunner:
+    """
+    Unified interface for VHDL simulation.
+
+    Dispatches analyze/elaborate/simulate to the configured simulator backend.
+
+    Usage:
+        val runner = VhdlSimulatorRunner.auto_detect()
+        val result = runner.full_run("design.vhd", "design_tb")
+    """
+
+    config: VhdlSimConfig
+
+    static fn create(config: VhdlSimConfig) -> VhdlSimulatorRunner:
+        """Create a simulator runner with explicit config."""
+        VhdlSimulatorRunner(config: config)
+
+    static fn auto_detect() -> VhdlSimulatorRunner:
+        """Auto-detect the best available simulator."""
+        if ghdl_available():
+            return VhdlSimulatorRunner(config: VhdlSimConfig.ghdl_default())
+        if modelsim_available():
+            return VhdlSimulatorRunner(config: VhdlSimConfig.modelsim_default())
+        # Fall back to GHDL (will fail with clear error on use)
+        VhdlSimulatorRunner(config: VhdlSimConfig.ghdl_default())
+
+    fn is_available() -> bool:
+        """Check if the configured simulator is installed."""
+        if self.config.simulator == VhdlSimulator.Ghdl:
+            return ghdl_available()
+        elif self.config.simulator == VhdlSimulator.ModelSim:
+            return modelsim_available()
+        elif self.config.simulator == VhdlSimulator.Questa:
+            return modelsim_available()
+        false
+
+    fn analyze(vhdl_file: text) -> VhdlSimResult:
+        """Analyze (compile) a VHDL source file."""
+        if self.config.simulator == VhdlSimulator.Ghdl:
+            val r = ghdl_analyze(vhdl_file)
+            return VhdlSimResult.from_tool_result(r, nil)
+        elif self.config.simulator == VhdlSimulator.ModelSim:
+            val lib_r = modelsim_vlib("work")
+            if not lib_r.success:
+                return VhdlSimResult.from_tool_result(lib_r, nil)
+            val r = modelsim_vcom(vhdl_file, "work")
+            return VhdlSimResult.from_tool_result(r, nil)
+        elif self.config.simulator == VhdlSimulator.Questa:
+            val lib_r = modelsim_vlib("work")
+            if not lib_r.success:
+                return VhdlSimResult.from_tool_result(lib_r, nil)
+            val r = modelsim_vcom(vhdl_file, "work")
+            return VhdlSimResult.from_tool_result(r, nil)
+        VhdlSimResult.error("Unknown simulator")
+
+    fn elaborate(entity_name: text) -> VhdlSimResult:
+        """Elaborate a VHDL entity."""
+        if self.config.simulator == VhdlSimulator.Ghdl:
+            val r = ghdl_elaborate(entity_name)
+            return VhdlSimResult.from_tool_result(r, nil)
+        elif self.config.simulator == VhdlSimulator.ModelSim:
+            # ModelSim does elaborate+simulate in one step
+            return VhdlSimResult(
+                success: true, exit_code: 0,
+                stdout: "ModelSim elaboration deferred to simulate step",
+                stderr: "", waveform_file: nil
+            )
+        elif self.config.simulator == VhdlSimulator.Questa:
+            return VhdlSimResult(
+                success: true, exit_code: 0,
+                stdout: "Questa elaboration deferred to simulate step",
+                stderr: "", waveform_file: nil
+            )
+        VhdlSimResult.error("Unknown simulator")
+
+    fn simulate(entity_name: text) -> VhdlSimResult:
+        """Run simulation of an elaborated entity."""
+        val wave_fmt = self.config.waveform_format
+        val wave_path = self.config.waveform_path
+        val stop = self.config.stop_time
+
+        if self.config.simulator == VhdlSimulator.Ghdl:
+            return self._ghdl_simulate(entity_name, wave_fmt, wave_path, stop)
+        elif self.config.simulator == VhdlSimulator.ModelSim:
+            return self._modelsim_simulate(entity_name, wave_fmt, wave_path, stop)
+        elif self.config.simulator == VhdlSimulator.Questa:
+            return self._modelsim_simulate(entity_name, wave_fmt, wave_path, stop)
+        VhdlSimResult.error("Unknown simulator")
+
+    fn full_run(vhdl_file: text, entity_name: text) -> VhdlSimResult:
+        """Analyze, elaborate, and simulate in one step."""
+        val analyze_r = self.analyze(vhdl_file)
+        if not analyze_r.success:
+            return analyze_r
+        val elab_r = self.elaborate(entity_name)
+        if not elab_r.success:
+            return elab_r
+        self.simulate(entity_name)
+
+    fn simulator_name() -> text:
+        """Human-readable simulator name."""
+        if self.config.simulator == VhdlSimulator.Ghdl:
+            return "GHDL"
+        elif self.config.simulator == VhdlSimulator.ModelSim:
+            return "ModelSim"
+        elif self.config.simulator == VhdlSimulator.Questa:
+            return "Questa"
+        "Unknown"
+
+    # === Private Helpers ===
+
+    fn _ghdl_simulate(entity: text, wave_fmt: text?, wave_path: text?, stop: text?) -> VhdlSimResult:
+        """GHDL-specific simulation dispatch."""
+        if wave_fmt.? and wave_path.?:
+            val fmt = wave_fmt.unwrap()
+            val path = wave_path.unwrap()
+            if fmt == "vcd":
+                val r = ghdl_run_vcd(entity, path, stop)
+                return VhdlSimResult.from_tool_result(r, Some(path))
+            elif fmt == "ghw":
+                val r = ghdl_run_ghw(entity, path, stop)
+                return VhdlSimResult.from_tool_result(r, Some(path))
+        val r = ghdl_run(entity, stop)
+        VhdlSimResult.from_tool_result(r, nil)
+
+    fn _modelsim_simulate(entity: text, wave_fmt: text?, wave_path: text?, stop: text?) -> VhdlSimResult:
+        """ModelSim/Questa simulation dispatch."""
+        val vcd = if wave_fmt.? and wave_path.?: Some(wave_path.unwrap()) else: nil
+        val r = modelsim_vsim(entity, "work", stop, vcd)
+        VhdlSimResult.from_tool_result(r, vcd)

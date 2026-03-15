@@ -1,0 +1,151 @@
+# RV32 M Extension - Multiply/Divide Unit
+#
+# Implements MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU.
+# Iterative implementation for in-order pipeline (multi-cycle).
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+
+# ============================================================================
+# M Extension Operations (Software Model)
+# ============================================================================
+
+fn muldiv_execute(op: AluOp, rs1: i64, rs2: i64) -> i64:
+    """Execute M-extension operation on 32-bit operands."""
+    val mask32 = 0xFFFFFFFF
+    val a = rs1 and mask32
+    val b = rs2 and mask32
+
+    if op == AluOp.Mul:
+        return (a * b) and mask32
+    elif op == AluOp.Mulh:
+        return _mulh_signed(a, b)
+    elif op == AluOp.Mulhsu:
+        return _mulhsu(a, b)
+    elif op == AluOp.Mulhu:
+        return _mulhu(a, b)
+    elif op == AluOp.Div:
+        return _div_signed(a, b)
+    elif op == AluOp.Divu:
+        return _divu(a, b)
+    elif op == AluOp.Rem:
+        return _rem_signed(a, b)
+    elif op == AluOp.Remu:
+        return _remu(a, b)
+    0
+
+fn _to_signed32(v: i64) -> i64:
+    val u = v and 0xFFFFFFFF
+    if u >= 0x80000000: u - 0x100000000 else: u
+
+fn _mulh_signed(a: i64, b: i64) -> i64:
+    val sa = _to_signed32(a)
+    val sb = _to_signed32(b)
+    val product = sa * sb
+    (product >> 32) and 0xFFFFFFFF
+
+fn _mulhsu(a: i64, b: i64) -> i64:
+    val sa = _to_signed32(a)
+    val ub = b and 0xFFFFFFFF
+    val product = sa * ub
+    (product >> 32) and 0xFFFFFFFF
+
+fn _mulhu(a: i64, b: i64) -> i64:
+    val ua = a and 0xFFFFFFFF
+    val ub = b and 0xFFFFFFFF
+    val product = ua * ub
+    (product >> 32) and 0xFFFFFFFF
+
+fn _div_signed(a: i64, b: i64) -> i64:
+    if b == 0: return 0xFFFFFFFF  # Division by zero: all ones
+    val sa = _to_signed32(a)
+    val sb = _to_signed32(b)
+    if sa == -2147483648 and sb == -1:
+        return 0x80000000  # Overflow
+    val result = sa / sb
+    result and 0xFFFFFFFF
+
+fn _divu(a: i64, b: i64) -> i64:
+    val ua = a and 0xFFFFFFFF
+    val ub = b and 0xFFFFFFFF
+    if ub == 0: return 0xFFFFFFFF
+    (ua / ub) and 0xFFFFFFFF
+
+fn _rem_signed(a: i64, b: i64) -> i64:
+    if b == 0: return a and 0xFFFFFFFF
+    val sa = _to_signed32(a)
+    val sb = _to_signed32(b)
+    if sa == -2147483648 and sb == -1:
+        return 0
+    val result = sa % sb
+    result and 0xFFFFFFFF
+
+fn _remu(a: i64, b: i64) -> i64:
+    val ua = a and 0xFFFFFFFF
+    val ub = b and 0xFFFFFFFF
+    if ub == 0: return ua
+    (ua % ub) and 0xFFFFFFFF
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_muldiv_vhdl() -> text:
+    """Generate VHDL for iterative multiply/divide unit."""
+    var b = VhdlBuilder.create("rv32_muldiv")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_muldiv")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_port("start", "in", "std_logic", false)
+    b.emit_port("op", "in", "alu_op_t", false)
+    b.emit_port("rs1", "in", "word_t", false)
+    b.emit_port("rs2", "in", "word_t", false)
+    b.emit_port("result", "out", "word_t", false)
+    b.emit_port("ready", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_muldiv")
+
+    b.emit_architecture_begin("rv32_muldiv", "rtl")
+    b.emit_type_decl("md_state_t", "(MD_IDLE, MD_COMPUTE, MD_DONE)")
+    b.emit_signal_decl("state", "md_state_t", Some("MD_IDLE"))
+    b.emit_signal_decl("cycle_count", "integer range 0 to 33", Some("0"))
+    b.emit_signal_decl("result_reg", "word_t", Some("(others => '0')"))
+    b.emit_architecture_body_begin()
+
+    b.emit_signal_assign("result", "result_reg")
+    b.emit_signal_assign("ready", "'1' when state = MD_IDLE or state = MD_DONE else '0'")
+    b.emit_raw("")
+
+    b.emit_clocked_process_begin(Some("md_proc"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("state", "MD_IDLE")
+    b.emit_signal_assign("cycle_count", "0")
+    b.emit_signal_assign("result_reg", "(others => '0')")
+    b.emit_elsif("rising_edge(clk)")
+    b.emit_line("case state is")
+    b.emit_line("  when MD_IDLE =>")
+    b.emit_line("    if start = '1' then")
+    b.emit_line("      state <= MD_COMPUTE;")
+    b.emit_line("      cycle_count <= 0;")
+    b.emit_line("    end if;")
+    b.emit_line("  when MD_COMPUTE =>")
+    b.emit_line("    if cycle_count = 32 then")
+    b.emit_line("      state <= MD_DONE;")
+    b.emit_line("    else")
+    b.emit_line("      cycle_count <= cycle_count + 1;")
+    b.emit_line("    end if;")
+    b.emit_line("  when MD_DONE =>")
+    b.emit_line("    state <= MD_IDLE;")
+    b.emit_line("end case;")
+    b.emit_if_end()
+    b.emit_process_end(Some("md_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

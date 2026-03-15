@@ -1,0 +1,247 @@
+# Untyped Memory — seL4-style Raw Memory Regions
+#
+# An UntypedMemory object represents a contiguous region of physical memory
+# that has not yet been given a type.  The only operation on untyped memory
+# is "retype", which carves out a sub-region and stamps it as a typed
+# kernel object (endpoint, TCB, CNode, frame, page table, etc.).
+#
+# Key invariants:
+#   - Untyped memory is a power-of-two sized region, naturally aligned
+#   - Objects are allocated sequentially (bump allocator) within the region
+#   - All children can be revoked atomically, reclaiming the entire region
+#   - Retyping enforces alignment: each object starts at its natural alignment
+#
+# This is the foundation of the capability-based memory management model.
+
+# ---------------------------------------------------------------------------
+# Object type tags for retype operations
+# ---------------------------------------------------------------------------
+enum KernelObjectType:
+    EndpointObj         # IPC endpoint
+    NotificationObj     # Async notification
+    TcbObj              # Thread control block
+    CNodeObj            # Capability node
+    FrameObj            # 4KB physical frame
+    PageTableObj        # Page table (second-level)
+    UntypedObj          # Sub-untyped (for delegation)
+
+# ---------------------------------------------------------------------------
+# Object size constants (in bytes, must be powers of two)
+# ---------------------------------------------------------------------------
+val ENDPOINT_SIZE: u32 = 64
+val NOTIFICATION_SIZE: u32 = 64
+val TCB_SIZE: u32 = 1024
+val FRAME_OBJ_SIZE: u32 = 4096
+val PAGE_TABLE_OBJ_SIZE: u32 = 4096
+
+# Maximum number of children an untyped can track
+val UNTYPED_MAX_CHILDREN: u32 = 256
+
+# ---------------------------------------------------------------------------
+# Child object descriptor — tracks a typed object carved from this untyped
+# ---------------------------------------------------------------------------
+struct UntypedChild:
+    obj_type: KernelObjectType
+    offset: u32         # Offset from base_addr where this object starts
+    size: u32           # Size in bytes of this object
+    active: bool        # Whether this child is still alive
+
+# ---------------------------------------------------------------------------
+# UntypedMemory structure
+# ---------------------------------------------------------------------------
+struct UntypedMemory:
+    base_addr: u32          # Physical base address (naturally aligned)
+    size_bits: u32          # log2 of total size (e.g., 20 = 1MB)
+    total_size: u32         # 1 << size_bits
+    free_offset: u32        # Bump pointer: next free byte offset from base
+    children: [UntypedChild; 256]
+    child_count: u32        # Number of children created
+    is_device: bool         # True if this represents device memory (non-cacheable)
+
+# ---------------------------------------------------------------------------
+# Create a new untyped memory region.
+# base must be aligned to (1 << size_bits).
+# ---------------------------------------------------------------------------
+fn untyped_create(base: u32, size_bits: u32) -> UntypedMemory:
+    val total = 1 as u32 << size_bits
+    var default_child = UntypedChild(
+        obj_type: KernelObjectType.EndpointObj,
+        offset: 0,
+        size: 0,
+        active: false
+    )
+    UntypedMemory(
+        base_addr: base,
+        size_bits: size_bits,
+        total_size: total,
+        free_offset: 0,
+        children: [default_child; 256],
+        child_count: 0,
+        is_device: false
+    )
+
+# ---------------------------------------------------------------------------
+# Create an untyped for device memory (MMIO regions).
+# ---------------------------------------------------------------------------
+fn untyped_create_device(base: u32, size_bits: u32) -> UntypedMemory:
+    var ut = untyped_create(base, size_bits)
+    ut.is_device = true
+    ut
+
+# ---------------------------------------------------------------------------
+# Get the size of a kernel object type.
+# For CNodes, size depends on the number of slots (size_bits parameter).
+# ---------------------------------------------------------------------------
+fn kernel_object_size(obj_type: KernelObjectType, size_bits: u32) -> u32:
+    if obj_type == KernelObjectType.EndpointObj:
+        return ENDPOINT_SIZE
+    if obj_type == KernelObjectType.NotificationObj:
+        return NOTIFICATION_SIZE
+    if obj_type == KernelObjectType.TcbObj:
+        return TCB_SIZE
+    if obj_type == KernelObjectType.CNodeObj:
+        # CNode size = 16 bytes per slot * (1 << size_bits) slots
+        return 16 * (1 as u32 << size_bits)
+    if obj_type == KernelObjectType.FrameObj:
+        return FRAME_OBJ_SIZE
+    if obj_type == KernelObjectType.PageTableObj:
+        return PAGE_TABLE_OBJ_SIZE
+    if obj_type == KernelObjectType.UntypedObj:
+        return 1 as u32 << size_bits
+    # Fallback
+    0
+
+# ---------------------------------------------------------------------------
+# Align an offset up to the given alignment (must be a power of two).
+# ---------------------------------------------------------------------------
+fn align_up(offset: u32, alignment: u32) -> u32:
+    val mask = alignment - 1
+    (offset + mask) & ~mask
+
+# ---------------------------------------------------------------------------
+# Retype: carve a typed object from this untyped memory region.
+#
+# Validates that:
+#   - Enough free space remains
+#   - The child count hasn't been exceeded
+#   - The object is naturally aligned
+#
+# Returns the physical address of the new object on success.
+# ---------------------------------------------------------------------------
+fn untyped_retype(ut: var UntypedMemory, new_type: KernelObjectType, size_bits: u32) -> Result<u32, text>:
+    if ut.child_count >= UNTYPED_MAX_CHILDREN:
+        return Result<u32, text>.Err("max children exceeded")
+
+    val obj_size = kernel_object_size(new_type, size_bits)
+    if obj_size == 0:
+        return Result<u32, text>.Err("invalid object size")
+
+    # Align the free pointer to the object's natural alignment
+    val aligned_offset = align_up(ut.free_offset, obj_size)
+
+    # Check if we have enough space
+    if aligned_offset + obj_size > ut.total_size:
+        return Result<u32, text>.Err("insufficient untyped memory")
+
+    # Record the child
+    val child_idx = ut.child_count
+    ut.children[child_idx] = UntypedChild(
+        obj_type: new_type,
+        offset: aligned_offset,
+        size: obj_size,
+        active: true
+    )
+    ut.child_count = ut.child_count + 1
+
+    # Advance the bump pointer past this object
+    ut.free_offset = aligned_offset + obj_size
+
+    # Return the physical address of the new object
+    val obj_addr = ut.base_addr + aligned_offset
+    Result<u32, text>.Ok(obj_addr)
+
+# ---------------------------------------------------------------------------
+# Revoke all children and reclaim the entire untyped region.
+# After revocation, the region is fully free for reuse.
+# ---------------------------------------------------------------------------
+fn untyped_revoke_all(ut: var UntypedMemory):
+    for i in 0..ut.child_count:
+        ut.children[i].active = false
+    ut.child_count = 0
+    ut.free_offset = 0
+
+# ---------------------------------------------------------------------------
+# Revoke a single child by index. Does NOT reclaim space (bump allocator).
+# The child is simply marked inactive.
+# ---------------------------------------------------------------------------
+fn untyped_revoke_child(ut: var UntypedMemory, child_idx: u32):
+    if child_idx >= ut.child_count:
+        return
+    ut.children[child_idx].active = false
+
+# ---------------------------------------------------------------------------
+# Get the remaining free bytes in this untyped.
+# Note: due to alignment padding, actual usable space may be less.
+# ---------------------------------------------------------------------------
+fn untyped_remaining(ut: UntypedMemory) -> u32:
+    if ut.free_offset >= ut.total_size:
+        return 0
+    ut.total_size - ut.free_offset
+
+# ---------------------------------------------------------------------------
+# Get the total size of this untyped region in bytes.
+# ---------------------------------------------------------------------------
+fn untyped_total_size(ut: UntypedMemory) -> u32:
+    ut.total_size
+
+# ---------------------------------------------------------------------------
+# Get the number of active children.
+# ---------------------------------------------------------------------------
+fn untyped_active_children(ut: UntypedMemory) -> u32:
+    var count: u32 = 0
+    for i in 0..ut.child_count:
+        if ut.children[i].active:
+            count = count + 1
+    count
+
+# ---------------------------------------------------------------------------
+# Check whether this untyped has any active children.
+# An untyped with no active children can be safely revoked or retyped.
+# ---------------------------------------------------------------------------
+fn untyped_has_children(ut: UntypedMemory) -> bool:
+    for i in 0..ut.child_count:
+        if ut.children[i].active:
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Get the physical address that the next retype would use.
+# Useful for pre-checking alignment and availability.
+# ---------------------------------------------------------------------------
+fn untyped_next_addr(ut: UntypedMemory, new_type: KernelObjectType, size_bits: u32) -> Option<u32>:
+    val obj_size = kernel_object_size(new_type, size_bits)
+    if obj_size == 0:
+        return Option<u32>.None
+    val aligned_offset = align_up(ut.free_offset, obj_size)
+    if aligned_offset + obj_size > ut.total_size:
+        return Option<u32>.None
+    Option<u32>.Some(ut.base_addr + aligned_offset)
+
+# ---------------------------------------------------------------------------
+# Check whether the untyped represents device (non-RAM) memory.
+# Device untypeds can only be retyped into frames, not kernel objects.
+# ---------------------------------------------------------------------------
+fn untyped_is_device(ut: UntypedMemory) -> bool:
+    ut.is_device
+
+# ---------------------------------------------------------------------------
+# Get the base physical address of this untyped.
+# ---------------------------------------------------------------------------
+fn untyped_base(ut: UntypedMemory) -> u32:
+    ut.base_addr
+
+# ---------------------------------------------------------------------------
+# Get the size_bits (log2 of total size) of this untyped.
+# ---------------------------------------------------------------------------
+fn untyped_size_bits(ut: UntypedMemory) -> u32:
+    ut.size_bits

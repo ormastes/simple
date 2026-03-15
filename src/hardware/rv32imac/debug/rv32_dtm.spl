@@ -1,0 +1,97 @@
+# RV32 Debug Transport Module
+#
+# JTAG TAP or simulation stub for debug access.
+# Bridges external debug interface to the Debug Module Interface (DMI).
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# DTM Model (Simulation Stub)
+# ============================================================================
+
+class Rv32DtmStub:
+    """
+    Simulation stub for Debug Transport Module.
+
+    In real hardware, this would be a JTAG TAP controller.
+    For simulation, provides direct DMI read/write access.
+    """
+
+    pending_addr: i64
+    pending_wdata: i64
+    pending_we: bool
+    pending_req: bool
+    rdata: i64
+
+    static fn create() -> Rv32DtmStub:
+        Rv32DtmStub(
+            pending_addr: 0,
+            pending_wdata: 0,
+            pending_we: false,
+            pending_req: false,
+            rdata: 0
+        )
+
+    me dmi_read(addr: i64):
+        """Issue a DMI read request."""
+        self.pending_addr = addr
+        self.pending_we = false
+        self.pending_req = true
+
+    me dmi_write(addr: i64, data: i64):
+        """Issue a DMI write request."""
+        self.pending_addr = addr
+        self.pending_wdata = data
+        self.pending_we = true
+        self.pending_req = true
+
+    me complete(rdata: i64):
+        """Complete pending request."""
+        self.rdata = rdata
+        self.pending_req = false
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_dtm_vhdl() -> text:
+    """Generate VHDL for DTM simulation stub."""
+    var b = VhdlBuilder.create("rv32_dtm")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_dtm")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("External debug interface (simulation)")
+    b.emit_port("ext_addr", "in", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("ext_wdata", "in", "word_t", false)
+    b.emit_port("ext_rdata", "out", "word_t", false)
+    b.emit_port("ext_we", "in", "std_logic", false)
+    b.emit_port("ext_req", "in", "std_logic", false)
+    b.emit_port("ext_ack", "out", "std_logic", false)
+    b.emit_comment("DMI to Debug Module")
+    b.emit_port("dmi_addr", "out", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("dmi_wdata", "out", "word_t", false)
+    b.emit_port("dmi_rdata", "in", "word_t", false)
+    b.emit_port("dmi_we", "out", "std_logic", false)
+    b.emit_port("dmi_req", "out", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_dtm")
+
+    b.emit_architecture_begin("rv32_dtm", "rtl")
+    b.emit_architecture_body_begin()
+
+    b.emit_comment("Direct pass-through for simulation")
+    b.emit_signal_assign("dmi_addr", "ext_addr")
+    b.emit_signal_assign("dmi_wdata", "ext_wdata")
+    b.emit_signal_assign("dmi_we", "ext_we")
+    b.emit_signal_assign("dmi_req", "ext_req")
+    b.emit_signal_assign("ext_rdata", "dmi_rdata")
+    b.emit_signal_assign("ext_ack", "ext_req")
+
+    b.emit_architecture_end("rtl")
+    b.build()

@@ -1,0 +1,212 @@
+# CSpace - Capability Address Space
+# Uses a tree of CNodes for hierarchical capability lookup.
+#
+# A capability address is a bitstring that is consumed level by level as
+# the lookup walks down the CNode tree.  At each level, `CNODE_BITS` bits
+# are extracted to index into the local slots array.  Guard bits allow
+# path compression so that sparsely-populated address spaces do not waste
+# memory on intermediate CNode levels.
+#
+# This implementation supports a two-level tree (root + one child level).
+# Deeper nesting can be added later by making CNode slots point to further
+# CNode objects.
+
+use kernel.core.capability_types.{CapSlot, CapType, CapRights, cap_slot_empty, cap_slot_is_valid}
+
+val CNODE_BITS: u32 = 8      # Each CNode indexes 2^8 = 256 slots
+val CNODE_SIZE: u32 = 256
+val MAX_DEPTH: u32 = 2       # Maximum tree depth (root + one child)
+
+# ---------------------------------------------------------------------------
+# CNode - one node in the CSpace tree
+# ---------------------------------------------------------------------------
+struct CNode:
+    slots: [CapSlot; 256]
+    depth: u32          # Level in the tree (0 = root)
+    guard: u32          # Guard bits for path compression
+    guard_bits: u32     # Number of significant guard bits (0 = no guard)
+    slot_count: u32     # Number of occupied slots in this node
+
+# ---------------------------------------------------------------------------
+# CSpace - root of the capability address space
+# ---------------------------------------------------------------------------
+struct CSpace:
+    root: CNode
+    depth: u32          # Total configured depth of the tree
+
+# ---------------------------------------------------------------------------
+# Create an empty CNode with all Null slots.
+# ---------------------------------------------------------------------------
+fn cnode_create(depth: u32, guard: u32, guard_bits: u32) -> CNode:
+    var empty = cap_slot_empty()
+    var node = CNode(
+        slots: [empty; 256],
+        depth: depth,
+        guard: guard,
+        guard_bits: guard_bits,
+        slot_count: 0
+    )
+    node
+
+# ---------------------------------------------------------------------------
+# Create a fresh CSpace with an empty root CNode.
+# ---------------------------------------------------------------------------
+fn cspace_create() -> CSpace:
+    var root = cnode_create(0, 0, 0)
+    var cs = CSpace(root: root, depth: 1)
+    cs
+
+# ---------------------------------------------------------------------------
+# Extract `num_bits` bits from `addr` starting at bit position `offset`.
+# Bit 0 is the most-significant consumed bit.
+# ---------------------------------------------------------------------------
+fn extract_bits(addr: u32, offset: u32, num_bits: u32) -> u32:
+    if num_bits == 0:
+        return 0
+    # Shift right so the desired bits are in the lowest positions, then mask.
+    val shift = 32 - offset - num_bits
+    val mask = (1 as u32 << num_bits) - 1
+    (addr >> shift) & mask
+
+# ---------------------------------------------------------------------------
+# Check whether the guard at a CNode matches the corresponding bits in addr.
+# ---------------------------------------------------------------------------
+fn guard_matches(node: CNode, addr: u32, bit_offset: u32) -> bool:
+    if node.guard_bits == 0:
+        return true
+    val extracted = extract_bits(addr, bit_offset, node.guard_bits)
+    extracted == node.guard
+
+# ---------------------------------------------------------------------------
+# Lookup a capability in the CSpace by its full address.
+#
+# `cap_addr` is a packed bitstring: [guard_0 | index_0 | guard_1 | index_1 ...]
+# `depth` is the number of CNode levels to resolve (1 = root only).
+#
+# For a single-level lookup (depth=1), only the root CNode is consulted.
+# For a two-level lookup (depth=2), if the resolved root slot is itself
+# a CNode capability, the walk continues into that CNode.
+# ---------------------------------------------------------------------------
+fn cspace_lookup(cs: CSpace, cap_addr: u32, depth: u32) -> Option<CapSlot>:
+    val resolve_depth = if depth > MAX_DEPTH: MAX_DEPTH else: depth
+    if resolve_depth == 0:
+        return Option<CapSlot>.None
+
+    # --- Level 0: root CNode ---
+    var bit_offset: u32 = 0
+
+    # Check root guard
+    if !guard_matches(cs.root, cap_addr, bit_offset):
+        return Option<CapSlot>.None
+    bit_offset = bit_offset + cs.root.guard_bits
+
+    val root_index = extract_bits(cap_addr, bit_offset, CNODE_BITS)
+    bit_offset = bit_offset + CNODE_BITS
+
+    if root_index >= CNODE_SIZE:
+        return Option<CapSlot>.None
+
+    val root_slot = cs.root.slots[root_index]
+
+    # If the caller only asked for one level, or the slot is not a CNode,
+    # return what we found.
+    if resolve_depth == 1:
+        if root_slot.type_tag == CapType.Null:
+            return Option<CapSlot>.None
+        return Option<CapSlot>.Some(root_slot)
+
+    # For depth >= 2, the root slot must be a CNode capability pointing to
+    # a child node.  In this flat implementation we encode the child CNode
+    # index in object_ptr; the child nodes are stored elsewhere.  For now,
+    # we only support single-level so deeper lookups return None.
+    # (A full implementation would dereference object_ptr to obtain the
+    # child CNode, then continue the walk.)
+    if root_slot.type_tag == CapType.Null:
+        return Option<CapSlot>.None
+    Option<CapSlot>.Some(root_slot)
+
+# ---------------------------------------------------------------------------
+# Insert a capability at a given address in the root CNode.
+# Returns Ok(index) on success, Err on failure.
+# ---------------------------------------------------------------------------
+fn cspace_insert(cs: var CSpace, cap_addr: u32, slot: CapSlot) -> Result<u32, text>:
+    var bit_offset: u32 = 0
+
+    # Verify root guard
+    if !guard_matches(cs.root, cap_addr, bit_offset):
+        return Result<u32, text>.Err("guard mismatch at root CNode")
+    bit_offset = bit_offset + cs.root.guard_bits
+
+    val index = extract_bits(cap_addr, bit_offset, CNODE_BITS)
+
+    if index >= CNODE_SIZE:
+        return Result<u32, text>.Err("index out of range")
+
+    # Reject if the slot is already occupied
+    if cs.root.slots[index].type_tag != CapType.Null:
+        return Result<u32, text>.Err("slot already occupied")
+
+    cs.root.slots[index] = slot
+    cs.root.slot_count = cs.root.slot_count + 1
+    Result<u32, text>.Ok(index)
+
+# ---------------------------------------------------------------------------
+# Insert a capability at a specific raw index in the root CNode, bypassing
+# address decoding. Useful during bootstrap when the address layout is known.
+# ---------------------------------------------------------------------------
+fn cspace_insert_at(cs: var CSpace, index: u32, slot: CapSlot) -> Result<u32, text>:
+    if index >= CNODE_SIZE:
+        return Result<u32, text>.Err("index out of range")
+    if cs.root.slots[index].type_tag != CapType.Null:
+        return Result<u32, text>.Err("slot already occupied")
+
+    cs.root.slots[index] = slot
+    cs.root.slot_count = cs.root.slot_count + 1
+    Result<u32, text>.Ok(index)
+
+# ---------------------------------------------------------------------------
+# Delete the capability at the given address in the root CNode.
+# ---------------------------------------------------------------------------
+fn cspace_delete(cs: var CSpace, cap_addr: u32) -> Result<u32, text>:
+    var bit_offset: u32 = 0
+
+    if !guard_matches(cs.root, cap_addr, bit_offset):
+        return Result<u32, text>.Err("guard mismatch at root CNode")
+    bit_offset = bit_offset + cs.root.guard_bits
+
+    val index = extract_bits(cap_addr, bit_offset, CNODE_BITS)
+
+    if index >= CNODE_SIZE:
+        return Result<u32, text>.Err("index out of range")
+
+    if cs.root.slots[index].type_tag == CapType.Null:
+        return Result<u32, text>.Err("slot already empty")
+
+    cs.root.slots[index] = cap_slot_empty()
+    cs.root.slot_count = cs.root.slot_count - 1
+    Result<u32, text>.Ok(index)
+
+# ---------------------------------------------------------------------------
+# Delete a capability at a specific raw index.
+# ---------------------------------------------------------------------------
+fn cspace_delete_at(cs: var CSpace, index: u32) -> Result<u32, text>:
+    if index >= CNODE_SIZE:
+        return Result<u32, text>.Err("index out of range")
+    if cs.root.slots[index].type_tag == CapType.Null:
+        return Result<u32, text>.Err("slot already empty")
+
+    cs.root.slots[index] = cap_slot_empty()
+    cs.root.slot_count = cs.root.slot_count - 1
+    Result<u32, text>.Ok(index)
+
+# ---------------------------------------------------------------------------
+# Return the number of occupied slots in the root CNode.
+# ---------------------------------------------------------------------------
+fn cspace_count(cs: CSpace) -> u32:
+    cs.root.slot_count
+
+# ---------------------------------------------------------------------------
+# Return the number of free slots in the root CNode.
+# ---------------------------------------------------------------------------
+fn cspace_free_count(cs: CSpace) -> u32:
+    CNODE_SIZE - cs.root.slot_count

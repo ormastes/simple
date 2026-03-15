@@ -1,0 +1,178 @@
+# x86 Trap / Interrupt Dispatch
+#
+# Central handler called from the ISR stubs after registers are saved.
+# Routes the interrupt to the appropriate subsystem:
+#   Vectors  0-31  : CPU exceptions (faults, traps, aborts)
+#   Vectors 32-47  : Hardware IRQs (via 8259 PIC)
+#   Vector  0x80   : System call (int 0x80)
+
+use arch.x86.boot.pic.{pic_eoi, pic_is_spurious}
+use arch.x86.boot.pit.{pit_tick}
+
+# ---------- exception names (for debug output) ----------
+
+val EXCEPTION_NAMES: [text; 32] = [
+    "Division Error",            # 0
+    "Debug",                     # 1
+    "NMI",                       # 2
+    "Breakpoint",                # 3
+    "Overflow",                  # 4
+    "Bound Range Exceeded",      # 5
+    "Invalid Opcode",            # 6
+    "Device Not Available",      # 7
+    "Double Fault",              # 8
+    "Coprocessor Segment",       # 9
+    "Invalid TSS",               # 10
+    "Segment Not Present",       # 11
+    "Stack-Segment Fault",       # 12
+    "General Protection Fault",  # 13
+    "Page Fault",                # 14
+    "Reserved",                  # 15
+    "x87 FP Exception",         # 16
+    "Alignment Check",           # 17
+    "Machine Check",             # 18
+    "SIMD FP Exception",        # 19
+    "Virtualization Exception",  # 20
+    "Control Protection",        # 21
+    "Reserved",                  # 22
+    "Reserved",                  # 23
+    "Reserved",                  # 24
+    "Reserved",                  # 25
+    "Reserved",                  # 26
+    "Reserved",                  # 27
+    "Hypervisor Injection",      # 28
+    "VMM Communication",         # 29
+    "Security Exception",        # 30
+    "Reserved"                   # 31
+]
+
+# ---------- register state passed from ISR stub ----------
+
+struct TrapFrame:
+    # Pushed by pusha (in reverse order)
+    edi: u32
+    esi: u32
+    ebp: u32
+    esp_dummy: u32   # pusha pushes original ESP, but we ignore it
+    ebx: u32
+    edx: u32
+    ecx: u32
+    eax: u32
+    # Pushed by ISR stub
+    vector: u32
+    error_code: u32
+    # Pushed by CPU on interrupt
+    eip: u32
+    cs: u32
+    eflags: u32
+    # Only present on privilege-level change (ring 3 -> ring 0)
+    user_esp: u32
+    user_ss: u32
+
+# ---------- handler tables ----------
+
+# Callback function type: fn(frame: TrapFrame)
+# We store handler addresses as u32 since function pointers
+# are represented as addresses.
+var irq_handlers: [u32; 16] = [0; 16]
+var exception_handlers: [u32; 32] = [0; 32]
+var syscall_handler_addr: u32 = 0
+
+# ---------- public API ----------
+
+# Main dispatch entry point called from the assembly ISR common stub.
+# The ISR stub pushes vector + error_code, then pusha, then calls this.
+fn trap_handler(frame: TrapFrame):
+    val vector = frame.vector
+
+    if vector < 32:
+        # CPU exception
+        handle_exception(frame)
+    elif vector >= 32 and vector < 48:
+        # Hardware IRQ
+        handle_irq(frame)
+    elif vector == 0x80:
+        # System call
+        handle_syscall(frame)
+    else:
+        # Unexpected vector - ignore
+        pass
+
+# ---------- exception handling ----------
+
+fn handle_exception(frame: TrapFrame):
+    val vector = frame.vector as i32
+
+    # Check for registered custom handler
+    if exception_handlers[vector] != 0:
+        # TODO: call registered handler via function pointer
+        return
+
+    # Default: panic with exception info
+    # In a real kernel this would print to serial/VGA and halt
+    exception_panic(frame)
+
+fn exception_panic(frame: TrapFrame):
+    # Halt the CPU - unhandled exception is fatal
+    asm """
+        cli
+    .exception_halt:
+        hlt
+        jmp .exception_halt
+    """
+
+# ---------- IRQ handling ----------
+
+fn handle_irq(frame: TrapFrame):
+    val irq = (frame.vector - 32) as i32
+
+    # Check for spurious IRQ
+    if pic_is_spurious(irq):
+        return
+
+    # IRQ 0 = PIT timer tick
+    if irq == 0:
+        pit_tick()
+
+    # Check for registered device handler
+    if irq_handlers[irq] != 0:
+        # TODO: call registered handler via function pointer
+        pass
+
+    # Send End-of-Interrupt
+    pic_eoi(irq)
+
+# ---------- syscall handling ----------
+
+fn handle_syscall(frame: TrapFrame):
+    if syscall_handler_addr != 0:
+        # TODO: call registered syscall dispatcher via function pointer
+        pass
+    # If no handler registered, syscall is a no-op
+
+# ---------- handler registration ----------
+
+# Register an IRQ handler (irq 0-15)
+fn register_irq_handler(irq: i32, handler: u32):
+    if irq >= 0 and irq < 16:
+        irq_handlers[irq] = handler
+
+# Register an exception handler (vector 0-31)
+fn register_exception_handler(vector: i32, handler: u32):
+    if vector >= 0 and vector < 32:
+        exception_handlers[vector] = handler
+
+# Register the syscall dispatcher
+fn register_syscall_handler(handler: u32):
+    syscall_handler_addr = handler
+
+# ---------- page fault helpers ----------
+
+# Read CR2 to get the faulting address (useful for page fault handler)
+fn get_page_fault_addr() -> u32:
+    var addr: u32 = 0
+    asm """
+        mov eax, cr2
+        mov {addr}, eax
+    """
+    addr

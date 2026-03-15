@@ -1,0 +1,218 @@
+# User-Space Syscall Interface
+#
+# Low-level wrappers around the int 0x80 syscall convention.
+# Syscall numbers must match the kernel's syscall dispatch table.
+#
+# Convention:
+#   eax = syscall number
+#   ebx = arg1, ecx = arg2, edx = arg3, esi = arg4, edi = arg5
+#   eax = return value
+
+# ---------------------------------------------------------------------------
+# Syscall numbers (must match kernel/core/syscall dispatch)
+# ---------------------------------------------------------------------------
+val SYS_SEND: i32 = 0
+val SYS_RECV: i32 = 1
+val SYS_CALL: i32 = 2
+val SYS_REPLY: i32 = 3
+val SYS_YIELD: i32 = 4
+val SYS_NBSEND: i32 = 5
+val SYS_NBRECV: i32 = 6
+val SYS_DEBUG_PRINT: i32 = 7
+val SYS_RETYPE: i32 = 8
+val SYS_CNODE_COPY: i32 = 9
+val SYS_CNODE_MINT: i32 = 10
+val SYS_TCB_CONFIGURE: i32 = 11
+val SYS_TCB_RESUME: i32 = 12
+val SYS_TCB_SET_PRIORITY: i32 = 13
+val SYS_IRQ_SET_HANDLER: i32 = 14
+val SYS_IRQ_ACK: i32 = 15
+
+# ---------------------------------------------------------------------------
+# Raw syscall wrappers (0..5 arguments)
+# ---------------------------------------------------------------------------
+
+fn syscall0(num: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+fn syscall1(num: i32, arg1: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        mov ebx, {arg1}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+fn syscall2(num: i32, arg1: i32, arg2: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        mov ebx, {arg1}
+        mov ecx, {arg2}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+fn syscall3(num: i32, arg1: i32, arg2: i32, arg3: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        mov ebx, {arg1}
+        mov ecx, {arg2}
+        mov edx, {arg3}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+fn syscall4(num: i32, arg1: i32, arg2: i32, arg3: i32, arg4: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        mov ebx, {arg1}
+        mov ecx, {arg2}
+        mov edx, {arg3}
+        mov esi, {arg4}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+fn syscall5(num: i32, arg1: i32, arg2: i32, arg3: i32, arg4: i32, arg5: i32) -> i32:
+    var result = 0
+    asm """
+        mov eax, {num}
+        mov ebx, {arg1}
+        mov ecx, {arg2}
+        mov edx, {arg3}
+        mov esi, {arg4}
+        mov edi, {arg5}
+        int 0x80
+        mov {result}, eax
+    """
+    result
+
+# ---------------------------------------------------------------------------
+# High-level syscall wrappers
+# ---------------------------------------------------------------------------
+
+# Send a message on an IPC endpoint capability.
+# Returns 0 on success, negative on error.
+fn sys_send(cap: i32, msg_info: i32) -> i32:
+    syscall2(SYS_SEND, cap, msg_info)
+
+# Block until a message arrives on the given endpoint capability.
+# Returns the message info word (label + length encoded).
+fn sys_recv(cap: i32) -> i32:
+    syscall1(SYS_RECV, cap)
+
+# Combined send + receive (call semantics).
+# Sends msg_info on cap, then blocks for a reply on the same endpoint.
+# Returns the reply message info word.
+fn sys_call(cap: i32, msg_info: i32) -> i32:
+    syscall2(SYS_CALL, cap, msg_info)
+
+# Reply to the most recently received message.
+# Uses the kernel's implicit reply capability.
+fn sys_reply(msg_info: i32) -> i32:
+    syscall1(SYS_REPLY, msg_info)
+
+# Non-blocking send. Returns 0 on success, -1 if the receiver is not ready.
+fn sys_nbsend(cap: i32, msg_info: i32) -> i32:
+    syscall2(SYS_NBSEND, cap, msg_info)
+
+# Non-blocking receive. Returns message info or -1 if no message pending.
+fn sys_nbrecv(cap: i32) -> i32:
+    syscall1(SYS_NBRECV, cap)
+
+# Yield the current timeslice to the scheduler.
+fn sys_yield():
+    val _unused = syscall0(SYS_YIELD)
+
+# Print a debug string to the kernel's serial console.
+# The kernel copies the string from user memory via the pointer in ebx
+# and the length in ecx.
+fn sys_debug_print(msg: text):
+    # Pass pointer and length; kernel reads from user-space memory
+    var ptr: i32 = 0
+    var length: i32 = 0
+    asm """
+        lea eax, {msg}
+        mov {ptr}, eax
+    """
+    length = msg.len() as i32
+    val _unused = syscall2(SYS_DEBUG_PRINT, ptr, length)
+
+# ---------------------------------------------------------------------------
+# Capability management syscalls
+# ---------------------------------------------------------------------------
+
+# Retype untyped memory into a new kernel object.
+# untyped_cap: capability to the untyped memory region
+# obj_type:    desired object type (from KObjectType enum ordinal)
+# size_bits:   log2 of the object size
+# dest_slot:   destination CNode slot for the new capability
+fn sys_retype(untyped_cap: i32, obj_type: i32, size_bits: i32, dest_slot: i32) -> i32:
+    syscall4(SYS_RETYPE, untyped_cap, obj_type, size_bits, dest_slot)
+
+# Copy a capability from src_slot to dest_slot within the caller's CSpace.
+fn sys_cnode_copy(src_slot: i32, dest_slot: i32) -> i32:
+    syscall2(SYS_CNODE_COPY, src_slot, dest_slot)
+
+# Mint a new capability with reduced rights and a badge value.
+fn sys_cnode_mint(src_slot: i32, dest_slot: i32, rights: i32, badge: i32) -> i32:
+    syscall4(SYS_CNODE_MINT, src_slot, dest_slot, rights, badge)
+
+# ---------------------------------------------------------------------------
+# Thread management syscalls
+# ---------------------------------------------------------------------------
+
+# Configure a TCB: set its CSpace root, VSpace root, and IPC buffer.
+fn sys_tcb_configure(tcb_cap: i32, cspace_cap: i32, vspace_cap: i32, ipc_buffer: i32) -> i32:
+    syscall4(SYS_TCB_CONFIGURE, tcb_cap, cspace_cap, vspace_cap, ipc_buffer)
+
+# Resume a suspended thread.
+fn sys_tcb_resume(tcb_cap: i32) -> i32:
+    syscall1(SYS_TCB_RESUME, tcb_cap)
+
+# Set thread scheduling priority (0 = lowest, 255 = highest).
+fn sys_tcb_set_priority(tcb_cap: i32, priority: i32) -> i32:
+    syscall2(SYS_TCB_SET_PRIORITY, tcb_cap, priority)
+
+# ---------------------------------------------------------------------------
+# IRQ management syscalls
+# ---------------------------------------------------------------------------
+
+# Bind an IRQ handler capability to a notification endpoint.
+fn sys_irq_set_handler(irq_cap: i32, notification_cap: i32) -> i32:
+    syscall2(SYS_IRQ_SET_HANDLER, irq_cap, notification_cap)
+
+# Acknowledge an IRQ so the hardware can fire again.
+fn sys_irq_ack(irq_cap: i32) -> i32:
+    syscall1(SYS_IRQ_ACK, irq_cap)
+
+# ---------------------------------------------------------------------------
+# Message info encoding helpers
+# ---------------------------------------------------------------------------
+
+# Pack a message info word from label and length.
+# Format: bits [31:12] = label, bits [11:0] = length
+fn msg_info_new(label: i32, length: i32) -> i32:
+    ((label & 0xFFFFF) << 12) | (length & 0xFFF)
+
+# Extract the label from a message info word.
+fn msg_info_label(info: i32) -> i32:
+    (info >> 12) & 0xFFFFF
+
+# Extract the payload length from a message info word.
+fn msg_info_length(info: i32) -> i32:
+    info & 0xFFF

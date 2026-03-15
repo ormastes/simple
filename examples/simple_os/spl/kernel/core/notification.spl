@@ -1,0 +1,186 @@
+# Asynchronous Notification Objects
+#
+# A notification is a lightweight signaling mechanism based on a bitmap word.
+# Threads can signal a notification by OR-ing bits into the word, and a
+# waiting thread can consume (read and clear) the accumulated bits.
+#
+# Unlike endpoints, notifications are asynchronous: signaling never blocks
+# the signaler.  Only the waiter blocks if the word is zero.
+#
+# Notifications are used for:
+# - IRQ delivery to user-space drivers
+# - Lightweight event signaling between threads
+# - Combining multiple event sources via bit-per-source convention
+
+use kernel.lib.linked_list.{LinkedList, linked_list_create,
+    linked_list_push_back, linked_list_pop_front, linked_list_is_empty,
+    linked_list_remove, linked_list_contains, linked_list_count}
+
+# ---------------------------------------------------------------------------
+# Notification states
+# ---------------------------------------------------------------------------
+enum NotificationState:
+    Idle        # No threads waiting, word may or may not be zero
+    Waiting     # At least one thread is blocked waiting for a signal
+
+# ---------------------------------------------------------------------------
+# Maximum threads that can wait on a single notification
+# ---------------------------------------------------------------------------
+val NOTIF_MAX_WAITERS: u32 = 64
+
+# ---------------------------------------------------------------------------
+# Notification structure
+# ---------------------------------------------------------------------------
+struct Notification:
+    word: u32                   # Bitmap of accumulated signal bits
+    state: NotificationState
+    waiting_queue: LinkedList   # Queue of threads blocked in notification_wait
+    bound_tcb: u32              # TCB id of the thread bound to this notification (0 = none)
+    is_bound: bool              # Whether a thread is bound
+
+# ---------------------------------------------------------------------------
+# Create a new notification with an empty word and no waiters.
+# ---------------------------------------------------------------------------
+fn notification_create() -> Notification:
+    Notification(
+        word: 0,
+        state: NotificationState.Idle,
+        waiting_queue: linked_list_create(NOTIF_MAX_WAITERS),
+        bound_tcb: 0,
+        is_bound: false
+    )
+
+# ---------------------------------------------------------------------------
+# Signal a notification by OR-ing the given bits into the word.
+#
+# If a thread is blocked waiting, it is woken up and receives the
+# accumulated word value.  The word is then cleared.
+#
+# Returns the TCB id of the woken thread, or None if no waiter.
+# ---------------------------------------------------------------------------
+fn notification_signal(notif: var Notification, bits: u32) -> Option<u32>:
+    # Accumulate the signal bits
+    notif.word = notif.word | bits
+
+    # If a thread is waiting, wake it immediately
+    if !linked_list_is_empty(notif.waiting_queue):
+        if val waiter_id = linked_list_pop_front(notif.waiting_queue):
+            # The waiter consumes the entire word
+            # (the caller should deliver notif.word to the waiter's register)
+            # Clear the word since the waiter consumed it
+            notif.word = 0
+
+            if linked_list_is_empty(notif.waiting_queue):
+                notif.state = NotificationState.Idle
+            return Option<u32>.Some(waiter_id)
+
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Wait on a notification.
+#
+# If the word is non-zero, the accumulated bits are returned immediately
+# and the word is cleared (consume semantics).
+#
+# If the word is zero, the calling thread is enqueued on the waiting_queue
+# and must be suspended by the scheduler.  Returns Err to signal blocking.
+# ---------------------------------------------------------------------------
+fn notification_wait(notif: var Notification, thread_id: u32) -> Result<u32, text>:
+    # Fast path: word is already non-zero — consume immediately
+    if notif.word != 0:
+        val consumed = notif.word
+        notif.word = 0
+        return Result<u32, text>.Ok(consumed)
+
+    # Slow path: word is zero — block the thread
+    if thread_id < NOTIF_MAX_WAITERS:
+        linked_list_push_back(notif.waiting_queue, thread_id)
+        notif.state = NotificationState.Waiting
+    return Result<u32, text>.Err("wait blocked: word is zero")
+
+# ---------------------------------------------------------------------------
+# Non-blocking poll of a notification.
+#
+# If the word is non-zero, returns the accumulated bits and clears the word.
+# If the word is zero, returns None without blocking.
+# ---------------------------------------------------------------------------
+fn notification_poll(notif: var Notification) -> Option<u32>:
+    if notif.word == 0:
+        return Option<u32>.None
+
+    val consumed = notif.word
+    notif.word = 0
+    Option<u32>.Some(consumed)
+
+# ---------------------------------------------------------------------------
+# Cancel a blocked thread's wait on this notification.
+# Used when a thread is deleted or its timeout expires.
+# ---------------------------------------------------------------------------
+fn notification_cancel(notif: var Notification, thread_id: u32):
+    if linked_list_contains(notif.waiting_queue, thread_id):
+        linked_list_remove(notif.waiting_queue, thread_id)
+    if linked_list_is_empty(notif.waiting_queue):
+        notif.state = NotificationState.Idle
+
+# ---------------------------------------------------------------------------
+# Get the current word value without consuming it.
+# Useful for debugging and diagnostics.
+# ---------------------------------------------------------------------------
+fn notification_peek(notif: Notification) -> u32:
+    notif.word
+
+# ---------------------------------------------------------------------------
+# Get the number of threads blocked waiting on this notification.
+# ---------------------------------------------------------------------------
+fn notification_waiter_count(notif: Notification) -> u32:
+    linked_list_count(notif.waiting_queue)
+
+# ---------------------------------------------------------------------------
+# Bind a thread to this notification.
+#
+# A bound thread receives signals even when it is blocked on an endpoint
+# receive.  Only one thread can be bound to a notification at a time.
+# ---------------------------------------------------------------------------
+fn notification_bind(notif: var Notification, tcb_id: u32) -> Result<u32, text>:
+    if notif.is_bound:
+        return Result<u32, text>.Err("notification already bound")
+    notif.bound_tcb = tcb_id
+    notif.is_bound = true
+    Result<u32, text>.Ok(tcb_id)
+
+# ---------------------------------------------------------------------------
+# Unbind the currently bound thread.
+# ---------------------------------------------------------------------------
+fn notification_unbind(notif: var Notification) -> Result<u32, text>:
+    if !notif.is_bound:
+        return Result<u32, text>.Err("notification not bound")
+    val old_tcb = notif.bound_tcb
+    notif.bound_tcb = 0
+    notif.is_bound = false
+    Result<u32, text>.Ok(old_tcb)
+
+# ---------------------------------------------------------------------------
+# Check if a thread is bound to this notification.
+# ---------------------------------------------------------------------------
+fn notification_is_bound(notif: Notification) -> bool:
+    notif.is_bound
+
+# ---------------------------------------------------------------------------
+# Get the bound thread's TCB id.  Returns 0 if no thread is bound.
+# ---------------------------------------------------------------------------
+fn notification_get_bound_tcb(notif: Notification) -> u32:
+    if notif.is_bound:
+        return notif.bound_tcb
+    0
+
+# ---------------------------------------------------------------------------
+# Check if the notification has any pending signals (word != 0).
+# ---------------------------------------------------------------------------
+fn notification_has_signal(notif: Notification) -> bool:
+    notif.word != 0
+
+# ---------------------------------------------------------------------------
+# Set the word directly. Used during fault injection or testing.
+# ---------------------------------------------------------------------------
+fn notification_set_word(notif: var Notification, word: u32):
+    notif.word = word

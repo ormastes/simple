@@ -1,0 +1,129 @@
+# Bitmap Data Structure
+# Fixed-size bitmap for tracking allocated/free frames and other kernel resources.
+# Each word stores 32 bits; maximum capacity is 32768 bits (1024 words).
+
+val BITMAP_BITS_PER_WORD: u32 = 32
+val BITMAP_MAX_WORDS: u32 = 1024
+
+struct Bitmap:
+    words: [u32; 1024]
+    num_bits: u32
+    num_words: u32
+
+# Create a new bitmap that can track `num_bits` items, all initially clear (0).
+fn bitmap_create(num_bits: u32) -> Bitmap:
+    val capped = if num_bits > BITMAP_MAX_WORDS * BITMAP_BITS_PER_WORD:
+        BITMAP_MAX_WORDS * BITMAP_BITS_PER_WORD
+    else:
+        num_bits
+    var bm = Bitmap(
+        words: [0 as u32; 1024],
+        num_bits: capped,
+        num_words: (capped + 31) / 32
+    )
+    bm
+
+# Set a single bit (mark as used / allocated).
+fn bitmap_set(bm: var Bitmap, bit: u32):
+    if bit >= bm.num_bits:
+        return
+    val word_idx = bit / BITMAP_BITS_PER_WORD
+    val bit_idx = bit % BITMAP_BITS_PER_WORD
+    bm.words[word_idx] = bm.words[word_idx] | (1 as u32 << bit_idx)
+
+# Clear a single bit (mark as free).
+fn bitmap_clear(bm: var Bitmap, bit: u32):
+    if bit >= bm.num_bits:
+        return
+    val word_idx = bit / BITMAP_BITS_PER_WORD
+    val bit_idx = bit % BITMAP_BITS_PER_WORD
+    bm.words[word_idx] = bm.words[word_idx] & ~(1 as u32 << bit_idx)
+
+# Test whether a specific bit is set. Returns true if set.
+fn bitmap_test(bm: Bitmap, bit: u32) -> bool:
+    if bit >= bm.num_bits:
+        return false
+    val word_idx = bit / BITMAP_BITS_PER_WORD
+    val bit_idx = bit % BITMAP_BITS_PER_WORD
+    (bm.words[word_idx] & (1 as u32 << bit_idx)) != 0
+
+# Find the index of the first clear (0) bit. Used by the frame allocator
+# to locate the next free frame.
+fn bitmap_find_first_clear(bm: Bitmap) -> Option<u32>:
+    for i in 0..bm.num_words:
+        # A word of all-ones (0xFFFFFFFF) has no clear bits — skip it.
+        if bm.words[i] == 0xFFFFFFFF as u32:
+            continue
+
+        # Scan individual bits within this word.
+        for b in 0..BITMAP_BITS_PER_WORD:
+            val bit_index = i * BITMAP_BITS_PER_WORD + b
+            if bit_index >= bm.num_bits:
+                return Option<u32>.None
+            if (bm.words[i] & (1 as u32 << b)) == 0:
+                return Option<u32>.Some(bit_index)
+
+    Option<u32>.None
+
+# Find the index of the first set (1) bit.
+fn bitmap_find_first_set(bm: Bitmap) -> Option<u32>:
+    for i in 0..bm.num_words:
+        # A zero word has no set bits — skip it.
+        if bm.words[i] == 0:
+            continue
+
+        for b in 0..BITMAP_BITS_PER_WORD:
+            val bit_index = i * BITMAP_BITS_PER_WORD + b
+            if bit_index >= bm.num_bits:
+                return Option<u32>.None
+            if (bm.words[i] & (1 as u32 << b)) != 0:
+                return Option<u32>.Some(bit_index)
+
+    Option<u32>.None
+
+# Count the number of set bits across the entire bitmap.
+fn bitmap_count_set(bm: Bitmap) -> u32:
+    var count: u32 = 0
+    for i in 0..bm.num_words:
+        var word = bm.words[i]
+        # Kernighan's bit-counting trick: each iteration clears the
+        # lowest set bit, so the loop runs once per set bit.
+        while word != 0:
+            word = word & (word - 1)
+            count = count + 1
+    count
+
+# Count the number of clear bits (total capacity minus set bits).
+fn bitmap_count_clear(bm: Bitmap) -> u32:
+    bm.num_bits - bitmap_count_set(bm)
+
+# Set a contiguous range of bits [start, start+count).
+fn bitmap_set_range(bm: var Bitmap, start: u32, count: u32):
+    for i in 0..count:
+        bitmap_set(bm, start + i)
+
+# Clear a contiguous range of bits [start, start+count).
+fn bitmap_clear_range(bm: var Bitmap, start: u32, count: u32):
+    for i in 0..count:
+        bitmap_clear(bm, start + i)
+
+# Find `count` contiguous clear bits. Returns the starting index.
+# Used by alloc_contiguous in the frame allocator.
+fn bitmap_find_contiguous_clear(bm: Bitmap, count: u32) -> Option<u32>:
+    if count == 0:
+        return Option<u32>.None
+
+    var run_start: u32 = 0
+    var run_len: u32 = 0
+
+    for bit in 0..bm.num_bits:
+        if bitmap_test(bm, bit):
+            # Bit is set — reset the run.
+            run_start = bit + 1
+            run_len = 0
+        else:
+            run_len = run_len + 1
+            if run_len >= count:
+                return Option<u32>.Some(run_start)
+
+    Option<u32>.None

@@ -1,0 +1,235 @@
+# Per-Thread IPC Buffer
+# Each thread has a dedicated 4KB IPC buffer at a fixed virtual address.
+# The buffer carries the message tag, label, message registers (u32 words),
+# and transferred capability slots for synchronous IPC.
+#
+# Layout (offsets in u32 words):
+#   0       : tag (message descriptor)
+#   1       : length (number of valid message registers)
+#   2       : label (opcode / method identifier)
+#   3       : caps_length (number of capability slots transferred)
+#   4..123  : msg_regs[0..119]  — 120 u32 message registers
+#   124..131: caps[0..7]        — up to 8 capability slot indices
+
+val IPC_BUFFER_SIZE: u32 = 4096
+val MAX_MSG_REGS: u32 = 120
+val MAX_CAP_TRANSFER: u32 = 8
+
+# Header offsets within the buffer (in u32 indices)
+val IPC_OFFSET_TAG: u32 = 0
+val IPC_OFFSET_LENGTH: u32 = 1
+val IPC_OFFSET_LABEL: u32 = 2
+val IPC_OFFSET_CAPS_LEN: u32 = 3
+val IPC_OFFSET_MSG_REGS: u32 = 4
+val IPC_OFFSET_CAPS: u32 = 124
+
+# ---------------------------------------------------------------------------
+# IPC Buffer structure
+# ---------------------------------------------------------------------------
+struct IpcBuffer:
+    tag: u32                    # Message descriptor / type tag
+    length: u32                 # Number of valid message registers
+    label: u32                  # Opcode identifying the message type
+    caps_length: u32            # Number of capability slots in transfer
+    msg_regs: [u32; 120]        # Message register payload
+    caps: [u32; 8]              # Capability slot indices for transfer
+    owner_thread_id: u32        # Thread that owns this buffer
+    virt_addr: u32              # Virtual address where this buffer is mapped
+
+# ---------------------------------------------------------------------------
+# Create a fresh IPC buffer for a given thread.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_create() -> IpcBuffer:
+    IpcBuffer(
+        tag: 0,
+        length: 0,
+        label: 0,
+        caps_length: 0,
+        msg_regs: [0 as u32; 120],
+        caps: [0 as u32; 8],
+        owner_thread_id: 0,
+        virt_addr: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Create an IPC buffer bound to a specific thread and virtual address.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_create_for(thread_id: u32, vaddr: u32) -> IpcBuffer:
+    IpcBuffer(
+        tag: 0,
+        length: 0,
+        label: 0,
+        caps_length: 0,
+        msg_regs: [0 as u32; 120],
+        caps: [0 as u32; 8],
+        owner_thread_id: thread_id,
+        virt_addr: vaddr
+    )
+
+# ---------------------------------------------------------------------------
+# Set a message register at the given index.
+# Silently ignores out-of-range indices.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_mr(buf: var IpcBuffer, index: u32, value: u32):
+    if index >= MAX_MSG_REGS:
+        return
+    buf.msg_regs[index] = value
+
+# ---------------------------------------------------------------------------
+# Get a message register at the given index.
+# Returns 0 for out-of-range indices.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_mr(buf: IpcBuffer, index: u32) -> u32:
+    if index >= MAX_MSG_REGS:
+        return 0
+    buf.msg_regs[index]
+
+# ---------------------------------------------------------------------------
+# Set the message length (number of valid registers).
+# Clamped to MAX_MSG_REGS.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_length(buf: var IpcBuffer, len: u32):
+    if len > MAX_MSG_REGS:
+        buf.length = MAX_MSG_REGS
+    else:
+        buf.length = len
+
+# ---------------------------------------------------------------------------
+# Get the current message length.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_length(buf: IpcBuffer) -> u32:
+    buf.length
+
+# ---------------------------------------------------------------------------
+# Set the message label (opcode).
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_label(buf: var IpcBuffer, label: u32):
+    buf.label = label
+
+# ---------------------------------------------------------------------------
+# Get the message label.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_label(buf: IpcBuffer) -> u32:
+    buf.label
+
+# ---------------------------------------------------------------------------
+# Set the message tag.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_tag(buf: var IpcBuffer, tag: u32):
+    buf.tag = tag
+
+# ---------------------------------------------------------------------------
+# Get the message tag.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_tag(buf: IpcBuffer) -> u32:
+    buf.tag
+
+# ---------------------------------------------------------------------------
+# Set a transferred capability slot index.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_cap(buf: var IpcBuffer, index: u32, cap_slot: u32):
+    if index >= MAX_CAP_TRANSFER:
+        return
+    buf.caps[index] = cap_slot
+
+# ---------------------------------------------------------------------------
+# Get a transferred capability slot index.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_cap(buf: IpcBuffer, index: u32) -> u32:
+    if index >= MAX_CAP_TRANSFER:
+        return 0
+    buf.caps[index]
+
+# ---------------------------------------------------------------------------
+# Set the number of capability slots being transferred.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_set_caps_length(buf: var IpcBuffer, len: u32):
+    if len > MAX_CAP_TRANSFER:
+        buf.caps_length = MAX_CAP_TRANSFER
+    else:
+        buf.caps_length = len
+
+# ---------------------------------------------------------------------------
+# Get the number of capability slots being transferred.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_get_caps_length(buf: IpcBuffer) -> u32:
+    buf.caps_length
+
+# ---------------------------------------------------------------------------
+# Copy message registers from a source buffer to a destination buffer.
+# Copies min(src.length, max_regs) registers.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_copy_mrs(src: IpcBuffer, dst: var IpcBuffer, max_regs: u32):
+    val count = if src.length < max_regs: src.length else: max_regs
+    for i in 0..count:
+        dst.msg_regs[i] = src.msg_regs[i]
+    dst.length = count
+
+# ---------------------------------------------------------------------------
+# Transfer the full message (tag, label, registers, caps) from src to dst.
+# This is the core operation used during IPC send/receive rendezvous.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_transfer(src: IpcBuffer, dst: var IpcBuffer):
+    dst.tag = src.tag
+    dst.label = src.label
+    dst.length = src.length
+    dst.caps_length = src.caps_length
+
+    # Copy message registers
+    for i in 0..src.length:
+        if i >= MAX_MSG_REGS:
+            break
+        dst.msg_regs[i] = src.msg_regs[i]
+
+    # Copy capability transfer slots
+    for i in 0..src.caps_length:
+        if i >= MAX_CAP_TRANSFER:
+            break
+        dst.caps[i] = src.caps[i]
+
+# ---------------------------------------------------------------------------
+# Clear the buffer, resetting all fields to zero.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_clear(buf: var IpcBuffer):
+    buf.tag = 0
+    buf.length = 0
+    buf.label = 0
+    buf.caps_length = 0
+    for i in 0..MAX_MSG_REGS:
+        buf.msg_regs[i] = 0
+    for i in 0..MAX_CAP_TRANSFER:
+        buf.caps[i] = 0
+
+# ---------------------------------------------------------------------------
+# Encode a message info word from label and length.
+# The message info word packs label in the upper 20 bits and length in
+# the lower 12 bits, matching seL4 convention.
+# ---------------------------------------------------------------------------
+fn ipc_msg_info_new(label: u32, length: u32) -> u32:
+    val capped_len = if length > MAX_MSG_REGS: MAX_MSG_REGS else: length
+    ((label & 0xFFFFF) << 12) | (capped_len & 0xFFF)
+
+# ---------------------------------------------------------------------------
+# Extract the label from a message info word.
+# ---------------------------------------------------------------------------
+fn ipc_msg_info_get_label(msg_info: u32) -> u32:
+    (msg_info >> 12) & 0xFFFFF
+
+# ---------------------------------------------------------------------------
+# Extract the length from a message info word.
+# ---------------------------------------------------------------------------
+fn ipc_msg_info_get_length(msg_info: u32) -> u32:
+    msg_info & 0xFFF
+
+# ---------------------------------------------------------------------------
+# Load a message info word into the buffer, setting label and length.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_load_msg_info(buf: var IpcBuffer, msg_info: u32):
+    buf.label = ipc_msg_info_get_label(msg_info)
+    buf.length = ipc_msg_info_get_length(msg_info)
+
+# ---------------------------------------------------------------------------
+# Build a message info word from the buffer's current label and length.
+# ---------------------------------------------------------------------------
+fn ipc_buffer_build_msg_info(buf: IpcBuffer) -> u32:
+    ipc_msg_info_new(buf.label, buf.length)

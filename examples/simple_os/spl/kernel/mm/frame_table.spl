@@ -1,0 +1,185 @@
+# Physical Frame Table
+# Tracks metadata for every physical 4KB frame in the system.
+# Each entry records its allocation state, reference count, and
+# the capability that owns it (if any).
+
+val FRAME_SIZE: u32 = 4096          # 4KB pages
+val MAX_FRAMES: u32 = 8192         # Up to 32MB of physical memory
+
+# The lifecycle state of a physical frame.
+enum FrameState:
+    Free        # Available for allocation
+    Allocated   # In use by a user-space process
+    Kernel      # Reserved for kernel data structures
+    Reserved    # Hardware-reserved (MMIO, ROM, etc.)
+
+# Per-frame metadata entry.
+struct FrameEntry:
+    state: FrameState
+    ref_count: u32     # Number of mappings that reference this frame
+    owner_cap: u32     # Capability index of the owning entity (0 = none)
+
+# The frame table: an array of FrameEntry indexed by frame number.
+struct FrameTable:
+    entries: [FrameEntry; 8192]
+    num_frames: u32
+    base_addr: u32     # Physical address of the first tracked frame
+
+# Create a frame table covering physical memory starting at `base_addr`
+# for `memory_size` bytes. All frames start as Free.
+fn frame_table_create(base_addr: u32, memory_size: u32) -> FrameTable:
+    val num_frames_raw = memory_size / FRAME_SIZE
+    val num_frames = if num_frames_raw > MAX_FRAMES: MAX_FRAMES else: num_frames_raw
+
+    var default_entry = FrameEntry(
+        state: FrameState.Free,
+        ref_count: 0,
+        owner_cap: 0
+    )
+    var ft = FrameTable(
+        entries: [default_entry; 8192],
+        num_frames: num_frames,
+        base_addr: base_addr
+    )
+    ft
+
+# Convert a physical address to a frame index.
+fn frame_table_addr_to_index(ft: FrameTable, addr: u32) -> Option<u32>:
+    if addr < ft.base_addr:
+        return Option<u32>.None
+    val index = (addr - ft.base_addr) / FRAME_SIZE
+    if index >= ft.num_frames:
+        return Option<u32>.None
+    Option<u32>.Some(index)
+
+# Convert a frame index to a physical address.
+fn frame_table_index_to_addr(ft: FrameTable, index: u32) -> Option<u32>:
+    if index >= ft.num_frames:
+        return Option<u32>.None
+    Option<u32>.Some(ft.base_addr + index * FRAME_SIZE)
+
+# Mark a frame as allocated, setting its owner capability.
+fn frame_table_mark_allocated(ft: var FrameTable, index: u32, owner_cap: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    ft.entries[index].state = FrameState.Allocated
+    ft.entries[index].ref_count = 1
+    ft.entries[index].owner_cap = owner_cap
+    true
+
+# Mark a frame as free, clearing its metadata.
+fn frame_table_mark_free(ft: var FrameTable, index: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    ft.entries[index].state = FrameState.Free
+    ft.entries[index].ref_count = 0
+    ft.entries[index].owner_cap = 0
+    true
+
+# Mark a frame as kernel-reserved.
+fn frame_table_mark_kernel(ft: var FrameTable, index: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    ft.entries[index].state = FrameState.Kernel
+    ft.entries[index].ref_count = 1
+    ft.entries[index].owner_cap = 0
+    true
+
+# Mark a frame as hardware-reserved (MMIO, BIOS, etc.).
+fn frame_table_mark_reserved(ft: var FrameTable, index: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    ft.entries[index].state = FrameState.Reserved
+    ft.entries[index].ref_count = 0
+    ft.entries[index].owner_cap = 0
+    true
+
+# Mark a range of frames [start_index, start_index+count) with a given state.
+fn frame_table_mark_range(ft: var FrameTable, start_index: u32, count: u32, state: FrameState):
+    for i in 0..count:
+        val idx = start_index + i
+        if idx >= ft.num_frames:
+            break
+        ft.entries[idx].state = state
+        if state == FrameState.Free:
+            ft.entries[idx].ref_count = 0
+            ft.entries[idx].owner_cap = 0
+
+# Get the state of a specific frame.
+fn frame_table_get_state(ft: FrameTable, index: u32) -> Option<FrameState>:
+    if index >= ft.num_frames:
+        return Option<FrameState>.None
+    Option<FrameState>.Some(ft.entries[index].state)
+
+# Get the reference count for a frame.
+fn frame_table_get_ref_count(ft: FrameTable, index: u32) -> u32:
+    if index >= ft.num_frames:
+        return 0
+    ft.entries[index].ref_count
+
+# Increment the reference count (e.g., when a new page table maps this frame).
+fn frame_table_ref_acquire(ft: var FrameTable, index: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    if ft.entries[index].state == FrameState.Free:
+        return false  # Cannot reference a free frame
+    ft.entries[index].ref_count = ft.entries[index].ref_count + 1
+    true
+
+# Decrement the reference count. If it reaches zero and the frame is
+# Allocated, automatically transition to Free.
+fn frame_table_ref_release(ft: var FrameTable, index: u32) -> bool:
+    if index >= ft.num_frames:
+        return false
+    if ft.entries[index].ref_count == 0:
+        return false
+    ft.entries[index].ref_count = ft.entries[index].ref_count - 1
+    if (ft.entries[index].ref_count == 0 and
+        ft.entries[index].state == FrameState.Allocated):
+        ft.entries[index].state = FrameState.Free
+        ft.entries[index].owner_cap = 0
+    true
+
+# Count the total number of frames in a given state.
+fn frame_table_count_by_state(ft: FrameTable, state: FrameState) -> u32:
+    var count: u32 = 0
+    for i in 0..ft.num_frames:
+        if ft.entries[i].state == state:
+            count = count + 1
+    count
+
+# Count free frames.
+fn frame_table_free_count(ft: FrameTable) -> u32:
+    frame_table_count_by_state(ft, FrameState.Free)
+
+# Count allocated frames.
+fn frame_table_allocated_count(ft: FrameTable) -> u32:
+    frame_table_count_by_state(ft, FrameState.Allocated)
+
+# Initialize the frame table from a BIOS/bootloader-provided memory map.
+# Regions marked as usable become Free; everything else is Reserved.
+fn frame_table_init_from_memory_map(
+    ft: var FrameTable,
+    region_bases: [u32; 32],
+    region_sizes: [u32; 32],
+    region_types: [u32; 32],  # 1 = usable, 2 = reserved, 3 = ACPI
+    num_regions: u32
+):
+    # First, mark all frames as Reserved.
+    for i in 0..ft.num_frames:
+        ft.entries[i].state = FrameState.Reserved
+
+    # Then mark usable regions as Free.
+    for r in 0..num_regions:
+        if region_types[r] != 1:
+            continue  # Not usable memory
+
+        val region_start = region_bases[r]
+        val region_end = region_start + region_sizes[r]
+
+        # Convert to frame indices and mark free.
+        for i in 0..ft.num_frames:
+            val frame_addr = ft.base_addr + i * FRAME_SIZE
+            if (frame_addr >= region_start and
+                frame_addr + FRAME_SIZE <= region_end):
+                ft.entries[i].state = FrameState.Free

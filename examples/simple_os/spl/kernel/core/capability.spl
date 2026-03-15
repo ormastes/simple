@@ -1,0 +1,246 @@
+# Capability Table
+# Manages a flat array of capability slots.
+#
+# A CapTable is the storage backing for a single CNode.  Each slot holds
+# one capability (or Null if empty).  Operations enforce the monotonic
+# rights rule: derived capabilities can never exceed the rights of their
+# parent.
+
+use kernel.core.capability_types.{CapType, CapRights, CapSlot,
+    cap_slot_empty, cap_slot_is_valid, cap_rights_mask,
+    cap_rights_is_subset, cap_rights_all}
+
+val CAP_TABLE_MAX_SIZE: u32 = 4096
+
+# ---------------------------------------------------------------------------
+# CapTable structure
+# ---------------------------------------------------------------------------
+struct CapTable:
+    slots: [CapSlot; 4096]
+    size: u32       # Allocated number of usable slots (<= CAP_TABLE_MAX_SIZE)
+    count: u32      # Number of occupied (non-Null) slots
+
+# ---------------------------------------------------------------------------
+# Create an empty capability table.
+# ---------------------------------------------------------------------------
+fn cap_table_create(size: u32) -> CapTable:
+    val capped = if size > CAP_TABLE_MAX_SIZE: CAP_TABLE_MAX_SIZE else: size
+    var empty = cap_slot_empty()
+    var table = CapTable(
+        slots: [empty; 4096],
+        size: capped,
+        count: 0
+    )
+    table
+
+# ---------------------------------------------------------------------------
+# Find the first empty slot in the table.  Returns None if the table is full.
+# ---------------------------------------------------------------------------
+fn cap_table_find_free(table: CapTable) -> Option<u32>:
+    for i in 0..table.size:
+        if table.slots[i].type_tag == CapType.Null:
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Insert a new capability into the first available slot.
+# Returns the index of the newly occupied slot, or None if full.
+# ---------------------------------------------------------------------------
+fn cap_table_insert(table: var CapTable, type_tag: CapType, object_ptr: u32, rights: CapRights) -> Option<u32>:
+    if table.count >= table.size:
+        return Option<u32>.None
+
+    # Locate a free slot
+    var idx: u32 = 0
+    var found = false
+    for i in 0..table.size:
+        if table.slots[i].type_tag == CapType.Null:
+            idx = i
+            found = true
+            break
+
+    if !found:
+        return Option<u32>.None
+
+    table.slots[idx] = CapSlot(
+        type_tag: type_tag,
+        object_ptr: object_ptr,
+        rights: rights,
+        badge: 0,
+        is_derived: false,
+        parent_idx: 0
+    )
+    table.count = table.count + 1
+    Option<u32>.Some(idx)
+
+# ---------------------------------------------------------------------------
+# Insert a capability at a specific slot index.
+# Returns false if the index is out of range or the slot is already occupied.
+# ---------------------------------------------------------------------------
+fn cap_table_insert_at(table: var CapTable, index: u32, type_tag: CapType, object_ptr: u32, rights: CapRights) -> bool:
+    if index >= table.size:
+        return false
+    if table.slots[index].type_tag != CapType.Null:
+        return false
+
+    table.slots[index] = CapSlot(
+        type_tag: type_tag,
+        object_ptr: object_ptr,
+        rights: rights,
+        badge: 0,
+        is_derived: false,
+        parent_idx: 0
+    )
+    table.count = table.count + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Lookup a capability by slot index.
+# Returns None if the index is out of bounds or the slot is Null.
+# ---------------------------------------------------------------------------
+fn cap_table_lookup(table: CapTable, index: u32) -> Option<CapSlot>:
+    if index >= table.size:
+        return Option<CapSlot>.None
+    if table.slots[index].type_tag == CapType.Null:
+        return Option<CapSlot>.None
+    Option<CapSlot>.Some(table.slots[index])
+
+# ---------------------------------------------------------------------------
+# Mint a derived capability with (possibly) reduced rights and a badge.
+#
+# The new rights are computed as the intersection of the source rights and
+# `new_rights`, guaranteeing monotonic decrease.  The derived cap records
+# its parent index so the revocation tree can be walked later.
+# ---------------------------------------------------------------------------
+fn cap_table_mint(table: var CapTable, src_idx: u32, new_rights: CapRights, badge: u32) -> Option<u32>:
+    # Validate source
+    if src_idx >= table.size:
+        return Option<u32>.None
+    if table.slots[src_idx].type_tag == CapType.Null:
+        return Option<u32>.None
+
+    # The source must carry grant rights to allow minting
+    if !table.slots[src_idx].rights.grant:
+        return Option<u32>.None
+
+    val src = table.slots[src_idx]
+
+    # Mask new_rights against the source rights so we never escalate
+    val masked = cap_rights_mask(src.rights, new_rights)
+
+    # Find a free slot for the derived cap
+    var dst_idx: u32 = 0
+    var found = false
+    for i in 0..table.size:
+        if table.slots[i].type_tag == CapType.Null:
+            dst_idx = i
+            found = true
+            break
+
+    if !found:
+        return Option<u32>.None
+
+    table.slots[dst_idx] = CapSlot(
+        type_tag: src.type_tag,
+        object_ptr: src.object_ptr,
+        rights: masked,
+        badge: badge,
+        is_derived: true,
+        parent_idx: src_idx
+    )
+    table.count = table.count + 1
+    Option<u32>.Some(dst_idx)
+
+# ---------------------------------------------------------------------------
+# Copy a capability to a new slot, preserving the same rights and badge.
+# The copy is marked as derived from the source.
+# ---------------------------------------------------------------------------
+fn cap_table_copy(table: var CapTable, src_idx: u32) -> Option<u32>:
+    if src_idx >= table.size:
+        return Option<u32>.None
+    if table.slots[src_idx].type_tag == CapType.Null:
+        return Option<u32>.None
+    if !table.slots[src_idx].rights.grant:
+        return Option<u32>.None
+
+    val src = table.slots[src_idx]
+
+    var dst_idx: u32 = 0
+    var found = false
+    for i in 0..table.size:
+        if table.slots[i].type_tag == CapType.Null:
+            dst_idx = i
+            found = true
+            break
+
+    if !found:
+        return Option<u32>.None
+
+    table.slots[dst_idx] = CapSlot(
+        type_tag: src.type_tag,
+        object_ptr: src.object_ptr,
+        rights: src.rights,
+        badge: src.badge,
+        is_derived: true,
+        parent_idx: src_idx
+    )
+    table.count = table.count + 1
+    Option<u32>.Some(dst_idx)
+
+# ---------------------------------------------------------------------------
+# Revoke a capability and ALL capabilities derived from it.
+# Walks the entire table to find children — O(n * depth) but correct.
+# ---------------------------------------------------------------------------
+fn cap_table_revoke(table: var CapTable, index: u32):
+    if index >= table.size:
+        return
+    if table.slots[index].type_tag == CapType.Null:
+        return
+
+    # First, recursively revoke all children that list `index` as parent
+    for i in 0..table.size:
+        if i == index:
+            continue
+        if table.slots[i].type_tag == CapType.Null:
+            continue
+        if table.slots[i].is_derived and table.slots[i].parent_idx == index:
+            # Revoke the child first (depth-first), then clear it
+            cap_table_revoke(table, i)
+
+    # Now delete the slot itself
+    table.slots[index] = cap_slot_empty()
+    table.count = table.count - 1
+
+# ---------------------------------------------------------------------------
+# Delete a single capability slot without touching derived caps.
+# Derived caps become orphaned (their parent_idx points to a Null slot).
+# ---------------------------------------------------------------------------
+fn cap_table_delete(table: var CapTable, index: u32):
+    if index >= table.size:
+        return
+    if table.slots[index].type_tag == CapType.Null:
+        return
+    table.slots[index] = cap_slot_empty()
+    table.count = table.count - 1
+
+# ---------------------------------------------------------------------------
+# Count how many capabilities in the table reference a given object pointer.
+# Useful for determining whether a kernel object can be freed.
+# ---------------------------------------------------------------------------
+fn cap_table_ref_count(table: CapTable, object_ptr: u32) -> u32:
+    var count: u32 = 0
+    for i in 0..table.size:
+        if table.slots[i].type_tag != CapType.Null:
+            if table.slots[i].object_ptr == object_ptr:
+                count = count + 1
+    count
+
+# ---------------------------------------------------------------------------
+# Check whether a slot has the required rights for an operation.
+# ---------------------------------------------------------------------------
+fn cap_table_check_rights(table: CapTable, index: u32, required: CapRights) -> bool:
+    if index >= table.size:
+        return false
+    if table.slots[index].type_tag == CapType.Null:
+        return false
+    cap_rights_is_subset(required, table.slots[index].rights)

@@ -1,0 +1,253 @@
+# User-Space IPC Helpers
+#
+# Higher-level IPC operations built on top of the raw syscall wrappers.
+# Provides structured message passing with string payloads, a message
+# builder pattern, and convenience functions for common IPC patterns.
+
+use user.libos.syscall.{
+    sys_send, sys_recv, sys_call, sys_reply, sys_nbsend, sys_nbrecv,
+    msg_info_new, msg_info_label, msg_info_length
+}
+
+# ---------------------------------------------------------------------------
+# IPC message register constants
+# ---------------------------------------------------------------------------
+
+# Maximum number of message registers (words) per IPC message.
+# Matches the kernel's per-thread IPC buffer layout.
+val MAX_MSG_REGS: i32 = 64
+
+# Maximum string length that can be transferred in a single IPC message.
+# Each register holds 4 bytes (one i32), so max chars = MAX_MSG_REGS * 4.
+val MAX_IPC_STRING_LEN: i32 = 256
+
+# Well-known message labels
+val LABEL_STRING_MSG: i32 = 1
+val LABEL_ACK: i32 = 2
+val LABEL_ERROR: i32 = 3
+val LABEL_REGISTER: i32 = 4
+val LABEL_LOOKUP: i32 = 5
+val LABEL_FOUND: i32 = 6
+val LABEL_NOT_FOUND: i32 = 7
+
+# ---------------------------------------------------------------------------
+# MessageInfo - structured view of the raw message info word
+# ---------------------------------------------------------------------------
+struct MessageInfo:
+    label: i32
+    length: i32
+    caps_count: i32
+
+# Create a MessageInfo from individual fields.
+fn message_info_create(label: i32, length: i32, caps_count: i32) -> MessageInfo:
+    MessageInfo(label: label, length: length, caps_count: caps_count)
+
+# Encode a MessageInfo into a raw i32 for the syscall layer.
+# Format: bits [31:12] = label, bits [11:6] = caps_count, bits [5:0] = length
+fn message_info_encode(info: MessageInfo) -> i32:
+    var raw = (info.label & 0xFFFFF) << 12
+    raw = raw | ((info.caps_count & 0x3F) << 6)
+    raw = raw | (info.length & 0x3F)
+    raw
+
+# Decode a raw i32 from a syscall return into a MessageInfo.
+fn message_info_decode(raw: i32) -> MessageInfo:
+    MessageInfo(
+        label: (raw >> 12) & 0xFFFFF,
+        caps_count: (raw >> 6) & 0x3F,
+        length: raw & 0x3F
+    )
+
+# ---------------------------------------------------------------------------
+# IPC Buffer - shared memory region for message register transfer
+# ---------------------------------------------------------------------------
+
+# The IPC buffer is a region of memory mapped into the thread's address space.
+# The kernel copies message registers to/from this buffer during IPC.
+struct IpcBuffer:
+    tag: i32                    # Raw message info word
+    registers: [i32; 64]       # Message registers (payload words)
+    caps: [i32; 8]             # Capability transfer slots
+    recv_badge: i32             # Badge of the sender (filled by kernel on recv)
+
+# Create a zeroed IPC buffer.
+fn ipc_buffer_create() -> IpcBuffer:
+    IpcBuffer(
+        tag: 0,
+        registers: [0; 64],
+        caps: [0; 8],
+        recv_badge: 0
+    )
+
+# Write a single register in the IPC buffer.
+fn ipc_buffer_set_reg(buf: var IpcBuffer, index: i32, value: i32):
+    if index >= 0 and index < MAX_MSG_REGS:
+        buf.registers[index] = value
+
+# Read a single register from the IPC buffer.
+fn ipc_buffer_get_reg(buf: IpcBuffer, index: i32) -> i32:
+    if index >= 0 and index < MAX_MSG_REGS:
+        return buf.registers[index]
+    0
+
+# ---------------------------------------------------------------------------
+# Message builder - fluent construction of IPC messages
+# ---------------------------------------------------------------------------
+struct MessageBuilder:
+    label: i32
+    reg_count: i32
+    registers: [i32; 64]
+    caps_count: i32
+    caps: [i32; 8]
+
+# Create a new message builder with a given label.
+fn message_builder_new(label: i32) -> MessageBuilder:
+    MessageBuilder(
+        label: label,
+        reg_count: 0,
+        registers: [0; 64],
+        caps_count: 0,
+        caps: [0; 8]
+    )
+
+# Append a word to the message payload.
+fn message_builder_add_word(builder: var MessageBuilder, word: i32) -> bool:
+    if builder.reg_count >= MAX_MSG_REGS:
+        return false
+    builder.registers[builder.reg_count] = word
+    builder.reg_count = builder.reg_count + 1
+    true
+
+# Append a capability slot index to the cap transfer list.
+fn message_builder_add_cap(builder: var MessageBuilder, cap: i32) -> bool:
+    if builder.caps_count >= 8:
+        return false
+    builder.caps[builder.caps_count] = cap
+    builder.caps_count = builder.caps_count + 1
+    true
+
+# Write the built message into an IPC buffer, ready for sending.
+fn message_builder_write(builder: MessageBuilder, buf: var IpcBuffer):
+    val info = message_info_create(builder.label, builder.reg_count, builder.caps_count)
+    buf.tag = message_info_encode(info)
+    for i in 0..builder.reg_count:
+        buf.registers[i] = builder.registers[i]
+    for i in 0..builder.caps_count:
+        buf.caps[i] = builder.caps[i]
+
+# ---------------------------------------------------------------------------
+# String packing / unpacking
+# ---------------------------------------------------------------------------
+
+# Pack a text string into message registers starting at reg_offset.
+# Returns the number of registers consumed.
+# Each register holds 4 bytes, packed little-endian.
+fn ipc_pack_string(buf: var IpcBuffer, reg_offset: i32, s: text) -> i32:
+    val slen = s.len() as i32
+    val capped_len = if slen > MAX_IPC_STRING_LEN: MAX_IPC_STRING_LEN else: slen
+
+    # First register holds the string length
+    buf.registers[reg_offset] = capped_len
+    var reg_idx = reg_offset + 1
+
+    # Pack 4 characters per register
+    var i = 0
+    while i < capped_len:
+        var word: i32 = 0
+        for j in 0..4:
+            if (i + j) < capped_len:
+                val ch = s.char_at(i + j) as i32
+                word = word | (ch << (j * 8))
+        buf.registers[reg_idx] = word
+        reg_idx = reg_idx + 1
+        i = i + 4
+
+    # Return number of registers used (1 for length + ceil(len/4) for data)
+    reg_idx - reg_offset
+
+# Unpack a text string from message registers starting at reg_offset.
+fn ipc_unpack_string(buf: IpcBuffer, reg_offset: i32) -> text:
+    val slen = buf.registers[reg_offset]
+    if slen <= 0:
+        return ""
+
+    val capped_len = if slen > MAX_IPC_STRING_LEN: MAX_IPC_STRING_LEN else: slen
+    var result = ""
+    var reg_idx = reg_offset + 1
+    var chars_read = 0
+
+    while chars_read < capped_len:
+        val word = buf.registers[reg_idx]
+        for j in 0..4:
+            if chars_read < capped_len:
+                val ch = (word >> (j * 8)) & 0xFF
+                result = result + chr(ch)
+                chars_read = chars_read + 1
+        reg_idx = reg_idx + 1
+
+    result
+
+# ---------------------------------------------------------------------------
+# High-level IPC convenience functions
+# ---------------------------------------------------------------------------
+
+# Send a string message via IPC on the given endpoint capability.
+# Uses a thread-local IPC buffer (caller must have one mapped).
+fn ipc_send_string(cap: i32, msg: text, buf: var IpcBuffer):
+    var builder = message_builder_new(LABEL_STRING_MSG)
+    val _ok = message_builder_add_word(builder, msg.len() as i32)
+    message_builder_write(builder, buf)
+    # Pack the string payload after the builder's registers
+    val _regs_used = ipc_pack_string(buf, 1, msg)
+    # Update the tag with the correct length
+    val total_regs = 1 + _regs_used
+    val info = message_info_create(LABEL_STRING_MSG, total_regs, 0)
+    buf.tag = message_info_encode(info)
+    val _result = sys_send(cap, buf.tag)
+
+# Receive a string message via IPC. Blocks until a message arrives.
+# Returns the decoded string.
+fn ipc_recv_string(cap: i32, buf: var IpcBuffer) -> text:
+    val raw_info = sys_recv(cap)
+    buf.tag = raw_info
+    val info = message_info_decode(raw_info)
+    if info.label != LABEL_STRING_MSG:
+        return ""
+    ipc_unpack_string(buf, 1)
+
+# Combined call: send a string and receive a string reply.
+fn ipc_call_string(cap: i32, msg: text, buf: var IpcBuffer) -> text:
+    var builder = message_builder_new(LABEL_STRING_MSG)
+    val _ok = message_builder_add_word(builder, msg.len() as i32)
+    message_builder_write(builder, buf)
+    val _regs_used = ipc_pack_string(buf, 1, msg)
+    val total_regs = 1 + _regs_used
+    val info = message_info_create(LABEL_STRING_MSG, total_regs, 0)
+    buf.tag = message_info_encode(info)
+    val reply_raw = sys_call(cap, buf.tag)
+    buf.tag = reply_raw
+    val reply_info = message_info_decode(reply_raw)
+    if reply_info.label != LABEL_STRING_MSG:
+        return ""
+    ipc_unpack_string(buf, 1)
+
+# Reply to a received message with a string payload.
+fn ipc_reply_string(msg: text, buf: var IpcBuffer):
+    val _regs_used = ipc_pack_string(buf, 1, msg)
+    val total_regs = 1 + _regs_used
+    val info = message_info_create(LABEL_STRING_MSG, total_regs, 0)
+    buf.tag = message_info_encode(info)
+    val _result = sys_reply(buf.tag)
+
+# Reply with a simple acknowledgement (no payload).
+fn ipc_reply_ack(buf: var IpcBuffer):
+    val info = message_info_create(LABEL_ACK, 0, 0)
+    buf.tag = message_info_encode(info)
+    val _result = sys_reply(buf.tag)
+
+# Reply with an error code.
+fn ipc_reply_error(error_code: i32, buf: var IpcBuffer):
+    buf.registers[0] = error_code
+    val info = message_info_create(LABEL_ERROR, 1, 0)
+    buf.tag = message_info_encode(info)
+    val _result = sys_reply(buf.tag)

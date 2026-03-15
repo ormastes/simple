@@ -1,0 +1,167 @@
+# RV32IMAC SoC Top-Level
+#
+# Minimal System-on-Chip: core + bus + SRAM + UART + timer.
+#
+# Memory map:
+#   0x00000000  Boot ROM (instruction memory)
+#   0x80000000  SRAM (data memory)
+#   0x10000000  UART 16550 (tx/rx/status)
+#   0x02000000  Timer (mtime/mtimecmp)
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+# ============================================================================
+# Memory Map Constants
+# ============================================================================
+
+val ADDR_ROM_BASE: i64    = 0x00000000
+val ADDR_SRAM_BASE: i64   = 0x80000000
+val ADDR_UART_BASE: i64   = 0x10000000
+val ADDR_TIMER_BASE: i64  = 0x02000000
+
+val SRAM_SIZE_BYTES: i64  = 65536   # 64 KB
+val ROM_SIZE_BYTES: i64   = 32768   # 32 KB
+
+# ============================================================================
+# Bus Address Decode
+# ============================================================================
+
+enum BusTarget:
+    Rom
+    Sram
+    Uart
+    Timer
+    Invalid
+
+fn decode_bus_target(addr: i64) -> BusTarget:
+    """Decode bus target from address."""
+    val top_nibble = (addr >> 28) and 0xF
+    if top_nibble == 0x0: return BusTarget.Rom
+    elif top_nibble == 0x8: return BusTarget.Sram
+    elif top_nibble == 0x1: return BusTarget.Uart
+    elif addr >= ADDR_TIMER_BASE and addr < ADDR_TIMER_BASE + 0x1000:
+        return BusTarget.Timer
+    BusTarget.Invalid
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_soc_top_vhdl() -> text:
+    """Generate VHDL for the SoC top-level."""
+    var b = VhdlBuilder.create("rv32_soc_top")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+    b.emit_use_package("work", "rv32_config_pkg")
+
+    b.emit_entity_begin("rv32_soc_top")
+    b.emit_generic_begin()
+    b.emit_generic_param("ROM_INIT_FILE", "string", Some("\"\""), false)
+    b.emit_generic_param("SRAM_SIZE_KB", "integer", Some("64"), true)
+    b.emit_generic_end()
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("UART external pins")
+    b.emit_port("uart_tx", "out", "std_logic", false)
+    b.emit_port("uart_rx", "in", "std_logic", false)
+    b.emit_comment("Debug")
+    b.emit_port("retire_valid", "out", "std_logic", false)
+    b.emit_port("retire_pc", "out", "word_t", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_soc_top")
+
+    b.emit_architecture_begin("rv32_soc_top", "rtl")
+
+    b.emit_comment("Core memory interface signals")
+    b.emit_signal_decl("imem_addr", "word_t", nil)
+    b.emit_signal_decl("imem_rdata", "word_t", nil)
+    b.emit_signal_decl("imem_valid", "std_logic", Some("'1'"))
+    b.emit_signal_decl("dmem_addr", "word_t", nil)
+    b.emit_signal_decl("dmem_wdata", "word_t", nil)
+    b.emit_signal_decl("dmem_rdata", "word_t", nil)
+    b.emit_signal_decl("dmem_we", "std_logic", nil)
+    b.emit_signal_decl("dmem_be", "std_logic_vector(3 downto 0)", nil)
+    b.emit_raw("")
+
+    b.emit_comment("Peripheral select signals")
+    b.emit_signal_decl("sram_rdata", "word_t", nil)
+    b.emit_signal_decl("uart_rdata", "word_t", nil)
+    b.emit_signal_decl("timer_rdata", "word_t", nil)
+    b.emit_signal_decl("sram_sel", "std_logic", nil)
+    b.emit_signal_decl("uart_sel", "std_logic", nil)
+    b.emit_signal_decl("timer_sel", "std_logic", nil)
+
+    b.emit_architecture_body_begin()
+
+    # Core instantiation
+    b.emit_comment("=== CPU Core ===")
+    b.emit_instance_begin("u_core", "rv32_core_top")
+    b.emit_port_map_begin()
+    b.emit_port_map_entry("clk", "clk", false)
+    b.emit_port_map_entry("rst", "rst", false)
+    b.emit_port_map_entry("imem_addr", "imem_addr", false)
+    b.emit_port_map_entry("imem_rdata", "imem_rdata", false)
+    b.emit_port_map_entry("imem_valid", "imem_valid", false)
+    b.emit_port_map_entry("dmem_addr", "dmem_addr", false)
+    b.emit_port_map_entry("dmem_wdata", "dmem_wdata", false)
+    b.emit_port_map_entry("dmem_rdata", "dmem_rdata", false)
+    b.emit_port_map_entry("dmem_we", "dmem_we", false)
+    b.emit_port_map_entry("dmem_be", "dmem_be", false)
+    b.emit_port_map_entry("retire_valid", "retire_valid", false)
+    b.emit_port_map_entry("retire_pc", "retire_pc", true)
+    b.emit_port_map_end()
+    b.emit_raw("")
+
+    # SRAM
+    b.emit_comment("=== SRAM ===")
+    b.emit_instance_begin("u_sram", "rv32_sram")
+    b.emit_port_map_begin()
+    b.emit_port_map_entry("clk", "clk", false)
+    b.emit_port_map_entry("addr", "dmem_addr", false)
+    b.emit_port_map_entry("wdata", "dmem_wdata", false)
+    b.emit_port_map_entry("rdata", "sram_rdata", false)
+    b.emit_port_map_entry("we", "dmem_we and sram_sel", false)
+    b.emit_port_map_entry("be", "dmem_be", true)
+    b.emit_port_map_end()
+    b.emit_raw("")
+
+    # UART
+    b.emit_comment("=== UART ===")
+    b.emit_instance_begin("u_uart", "rv32_uart")
+    b.emit_port_map_begin()
+    b.emit_port_map_entry("clk", "clk", false)
+    b.emit_port_map_entry("rst", "rst", false)
+    b.emit_port_map_entry("addr", "dmem_addr(3 downto 0)", false)
+    b.emit_port_map_entry("wdata", "dmem_wdata(7 downto 0)", false)
+    b.emit_port_map_entry("rdata", "uart_rdata(7 downto 0)", false)
+    b.emit_port_map_entry("we", "dmem_we and uart_sel", false)
+    b.emit_port_map_entry("tx", "uart_tx", false)
+    b.emit_port_map_entry("rx", "uart_rx", true)
+    b.emit_port_map_end()
+    b.emit_raw("")
+
+    # Bus decode
+    b.emit_comment("=== Bus Address Decode ===")
+    b.emit_signal_assign("sram_sel", "'1' when dmem_addr(31 downto 28) = x\"8\" else '0'")
+    b.emit_signal_assign("uart_sel", "'1' when dmem_addr(31 downto 28) = x\"1\" else '0'")
+    b.emit_signal_assign("timer_sel", "'1' when dmem_addr(31 downto 28) = x\"0\" and dmem_addr(27 downto 24) = x\"2\" else '0'")
+    b.emit_raw("")
+
+    b.emit_comment("Read data mux")
+    b.emit_process_begin(Some("rdata_mux"), ["sram_sel", "uart_sel", "timer_sel", "sram_rdata", "uart_rdata", "timer_rdata"])
+    b.emit_process_body_begin()
+    b.emit_signal_assign("dmem_rdata", "ZERO_WORD")
+    b.emit_if_begin("sram_sel = '1'")
+    b.emit_signal_assign("dmem_rdata", "sram_rdata")
+    b.emit_elsif("uart_sel = '1'")
+    b.emit_signal_assign("dmem_rdata", "uart_rdata")
+    b.emit_elsif("timer_sel = '1'")
+    b.emit_signal_assign("dmem_rdata", "timer_rdata")
+    b.emit_if_end()
+    b.emit_process_end(Some("rdata_mux"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

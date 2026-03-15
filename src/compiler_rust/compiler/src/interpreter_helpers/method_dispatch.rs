@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods,
-    BLANKET_IMPL_METHODS, TRAIT_IMPLS,
+    BLANKET_IMPL_METHODS, GLOBAL_ENUMS, TRAIT_IMPLS,
 };
 use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
@@ -386,6 +386,55 @@ pub(crate) fn call_method_on_value(
             }
 
             // Method not found, fall through to error
+        }
+
+        // User-defined enum methods (non-Option, non-Result)
+        Value::Enum {
+            enum_name,
+            variant: _,
+            payload: _,
+        } if enum_name != "Option" && enum_name != "Result" => {
+            // Check impl_methods for this enum type
+            if let Some(methods) = _impl_methods.get(enum_name.as_str()) {
+                if let Some(func) = methods.iter().find(|m| m.name == method) {
+                    let mut enum_fields = HashMap::new();
+                    enum_fields.insert("self".to_string(), recv_val.clone());
+                    let enum_fields = Arc::new(enum_fields);
+                    return exec_function_with_values_and_self(
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
+                        Some((enum_name, &enum_fields)),
+                    );
+                }
+            }
+
+            // Check enum definition methods (local enums + GLOBAL_ENUMS for cross-module)
+            let enum_def_for_method = _enums
+                .get(enum_name.as_str())
+                .cloned()
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name.as_str()).cloned()));
+            if let Some(enum_def) = enum_def_for_method {
+                if let Some(func) = enum_def.methods.iter().find(|m| m.name == method) {
+                    let mut enum_fields = HashMap::new();
+                    enum_fields.insert("self".to_string(), recv_val.clone());
+                    let enum_fields = Arc::new(enum_fields);
+                    return exec_function_with_values_and_self(
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
+                        Some((enum_name, &enum_fields)),
+                    );
+                }
+            }
         }
 
         _ => {}

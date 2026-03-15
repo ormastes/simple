@@ -1,0 +1,143 @@
+# Capability Type Definitions
+# Types for the seL4-inspired capability system.
+#
+# Capabilities are unforgeable tokens that grant authority over kernel objects.
+# Each capability carries a type tag, a pointer to the underlying kernel object,
+# a set of access rights, and an optional badge for endpoint discrimination.
+
+# ---------------------------------------------------------------------------
+# Capability object types
+# ---------------------------------------------------------------------------
+enum CapType:
+    Null            # Empty / invalid slot
+    Untyped         # Raw memory region (can be retyped into typed objects)
+    Endpoint        # Synchronous IPC endpoint
+    Notification    # Asynchronous notification word
+    CNode           # Capability node (sub-table in the CSpace tree)
+    Tcb             # Thread control block
+    Frame           # Physical memory frame (mappable into address spaces)
+    PageTable       # Page table object (second-level translation)
+    PageDir         # Page directory (first-level translation)
+    IRQControl      # Global IRQ management authority
+    IRQHandler      # Handler for a specific IRQ number
+    SchedContext    # MCS scheduling context (budget + period)
+    Reply           # One-shot reply capability for IPC
+
+# ---------------------------------------------------------------------------
+# Capability rights bitmask
+# ---------------------------------------------------------------------------
+# Rights are monotonically decreasing: a derived capability can never hold
+# more rights than its parent.
+struct CapRights:
+    read: bool      # Can read / receive through this capability
+    write: bool     # Can write / send through this capability
+    grant: bool     # Can copy (grant) this capability to another CSpace
+    revoke: bool    # Can revoke all capabilities derived from this one
+
+# ---------------------------------------------------------------------------
+# Capability slot
+# ---------------------------------------------------------------------------
+# One entry inside a CNode. The kernel stores an array of these.
+struct CapSlot:
+    type_tag: CapType       # What kind of object this cap refers to
+    object_ptr: u32         # Address / handle of the kernel object
+    rights: CapRights       # Access rights carried by this cap
+    badge: u32              # Badge value (used to distinguish senders on endpoints)
+    is_derived: bool        # True if this cap was minted / copied from another
+    parent_idx: u32         # Index of the parent cap in the same table (revocation tree)
+
+# ---------------------------------------------------------------------------
+# Helper constructors
+# ---------------------------------------------------------------------------
+
+# Full rights — used when the kernel initially creates an object capability.
+fn cap_rights_all() -> CapRights:
+    CapRights(read: true, write: true, grant: true, revoke: true)
+
+# Read-only rights — a common restricted set for shared memory mappings.
+fn cap_rights_read_only() -> CapRights:
+    CapRights(read: true, write: false, grant: false, revoke: false)
+
+# Write-only rights — useful for notification send-only caps.
+fn cap_rights_write_only() -> CapRights:
+    CapRights(read: false, write: true, grant: false, revoke: false)
+
+# Read-write without grant or revoke — typical for IPC endpoints shared
+# between mutually trusting threads.
+fn cap_rights_read_write() -> CapRights:
+    CapRights(read: true, write: true, grant: false, revoke: false)
+
+# Create an empty (Null) capability slot. Every freshly-allocated CNode
+# slot starts in this state.
+fn cap_slot_empty() -> CapSlot:
+    CapSlot(
+        type_tag: CapType.Null,
+        object_ptr: 0,
+        rights: CapRights(read: false, write: false, grant: false, revoke: false),
+        badge: 0,
+        is_derived: false,
+        parent_idx: 0
+    )
+
+# Returns true when the slot holds a valid (non-Null) capability.
+fn cap_slot_is_valid(slot: CapSlot) -> bool:
+    if val _t = slot.type_tag:
+        # CapType.Null is the only invalid type
+        pass_dn
+    # Compare by checking if it matches Null explicitly
+    var valid = true
+    if slot.type_tag == CapType.Null:
+        valid = false
+    valid
+
+# Compute the intersection of two rights sets.  Used when minting a
+# derived capability: the new rights must be a subset of the original.
+fn cap_rights_mask(original: CapRights, mask: CapRights) -> CapRights:
+    CapRights(
+        read:   original.read   and mask.read,
+        write:  original.write  and mask.write,
+        grant:  original.grant  and mask.grant,
+        revoke: original.revoke and mask.revoke
+    )
+
+# Check whether `inner` is a subset of `outer`.
+fn cap_rights_is_subset(inner: CapRights, outer: CapRights) -> bool:
+    # Every right in `inner` must also be present in `outer`.
+    if inner.read and !outer.read:
+        return false
+    if inner.write and !outer.write:
+        return false
+    if inner.grant and !outer.grant:
+        return false
+    if inner.revoke and !outer.revoke:
+        return false
+    true
+
+# Create a capability slot for a specific kernel object with full rights.
+fn cap_slot_create(type_tag: CapType, object_ptr: u32) -> CapSlot:
+    CapSlot(
+        type_tag: type_tag,
+        object_ptr: object_ptr,
+        rights: cap_rights_all(),
+        badge: 0,
+        is_derived: false,
+        parent_idx: 0
+    )
+
+# Create a badged variant of a slot (used for endpoint discrimination).
+fn cap_slot_badge(slot: CapSlot, badge: u32) -> CapSlot:
+    CapSlot(
+        type_tag: slot.type_tag,
+        object_ptr: slot.object_ptr,
+        rights: slot.rights,
+        badge: badge,
+        is_derived: slot.is_derived,
+        parent_idx: slot.parent_idx
+    )
+
+# Returns true when two rights sets are identical.
+fn cap_rights_equal(a: CapRights, b: CapRights) -> bool:
+    (a.read == b.read and
+        a.write == b.write and
+        a.grant == b.grant and
+        a.revoke == b.revoke)

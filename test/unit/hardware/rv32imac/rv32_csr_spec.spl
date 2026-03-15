@@ -1,0 +1,110 @@
+"""
+# RV32 CSR Unit Tests
+
+**Feature IDs:** #RV32-CSR-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** In Progress
+
+## Overview
+
+Unit tests for Control and Status Register file operations.
+"""
+
+import std.spec
+
+use hardware.rv32imac.core.rv32_csr.Rv32CsrFile
+use hardware.rv32imac.pkg.rv32_isa_pkg.*
+
+describe "CSR Read/Write":
+    """
+    ## Basic CSR Access
+    """
+
+    it "writes and reads mtvec":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MTVEC, 0x80000100)
+        expect(csr.read(CSR_MTVEC)).to_equal(0x80000100)
+
+    it "writes and reads mscratch":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MSCRATCH, 0xCAFEBABE)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(0xCAFEBABE)
+
+    it "mepc is word-aligned":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MEPC, 0x80001003)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80001000)
+
+    it "misa reports RV32IMAC":
+        val csr = Rv32CsrFile.create()
+        expect(csr.read(CSR_MISA)).to_equal(0x40101104)
+
+describe "CSR Atomic Operations":
+    """
+    ## CSRRW/CSRRS/CSRRC
+    """
+
+    it "CSRRW swaps value":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MSCRATCH, 0xAAAAAAAA)
+        val old = csr.csrrw(CSR_MSCRATCH, 0x55555555)
+        expect(old).to_equal(0xAAAAAAAA)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(0x55555555)
+
+    it "CSRRS sets bits":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MIE, 0x00)
+        csr.csrrs(CSR_MIE, 0x88)
+        expect(csr.read(CSR_MIE)).to_equal(0x88)
+
+    it "CSRRS with rs1=0 is read-only":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MIE, 0xFF)
+        val old = csr.csrrs(CSR_MIE, 0)
+        expect(old).to_equal(0xFF)
+        expect(csr.read(CSR_MIE)).to_equal(0xFF)
+
+    it "CSRRC clears bits":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MIE, 0xFF)
+        csr.csrrc(CSR_MIE, 0x0F)
+        expect(csr.read(CSR_MIE)).to_equal(0xF0)
+
+describe "CSR Trap Handling":
+    """
+    ## Trap Entry/Return
+    """
+
+    it "saves state on trap entry":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MTVEC, 0x80000100)
+        csr.write(CSR_MSTATUS, 0x08)  # MIE=1
+        csr.trap_enter(11, 0x80001234, 0)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80001234)
+        expect(csr.read(CSR_MCAUSE)).to_equal(11)
+
+    it "trap_vector returns aligned mtvec":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MTVEC, 0x80000103)  # mode bits in low 2
+        expect(csr.trap_vector()).to_equal(0x80000100)
+
+    it "mret returns to mepc":
+        var csr = Rv32CsrFile.create()
+        csr.write(CSR_MTVEC, 0x80000100)
+        csr.trap_enter(11, 0x80002000, 0)
+        val return_pc = csr.trap_return()
+        expect(return_pc).to_equal(0x80002000)
+
+    it "tick increments mcycle":
+        var csr = Rv32CsrFile.create()
+        csr.tick()
+        csr.tick()
+        csr.tick()
+        expect(csr.read(CSR_MCYCLE)).to_equal(3)
+
+    it "retire increments minstret":
+        var csr = Rv32CsrFile.create()
+        csr.retire()
+        csr.retire()
+        expect(csr.read(CSR_MINSTRET)).to_equal(2)

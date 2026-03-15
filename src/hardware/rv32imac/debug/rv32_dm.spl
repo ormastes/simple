@@ -1,0 +1,162 @@
+# RV32 Debug Module
+#
+# RISC-V Debug Specification 0.13 compliant debug module.
+# Supports halt/resume, register access, and abstract commands.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_debug_pkg.*
+
+# ============================================================================
+# Debug Module Model
+# ============================================================================
+
+class Rv32DebugModule:
+    """
+    Debug Module implementing RISC-V Debug Spec 0.13.
+
+    Manages halt/resume requests, abstract command execution,
+    and program buffer access.
+    """
+
+    dmcontrol: i64
+    dmstatus: i64
+    abstractcs: i64
+    command: i64
+    data0: i64
+    data1: i64
+    progbuf0: i64
+    progbuf1: i64
+    halted: bool
+    resumeack: bool
+
+    static fn create() -> Rv32DebugModule:
+        Rv32DebugModule(
+            dmcontrol: 0,
+            dmstatus: 0x00000C82,  # version=2, authenticated
+            abstractcs: 0x01000002, # 1 progbuf, 2 data
+            command: 0,
+            data0: 0,
+            data1: 0,
+            progbuf0: 0,
+            progbuf1: 0,
+            halted: false,
+            resumeack: false
+        )
+
+    fn read_reg(addr: i64) -> i64:
+        """Read debug module register."""
+        if addr == DM_DMCONTROL: return self.dmcontrol
+        elif addr == DM_DMSTATUS: return self._build_dmstatus()
+        elif addr == DM_ABSTRACTCS: return self.abstractcs
+        elif addr == DM_COMMAND: return self.command
+        elif addr == DM_DATA0: return self.data0
+        elif addr == DM_DATA1: return self.data1
+        elif addr == DM_PROGBUF0: return self.progbuf0
+        elif addr == DM_PROGBUF1: return self.progbuf1
+        0
+
+    me write_reg(addr: i64, value: i64):
+        """Write debug module register."""
+        if addr == DM_DMCONTROL:
+            self.dmcontrol = value
+            self._process_dmcontrol()
+        elif addr == DM_COMMAND:
+            self.command = value
+        elif addr == DM_DATA0:
+            self.data0 = value
+        elif addr == DM_DATA1:
+            self.data1 = value
+        elif addr == DM_PROGBUF0:
+            self.progbuf0 = value
+        elif addr == DM_PROGBUF1:
+            self.progbuf1 = value
+
+    fn is_halted() -> bool:
+        self.halted
+
+    fn _build_dmstatus() -> i64:
+        """Build dmstatus register value."""
+        var status = 0x00000082  # version=2, authenticated
+        if self.halted:
+            status = status or (1 << 9)   # allhalted
+            status = status or (1 << 8)   # anyhalted
+        else:
+            status = status or (1 << 11)  # allrunning
+            status = status or (1 << 10)  # anyrunning
+        if self.resumeack:
+            status = status or (1 << 17)  # allresumeack
+            status = status or (1 << 16)  # anyresumeack
+        status
+
+    me _process_dmcontrol():
+        """Process dmcontrol write: handle halt/resume."""
+        val haltreq = (self.dmcontrol >> DMCONTROL_HALTREQ) and 1
+        val resumereq = (self.dmcontrol >> DMCONTROL_RESUMEREQ) and 1
+        if haltreq == 1:
+            self.halted = true
+            self.resumeack = false
+        elif resumereq == 1:
+            self.halted = false
+            self.resumeack = true
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_dm_vhdl() -> text:
+    """Generate VHDL for debug module."""
+    var b = VhdlBuilder.create("rv32_dm")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+    b.emit_use_package("work", "rv32_debug_pkg")
+
+    b.emit_entity_begin("rv32_dm")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("DMI interface (Debug Module Interface)")
+    b.emit_port("dmi_addr", "in", "std_logic_vector(7 downto 0)", false)
+    b.emit_port("dmi_wdata", "in", "word_t", false)
+    b.emit_port("dmi_rdata", "out", "word_t", false)
+    b.emit_port("dmi_we", "in", "std_logic", false)
+    b.emit_port("dmi_req", "in", "std_logic", false)
+    b.emit_comment("Core control")
+    b.emit_port("halt_req", "out", "std_logic", false)
+    b.emit_port("resume_req", "out", "std_logic", false)
+    b.emit_port("halted", "in", "std_logic", false)
+    b.emit_port("running", "in", "std_logic", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_dm")
+
+    b.emit_architecture_begin("rv32_dm", "rtl")
+    b.emit_signal_decl("dmcontrol_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("data0_r", "word_t", Some("(others => '0')"))
+    b.emit_signal_decl("progbuf0_r", "word_t", Some("(others => '0')"))
+    b.emit_architecture_body_begin()
+
+    b.emit_signal_assign("halt_req", "dmcontrol_r(31)")
+    b.emit_signal_assign("resume_req", "dmcontrol_r(30)")
+    b.emit_raw("")
+
+    b.emit_clocked_process_begin(Some("dm_proc"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_signal_assign("dmcontrol_r", "(others => '0')")
+    b.emit_signal_assign("data0_r", "(others => '0')")
+    b.emit_signal_assign("progbuf0_r", "(others => '0')")
+    b.emit_elsif("rising_edge(clk)")
+    b.emit_if_begin("dmi_req = '1' and dmi_we = '1'")
+    b.emit_line("case dmi_addr is")
+    b.emit_line("  when DM_DMCONTROL => dmcontrol_r <= dmi_wdata;")
+    b.emit_line("  when DM_DATA0 => data0_r <= dmi_wdata;")
+    b.emit_line("  when DM_PROGBUF0 => progbuf0_r <= dmi_wdata;")
+    b.emit_line("  when others => null;")
+    b.emit_line("end case;")
+    b.emit_if_end()
+    b.emit_if_end()
+    b.emit_process_end(Some("dm_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

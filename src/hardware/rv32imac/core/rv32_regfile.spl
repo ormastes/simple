@@ -1,0 +1,114 @@
+# RV32 Register File
+#
+# 32x32-bit register file with 2 read ports and 1 write port.
+# x0 is hardwired to zero.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_types_pkg.{XLEN, NUM_REGS}
+
+# ============================================================================
+# Register File Model
+# ============================================================================
+
+class Rv32RegFile:
+    """
+    32-entry register file (2R1W).
+
+    Read ports are combinational.
+    Write port is synchronous (rising edge).
+    x0 always reads as zero.
+    """
+
+    regs: [i64]
+
+    static fn create() -> Rv32RegFile:
+        var r = [0 for _ in 0..32]
+        Rv32RegFile(regs: r)
+
+    fn read(addr: i64) -> i64:
+        """Read register (x0 = 0)."""
+        if addr == 0:
+            return 0
+        self.regs[addr] and 0xFFFFFFFF
+
+    me write(addr: i64, data: i64):
+        """Write register (x0 writes ignored)."""
+        if addr != 0:
+            self.regs[addr] = data and 0xFFFFFFFF
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_regfile_vhdl() -> text:
+    """Generate VHDL for 32x32 register file (2R1W)."""
+    var b = VhdlBuilder.create("rv32_regfile")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_regfile")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("Read port 1")
+    b.emit_port("rs1_addr", "in", "reg_addr_t", false)
+    b.emit_port("rs1_data", "out", "word_t", false)
+    b.emit_comment("Read port 2")
+    b.emit_port("rs2_addr", "in", "reg_addr_t", false)
+    b.emit_port("rs2_data", "out", "word_t", false)
+    b.emit_comment("Write port")
+    b.emit_port("wr_en", "in", "std_logic", false)
+    b.emit_port("wr_addr", "in", "reg_addr_t", false)
+    b.emit_port("wr_data", "in", "word_t", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_regfile")
+
+    b.emit_architecture_begin("rv32_regfile", "rtl")
+    b.emit_signal_decl("regs", "regfile_t", Some("(others => (others => '0'))"))
+    b.emit_architecture_body_begin()
+
+    # Write process
+    b.emit_clocked_process_begin(Some("write_proc"), "clk", Some("rst"))
+    b.emit_process_body_begin()
+    b.emit_if_begin("rst = '1'")
+    b.emit_for_loop_begin("i", 0, 31)
+    b.emit_signal_assign("regs(i)", "ZERO_WORD")
+    b.emit_for_loop_end()
+    b.emit_elsif("rising_edge(clk)")
+    b.emit_if_begin("wr_en = '1' and unsigned(wr_addr) /= 0")
+    b.emit_signal_assign("regs(to_integer(unsigned(wr_addr)))", "wr_data")
+    b.emit_if_end()
+    b.emit_if_end()
+    b.emit_process_end(Some("write_proc"))
+    b.emit_raw("")
+
+    # Read ports (combinational with write-through)
+    b.emit_comment("Read port 1 with write-through")
+    b.emit_process_begin(Some("read1"), ["rs1_addr", "regs", "wr_en", "wr_addr", "wr_data"])
+    b.emit_process_body_begin()
+    b.emit_if_begin("unsigned(rs1_addr) = 0")
+    b.emit_signal_assign("rs1_data", "ZERO_WORD")
+    b.emit_elsif("wr_en = '1' and rs1_addr = wr_addr")
+    b.emit_signal_assign("rs1_data", "wr_data")
+    b.emit_else()
+    b.emit_signal_assign("rs1_data", "regs(to_integer(unsigned(rs1_addr)))")
+    b.emit_if_end()
+    b.emit_process_end(Some("read1"))
+    b.emit_raw("")
+
+    b.emit_comment("Read port 2 with write-through")
+    b.emit_process_begin(Some("read2"), ["rs2_addr", "regs", "wr_en", "wr_addr", "wr_data"])
+    b.emit_process_body_begin()
+    b.emit_if_begin("unsigned(rs2_addr) = 0")
+    b.emit_signal_assign("rs2_data", "ZERO_WORD")
+    b.emit_elsif("wr_en = '1' and rs2_addr = wr_addr")
+    b.emit_signal_assign("rs2_data", "wr_data")
+    b.emit_else()
+    b.emit_signal_assign("rs2_data", "regs(to_integer(unsigned(rs2_addr)))")
+    b.emit_if_end()
+    b.emit_process_end(Some("read2"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

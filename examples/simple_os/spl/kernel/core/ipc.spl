@@ -1,0 +1,308 @@
+# IPC Core — Send / Recv / Call / Reply
+#
+# Top-level IPC operations that combine endpoint management with message
+# transfer through IPC buffers.  These are the operations invoked by the
+# syscall layer on behalf of user-space threads.
+#
+# The IPC model follows seL4/L4 conventions:
+#   Send  — synchronous send; blocks if no receiver
+#   Recv  — synchronous receive; blocks if no sender
+#   Call  — send + receive in one operation (generates a reply cap)
+#   Reply — one-shot response to a prior Call
+#
+# Each thread is identified by a TCB id (u32 index into the global TCB table).
+# The actual message data lives in per-thread IPC buffers.
+
+use kernel.core.endpoint.{Endpoint, EndpointState,
+    endpoint_send, endpoint_recv, endpoint_reply,
+    endpoint_cancel, endpoint_has_reply, endpoint_get_badge}
+use kernel.core.ipc_buffer.{IpcBuffer, ipc_buffer_transfer,
+    ipc_buffer_clear, ipc_buffer_set_mr, ipc_buffer_get_mr,
+    ipc_buffer_set_length, ipc_buffer_get_length,
+    ipc_buffer_set_label, ipc_buffer_get_label,
+    ipc_buffer_set_tag, ipc_buffer_load_msg_info,
+    ipc_buffer_build_msg_info, MAX_MSG_REGS}
+
+# ---------------------------------------------------------------------------
+# Maximum number of threads the IPC subsystem can track
+# ---------------------------------------------------------------------------
+val IPC_MAX_THREADS: u32 = 256
+
+# ---------------------------------------------------------------------------
+# Thread IPC state — tracks per-thread IPC metadata
+# ---------------------------------------------------------------------------
+enum ThreadIpcState:
+    Ready       # Not in any IPC operation
+    Sending     # Blocked in ipc_send
+    Receiving   # Blocked in ipc_recv
+    Calling     # Blocked in ipc_call (send phase completed, waiting reply)
+
+# ---------------------------------------------------------------------------
+# Per-thread IPC context
+# ---------------------------------------------------------------------------
+struct ThreadIpcContext:
+    state: ThreadIpcState
+    ipc_buffer: IpcBuffer
+    blocked_on_ep: u32      # Index of the endpoint this thread is blocked on
+    reply_cap_valid: bool   # Whether this thread holds a reply capability
+    reply_cap_ep: u32       # Endpoint index for the reply capability
+    badge: u32              # Badge received from the last IPC operation
+
+# ---------------------------------------------------------------------------
+# Global IPC thread context table
+# ---------------------------------------------------------------------------
+var g_ipc_contexts: [ThreadIpcContext; 256] = [ThreadIpcContext(
+    state: ThreadIpcState.Ready,
+    ipc_buffer: IpcBuffer(
+        tag: 0, length: 0, label: 0, caps_length: 0,
+        msg_regs: [0 as u32; 120], caps: [0 as u32; 8],
+        owner_thread_id: 0, virt_addr: 0
+    ),
+    blocked_on_ep: 0,
+    reply_cap_valid: false,
+    reply_cap_ep: 0,
+    badge: 0
+); 256]
+
+# ---------------------------------------------------------------------------
+# Initialize a thread's IPC context.
+# Called when a new TCB is created.
+# ---------------------------------------------------------------------------
+fn ipc_init_thread(tcb_id: u32):
+    if tcb_id >= IPC_MAX_THREADS:
+        return
+    g_ipc_contexts[tcb_id].state = ThreadIpcState.Ready
+    g_ipc_contexts[tcb_id].blocked_on_ep = 0
+    g_ipc_contexts[tcb_id].reply_cap_valid = false
+    g_ipc_contexts[tcb_id].reply_cap_ep = 0
+    g_ipc_contexts[tcb_id].badge = 0
+    ipc_buffer_clear(g_ipc_contexts[tcb_id].ipc_buffer)
+
+# ---------------------------------------------------------------------------
+# Get a thread's IPC buffer (mutable reference via index).
+# ---------------------------------------------------------------------------
+fn ipc_get_buffer(tcb_id: u32) -> IpcBuffer:
+    if tcb_id >= IPC_MAX_THREADS:
+        return IpcBuffer(
+            tag: 0, length: 0, label: 0, caps_length: 0,
+            msg_regs: [0 as u32; 120], caps: [0 as u32; 8],
+            owner_thread_id: 0, virt_addr: 0
+        )
+    g_ipc_contexts[tcb_id].ipc_buffer
+
+# ---------------------------------------------------------------------------
+# Synchronous Send
+#
+# Attempts to send a message through the destination endpoint.
+# The message is taken from the sender's IPC buffer.
+#
+# On rendezvous (a receiver is waiting):
+#   - Transfers the message from sender's buffer to receiver's buffer
+#   - Returns Ok with the receiver's TCB id (caller should wake it)
+#
+# If no receiver is available:
+#   - Marks the sender as SendBlocked
+#   - Returns Err (caller should suspend the sender)
+# ---------------------------------------------------------------------------
+fn ipc_send(sender_id: u32, dest_ep: var Endpoint, msg_info: u32) -> Result<u32, text>:
+    if sender_id >= IPC_MAX_THREADS:
+        return Result<u32, text>.Err("invalid sender tcb id")
+
+    # Load the message info into the sender's buffer
+    ipc_buffer_load_msg_info(g_ipc_contexts[sender_id].ipc_buffer, msg_info)
+
+    # Try the endpoint send
+    val ep_result = endpoint_send(dest_ep, sender_id, msg_info)
+
+    if val receiver_id = ep_result.ok():
+        # Rendezvous: transfer the message
+        ipc_buffer_transfer(
+            g_ipc_contexts[sender_id].ipc_buffer,
+            g_ipc_contexts[receiver_id].ipc_buffer
+        )
+
+        # Deliver badge to receiver
+        g_ipc_contexts[receiver_id].badge = endpoint_get_badge(dest_ep)
+
+        # Reset sender state
+        g_ipc_contexts[sender_id].state = ThreadIpcState.Ready
+
+        # Wake receiver
+        g_ipc_contexts[receiver_id].state = ThreadIpcState.Ready
+
+        return Result<u32, text>.Ok(receiver_id)
+
+    # No receiver — sender blocks
+    g_ipc_contexts[sender_id].state = ThreadIpcState.Sending
+    Result<u32, text>.Err("send blocked")
+
+# ---------------------------------------------------------------------------
+# Synchronous Receive
+#
+# Waits for a message on the source endpoint.
+#
+# On rendezvous (a sender is waiting):
+#   - Transfers the message from sender's buffer to receiver's buffer
+#   - Returns Ok with the sender's TCB id (caller should wake sender)
+#
+# If no sender is available:
+#   - Marks the receiver as Receiving
+#   - Returns Err (caller should suspend the receiver)
+# ---------------------------------------------------------------------------
+fn ipc_recv(receiver_id: u32, src_ep: var Endpoint) -> Result<u32, text>:
+    if receiver_id >= IPC_MAX_THREADS:
+        return Result<u32, text>.Err("invalid receiver tcb id")
+
+    val ep_result = endpoint_recv(src_ep, receiver_id)
+
+    if val sender_id = ep_result.ok():
+        # Rendezvous: transfer the message
+        ipc_buffer_transfer(
+            g_ipc_contexts[sender_id].ipc_buffer,
+            g_ipc_contexts[receiver_id].ipc_buffer
+        )
+
+        # Deliver badge
+        g_ipc_contexts[receiver_id].badge = endpoint_get_badge(src_ep)
+
+        # Grant reply capability to the receiver
+        g_ipc_contexts[receiver_id].reply_cap_valid = true
+
+        # Reset states
+        g_ipc_contexts[sender_id].state = ThreadIpcState.Ready
+        g_ipc_contexts[receiver_id].state = ThreadIpcState.Ready
+
+        return Result<u32, text>.Ok(sender_id)
+
+    # No sender — receiver blocks
+    g_ipc_contexts[receiver_id].state = ThreadIpcState.Receiving
+    Result<u32, text>.Err("recv blocked")
+
+# ---------------------------------------------------------------------------
+# Call — Send + Receive in one atomic operation
+#
+# 1. Sends the message through the destination endpoint
+# 2. Immediately blocks waiting for a reply on the same endpoint
+#
+# A reply capability is automatically generated so the server can
+# respond directly to this caller.
+#
+# Returns Ok with the replier's TCB id when the reply arrives.
+# ---------------------------------------------------------------------------
+fn ipc_call(caller_id: u32, dest_ep: var Endpoint, msg_info: u32) -> Result<u32, text>:
+    if caller_id >= IPC_MAX_THREADS:
+        return Result<u32, text>.Err("invalid caller tcb id")
+
+    # Phase 1: Send the request
+    ipc_buffer_load_msg_info(g_ipc_contexts[caller_id].ipc_buffer, msg_info)
+
+    val send_result = endpoint_send(dest_ep, caller_id, msg_info)
+
+    if val receiver_id = send_result.ok():
+        # Transfer message to the server
+        ipc_buffer_transfer(
+            g_ipc_contexts[caller_id].ipc_buffer,
+            g_ipc_contexts[receiver_id].ipc_buffer
+        )
+        g_ipc_contexts[receiver_id].badge = endpoint_get_badge(dest_ep)
+
+        # Grant reply cap to receiver
+        g_ipc_contexts[receiver_id].reply_cap_valid = true
+        g_ipc_contexts[receiver_id].state = ThreadIpcState.Ready
+
+        # Phase 2: Caller now waits for reply
+        g_ipc_contexts[caller_id].state = ThreadIpcState.Calling
+
+        return Result<u32, text>.Ok(receiver_id)
+
+    # Send phase blocked — mark as calling (will eventually complete)
+    g_ipc_contexts[caller_id].state = ThreadIpcState.Calling
+    Result<u32, text>.Err("call blocked in send phase")
+
+# ---------------------------------------------------------------------------
+# Reply — One-shot response to a Call
+#
+# The replier (typically a server thread) sends a response back to the
+# thread that issued ipc_call.  The reply capability is consumed.
+#
+# Returns Ok with the original caller's TCB id.
+# ---------------------------------------------------------------------------
+fn ipc_reply(replier_id: u32, dest_ep: var Endpoint, msg_info: u32) -> Result<u32, text>:
+    if replier_id >= IPC_MAX_THREADS:
+        return Result<u32, text>.Err("invalid replier tcb id")
+
+    if !g_ipc_contexts[replier_id].reply_cap_valid:
+        return Result<u32, text>.Err("no reply capability")
+
+    # Load message info
+    ipc_buffer_load_msg_info(g_ipc_contexts[replier_id].ipc_buffer, msg_info)
+
+    val reply_result = endpoint_reply(dest_ep, replier_id, msg_info)
+
+    if val caller_id = reply_result.ok():
+        # Transfer reply message
+        if caller_id < IPC_MAX_THREADS:
+            ipc_buffer_transfer(
+                g_ipc_contexts[replier_id].ipc_buffer,
+                g_ipc_contexts[caller_id].ipc_buffer
+            )
+            g_ipc_contexts[caller_id].state = ThreadIpcState.Ready
+
+        # Consume reply capability
+        g_ipc_contexts[replier_id].reply_cap_valid = false
+        return Result<u32, text>.Ok(caller_id)
+
+    # Reply failed (no pending reply)
+    g_ipc_contexts[replier_id].reply_cap_valid = false
+    Result<u32, text>.Err("reply failed")
+
+# ---------------------------------------------------------------------------
+# Cancel all IPC operations for a thread.
+# Called when a thread is deleted or faulted.
+# ---------------------------------------------------------------------------
+fn ipc_cancel_thread(tcb_id: u32, ep: var Endpoint):
+    if tcb_id >= IPC_MAX_THREADS:
+        return
+    endpoint_cancel(ep, tcb_id)
+    g_ipc_contexts[tcb_id].state = ThreadIpcState.Ready
+    g_ipc_contexts[tcb_id].reply_cap_valid = false
+
+# ---------------------------------------------------------------------------
+# Get the badge value received by a thread in its last IPC operation.
+# ---------------------------------------------------------------------------
+fn ipc_get_badge(tcb_id: u32) -> u32:
+    if tcb_id >= IPC_MAX_THREADS:
+        return 0
+    g_ipc_contexts[tcb_id].badge
+
+# ---------------------------------------------------------------------------
+# Get a thread's current IPC state.
+# ---------------------------------------------------------------------------
+fn ipc_get_thread_state(tcb_id: u32) -> ThreadIpcState:
+    if tcb_id >= IPC_MAX_THREADS:
+        return ThreadIpcState.Ready
+    g_ipc_contexts[tcb_id].state
+
+# ---------------------------------------------------------------------------
+# Check whether a thread holds a valid reply capability.
+# ---------------------------------------------------------------------------
+fn ipc_has_reply_cap(tcb_id: u32) -> bool:
+    if tcb_id >= IPC_MAX_THREADS:
+        return false
+    g_ipc_contexts[tcb_id].reply_cap_valid
+
+# ---------------------------------------------------------------------------
+# Set a message register in a thread's IPC buffer (used by syscall layer).
+# ---------------------------------------------------------------------------
+fn ipc_set_mr(tcb_id: u32, index: u32, value: u32):
+    if tcb_id >= IPC_MAX_THREADS:
+        return
+    ipc_buffer_set_mr(g_ipc_contexts[tcb_id].ipc_buffer, index, value)
+
+# ---------------------------------------------------------------------------
+# Get a message register from a thread's IPC buffer.
+# ---------------------------------------------------------------------------
+fn ipc_get_mr(tcb_id: u32, index: u32) -> u32:
+    if tcb_id >= IPC_MAX_THREADS:
+        return 0
+    ipc_buffer_get_mr(g_ipc_contexts[tcb_id].ipc_buffer, index)

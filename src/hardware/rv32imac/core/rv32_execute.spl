@@ -1,0 +1,145 @@
+# RV32 Execute Stage (EX)
+#
+# ALU operations, branch resolution, address calculation.
+#
+# @hardware
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use hardware.rv32imac.pkg.rv32_types_pkg.*
+
+# ============================================================================
+# ALU Model
+# ============================================================================
+
+fn alu_execute(op: AluOp, a: i64, b: i64) -> i64:
+    """Execute ALU operation on 32-bit operands."""
+    val mask = 0xFFFFFFFF
+    val result = if op == AluOp.Add: (a + b) and mask
+        elif op == AluOp.Sub: (a - b) and mask
+        elif op == AluOp.And: a and b
+        elif op == AluOp.Or: a or b
+        elif op == AluOp.Xor: a xor b
+        elif op == AluOp.Sll: (a << (b and 0x1F)) and mask
+        elif op == AluOp.Srl: (a >> (b and 0x1F)) and mask
+        elif op == AluOp.Sra: _sra32(a, b and 0x1F)
+        elif op == AluOp.Slt: if _signed_lt(a, b): 1 else: 0
+        elif op == AluOp.Sltu: if (a and mask) < (b and mask): 1 else: 0
+        elif op == AluOp.PassB: b and mask
+        else: 0
+    result and mask
+
+fn _sra32(val_a: i64, shamt: i64) -> i64:
+    """Arithmetic right shift for 32-bit values."""
+    val sign_bit = (val_a >> 31) and 1
+    var result = val_a >> shamt
+    if sign_bit == 1:
+        val fill = ((1 << shamt) - 1) << (32 - shamt)
+        result = result or fill
+    result and 0xFFFFFFFF
+
+fn _signed_lt(a: i64, b: i64) -> bool:
+    """Signed less-than comparison for 32-bit values."""
+    var sa = a and 0xFFFFFFFF
+    var sb = b and 0xFFFFFFFF
+    if sa >= 0x80000000:
+        sa = sa - 0x100000000
+    if sb >= 0x80000000:
+        sb = sb - 0x100000000
+    sa < sb
+
+# ============================================================================
+# Branch Resolution
+# ============================================================================
+
+fn resolve_branch(op: BranchOp, rs1: i64, rs2: i64) -> bool:
+    """Evaluate branch condition."""
+    if op == BranchOp.Beq: return rs1 == rs2
+    elif op == BranchOp.Bne: return rs1 != rs2
+    elif op == BranchOp.Blt: return _signed_lt(rs1, rs2)
+    elif op == BranchOp.Bge: return not _signed_lt(rs1, rs2)
+    elif op == BranchOp.Bltu: return (rs1 and 0xFFFFFFFF) < (rs2 and 0xFFFFFFFF)
+    elif op == BranchOp.Bgeu: return (rs1 and 0xFFFFFFFF) >= (rs2 and 0xFFFFFFFF)
+    elif op == BranchOp.Jal: return true
+    elif op == BranchOp.Jalr: return true
+    false
+
+fn compute_branch_target(op: BranchOp, pc: i64, rs1: i64, imm: i64) -> i64:
+    """Compute branch/jump target address."""
+    if op == BranchOp.Jalr:
+        return (rs1 + imm) and 0xFFFFFFFE
+    (pc + imm) and 0xFFFFFFFF
+
+# ============================================================================
+# VHDL Generation
+# ============================================================================
+
+fn generate_rv32_execute_vhdl() -> text:
+    """Generate VHDL for execute stage."""
+    var b = VhdlBuilder.create("rv32_execute")
+    b.emit_library_header()
+    b.emit_use_package("work", "rv32_types_pkg")
+
+    b.emit_entity_begin("rv32_execute")
+    b.emit_port_begin()
+    b.emit_port("clk", "in", "std_logic", false)
+    b.emit_port("rst", "in", "std_logic", false)
+    b.emit_comment("From ID stage")
+    b.emit_port("id_pc", "in", "word_t", false)
+    b.emit_port("id_rs1_data", "in", "word_t", false)
+    b.emit_port("id_rs2_data", "in", "word_t", false)
+    b.emit_port("id_rd", "in", "reg_addr_t", false)
+    b.emit_port("id_imm", "in", "word_t", false)
+    b.emit_port("id_alu_op", "in", "alu_op_t", false)
+    b.emit_port("id_branch_op", "in", "branch_op_t", false)
+    b.emit_port("id_mem_op", "in", "mem_op_t", false)
+    b.emit_port("id_mem_width", "in", "mem_width_t", false)
+    b.emit_port("id_reg_write", "in", "std_logic", false)
+    b.emit_port("id_use_imm", "in", "std_logic", false)
+    b.emit_port("id_valid", "in", "std_logic", false)
+    b.emit_comment("Forwarding inputs")
+    b.emit_port("fwd_ex_data", "in", "word_t", false)
+    b.emit_port("fwd_ex_rd", "in", "reg_addr_t", false)
+    b.emit_port("fwd_ex_we", "in", "std_logic", false)
+    b.emit_port("fwd_mem_data", "in", "word_t", false)
+    b.emit_port("fwd_mem_rd", "in", "reg_addr_t", false)
+    b.emit_port("fwd_mem_we", "in", "std_logic", false)
+    b.emit_comment("Output to MEM stage")
+    b.emit_port("ex_pc", "out", "word_t", false)
+    b.emit_port("ex_alu_result", "out", "word_t", false)
+    b.emit_port("ex_rs2_data", "out", "word_t", false)
+    b.emit_port("ex_rd", "out", "reg_addr_t", false)
+    b.emit_port("ex_mem_op", "out", "mem_op_t", false)
+    b.emit_port("ex_mem_width", "out", "mem_width_t", false)
+    b.emit_port("ex_reg_write", "out", "std_logic", false)
+    b.emit_port("ex_valid", "out", "std_logic", false)
+    b.emit_comment("Branch output")
+    b.emit_port("branch_taken", "out", "std_logic", false)
+    b.emit_port("branch_target", "out", "word_t", true)
+    b.emit_port_end()
+    b.emit_entity_end("rv32_execute")
+
+    b.emit_architecture_begin("rv32_execute", "rtl")
+    b.emit_signal_decl("alu_a", "word_t", nil)
+    b.emit_signal_decl("alu_b", "word_t", nil)
+    b.emit_signal_decl("alu_result_i", "word_t", nil)
+    b.emit_architecture_body_begin()
+
+    b.emit_comment("ALU operand selection with forwarding and immediate mux")
+    b.emit_comment("(Combinational process - full decode in actual RTL)")
+    b.emit_process_begin(Some("ex_proc"), ["id_pc", "id_rs1_data", "id_rs2_data", "id_imm", "id_alu_op", "id_branch_op", "id_mem_op", "id_mem_width", "id_reg_write", "id_use_imm", "id_valid", "id_rd", "fwd_ex_data", "fwd_ex_rd", "fwd_ex_we", "fwd_mem_data", "fwd_mem_rd", "fwd_mem_we"])
+    b.emit_process_body_begin()
+    b.emit_comment("Default outputs")
+    b.emit_signal_assign("ex_pc", "id_pc")
+    b.emit_signal_assign("ex_rd", "id_rd")
+    b.emit_signal_assign("ex_mem_op", "id_mem_op")
+    b.emit_signal_assign("ex_mem_width", "id_mem_width")
+    b.emit_signal_assign("ex_reg_write", "id_reg_write")
+    b.emit_signal_assign("ex_valid", "id_valid")
+    b.emit_signal_assign("ex_rs2_data", "id_rs2_data")
+    b.emit_signal_assign("ex_alu_result", "ZERO_WORD")
+    b.emit_signal_assign("branch_taken", "'0'")
+    b.emit_signal_assign("branch_target", "ZERO_WORD")
+    b.emit_process_end(Some("ex_proc"))
+
+    b.emit_architecture_end("rtl")
+    b.build()

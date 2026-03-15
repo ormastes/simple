@@ -1,0 +1,194 @@
+# User-Space Serial Driver
+#
+# A user-space process that owns the COM1 serial port via an MMIO capability.
+# Other processes communicate with this driver via an IPC endpoint: they
+# send text strings, and the driver writes them to the serial port.
+#
+# Architecture:
+#   - Receives an MMIO capability for the COM1 region (0x3F8..0x3FF)
+#   - Listens on an IPC endpoint for requests
+#   - Supports: write string, read byte, get status
+#
+# Capability slot assignments (set up by root task):
+#   5  = MMIO frame for COM1 (mapped into our address space)
+#   11 = Serial service IPC endpoint (we are the server)
+
+use user.libos.syscall.{
+    sys_recv, sys_reply, sys_debug_print, sys_yield,
+    msg_info_new, msg_info_label, msg_info_length
+}
+use user.libos.ipc.{
+    ipc_buffer_create, ipc_unpack_string, ipc_pack_string,
+    message_info_decode, message_info_create, message_info_encode,
+    IpcBuffer, MessageInfo,
+    LABEL_STRING_MSG, LABEL_ACK, LABEL_ERROR
+}
+
+# ---------------------------------------------------------------------------
+# Serial port constants
+# ---------------------------------------------------------------------------
+val COM1_BASE: i32 = 0x3F8
+
+val REG_DATA: i32 = 0
+val REG_IER: i32 = 1
+val REG_FCR: i32 = 2
+val REG_LCR: i32 = 3
+val REG_MCR: i32 = 4
+val REG_LSR: i32 = 5
+
+val LSR_DATA_READY: i32 = 0x01
+val LSR_THRE: i32 = 0x20
+
+val LCR_DLAB: i32 = 0x80
+val LCR_8N1: i32 = 0x03
+
+val BAUD_DIVISOR_115200: i32 = 1
+
+# Service endpoint capability slot
+val CAP_SERIAL_EP: i32 = 11
+val CAP_COM1_MMIO: i32 = 5
+
+# Request labels (clients use these)
+val LABEL_SERIAL_WRITE: i32 = 100
+val LABEL_SERIAL_READ: i32 = 101
+val LABEL_SERIAL_STATUS: i32 = 102
+
+# ---------------------------------------------------------------------------
+# Port I/O via inline assembly
+# ---------------------------------------------------------------------------
+fn outb(port: i32, value: i32):
+    asm """
+        mov dx, {port}
+        mov al, {value}
+        out dx, al
+    """
+
+fn inb(port: i32) -> i32:
+    var result = 0
+    asm """
+        mov dx, {port}
+        in al, dx
+        movzx eax, al
+        mov {result}, eax
+    """
+    result
+
+# ---------------------------------------------------------------------------
+# Serial hardware initialization
+# ---------------------------------------------------------------------------
+fn serial_hw_init():
+    val port = COM1_BASE
+
+    # Disable interrupts
+    outb(port + REG_IER, 0x00)
+
+    # Set DLAB, configure baud rate
+    outb(port + REG_LCR, LCR_DLAB)
+    outb(port + REG_DATA, BAUD_DIVISOR_115200 & 0xFF)
+    outb(port + REG_IER, 0)
+
+    # 8N1, clear DLAB
+    outb(port + REG_LCR, LCR_8N1)
+
+    # Enable FIFO, clear buffers, 14-byte threshold
+    outb(port + REG_FCR, 0xC7)
+
+    # RTS/DSR set
+    outb(port + REG_MCR, 0x0B)
+
+# ---------------------------------------------------------------------------
+# Low-level serial write
+# ---------------------------------------------------------------------------
+fn serial_wait_tx():
+    while (inb(COM1_BASE + REG_LSR) & LSR_THRE) == 0:
+        pass
+
+fn serial_write_byte(byte: i32):
+    serial_wait_tx()
+    outb(COM1_BASE + REG_DATA, byte)
+
+fn serial_write_string(s: text):
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        serial_write_byte(ch)
+
+fn serial_write_line(s: text):
+    serial_write_string(s)
+    serial_write_byte(0x0D)
+    serial_write_byte(0x0A)
+
+# ---------------------------------------------------------------------------
+# Low-level serial read
+# ---------------------------------------------------------------------------
+fn serial_has_data() -> bool:
+    (inb(COM1_BASE + REG_LSR) & LSR_DATA_READY) != 0
+
+fn serial_read_byte() -> i32:
+    while not serial_has_data():
+        pass
+    inb(COM1_BASE + REG_DATA)
+
+# ---------------------------------------------------------------------------
+# IPC request handler
+# ---------------------------------------------------------------------------
+fn handle_request(buf: var IpcBuffer, info: MessageInfo):
+    if info.label == LABEL_SERIAL_WRITE:
+        # Client wants to write a string
+        val text_to_write = ipc_unpack_string(buf, 0)
+        serial_write_line(text_to_write)
+        # Reply with ACK
+        val reply_info = message_info_create(LABEL_ACK, 0, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+    else if info.label == LABEL_SERIAL_READ:
+        # Client wants to read one byte
+        if serial_has_data():
+            val byte = serial_read_byte()
+            buf.registers[0] = byte
+            val reply_info = message_info_create(LABEL_ACK, 1, 0)
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+        else:
+            # No data available
+            buf.registers[0] = -1
+            val reply_info = message_info_create(LABEL_ACK, 1, 0)
+            buf.tag = message_info_encode(reply_info)
+            val _r = sys_reply(buf.tag)
+
+    else if info.label == LABEL_SERIAL_STATUS:
+        # Return TX empty and RX ready status
+        val lsr = inb(COM1_BASE + REG_LSR)
+        buf.registers[0] = lsr
+        val reply_info = message_info_create(LABEL_ACK, 1, 0)
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+    else:
+        # Unknown request
+        val reply_info = message_info_create(LABEL_ERROR, 1, 0)
+        buf.registers[0] = -1
+        buf.tag = message_info_encode(reply_info)
+        val _r = sys_reply(buf.tag)
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+fn main():
+    sys_debug_print("[SERIAL] Serial driver starting")
+
+    # Initialize the hardware
+    serial_hw_init()
+    serial_write_line("[SERIAL] COM1 initialized at 115200 baud")
+
+    sys_debug_print("[SERIAL] Serial driver ready, listening on endpoint")
+
+    # Create IPC buffer
+    var buf = ipc_buffer_create()
+
+    # Main service loop: wait for IPC requests, handle them, repeat
+    while true:
+        val raw_info = sys_recv(CAP_SERIAL_EP)
+        buf.tag = raw_info
+        val info = message_info_decode(raw_info)
+        handle_request(buf, info)

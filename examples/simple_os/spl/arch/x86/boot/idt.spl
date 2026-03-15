@@ -1,0 +1,147 @@
+# x86 Interrupt Descriptor Table (IDT)
+#
+# 256-entry IDT for CPU exceptions (0-31), hardware IRQs (32-47),
+# and the syscall gate (0x80).
+#
+# Each IDT entry is 8 bytes, stored as a pair of u32 (low + high).
+# Total storage: 256 * 2 = 512 u32 values.
+#
+# Entry layout (8 bytes):
+#   Bits  0..15  : handler offset low
+#   Bits 16..31  : segment selector
+#   Bits 32..39  : reserved (0)
+#   Bits 40..47  : type/attributes
+#   Bits 48..63  : handler offset high
+
+# ---------- constants ----------
+
+val IDT_ENTRIES: i32 = 256
+
+# Gate types (type_attr byte)
+val GATE_INTERRUPT_32: u32 = 0x8E   # P=1, DPL=0, 32-bit interrupt gate
+val GATE_TRAP_32: u32 = 0x8F        # P=1, DPL=0, 32-bit trap gate
+val GATE_SYSCALL: u32 = 0xEE        # P=1, DPL=3, 32-bit interrupt gate (user callable)
+
+# Default kernel code selector
+val KERNEL_CS: u32 = 0x08
+
+# ---------- storage ----------
+
+# IDT entries: each entry is two u32 (low word, high word)
+var idt_low: [u32; 256] = [0; 256]
+var idt_high: [u32; 256] = [0; 256]
+
+# IDT register pointer fields
+var idtr_limit: u16 = 0
+var idtr_base: u32 = 0
+
+# ---------- external ISR stub table ----------
+# These addresses are filled in by isr_stubs.S at link time.
+# For now, we reference a global stub table pointer.
+var isr_stub_table: [u32; 256] = [0; 256]
+
+# ---------- encoding ----------
+
+# Encode an IDT gate entry.
+# handler_addr: address of the ISR stub
+# selector:     code segment selector (usually 0x08)
+# type_attr:    gate type and attributes
+fn idt_encode_low(handler_addr: u32, selector: u32) -> u32:
+    val offset_low = handler_addr & 0xFFFF
+    val sel_shifted = (selector & 0xFFFF) << 16
+    offset_low | sel_shifted
+
+fn idt_encode_high(handler_addr: u32, type_attr: u32) -> u32:
+    val offset_high = handler_addr & 0xFFFF0000
+    val attr_shifted = (type_attr & 0xFF) << 8
+    offset_high | attr_shifted
+
+# ---------- public API ----------
+
+# Set a single IDT gate
+fn idt_set_gate(vector: i32, handler: u32, selector: u32, type_attr: u32):
+    idt_low[vector] = idt_encode_low(handler, selector)
+    idt_high[vector] = idt_encode_high(handler, type_attr)
+
+# Register all 256 vectors using the ISR stub table, then load IDT
+fn idt_init():
+    # Vectors 0-31: CPU exceptions (interrupt gates, ring 0)
+    for i in 0..32:
+        val handler = isr_stub_table[i]
+        idt_set_gate(i, handler, KERNEL_CS, GATE_INTERRUPT_32)
+
+    # Vectors 32-47: Hardware IRQs (interrupt gates, ring 0)
+    for i in 32..48:
+        val handler = isr_stub_table[i]
+        idt_set_gate(i, handler, KERNEL_CS, GATE_INTERRUPT_32)
+
+    # Vectors 48-127: unused, leave as zero (will triple-fault if called)
+    for i in 48..128:
+        val handler = isr_stub_table[i]
+        idt_set_gate(i, handler, KERNEL_CS, GATE_INTERRUPT_32)
+
+    # Vector 0x80 (128): syscall - DPL=3 so user mode can invoke
+    val syscall_handler = isr_stub_table[128]
+    idt_set_gate(128, syscall_handler, KERNEL_CS, GATE_SYSCALL)
+
+    # Vectors 129-255: remaining
+    for i in 129..256:
+        val handler = isr_stub_table[i]
+        idt_set_gate(i, handler, KERNEL_CS, GATE_INTERRUPT_32)
+
+    # Load IDT register
+    idt_load()
+
+# Load the IDTR register
+fn idt_load():
+    # The IDT is a flat array of 8-byte entries.
+    # We need to build a contiguous table from our split arrays.
+    # For now we build the IDTR and load it.
+    # The linker/assembler glue ensures idt_low and idt_high are interleaved.
+    idtr_limit = ((IDT_ENTRIES * 8) - 1) as u16
+
+    # Get the address of our packed IDT table
+    # The actual contiguous table is built by the isr_stubs.S glue
+    var idt_table_addr: u32 = 0
+    unsafe:
+        asm """
+            lea eax, {idt_low}
+            mov {idt_table_addr}, eax
+        """
+    idtr_base = idt_table_addr
+
+    asm """
+        sub esp, 8
+        mov ax, {idtr_limit}
+        mov [esp], ax
+        mov eax, {idtr_base}
+        mov [esp+2], eax
+        lidt [esp]
+        add esp, 8
+    """
+
+# Disable a specific IDT entry (set present bit to 0)
+fn idt_disable_gate(vector: i32):
+    idt_high[vector] = idt_high[vector] & 0xFFFF00FF   # clear type_attr byte
+
+# Register a custom handler for a specific vector
+fn idt_register_handler(vector: i32, handler: u32):
+    var type_attr = GATE_INTERRUPT_32
+    if vector == 128:
+        type_attr = GATE_SYSCALL
+    idt_set_gate(vector, handler, KERNEL_CS, type_attr)
+
+    # Reload IDT
+    idt_load()
+
+# Enable interrupts
+fn idt_enable_interrupts():
+    asm """
+        sti
+    """
+
+# Disable interrupts
+fn idt_disable_interrupts():
+    asm """
+        cli
+    """
