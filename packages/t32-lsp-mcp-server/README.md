@@ -1,4 +1,4 @@
-# @simple-lang/t32-lsp-mcp-server
+# @ormastes/t32-lsp-mcp-server
 
 CMM/PRACTICE language intelligence via [Model Context Protocol](https://modelcontextprotocol.io).
 
@@ -7,7 +7,7 @@ Provides 6 tools for parsing, diagnostics, completions, hover, symbols, and CLI 
 ## Installation
 
 ```bash
-npm install -g @simple-lang/t32-lsp-mcp-server
+npm install -g @ormastes/t32-lsp-mcp-server
 ```
 
 ## Usage with Claude Desktop

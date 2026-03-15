@@ -1,0 +1,117 @@
+# Baremetal Host Communication - Unified API
+#
+# HostComm wraps a transport backend and provides the unified communication API.
+# Handles logging, echo, and line ending normalization.
+
+use std.nogc_sync_mut.baremetal.types.{HostCommConfig, TransportKind, transport_kind_to_text}
+use std.nogc_sync_mut.baremetal.transport.loopback.LoopbackTransport
+use std.nogc_sync_mut.baremetal.factory.TransportFactory
+
+extern fn rt_print(msg: text)
+
+# Unified host communication API
+# Wraps any transport backend with logging and configuration
+class HostComm:
+    config: HostCommConfig
+    transport_name: text
+    connected: bool
+    log_enabled: bool
+    echo_commands: bool
+    line_ending: text
+    # Internal transport — we use LoopbackTransport as default;
+    # real transports are handled through the specific connect methods
+    loopback: LoopbackTransport
+
+impl HostComm:
+    static fn create(config: HostCommConfig) -> HostComm:
+        HostComm(
+            config: config,
+            transport_name: transport_kind_to_text(config.transport),
+            connected: false,
+            log_enabled: config.log_enabled,
+            echo_commands: config.echo_commands,
+            line_ending: config.line_ending,
+            loopback: TransportFactory.create_loopback()
+        )
+
+    static fn create_loopback() -> HostComm:
+        var config = HostCommConfig(
+            transport: TransportKind.Loopback,
+            timeout_ms: 5000,
+            ssh_host: "", ssh_port: 22, ssh_user: "", ssh_key_path: "",
+            serial_port: "", baud_rate: 115200, data_bits: 8, stop_bits: 1, parity: "none",
+            t32_host: "", t32_port: 20000, t32rem_path: "",
+            openocd_host: "", openocd_telnet_port: 4444, openocd_cfg: "",
+            stlink_serial: "", swo_freq: 2000000,
+            hw_device: "", hw_baud_rate: 115200,
+            log_enabled: false, echo_commands: false, line_ending: "\n"
+        )
+        HostComm.create(config)
+
+    fn name() -> text:
+        self.transport_name
+
+    fn is_connected() -> bool:
+        self.connected
+
+    me connect() -> Result<text, text>:
+        if self.connected:
+            return Ok("already connected")
+        val result = self.loopback.connect()
+        match result:
+            Ok(msg):
+                self.connected = true
+                self.log("connected via {self.transport_name}")
+                Ok(msg)
+            Err(e):
+                Err(e)
+
+    me disconnect() -> Result<text, text>:
+        if not self.connected:
+            return Ok("not connected")
+        val result = self.loopback.disconnect()
+        self.connected = false
+        self.log("disconnected")
+        result
+
+    me send(data: text) -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        if self.echo_commands:
+            rt_print("> {data}")
+        self.log("send: {data}")
+        self.loopback.send(data)
+
+    fn receive() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val result = self.loopback.receive()
+        match result:
+            Ok(data):
+                self.log("recv: {data}")
+                Ok(data)
+            Err(e):
+                Err(e)
+
+    fn receive_timeout(timeout_ms: i64) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        self.loopback.receive_timeout(timeout_ms)
+
+    me send_command(cmd: text) -> Result<text, text>:
+        self.send(cmd)?
+        self.receive()
+
+    fn flush() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        self.loopback.flush()
+
+    fn available() -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        self.loopback.available()
+
+    fn log(msg: text):
+        if self.log_enabled:
+            rt_print("[hostcomm] {msg}")

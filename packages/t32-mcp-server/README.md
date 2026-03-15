@@ -1,4 +1,4 @@
-# @simple-lang/t32-mcp-server
+# @ormastes/t32-mcp-server
 
 TRACE32 debug session control via [Model Context Protocol](https://modelcontextprotocol.io).
 
@@ -9,7 +9,7 @@ Provides 23 tools for session management, window capture, action invocation, fie
 ## Installation
 
 ```bash
-npm install -g @simple-lang/t32-mcp-server
+npm install -g @ormastes/t32-mcp-server
 ```
 
 ## Usage with Claude Desktop

@@ -1,4 +1,4 @@
-# @simple-lang/mcp-server
+# @ormastes/mcp-server
 
 MCP server for the [Simple programming language](https://github.com/ormastes/simple).
 
@@ -7,7 +7,7 @@ Provides 75 tools for diagnostics, debugging, VCS, testing, analysis, agent loop
 ## Installation
 
 ```bash
-npm install -g @simple-lang/mcp-server
+npm install -g @ormastes/mcp-server
 ```
 
 ## Usage with Claude Desktop
