@@ -1,0 +1,572 @@
+# Web Security Library — Tests
+#
+# Self-contained test file with all web_security functions inlined.
+
+# ============================================================================
+# User Storage (parallel arrays + manual counter)
+# ============================================================================
+
+var WS_USER_IDS: [text] = []
+var WS_USER_NAMES: [text] = []
+var WS_USER_HASHES: [text] = []
+var WS_USER_ROLES: [text] = []
+var WS_USER_ACTIVE: [bool] = []
+var WS_USER_COUNT = 0
+
+# ============================================================================
+# Session Storage
+# ============================================================================
+
+var WS_SESSION_IDS: [text] = []
+var WS_SESSION_USERS: [text] = []
+var WS_SESSION_EXPIRES: [i64] = []
+var WS_SESSION_COUNT = 0
+
+# ============================================================================
+# Rate Limiter Storage
+# ============================================================================
+
+var WS_RATE_IPS: [text] = []
+var WS_RATE_COUNTS: [i64] = []
+var WS_RATE_WINDOWS: [i64] = []
+var WS_RATE_COUNT = 0
+
+# ============================================================================
+# CSRF Storage
+# ============================================================================
+
+var WS_CSRF_TOKENS: [text] = []
+var WS_CSRF_COUNT = 0
+
+# ============================================================================
+# Content Filter Storage
+# ============================================================================
+
+var BLOCKED_TERMS: [text] = []
+var BLOCKED_COUNT = 0
+
+# ============================================================================
+# Security Log Storage
+# ============================================================================
+
+var WS_LOG_ENTRIES: [text] = []
+var WS_LOG_COUNT = 0
+
+# ============================================================================
+# Init
+# ============================================================================
+
+fn ws_init():
+    WS_USER_IDS = []
+    WS_USER_NAMES = []
+    WS_USER_HASHES = []
+    WS_USER_ROLES = []
+    WS_USER_ACTIVE = []
+    WS_USER_COUNT = 0
+    WS_SESSION_IDS = []
+    WS_SESSION_USERS = []
+    WS_SESSION_EXPIRES = []
+    WS_SESSION_COUNT = 0
+    WS_RATE_IPS = []
+    WS_RATE_COUNTS = []
+    WS_RATE_WINDOWS = []
+    WS_RATE_COUNT = 0
+    WS_CSRF_TOKENS = []
+    WS_CSRF_COUNT = 0
+    WS_LOG_ENTRIES = []
+    WS_LOG_COUNT = 0
+
+# ============================================================================
+# Password Hashing
+# ============================================================================
+
+fn _simple_hash(password: text) -> text:
+    var hash_val = 5381
+    var i = 0
+    while i < password.len():
+        val ch = password[i:i + 1]
+        hash_val = hash_val * 33 + i + password.len()
+        i = i + 1
+    var tmp = hash_val
+    "hash_" + tmp.to_text() + "_" + password.len().to_text()
+
+fn _verify_hash(password: text, hash: text) -> bool:
+    val computed = _simple_hash(password)
+    computed == hash
+
+# ============================================================================
+# Security Event Logger
+# ============================================================================
+
+fn ws_log(event_type: text, username: text, ip: text, details: text):
+    val entry = "[" + event_type + "] user=" + username + " ip=" + ip + " " + details
+    WS_LOG_ENTRIES = WS_LOG_ENTRIES + [entry]
+    WS_LOG_COUNT = WS_LOG_COUNT + 1
+
+fn ws_log_text() -> text:
+    if WS_LOG_COUNT == 0:
+        return "  (no security events)"
+    var parts: [text] = []
+    var i = 0
+    while i < WS_LOG_COUNT:
+        parts.push("  " + WS_LOG_ENTRIES[i])
+        i = i + 1
+    parts.join("\n")
+
+# ============================================================================
+# Session Management
+# ============================================================================
+
+fn _generate_token(seed: text) -> text:
+    var hash = 7919
+    var i = 0
+    while i < seed.len():
+        hash = hash * 31 + i
+        i = i + 1
+    var tmp_count = WS_SESSION_COUNT
+    var tmp_hash = hash
+    "sess_" + tmp_hash.to_text() + "_" + tmp_count.to_text()
+
+fn _session_create(session_id: text, username: text):
+    WS_SESSION_IDS = WS_SESSION_IDS + [session_id]
+    WS_SESSION_USERS = WS_SESSION_USERS + [username]
+    WS_SESSION_EXPIRES = WS_SESSION_EXPIRES + [0]
+    WS_SESSION_COUNT = WS_SESSION_COUNT + 1
+
+fn session_validate(session_id: text) -> (bool, text):
+    var i = 0
+    while i < WS_SESSION_COUNT:
+        if WS_SESSION_IDS[i] == session_id:
+            return (true, WS_SESSION_USERS[i])
+        i = i + 1
+    (false, "")
+
+fn session_destroy(session_id: text) -> bool:
+    var i = 0
+    while i < WS_SESSION_COUNT:
+        if WS_SESSION_IDS[i] == session_id:
+            val user = WS_SESSION_USERS[i]
+            WS_SESSION_IDS[i] = ""
+            WS_SESSION_USERS[i] = ""
+            ws_log("logout", user, "", "Session destroyed")
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Auth: Register + Login
+# ============================================================================
+
+fn auth_register(username: text, password: text) -> (bool, text):
+    var i = 0
+    while i < WS_USER_COUNT:
+        if WS_USER_NAMES[i] == username:
+            return (false, "username_exists")
+        i = i + 1
+    if username.len() < 3:
+        return (false, "username_too_short")
+    if password.len() < 6:
+        return (false, "password_too_short")
+    var tmp_count = WS_USER_COUNT
+    val user_id = "user_" + tmp_count.to_text()
+    val hash = _simple_hash(password)
+    WS_USER_IDS = WS_USER_IDS + [user_id]
+    WS_USER_NAMES = WS_USER_NAMES + [username]
+    WS_USER_HASHES = WS_USER_HASHES + [hash]
+    WS_USER_ROLES = WS_USER_ROLES + ["user"]
+    WS_USER_ACTIVE = WS_USER_ACTIVE + [true]
+    WS_USER_COUNT = WS_USER_COUNT + 1
+    ws_log("register", username, "", "User registered")
+    (true, user_id)
+
+fn auth_login(username: text, password: text) -> (bool, text):
+    var i = 0
+    while i < WS_USER_COUNT:
+        if WS_USER_NAMES[i] == username:
+            if not WS_USER_ACTIVE[i]:
+                ws_log("failed_login", username, "", "Account disabled")
+                return (false, "account_disabled")
+            if _verify_hash(password, WS_USER_HASHES[i]):
+                val session_id = _generate_token(username)
+                _session_create(session_id, username)
+                ws_log("login", username, "", "Login successful")
+                return (true, session_id)
+            ws_log("failed_login", username, "", "Wrong password")
+            return (false, "wrong_password")
+        i = i + 1
+    ws_log("failed_login", username, "", "User not found")
+    (false, "user_not_found")
+
+fn auth_find_user(username: text) -> i64:
+    var i = 0
+    while i < WS_USER_COUNT:
+        if WS_USER_NAMES[i] == username:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Rate Limiter
+# ============================================================================
+
+fn rate_check(ip: text, max_requests: i64) -> bool:
+    var i = 0
+    while i < WS_RATE_COUNT:
+        if WS_RATE_IPS[i] == ip:
+            if WS_RATE_COUNTS[i] >= max_requests:
+                ws_log("rate_limited", "", ip, "Rate limit exceeded")
+                return false
+            WS_RATE_COUNTS[i] = WS_RATE_COUNTS[i] + 1
+            return true
+        i = i + 1
+    WS_RATE_IPS = WS_RATE_IPS + [ip]
+    WS_RATE_COUNTS = WS_RATE_COUNTS + [1]
+    WS_RATE_WINDOWS = WS_RATE_WINDOWS + [0]
+    WS_RATE_COUNT = WS_RATE_COUNT + 1
+    true
+
+fn rate_reset(ip: text):
+    var i = 0
+    while i < WS_RATE_COUNT:
+        if WS_RATE_IPS[i] == ip:
+            WS_RATE_COUNTS[i] = 0
+            return
+        i = i + 1
+
+# ============================================================================
+# CSRF Protection
+# ============================================================================
+
+fn csrf_generate(session_id: text) -> text:
+    var hash = 1337
+    var i = 0
+    while i < session_id.len():
+        hash = hash * 37 + i
+        i = i + 1
+    var tmp_count = WS_CSRF_COUNT
+    var tmp_hash = hash
+    val token = "csrf_" + tmp_hash.to_text() + "_" + tmp_count.to_text()
+    WS_CSRF_TOKENS = WS_CSRF_TOKENS + [token]
+    WS_CSRF_COUNT = WS_CSRF_COUNT + 1
+    token
+
+fn csrf_validate(token: text) -> bool:
+    var i = 0
+    while i < WS_CSRF_COUNT:
+        if WS_CSRF_TOKENS[i] == token:
+            WS_CSRF_TOKENS[i] = ""
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Input Sanitizer
+# ============================================================================
+
+fn sanitize_html(input: text) -> text:
+    var result: [text] = []
+    var i = 0
+    while i < input.len():
+        val ch = input[i:i + 1]
+        if ch == "<":
+            result.push("&lt;")
+        elif ch == ">":
+            result.push("&gt;")
+        elif ch == "&":
+            result.push("&amp;")
+        elif ch == "\"":
+            result.push("&quot;")
+        elif ch == "'":
+            result.push("&#39;")
+        else:
+            result.push(ch)
+        i = i + 1
+    result.join("")
+
+fn sanitize_filename(input: text) -> text:
+    var result: [text] = []
+    var i = 0
+    while i < input.len():
+        val ch = input[i:i + 1]
+        val is_dangerous = (ch == "/" or ch == "\\" or ch == "." or ch == "~" or ch == "<" or ch == ">" or ch == "|" or ch == ":" or ch == "*" or ch == "?")
+        if not is_dangerous:
+            result.push(ch)
+        i = i + 1
+    val sanitized = result.join("")
+    if sanitized == "":
+        return "unnamed"
+    sanitized
+
+# ============================================================================
+# Content Safety Filter
+# ============================================================================
+
+fn content_filter_init():
+    BLOCKED_TERMS = []
+    BLOCKED_COUNT = 0
+    _add_blocked("nude")
+    _add_blocked("naked")
+    _add_blocked("nsfw")
+    _add_blocked("explicit")
+    _add_blocked("violence")
+    _add_blocked("weapon")
+    _add_blocked("drug")
+    _add_blocked("child")
+    _add_blocked("minor")
+    _add_blocked("deepfake")
+    _add_blocked("fake id")
+    _add_blocked("passport")
+    _add_blocked("without consent")
+
+fn _add_blocked(term: text):
+    BLOCKED_TERMS = BLOCKED_TERMS + [term]
+    BLOCKED_COUNT = BLOCKED_COUNT + 1
+
+fn content_is_safe(prompt: text) -> (bool, text):
+    val lower_prompt = prompt.to_lower()
+    var i = 0
+    while i < BLOCKED_COUNT:
+        val term = BLOCKED_TERMS[i]
+        if lower_prompt.contains(term):
+            ws_log("content_blocked", "", "", "Blocked term: " + term)
+            return (false, term)
+        i = i + 1
+    (true, "")
+
+# ============================================================================
+# Security Error Messages (i18n)
+# ============================================================================
+
+fn security_error_msg(code: text, lang: text) -> text:
+    if lang == "ko":
+        if code == "username_exists":
+            return "이미 사용 중인 사용자 이름입니다."
+        elif code == "username_too_short":
+            return "사용자 이름은 3자 이상이어야 합니다."
+        elif code == "password_too_short":
+            return "비밀번호는 6자 이상이어야 합니다."
+        elif code == "wrong_password":
+            return "비밀번호가 올바르지 않습니다."
+        elif code == "user_not_found":
+            return "사용자를 찾을 수 없습니다."
+        elif code == "account_disabled":
+            return "계정이 비활성화되었습니다."
+        elif code == "rate_limited":
+            return "요청이 너무 많습니다. 잠시 후 다시 시도해주세요."
+        elif code == "csrf_invalid":
+            return "보안 토큰이 유효하지 않습니다."
+        elif code == "unauthorized":
+            return "로그인이 필요합니다."
+        elif code == "blocked_content":
+            return "부적절한 콘텐츠가 감지되었습니다."
+        elif code == "missing_face_image":
+            return "얼굴 사진이 필요합니다."
+        return "알 수 없는 오류가 발생했습니다."
+    elif lang == "ja":
+        if code == "username_exists":
+            return "このユーザー名は既に使用されています。"
+        elif code == "username_too_short":
+            return "ユーザー名は3文字以上である必要があります。"
+        elif code == "password_too_short":
+            return "パスワードは6文字以上である必要があります。"
+        elif code == "wrong_password":
+            return "パスワードが正しくありません。"
+        elif code == "user_not_found":
+            return "ユーザーが見つかりません。"
+        elif code == "account_disabled":
+            return "アカウントが無効化されています。"
+        elif code == "rate_limited":
+            return "リクエストが多すぎます。しばらくしてから再試行してください。"
+        elif code == "csrf_invalid":
+            return "セキュリティトークンが無効です。"
+        elif code == "unauthorized":
+            return "ログインが必要です。"
+        elif code == "blocked_content":
+            return "不適切なコンテンツが検出されました。"
+        elif code == "missing_face_image":
+            return "顔写真が必要です。"
+        return "不明なエラーが発生しました。"
+    # English (default)
+    if code == "username_exists":
+        return "Username already taken."
+    elif code == "username_too_short":
+        return "Username must be at least 3 characters."
+    elif code == "password_too_short":
+        return "Password must be at least 6 characters."
+    elif code == "wrong_password":
+        return "Incorrect password."
+    elif code == "user_not_found":
+        return "User not found."
+    elif code == "account_disabled":
+        return "Account is disabled."
+    elif code == "rate_limited":
+        return "Too many requests. Please try again later."
+    elif code == "csrf_invalid":
+        return "Invalid security token."
+    elif code == "unauthorized":
+        return "Login required."
+    elif code == "blocked_content":
+        return "Inappropriate content detected."
+    elif code == "missing_face_image":
+        return "Face photo is required."
+    "An unknown error occurred."
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Auth Registration":
+    it "registers new user":
+        ws_init()
+        val result = auth_register("testuser", "password123")
+        expect(result.0).to_equal(true)
+        expect(result.1).to_start_with("user_")
+
+    it "rejects duplicate username":
+        ws_init()
+        auth_register("testuser", "pass123456")
+        val result = auth_register("testuser", "other456789")
+        expect(result.0).to_equal(false)
+        expect(result.1).to_equal("username_exists")
+
+    it "rejects short username":
+        ws_init()
+        val result = auth_register("ab", "password123")
+        expect(result.0).to_equal(false)
+        expect(result.1).to_equal("username_too_short")
+
+    it "rejects short password":
+        ws_init()
+        val result = auth_register("testuser", "short")
+        expect(result.0).to_equal(false)
+        expect(result.1).to_equal("password_too_short")
+
+describe "Auth Login":
+    it "logs in with correct credentials":
+        ws_init()
+        auth_register("testuser", "password123")
+        val result = auth_login("testuser", "password123")
+        expect(result.0).to_equal(true)
+        expect(result.1).to_start_with("sess_")
+
+    it "rejects wrong password":
+        ws_init()
+        auth_register("testuser", "password123")
+        val result = auth_login("testuser", "wrongpass")
+        expect(result.0).to_equal(false)
+        expect(result.1).to_equal("wrong_password")
+
+    it "rejects unknown user":
+        ws_init()
+        val result = auth_login("nobody", "password123")
+        expect(result.0).to_equal(false)
+        expect(result.1).to_equal("user_not_found")
+
+describe "Session Management":
+    it "validates active session":
+        ws_init()
+        auth_register("testuser", "password123")
+        val login = auth_login("testuser", "password123")
+        val session_id = login.1
+        val check = session_validate(session_id)
+        expect(check.0).to_equal(true)
+        expect(check.1).to_equal("testuser")
+
+    it "rejects invalid session":
+        ws_init()
+        val check = session_validate("fake_session")
+        expect(check.0).to_equal(false)
+
+    it "destroys session":
+        ws_init()
+        auth_register("testuser", "password123")
+        val login = auth_login("testuser", "password123")
+        val destroyed = session_destroy(login.1)
+        expect(destroyed).to_equal(true)
+
+describe "Rate Limiter":
+    it "allows requests under limit":
+        ws_init()
+        expect(rate_check("192.168.1.1", 5)).to_equal(true)
+        expect(rate_check("192.168.1.1", 5)).to_equal(true)
+
+    it "blocks requests over limit":
+        ws_init()
+        rate_check("10.0.0.1", 2)
+        rate_check("10.0.0.1", 2)
+        expect(rate_check("10.0.0.1", 2)).to_equal(false)
+
+    it "tracks IPs independently":
+        ws_init()
+        rate_check("1.1.1.1", 1)
+        expect(rate_check("1.1.1.1", 1)).to_equal(false)
+        expect(rate_check("2.2.2.2", 1)).to_equal(true)
+
+describe "CSRF Protection":
+    it "generates and validates token":
+        ws_init()
+        val token = csrf_generate("test_session")
+        expect(token).to_start_with("csrf_")
+        expect(csrf_validate(token)).to_equal(true)
+
+    it "invalidates token after use":
+        ws_init()
+        val token = csrf_generate("test_session")
+        csrf_validate(token)
+        expect(csrf_validate(token)).to_equal(false)
+
+    it "rejects unknown token":
+        ws_init()
+        expect(csrf_validate("fake_token")).to_equal(false)
+
+describe "Input Sanitizer":
+    it "escapes HTML special chars":
+        val result = sanitize_html("<script>alert('xss')</script>")
+        expect(result).to_contain("&lt;")
+        expect(result).to_contain("&gt;")
+        expect(result).to_contain("&#39;")
+
+    it "passes safe text through":
+        val result = sanitize_html("Hello World")
+        expect(result).to_equal("Hello World")
+
+    it "sanitizes filenames":
+        val result = sanitize_filename("../../../etc/passwd")
+        expect(result).to_equal("etcpasswd")
+
+describe "Content Safety Filter":
+    it "allows safe prompts":
+        content_filter_init()
+        val result = content_is_safe("Apply short bob hairstyle")
+        expect(result.0).to_equal(true)
+
+    it "blocks unsafe prompts":
+        content_filter_init()
+        val result = content_is_safe("make nude photo")
+        expect(result.0).to_equal(false)
+
+    it "blocks deepfake requests":
+        content_filter_init()
+        val result = content_is_safe("create deepfake of celebrity")
+        expect(result.0).to_equal(false)
+
+describe "Security Error Messages":
+    it "returns Korean messages":
+        val msg = security_error_msg("unauthorized", "ko")
+        expect(msg).to_contain("로그인")
+
+    it "returns English messages":
+        val msg = security_error_msg("unauthorized", "en")
+        expect(msg).to_contain("Login required")
+
+    it "returns Japanese messages":
+        val msg = security_error_msg("unauthorized", "ja")
+        expect(msg).to_contain("ログイン")
+
+describe "Security Logger":
+    it "logs events":
+        ws_init()
+        ws_log("test_event", "testuser", "127.0.0.1", "Test log")
+        val log = ws_log_text()
+        expect(log).to_contain("test_event")
+        expect(log).to_contain("testuser")

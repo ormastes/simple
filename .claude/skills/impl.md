@@ -456,7 +456,7 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 **Provider:** `codex_cli` (OpenAI Codex CLI)
 **Binary:** `codex`
-**Flags:** `--full-auto --quiet`
+**Flags:** `exec` (non-interactive subcommand)
 **Role:** Automated verification — never writes code, only reports findings.
 
 **Used in:**
@@ -477,7 +477,7 @@ AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
 
 **Provider:** `gemini_cli` (Google Gemini CLI)
 **Binary:** `gemini`
-**Flags:** `--sandbox off`
+**Flags:** `-p` (headless) `--yolo` (auto-approve)
 **Role:** Visual/UI design — produces layout mockups, wireframes, visual concepts.
 
 **Used in:**

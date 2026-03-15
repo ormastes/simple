@@ -1,0 +1,408 @@
+"""
+# Generator Intensive Tests
+
+**Feature IDs:** #RT-020
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** doc/requirement/async_promise_intensive_tests.md
+
+## Overview
+Intensive tests for generator patterns: yield/next iteration, stateful generators,
+finite and infinite (bounded) generators, and GeneratorState transitions.
+"""
+
+# ─── StepResult ───────────────────────────────────────────────
+
+class StepResult:
+    value: i64
+    has_more: bool
+
+# ─── GeneratorState ───────────────────────────────────────────
+
+enum GeneratorState:
+    Yielded(value: i64)
+    Completed
+
+impl GeneratorState:
+    fn is_yielded() -> bool:
+        if val GeneratorState.Yielded(_) = self:
+            return true
+        return false
+
+    fn is_completed() -> bool:
+        if val GeneratorState.Completed = self:
+            return true
+        return false
+
+    fn get_value() -> i64:
+        if val GeneratorState.Yielded(v) = self:
+            return v
+        return 0
+
+# ─── Generator ────────────────────────────────────────────────
+
+class Generator:
+    current: i64
+    step_fn: fn(i64) -> StepResult
+    done: bool
+
+    static fn new(initial: i64, step_fn: fn(i64) -> StepResult) -> Generator:
+        return Generator(current: initial, step_fn: step_fn, done: false)
+
+    me next() -> GeneratorState:
+        if self.done:
+            return GeneratorState.Completed
+        var result = self.step_fn(self.current)
+        self.current = result.value
+        if not result.has_more:
+            self.done = true
+        return GeneratorState.Yielded(value: result.value)
+
+    fn is_complete() -> bool:
+        return self.done
+
+# ─── Helper: collect values from generator ────────────────────
+
+fn collect(gen: Generator, max_items: i64) -> [i64]:
+    var results: [i64] = []
+    var count = 0
+    while count < max_items and not gen.is_complete():
+        var state = gen.next()
+        if val GeneratorState.Yielded(v) = state:
+            results = results + [v]
+        count = count + 1
+    return results
+
+# ─── Fibonacci helper ─────────────────────────────────────────
+
+class FibGenerator:
+    prev: i64
+    curr: i64
+    remaining: i64
+
+    static fn new(count: i64) -> FibGenerator:
+        return FibGenerator(prev: 0, curr: 1, remaining: count)
+
+    me next() -> GeneratorState:
+        if self.remaining <= 0:
+            return GeneratorState.Completed
+        var value = self.curr
+        var next_curr = self.prev + self.curr
+        self.prev = self.curr
+        self.curr = next_curr
+        self.remaining = self.remaining - 1
+        return GeneratorState.Yielded(value: value)
+
+    fn is_complete() -> bool:
+        return self.remaining <= 0
+
+fn collect_fib(gen: FibGenerator, max_items: i64) -> [i64]:
+    var results: [i64] = []
+    var count = 0
+    while count < max_items and not gen.is_complete():
+        var state = gen.next()
+        if val GeneratorState.Yielded(v) = state:
+            results = results + [v]
+        count = count + 1
+    return results
+
+# ─── Transform Generator ─────────────────────────────────────
+
+class TransformGenerator:
+    source: Generator
+    transform_fn: fn(i64) -> i64
+
+    static fn new(source: Generator, transform_fn: fn(i64) -> i64) -> TransformGenerator:
+        return TransformGenerator(source: source, transform_fn: transform_fn)
+
+    me next() -> GeneratorState:
+        var state = self.source.next()
+        if val GeneratorState.Yielded(v) = state:
+            var transformed = self.transform_fn(v)
+            return GeneratorState.Yielded(value: transformed)
+        return GeneratorState.Completed
+
+    fn is_complete() -> bool:
+        return self.source.is_complete()
+
+fn collect_transform(gen: TransformGenerator, max_items: i64) -> [i64]:
+    var results: [i64] = []
+    var count = 0
+    while count < max_items and not gen.is_complete():
+        var state = gen.next()
+        if val GeneratorState.Yielded(v) = state:
+            results = results + [v]
+        count = count + 1
+    return results
+
+# ─── Filter Generator ────────────────────────────────────────
+
+class FilterGenerator:
+    source: Generator
+    predicate: fn(i64) -> bool
+
+    static fn new(source: Generator, predicate: fn(i64) -> bool) -> FilterGenerator:
+        return FilterGenerator(source: source, predicate: predicate)
+
+    me next() -> GeneratorState:
+        while not self.source.is_complete():
+            var state = self.source.next()
+            if val GeneratorState.Yielded(v) = state:
+                if self.predicate(v):
+                    return GeneratorState.Yielded(value: v)
+        return GeneratorState.Completed
+
+    fn is_complete() -> bool:
+        return self.source.is_complete()
+
+fn collect_filter(gen: FilterGenerator, max_items: i64) -> [i64]:
+    var results: [i64] = []
+    var count = 0
+    while count < max_items and not gen.is_complete():
+        var state = gen.next()
+        if val GeneratorState.Yielded(v) = state:
+            results = results + [v]
+        count = count + 1
+    return results
+
+# ===========================================================================
+# Factory helpers
+# ===========================================================================
+
+fn make_counting_generator(start: i64, limit: i64) -> Generator:
+    return Generator.new(start, \current: StepResult(value: current + 1, has_more: current + 1 < limit))
+
+fn make_range_generator(start: i64, end_val: i64) -> Generator:
+    return Generator.new(start - 1, \current: StepResult(value: current + 1, has_more: current + 1 < end_val - 1))
+
+fn make_single_value_generator(value: i64) -> Generator:
+    return Generator.new(value, \current: StepResult(value: current, has_more: false))
+
+fn make_empty_generator() -> Generator:
+    var gen = Generator(current: 0, step_fn: \current: StepResult(value: 0, has_more: false), done: true)
+    return gen
+
+fn make_step_generator(start: i64, step: i64, limit: i64) -> Generator:
+    return Generator.new(start - step, \current: StepResult(value: current + step, has_more: current + step + step <= limit))
+
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+describe "Generator Creation":
+
+    it "creates a generator with initial state":
+        var gen = make_counting_generator(0, 5)
+        expect(gen.is_complete()).to_equal(false)
+        expect(gen.done).to_equal(false)
+
+    it "new generator has correct initial current value":
+        var gen = Generator.new(42, \current: StepResult(value: current + 1, has_more: true))
+        expect(gen.current).to_equal(42)
+        expect(gen.done).to_equal(false)
+
+describe "Generator Next":
+
+    it "first next yields a value":
+        var gen = make_counting_generator(0, 5)
+        var state = gen.next()
+        expect(state.is_yielded()).to_equal(true)
+        expect(state.get_value()).to_equal(1)
+
+    it "subsequent nexts yield incremented values":
+        var gen = make_counting_generator(0, 10)
+        var s1 = gen.next()
+        var s2 = gen.next()
+        var s3 = gen.next()
+        expect(s1.get_value()).to_equal(1)
+        expect(s2.get_value()).to_equal(2)
+        expect(s3.get_value()).to_equal(3)
+
+describe "Counting Generator":
+
+    it "counts from 1 up to N then completes":
+        var gen = make_counting_generator(0, 4)
+        var vals = collect(gen, 100)
+        expect(vals.len()).to_equal(4)
+        expect(vals[0]).to_equal(1)
+        expect(vals[1]).to_equal(2)
+        expect(vals[2]).to_equal(3)
+        expect(vals[3]).to_equal(4)
+
+    it "is_complete returns true after exhaustion":
+        var gen = make_counting_generator(0, 2)
+        var v1 = gen.next()
+        var v2 = gen.next()
+        expect(gen.is_complete()).to_equal(true)
+
+describe "Fibonacci Generator":
+
+    it "yields fibonacci sequence":
+        var fib = FibGenerator.new(7)
+        var vals = collect_fib(fib, 100)
+        expect(vals.len()).to_equal(7)
+        expect(vals[0]).to_equal(1)
+        expect(vals[1]).to_equal(1)
+        expect(vals[2]).to_equal(2)
+        expect(vals[3]).to_equal(3)
+        expect(vals[4]).to_equal(5)
+        expect(vals[5]).to_equal(8)
+        expect(vals[6]).to_equal(13)
+
+    it "fibonacci generator completes after requested count":
+        var fib = FibGenerator.new(3)
+        var v1 = fib.next()
+        var v2 = fib.next()
+        var v3 = fib.next()
+        expect(fib.is_complete()).to_equal(true)
+        var v4 = fib.next()
+        expect(v4.is_completed()).to_equal(true)
+
+describe "Range Generator":
+
+    it "yields values in range [start, end)":
+        var gen = make_range_generator(3, 7)
+        var vals = collect(gen, 100)
+        expect(vals.len()).to_equal(4)
+        expect(vals[0]).to_equal(3)
+        expect(vals[1]).to_equal(4)
+        expect(vals[2]).to_equal(5)
+        expect(vals[3]).to_equal(6)
+
+describe "Single Value Generator":
+
+    it "yields one value then completes":
+        var gen = make_single_value_generator(99)
+        var state = gen.next()
+        expect(state.is_yielded()).to_equal(true)
+        expect(state.get_value()).to_equal(99)
+        expect(gen.is_complete()).to_equal(true)
+
+    it "next after single value returns Completed":
+        var gen = make_single_value_generator(42)
+        var s1 = gen.next()
+        var s2 = gen.next()
+        expect(s1.is_yielded()).to_equal(true)
+        expect(s2.is_completed()).to_equal(true)
+
+describe "Empty Generator":
+
+    it "is immediately complete":
+        var gen = make_empty_generator()
+        expect(gen.is_complete()).to_equal(true)
+
+    it "next on empty generator returns Completed":
+        var gen = make_empty_generator()
+        var state = gen.next()
+        expect(state.is_completed()).to_equal(true)
+
+describe "GeneratorState":
+
+    it "Yielded state has a value":
+        var state = GeneratorState.Yielded(value: 10)
+        expect(state.is_yielded()).to_equal(true)
+        expect(state.get_value()).to_equal(10)
+
+    it "Completed state has no value":
+        var state = GeneratorState.Completed
+        expect(state.is_completed()).to_equal(true)
+        expect(state.get_value()).to_equal(0)
+
+    it "is_yielded returns false for Completed":
+        var state = GeneratorState.Completed
+        expect(state.is_yielded()).to_equal(false)
+
+    it "is_completed returns false for Yielded":
+        var state = GeneratorState.Yielded(value: 5)
+        expect(state.is_completed()).to_equal(false)
+
+describe "Collect Helper":
+
+    it "collects all values from generator into list":
+        var gen = make_counting_generator(0, 3)
+        var vals = collect(gen, 100)
+        expect(vals.len()).to_equal(3)
+        expect(vals[0]).to_equal(1)
+        expect(vals[1]).to_equal(2)
+        expect(vals[2]).to_equal(3)
+
+    it "respects max_items limit":
+        var gen = make_counting_generator(0, 100)
+        var vals = collect(gen, 5)
+        expect(vals.len()).to_equal(5)
+
+describe "Generator After Completion":
+
+    it "next after complete returns Completed":
+        var gen = make_single_value_generator(7)
+        var s1 = gen.next()
+        var s2 = gen.next()
+        var s3 = gen.next()
+        expect(s1.is_yielded()).to_equal(true)
+        expect(s2.is_completed()).to_equal(true)
+        expect(s3.is_completed()).to_equal(true)
+
+    it "calling next many times after completion is safe":
+        var gen = make_empty_generator()
+        var i = 0
+        while i < 20:
+            var state = gen.next()
+            expect(state.is_completed()).to_equal(true)
+            i = i + 1
+        expect(gen.is_complete()).to_equal(true)
+
+describe "Transform Generator":
+
+    it "multiplies each yielded value":
+        var source = make_counting_generator(0, 4)
+        var doubled = TransformGenerator.new(source, \v: v * 2)
+        var vals = collect_transform(doubled, 100)
+        expect(vals.len()).to_equal(4)
+        expect(vals[0]).to_equal(2)
+        expect(vals[1]).to_equal(4)
+        expect(vals[2]).to_equal(6)
+        expect(vals[3]).to_equal(8)
+
+    it "applies identity transform preserving values":
+        var source = make_counting_generator(0, 3)
+        var identity = TransformGenerator.new(source, \v: v)
+        var vals = collect_transform(identity, 100)
+        expect(vals[0]).to_equal(1)
+        expect(vals[1]).to_equal(2)
+        expect(vals[2]).to_equal(3)
+
+describe "Filter Generator":
+
+    it "skips values not matching predicate":
+        var source = make_counting_generator(0, 10)
+        var evens = FilterGenerator.new(source, fun(v: i64) -> bool:
+            return v % 2 == 0
+        )
+        var vals = collect_filter(evens, 100)
+        # Values 1..10, evens are 2, 4, 6, 8, 10
+        expect(vals.len()).to_equal(5)
+        expect(vals[0]).to_equal(2)
+        expect(vals[1]).to_equal(4)
+        expect(vals[2]).to_equal(6)
+        expect(vals[3]).to_equal(8)
+        expect(vals[4]).to_equal(10)
+
+    it "filter with always-true predicate keeps all values":
+        var source = make_counting_generator(0, 3)
+        var all = FilterGenerator.new(source, fun(v: i64) -> bool:
+            return true
+        )
+        var vals = collect_filter(all, 100)
+        expect(vals.len()).to_equal(3)
+
+describe "Step Generator":
+
+    it "yields values with custom step size":
+        var gen = make_step_generator(0, 5, 20)
+        var vals = collect(gen, 100)
+        expect(vals.len()).to_equal(4)
+        expect(vals[0]).to_equal(5)
+        expect(vals[1]).to_equal(10)
+        expect(vals[2]).to_equal(15)
+        expect(vals[3]).to_equal(20)

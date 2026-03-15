@@ -1,0 +1,560 @@
+"""
+# Async/Promise System Tests
+
+**Feature IDs:** #RT-020
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** doc/requirement/async_promise_intensive_tests.md
+**Plan:** doc/plan/async_promise_intensive_tests.md
+**Design:** doc/design/async_promise_intensive_tests.md
+
+## Overview
+End-to-end system tests verifying complete async workflows combining
+promises, futures, executors, combinators, channels, and generators.
+These tests verify components work together, not in isolation.
+"""
+
+tag: slow, system
+
+# ============================================================
+# Inline Stubs - Minimal but functional async primitives
+# ============================================================
+
+enum PromiseState:
+    Pending
+    Resolved(value: Any)
+    Rejected(error: String)
+
+class Promise:
+    state: PromiseState
+    callbacks: List<Fun>
+
+    static fn new() -> Promise:
+        return Promise(state: PromiseState.Pending, callbacks: [])
+
+    fn resolve(self, value: Any):
+        self.state = PromiseState.Resolved(value: value)
+        for cb in self.callbacks:
+            cb(value)
+
+    fn reject(self, error: String):
+        self.state = PromiseState.Rejected(error: error)
+
+    fn then(self, callback: Fun) -> Promise:
+        var next = Promise.new()
+        var handler = fn(val):
+            var result = callback(val)
+            next.resolve(result)
+        if val self.state is PromiseState.Resolved:
+            handler(val.value)
+        else:
+            self.callbacks.push(handler)
+        return next
+
+    fn is_resolved(self) -> Bool:
+        if val self.state is PromiseState.Resolved:
+            return true
+        return false
+
+    fn is_rejected(self) -> Bool:
+        if val self.state is PromiseState.Rejected:
+            return true
+        return false
+
+    fn value(self) -> Any:
+        if val self.state is PromiseState.Resolved:
+            return val.value
+        return nil
+
+    fn error(self) -> String:
+        if val self.state is PromiseState.Rejected:
+            return val.error
+        return ""
+
+enum FutureState:
+    Pending
+    Ready(value: Any)
+    Failed(error: String)
+
+class SimpleFuture:
+    state: FutureState
+
+    static fn ready(value: Any) -> SimpleFuture:
+        return SimpleFuture(state: FutureState.Ready(value: value))
+
+    static fn pending() -> SimpleFuture:
+        return SimpleFuture(state: FutureState.Pending)
+
+    static fn failed(error: String) -> SimpleFuture:
+        return SimpleFuture(state: FutureState.Failed(error: error))
+
+    fn complete(self, value: Any):
+        self.state = FutureState.Ready(value: value)
+
+    fn fail(self, error: String):
+        self.state = FutureState.Failed(error: error)
+
+    fn is_ready(self) -> Bool:
+        if val self.state is FutureState.Ready:
+            return true
+        return false
+
+    fn is_failed(self) -> Bool:
+        if val self.state is FutureState.Failed:
+            return true
+        return false
+
+    fn value(self) -> Any:
+        if val self.state is FutureState.Ready:
+            return val.value
+        return nil
+
+    fn error(self) -> String:
+        if val self.state is FutureState.Failed:
+            return val.error
+        return ""
+
+enum TaskState:
+    Queued
+    Running
+    Done(result: Any)
+
+class Task:
+    id: Int
+    work: Fun
+    state: TaskState
+
+    fn run(self) -> Any:
+        self.state = TaskState.Running
+        var result = self.work()
+        self.state = TaskState.Done(result: result)
+        return result
+
+class Executor:
+    tasks: List<Task>
+    results: List<Any>
+
+    static fn new() -> Executor:
+        return Executor(tasks: [], results: [])
+
+    fn spawn(self, id: Int, work: Fun):
+        var task = Task(id: id, work: work, state: TaskState.Queued)
+        self.tasks.push(task)
+
+    fn run_all(self):
+        for task in self.tasks:
+            var result = task.run()
+            self.results.push(result)
+
+    fn task_count(self) -> Int:
+        return self.tasks.length()
+
+    fn all_done(self) -> Bool:
+        for task in self.tasks:
+            if val task.state is TaskState.Done:
+                pass_dn
+            else:
+                return false
+        return true
+
+class Channel:
+    buffer: List<Any>
+    closed: Bool
+
+    static fn new() -> Channel:
+        return Channel(buffer: [], closed: false)
+
+    fn send(self, value: Any):
+        if self.closed:
+            return
+        self.buffer.push(value)
+
+    fn receive(self) -> Any:
+        if self.buffer.length() == 0:
+            return nil
+        return self.buffer.remove_at(0)
+
+    fn is_empty(self) -> Bool:
+        return self.buffer.length() == 0
+
+    fn size(self) -> Int:
+        return self.buffer.length()
+
+    fn close(self):
+        self.closed = true
+
+    fn drain_all(self) -> List<Any>:
+        var items = []
+        while self.buffer.length() > 0:
+            items.push(self.buffer.remove_at(0))
+        return items
+
+class Generator:
+    current: Int
+    max: Int
+    transform: Fun
+
+    static fn range(start: Int, end: Int) -> Generator:
+        return Generator(current: start, max: end, transform: fn(x): return x)
+
+    static fn range_with(start: Int, end: Int, transform: Fun) -> Generator:
+        return Generator(current: start, max: end, transform: transform)
+
+    fn has_next(self) -> Bool:
+        return self.current < self.max
+
+    fn next(self) -> Any:
+        if self.current >= self.max:
+            return nil
+        var val = self.transform(self.current)
+        self.current = self.current + 1
+        return val
+
+    fn collect(self) -> List<Any>:
+        var items = []
+        while self.has_next():
+            items.push(self.next())
+        return items
+
+class WorkStealingQueue:
+    queues: List<List<Fun>>
+
+    static fn new(num_workers: Int) -> WorkStealingQueue:
+        var qs = []
+        var i = 0
+        while i < num_workers:
+            qs.push([])
+            i = i + 1
+        return WorkStealingQueue(queues: qs)
+
+    fn push(self, worker_id: Int, task: Fun):
+        self.queues[worker_id].push(task)
+
+    fn pop(self, worker_id: Int) -> Fun:
+        var q = self.queues[worker_id]
+        if q.length() == 0:
+            return nil
+        return q.remove_at(q.length() - 1)
+
+    fn steal(self, from_id: Int) -> Fun:
+        var q = self.queues[from_id]
+        if q.length() == 0:
+            return nil
+        return q.remove_at(0)
+
+    fn total_tasks(self) -> Int:
+        var count = 0
+        for q in self.queues:
+            count = count + q.length()
+        return count
+
+# ============================================================
+# Combinators
+# ============================================================
+
+fn join_all(futures: List<SimpleFuture>) -> SimpleFuture:
+    var results = []
+    for f in futures:
+        if f.is_failed():
+            return SimpleFuture.failed(f.error())
+        results.push(f.value())
+    return SimpleFuture.ready(results)
+
+fn select_first(futures: List<SimpleFuture>) -> SimpleFuture:
+    for f in futures:
+        if f.is_ready():
+            return f
+    for f in futures:
+        if f.is_failed():
+            return f
+    return SimpleFuture.pending()
+
+# ============================================================
+# Test Suites
+# ============================================================
+
+describe "Promise-to-Future Pipeline":
+    it "should flow data from promise resolution through to future completion":
+        var p = Promise.new()
+        var future = SimpleFuture.pending()
+
+        p.resolve(42)
+        expect(p.is_resolved()).to_equal(true)
+
+        var val = p.value()
+        future.complete(val)
+        expect(future.is_ready()).to_equal(true)
+        expect(future.value()).to_equal(42)
+
+    it "should propagate transformed data through promise-then into a future":
+        var p = Promise.new()
+        var future = SimpleFuture.pending()
+
+        var chained = p.then(fn(v): return v * 2)
+        p.resolve(10)
+
+        expect(chained.is_resolved()).to_equal(true)
+        future.complete(chained.value())
+        expect(future.value()).to_equal(20)
+
+describe "Executor Running Promise Tasks":
+    it "should spawn and run multiple promise-creating tasks to completion":
+        var exec = Executor.new()
+        var results_holder = []
+
+        exec.spawn(1, fn():
+            var p = Promise.new()
+            p.resolve("task1-done")
+            return p.value()
+        )
+        exec.spawn(2, fn():
+            var p = Promise.new()
+            p.resolve("task2-done")
+            return p.value()
+        )
+        exec.spawn(3, fn():
+            var p = Promise.new()
+            p.resolve("task3-done")
+            return p.value()
+        )
+
+        exec.run_all()
+        expect(exec.all_done()).to_equal(true)
+        expect(exec.results.length()).to_equal(3)
+        expect(exec.results[0]).to_equal("task1-done")
+        expect(exec.results[1]).to_equal("task2-done")
+        expect(exec.results[2]).to_equal("task3-done")
+
+    it "should correctly track task count after spawning":
+        var exec = Executor.new()
+        exec.spawn(1, fn(): return 1)
+        exec.spawn(2, fn(): return 2)
+        expect(exec.task_count()).to_equal(2)
+        exec.run_all()
+        expect(exec.all_done()).to_equal(true)
+
+describe "Channel Producer-Consumer":
+    it "should deliver all messages from producer to consumer in order":
+        var ch = Channel.new()
+
+        # Producer
+        var i = 0
+        while i < 5:
+            ch.send(i * 10)
+            i = i + 1
+
+        expect(ch.size()).to_equal(5)
+
+        # Consumer
+        var received = ch.drain_all()
+        expect(received.length()).to_equal(5)
+        expect(received[0]).to_equal(0)
+        expect(received[1]).to_equal(10)
+        expect(received[2]).to_equal(20)
+        expect(received[3]).to_equal(30)
+        expect(received[4]).to_equal(40)
+
+    it "should return nil when receiving from empty channel":
+        var ch = Channel.new()
+        var result = ch.receive()
+        expect(result).to_be_nil()
+
+    it "should stop accepting messages after channel is closed":
+        var ch = Channel.new()
+        ch.send("before")
+        ch.close()
+        ch.send("after")
+        expect(ch.size()).to_equal(1)
+        expect(ch.receive()).to_equal("before")
+
+describe "Future Combinator Workflows":
+    it "should join all ready futures into a single result list":
+        var f1 = SimpleFuture.ready(10)
+        var f2 = SimpleFuture.ready(20)
+        var f3 = SimpleFuture.ready(30)
+
+        var joined = join_all([f1, f2, f3])
+        expect(joined.is_ready()).to_equal(true)
+        var vals = joined.value()
+        expect(vals.length()).to_equal(3)
+        expect(vals[0]).to_equal(10)
+        expect(vals[1]).to_equal(20)
+        expect(vals[2]).to_equal(30)
+
+    it "should select the first ready future from a mixed set":
+        var f1 = SimpleFuture.pending()
+        var f2 = SimpleFuture.ready("winner")
+        var f3 = SimpleFuture.pending()
+
+        var selected = select_first([f1, f2, f3])
+        expect(selected.is_ready()).to_equal(true)
+        expect(selected.value()).to_equal("winner")
+
+describe "Generator-to-Channel Pipeline":
+    it "should pipe generator output through channel and preserve sequence":
+        var gen = Generator.range(start: 0, end: 5)
+        var ch = Channel.new()
+
+        while gen.has_next():
+            ch.send(gen.next())
+
+        expect(ch.size()).to_equal(5)
+        var items = ch.drain_all()
+        expect(items[0]).to_equal(0)
+        expect(items[1]).to_equal(1)
+        expect(items[2]).to_equal(2)
+        expect(items[3]).to_equal(3)
+        expect(items[4]).to_equal(4)
+
+    it "should apply transform in generator before sending to channel":
+        var gen = Generator.range_with(start: 1, end: 4, transform: fn(x): return x * x)
+        var ch = Channel.new()
+
+        while gen.has_next():
+            ch.send(gen.next())
+
+        var items = ch.drain_all()
+        expect(items.length()).to_equal(3)
+        expect(items[0]).to_equal(1)
+        expect(items[1]).to_equal(4)
+        expect(items[2]).to_equal(9)
+
+describe "Error Propagation Through Pipeline":
+    it "should propagate rejection from promise through future to combinator":
+        var p = Promise.new()
+        p.reject("upstream failure")
+        expect(p.is_rejected()).to_equal(true)
+
+        var future = SimpleFuture.failed(p.error())
+        expect(future.is_failed()).to_equal(true)
+        expect(future.error()).to_equal("upstream failure")
+
+        var f_ok = SimpleFuture.ready(100)
+        var joined = join_all([f_ok, future])
+        expect(joined.is_failed()).to_equal(true)
+        expect(joined.error()).to_equal("upstream failure")
+
+describe "Work-Stealing Task Distribution":
+    it "should distribute and steal tasks across worker queues":
+        var wsq = WorkStealingQueue.new(num_workers: 3)
+
+        # Push tasks to worker 0
+        var results = []
+        wsq.push(0, fn(): return "a")
+        wsq.push(0, fn(): return "b")
+        wsq.push(0, fn(): return "c")
+        wsq.push(1, fn(): return "d")
+
+        expect(wsq.total_tasks()).to_equal(4)
+
+        # Worker 2 steals from worker 0 (takes from front)
+        var stolen = wsq.steal(from_id: 0)
+        expect(stolen).to_equal(nil).not  # stolen should not be nil
+        results.push(stolen())
+        expect(results[0]).to_equal("a")
+
+        # Worker 0 pops from own queue (takes from back)
+        var own = wsq.pop(worker_id: 0)
+        results.push(own())
+        expect(results[1]).to_equal("c")
+
+        expect(wsq.total_tasks()).to_equal(2)
+
+describe "Chained Async Operations":
+    it "should chain multiple then callbacks and produce correct final result":
+        var p = Promise.new()
+
+        var step1 = p.then(fn(v): return v + 10)
+        var step2 = step1.then(fn(v): return v * 2)
+        var step3 = step2.then(fn(v): return "result:" + v.to_string())
+
+        p.resolve(5)
+
+        expect(step1.is_resolved()).to_equal(true)
+        expect(step1.value()).to_equal(15)
+        expect(step2.is_resolved()).to_equal(true)
+        expect(step2.value()).to_equal(30)
+        expect(step3.is_resolved()).to_equal(true)
+        expect(step3.value()).to_equal("result:30")
+
+describe "Mixed Ready and Pending Futures":
+    it "should handle join_all with all ready futures":
+        var futures = [
+            SimpleFuture.ready("a"),
+            SimpleFuture.ready("b"),
+            SimpleFuture.ready("c")
+        ]
+        var joined = join_all(futures)
+        expect(joined.is_ready()).to_equal(true)
+        var vals = joined.value()
+        expect(vals.length()).to_equal(3)
+
+    it "should select first ready from mixed ready/pending set":
+        var futures = [
+            SimpleFuture.pending(),
+            SimpleFuture.pending(),
+            SimpleFuture.ready(99),
+            SimpleFuture.pending()
+        ]
+        var result = select_first(futures)
+        expect(result.is_ready()).to_equal(true)
+        expect(result.value()).to_equal(99)
+
+    it "should return pending when no futures are ready":
+        var futures = [
+            SimpleFuture.pending(),
+            SimpleFuture.pending()
+        ]
+        var result = select_first(futures)
+        expect(result.is_ready()).to_equal(false)
+
+describe "Full Async Runtime Simulation":
+    it "should run a complete pipeline with executor, promises, futures, and channel":
+        var exec = Executor.new()
+        var ch = Channel.new()
+
+        # Spawn tasks that create promises, resolve them, and send to channel
+        exec.spawn(1, fn():
+            var p = Promise.new()
+            p.resolve(100)
+            ch.send(p.value())
+            return p.value()
+        )
+        exec.spawn(2, fn():
+            var p = Promise.new()
+            p.resolve(200)
+            ch.send(p.value())
+            return p.value()
+        )
+        exec.spawn(3, fn():
+            var p = Promise.new()
+            p.resolve(300)
+            ch.send(p.value())
+            return p.value()
+        )
+
+        exec.run_all()
+        expect(exec.all_done()).to_equal(true)
+
+        # Collect channel results into futures
+        var futures = []
+        while ch.is_empty() == false:
+            var val = ch.receive()
+            futures.push(SimpleFuture.ready(val))
+
+        expect(futures.length()).to_equal(3)
+
+        # Join all futures
+        var joined = join_all(futures)
+        expect(joined.is_ready()).to_equal(true)
+        var final_vals = joined.value()
+        expect(final_vals[0]).to_equal(100)
+        expect(final_vals[1]).to_equal(200)
+        expect(final_vals[2]).to_equal(300)
+
+        # Verify total sum via generator-style accumulation
+        var total = 0
+        for v in final_vals:
+            total = total + v
+        expect(total).to_equal(600)

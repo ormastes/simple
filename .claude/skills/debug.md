@@ -1,5 +1,96 @@
 # Debug Skill - Simple Compiler Debugging
 
+## Bugfix Workflow (Reproduce-First)
+
+When fixing a bug, always follow this order:
+
+### 1. Reproduce — System Test First
+
+Before touching source, write a **failing system test** that demonstrates the bug.
+
+```simple
+# test/system/<component>_regression_spec.spl
+# @bug BUG-XXX
+describe "<Component> Regression":
+    it "reproduces: <one-line symptom description>":
+        val result = <buggy_operation>(<trigger_input>)
+        expect(result).to_equal(<expected>)
+```
+
+Test MUST fail before fix, pass after. Minimal reproduction — fewest lines.
+
+### 2. Neighbor Tests — Test Adjacent Logic
+
+Bugs cluster. Write 3-5 intensive tests for similar constructs nearby.
+
+```simple
+describe "<Component> Intensive - Variants":
+    it "variant A": ...
+    it "variant B": ...
+    it "edge case": ...
+```
+
+### 3. Debug — Use Tools, Not Prints
+
+| Priority | Method | When |
+|----------|--------|------|
+| 1 | **DAP Debugger** | Complex state, call paths (see `/debug-lsp` skill) |
+| 2 | **Toggle-able log** | Need trace across many calls |
+| 3 | **IR Export** | Type/codegen bugs (`--emit-ast`, `--emit-hir`, `--emit-mir`) |
+| 4 | **Conditional print** | Last resort, simple cases |
+
+**Toggle-able Debug Logging** — NEVER add bare `print` that must be deleted:
+
+```simple
+val DEBUG_PARSER = env_get("DEBUG_PARSER") != ""
+
+fn parse_lambda(tokens):
+    if DEBUG_PARSER:
+        print "[parse_lambda] tokens: {tokens.len()}"
+    val result = do_parse(tokens)
+    if DEBUG_PARSER:
+        print "[parse_lambda] result: {result}"
+    result
+```
+
+```bash
+DEBUG_PARSER=1 bin/simple test test/system/bug_spec.spl  # Enable
+bin/simple test test/system/bug_spec.spl                  # Disabled (zero overhead)
+```
+
+### 4. Fix — Minimal Change, Then Verify
+
+```bash
+bin/simple test test/system/<component>_regression_spec.spl  # Repro passes
+bin/simple test test/unit/<component>_intensive_spec.spl      # Neighbors pass
+bin/simple test                                               # Full suite
+bin/simple build lint                                         # Lint clean
+```
+
+### 5. Document
+
+Add to `doc/bug/bug_db.sdn` if significant. Add `doc/bug/<component>_limitations.md` if workaround needed.
+
+### Common Error → Root Cause Table
+
+| Error | Likely Cause | Fix |
+|-------|-------------|-----|
+| `expected identifier, found LParen` | Wrong lambda syntax | Use `\x:` not `fn(x):` |
+| `expected LParen, found Colon` | `me fn` syntax | Use `me method():` not `me fn method():` |
+| `expected Comma, found Identifier` | Lambda param syntax | Use `\x: body` not `fn(x): body` |
+| `method X not found on type Y` | fn-typed field access | Use intermediate var |
+| `method X not found on type nil` | Function returns nil | Check return paths |
+| `.len()` wrong value | Module-level array corruption | Use manual counter |
+
+### Anti-Patterns
+
+- **NEVER** add bare `print` for debugging — use toggle-able `DEBUG_*` flag
+- **NEVER** fix before reproducing — write failing test first
+- **NEVER** fix in isolation — test neighbors too
+- **NEVER** delete debug logging after fix — leave it toggle-able
+
+---
+
 ## Logging Setup
 
 ### Enable Tracing
