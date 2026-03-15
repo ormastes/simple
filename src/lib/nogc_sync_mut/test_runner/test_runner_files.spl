@@ -230,6 +230,49 @@ fn file_mode_matches(mode_tags: text, mode: TestExecutionMode) -> bool:
     true
 
 # =========================================================================
+# Speed Resolution
+# =========================================================================
+
+fn resolve_speed(entry: TestManifestEntry, context: text) -> text:
+    """Resolve effective speed for a manifest entry given a context.
+    1. If context matches a speed_contexts entry → use that speed
+    2. Else fall back to speed_default
+    3. Else fall back to has_slow → 'long'
+    4. Else → 'unknown'"""
+    if context != "" and entry.speed_contexts != "":
+        val pairs = entry.speed_contexts.split(",")
+        for pair in pairs:
+            val kv = pair.split("=")
+            if kv.len() == 2:
+                val ctx = kv[0].trim()
+                val spd = kv[1].trim()
+                if ctx == context:
+                    return spd
+    if entry.speed_default != "":
+        return entry.speed_default
+    if entry.has_slow:
+        return "long"
+    "unknown"
+
+fn speed_matches_filter(speed: text, filter: text, only_short: bool) -> bool:
+    """Check if a resolved speed passes the filter.
+    --only-short: only 'short' passes
+    --speed=short: only 'short' passes
+    --speed=medium: 'short' and 'medium' pass
+    --speed=long: everything passes"""
+    if only_short:
+        return speed == "short"
+    if filter == "":
+        return true
+    if filter == "short":
+        return speed == "short"
+    if filter == "medium":
+        return speed == "short" or speed == "medium"
+    if filter == "long":
+        return true
+    true
+
+# =========================================================================
 # Fast Test File Discovery (manifest-based)
 # =========================================================================
 
@@ -301,6 +344,17 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         if not file_mode_matches(entry.mode_tags, options.mode):
             continue
 
+        # Category filtering
+        if options.category != "":
+            if entry.category != options.category:
+                continue
+
+        # Speed filtering (contextual)
+        if options.only_short or options.speed_filter != "":
+            val speed = resolve_speed(entry, options.context)
+            if not speed_matches_filter(speed, options.speed_filter, options.only_short):
+                continue
+
         # Content-based filters (from manifest metadata, no file I/O)
         if options.list_ignored:
             if not entry.has_slow and not entry.has_skip and not entry.has_pending:
@@ -318,10 +372,19 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
             if not entry.tags.contains(options.tag):
                 continue
 
-        # Skip slow tests by default
+        # Skip slow tests by default (unless contextual speed says short/medium)
         if not options.run_all and not options.only_slow:
             if entry.has_slow:
-                continue
+                # Contextual override: if speed resolves to short/medium, don't skip
+                if options.context != "":
+                    val ctx_speed = resolve_speed(entry, options.context)
+                    if ctx_speed == "short" or ctx_speed == "medium":
+                        # Allow through — contextual speed overrides slow marker
+                        pass_do_nothing
+                    else:
+                        continue
+                else:
+                    continue
 
         test_files.push(entry.path)
 
@@ -422,6 +485,18 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
             val mtags_str = mtags.join(",")
             if not file_mode_matches(mtags_str, options.mode):
                 continue
+        # Category filtering (slow path: extract from content)
+        if options.category != "":
+            val cat = _extract_category_from_content(content, f)
+            if cat != options.category:
+                continue
+
+        # Speed filtering (slow path: extract from content)
+        if options.only_short or options.speed_filter != "":
+            val spd = _resolve_speed_from_content(content, f, options.context)
+            if not speed_matches_filter(spd, options.speed_filter, options.only_short):
+                continue
+
         # Content-based filters
         if needs_content:
             # --list-ignored: only show files with ignored tests

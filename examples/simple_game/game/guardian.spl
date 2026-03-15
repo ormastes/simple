@@ -1,0 +1,490 @@
+# Guardian / Boss System - Elemental Siege
+#
+# Ported from C# Guardian.cs, GuardianAI.cs, BossGuardian.cs.
+# Single Guardian class handles both normal guardians and bosses (is_boss flag).
+# No coroutines — all timed transitions use dt-based timers.
+# No inheritance — composition only.
+
+use std.nogc_async_mut.game3d.*
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum GuardianState:
+    Idle
+    Alert
+    Attack
+    Vulnerable
+    PhaseTransition
+    Defeated
+
+# Element categories for shield/vulnerability mechanics (mirrors ElementCategory)
+enum Element:
+    Fire
+    Water
+    Earth
+    Air
+    Lightning
+    Ice
+
+# ============================================================================
+# BossPhase data class
+# ============================================================================
+
+class BossPhase:
+    phase_number: i32
+    health_threshold: f32        # 0.0–1.0; enter this phase when health_ratio <= threshold
+    attack_pattern: String       # label e.g. "Inferno", "Frost Nova"
+    vulnerability: Element       # element that deals 2x damage in this phase
+    attack_speed_multiplier: f32 # scales windup and cooldown
+    minion_count: i32            # minions spawned on phase transition
+
+# ============================================================================
+# Guardian class (normal + boss unified)
+# ============================================================================
+
+class Guardian:
+    entity_id: i32
+
+    # FSM
+    state: GuardianState
+
+    # Health / shield
+    health: f32
+    max_health: f32
+    shield: f32
+    max_shield: f32
+    has_shield: bool
+    shield_weakness: Element     # element that bypasses/destroys shield
+
+    # Score
+    score_value: i32
+
+    # Spatial
+    position: Vec3
+    base_position: Vec3
+
+    # Boss flag and phase data
+    is_boss: bool
+    current_phase: i32
+    phases: [BossPhase]
+
+    # AI tuning
+    alert_range: f32
+    attack_range: f32
+    attack_cooldown: f32
+    attack_timer: f32
+    vulnerability_duration: f32
+    vulnerability_timer: f32
+    alert_duration: f32
+    alert_timer: f32
+    idle_timer: f32
+    idle_duration: f32           # randomised each idle entry
+
+    # Phase transition
+    in_transition: bool
+    transition_timer: f32
+    transition_duration: f32
+
+    # Attack burst tracking
+    attack_count: i32
+    attacks_before_rest: i32
+    rest_duration: f32
+
+    # Orb / player detection
+    orb_detected: bool
+
+    # Dead flag (one-shot)
+    is_dead: bool
+
+# ============================================================================
+# Constructor helpers
+# ============================================================================
+
+fn create_guardian(entity_id: i32, health: f32, position: Vec3) -> Guardian:
+    Guardian(
+        entity_id: entity_id,
+        state: GuardianState.Idle,
+        health: health,
+        max_health: health,
+        shield: 0.0,
+        max_shield: 0.0,
+        has_shield: false,
+        shield_weakness: Element.Fire,
+        score_value: 500,
+        position: position,
+        base_position: position,
+        is_boss: false,
+        current_phase: 0,
+        phases: [],
+        alert_range: 15.0,
+        attack_range: 20.0,
+        attack_cooldown: 4.0,
+        attack_timer: 0.0,
+        vulnerability_duration: 2.0,
+        vulnerability_timer: 0.0,
+        alert_duration: 1.5,
+        alert_timer: 0.0,
+        idle_timer: 0.0,
+        idle_duration: 3.0,
+        in_transition: false,
+        transition_timer: 0.0,
+        transition_duration: 3.0,
+        attack_count: 0,
+        attacks_before_rest: 3,
+        rest_duration: 3.0,
+        orb_detected: false,
+        is_dead: false
+    )
+
+fn create_boss(entity_id: i32, health: f32, position: Vec3, phases: [BossPhase]) -> Guardian:
+    val g = create_guardian(entity_id, health, position)
+    Guardian(
+        entity_id: g.entity_id,
+        state: g.state,
+        health: g.health,
+        max_health: g.max_health,
+        shield: g.shield,
+        max_shield: g.max_shield,
+        has_shield: g.has_shield,
+        shield_weakness: g.shield_weakness,
+        score_value: 2000,
+        position: g.position,
+        base_position: g.base_position,
+        is_boss: true,
+        current_phase: 0,
+        phases: phases,
+        alert_range: 25.0,
+        attack_range: 30.0,
+        attack_cooldown: g.attack_cooldown,
+        attack_timer: g.attack_timer,
+        vulnerability_duration: g.vulnerability_duration,
+        vulnerability_timer: g.vulnerability_timer,
+        alert_duration: g.alert_duration,
+        alert_timer: g.alert_timer,
+        idle_timer: g.idle_timer,
+        idle_duration: g.idle_duration,
+        in_transition: g.in_transition,
+        transition_timer: g.transition_timer,
+        transition_duration: g.transition_duration,
+        attack_count: g.attack_count,
+        attacks_before_rest: g.attacks_before_rest,
+        rest_duration: g.rest_duration,
+        orb_detected: g.orb_detected,
+        is_dead: g.is_dead
+    )
+
+# ============================================================================
+# Health helpers
+# ============================================================================
+
+fn health_ratio(guardian: Guardian) -> f32:
+    if guardian.max_health > 0.0:
+        guardian.health / guardian.max_health
+    else:
+        0.0
+
+fn is_shielded(guardian: Guardian) -> bool:
+    guardian.has_shield and guardian.shield > 0.0
+
+fn is_alive(guardian: Guardian) -> bool:
+    guardian.health > 0.0
+
+# ============================================================================
+# Damage system
+# ============================================================================
+
+# Returns true if the guardian was defeated by this hit.
+fn damage_guardian(guardian: Guardian, damage: f32, element: i32) -> bool:
+    if guardian.is_dead:
+        false
+    else:
+        # Boss: invulnerable during phase transition
+        if (guardian.is_boss and guardian.in_transition):
+            false
+        else:
+            var actual_damage = damage
+
+            # Boss phase elemental vulnerability (2x)
+            if guardian.is_boss:
+                val phase_vuln = get_phase_vulnerability(guardian)
+                if element == phase_vuln:
+                    actual_damage = actual_damage * 2.0
+
+            # Vulnerable window bonus (1.5x, stacks with elemental bonus)
+            if guardian.state.to_i32() == GuardianState.Vulnerable.to_i32():
+                actual_damage = actual_damage * 1.5
+
+            # Shield mechanics
+            if is_shielded(guardian):
+                if element == guardian.shield_weakness.to_i32():
+                    # Element effective against shield — damage shield only
+                    guardian.shield = guardian.shield - damage
+                    if guardian.shield < 0.0:
+                        guardian.shield = 0.0
+                    # Shield destroyed: health is untouched this hit
+                    false
+                else:
+                    # Shield absorbs most damage (80% reduction)
+                    actual_damage = actual_damage * 0.2
+                    guardian.health = guardian.health - actual_damage
+                    if guardian.health < 0.0:
+                        guardian.health = 0.0
+                    check_defeated(guardian)
+            else:
+                guardian.health = guardian.health - actual_damage
+                if guardian.health < 0.0:
+                    guardian.health = 0.0
+                check_defeated(guardian)
+
+fn check_defeated(guardian: Guardian) -> bool:
+    if guardian.health <= 0.0:
+        guardian.is_dead = true
+        guardian.state = GuardianState.Defeated
+        true
+    else:
+        false
+
+# Returns the Element int value for the current boss phase vulnerability.
+# Returns -1 if not a boss or no phases defined.
+fn get_phase_vulnerability(guardian: Guardian) -> i32:
+    if (not guardian.is_boss):
+        -1
+    else:
+        val count = guardian.phases.len()
+        if count == 0:
+            -1
+        else:
+            if guardian.current_phase < count:
+                guardian.phases[guardian.current_phase].vulnerability.to_i32()
+            else:
+                -1
+
+# ============================================================================
+# Phase transition
+# ============================================================================
+
+# Call after every damage event for a boss.
+# Returns true if a phase transition was triggered.
+fn check_phase_transition(guardian: Guardian) -> bool:
+    if (not guardian.is_boss):
+        false
+    else:
+        if guardian.in_transition:
+            false
+        else:
+            val next = guardian.current_phase + 1
+            val count = guardian.phases.len()
+            if next >= count:
+                false
+            else:
+                val threshold = guardian.phases[next].health_threshold
+                if health_ratio(guardian) <= threshold:
+                    start_phase_transition(guardian, next)
+                    true
+                else:
+                    false
+
+fn start_phase_transition(guardian: Guardian, next_phase: i32):
+    guardian.in_transition = true
+    guardian.transition_timer = 0.0
+    guardian.state = GuardianState.PhaseTransition
+    guardian.attack_count = 0
+    # Minion spawning and VFX are handled by the game layer that reads
+    # the in_transition flag and the phases[next_phase].minion_count value.
+
+# Advance the transition timer; completes the transition when timer expires.
+fn update_phase_transition_timer(guardian: Guardian, dt: f32):
+    if guardian.in_transition:
+        guardian.transition_timer = guardian.transition_timer + dt
+        if guardian.transition_timer >= guardian.transition_duration:
+            val next = guardian.current_phase + 1
+            val count = guardian.phases.len()
+            if next < count:
+                guardian.current_phase = next
+            guardian.in_transition = false
+            guardian.transition_timer = 0.0
+            guardian.state = GuardianState.Idle
+            guardian.idle_timer = 0.0
+
+# ============================================================================
+# AI state machine — per-state update helpers
+# ============================================================================
+
+fn update_idle(guardian: Guardian, player_pos: Vec3):
+    guardian.idle_timer = guardian.idle_timer + 0.0  # timer advanced in update_guardian
+    # Transition: orb detected → Alert
+    if guardian.orb_detected:
+        transition_state(guardian, GuardianState.Alert)
+    else:
+        # Auto-transition to Attack after idle duration
+        if guardian.idle_timer >= guardian.idle_duration:
+            if guardian.attack_count >= guardian.attacks_before_rest:
+                # Need rest; extend idle by rest_duration
+                if guardian.idle_timer >= (guardian.idle_duration + guardian.rest_duration):
+                    guardian.attack_count = 0
+                    transition_state(guardian, GuardianState.Attack)
+            else:
+                transition_state(guardian, GuardianState.Attack)
+
+fn update_alert(guardian: Guardian, dt: f32, player_pos: Vec3):
+    guardian.alert_timer = guardian.alert_timer + dt
+    if guardian.alert_timer >= guardian.alert_duration:
+        transition_state(guardian, GuardianState.Attack)
+
+fn update_attack(guardian: Guardian, dt: f32):
+    # Advance the attack cooldown timer
+    guardian.attack_timer = guardian.attack_timer + dt
+
+    # The attack fires when the cooldown elapses
+    val speed_mult = get_attack_speed_multiplier(guardian)
+    val effective_cooldown = guardian.attack_cooldown / speed_mult
+
+    if guardian.attack_timer >= effective_cooldown:
+        guardian.attack_timer = 0.0
+        # Enter vulnerable window after attack completes
+        guardian.attack_count = guardian.attack_count + 1
+        transition_state(guardian, GuardianState.Vulnerable)
+
+    # Safety timeout: if something stalls, return to idle
+    val timeout = effective_cooldown + 5.0
+    if guardian.attack_timer >= timeout:
+        guardian.attack_count = guardian.attack_count + 1
+        transition_state(guardian, GuardianState.Idle)
+
+fn update_vulnerable(guardian: Guardian, dt: f32):
+    guardian.vulnerability_timer = guardian.vulnerability_timer + dt
+    if guardian.vulnerability_timer >= guardian.vulnerability_duration:
+        transition_state(guardian, GuardianState.Idle)
+
+fn get_attack_speed_multiplier(guardian: Guardian) -> f32:
+    if (not guardian.is_boss):
+        1.0
+    else:
+        val count = guardian.phases.len()
+        if count == 0:
+            1.0
+        else:
+            if guardian.current_phase < count:
+                guardian.phases[guardian.current_phase].attack_speed_multiplier
+            else:
+                1.0
+
+# ============================================================================
+# State transition (resets per-state timers)
+# ============================================================================
+
+fn transition_state(guardian: Guardian, new_state: GuardianState):
+    if guardian.state.to_i32() == new_state.to_i32():
+        # No-op
+    else:
+        guardian.state = new_state
+        # Reset timers for the new state
+        if new_state.to_i32() == GuardianState.Idle.to_i32():
+            guardian.idle_timer = 0.0
+            guardian.orb_detected = false
+        else:
+            if new_state.to_i32() == GuardianState.Alert.to_i32():
+                guardian.alert_timer = 0.0
+            else:
+                if new_state.to_i32() == GuardianState.Attack.to_i32():
+                    guardian.attack_timer = 0.0
+                else:
+                    if new_state.to_i32() == GuardianState.Vulnerable.to_i32():
+                        guardian.vulnerability_timer = 0.0
+                    else:
+                        if new_state.to_i32() == GuardianState.PhaseTransition.to_i32():
+                            guardian.transition_timer = 0.0
+                            guardian.attack_count = 0
+
+# ============================================================================
+# Main AI update (call every frame)
+# ============================================================================
+
+fn update_ai(guardian: Guardian, dt: f32, player_pos: Vec3):
+    if guardian.state.to_i32() == GuardianState.Defeated.to_i32():
+        # Nothing to do
+    else:
+        # Boss phase transition overrides any other state
+        if (guardian.is_boss and guardian.in_transition):
+            if guardian.state.to_i32() != GuardianState.PhaseTransition.to_i32():
+                transition_state(guardian, GuardianState.PhaseTransition)
+            update_phase_transition_timer(guardian, dt)
+        else:
+            if guardian.state.to_i32() == GuardianState.Idle.to_i32():
+                guardian.idle_timer = guardian.idle_timer + dt
+                update_idle(guardian, player_pos)
+            else:
+                if guardian.state.to_i32() == GuardianState.Alert.to_i32():
+                    update_alert(guardian, dt, player_pos)
+                else:
+                    if guardian.state.to_i32() == GuardianState.Attack.to_i32():
+                        update_attack(guardian, dt)
+                    else:
+                        if guardian.state.to_i32() == GuardianState.Vulnerable.to_i32():
+                            update_vulnerable(guardian, dt)
+                        else:
+                            if guardian.state.to_i32() == GuardianState.PhaseTransition.to_i32():
+                                update_phase_transition_timer(guardian, dt)
+
+# ============================================================================
+# Top-level update (combine AI + idle animation position)
+# ============================================================================
+
+fn update_guardian(guardian: Guardian, dt: f32, player_pos: Vec3):
+    if guardian.is_dead:
+        # Skip
+    else:
+        update_ai(guardian, dt, player_pos)
+
+        # Idle bob animation (sine-wave on Y axis, timer-based without Unity Time)
+        # The game layer should pass accumulated time; here we use idle_timer as proxy
+        # when idle, or track separately. Position is updated as a suggestion to renderer.
+        val bob_amplitude: f32 = 0.2
+        val bob_speed: f32 = 1.5
+        val bob_offset = (guardian.idle_timer * bob_speed).sin() * bob_amplitude
+        guardian.position = Vec3(
+            guardian.base_position.x,
+            guardian.base_position.y + bob_offset,
+            guardian.base_position.z
+        )
+
+# ============================================================================
+# Notify helpers (called by game layer)
+# ============================================================================
+
+# Call when an orb is launched toward this guardian.
+fn notify_orb_launched(guardian: Guardian):
+    if guardian.state.to_i32() == GuardianState.Idle.to_i32():
+        guardian.orb_detected = true
+
+# ============================================================================
+# Convenience query helpers
+# ============================================================================
+
+fn current_attack_pattern(guardian: Guardian) -> String:
+    if (not guardian.is_boss):
+        "Basic"
+    else:
+        val count = guardian.phases.len()
+        if count == 0:
+            "Basic"
+        else:
+            if guardian.current_phase < count:
+                guardian.phases[guardian.current_phase].attack_pattern
+            else:
+                "Basic"
+
+fn current_minion_count(guardian: Guardian) -> i32:
+    if (not guardian.is_boss):
+        0
+    else:
+        val count = guardian.phases.len()
+        if count == 0:
+            0
+        else:
+            if guardian.current_phase < count:
+                guardian.phases[guardian.current_phase].minion_count
+            else:
+                0

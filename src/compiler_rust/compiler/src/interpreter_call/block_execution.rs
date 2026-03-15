@@ -4,9 +4,9 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT,
-    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
-    TRAIT_IMPLS, TRAITS, USER_MACROS,
+    check_execution_limit, evaluate_expr, exec_with, get_type_name, is_interrupted, pattern_matches,
+    BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
+    MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -462,6 +462,51 @@ pub(super) fn exec_block_closure(
                     )?;
                 }
             }
+            Node::While(while_stmt) => {
+                // Handle while loops inside block closures (like in `it` blocks)
+                loop {
+                    if is_interrupted() {
+                        return Err(CompileError::InterruptedByUser);
+                    }
+                    check_execution_limit()?;
+                    let cond_val = evaluate_expr(
+                        &while_stmt.condition,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    if !cond_val.truthy() {
+                        break;
+                    }
+                    last_value = exec_block_closure_mut(
+                        &while_stmt.body.statements,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                }
+            }
+            Node::Loop(loop_stmt) => {
+                // Handle infinite loops inside block closures (like in `it` blocks)
+                loop {
+                    if is_interrupted() {
+                        return Err(CompileError::InterruptedByUser);
+                    }
+                    check_execution_limit()?;
+                    last_value = exec_block_closure_mut(
+                        &loop_stmt.body.statements,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                }
+            }
             Node::Match(match_stmt) => {
                 let subject = evaluate_expr(
                     &match_stmt.subject,
@@ -802,7 +847,7 @@ pub(super) fn exec_block_closure(
 
 /// Execute statements in an already-existing mutable environment.
 /// Used for if-let blocks and for loop bodies where assignments should propagate to the outer scope.
-fn exec_block_closure_mut(
+pub(crate) fn exec_block_closure_mut(
     nodes: &[Node],
     local_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
@@ -985,6 +1030,51 @@ fn exec_block_closure_mut(
                     }
                     last_value = exec_block_closure_mut(
                         &for_stmt.body.statements,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                }
+            }
+            Node::While(while_stmt) => {
+                // Handle while loops inside mutable block closures
+                loop {
+                    if is_interrupted() {
+                        return Err(CompileError::InterruptedByUser);
+                    }
+                    check_execution_limit()?;
+                    let cond_val = evaluate_expr(
+                        &while_stmt.condition,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    if !cond_val.truthy() {
+                        break;
+                    }
+                    last_value = exec_block_closure_mut(
+                        &while_stmt.body.statements,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                }
+            }
+            Node::Loop(loop_stmt) => {
+                // Handle infinite loops inside mutable block closures
+                loop {
+                    if is_interrupted() {
+                        return Err(CompileError::InterruptedByUser);
+                    }
+                    check_execution_limit()?;
+                    last_value = exec_block_closure_mut(
+                        &loop_stmt.body.statements,
                         local_env,
                         functions,
                         classes,

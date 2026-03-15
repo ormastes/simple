@@ -1,0 +1,658 @@
+# Elemental Siege — Orb System
+#
+# Ports OrbBase + 8 element subclasses (Fire, Ice, Lightning, Wind, Stone,
+# Crystal, Gravity, Void) from C# to Simple.
+#
+# Design: NO inheritance. One Orb class + enum dispatch for element abilities.
+# Element-specific logic lives in plain functions dispatched by ElementCategory.
+
+use std.nogc_async_mut.game3d.*
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum OrbState:
+    Loaded           # Waiting in launcher for player input
+    InFlight         # Launched, travelling through the air
+    AbilityActivated # Mid-flight ability triggered by player
+    Settled          # Come to rest after impact
+    Destroyed        # Pending cleanup
+
+# Element categories (mirrors ElementalSiege.Elements.ElementCategory)
+enum ElementCategory:
+    Stone
+    Fire
+    Ice
+    Lightning
+    Wind
+    Crystal
+    Gravity
+    Void
+
+# Effect type produced by an ability activation
+enum OrbEffectType:
+    None
+    Explosion          # Fire burst
+    FlashFreeze        # Ice area freeze
+    ChainLightning     # Lightning chain
+    GustPush           # Wind knockback
+    HeavySlam          # Stone gravity dive
+    PrismSplit         # Crystal fan split
+    GravityWell        # Gravity pull zone
+    BlackHole          # Void micro black hole
+    AbsorbedAbility    # Void re-using absorbed element
+
+# ============================================================================
+# Data classes
+# ============================================================================
+
+# Result produced when an orb ability fires.
+# The game world uses this to apply physics and status effects.
+class OrbEffect:
+    effect_type: OrbEffectType
+    position: Vec3
+    radius: f32
+    damage: f32
+    force: f32
+    duration: f32
+    # Element carried by the effect (used for damage typing and chain effects)
+    element: ElementCategory
+    # Extra scalar — burn dps, chain falloff multiplier, slam gravity scale, etc.
+    aux_scalar: f32
+    # Extra count — chain max targets, crystal split count
+    aux_count: i32
+
+# ============================================================================
+# Orb class — single unified type for ALL elements
+# ============================================================================
+
+class Orb:
+    entity_id: i32
+    element: ElementCategory
+    state: OrbState
+
+    position: Vec3
+    velocity: Vec3
+
+    # Core stats (from ElementType ScriptableObject in C#)
+    base_damage: f32
+    radius: f32             # Collision / ability base radius
+
+    # Lifecycle timers
+    lifetime: f32           # Elapsed seconds since launch
+    max_lifetime: f32       # Auto-destroy threshold (default 10 s)
+
+    # Settling detection
+    settle_timer: f32
+    settle_velocity_threshold: f32   # Below this = "at rest"
+    settle_time_required: f32        # Must stay below threshold this long
+
+    # Whether the mid-flight ability has been spent
+    ability_used: bool
+
+    # --- Element-specific fields ---
+
+    # Stone: slam state
+    is_slamming: bool
+    slam_timer: f32
+
+    # Gravity: well active
+    well_active: bool
+    well_timer: f32
+    well_position: Vec3
+
+    # Void: absorbed element (use ElementCategory.Void as "nothing absorbed")
+    has_absorbed: bool
+    absorbed_element: ElementCategory
+
+# ============================================================================
+# Orb default configuration per element
+# ============================================================================
+
+# Returns default max_lifetime for any orb (shared)
+fn orb_default_max_lifetime() -> f32:
+    10.0
+
+fn orb_default_radius() -> f32:
+    0.5
+
+fn orb_default_base_damage(element: ElementCategory) -> f32:
+    match element:
+        case Stone:     20.0
+        case Fire:      15.0
+        case Ice:       10.0
+        case Lightning: 12.0
+        case Wind:       8.0
+        case Crystal:   14.0
+        case Gravity:   10.0
+        case Void:      25.0
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+fn create_orb(element: ElementCategory, position: Vec3) -> Orb:
+    Orb(
+        entity_id: -1,
+        element: element,
+        state: OrbState::Loaded,
+        position: position,
+        velocity: Vec3(0.0, 0.0, 0.0),
+        base_damage: orb_default_base_damage(element),
+        radius: orb_default_radius(),
+        lifetime: 0.0,
+        max_lifetime: orb_default_max_lifetime(),
+        settle_timer: 0.0,
+        settle_velocity_threshold: 0.15,
+        settle_time_required: 1.0,
+        ability_used: false,
+        is_slamming: false,
+        slam_timer: 0.0,
+        well_active: false,
+        well_timer: 0.0,
+        well_position: Vec3(0.0, 0.0, 0.0),
+        has_absorbed: false,
+        absorbed_element: ElementCategory::Void
+    )
+
+# ============================================================================
+# Lifecycle functions
+# ============================================================================
+
+# Launch: transitions Loaded → InFlight.
+# Returns true if launch succeeded.
+fn launch_orb(orb: Orb, velocity: Vec3) -> bool:
+    if orb.state.to_i32() != OrbState::Loaded.to_i32():
+        debug.log("orb.launch_orb: cannot launch orb not in Loaded state")
+        false
+    else:
+        orb.state = OrbState::InFlight
+        orb.velocity = velocity
+        true
+
+# Attempt to activate the orb's mid-flight ability (once only, InFlight only).
+# Returns the OrbEffect if ability fired, or an effect with type None.
+fn try_activate_ability(orb: Orb) -> OrbEffect:
+    val none_effect = OrbEffect(
+        effect_type: OrbEffectType::None,
+        position: orb.position,
+        radius: 0.0,
+        damage: 0.0,
+        force: 0.0,
+        duration: 0.0,
+        element: orb.element,
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+    if orb.state.to_i32() != OrbState::InFlight.to_i32():
+        none_effect
+    else:
+        if orb.ability_used:
+            none_effect
+        else:
+            orb.ability_used = true
+            orb.state = OrbState::AbilityActivated
+            activate_ability(orb)
+
+# Update orb each frame. dt = delta time in seconds.
+# Returns the new OrbState after update.
+fn update_orb(orb: Orb, dt: f32) -> OrbState:
+    if orb.state.to_i32() == OrbState::Destroyed.to_i32():
+        orb.state
+
+    else:
+        # Advance lifetime for active orbs
+        val active = (orb.state.to_i32() == OrbState::InFlight.to_i32() or
+                      orb.state.to_i32() == OrbState::AbilityActivated.to_i32() or
+                      orb.state.to_i32() == OrbState::Settled.to_i32())
+        if active:
+            orb.lifetime = orb.lifetime + dt
+            if orb.lifetime >= orb.max_lifetime:
+                orb.state = OrbState::Destroyed
+                orb.state
+            else:
+                update_orb_motion(orb, dt)
+        else:
+            update_orb_motion(orb, dt)
+
+fn update_orb_motion(orb: Orb, dt: f32) -> OrbState:
+    # Settling detection
+    val in_flight = (orb.state.to_i32() == OrbState::InFlight.to_i32() or
+                     orb.state.to_i32() == OrbState::AbilityActivated.to_i32())
+    if in_flight:
+        val speed = orb.velocity.length()
+        if speed < orb.settle_velocity_threshold:
+            orb.settle_timer = orb.settle_timer + dt
+            if orb.settle_timer >= orb.settle_time_required:
+                orb.state = OrbState::Settled
+        else:
+            orb.settle_timer = 0.0
+
+    # Stone slam countdown
+    if orb.is_slamming:
+        orb.slam_timer = orb.slam_timer - dt
+        if orb.slam_timer <= 0.0:
+            orb.is_slamming = false
+
+    # Gravity well tick (caller applies pull forces using well_position / well_timer)
+    if orb.well_active:
+        orb.well_timer = orb.well_timer - dt
+        if orb.well_timer <= 0.0:
+            orb.well_active = false
+
+    orb.state
+
+# Called when the orb collides with another entity.
+# Returns an OrbEffect describing what happened on impact.
+fn on_orb_collision(orb: Orb, other_entity: i32) -> OrbEffect:
+    val can_impact = (orb.state.to_i32() == OrbState::InFlight.to_i32() or
+                      orb.state.to_i32() == OrbState::AbilityActivated.to_i32())
+    if can_impact:
+        handle_impact(orb, other_entity)
+    else:
+        OrbEffect(
+            effect_type: OrbEffectType::None,
+            position: orb.position,
+            radius: 0.0,
+            damage: 0.0,
+            force: 0.0,
+            duration: 0.0,
+            element: orb.element,
+            aux_scalar: 0.0,
+            aux_count: 0
+        )
+
+# ============================================================================
+# Impact handling
+# ============================================================================
+
+fn handle_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    match orb.element:
+        case Fire:
+            fire_impact(orb, other_entity)
+        case Ice:
+            ice_impact(orb, other_entity)
+        case Lightning:
+            lightning_impact(orb, other_entity)
+        case Wind:
+            wind_impact(orb, other_entity)
+        case Stone:
+            stone_impact(orb, other_entity)
+        case Crystal:
+            crystal_impact(orb, other_entity)
+        case Gravity:
+            gravity_impact(orb, other_entity)
+        case Void:
+            void_impact(orb, other_entity)
+
+fn base_impact_effect(orb: Orb) -> OrbEffect:
+    OrbEffect(
+        effect_type: OrbEffectType::None,
+        position: orb.position,
+        radius: orb.radius,
+        damage: orb.base_damage,
+        force: 0.0,
+        duration: 0.0,
+        element: orb.element,
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+fn fire_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Direct impact ignites the struck object (burn_duration=4s, dps=5)
+    OrbEffect(
+        effect_type: OrbEffectType::Explosion,
+        position: orb.position,
+        radius: orb.radius,
+        damage: orb.base_damage,
+        force: 0.0,
+        duration: 4.0,
+        element: ElementCategory::Fire,
+        aux_scalar: 5.0,   # burn_damage_per_second
+        aux_count: 0
+    )
+
+fn ice_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Direct contact freezes the struck object (freeze_duration=5s, brittle=0.2)
+    OrbEffect(
+        effect_type: OrbEffectType::FlashFreeze,
+        position: orb.position,
+        radius: orb.radius,
+        damage: orb.base_damage,
+        force: 0.0,
+        duration: 5.0,
+        element: ElementCategory::Ice,
+        aux_scalar: 0.2,   # brittle_break_force_multiplier
+        aux_count: 0
+    )
+
+fn lightning_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Direct hit energises the struck mechanism
+    OrbEffect(
+        effect_type: OrbEffectType::ChainLightning,
+        position: orb.position,
+        radius: 0.0,
+        damage: orb.base_damage,
+        force: 0.0,
+        duration: 0.0,
+        element: ElementCategory::Lightning,
+        aux_scalar: 0.0,
+        aux_count: 1       # single-target on direct hit
+    )
+
+fn wind_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Small push on direct impact (30 % of gust force = 400 * 0.3 = 120)
+    OrbEffect(
+        effect_type: OrbEffectType::GustPush,
+        position: orb.position,
+        radius: orb.radius,
+        damage: orb.base_damage,
+        force: 120.0,
+        duration: 0.0,
+        element: ElementCategory::Wind,
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+fn stone_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # If slamming, add bonus damage (base * (multiplier-1) = base * 1.0 extra)
+    val slam_bonus = if orb.is_slamming: orb.base_damage * 1.0 else: 0.0
+    OrbEffect(
+        effect_type: OrbEffectType::HeavySlam,
+        position: orb.position,
+        radius: orb.radius,
+        damage: orb.base_damage + slam_bonus,
+        force: 0.0,
+        duration: 0.0,
+        element: ElementCategory::Stone,
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+fn crystal_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Crystal bounces off surfaces; on crystal surface a sparkle is implied by caller
+    base_impact_effect(orb)
+
+fn gravity_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    base_impact_effect(orb)
+
+fn void_impact(orb: Orb, other_entity: i32) -> OrbEffect:
+    # Try to absorb the element from the struck entity (one-time, first contact)
+    # The caller is responsible for checking IElemental / OrbBase on other_entity
+    # and calling void_absorb_element if appropriate.
+    base_impact_effect(orb)
+
+# ============================================================================
+# Void absorption helper
+# ============================================================================
+
+# Call this from the game world when the Void orb touches an elemental object.
+fn void_absorb_element(orb: Orb, element: ElementCategory):
+    if orb.element.to_i32() == ElementCategory::Void.to_i32():
+        if not orb.has_absorbed:
+            orb.has_absorbed = true
+            orb.absorbed_element = element
+
+# ============================================================================
+# Ability activation — dispatched by element
+# ============================================================================
+
+fn activate_ability(orb: Orb) -> OrbEffect:
+    match orb.element:
+        case Fire:      fire_ability(orb)
+        case Ice:       ice_ability(orb)
+        case Lightning: lightning_ability(orb)
+        case Wind:      wind_ability(orb)
+        case Stone:     stone_ability(orb)
+        case Crystal:   crystal_ability(orb)
+        case Gravity:   gravity_ability(orb)
+        case Void:      void_ability(orb)
+
+# ----------------------------------------------------------------------------
+# Fire — Fireball Burst
+# Explodes in a radius, applies force + ignites flammable objects.
+# ----------------------------------------------------------------------------
+fn fire_ability(orb: Orb) -> OrbEffect:
+    # explosion_radius=3, explosion_force=500
+    # burn_duration=4, burn_dps=5, spread_delay=1, spread_radius=1.5
+    OrbEffect(
+        effect_type: OrbEffectType::Explosion,
+        position: orb.position,
+        radius: 3.0,
+        damage: orb.base_damage * 0.5,   # area damage is half base (per C# source)
+        force: 500.0,
+        duration: 4.0,                   # burn_duration
+        element: ElementCategory::Fire,
+        aux_scalar: 5.0,                 # burn_damage_per_second
+        aux_count: 0
+    )
+
+# ----------------------------------------------------------------------------
+# Ice — Flash Freeze
+# Freezes all freezable objects in radius, reduces joint break forces,
+# applies low-friction surface material, converts water to platforms.
+# ----------------------------------------------------------------------------
+fn ice_ability(orb: Orb) -> OrbEffect:
+    # freeze_radius=3.5, freeze_duration=5, brittle_multiplier=0.2
+    OrbEffect(
+        effect_type: OrbEffectType::FlashFreeze,
+        position: orb.position,
+        radius: 3.5,
+        damage: 0.0,
+        force: 0.0,
+        duration: 5.0,                   # freeze_duration
+        element: ElementCategory::Ice,
+        aux_scalar: 0.2,                 # brittle_break_force_multiplier
+        aux_count: 0
+    )
+
+# ----------------------------------------------------------------------------
+# Lightning — Chain Lightning
+# Bolts jump between conductive targets, damage falls off per hop.
+# ----------------------------------------------------------------------------
+fn lightning_ability(orb: Orb) -> OrbEffect:
+    # max_chain=5, chain_radius=4, damage_falloff=0.7
+    OrbEffect(
+        effect_type: OrbEffectType::ChainLightning,
+        position: orb.position,
+        radius: 4.0,                     # chain_radius per hop
+        damage: orb.base_damage,
+        force: 0.0,
+        duration: 0.4,                   # bolt_visual_duration
+        element: ElementCategory::Lightning,
+        aux_scalar: 0.7,                 # chain_damage_falloff per jump
+        aux_count: 5                     # max_chain_count
+    )
+
+# ----------------------------------------------------------------------------
+# Wind — Gust
+# Pushes all rigidbodies outward from orb position + creates wind zone.
+# Fans fire spread rate by 2x.
+# ----------------------------------------------------------------------------
+fn wind_ability(orb: Orb) -> OrbEffect:
+    # gust_radius=5, gust_force=400, wind_zone_duration=2.5,
+    # wind_zone_force=15, fire_spread_multiplier=2
+    OrbEffect(
+        effect_type: OrbEffectType::GustPush,
+        position: orb.position,
+        radius: 5.0,
+        damage: 0.0,
+        force: 400.0,
+        duration: 2.5,                   # wind_zone_duration
+        element: ElementCategory::Wind,
+        aux_scalar: 2.0,                 # fire_spread_multiplier
+        aux_count: 0
+    )
+
+# ----------------------------------------------------------------------------
+# Stone — Heavy Slam
+# Boosts gravity scale for a power dive; slam lasts 1.5 s.
+# On-impact damage multiplier 2x while slamming.
+# ----------------------------------------------------------------------------
+fn stone_ability(orb: Orb) -> OrbEffect:
+    # slam_gravity_scale=8, slam_duration=1.5, slam_damage_multiplier=2
+    orb.is_slamming = true
+    orb.slam_timer = 1.5
+    OrbEffect(
+        effect_type: OrbEffectType::HeavySlam,
+        position: orb.position,
+        radius: 0.0,
+        damage: 0.0,
+        force: 0.0,
+        duration: 1.5,                   # slam_duration
+        element: ElementCategory::Stone,
+        aux_scalar: 8.0,                 # slam_gravity_scale to apply
+        aux_count: 0
+    )
+
+# ----------------------------------------------------------------------------
+# Crystal — Prism Split
+# Spawns split_count sub-orbs in a fan; original orb is destroyed.
+# Sub-orbs deal 40 % of base damage each.
+# ----------------------------------------------------------------------------
+fn crystal_ability(orb: Orb) -> OrbEffect:
+    # split_count=3, sub_orb_damage_multiplier=0.4, fan_angle=45, sub_orb_speed=8
+    orb.state = OrbState::Destroyed   # original orb destroyed after split
+    OrbEffect(
+        effect_type: OrbEffectType::PrismSplit,
+        position: orb.position,
+        radius: 0.0,
+        damage: orb.base_damage * 0.4,   # per sub-orb
+        force: 8.0,                      # sub_orb_speed
+        duration: 0.0,
+        element: ElementCategory::Crystal,
+        aux_scalar: 45.0,                # fan_angle in degrees
+        aux_count: 3                     # split_count
+    )
+
+# Helper: compute the velocity direction for the i-th crystal sub-orb.
+# base_velocity = orb velocity at split time (or Vec3.right() if near zero).
+# i ranges 0 .. split_count-1
+fn crystal_sub_orb_velocity(base_velocity: Vec3, i: i32, split_count: i32, fan_angle_deg: f32, speed: f32) -> Vec3:
+    val safe_vel = if base_velocity.length() < 0.01: Vec3(1.0, 0.0, 0.0) else: base_velocity
+    val base_angle = safe_vel.y.atan2(safe_vel.x)   # radians, 2-D x/y plane
+    val t = if split_count > 1: (i as f32) / ((split_count - 1) as f32) else: 0.5
+    val half = fan_angle_deg * 0.5
+    val deg = base_angle * 57.29578 - half + fan_angle_deg * t
+    val rad = deg * 0.017453
+    Vec3(rad.cos() * speed, rad.sin() * speed, 0.0)
+
+# ----------------------------------------------------------------------------
+# Gravity — Gravity Well
+# Freezes the orb in place, pulls all nearby rigidbodies inward for 3 s.
+# Force falls off from edge (1.0 multiplier) to center (0.2 multiplier).
+# ----------------------------------------------------------------------------
+fn gravity_ability(orb: Orb) -> OrbEffect:
+    # well_radius=5, well_force=300, well_duration=3
+    orb.velocity = Vec3(0.0, 0.0, 0.0)   # stop orb movement
+    orb.well_active = true
+    orb.well_timer = 3.0
+    orb.well_position = orb.position
+    OrbEffect(
+        effect_type: OrbEffectType::GravityWell,
+        position: orb.position,
+        radius: 5.0,
+        damage: 0.0,
+        force: 300.0,
+        duration: 3.0,
+        element: ElementCategory::Gravity,
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+# Per-frame gravitational pull calculation for a single body inside the well.
+# Returns the force vector to apply to that body this frame.
+# distance = distance from body to well center.
+# dt = frame delta time.
+fn gravity_well_force_for(well_force: f32, well_radius: f32, to_well: Vec3, distance: f32, dt: f32) -> Vec3:
+    if distance < 0.1:
+        Vec3(0.0, 0.0, 0.0)
+    else:
+        val normalized_dist = distance / well_radius
+        # Linearly interpolated falloff: 1.0 at edge → 0.2 at center
+        val falloff = 1.0 - normalized_dist * 0.8
+        val magnitude = well_force * falloff * dt
+        val dir = to_well.normalize()
+        dir.scale(magnitude)
+
+# ----------------------------------------------------------------------------
+# Void — Element Absorb / Black Hole
+# If an element was absorbed on contact, fires that element's ability.
+# Otherwise creates a micro black hole (radius 1.2, 1.5 s, damage 100, pull 600).
+# ----------------------------------------------------------------------------
+fn void_ability(orb: Orb) -> OrbEffect:
+    if orb.has_absorbed:
+        void_absorbed_ability(orb)
+    else:
+        void_black_hole(orb)
+
+fn void_absorbed_ability(orb: Orb) -> OrbEffect:
+    # Delegate to the absorbed element's ability using a temporary proxy orb.
+    # The returned OrbEffect carries the absorbed element's type.
+    val proxy = create_orb(orb.absorbed_element, orb.position)
+    proxy.base_damage = orb.base_damage
+    proxy.velocity = orb.velocity.scale(0.5)
+    proxy.state = OrbState::InFlight
+    proxy.ability_used = false
+    OrbEffect(
+        effect_type: OrbEffectType::AbsorbedAbility,
+        position: orb.position,
+        radius: 0.0,
+        damage: 0.0,
+        force: 0.0,
+        duration: 0.0,
+        element: orb.absorbed_element,   # tells caller which ability to fire
+        aux_scalar: 0.0,
+        aux_count: 0
+    )
+
+fn void_black_hole(orb: Orb) -> OrbEffect:
+    # black_hole_radius=1.2, black_hole_duration=1.5, damage=100, pull_force=600
+    OrbEffect(
+        effect_type: OrbEffectType::BlackHole,
+        position: orb.position,
+        radius: 1.2,
+        damage: 100.0,
+        force: 600.0,
+        duration: 1.5,
+        element: ElementCategory::Void,
+        aux_scalar: 0.3,     # core_radius_fraction — objects closer than radius*0.3 take damage
+        aux_count: 0
+    )
+
+# Per-frame black hole pull/destroy logic for a single body inside the event horizon.
+# Returns force vector to apply this frame, and true if the body should be destroyed.
+fn black_hole_tick_for(center: Vec3, body_pos: Vec3, radius: f32, pull_force: f32, damage: f32, dt: f32) -> Vec3:
+    val to_center = center.sub(body_pos)
+    val distance = to_center.length()
+    if distance < 0.01:
+        Vec3(0.0, 0.0, 0.0)
+    else:
+        val dir = to_center.normalize()
+        dir.scale(pull_force * dt)
+
+# ============================================================================
+# Utility: destroy orb
+# ============================================================================
+
+fn destroy_orb(orb: Orb):
+    if orb.state.to_i32() != OrbState::Destroyed.to_i32():
+        orb.state = OrbState::Destroyed
+
+# ============================================================================
+# Query helpers
+# ============================================================================
+
+fn orb_is_active(orb: Orb) -> bool:
+    val s = orb.state.to_i32()
+    (s == OrbState::InFlight.to_i32() or
+     s == OrbState::AbilityActivated.to_i32() or
+     s == OrbState::Settled.to_i32())
+
+fn orb_can_launch(orb: Orb) -> bool:
+    orb.state.to_i32() == OrbState::Loaded.to_i32()
+
+fn orb_can_use_ability(orb: Orb) -> bool:
+    (orb.state.to_i32() == OrbState::InFlight.to_i32() and not orb.ability_used)

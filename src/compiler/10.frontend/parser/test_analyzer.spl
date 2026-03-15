@@ -22,19 +22,26 @@ struct TestMeta:
     line: i64
     tags: [text]
     group_path: [text]      # ["Math operations", "addition"]
+    category: text           # standalone, platform, lib, other
+    speed_default: text      # short, medium, long
+    speed_contexts: [text]   # ["baremetal=short", "native=short"]
 
 impl TestMeta:
     static fn new(description: text, line: i64, kind: TestKind) -> TestMeta:
         TestMeta(description: description, kind: kind, line: line,
-                 tags: [], group_path: [])
+                 tags: [], group_path: [], category: "", speed_default: "", speed_contexts: [])
 
     fn with_tags(tags: [text]) -> TestMeta:
         TestMeta(description: self.description, kind: self.kind,
-                 line: self.line, tags: tags, group_path: self.group_path)
+                 line: self.line, tags: tags, group_path: self.group_path,
+                 category: self.category, speed_default: self.speed_default,
+                 speed_contexts: self.speed_contexts)
 
     fn with_group_path(path: [text]) -> TestMeta:
         TestMeta(description: self.description, kind: self.kind,
-                 line: self.line, tags: self.tags, group_path: path)
+                 line: self.line, tags: self.tags, group_path: path,
+                 category: self.category, speed_default: self.speed_default,
+                 speed_contexts: self.speed_contexts)
 
     fn full_name() -> text:
         """Get full test name including group path."""
@@ -152,6 +159,29 @@ fn extract_tests_from_source(source: text, file_path: text?) -> FileTestMeta:
     var group_path: [text] = []
     var indent_stack: [i64] = []
     var pending_tags: [text] = []
+    var file_category = ""
+    var file_speed_default = ""
+    var file_speed_contexts: [text] = []
+    var pending_speed: text = ""
+    var pending_speed_ctx: text = ""
+
+    # Pre-scan for file-level category and speed annotations
+    for pre_line in lines:
+        val pre_trimmed = pre_line.trim()
+        if pre_trimmed.starts_with("# @category:"):
+            file_category = pre_trimmed[12:].trim()
+        elif pre_trimmed.starts_with("# @speed:"):
+            file_speed_default = pre_trimmed[9:].trim()
+        elif pre_trimmed.starts_with("# @speed("):
+            val rest = pre_trimmed[9:]
+            val pe = rest.index_of(")")
+            if pe > 0:
+                val ctx = rest[0:pe].trim()
+                val after = rest[pe + 1:]
+                if after.starts_with(":"):
+                    val spd = after[1:].trim()
+                    if ctx != "" and spd != "":
+                        file_speed_contexts = file_speed_contexts.push("{ctx}={spd}")
 
     var line_num = 0
     while line_num < lines.len():
@@ -163,6 +193,23 @@ fn extract_tests_from_source(source: text, file_path: text?) -> FileTestMeta:
         if trimmed.starts_with("# @"):
             val tag = trimmed[3:].trim()
             pending_tags = pending_tags.push(tag)
+            line_num = line_num + 1
+            continue
+
+        # Check for decorator-style speed annotations (@short_test, @medium_test, @long_test)
+        if trimmed.starts_with("@short_test"):
+            pending_speed = "short"
+            pending_speed_ctx = _extract_decorator_context(trimmed)
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("@medium_test"):
+            pending_speed = "medium"
+            pending_speed_ctx = _extract_decorator_context(trimmed)
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("@long_test"):
+            pending_speed = "long"
+            pending_speed_ctx = ""
             line_num = line_num + 1
             continue
 
@@ -227,6 +274,8 @@ fn extract_tests_from_source(source: text, file_path: text?) -> FileTestMeta:
                 indent_stack = indent_stack.push(indent)
 
         pending_tags = []
+        pending_speed = ""
+        pending_speed_ctx = ""
         line_num = line_num + 1
 
     # Flush remaining groups
@@ -290,6 +339,17 @@ fn extract_string_literal(s: text) -> text?:
         end = end + 1
 
     nil
+
+fn _extract_decorator_context(trimmed: text) -> text:
+    """Extract context from decorator like @short_test(baremetal)."""
+    val paren_start = trimmed.find("(")
+    if not paren_start.?:
+        return ""
+    val rest = trimmed[paren_start.unwrap() + 1:]
+    val paren_end = rest.find(")")
+    if not paren_end.?:
+        return ""
+    rest[0:paren_end.unwrap()].trim()
 
 fn count_leading_spaces(line: text) -> i64:
     var count = 0

@@ -350,7 +350,7 @@ pub(crate) fn exec_block_value(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let mut captured_clone = captured.clone();
-            exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
+            super::block_execution::exec_block_closure_mut(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),
     }

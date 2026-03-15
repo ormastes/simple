@@ -1,111 +1,348 @@
-# Simple Game - Spinning Cube Demo
+# Elemental Siege - Main Entry Point
 #
-# Minimal game demonstrating the Game3D library.
-# Compiles to WASM → runs identically in Unity, Godot, and Unreal.
+# Wires all game systems together: GameManager, LevelManager, ScoreManager,
+# UIState, Catapult, Orbs, Guardians, and Structures.
 
 use std.nogc_async_mut.game3d.*
+use .elements.*
+use .orb.*
+use .guardian.*
+use .launcher.*
+use .level.*
+use .score.*
+use .game_state.*
+use .ui_state.*
+use .structures.*
 
 # ============================================================================
-# Game State
+# Module-level state
 # ============================================================================
 
-var cube: Entity = Entity.invalid()
+var game_mgr: GameManager = create_game_manager()
+var level_mgr: LevelManager = create_level_manager()
+var score_mgr: ScoreManager = create_score_manager()
+var ui: UIState = create_ui_state()
+var catapult: Catapult = create_catapult(
+    0,
+    Vec3(x: 0.0, y: 0.5, z: -8.0),
+    default_launch_config()
+)
+
+var active_orbs: [Orb] = []
+var guardians: [Guardian] = []
+var structures: [StructureBlock] = []
+
 var camera_entity: Entity = Entity.invalid()
-var light_entity: Entity = Entity.invalid()
-var rotation_speed: f32 = 1.0
-var time_elapsed: f32 = 0.0
+var player_pos: Vec3 = Vec3(x: 0.0, y: 0.5, z: -8.0)
 
 # ============================================================================
-# Game Lifecycle
+# Level data helpers
+# ============================================================================
+
+fn make_level_one() -> LevelData:
+    LevelData(
+        level_id: 1,
+        name: "The First Siege",
+        description: "Defeat the stone guardians to claim the fortress.",
+        star_thresholds: [30, 60, 90],
+        time_limit: 120.0,
+        available_orbs: [0, 1, 2],
+        orb_count: 5,
+        guardian_placements: [
+            PlacementData(
+                entity_type: "Guardian",
+                position: Vec3(x: -3.0, y: 0.5, z: 4.0),
+                rotation_y: 180.0
+            ),
+            PlacementData(
+                entity_type: "Guardian",
+                position: Vec3(x: 3.0, y: 0.5, z: 4.0),
+                rotation_y: 180.0
+            )
+        ],
+        structure_placements: [
+            PlacementData(
+                entity_type: "Wood",
+                position: Vec3(x: -3.0, y: 0.5, z: 2.0),
+                rotation_y: 0.0
+            ),
+            PlacementData(
+                entity_type: "Stone",
+                position: Vec3(x: 0.0, y: 0.5, z: 2.0),
+                rotation_y: 0.0
+            ),
+            PlacementData(
+                entity_type: "Wood",
+                position: Vec3(x: 3.0, y: 0.5, z: 2.0),
+                rotation_y: 0.0
+            ),
+            PlacementData(
+                entity_type: "Metal",
+                position: Vec3(x: 0.0, y: 1.5, z: 2.0),
+                rotation_y: 0.0
+            )
+        ]
+    )
+
+fn spawn_guardians(level: LevelData):
+    val count = level.guardian_placements.len()
+    var i = 0
+    while i < count:
+        val placement = level.guardian_placements[i]
+        val entity = render.create_primitive(PrimitiveType.Capsule)
+        entity.set_position(placement.position)
+        val mat = Material.create()
+        mat.set_color(0.4, 0.8, 0.4, 1.0)
+        render.set_material(entity, mat)
+        physics.add_rigidbody(entity, BodyType.Dynamic)
+        physics.add_box_collider(entity, Vec3(x: 0.5, y: 1.0, z: 0.5))
+        val g = create_guardian(entity.id, 100.0, placement.position)
+        guardians.push(g)
+        i = i + 1
+
+fn spawn_structures(level: LevelData):
+    val count = level.structure_placements.len()
+    var i = 0
+    while i < count:
+        val placement = level.structure_placements[i]
+        val mat_type = if placement.entity_type == "Stone":
+            MaterialType.Stone
+        else:
+            if placement.entity_type == "Metal":
+                MaterialType.Metal
+            else:
+                MaterialType.Wood
+        val entity = render.create_primitive(PrimitiveType.Cube)
+        entity.set_position(placement.position)
+        val rmat = Material.create()
+        if mat_type.to_i32() == MaterialType.Stone.to_i32():
+            rmat.set_color(0.6, 0.6, 0.6, 1.0)
+        else:
+            if mat_type.to_i32() == MaterialType.Metal.to_i32():
+                rmat.set_color(0.7, 0.7, 0.9, 1.0)
+            else:
+                rmat.set_color(0.6, 0.4, 0.2, 1.0)
+        render.set_material(entity, rmat)
+        physics.add_rigidbody(entity, BodyType.Dynamic)
+        physics.add_box_collider(entity, Vec3(x: 0.5, y: 0.5, z: 0.5))
+        val block = create_block(entity.id, mat_type, placement.position)
+        structures.push(block)
+        i = i + 1
+
+# ============================================================================
+# init
 # ============================================================================
 
 fn init() -> i32:
     """Called once when the game starts."""
-    debug.log("Simple Game initializing...")
+    debug.log("Elemental Siege initializing...")
 
-    # Create a spinning cube
-    cube = render.create_primitive(PrimitiveType.Cube)
-    cube.set_position(Vec3(0.0, 1.0, 0.0))
-
-    # Set cube material (red)
-    val mat = Material.create()
-    mat.set_color(0.8, 0.2, 0.1, 1.0)
-    render.set_material(cube, mat)
-
-    # Add physics
-    physics.add_rigidbody(cube, BodyType.Kinematic)
-    physics.add_box_collider(cube, Vec3(0.5, 0.5, 0.5))
-
-    # Create a ground plane
+    # Create ground
     val ground = render.create_primitive(PrimitiveType.Plane)
-    ground.set_position(Vec3(0.0, 0.0, 0.0))
-    ground.set_scale(Vec3(10.0, 1.0, 10.0))
+    ground.set_position(Vec3(x: 0.0, y: 0.0, z: 0.0))
+    ground.set_scale(Vec3(x: 20.0, y: 1.0, z: 20.0))
     val ground_mat = Material.create()
-    ground_mat.set_color(0.3, 0.6, 0.3, 1.0)
+    ground_mat.set_color(0.3, 0.5, 0.3, 1.0)
     render.set_material(ground, ground_mat)
     physics.add_rigidbody(ground, BodyType.Static)
-    physics.add_box_collider(ground, Vec3(5.0, 0.01, 5.0))
+    physics.add_box_collider(ground, Vec3(x: 10.0, y: 0.01, z: 10.0))
 
-    # Create a directional light
+    # Catapult entity
+    val cat_entity = render.create_primitive(PrimitiveType.Cube)
+    cat_entity.set_position(Vec3(x: 0.0, y: 0.5, z: -8.0))
+    cat_entity.set_scale(Vec3(x: 1.0, y: 0.5, z: 1.5))
+    val cat_mat = Material.create()
+    cat_mat.set_color(0.5, 0.3, 0.1, 1.0)
+    render.set_material(cat_entity, cat_mat)
+    catapult = create_catapult(cat_entity.id, Vec3(x: 0.0, y: 0.5, z: -8.0), default_launch_config())
+
+    # Lighting
     val light = Light.create(LightType.Directional)
     light.set_color(1.0, 0.95, 0.8)
-    light.set_intensity(1.0)
+    light.set_intensity(1.2)
 
-    # Create camera
+    # Camera
     val cam = Camera.create()
     cam.set_fov(60.0)
     cam.set_active(true)
-
-    # Position camera to look at cube
     camera_entity = Entity(id: cam.id)
-    camera_entity.set_position(Vec3(3.0, 3.0, 3.0))
-    camera_entity.look_at(Vec3(0.0, 1.0, 0.0))
+    camera_entity.set_position(Vec3(x: 0.0, y: 8.0, z: -12.0))
+    camera_entity.look_at(Vec3(x: 0.0, y: 0.0, z: 2.0))
 
-    debug.log("Simple Game initialized!")
+    # Load and start level 1
+    val level_data = make_level_one()
+    load_level(level_mgr, level_data)
+    spawn_guardians(level_data)
+    spawn_structures(level_data)
+    load_orb(catapult)
+    val first_orb = create_orb(ElementCategory.Fire, catapult.position)
+    active_orbs.push(first_orb)
+    start_level(level_mgr)
+
+    # Game state
+    game_mgr = create_game_manager()
+    transition_to(game_mgr, GameState.MainMenu)
+    transition_to(game_mgr, GameState.LevelSelect)
+    transition_to(game_mgr, GameState.Loading)
+    transition_to(game_mgr, GameState.Playing)
+
+    # UI
+    ui = create_ui_state()
+    show_screen(ui, UIScreen.HUD)
+
+    debug.log("Elemental Siege initialized!")
     0
+
+# ============================================================================
+# update
+# ============================================================================
 
 fn update(dt: f32):
     """Called every frame."""
-    time_elapsed = time_elapsed + dt
+    update_game_state(game_mgr, dt)
 
-    # Rotate the cube
-    cube.rotate(Vec3.up(), rotation_speed * dt)
+    val is_playing = game_mgr.state.to_i32() == GameState.Playing.to_i32()
+    if is_playing:
+        # Update catapult
+        update_catapult(catapult, dt)
 
-    # Pulse scale with sine wave
-    val pulse = 1.0 + (time_elapsed * 2.0).sin() * 0.1
-    cube.set_scale(Vec3(pulse, pulse, pulse))
+        # Update active orbs
+        var oi = 0
+        val orb_count = active_orbs.len()
+        while oi < orb_count:
+            val orb = active_orbs[oi]
+            update_orb(orb, dt)
+            oi = oi + 1
 
-    # Handle input
-    if input.is_key_pressed(KeyCode.Space):
-        rotation_speed = 5.0
-    else:
-        rotation_speed = 1.0
+        # Update guardians
+        var gi = 0
+        val guardian_count = guardians.len()
+        while gi < guardian_count:
+            val g = guardians[gi]
+            update_guardian(g, dt, player_pos)
+            gi = gi + 1
 
-    # WASD camera movement
-    val move_dir = input.get_wasd_direction()
-    if move_dir.length_squared() > 0.0:
-        val move_speed = 5.0 * dt
-        val cam_forward = camera_entity.get_forward()
-        val cam_right = camera_entity.get_right()
-        val movement = cam_forward.scale(move_dir.y * move_speed).add(cam_right.scale(move_dir.x * move_speed))
-        camera_entity.translate(movement)
+        # Update structures (burn/freeze ticks)
+        var si = 0
+        val struct_count = structures.len()
+        while si < struct_count:
+            val block = structures[si]
+            val destroyed = update_block(block, dt)
+            if destroyed:
+                add_score(score_mgr, block.score_value)
+                add_combo(score_mgr)
+                on_structure_destroyed(level_mgr, block.score_value)
+            si = si + 1
 
-    # Process collision events
-    val events = game_loop.get_event_queue()
-    var i = 0
-    while i < events.count():
-        val event = events.get(i)
-        if event.event_type.to_i32() == GameEventType.CollisionEnter.to_i32():
-            debug.log("Collision detected!")
-        i = i + 1
+        # Update score combo
+        update_combo(score_mgr, dt)
 
-    # Debug visualization
-    debug.draw_line(Vec3.zero(), Vec3.up().scale(2.0), Vec3(0.0, 1.0, 0.0))
+        # Update level timer and win/fail
+        update_level(level_mgr, dt)
+
+        # Process collision events
+        val events = game_loop.get_event_queue()
+        var ei = 0
+        val event_count = events.count()
+        while ei < event_count:
+            val event = events.get(ei)
+            if event.event_type.to_i32() == GameEventType.CollisionEnter.to_i32():
+                debug.log("Collision detected!")
+            ei = ei + 1
+
+        # Check win/fail
+        if level_mgr.state.to_i32() == LevelState.Won.to_i32():
+            on_level_complete(game_mgr)
+            val result = finalize_score(
+                score_mgr,
+                level_mgr.orbs_used,
+                level_mgr.destruction_percent,
+                level_mgr.elapsed_time
+            )
+            show_level_result(ui, result.stars, result.score)
+            debug.log("Level complete!")
+
+        if level_mgr.state.to_i32() == LevelState.Failed.to_i32():
+            on_level_failed(game_mgr)
+            show_screen(ui, UIScreen.LevelFailed)
+            debug.log("Level failed!")
+
+    # Update HUD
+    if ui.hud_visible:
+        update_hud(
+            ui,
+            score_mgr.current_score,
+            level_mgr.orbs_remaining,
+            level_mgr.elapsed_time
+        )
+
+# ============================================================================
+# handle_input
+# ============================================================================
+
+fn handle_input(event_type: i32, key: i32, value: f32):
+    """Handle input events from the engine.
+
+    event_type: 0=mouse_down, 1=mouse_move, 2=mouse_up, 3=key_down
+    key: mouse button or KeyCode
+    value: analog value (e.g. axis) or 0.0 for digital
+    """
+    val is_playing = game_mgr.state.to_i32() == GameState.Playing.to_i32()
+
+    # Keyboard
+    if event_type == 3:
+        # Escape: pause/resume
+        if key == KeyCode.Escape.to_i32():
+            if is_playing:
+                request_pause(game_mgr)
+                show_screen(ui, UIScreen.PauseMenu)
+            else:
+                if game_mgr.state.to_i32() == GameState.Paused.to_i32():
+                    request_resume(game_mgr)
+                    show_screen(ui, UIScreen.HUD)
+        # Space: speed-up (handled in update via input.is_key_pressed)
+
+    # Mouse down: start aim
+    if event_type == 0 and is_playing:
+        val touch = Vec2(x: value, y: 0.0)
+        start_aiming(catapult, touch)
+
+    # Mouse move: update aim
+    if event_type == 1 and is_playing:
+        val touch = Vec2(x: value, y: 0.0)
+        update_aim(catapult, touch)
+
+    # Mouse up: launch
+    if event_type == 2 and is_playing:
+        val velocity = launch(catapult)
+        val orb_count = active_orbs.len()
+        if orb_count > 0:
+            val orb = active_orbs[orb_count - 1]
+            if orb_can_launch(orb):
+                launch_orb(orb, velocity)
+                use_orb(level_mgr)
+                # Notify all guardians
+                var gi = 0
+                val gcount = guardians.len()
+                while gi < gcount:
+                    notify_orb_launched(guardians[gi])
+                    gi = gi + 1
+                # Queue next orb if orbs remain
+                if level_mgr.orbs_remaining > 0:
+                    val next_elem = ElementCategory.from_i32(
+                        level_mgr.orbs_remaining - 1
+                    )
+                    val next_orb = create_orb(next_elem, catapult.position)
+                    active_orbs.push(next_orb)
+                    load_orb(catapult)
+
+# ============================================================================
+# shutdown
+# ============================================================================
 
 fn shutdown():
     """Called when the game shuts down."""
-    debug.log("Simple Game shutting down...")
-    cube.destroy()
+    debug.log("Elemental Siege shutting down...")
 
 # ============================================================================
 # Register callbacks
@@ -114,4 +351,3 @@ fn shutdown():
 game_loop.set_init_callback(init)
 game_loop.set_update_callback(update)
 game_loop.set_shutdown_callback(shutdown)
-

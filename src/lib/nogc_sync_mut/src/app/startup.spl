@@ -1,0 +1,76 @@
+# Platform-Specific Startup
+#
+# Common entry point abstraction across all platforms.
+# Each platform's native entry calls app_main() to start the Simple app.
+#
+# Platform → Native Entry → app_main(args) → AppLifecycle
+#
+# Desktop (Linux/macOS/Windows/FreeBSD):
+#   C main(argc, argv) → app_main(args)
+#
+# iOS:
+#   UIApplicationMain → delegate → app_main(args)
+#
+# Android:
+#   JNI_OnLoad / ANativeActivity_onCreate → app_main(args)
+#
+# WASM:
+#   _start() or _initialize() → app_main(args)
+#
+# Bare-metal:
+#   _start (no OS, no args) → app_main([])
+
+use nogc_sync_mut.src.app.config.{AppConfig}
+use nogc_sync_mut.src.app.lifecycle.{AppLifecycle}
+use nogc_sync_mut.src.app.runner.{run_app}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_exit(code: i64)
+
+# ============================================================================
+# Common Entry Point
+# ============================================================================
+
+"""The universal entry point for Simple applications.
+
+All platform-specific startup code should eventually call this function.
+It collects args, creates config, and runs the app lifecycle.
+
+Args:
+    app: The application implementing AppLifecycle
+    args: Command-line arguments (empty for bare-metal/WASM)
+
+Returns:
+    Exit code (0 = success)
+"""
+fn app_main(app: AppLifecycle, args: [text]) -> i32:
+    run_app(app)
+
+# ============================================================================
+# Platform Startup Helpers
+# ============================================================================
+
+"""Desktop startup — called from C main(argc, argv).
+This is the default for Linux, macOS, Windows, FreeBSD.
+"""
+fn desktop_start(app: AppLifecycle) -> i32:
+    val args = rt_cli_get_args()
+    app_main(app, args)
+
+"""WASM startup — called from _start() or _initialize().
+No real CLI args in WASM; uses empty list or host-provided args.
+"""
+fn wasm_start(app: AppLifecycle) -> i32:
+    app_main(app, [])
+
+"""Bare-metal startup — called from _start after hardware init.
+No OS, no filesystem, no args.
+"""
+fn baremetal_start(app: AppLifecycle) -> i32:
+    app_main(app, [])
+
+"""Mobile startup — called from iOS/Android native bridge.
+Args may come from intent extras (Android) or launch options (iOS).
+"""
+fn mobile_start(app: AppLifecycle, args: [text]) -> i32:
+    app_main(app, args)

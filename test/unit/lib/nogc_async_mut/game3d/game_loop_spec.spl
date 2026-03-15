@@ -1,0 +1,240 @@
+use std.spec.*
+
+use std.nogc_async_mut.game3d.game_loop.*
+use std.nogc_async_mut.game3d.event.*
+
+# ============================================================================
+# Module-level flag variables used by test callbacks
+# ============================================================================
+
+var init_called = false
+var shutdown_called = false
+var update_called = false
+var fixed_update_called = false
+var input_called = false
+
+var last_dt: f32 = 0.0
+var last_input_type: i32 = 0
+var last_input_key: i32 = 0
+var last_input_value: f32 = 0.0
+
+# ============================================================================
+# Test callback implementations
+# ============================================================================
+
+fn test_init() -> i32:
+    init_called = true
+    42
+
+fn test_shutdown():
+    shutdown_called = true
+
+fn test_update(dt: f32):
+    update_called = true
+    last_dt = dt
+
+fn test_fixed_update(dt: f32):
+    fixed_update_called = true
+    last_dt = dt
+
+fn test_input(event_type: i32, key: i32, value: f32):
+    input_called = true
+    last_input_type = event_type
+    last_input_key = key
+    last_input_value = value
+
+
+# ============================================================================
+# Callback Registration
+# ============================================================================
+
+describe "GameLoop callback registration":
+
+    context "when registering init callback":
+        it "calls init callback and returns its return value":
+            init_called = false
+            set_init_callback(test_init)
+            val result = game_init()
+            expect(result).to_equal(42)
+            expect(init_called).to_equal(true)
+
+    context "when registering update callback":
+        it "calls update callback with delta time":
+            update_called = false
+            last_dt = 0.0
+            set_update_callback(test_update)
+            game_update(0.016)
+            expect(update_called).to_equal(true)
+
+    context "when registering shutdown callback":
+        it "calls shutdown callback":
+            shutdown_called = false
+            set_shutdown_callback(test_shutdown)
+            game_shutdown()
+            expect(shutdown_called).to_equal(true)
+
+    context "when registering fixed update callback":
+        it "calls fixed update callback with delta time":
+            fixed_update_called = false
+            last_dt = 0.0
+            set_fixed_update_callback(test_fixed_update)
+            game_fixed_update(0.02)
+            expect(fixed_update_called).to_equal(true)
+
+    context "when registering input callback":
+        it "calls input callback with event type, key, and value":
+            input_called = false
+            last_input_type = 0
+            last_input_key = 0
+            last_input_value = 0.0
+            set_input_callback(test_input)
+            on_input_event(1, 65, 1.0)
+            expect(input_called).to_equal(true)
+            expect(last_input_type).to_equal(1)
+            expect(last_input_key).to_equal(65)
+
+
+# ============================================================================
+# Event Queue
+# ============================================================================
+
+describe "GameLoop event queue":
+
+    context "get_event_queue":
+        it "returns the shared event queue":
+            val q = get_event_queue()
+            expect(q.?).to_equal(true)
+
+    context "on_collision":
+        it "pushes a collision event into the queue":
+            val q = get_event_queue()
+            q.clear()
+            on_collision(1, 2, 0.0, 1.0, 0.0)
+            expect(q.count()).to_equal(1)
+
+        it "stores correct entity ids in collision event":
+            val q = get_event_queue()
+            q.clear()
+            on_collision(10, 20, 0.5, 0.5, 0.5)
+            val ev = q.get(0)
+            expect(ev.entity_a).to_equal(10)
+            expect(ev.entity_b).to_equal(20)
+
+        it "stores correct normal in collision event":
+            val q = get_event_queue()
+            q.clear()
+            on_collision(1, 2, 1.0, 0.0, 0.0)
+            val ev = q.get(0)
+            expect(ev.event_type.to_i32()).to_equal(GameEventType.CollisionEnter.to_i32())
+
+    context "on_trigger":
+        it "pushes a trigger-enter event when entered is non-zero":
+            val q = get_event_queue()
+            q.clear()
+            on_trigger(3, 4, 1)
+            expect(q.count()).to_equal(1)
+            val ev = q.get(0)
+            expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerEnter.to_i32())
+
+        it "pushes a trigger-exit event when entered is zero":
+            val q = get_event_queue()
+            q.clear()
+            on_trigger(5, 6, 0)
+            expect(q.count()).to_equal(1)
+            val ev = q.get(0)
+            expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerExit.to_i32())
+
+        it "stores correct entity ids in trigger event":
+            val q = get_event_queue()
+            q.clear()
+            on_trigger(7, 8, 1)
+            val ev = q.get(0)
+            expect(ev.entity_a).to_equal(7)
+            expect(ev.entity_b).to_equal(8)
+
+    context "game_update clears events":
+        it "empties the event queue on each game_update call":
+            val q = get_event_queue()
+            on_collision(1, 2, 0.0, 0.0, 1.0)
+            on_trigger(3, 4, 1)
+            set_update_callback(test_update)
+            game_update(0.016)
+            expect(q.count()).to_equal(0)
+
+        it "accumulates new events after game_update clears":
+            val q = get_event_queue()
+            set_update_callback(test_update)
+            game_update(0.016)
+            on_collision(9, 10, 0.0, 1.0, 0.0)
+            expect(q.count()).to_equal(1)
+
+
+# ============================================================================
+# Export Function Behavior
+# ============================================================================
+
+describe "GameLoop export functions":
+
+    context "game_init":
+        it "passes delta time through to update callback":
+            update_called = false
+            last_dt = 0.0
+            set_update_callback(test_update)
+            game_update(0.033)
+            expect(update_called).to_equal(true)
+
+    context "game_fixed_update":
+        it "calls registered fixed update callback":
+            fixed_update_called = false
+            set_fixed_update_callback(test_fixed_update)
+            game_fixed_update(0.02)
+            expect(fixed_update_called).to_equal(true)
+
+    context "on_input_event":
+        it "forwards all three input parameters to the callback":
+            input_called = false
+            last_input_type = 0
+            last_input_key = 0
+            last_input_value = 0.0
+            set_input_callback(test_input)
+            on_input_event(2, 87, 0.75)
+            expect(input_called).to_equal(true)
+            expect(last_input_type).to_equal(2)
+            expect(last_input_key).to_equal(87)
+
+
+# ============================================================================
+# Default Behavior (no callbacks set)
+# ============================================================================
+
+describe "GameLoop default behavior with no callbacks":
+
+    context "game_init with nil callback":
+        it "returns 0 when no init callback is registered":
+            set_init_callback(nil)
+            val result = game_init()
+            expect(result).to_equal(0)
+
+    context "game_update with nil callback":
+        it "does not crash when no update callback is registered":
+            set_update_callback(nil)
+            game_update(0.016)
+            expect(true).to_equal(true)
+
+    context "game_shutdown with nil callback":
+        it "does not crash when no shutdown callback is registered":
+            set_shutdown_callback(nil)
+            game_shutdown()
+            expect(true).to_equal(true)
+
+    context "game_fixed_update with nil callback":
+        it "does not crash when no fixed update callback is registered":
+            set_fixed_update_callback(nil)
+            game_fixed_update(0.02)
+            expect(true).to_equal(true)
+
+    context "on_input_event with nil callback":
+        it "does not crash when no input callback is registered":
+            set_input_callback(nil)
+            on_input_event(0, 0, 0.0)
+            expect(true).to_equal(true)

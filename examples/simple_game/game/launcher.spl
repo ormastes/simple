@@ -1,0 +1,233 @@
+use std.nogc_async_mut.game3d.math.*
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+enum CatapultState:
+    Idle
+    Aiming
+    Launched
+    WaitingForOrb
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+class LaunchConfig:
+    min_power: f32
+    max_power: f32
+    launch_angle_min: f32
+    launch_angle_max: f32
+    cooldown_time: f32
+    gravity_scale: f32
+    force_multiplier: f32
+    max_drag_distance: f32
+    max_force: f32
+    settle_velocity_threshold: f32
+    settle_time: f32
+
+fn default_launch_config() -> LaunchConfig:
+    return LaunchConfig(
+        min_power: 0.0,
+        max_power: 50.0,
+        launch_angle_min: 0.0,
+        launch_angle_max: 90.0,
+        cooldown_time: 1.0,
+        gravity_scale: 1.0,
+        force_multiplier: 15.0,
+        max_drag_distance: 3.0,
+        max_force: 50.0,
+        settle_velocity_threshold: 0.15,
+        settle_time: 0.6
+    )
+
+# ---------------------------------------------------------------------------
+# Catapult
+# ---------------------------------------------------------------------------
+
+class Catapult:
+    entity_id: i32
+    state: CatapultState
+    position: Vec3
+    aim_direction: Vec3
+    power: f32
+    config: LaunchConfig
+    cooldown_timer: f32
+    drag_start: Vec2
+    drag_current: Vec2
+    normalised_power: f32
+    settle_timer: f32
+    band_anchor_left: Vec3
+    band_anchor_right: Vec3
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+fn create_catapult(entity_id: i32, position: Vec3, config: LaunchConfig) -> Catapult:
+    val left_anchor = Vec3(
+        x: position.x - 0.5,
+        y: position.y,
+        z: position.z
+    )
+    val right_anchor = Vec3(
+        x: position.x + 0.5,
+        y: position.y,
+        z: position.z
+    )
+    return Catapult(
+        entity_id: entity_id,
+        state: CatapultState.WaitingForOrb,
+        position: position,
+        aim_direction: Vec3(x: 0.0, y: 1.0, z: 0.0),
+        power: 0.0,
+        config: config,
+        cooldown_timer: 0.0,
+        drag_start: Vec2(x: 0.0, y: 0.0),
+        drag_current: Vec2(x: 0.0, y: 0.0),
+        normalised_power: 0.0,
+        settle_timer: 0.0,
+        band_anchor_left: left_anchor,
+        band_anchor_right: right_anchor
+    )
+
+# ---------------------------------------------------------------------------
+# Aiming
+# ---------------------------------------------------------------------------
+
+fn start_aiming(catapult: Catapult, touch_pos: Vec2):
+    # Only begin aiming when Idle
+    if catapult.state != CatapultState.Idle:
+        return
+    # Check touch is within drag radius of launch point
+    val launch_2d = Vec2(x: catapult.position.x, y: catapult.position.y)
+    val dx = touch_pos.x - launch_2d.x
+    val dy = touch_pos.y - launch_2d.y
+    val dist = sqrt_f32(dx * dx + dy * dy)
+    if dist > catapult.config.max_drag_distance * 1.5:
+        return
+    catapult.state = CatapultState.Aiming
+    catapult.drag_start = touch_pos
+    catapult.drag_current = touch_pos
+    catapult.normalised_power = 0.0
+
+fn update_aim(catapult: Catapult, touch_pos: Vec2):
+    if catapult.state != CatapultState.Aiming:
+        return
+    # Clamp drag position to max drag distance from launch point
+    val launch_2d = Vec2(x: catapult.position.x, y: catapult.position.y)
+    val raw_dx = touch_pos.x - launch_2d.x
+    val raw_dy = touch_pos.y - launch_2d.y
+    val raw_dist = sqrt_f32(raw_dx * raw_dx + raw_dy * raw_dy)
+    var clamped = touch_pos
+    if raw_dist > catapult.config.max_drag_distance:
+        val scale = catapult.config.max_drag_distance / raw_dist
+        clamped = Vec2(
+            x: launch_2d.x + raw_dx * scale,
+            y: launch_2d.y + raw_dy * scale
+        )
+    catapult.drag_current = clamped
+    # Direction: from drag point back toward launch (slingshot pull-back)
+    val off_x = launch_2d.x - clamped.x
+    val off_y = launch_2d.y - clamped.y
+    val off_dist = sqrt_f32(off_x * off_x + off_y * off_y)
+    if off_dist > 0.0001:
+        catapult.aim_direction = Vec3(
+            x: off_x / off_dist,
+            y: off_y / off_dist,
+            z: 0.0
+        )
+    val clamped_dist = clamp_f32(off_dist, 0.0, catapult.config.max_drag_distance)
+    catapult.normalised_power = clamped_dist / catapult.config.max_drag_distance
+    catapult.power = clamp_f32(
+        clamped_dist * catapult.config.force_multiplier,
+        0.0,
+        catapult.config.max_force
+    )
+
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+
+fn calculate_launch_velocity(catapult: Catapult) -> Vec3:
+    return Vec3(
+        x: catapult.aim_direction.x * catapult.power,
+        y: catapult.aim_direction.y * catapult.power,
+        z: 0.0
+    )
+
+fn launch(catapult: Catapult) -> Vec3:
+    if catapult.state != CatapultState.Aiming:
+        return Vec3(x: 0.0, y: 0.0, z: 0.0)
+    val velocity = calculate_launch_velocity(catapult)
+    catapult.state = CatapultState.Launched
+    catapult.settle_timer = 0.0
+    return velocity
+
+# ---------------------------------------------------------------------------
+# Update
+# ---------------------------------------------------------------------------
+
+fn update_catapult(catapult: Catapult, dt: f32):
+    match catapult.state:
+        CatapultState.Launched:
+            catapult.settle_timer = catapult.settle_timer + dt
+            if catapult.settle_timer >= catapult.config.settle_time:
+                catapult.state = CatapultState.WaitingForOrb
+                catapult.settle_timer = 0.0
+        CatapultState.Cooldown:
+            catapult.cooldown_timer = catapult.cooldown_timer - dt
+            if catapult.cooldown_timer <= 0.0:
+                catapult.cooldown_timer = 0.0
+                catapult.state = CatapultState.Idle
+        _:
+            pass_dn
+
+# ---------------------------------------------------------------------------
+# Trajectory preview
+# ---------------------------------------------------------------------------
+
+fn get_trajectory_points(start: Vec3, velocity: Vec3, gravity: f32, steps: i32) -> [Vec3]:
+    var points: [Vec3] = []
+    val time_step = 0.1
+    var i = 0
+    while i < steps:
+        val t = time_step * i
+        val x = start.x + velocity.x * t
+        val y = start.y + velocity.y * t + 0.5 * gravity * t * t
+        val z = start.z + velocity.z * t
+        points.push(Vec3(x: x, y: y, z: z))
+        i = i + 1
+    return points
+
+# ---------------------------------------------------------------------------
+# Rubber-band anchor queries
+# ---------------------------------------------------------------------------
+
+fn get_band_left(catapult: Catapult) -> Vec3:
+    return catapult.band_anchor_left
+
+fn get_band_right(catapult: Catapult) -> Vec3:
+    return catapult.band_anchor_right
+
+fn get_band_orb_pos(catapult: Catapult) -> Vec3:
+    return Vec3(
+        x: catapult.drag_current.x,
+        y: catapult.drag_current.y,
+        z: catapult.position.z
+    )
+
+# ---------------------------------------------------------------------------
+# State helpers
+# ---------------------------------------------------------------------------
+
+fn load_orb(catapult: Catapult):
+    catapult.state = CatapultState.Idle
+    catapult.drag_start = Vec2(x: 0.0, y: 0.0)
+    catapult.drag_current = Vec2(x: 0.0, y: 0.0)
+    catapult.normalised_power = 0.0
+    catapult.power = 0.0
+
+fn set_waiting_for_orb(catapult: Catapult):
+    catapult.state = CatapultState.WaitingForOrb

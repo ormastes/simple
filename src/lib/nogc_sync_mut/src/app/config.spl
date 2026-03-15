@@ -1,0 +1,120 @@
+# App Configuration
+#
+# Provides AppConfig for application metadata and environment detection.
+# Auto-detects platform, architecture, and collects CLI arguments.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# AppConfig
+# ============================================================================
+
+struct AppConfig:
+    name: text
+    version: text
+    args: [text]
+    platform: text
+    arch: text
+
+impl AppConfig:
+    """Create AppConfig by auto-detecting platform and collecting args."""
+    static fn from_env(name: text, version: text) -> AppConfig:
+        val args = rt_cli_get_args()
+        val platform = detect_platform()
+        val arch = detect_arch()
+        AppConfig(
+            name: name,
+            version: version,
+            args: args,
+            platform: platform,
+            arch: arch
+        )
+
+    """Create AppConfig with explicit values (for testing or embedded)."""
+    static fn create(name: text, version: text, args: [text], platform: text, arch: text) -> AppConfig:
+        AppConfig(
+            name: name,
+            version: version,
+            args: args,
+            platform: platform,
+            arch: arch
+        )
+
+    """Check if running on a desktop platform."""
+    fn is_desktop() -> bool:
+        val p = self.platform
+        p == "linux" or p == "macos" or p == "windows" or p == "freebsd"
+
+    """Check if running on a mobile platform."""
+    fn is_mobile() -> bool:
+        val p = self.platform
+        p == "ios" or p == "android"
+
+    """Check if running in a web/WASM environment."""
+    fn is_wasm() -> bool:
+        val a = self.arch
+        a == "wasm32" or a == "wasm64"
+
+    """Check if running on bare-metal (no OS)."""
+    fn is_baremetal() -> bool:
+        self.platform == "none"
+
+    """Check if this is a 64-bit platform."""
+    fn is_64bit() -> bool:
+        val a = self.arch
+        a == "x86_64" or a == "aarch64" or a == "riscv64" or a == "wasm64"
+
+# ============================================================================
+# Platform Detection Helpers
+# ============================================================================
+
+fn detect_platform() -> text:
+    val os_env = rt_env_get("OS")
+    if os_env != nil:
+        val os_lower = os_env.lower()
+        if os_lower.contains("windows"):
+            return "windows"
+
+    val result = rt_process_run("/bin/sh", ["-c", "uname -s"])
+    val os = result[0].trim()
+    val code = result[2]
+    if code != 0:
+        return "linux"
+
+    match os:
+        "Linux": "linux"
+        "Darwin": "macos"
+        "FreeBSD": "freebsd"
+        _: os.lower()
+
+fn detect_arch() -> text:
+    val os_env = rt_env_get("OS")
+    if os_env != nil:
+        val os_lower = os_env.lower()
+        if os_lower.contains("windows"):
+            val arch_env = rt_env_get("PROCESSOR_ARCHITECTURE")
+            if arch_env == nil:
+                return "x86_64"
+            match arch_env:
+                "AMD64": return "x86_64"
+                "ARM64": return "aarch64"
+                "x86": return "i686"
+                _: return arch_env.lower()
+
+    val result = rt_process_run("/bin/sh", ["-c", "uname -m"])
+    val arch = result[0].trim()
+    val code = result[2]
+    if code != 0:
+        return "x86_64"
+
+    match arch:
+        "x86_64": "x86_64"
+        "amd64": "x86_64"
+        "arm64": "aarch64"
+        "aarch64": "aarch64"
+        "riscv64": "riscv64"
+        "i686": "i686"
+        "i386": "i686"
+        _: arch

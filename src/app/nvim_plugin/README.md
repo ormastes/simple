@@ -1,6 +1,6 @@
 # simple.nvim
 
-Neovim plugin for the [Simple programming language](https://github.com/nicholasgasior/simple).
+Neovim plugin for the [Simple programming language](https://github.com/ormastes/simple).
 
 ## Features
 
@@ -24,7 +24,7 @@ Neovim plugin for the [Simple programming language](https://github.com/nicholasg
 
 ```lua
 {
-  "nicholasgasior/simple.nvim",
+  "ormastes/simple.nvim",
   ft = "simple",
   opts = {},
 }
@@ -34,7 +34,7 @@ Neovim plugin for the [Simple programming language](https://github.com/nicholasg
 
 ```lua
 use {
-  "nicholasgasior/simple.nvim",
+  "ormastes/simple.nvim",
   config = function()
     require("simple").setup()
   end,

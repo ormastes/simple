@@ -1,0 +1,136 @@
+# Elemental Siege - Game State
+#
+# Ported from GameManager.cs (C# / Unity).
+# No Singleton, no inheritance — plain data + functions.
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum GameState:
+    Boot
+    MainMenu
+    LevelSelect
+    Loading
+    Playing
+    Paused
+    LevelComplete
+    LevelFailed
+    Settings
+
+# ============================================================================
+# Data
+# ============================================================================
+
+class GameManager:
+    state: GameState
+    current_level_id: i32
+    is_transitioning: bool
+    transition_timer: f32
+    transition_duration: f32
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+fn create_game_manager() -> GameManager:
+    GameManager(
+        state: GameState.Boot,
+        current_level_id: 0,
+        is_transitioning: false,
+        transition_timer: 0.0,
+        transition_duration: 0.5
+    )
+
+# ============================================================================
+# FSM validation
+# ============================================================================
+
+fn can_transition(from: GameState, to: GameState) -> bool:
+    match from:
+        GameState.Boot:
+            match to:
+                GameState.MainMenu: true
+                _: false
+        GameState.MainMenu:
+            match to:
+                GameState.LevelSelect: true
+                GameState.Settings: true
+                _: false
+        GameState.LevelSelect:
+            match to:
+                GameState.Loading: true
+                GameState.MainMenu: true
+                GameState.Settings: true
+                _: false
+        GameState.Loading:
+            match to:
+                GameState.Playing: true
+                GameState.MainMenu: true
+                _: false
+        GameState.Playing:
+            match to:
+                GameState.Paused: true
+                GameState.LevelComplete: true
+                GameState.LevelFailed: true
+                GameState.MainMenu: true
+                _: false
+        GameState.Paused:
+            match to:
+                GameState.Playing: true
+                GameState.MainMenu: true
+                GameState.Settings: true
+                _: false
+        GameState.LevelComplete:
+            match to:
+                GameState.LevelSelect: true
+                GameState.Loading: true
+                GameState.MainMenu: true
+                _: false
+        GameState.LevelFailed:
+            match to:
+                GameState.Loading: true
+                GameState.LevelSelect: true
+                GameState.MainMenu: true
+                _: false
+        GameState.Settings:
+            match to:
+                GameState.MainMenu: true
+                GameState.Paused: true
+                _: false
+        _: false
+
+# ============================================================================
+# State transitions
+# ============================================================================
+
+fn transition_to(manager: GameManager, new_state: GameState):
+    if manager.is_transitioning:
+        return
+    if can_transition(manager.state, new_state):
+        manager.state = new_state
+        manager.is_transitioning = true
+        manager.transition_timer = 0.0
+
+fn update_game_state(manager: GameManager, dt: f32):
+    if manager.is_transitioning:
+        manager.transition_timer = manager.transition_timer + dt
+        if manager.transition_timer >= manager.transition_duration:
+            manager.is_transitioning = false
+            manager.transition_timer = 0.0
+
+# ============================================================================
+# Convenience actions
+# ============================================================================
+
+fn request_pause(manager: GameManager):
+    transition_to(manager, GameState.Paused)
+
+fn request_resume(manager: GameManager):
+    transition_to(manager, GameState.Playing)
+
+fn on_level_complete(manager: GameManager):
+    transition_to(manager, GameState.LevelComplete)
+
+fn on_level_failed(manager: GameManager):
+    transition_to(manager, GameState.LevelFailed)

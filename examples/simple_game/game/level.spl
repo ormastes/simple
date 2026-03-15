@@ -1,0 +1,160 @@
+# Elemental Siege - Level System
+#
+# Ported from C# LevelManager.cs (ElementalSiege.Core namespace).
+# No ScriptableObjects - level data comes from plain classes (loaded from .sdn files).
+
+use std.nogc_async_mut.game3d.*
+
+# ============================================================================
+# Data Types
+# ============================================================================
+
+class PlacementData:
+    entity_type: String
+    position: Vec3
+    rotation_y: f32
+
+class LevelData:
+    level_id: i32
+    name: String
+    description: String
+    star_thresholds: [i32]
+    time_limit: f32
+    available_orbs: [i32]
+    orb_count: i32
+    guardian_placements: [PlacementData]
+    structure_placements: [PlacementData]
+
+# ============================================================================
+# Level State
+# ============================================================================
+
+enum LevelState:
+    NotStarted
+    Loading
+    Active
+    Paused
+    Won
+    Failed
+
+# ============================================================================
+# Level Manager
+# ============================================================================
+
+class LevelManager:
+    current_level: LevelData
+    state: LevelState
+    elapsed_time: f32
+    orbs_used: i32
+    orbs_remaining: i32
+    entities_spawned: [i32]
+    guardians_remaining: i32
+    destruction_percent: f32
+
+# ============================================================================
+# Functions
+# ============================================================================
+
+fn create_level_manager() -> LevelManager:
+    LevelManager(
+        current_level: LevelData(
+            level_id: 0,
+            name: "",
+            description: "",
+            star_thresholds: [0, 0, 0],
+            time_limit: 0.0,
+            available_orbs: [],
+            orb_count: 0,
+            guardian_placements: [],
+            structure_placements: []
+        ),
+        state: LevelState.NotStarted,
+        elapsed_time: 0.0,
+        orbs_used: 0,
+        orbs_remaining: 0,
+        entities_spawned: [],
+        guardians_remaining: 0,
+        destruction_percent: 0.0
+    )
+
+fn load_level(manager: LevelManager, level: LevelData):
+    """Load level data and initialise runtime state."""
+    manager.current_level = level
+    manager.state = LevelState.Loading
+    manager.elapsed_time = 0.0
+    manager.orbs_used = 0
+    manager.orbs_remaining = level.orb_count
+    manager.entities_spawned = []
+    manager.guardians_remaining = level.guardian_placements.len()
+    manager.destruction_percent = 0.0
+    debug.log("Level loaded: " + level.name)
+
+fn start_level(manager: LevelManager):
+    """Transition from Loading to Active."""
+    manager.state = LevelState.Active
+    debug.log("Level started: " + manager.current_level.name)
+
+fn update_level(manager: LevelManager, dt: f32):
+    """Advance elapsed time and check win/fail conditions each frame."""
+    if manager.state.to_i32() != LevelState.Active.to_i32():
+        return
+
+    manager.elapsed_time = manager.elapsed_time + dt
+
+    val time_limit = manager.current_level.time_limit
+    if (time_limit > 0.0 and manager.elapsed_time >= time_limit):
+        if check_win_condition(manager):
+            manager.state = LevelState.Won
+        else:
+            manager.state = LevelState.Failed
+        return
+
+    if check_win_condition(manager):
+        manager.state = LevelState.Won
+        debug.log("Level won: all guardians defeated")
+        return
+
+    if check_fail_condition(manager):
+        manager.state = LevelState.Failed
+        debug.log("Level failed: out of orbs with guardians remaining")
+
+fn use_orb(manager: LevelManager):
+    """Consume one orb from the remaining pool."""
+    if manager.orbs_remaining <= 0:
+        return
+    manager.orbs_remaining = manager.orbs_remaining - 1
+    manager.orbs_used = manager.orbs_used + 1
+
+fn on_guardian_defeated(manager: LevelManager):
+    """Decrement the live guardian count."""
+    if manager.guardians_remaining > 0:
+        manager.guardians_remaining = manager.guardians_remaining - 1
+
+fn on_structure_destroyed(manager: LevelManager, score: i32):
+    """Update destruction percentage when a structure is destroyed."""
+    val total = manager.current_level.structure_placements.len()
+    if total <= 0:
+        manager.destruction_percent = 1.0
+        return
+    val destroyed_count = (manager.destruction_percent * total.to_f32()).to_i32() + 1
+    manager.destruction_percent = destroyed_count.to_f32() / total.to_f32()
+
+fn check_win_condition(manager: LevelManager) -> bool:
+    """Win when all guardians are defeated."""
+    manager.guardians_remaining <= 0
+
+fn check_fail_condition(manager: LevelManager) -> bool:
+    """Fail when orbs are exhausted but guardians still live."""
+    (manager.orbs_remaining <= 0 and manager.guardians_remaining > 0)
+
+fn calculate_stars(manager: LevelManager) -> i32:
+    """Return 1-3 stars based on elapsed time vs star_thresholds."""
+    val thresholds = manager.current_level.star_thresholds
+    val t = manager.elapsed_time
+    if t <= thresholds[0].to_f32():
+        return 3
+    if t <= thresholds[1].to_f32():
+        return 2
+    if t <= thresholds[2].to_f32():
+        return 1
+    0

@@ -1,0 +1,85 @@
+# Memory-Mapped File
+#
+# Safe wrapper around the mmap FFI for efficient file access.
+# Provides read-only memory-mapped file operations.
+
+# ============================================================================
+# Extern FFI Declarations (from runtime)
+# ============================================================================
+
+extern fn rt_mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64) -> (i64, i64)
+extern fn rt_munmap(address: i64, size: i64) -> bool
+extern fn rt_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]
+extern fn rt_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text
+extern fn rt_file_size_for_mmap(path: text) -> i64
+
+# Protection and mapping flags
+val MMAP_PROT_READ: i32 = 0x1
+val MMAP_MAP_PRIVATE: i32 = 0x2
+
+# ============================================================================
+# MappedFile
+# ============================================================================
+
+struct MappedFile:
+    address: i64
+    size: i64
+    path: text
+
+impl MappedFile:
+    """Open a file as memory-mapped (read-only, private mapping)."""
+    static fn open(path: text) -> Result<MappedFile, text>:
+        val file_size = rt_file_size_for_mmap(path)
+        if file_size < 0:
+            return Err("Failed to get file size: {path}")
+
+        if file_size == 0:
+            return Err("File is empty: {path}")
+
+        val result = rt_mmap_file(path, MMAP_PROT_READ, MMAP_MAP_PRIVATE, 0, 0)
+        val address = result[0]
+        val mapped_size = result[1]
+
+        if address == 0:
+            return Err("Failed to mmap file: {path}")
+
+        Ok(MappedFile(
+            address: address,
+            size: mapped_size,
+            path: path
+        ))
+
+    """Read raw bytes from the mapped file at given offset and length."""
+    fn read_bytes(offset: i64, length: i64) -> Result<[u8], text>:
+        if offset < 0 or length < 0:
+            return Err("Negative offset or length")
+        if offset + length > self.size:
+            return Err("Read past end of mapped file")
+        Ok(rt_mmap_read_bytes(self.address, offset, length))
+
+    """Read a string from the mapped file at given offset."""
+    fn read_string(offset: i64, max_length: i64) -> Result<text, text>:
+        if offset < 0 or max_length < 0:
+            return Err("Negative offset or max_length")
+        if offset >= self.size:
+            return Err("Offset past end of mapped file")
+        val actual_max = if offset + max_length > self.size:
+            self.size - offset
+        else:
+            max_length
+        Ok(rt_mmap_read_string(self.address, offset, actual_max))
+
+    """Get the size of the mapped file in bytes."""
+    fn file_size() -> i64:
+        self.size
+
+    """Check if the mapping is valid (non-zero address)."""
+    fn is_valid() -> bool:
+        self.address != 0
+
+    """Unmap the file from memory."""
+    me close():
+        if self.address != 0:
+            rt_munmap(self.address, self.size)
+            self.address = 0
+            self.size = 0

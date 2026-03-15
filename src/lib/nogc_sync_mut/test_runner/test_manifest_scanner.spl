@@ -115,6 +115,11 @@ fn scan_test_file(path: text) -> TestManifestEntry:
     val mtime = rt_file_stat(path)
     val content = rt_file_read_text(path) ?? ""
 
+    val cat = extract_category(content)
+    var resolved_cat = cat
+    if resolved_cat == "":
+        resolved_cat = auto_detect_category(content, path)
+
     TestManifestEntry(
         path: path,
         file_size: size,
@@ -134,7 +139,10 @@ fn scan_test_file(path: text) -> TestManifestEntry:
         is_deploy: path.contains("/deploy/"),
         is_security: path.contains("/security/"),
         is_baremetal: path.contains("/baremetal/"),
-        mode_tags: extract_mode_tags(content)
+        mode_tags: extract_mode_tags(content),
+        category: resolved_cat,
+        speed_default: extract_speed_default(content),
+        speed_contexts: extract_speed_contexts(content)
     )
 
 fn scan_sdoctest_file(path: text) -> SdoctestManifestEntry:
@@ -231,6 +239,88 @@ fn count_sdoctest_blocks(content: text) -> i64:
         if trimmed == "```simple" or trimmed == "```spl":
             count = count + 1
     count
+
+# ============================================================================
+# Category & Speed Annotation Extraction
+# ============================================================================
+
+fn extract_category(content: text) -> text:
+    """Parse explicit # @category: annotation from file content."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @category:"):
+            val cat = trimmed[12:].trim()
+            if cat != "":
+                return cat
+    ""
+
+fn extract_speed_default(content: text) -> text:
+    """Parse # @speed: annotation (without context parentheses)."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @speed:"):
+            val speed = trimmed[9:].trim()
+            if speed != "":
+                return speed
+        elif trimmed.starts_with("# @speed("):
+            # Skip contextual speed annotations — handled by extract_speed_contexts
+            continue
+    ""
+
+fn extract_speed_contexts(content: text) -> text:
+    """Parse all # @speed(ctx): val annotations, return 'baremetal=short,native=short'."""
+    val lines = content.split("\n")
+    var pairs: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @speed("):
+            val rest = trimmed[9:]
+            val paren_end = rest.index_of(")")
+            if paren_end > 0:
+                val ctx = rest[0:paren_end].trim()
+                val after_paren = rest[paren_end + 1:]
+                if after_paren.starts_with(":"):
+                    val speed = after_paren[1:].trim()
+                    if ctx != "" and speed != "":
+                        pairs.push("{ctx}={speed}")
+    pairs.join(",")
+
+fn auto_detect_category(content: text, path: text) -> text:
+    """Auto-detect category from path and content when no explicit annotation."""
+    # Path-based detection
+    if (path.contains("/baremetal/") or path.contains("/qemu/") or
+        path.contains("/cuda/") or path.contains("/gpu/")):
+        return "platform"
+
+    # Check for non-all/non-host platform tags
+    val lines = content.split("\n")
+    var has_use = false
+    var only_spec_use = true
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @platform:"):
+            val tag = trimmed[12:].trim()
+            if tag != "" and tag != "all" and tag != "host":
+                return "platform"
+        if trimmed.starts_with("use "):
+            has_use = true
+            val module = trimmed[4:].trim()
+            # Check if it's more than just std.spec
+            val is_spec = module.starts_with("std.spec") or module.starts_with("nogc_sync_mut.spec")
+            if not is_spec:
+                only_spec_use = false
+
+    # No use statements or only spec import → standalone
+    if not has_use or only_spec_use:
+        return "standalone"
+
+    # Has non-spec use statements → lib
+    if has_use and not only_spec_use:
+        return "lib"
+
+    "other"
 
 # ============================================================================
 # Internal Lookup Helper

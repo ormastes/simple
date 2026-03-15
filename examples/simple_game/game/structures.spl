@@ -1,0 +1,404 @@
+# Elemental Siege - Structure / Block System
+#
+# Ported from C# StructureBlock.cs, StructureHealth.cs, Flammable.cs,
+# Freezable.cs, Conductive.cs, WindAffected.cs
+#
+# No inheritance, no interfaces — all trait behaviours are stored as
+# flags and scalar fields directly on StructureBlock.
+
+use std.nogc_async_mut.game3d.math.*
+
+# ============================================================================
+# Element indices (mirrors ElementCategory enum in elements.spl)
+# ============================================================================
+
+val ELEM_STONE:     i32 = 0
+val ELEM_FIRE:      i32 = 1
+val ELEM_ICE:       i32 = 2
+val ELEM_LIGHTNING: i32 = 3
+val ELEM_WIND:      i32 = 4
+val ELEM_CRYSTAL:   i32 = 5
+val ELEM_GRAVITY:   i32 = 6
+val ELEM_VOID:      i32 = 7
+
+# ============================================================================
+# MaterialType enum
+# ============================================================================
+
+"""Material determines base stats, elemental resistances, and trait eligibility."""
+enum MaterialType:
+    Wood    # 0 — light, flammable, wind-affected
+    Stone   # 1 — heavy, fire-resistant, wind-resistant
+    Metal   # 2 — dense, conductive, fire-resistant
+    Glass   # 3 — fragile, crystal-vulnerable
+    Ice     # 4 — brittle, melts to fire, freezable by default
+    Crystal # 5 — prismatic, lightning-amplifying
+
+impl MaterialType:
+    """Base health pool for this material."""
+    fn base_health() -> f32:
+        match self:
+            MaterialType.Wood:    80.0
+            MaterialType.Stone:  150.0
+            MaterialType.Metal:  200.0
+            MaterialType.Glass:   40.0
+            MaterialType.Ice:     60.0
+            MaterialType.Crystal: 120.0
+
+    """Score awarded when a block of this material is destroyed."""
+    fn score_value() -> i32:
+        match self:
+            MaterialType.Wood:    100
+            MaterialType.Stone:   200
+            MaterialType.Metal:   300
+            MaterialType.Glass:   150
+            MaterialType.Ice:     150
+            MaterialType.Crystal: 250
+
+    """Physics density (used for mass and wind scale)."""
+    fn density() -> f32:
+        match self:
+            MaterialType.Wood:    1.0
+            MaterialType.Stone:   3.0
+            MaterialType.Metal:   5.0
+            MaterialType.Glass:   1.5
+            MaterialType.Ice:     1.2
+            MaterialType.Crystal: 2.5
+
+    """Whether this material can catch fire."""
+    fn is_flammable() -> bool:
+        match self:
+            MaterialType.Wood:    true
+            MaterialType.Stone:   false
+            MaterialType.Metal:   false
+            MaterialType.Glass:   false
+            MaterialType.Ice:     false
+            MaterialType.Crystal: false
+
+    """Whether this material conducts lightning."""
+    fn is_conductive() -> bool:
+        match self:
+            MaterialType.Wood:    false
+            MaterialType.Stone:   false
+            MaterialType.Metal:   true
+            MaterialType.Glass:   false
+            MaterialType.Ice:     false
+            MaterialType.Crystal: true
+
+    """Whether this material can be frozen (slowed / shattered)."""
+    fn is_freezable() -> bool:
+        match self:
+            MaterialType.Wood:    true
+            MaterialType.Stone:   false
+            MaterialType.Metal:   false
+            MaterialType.Glass:   true
+            MaterialType.Ice:     true
+            MaterialType.Crystal: true
+
+    """Base wind drag coefficient (lighter = more affected)."""
+    fn wind_resistance() -> f32:
+        match self:
+            MaterialType.Wood:    1.0   # fully affected
+            MaterialType.Stone:   0.3   # heavy, barely moved
+            MaterialType.Metal:   0.2   # very heavy
+            MaterialType.Glass:   0.8
+            MaterialType.Ice:     0.7
+            MaterialType.Crystal: 0.5
+
+    fn to_i32() -> i32:
+        match self:
+            MaterialType.Wood:    0
+            MaterialType.Stone:   1
+            MaterialType.Metal:   2
+            MaterialType.Glass:   3
+            MaterialType.Ice:     4
+            MaterialType.Crystal: 5
+
+    static fn from_i32(v: i32) -> MaterialType:
+        match v:
+            0: MaterialType.Wood
+            1: MaterialType.Stone
+            2: MaterialType.Metal
+            3: MaterialType.Glass
+            4: MaterialType.Ice
+            5: MaterialType.Crystal
+            _: MaterialType.Wood
+
+# ============================================================================
+# StructureBlock — single class, all trait data inlined
+# ============================================================================
+
+"""A destructible block with optional elemental trait behaviours.
+
+All C# MonoBehaviour components (Flammable, Freezable, Conductive, WindAffected)
+are collapsed into this one class.  Boolean flags gate the behaviour.
+"""
+class StructureBlock:
+    entity_id:   i32
+    material:    MaterialType
+    health:      f32
+    max_health:  f32
+    score_value: i32
+    position:    Vec3
+    is_destroyed: bool
+
+    # ── Flammable trait ──────────────────────────────────────────────────────
+    is_burning:       bool
+    burn_damage_rate: f32   # health lost per second while burning
+    burn_timer:       f32   # seconds since ignition (used for spread timing)
+
+    # ── Freezable trait ──────────────────────────────────────────────────────
+    is_frozen:    bool
+    freeze_timer: f32   # seconds remaining before thaw
+    brittleness:  f32   # joint-weakness multiplier while frozen (0-1)
+
+    # ── Conductive trait ─────────────────────────────────────────────────────
+    charge:       f32   # current charge level (0 = uncharged)
+    conductivity: f32   # how well charge propagates (0-1)
+
+    # ── WindAffected trait ───────────────────────────────────────────────────
+    wind_drag:    f32   # horizontal wind drag coefficient
+
+# ============================================================================
+# Factory
+# ============================================================================
+
+"""Create a StructureBlock with material-appropriate defaults."""
+fn create_block(entity_id: i32, material: MaterialType, position: Vec3) -> StructureBlock:
+    val hp = material.base_health()
+    StructureBlock(
+        entity_id:   entity_id,
+        material:    material,
+        health:      hp,
+        max_health:  hp,
+        score_value: material.score_value(),
+        position:    position,
+        is_destroyed: false,
+
+        is_burning:       false,
+        burn_damage_rate: 10.0,
+        burn_timer:       0.0,
+
+        is_frozen:    false,
+        freeze_timer: 0.0,
+        brittleness:  0.1,
+
+        charge:       0.0,
+        conductivity: if material.is_conductive(): 0.8 else: 0.0,
+
+        wind_drag:    material.wind_resistance()
+    )
+
+# ============================================================================
+# Elemental damage multipliers
+# ============================================================================
+
+"""Return the damage multiplier for an element hitting a material.
+
+Element indices mirror ElementCategory:
+  0=Stone 1=Fire 2=Ice 3=Lightning 4=Wind 5=Crystal 6=Gravity 7=Void
+Multipliers sourced from StructureHealth.ApplyDefaultElementalMultipliers().
+"""
+fn get_damage_multiplier(material: MaterialType, element: i32) -> f32:
+    match material:
+        MaterialType.Wood:
+            if element == ELEM_FIRE:      return 2.0
+            if element == ELEM_ICE:       return 0.5
+            1.0
+        MaterialType.Stone:
+            if element == ELEM_FIRE:      return 0.5
+            if element == ELEM_WIND:      return 0.3
+            1.0
+        MaterialType.Metal:
+            if element == ELEM_LIGHTNING: return 2.0
+            if element == ELEM_FIRE:      return 0.3
+            1.0
+        MaterialType.Glass:
+            if element == ELEM_CRYSTAL:   return 2.0
+            1.0
+        MaterialType.Ice:
+            if element == ELEM_FIRE:      return 3.0
+            if element == ELEM_ICE:       return 0.0
+            1.0
+        MaterialType.Crystal:
+            if element == ELEM_LIGHTNING: return 1.5
+            1.0
+
+# ============================================================================
+# Core damage
+# ============================================================================
+
+"""Apply elemental damage to a block.  Returns true if the block was destroyed.
+
+The caller is responsible for propagating any on-death effects.
+Frozen blocks are shattered (instant kill) by any hit >= 1.0 damage.
+"""
+fn damage_block(block: StructureBlock, damage: f32, element: i32) -> bool:
+    if block.is_destroyed:
+        return false
+
+    val multiplier = get_damage_multiplier(block.material, element)
+    val actual = damage * multiplier
+
+    if actual <= 0.0:
+        return false
+
+    # Frozen: shatter on any meaningful impact
+    if block.is_frozen and actual >= 1.0:
+        block.health = 0.0
+        block.is_destroyed = true
+        block.is_burning = false
+        block.is_frozen = false
+        return true
+
+    block.health = block.health - actual
+    if block.health < 0.0:
+        block.health = 0.0
+
+    if block.health <= 0.0:
+        block.is_destroyed = true
+        block.is_burning = false
+        block.is_frozen = false
+        return true
+
+    false
+
+# ============================================================================
+# Trait actions
+# ============================================================================
+
+"""Ignite a block.  No-op if the material is not flammable or already burning."""
+fn ignite(block: StructureBlock):
+    if block.is_destroyed:
+        return
+    if not block.material.is_flammable():
+        return
+    if block.is_burning:
+        return
+    # Freezing extinguishes; you cannot burn while frozen
+    if block.is_frozen:
+        return
+    block.is_burning = true
+    block.burn_timer = 0.0
+
+"""Freeze a block for `duration` seconds.  Extinguishes fire if burning.
+No-op if the material is not freezable."""
+fn freeze(block: StructureBlock, duration: f32):
+    if block.is_destroyed:
+        return
+    if not block.material.is_freezable():
+        return
+    # Ice puts out fire
+    if block.is_burning:
+        block.is_burning = false
+        block.burn_timer = 0.0
+    block.is_frozen = true
+    block.freeze_timer = duration
+
+"""Add charge to a conductive block.  No-op if not conductive."""
+fn electrify(block: StructureBlock, charge: f32):
+    if block.is_destroyed:
+        return
+    if not block.material.is_conductive():
+        return
+    block.charge = block.charge + charge
+
+"""Apply a wind impulse to a block, shifting its position.
+
+In a real engine the rigidbody would receive the force; here we store the
+net displacement so the engine layer can consume it.  We approximate a
+single-frame push clamped to max_wind_force.
+"""
+fn apply_wind(block: StructureBlock, force: Vec3):
+    if block.is_destroyed:
+        return
+    val drag = block.wind_drag
+    val max_wind_force: f32 = 50.0
+
+    val fx = force.x * drag
+    val fy = force.y * drag
+    val fz = force.z * drag
+
+    # Clamp magnitude
+    val mag_sq = fx * fx + fy * fy + fz * fz
+    if mag_sq > max_wind_force * max_wind_force:
+        val mag = sqrt(mag_sq)
+        val scale = max_wind_force / mag
+        block.position = Vec3(
+            x: block.position.x + fx * scale,
+            y: block.position.y + fy * scale,
+            z: block.position.z + fz * scale
+        )
+    else:
+        block.position = Vec3(
+            x: block.position.x + fx,
+            y: block.position.y + fy,
+            z: block.position.z + fz
+        )
+
+# ============================================================================
+# Per-frame update
+# ============================================================================
+
+"""Tick all active trait timers by `dt` seconds.
+
+Burn: deal continuous fire damage.
+Freeze: count down to thaw.
+Charge: decay toward zero over time.
+Returns true if the block was destroyed this tick (from burn damage).
+"""
+fn update_block(block: StructureBlock, dt: f32) -> bool:
+    if block.is_destroyed:
+        return false
+
+    # ── Burn tick ────────────────────────────────────────────────────────────
+    if block.is_burning:
+        block.burn_timer = block.burn_timer + dt
+        val burn_dmg = block.burn_damage_rate * dt
+        val destroyed = damage_block(block, burn_dmg, ELEM_FIRE)
+        if destroyed:
+            return true
+
+    # ── Freeze countdown ─────────────────────────────────────────────────────
+    if block.is_frozen:
+        block.freeze_timer = block.freeze_timer - dt
+        if block.freeze_timer <= 0.0:
+            block.is_frozen = false
+            block.freeze_timer = 0.0
+
+    # ── Charge decay (simple linear drain) ───────────────────────────────────
+    if block.charge > 0.0:
+        val charge_drain: f32 = 1.0   # units per second
+        block.charge = block.charge - charge_drain * dt
+        if block.charge < 0.0:
+            block.charge = 0.0
+
+    false
+
+# ============================================================================
+# Fire spread
+# ============================================================================
+
+"""Attempt to spread fire from `block` to any flammable neighbours.
+
+`neighbors` is a list of nearby blocks (caller supplies spatial query).
+Only spreads when the source has been burning for at least spread_delay seconds.
+"""
+fn check_fire_spread(block: StructureBlock, neighbors: [StructureBlock]):
+    if block.is_destroyed:
+        return
+    if not block.is_burning:
+        return
+
+    val spread_delay: f32 = 1.5
+    if block.burn_timer < spread_delay:
+        return
+
+    var i: i32 = 0
+    val count = neighbors.len()
+    while i < count:
+        val nb = neighbors[i]
+        if not nb.is_destroyed:
+            if not nb.is_burning:
+                ignite(nb)
+        i = i + 1

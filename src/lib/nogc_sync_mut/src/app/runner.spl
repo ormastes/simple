@@ -1,0 +1,65 @@
+# App Runner
+#
+# Provides functions to run Simple applications through the standard lifecycle.
+# Supports both trait-based (AppLifecycle) and functional-style (run_oneshot) apps.
+
+use nogc_sync_mut.src.app.config.{AppConfig}
+use nogc_sync_mut.src.app.lifecycle.{AppLifecycle, AppState}
+
+extern fn rt_exit(code: i64)
+
+# ============================================================================
+# Trait-based Runner
+# ============================================================================
+
+"""Run an app through the full lifecycle: init → update loop → shutdown.
+
+Returns 0 on success, 1 on init failure.
+"""
+fn run_app(app: AppLifecycle) -> i32:
+    val config = AppConfig.from_env(app.name(), "0.1.0")
+
+    val init_result = app.init(config)
+    if init_result.is_err():
+        val err = init_result.unwrap_err()
+        print("App init failed: {err}")
+        return 1
+
+    # Update loop — run until update() returns false
+    var running = true
+    while running:
+        running = app.update()
+
+    app.shutdown()
+    0
+
+# ============================================================================
+# Functional-style Runner
+# ============================================================================
+
+"""Run a one-shot app with functional callbacks.
+
+For CLI tools and scripts that don't need a loop:
+  init_fn: called with AppConfig for setup
+  run_fn: called with AppConfig, returns exit code
+  shutdown_fn: called for cleanup
+"""
+fn run_oneshot(name: text, version: text, init_fn: fn(AppConfig), run_fn: fn(AppConfig) -> i32, shutdown_fn: fn()) -> i32:
+    val config = AppConfig.from_env(name, version)
+
+    init_fn(config)
+
+    val exit_code = run_fn(config)
+
+    shutdown_fn()
+
+    exit_code
+
+# ============================================================================
+# Simple Runner (no init/shutdown)
+# ============================================================================
+
+"""Run a simple app that only needs args. For minimal CLI tools."""
+fn run_simple(name: text, main_fn: fn([text]) -> i32) -> i32:
+    val config = AppConfig.from_env(name, "0.1.0")
+    main_fn(config.args)
