@@ -59,23 +59,22 @@ _start:
     /* Disable interrupts */
     cli
 
-    /* Save Multiboot info pointer (EBX) and magic (EAX) */
-    movl    %ebx, %edi              /* Multiboot info — will be arg to kernel_main */
+    /* Save Multiboot info pointer (EBX) before anything clobbers it */
+    movl    %ebx, %esi
 
     /* Set up a temporary 32-bit stack */
     movl    $stack_top, %esp
 
     /* ── Zero the BSS section ─────────────────────────────────── */
-    movl    $_bss_start, %eax
+    movl    $_bss_start, %edi
     movl    $_bss_end, %ecx
-    subl    %eax, %ecx
+    subl    %edi, %ecx
     shrl    $2, %ecx                /* count in 32-bit words */
-    movl    %eax, %edi
     xorl    %eax, %eax
     rep stosl
 
-    /* Restore multiboot info pointer */
-    movl    %edi, %esi              /* Save for later (kernel_main arg) */
+    /* ── Load the boot GDT ────────────────────────────────────── */
+    lgdt    boot_gdt_ptr
 
     /* ── Set up page tables for long mode ─────────────────────── */
 
@@ -151,6 +150,40 @@ long_mode_entry:
     jmp     .halt_loop
 
 .size _start, . - _start
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Boot GDT — minimal 64-bit GDT used during the 32→64 transition.
+ * The real GDT is loaded later by gdt_init() in C code.
+ *
+ * Layout:
+ *   0x00 — Null descriptor
+ *   0x08 — 64-bit Code (L=1, D=0, P=1, S=1, Type=Execute/Read)
+ *   0x10 — 64-bit Data (P=1, S=1, Type=Read/Write)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.section .rodata, "a"
+.align 16
+
+boot_gdt:
+    /* 0x00: Null descriptor */
+    .quad   0x0000000000000000
+
+    /* 0x08: 64-bit Kernel Code — base=0 limit=0 (ignored in long mode)
+     *   Access: P(1) DPL(00) S(1) Type(1010) = 0x9A
+     *   Flags:  G(1) D(0) L(1) AVL(0) Limit[19:16]=0 → 0xA0
+     *   Encoded: 0x00AF9A000000FFFF */
+    .quad   0x00AF9A000000FFFF
+
+    /* 0x10: 64-bit Kernel Data — base=0 limit=0 (ignored in long mode)
+     *   Access: P(1) DPL(00) S(1) Type(0010) = 0x92
+     *   Flags:  G(1) D(0) L(0) AVL(0) Limit[19:16]=0 → 0xC0
+     *   Encoded: 0x00CF92000000FFFF */
+    .quad   0x00CF92000000FFFF
+boot_gdt_end:
+
+boot_gdt_ptr:
+    .word   boot_gdt_end - boot_gdt - 1     /* limit */
+    .long   boot_gdt                         /* base (32-bit address) */
 
 /* ══════════════════════════════════════════════════════════════════════
  * BSS: Boot page tables and stack

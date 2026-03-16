@@ -43,24 +43,18 @@ _start:
     la      t0, trap_entry
     csrw    mtvec, t0
 
-    /* ── Configure mstatus ── */
+    /* ── Ensure interrupts are DISABLED until kernel_main sets them up ── */
     /*
-     * Set MIE (Machine Interrupt Enable) bit in mstatus.
-     * mstatus.MIE = bit 3
-     * Also set MPIE (bit 7) so interrupts are re-enabled on mret.
+     * Do NOT enable MIE here.  On QEMU virt, mtimecmp defaults to 0
+     * and mtime > 0, so a timer interrupt fires immediately if MTIE
+     * is set before clint_init() programs mtimecmp — creating an
+     * infinite trap loop that prevents kernel_main from running.
+     *
+     * kernel_main (via clint_init) will enable interrupts after the
+     * timer compare register has been properly configured.
      */
-    li      t0, (1 << 3) | (1 << 7)
-    csrw    mstatus, t0
-
-    /* ── Enable machine interrupts in mie ── */
-    /*
-     * MIE register bits:
-     *   bit 3: MSIE (Software Interrupt Enable)
-     *   bit 7: MTIE (Timer Interrupt Enable)
-     *   bit 11: MEIE (External Interrupt Enable)
-     */
-    li      t0, (1 << 3) | (1 << 7) | (1 << 11)
-    csrw    mie, t0
+    csrw    mstatus, zero
+    csrw    mie, zero
 
     /* ── Call kernel_main() ── */
     call    kernel_main

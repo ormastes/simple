@@ -20,7 +20,8 @@
 .type _start, @function
 
 _start:
-    /* Disable interrupts */
+    /* Disable all interrupts until kernel is ready */
+    csrw    mstatus, zero
     csrw    mie, zero
 
     /* Read hart ID; only hart 0 boots, others park */
@@ -44,9 +45,8 @@ _start:
     la      t0, trap_entry
     csrw    mtvec, t0
 
-    /* Enable machine-mode interrupts globally (mstatus.MIE) */
-    li      t0, (1 << 3)       /* MIE bit in mstatus */
-    csrs    mstatus, t0
+    /* NOTE: Interrupts remain disabled (mstatus.MIE=0, mie=0).
+     * kernel_main will enable them once handlers are installed. */
 
     /* Pass hart_id = 0 as first argument */
     li      a0, 0

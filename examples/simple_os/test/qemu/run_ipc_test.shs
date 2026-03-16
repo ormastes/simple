@@ -1,0 +1,122 @@
+#!/bin/bash
+# QEMU IPC test for all architectures
+# Looks for [IPC_TEST_PASS] in serial output
+# Usage: ./run_ipc_test.shs [ref|spl] [arch]
+#   arch: x86, x86_64, arm32, aarch64, riscv32, riscv64, all (default: all)
+set -e
+VARIANT=${1:-ref}
+ARCH=${2:-all}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+run_ipc_test() {
+    local arch="$1"
+    local qemu_cmd=""
+    local qemu_args=""
+    local kernel=""
+
+    case "$arch" in
+        x86)
+            qemu_cmd="qemu-system-i386"
+            qemu_args="-M pc"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/x86/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc.elf"
+            fi
+            ;;
+        x86_64)
+            qemu_cmd="qemu-system-x86_64"
+            qemu_args="-M pc"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/x86_64/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc_x64.elf"
+            fi
+            ;;
+        arm32)
+            qemu_cmd="qemu-system-arm"
+            qemu_args="-M virt -cpu cortex-a15"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/arm32/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc_arm.elf"
+            fi
+            ;;
+        aarch64)
+            qemu_cmd="qemu-system-aarch64"
+            qemu_args="-M virt -cpu cortex-a57"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/aarch64/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc_a64.elf"
+            fi
+            ;;
+        riscv32)
+            qemu_cmd="qemu-system-riscv32"
+            qemu_args="-M virt -bios none"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/riscv32/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc_rv32.elf"
+            fi
+            ;;
+        riscv64)
+            qemu_cmd="qemu-system-riscv64"
+            qemu_args="-M virt -bios none"
+            if [ "$VARIANT" = "ref" ]; then
+                kernel="$PROJECT_DIR/ref/build/riscv64/kernel_ipc.elf"
+            else
+                kernel="$PROJECT_DIR/spl/build/simple_os_ipc_rv64.elf"
+            fi
+            ;;
+        *)
+            echo "ERROR: Unknown architecture: $arch"
+            return 1
+            ;;
+    esac
+
+    if [ ! -f "$kernel" ]; then
+        echo "ERROR: IPC kernel not found: $kernel"
+        return 1
+    fi
+
+    echo "=== QEMU $arch IPC Test ($VARIANT) ==="
+    echo "Kernel: $kernel"
+
+    OUTPUT=$(timeout 10 $qemu_cmd \
+        $qemu_args \
+        -kernel "$kernel" \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        2>/dev/null || true)
+
+    echo "$OUTPUT"
+
+    if echo "$OUTPUT" | grep -q "\[IPC_TEST_PASS\]"; then
+        echo "RESULT: PASS"
+        return 0
+    else
+        echo "RESULT: FAIL (no [IPC_TEST_PASS] found)"
+        return 1
+    fi
+}
+
+if [ "$ARCH" = "all" ]; then
+    PASS=0
+    FAIL=0
+    for arch in x86 x86_64 arm32 aarch64 riscv32 riscv64; do
+        echo "--- $arch IPC ---"
+        if run_ipc_test "$arch"; then
+            PASS=$((PASS + 1))
+        else
+            FAIL=$((FAIL + 1))
+        fi
+        echo ""
+    done
+    echo "=== IPC Summary: $PASS passed, $FAIL failed ==="
+    [ $FAIL -eq 0 ]
+else
+    run_ipc_test "$ARCH"
+fi

@@ -38,7 +38,7 @@ ARCH_x86_LINKER      := arch/x86/linker.ld
 ARCH_x86_64_TRIPLE   := --target=x86_64-unknown-none-elf
 ARCH_x86_64_CFLAGS   := -m64 -mcmodel=kernel -mno-red-zone
 ARCH_x86_64_LDFLAGS  := -m elf_x86_64
-ARCH_x86_64_LINKER   := arch/x86_64/linker.ld
+ARCH_x86_64_LINKER   := arch/x86_64/linker64.ld
 
 ARCH_arm32_TRIPLE    := --target=armv7a-none-eabi
 ARCH_arm32_CFLAGS    := -marm -mfloat-abi=soft
@@ -126,6 +126,58 @@ $(eval $(call ARCH_template,arm32))
 $(eval $(call ARCH_template,aarch64))
 $(eval $(call ARCH_template,riscv32))
 $(eval $(call ARCH_template,riscv64))
+
+# ── x86_64 two-stage boot build ─────────────────────────────────────
+# QEMU's Multiboot1 loader requires ELF32, but our kernel is 64-bit.
+# Solution: build the 64-bit kernel, extract a flat binary, then wrap
+# it in a 32-bit ELF boot stub that handles the 32→64 transition.
+#
+# Stage 1: Link 64-bit objects into kernel64.elf
+# Stage 2: objcopy extracts kernel64.bin (raw binary)
+# Stage 3: boot_wrapper.S (.incbin kernel64.bin) compiled as 32-bit
+# Stage 4: Link boot_wrapper.o into final ELF32 kernel.elf
+
+BUILDDIR_64    := build/x86_64
+KERNEL64_ELF   := $(BUILDDIR_64)/kernel64.elf
+KERNEL64_BIN   := $(BUILDDIR_64)/kernel64.bin
+BOOT_WRAPPER_S := arch/x86_64/boot/boot_wrapper.S
+BOOT_WRAPPER_O := $(BUILDDIR_64)/boot_wrapper.o
+KERNEL_BOOT    := $(BUILDDIR_64)/kernel.elf
+LINKER_BOOT    := arch/x86_64/linker_boot.ld
+
+# Exclude multiboot.S and boot_wrapper.S from 64-bit link.
+# multiboot.S is replaced by entry64.S (64-bit) + boot_wrapper.S (32-bit).
+# boot_wrapper.S is compiled separately as 32-bit in Stage 3.
+ARCH_S_SRCS_x86_64_FILTERED := $(filter-out arch/x86_64/boot/multiboot.S arch/x86_64/boot/boot_wrapper.S,$(ARCH_S_SRCS_x86_64))
+ARCH_S_OBJS_x86_64_FILTERED := $(patsubst %.S,$(BUILDDIR_64)/%.o,$(ARCH_S_SRCS_x86_64_FILTERED))
+ALL_OBJS_x86_64_FILTERED    := $(KERNEL_OBJS_x86_64) $(COMMON_OBJS_x86_64) $(ARCH_C_OBJS_x86_64) $(ARCH_S_OBJS_x86_64_FILTERED)
+
+# Stage 1: Link 64-bit objects into kernel64.elf
+$(KERNEL64_ELF): $(ALL_OBJS_x86_64_FILTERED)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib $(ARCH_x86_64_LDFLAGS) -T arch/x86_64/linker64.ld -o $@ $^
+	@echo "[LINK]  $@ (64-bit payload)"
+
+# Stage 2: Extract flat binary
+$(KERNEL64_BIN): $(KERNEL64_ELF)
+	$(OBJCOPY) -O binary $< $@
+	@echo "[BIN]   $@ (flat binary)"
+
+# Stage 3: Compile 32-bit boot wrapper (after kernel64.bin exists)
+$(BOOT_WRAPPER_O): $(BOOT_WRAPPER_S) $(KERNEL64_BIN)
+	@mkdir -p $(dir $@)
+	$(AS) -ffreestanding -nostdlib --target=i686-unknown-none-elf -m32 \
+	    -I. -Icommon -c -o $@ $<
+
+# Stage 4: Link into final ELF32
+$(KERNEL_BOOT): $(BOOT_WRAPPER_O)
+	$(LD) -nostdlib -m elf_i386 -T $(LINKER_BOOT) -o $@ $<
+	@echo "[LINK]  $@ (ELF32 bootable)"
+	@$(SIZE) $@ 2>/dev/null || size $@ 2>/dev/null || true
+
+# Override the template's all-x86_64 to use the two-stage build
+.PHONY: all-x86_64
+all-x86_64: $(KERNEL_BOOT)
 
 # ── Convenience: build all architectures ──────────────────────────────
 .PHONY: all-arches

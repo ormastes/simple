@@ -19,6 +19,10 @@
 .type   _start, @function
 
 _start:
+    /* ── Disable all interrupts until kernel is ready ── */
+    csrw    mstatus, zero
+    csrw    mie, zero
+
     /* ── Only allow hart 0 to proceed; park other harts ── */
     csrr    t0, mhartid
     bnez    t0, .park_hart
@@ -40,14 +44,8 @@ _start:
     la      t0, trap_entry
     csrw    mtvec, t0
 
-    /* ── Configure mstatus: MIE + MPIE ── */
-    li      t0, (1 << 3) | (1 << 7)
-    csrw    mstatus, t0
-
-    /* ── Enable machine interrupts in mie ── */
-    /* MSIE (3) + MTIE (7) + MEIE (11) */
-    li      t0, (1 << 3) | (1 << 7) | (1 << 11)
-    csrw    mie, t0
+    /* NOTE: Interrupts remain disabled (mstatus.MIE=0, mie=0).
+     * kernel_main will enable them once handlers are installed. */
 
     /* ── Call kernel_main() ── */
     call    kernel_main

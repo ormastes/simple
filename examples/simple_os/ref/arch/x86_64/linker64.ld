@@ -1,52 +1,52 @@
 /*
- * linker.ld — Original linker script for x86_64 SimpleOS kernel (UNUSED)
+ * linker64.ld — Linker script for x86_64 64-bit kernel payload
  *
- * NOTE: This file is superseded by the two-stage boot build:
- *   - linker64.ld  — links the 64-bit kernel payload (Stage 1)
- *   - linker_boot.ld — links the 32-bit ELF32 boot wrapper (Stage 4)
+ * Part of the SimpleOS L4 microkernel reference implementation.
  *
- * Kept for reference only.
+ * This is the STAGE 1 linker script used to build kernel64.elf,
+ * which contains only the 64-bit kernel code.  The boot_wrapper.S
+ * (compiled as 32-bit) embeds the flat-binary form of this ELF
+ * and handles the Multiboot header + 32→64 mode transition.
+ *
+ * Layout: loaded at 0x00101000 (1 MB + 4 KB), leaving room for the
+ * 32-bit boot wrapper's multiboot header + trampoline at 0x00100000.
  */
 
 OUTPUT_FORMAT(elf64-x86-64)
-ENTRY(_start)
+ENTRY(_start64)
 
 SECTIONS
 {
-    /* Load address: 1 MB */
-    . = 0x00100000;
+    /* 64-bit payload starts at 1 MB + 4 KB.
+     * The first 4 KB (0x100000..0x100FFF) is reserved for the
+     * 32-bit boot wrapper (multiboot header + trampoline). */
+    . = 0x00101000;
 
-    _kernel_start = .;
-
-    /* ── Multiboot header (must be in first 8 KB) ─────────────── */
-    .multiboot ALIGN(4) :
-    {
-        *(.multiboot)
-    }
+    _kernel64_start = .;
 
     /* ── Code ──────────────────────────────────────────────────── */
-    .text ALIGN(4096) :
+    .text ALIGN(16) :
     {
         *(.text)
         *(.text.*)
     }
 
     /* ── Read-only data ────────────────────────────────────────── */
-    .rodata ALIGN(4096) :
+    .rodata ALIGN(16) :
     {
         *(.rodata)
         *(.rodata.*)
     }
 
     /* ── Initialised data ──────────────────────────────────────── */
-    .data ALIGN(4096) :
+    .data ALIGN(16) :
     {
         *(.data)
         *(.data.*)
     }
 
     /* ── Uninitialised data (BSS) ──────────────────────────────── */
-    .bss ALIGN(4096) :
+    .bss ALIGN(16) :
     {
         _bss_start = .;
         *(.bss)
@@ -56,7 +56,7 @@ SECTIONS
     }
 
     /* ── Kernel stack (16 KB) ──────────────────────────────────── */
-    .stack ALIGN(4096) :
+    .stack ALIGN(16) :
     {
         _stack_bottom = .;
         . += 16384;
@@ -71,7 +71,7 @@ SECTIONS
         _page_tables_end = .;
     }
 
-    _kernel_end = .;
+    _kernel64_end = .;
 
     /* ── Discard unwanted sections ─────────────────────────────── */
     /DISCARD/ :
@@ -80,5 +80,6 @@ SECTIONS
         *(.note)
         *(.note.*)
         *(.eh_frame)
+        *(.multiboot)
     }
 }

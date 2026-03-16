@@ -1,13 +1,39 @@
-#!/bin/sh
-# Run simple_os on QEMU x86 (32-bit)
-KERNEL="${1:-build/simple_os.elf}"
-TIMEOUT="${2:-10}"
+#!/bin/bash
+# QEMU boot test for x86 kernel
+# Usage: ./run_x86.shs [ref|spl]
+set -e
+VARIANT=${1:-ref}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-qemu-system-i386 \
+if [ "$VARIANT" = "ref" ]; then
+    KERNEL="$PROJECT_DIR/ref/build/x86/kernel.elf"
+else
+    KERNEL="$PROJECT_DIR/spl/build/simple_os.elf"
+fi
+
+if [ ! -f "$KERNEL" ]; then
+    echo "ERROR: Kernel not found: $KERNEL"
+    exit 1
+fi
+
+echo "=== QEMU x86 Boot Test ($VARIANT) ==="
+echo "Kernel: $KERNEL"
+
+OUTPUT=$(timeout 5 qemu-system-i386 \
+    -M pc \
     -kernel "$KERNEL" \
-    -nographic \
     -serial stdio \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -display none \
     -no-reboot \
-    -m 128M \
-    2>&1 | timeout "$TIMEOUT" grep -m1 "BOOT OK\|IPC_TEST_PASS\|PANIC"
+    2>/dev/null || true)
+
+echo "$OUTPUT"
+
+if echo "$OUTPUT" | grep -q "\[BOOT OK\]"; then
+    echo "RESULT: PASS"
+    exit 0
+else
+    echo "RESULT: FAIL (no [BOOT OK] found)"
+    exit 1
+fi

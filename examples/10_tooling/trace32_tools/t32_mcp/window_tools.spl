@@ -10,14 +10,25 @@ use app.t32_cli.error_codes.{T4030, T4082, t32_err_window_not_found, t32_err_mis
 var MCP_T32_WINDOW_CATALOG: [text] = []
 var MCP_T32_CATALOG_LOADED = false
 
+fn t32_catalog_dir() -> text:
+    val env_dir = rt_env_get("T32_CATALOG_DIR") ?? ""
+    if env_dir != "":
+        return env_dir
+    "config/t32/catalogs"
+
 fn t32_get_window_catalog() -> [text]:
     if MCP_T32_CATALOG_LOADED:
         return MCP_T32_WINDOW_CATALOG
     MCP_T32_CATALOG_LOADED = true
     # Try loading from SDN file
-    val sdn_content = rt_file_read_text("config/t32/catalogs/windows.sdn") ?? ""
+    val catalog_dir = t32_catalog_dir()
+    val sdn_path = catalog_dir + "/windows.sdn"
+    val sdn_content = rt_file_read_text(sdn_path) ?? ""
     if sdn_content != "":
         MCP_T32_WINDOW_CATALOG = t32_parse_window_sdn(sdn_content)
+    else:
+        stderr_write("[t32-mcp] catalog: windows.sdn not found at " + sdn_path + ", using hardcoded fallback\n")
+        stderr_flush()
     if MCP_T32_WINDOW_CATALOG.len() == 0:
         # Fallback to hardcoded catalog
         MCP_T32_WINDOW_CATALOG = t32_hardcoded_window_catalog()
@@ -137,7 +148,7 @@ fn t32_get_window_actions(window_key: text) -> [text]:
     # First load from SDN if not cached
     if not MCP_T32_ACTION_LOADED:
         MCP_T32_ACTION_LOADED = true
-        val sdn_content = rt_file_read_text("config/t32/catalogs/actions.sdn") ?? ""
+        val sdn_content = rt_file_read_text(t32_catalog_dir() + "/actions.sdn") ?? ""
         if sdn_content != "":
             MCP_T32_ACTION_CATALOG = t32_parse_action_sdn(sdn_content)
     # Filter actions matching this window key (by target field or matching open_command)
@@ -226,7 +237,7 @@ fn t32_get_window_fields(window_key: text) -> [text]:
     # Returns fields as "field_key|label|value_type|scope"
     if not MCP_T32_FIELD_LOADED:
         MCP_T32_FIELD_LOADED = true
-        val sdn_content = rt_file_read_text("config/t32/catalogs/fields.sdn") ?? ""
+        val sdn_content = rt_file_read_text(t32_catalog_dir() + "/fields.sdn") ?? ""
         if sdn_content != "":
             MCP_T32_FIELD_CATALOG = t32_parse_field_sdn(sdn_content)
     # Return all fields (not window-specific in SDN model)
@@ -390,7 +401,8 @@ fn handle_t32_window_capture(id: text, body: text) -> text:
             var capture_method = "winprint"
             # Fallback: if WinPrint result is empty, try PRinTer.FILE to temp file
             if content == "" and rc == 0:
-                val temp_file = "/tmp/t32_capture_" + window_key + ".txt"
+                val ts = str(rt_time_now_unix_micros())
+                val temp_file = "/tmp/t32_" + ts + "_" + window_key + ".txt"
                 val printer_cmd = "PRinTer.FILE " + temp_file + " " + found_capture.replace("WinPrint.", "")
                 var stdout2 = ""
                 var rc2: i64 = 0
