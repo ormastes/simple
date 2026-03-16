@@ -26,7 +26,7 @@ use .smf_source.{SmfSource, smf_source_get_reader}
 enum ObjTakeResult:
     """Result of taking an object from SMF."""
     Code(bytes: [u8], symbol: SmfSymbol, ty: TypeInfo?)
-    Template(template: Template, symbol: SmfSymbol)
+    Template(tmpl: Template, symbol: SmfSymbol)
     Deferred(symbol: text, hints: DeferredHints)
     NotFound(symbol: text)
     Error(message: text)
@@ -90,7 +90,7 @@ struct TypeConstraint:
 
 struct SubstitutedTemplate:
     """Template with type arguments applied."""
-    template: Template
+    tmpl: Template
     type_args: [TypeInfo]
     mangled_name: text
 
@@ -312,8 +312,8 @@ fn objtaker_take_with_types(self: ObjTaker, smf_reader: SmfReader, symbol_name: 
     val template_result = objtaker_load_template(self, smf_reader, symbol)
     if template_result.is_err():
         return ObjTakeResult.Error(message: template_result.unwrap_err())
-    val template = template_result.unwrap()
-    objtaker_instantiate(self, template, type_args)
+    val tmpl = template_result.unwrap()
+    objtaker_instantiate(self, tmpl, type_args)
 
 
 fn objtaker_take_generic(self: ObjTaker, smf_reader: SmfReader, symbol: SmfSymbol) -> ObjTakeResult:
@@ -326,24 +326,24 @@ fn objtaker_take_generic(self: ObjTaker, smf_reader: SmfReader, symbol: SmfSymbo
     if template_result.is_err():
         return ObjTakeResult.Error(message: template_result.unwrap_err())
 
-    val template = template_result.unwrap()
+    val tmpl = template_result.unwrap()
 
     # 2. Get usage hints from note.sdn
     val hints = objtaker_get_usage_hints(self, smf_reader, symbol.name)
 
     # 3. Try to infer type arguments
-    val inferred = objtaker_infer_type_args(self, template, hints)
+    val inferred = objtaker_infer_type_args(self, tmpl, hints)
     if inferred.is_err():
         # Cannot infer - return template for deferred instantiation
         if self.config.allow_deferred:
-            return ObjTakeResult.Template(template: template, symbol: symbol)
+            return ObjTakeResult.Template(tmpl: tmpl, symbol: symbol)
         else:
             return ObjTakeResult.Error(message: "Cannot infer type arguments for {symbol.name}")
 
     val type_args = inferred.unwrap()
 
     # 4. Instantiate with inferred types
-    objtaker_instantiate(self, template, type_args)
+    objtaker_instantiate(self, tmpl, type_args)
 
 
 fn objtaker_take_deferred(self: ObjTaker, smf_reader: SmfReader, symbol: SmfSymbol) -> ObjTakeResult:
@@ -376,20 +376,20 @@ fn objtaker_take_concrete(self: ObjTaker, smf_reader: SmfReader, symbol: SmfSymb
     ObjTakeResult.Code(bytes: code, symbol: symbol, ty: nil)
 
 
-fn objtaker_instantiate(self: ObjTaker, template: Template, type_args: [TypeInfo]) -> ObjTakeResult:
+fn objtaker_instantiate(self: ObjTaker, tmpl: Template, type_args: [TypeInfo]) -> ObjTakeResult:
     """Instantiate template with type arguments using compiler FFI."""
-    if type_args.len() != template.type_params.len():
+    if type_args.len() != tmpl.type_params.len():
         return ObjTakeResult.Error(
-            message: "Type argument count mismatch: expected {template.type_params.len()}, got {type_args.len()}"
+            message: "Type argument count mismatch: expected {tmpl.type_params.len()}, got {type_args.len()}"
         )
 
-    val substituted = template_substitute(template, type_args)
+    val substituted = template_substitute(tmpl, type_args)
 
     if self.config.verbose:
-        print "[obj-taker] Instantiating {template.name} as {substituted.mangled_name}"
+        print "[obj-taker] Instantiating {tmpl.name} as {substituted.mangled_name}"
 
     # Generate code via compiler FFI
-    val template_json = '{"name": "{template.name}", "type_params": [' + template.type_params.map(\p: '"{p}"').join(",") + ']}'
+    val template_json = '{"name": "{tmpl.name}", "type_params": [' + tmpl.type_params.map(\p: '"{p}"').join(",") + ']}'
     val types_json = serialize_types_json(type_args)
     val result_text = compiler_instantiate_template(self.compiler_ctx.handle, template_json, types_json)
 
@@ -464,13 +464,13 @@ fn objtaker_load_template(self: ObjTaker, smf_reader: SmfReader, symbol: SmfSymb
     val bytes = section_result.unwrap()
 
     # Parse template from bytes
-    val template = parse_template(bytes, symbol)
+    val tmpl = parse_template(bytes, symbol)
 
     # Cache if enabled
     if self.config.enable_caching:
-        self.template_cache[symbol.name] = template
+        self.template_cache[symbol.name] = tmpl
 
-    Ok(template)
+    Ok(tmpl)
 
 
 fn objtaker_get_usage_hints(self: ObjTaker, smf_reader: SmfReader, symbol_name: text) -> [TypeHint]:
@@ -484,12 +484,12 @@ fn objtaker_get_usage_hints(self: ObjTaker, smf_reader: SmfReader, symbol_name: 
     []
 
 
-fn objtaker_infer_type_args(self: ObjTaker, template: Template, hints: [TypeHint]) -> Result<[TypeInfo], text>:
+fn objtaker_infer_type_args(self: ObjTaker, tmpl: Template, hints: [TypeHint]) -> Result<[TypeInfo], text>:
     """Infer type arguments for a template using compiler FFI."""
     if hints.len() == 0:
-        return Err("No type hints available for inference of {template.name}")
+        return Err("No type hints available for inference of {tmpl.name}")
 
-    val template_json = '{"name": "{template.name}", "type_params": [' + template.type_params.map(\p: '"{p}"').join(",") + ']}'
+    val template_json = '{"name": "{tmpl.name}", "type_params": [' + tmpl.type_params.map(\p: '"{p}"').join(",") + ']}'
     var hints_parts: [text] = []
     for h in hints:
         val ty_json = serialize_type_json(h.ty)
@@ -499,7 +499,7 @@ fn objtaker_infer_type_args(self: ObjTaker, template: Template, hints: [TypeHint
     val result_text = compiler_infer_types(self.compiler_ctx.handle, template_json, hints_json)
     val types = parse_types_json(result_text)
     if types.len() == 0:
-        return Err("Type inference returned no types for {template.name}")
+        return Err("Type inference returned no types for {tmpl.name}")
     Ok(types)
 
 
@@ -524,11 +524,11 @@ fn objtaker_get_deferred_hints(self: ObjTaker, smf_reader: SmfReader, symbol: Sm
     )
 
 
-fn template_substitute(template: Template, type_args: [TypeInfo]) -> SubstitutedTemplate:
+fn template_substitute(tmpl: Template, type_args: [TypeInfo]) -> SubstitutedTemplate:
     """Create a SubstitutedTemplate with mangled name."""
-    val mangled = mangle_name(template.name, type_args)
+    val mangled = mangle_name(tmpl.name, type_args)
     SubstitutedTemplate(
-        template: template,
+        tmpl: tmpl,
         type_args: type_args,
         mangled_name: mangled
     )

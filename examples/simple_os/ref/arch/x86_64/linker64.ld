@@ -25,8 +25,12 @@ SECTIONS
     _kernel64_start = .;
 
     /* ── Code ──────────────────────────────────────────────────── */
+    /* entry64.o MUST come first so _start64 is at the very start
+     * of .text (address 0x101000).  The boot_wrapper.S trampoline
+     * jumps to 0x101000 after switching to long mode. */
     .text ALIGN(16) :
     {
+        *entry64.o(.text)
         *(.text)
         *(.text.*)
     }
@@ -46,7 +50,7 @@ SECTIONS
     }
 
     /* ── Uninitialised data (BSS) ──────────────────────────────── */
-    .bss ALIGN(16) :
+    .bss ALIGN(4096) :
     {
         _bss_start = .;
         *(.bss)

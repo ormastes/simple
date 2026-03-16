@@ -102,3 +102,39 @@ void __aeabi_memclr8(void *dst, uint32_t n) {
 }
 
 #endif /* __ARM_EABI__ */
+
+/* ── Generic compiler-rt builtins (RISC-V 32-bit, etc.) ───────────── */
+/* clang emits calls to __udivdi3 / __divdi3 for 64-bit division on
+ * 32-bit targets that don't use the ARM EABI naming convention.        */
+
+#if defined(__riscv) && __riscv_xlen == 32
+
+uint64_t __udivdi3(uint64_t num, uint64_t den) {
+    if (den == 0) return 0;
+    uint64_t quot = 0;
+    uint64_t bit = 1;
+    while (den <= num && !(den & ((uint64_t)1 << 63))) { den <<= 1; bit <<= 1; }
+    while (bit) {
+        if (num >= den) { num -= den; quot |= bit; }
+        den >>= 1; bit >>= 1;
+    }
+    return quot;
+}
+
+uint64_t __umoddi3(uint64_t num, uint64_t den) {
+    return num - __udivdi3(num, den) * den;
+}
+
+int64_t __divdi3(int64_t num, int64_t den) {
+    int negative = 0;
+    if (num < 0) { num = -num; negative = !negative; }
+    if (den < 0) { den = -den; negative = !negative; }
+    int64_t result = (int64_t)__udivdi3((uint64_t)num, (uint64_t)den);
+    return negative ? -result : result;
+}
+
+int64_t __moddi3(int64_t num, int64_t den) {
+    return num - __divdi3(num, den) * den;
+}
+
+#endif /* __riscv && __riscv_xlen == 32 */

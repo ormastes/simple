@@ -21,7 +21,9 @@ These range from security vulnerabilities (shell injection) to functional gaps
 |---|-----|----------|---------|
 | 1 | Shell injection in `t32_run_remote` | Critical | session_tools.spl:85-101 |
 | 2 | Blind CMM execution (no path validation) | High | session_tools.spl:379-449 |
-| 3 | CLI dispatching missing (cmm/set/do are stubs) | High | t32_cli/cli_shell.spl |
+| 3 | CLI dispatching: no `mcp-t32` subcommand case | High | cli/main.spl, dispatch/table.spl, cli_commands.spl |
+| 3b | `t32_find_backend()` missing WSL support | High | session_tools.spl:43-78 |
+| 3c | No `T32MEM` env var — paths not configurable | Medium | session_tools.spl:43-78 |
 | 4 | Multi-core: session_id param ignored, silent fallback | Medium | session_tools.spl:282-333 |
 | 5 | Catalog hardcoded path, no env override, no error log | Medium | window_tools.spl:13-24 |
 | 6 | Variable read: no input escaping in field_to_eval | High | action_tools.spl:137-168 |

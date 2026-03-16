@@ -101,7 +101,11 @@ impl MirTextCodegen for MirToLlvm:
         var params: [text] = []
         for i in 0..body.arg_count:
             val param_ty = self.get_local_type(i)
-            params = params.push("{param_ty} %arg{i}")
+            # Add parameter attributes: pointer params get noalias nocapture for better alias analysis
+            if param_ty == "ptr":
+                params = params.push("{param_ty} noalias nocapture %arg{i}")
+            else:
+                params = params.push("{param_ty} noundef %arg{i}")
 
         val ret_ty = self.type_mapper.map_type(body.return_ty)
 
@@ -211,13 +215,14 @@ impl MirTextCodegen for MirToLlvm:
 
         match value:
             case Int(v):
-                self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+                # Inline constant: store value in local_map for direct substitution
+                self.local_map[dest.id] = "{v}"
             case Float(v):
                 val fv = ensure_float_literal("{v}")
-                self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, 0.0  ; const float")
+                self.local_map[dest.id] = fv
             case Bool(v):
                 val bval = if v: "1" else: "0"
-                self.builder.emit("  {dest_name} = add {llvm_ty} {bval}, 0  ; const bool")
+                self.local_map[dest.id] = bval
             case Str(v):
                 val global_name = self.add_string_global(v)
                 val str_len = escaped_string_byte_len(v) + 1
@@ -225,51 +230,49 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
-                    self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
+                    self.local_map[dest.id] = "0.0"
                 elif llvm_ty == "ptr":
-                    val nit = self.native_int()
-                    self.builder.emit("  {dest_name} = inttoptr {nit} 0 to ptr  ; const null")
+                    self.local_map[dest.id] = "null"
                 elif llvm_ty == "void":
                     ()
+                elif is_integer_type(llvm_ty) or llvm_ty == "i1":
+                    self.local_map[dest.id] = "0"
                 else:
                     self.builder.emit("  {dest_name} = add {llvm_ty} 0, 0  ; const zero")
             case Array(elements):
                 val tmp = self.builder.fresh_local()
                 self.builder.emit_alloca(tmp, llvm_ty)
-                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
-                self.builder.emit_load(dest_name, llvm_ty, tmp)
+                self.builder.emit_store_tbaa(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load_tbaa(dest_name, llvm_ty, tmp)
             case Tuple(elements):
                 val tmp = self.builder.fresh_local()
                 self.builder.emit_alloca(tmp, llvm_ty)
-                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
-                self.builder.emit_load(dest_name, llvm_ty, tmp)
+                self.builder.emit_store_tbaa(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load_tbaa(dest_name, llvm_ty, tmp)
             case Struct(fields):
                 val tmp = self.builder.fresh_local()
                 self.builder.emit_alloca(tmp, llvm_ty)
-                self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
-                self.builder.emit_load(dest_name, llvm_ty, tmp)
+                self.builder.emit_store_tbaa(llvm_ty, "zeroinitializer", tmp)
+                self.builder.emit_load_tbaa(dest_name, llvm_ty, tmp)
 
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
         val dest_name = self.get_local(dest.id)
         val src_name = self.get_local(src.id)
         val ty = self.get_local_type(src.id)
-        val comment = if is_move: "move" else: "copy"
 
-        if is_float_type(ty):
-            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
-        elif ty == "ptr":
-            val nit = self.native_int()
-            self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_name}, {nit} 0  ; {comment}")
-        elif ty == "void":
+        # For scalar types, map dest directly to src SSA value (copy propagation).
+        # LLVM's opt would do this anyway, but emitting clean IR helps llc too.
+        if ty == "void":
             ()
-        elif is_integer_type(ty) or ty == "i1":
-            self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; {comment}")
+        elif is_integer_type(ty) or ty == "i1" or is_float_type(ty) or ty == "ptr":
+            # SSA alias: dest = src (no arithmetic needed, LLVM SSA handles this)
+            self.local_map[dest.id] = src_name
         else:
             # Aggregate types: alloca + store + load
             val tmp = self.builder.fresh_local()
             self.builder.emit_alloca(tmp, ty)
-            self.builder.emit_store(ty, src_name, tmp)
-            self.builder.emit_load(dest_name, ty, tmp)
+            self.builder.emit_store_tbaa(ty, src_name, tmp)
+            self.builder.emit_load_tbaa(dest_name, ty, tmp)
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
@@ -479,13 +482,13 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = self.get_local(dest.id)
         val ptr_val = self.translate_operand(ptr)
         val load_ty = self.get_local_type(dest.id)
-        self.builder.emit_load(dest_name, load_ty, ptr_val)
+        self.builder.emit_load_tbaa(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):
         val ptr_val = self.translate_operand(ptr)
         val value_val = self.translate_operand(value)
         val store_ty = self.get_operand_type(value)
-        self.builder.emit_store(store_ty, value_val, ptr_val)
+        self.builder.emit_store_tbaa(store_ty, value_val, ptr_val)
 
     me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
         val dest_name = self.get_local(dest.id)
@@ -508,8 +511,8 @@ impl MirTextCodegen for MirToLlvm:
             val elem_ty = self.get_operand_type(operands[i])
             val elem_ptr = self.builder.fresh_local()
             self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
-            self.builder.emit_store(elem_ty, elem_val, elem_ptr)
-        self.builder.emit_load(dest_name, agg_ty, agg_ptr)
+            self.builder.emit_store_tbaa(elem_ty, elem_val, elem_ptr)
+        self.builder.emit_load_tbaa(dest_name, agg_ty, agg_ptr)
 
     me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
         val dest_name = self.get_local(dest.id)
@@ -517,7 +520,7 @@ impl MirTextCodegen for MirToLlvm:
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
-        self.builder.emit_load(dest_name, nit, field_ptr)
+        self.builder.emit_load_tbaa(dest_name, nit, field_ptr)
 
     me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
         val base_val = self.translate_operand(base)
@@ -525,7 +528,7 @@ impl MirTextCodegen for MirToLlvm:
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
-        self.builder.emit_store(nit, value_val, field_ptr)
+        self.builder.emit_store_tbaa(nit, value_val, field_ptr)
 
     # === Overrides: casts ===
 

@@ -1,0 +1,60 @@
+# RISC-V 32-bit HAL Implementation
+#
+# Maps the generic Hal trait to RISC-V32-specific drivers:
+#   serial  -> 16550 UART (MMIO at 0x10000000)
+#   timer   -> CLINT timer (MMIO at 0x02000000)
+#   mmu     -> Sv32 2-level page tables
+#   irq     -> csrs/csrc mstatus instructions
+
+use arch.hal.Hal
+use arch.riscv32.io.uart.{serial_init, serial_write, serial_print}
+use arch.riscv32.boot.clint.{clint_init, clint_get_time, clint_get_millis}
+use arch.riscv32.mm.mmu.{mmu_init}
+use arch.riscv32.mm.paging.{paging_init, paging_map, paging_unmap}
+use arch.riscv32.context.context.{RegisterState}
+
+# ---------- HAL trait implementation ----------
+
+struct Riscv32Hal:
+    pass
+
+impl Hal for Riscv32Hal:
+    fn serial_init():
+        serial_init()
+
+    fn serial_putc(c: u8):
+        serial_write(c as u32)
+
+    fn serial_write(s: String):
+        serial_print(s)
+
+    fn timer_init(freq_hz: u32):
+        clint_init()
+
+    fn timer_ticks() -> u64:
+        clint_get_time()
+
+    fn irq_enable():
+        asm """
+            csrsi mstatus, 0x8
+        """
+
+    fn irq_disable():
+        asm """
+            csrci mstatus, 0x8
+        """
+
+    fn context_switch(old: var RegisterState, new_ctx: RegisterState):
+        # Delegated to assembly in switch.S
+        pass
+
+    fn mmu_map(virt: u32, phys: u32, size: u32, flags: u32):
+        paging_map(virt, phys, flags)
+
+    fn mmu_unmap(virt: u32, size: u32):
+        paging_unmap(virt)
+
+    fn halt():
+        asm """
+            wfi
+        """

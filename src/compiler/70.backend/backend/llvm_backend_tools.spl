@@ -127,7 +127,25 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     # Build llc command
     val triple = config.triple.to_text()
     val cpu = config.to_cpu_string()
-    val cmd = "{llc} --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+
+    # Use static relocation for bare-metal targets, PIC for hosted
+    val reloc_model = if config.triple.os == "none": "static" else: "pic"
+
+    # Add code model for kernel targets
+    var code_model_flag = ""
+    if config.triple.os == "none":
+        if config.triple.arch == "x86_64":
+            code_model_flag = " --code-model=kernel"
+        elif config.triple.arch == "riscv64" or config.triple.arch == "riscv32":
+            code_model_flag = " --code-model=medany"
+
+    # Add target features if specified
+    var features_flag = ""
+    val feat_str = config.to_feature_string()
+    if feat_str != "":
+        features_flag = " -mattr={feat_str}"
+
+    val cmd = "{llc} --filetype=obj --relocation-model={reloc_model}{code_model_flag} -mtriple={triple} -mcpu={cpu}{features_flag} {opt_flag} -o {obj_path} {ir_path} 2>&1"
     val (llc_out, llc_err, llc_code) = shell(cmd)
 
     # Clean up IR file

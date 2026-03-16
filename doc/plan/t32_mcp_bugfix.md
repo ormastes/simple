@@ -61,6 +61,40 @@ messages but don't actually call `t32_run_remote` to execute commands on the T32
 **Test:** Verify that `shell_dispatch("cmm test.cmm")` produces a command string
 that includes "DO test.cmm" (unit-level, no real T32 needed).
 
+### Bug 3a: Missing `mcp-t32` CLI Subcommand (difficulty: 1)
+
+**Problem:** `bin/simple mcp-t32` falls through to "file not found" because there is no
+`case "mcp-t32"` in `src/app/cli/main.spl`, no entry in `dispatch/table.spl`, and no
+`cli_run_mcp_t32` handler in `cli_commands.spl`.
+
+**Fix:**
+1. Add `fn cli_run_mcp_t32(args)` to `src/app/io/cli_commands.spl` — runs `./bin/t32_mcp_server.spl` via shell (model after `cli_run_mcp`)
+2. Add `case "mcp-t32":` to `src/app/cli/main.spl` after `case "mcp":`
+3. Add `CommandEntry(name: "mcp-t32", ...)` to `src/app/cli/dispatch/table.spl`
+
+### Bug 3b: `t32_find_backend()` Missing WSL Support (difficulty: 2)
+
+**Problem:** `session_tools.spl:43-78` only checks Linux-native paths. Under WSL,
+T32 is typically installed at `C:\T32` which maps to `/mnt/c/T32/`. No WSL detection,
+no Windows-style candidate paths.
+
+**Fix:**
+1. Add `t32_is_wsl()` helper: check if `/proc/version` contains "microsoft" or "WSL"
+2. When WSL detected, add candidate paths:
+   - `/mnt/c/T32/bin/windows64/t32rem.exe`
+   - `/mnt/c/T32/bin/t32rem.exe`
+3. If `T32MEM` is set, also derive WSL paths from it
+
+### Bug 3c: No `T32MEM` Env Var for Path Configuration (difficulty: 2)
+
+**Problem:** Only `T32REM` (explicit binary path) and `T32_PYTHON_BRIDGE` env vars exist.
+No way to set the T32 installation root so all candidate paths derive from it.
+
+**Fix:**
+1. Check `T32MEM` env var in `t32_find_backend()` before hardcoded paths
+2. When set, derive candidates: `T32MEM + "/bin/pc_linux64/t32rem"`, `T32MEM + "/bin/t32rem"`
+3. Under WSL, also try `T32MEM + "/bin/windows64/t32rem.exe"`
+
 ### Bug 4: Multi-Core Issues (difficulty: 2)
 
 **Problem:** `session_tools.spl:282-333` — `handle_t32_core_list`:
