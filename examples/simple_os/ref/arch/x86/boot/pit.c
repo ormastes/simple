@@ -42,11 +42,20 @@ uint64_t pit_get_ticks(void)
     return pit_ticks;
 }
 
-uint64_t pit_get_ms(void)
+uint32_t pit_get_ms(void)
 {
     if (pit_freq == 0)
         return 0;
-    return (pit_ticks * 1000) / pit_freq;
+    /*
+     * Avoid 64-bit division which emits __udivdi3 on 32-bit targets.
+     * Use 32-bit arithmetic: ms = ticks / (freq / 1000).
+     * For freq=1000 Hz this is just ticks; for others it's close enough.
+     */
+    uint32_t ticks32 = (uint32_t)pit_ticks;
+    uint32_t divisor = pit_freq / 1000;
+    if (divisor == 0)
+        divisor = 1;
+    return ticks32 / divisor;
 }
 
 /* Called from IRQ0 handler */

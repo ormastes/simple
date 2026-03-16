@@ -1,0 +1,267 @@
+# AArch64 4-Level Page Tables (4 KB Granule)
+#
+# With T0SZ=25 (39-bit VA), we use 3 effective levels:
+#   L0: bits [38:30] — 512 entries, each covers 1 GB
+#   L1: bits [29:21] — 512 entries, each covers 2 MB
+#   L2: bits [20:12] — 512 entries, each covers 4 KB
+#
+# Descriptor types:
+#   Invalid:  bit[0] = 0
+#   Block:    bits[1:0] = 01 (valid, block — L0/L1 only)
+#   Table:    bits[1:0] = 11 (valid, table pointer)
+#   Page:     bits[1:0] = 11 (valid, page — L2/L3 only)
+
+use arch.aarch64.mm.mmu.{mmu_init, mmu_set_ttbr0, mmu_flush_tlb, mmu_enable, mmu_invalidate_addr}
+
+# ---------- constants ----------
+
+val PAGE_SIZE: u64 = 4096
+val ENTRIES_PER_TABLE: i32 = 512
+
+# Descriptor bits
+val PTE_VALID: u64 = 0x01
+val PTE_TABLE: u64 = 0x02
+val PTE_PAGE: u64 = 0x02
+val PTE_BLOCK: u64 = 0x00
+
+# Lower attributes
+val PTE_AF: u64 = 0x400             # Access Flag (bit 10)
+val PTE_SH_INNER: u64 = 0x300       # Inner Shareable (bits [9:8])
+val PTE_SH_OUTER: u64 = 0x200       # Outer Shareable
+val PTE_AP_RW_EL1: u64 = 0x00       # EL1 R/W, EL0 none (bits [7:6])
+val PTE_AP_RW_ALL: u64 = 0x40       # EL1 R/W, EL0 R/W
+val PTE_AP_RO_EL1: u64 = 0x80       # EL1 R/O, EL0 none
+val PTE_AP_RO_ALL: u64 = 0xC0       # EL1 R/O, EL0 R/O
+val PTE_NG: u64 = 0x800             # Not Global (bit 11)
+
+# AttrIdx (bits [4:2])
+val PTE_ATTR_DEVICE: u64 = 0x00     # Index 0: Device-nGnRnE
+val PTE_ATTR_NORMAL_NC: u64 = 0x04  # Index 1: Normal NC
+val PTE_ATTR_NORMAL: u64 = 0x08     # Index 2: Normal WB-WA
+
+# Upper attributes
+val PTE_PXN: u64 = 0x0020000000000000   # Privileged Execute-Never (bit 53)
+val PTE_UXN: u64 = 0x0040000000000000   # Unprivileged Execute-Never (bit 54)
+
+# Address mask (bits [47:12])
+val PTE_ADDR_MASK: u64 = 0x0000FFFFFFFFF000
+
+# Convenience combinations
+val PTE_KERNEL_RWX: u64 = 0x408   # AF | SH_INNER | AP_RW_EL1 | ATTR_NORMAL
+val PTE_DEVICE_FLAGS: u64 = 0x0060000000000400  # AF | PXN | UXN | ATTR_DEVICE
+val PTE_USER_RWX: u64 = 0xC48    # AF | SH_INNER | AP_RW_ALL | ATTR_NORMAL | NG
+
+# ---------- page table pool ----------
+
+val PT_POOL_SIZE: i32 = 32
+
+struct PageTable:
+    entries: [u64; 512]
+
+var pt_pool: [PageTable; 32]
+var pt_pool_used: [bool; 32] = [false; 32]
+
+# Kernel L0 table
+var kernel_l0: PageTable
+
+fn pt_pool_alloc() -> i32:
+    for i in 0..PT_POOL_SIZE:
+        if not pt_pool_used[i]:
+            pt_pool_used[i] = true
+            for j in 0..ENTRIES_PER_TABLE:
+                pt_pool[i].entries[j] = 0
+            return i
+    -1
+
+fn pt_pool_free(index: i32):
+    if index >= 0 and index < PT_POOL_SIZE:
+        pt_pool_used[index] = false
+
+fn pt_pool_addr(index: i32) -> u64:
+    var addr: u64 = 0
+    unsafe:
+        asm """
+            ldr x0, ={pt_pool}
+            mov {addr}, x0
+        """
+    addr + (index as u64 * PAGE_SIZE)
+
+fn kernel_l0_addr() -> u64:
+    var addr: u64 = 0
+    unsafe:
+        asm """
+            ldr x0, ={kernel_l0}
+            mov {addr}, x0
+        """
+    addr
+
+# ---------- index extraction ----------
+
+# L0 index: bits [38:30]
+fn l0_index(vaddr: u64) -> i32:
+    ((vaddr >> 30) & 0x1FF) as i32
+
+# L1 index: bits [29:21]
+fn l1_index(vaddr: u64) -> i32:
+    ((vaddr >> 21) & 0x1FF) as i32
+
+# L2 index: bits [20:12]
+fn l2_index(vaddr: u64) -> i32:
+    ((vaddr >> 12) & 0x1FF) as i32
+
+# ---------- public API ----------
+
+# Initialize page tables with identity mapping for first 2 GB
+fn paging_init():
+    # Zero L0 table
+    for i in 0..ENTRIES_PER_TABLE:
+        kernel_l0.entries[i] = 0
+
+    # Allocate L1 for first 1 GB (device MMIO region 0x00000000-0x3FFFFFFF)
+    val l1_dev_idx = pt_pool_alloc()
+    if l1_dev_idx < 0:
+        return
+
+    # Fill with 2 MB block entries for device memory
+    for i in 0..ENTRIES_PER_TABLE:
+        val phys = i as u64 * 0x200000   # 2 MB blocks
+        pt_pool[l1_dev_idx].entries[i] = phys | PTE_VALID | PTE_BLOCK | PTE_AF | PTE_ATTR_DEVICE | PTE_PXN | PTE_UXN
+
+    kernel_l0.entries[0] = pt_pool_addr(l1_dev_idx) | PTE_VALID | PTE_TABLE
+
+    # Allocate L1 for second 1 GB (RAM at 0x40000000)
+    val l1_ram_idx = pt_pool_alloc()
+    if l1_ram_idx < 0:
+        return
+
+    # Fill with 2 MB block entries for normal memory
+    for i in 0..ENTRIES_PER_TABLE:
+        val phys = 0x40000000 + i as u64 * 0x200000
+        pt_pool[l1_ram_idx].entries[i] = phys | PTE_VALID | PTE_BLOCK | PTE_KERNEL_RWX
+
+    kernel_l0.entries[1] = pt_pool_addr(l1_ram_idx) | PTE_VALID | PTE_TABLE
+
+    # Configure and enable MMU
+    mmu_init()
+    mmu_set_ttbr0(kernel_l0_addr())
+    mmu_flush_tlb()
+    mmu_enable()
+
+# Map a single 4 KB page (3-level walk)
+fn paging_map(virt: u64, phys: u64, flags: u64):
+    val l0i = l0_index(virt)
+    val l1i = l1_index(virt)
+    val l2i = l2_index(virt)
+
+    # Ensure L1 table exists
+    if (kernel_l0.entries[l0i] & PTE_VALID) == 0:
+        val idx = pt_pool_alloc()
+        if idx < 0:
+            return
+        kernel_l0.entries[l0i] = pt_pool_addr(idx) | PTE_VALID | PTE_TABLE
+
+    val l1_phys = kernel_l0.entries[l0i] & PTE_ADDR_MASK
+
+    # Read L1 entry to check for L2 table
+    var l1_entry: u64 = 0
+    unsafe:
+        val l1_addr = l1_phys + (l1i as u64 * 8)
+        @address(l1_addr) @volatile var reg: u64
+        l1_entry = reg
+
+    if (l1_entry & PTE_VALID) == 0:
+        val idx = pt_pool_alloc()
+        if idx < 0:
+            return
+        val new_entry = pt_pool_addr(idx) | PTE_VALID | PTE_TABLE
+        unsafe:
+            val l1_addr = l1_phys + (l1i as u64 * 8)
+            @address(l1_addr) @volatile var reg: u64
+            reg = new_entry
+        l1_entry = new_entry
+    elif (l1_entry & PTE_TABLE) == 0:
+        # Block entry, cannot split
+        return
+
+    val l2_phys = l1_entry & PTE_ADDR_MASK
+
+    # Write L2 page entry
+    unsafe:
+        val l2_addr = l2_phys + (l2i as u64 * 8)
+        @address(l2_addr) @volatile var reg: u64
+        reg = (phys & PTE_ADDR_MASK) | flags | PTE_VALID | PTE_PAGE
+
+    mmu_invalidate_addr(virt)
+
+# Unmap a single 4 KB page
+fn paging_unmap(virt: u64):
+    val l0i = l0_index(virt)
+    if (kernel_l0.entries[l0i] & PTE_VALID) == 0:
+        return
+
+    val l1_phys = kernel_l0.entries[l0i] & PTE_ADDR_MASK
+    val l1i = l1_index(virt)
+
+    var l1_entry: u64 = 0
+    unsafe:
+        val l1_addr = l1_phys + (l1i as u64 * 8)
+        @address(l1_addr) @volatile var reg: u64
+        l1_entry = reg
+
+    if (l1_entry & PTE_VALID) == 0 or (l1_entry & PTE_TABLE) == 0:
+        return
+
+    val l2_phys = l1_entry & PTE_ADDR_MASK
+    val l2i = l2_index(virt)
+
+    unsafe:
+        val l2_addr = l2_phys + (l2i as u64 * 8)
+        @address(l2_addr) @volatile var reg: u64
+        reg = 0
+
+    mmu_invalidate_addr(virt)
+
+# Translate virtual address to physical (returns 0 if unmapped)
+fn paging_translate(virt: u64) -> u64:
+    val l0i = l0_index(virt)
+    if (kernel_l0.entries[l0i] & PTE_VALID) == 0:
+        return 0
+
+    val l1_phys = kernel_l0.entries[l0i] & PTE_ADDR_MASK
+    val l1i = l1_index(virt)
+
+    var l1_entry: u64 = 0
+    unsafe:
+        val l1_addr = l1_phys + (l1i as u64 * 8)
+        @address(l1_addr) @volatile var reg: u64
+        l1_entry = reg
+
+    if (l1_entry & PTE_VALID) == 0:
+        return 0
+
+    # Check for 2 MB block
+    if (l1_entry & PTE_TABLE) == 0:
+        val block_phys = l1_entry & 0x0000FFFFFFE00000
+        return block_phys | (virt & 0x1FFFFF)
+
+    val l2_phys = l1_entry & PTE_ADDR_MASK
+    val l2i = l2_index(virt)
+
+    var l2_entry: u64 = 0
+    unsafe:
+        val l2_addr = l2_phys + (l2i as u64 * 8)
+        @address(l2_addr) @volatile var reg: u64
+        l2_entry = reg
+
+    if (l2_entry & PTE_VALID) == 0:
+        return 0
+
+    (l2_entry & PTE_ADDR_MASK) | (virt & 0xFFF)
+
+# Identity-map a range
+fn paging_identity_map(start: u64, size: u64, flags: u64):
+    var addr = start & PTE_ADDR_MASK
+    val end = start + size
+    while addr < end:
+        paging_map(addr, addr, flags)
+        addr = addr + PAGE_SIZE

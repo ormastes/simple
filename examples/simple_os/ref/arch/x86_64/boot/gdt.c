@@ -11,7 +11,7 @@
 /* 7 slots: 5 normal entries + 1 TSS64 entry (occupies 2 slots) */
 static gdt_entry_t gdt_entries[GDT_NUM_ENTRIES];
 static gdt_ptr64_t gdt_pointer;
-static tss64_t     tss;
+tss64_t            tss;
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 

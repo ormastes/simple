@@ -26,7 +26,7 @@
 
 void     pit_init(uint32_t freq_hz);
 uint64_t pit_get_ticks(void);
-uint64_t pit_get_ms(void);
+uint32_t pit_get_ms(void);
 void     pit_handler(void);
 
 #endif /* ARCH_X86_BOOT_PIT_H */

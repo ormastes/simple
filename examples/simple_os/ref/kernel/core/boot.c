@@ -61,8 +61,17 @@ NORETURN void kernel_main(void)
     /* 8. Should never reach here */
     klog_info("[BOOT] Init complete, entering idle loop");
 
-    /* Halt loop */
+    /* Halt loop (architecture-specific wait-for-interrupt) */
     for (;;) {
+#if defined(__i386__) || defined(__x86_64__)
         __asm__ volatile ("hlt");
+#elif defined(__aarch64__) || defined(__arm__)
+        __asm__ volatile ("wfi");
+#elif defined(__riscv)
+        __asm__ volatile ("wfi");
+#else
+        /* Busy-wait fallback */
+        ;
+#endif
     }
 }

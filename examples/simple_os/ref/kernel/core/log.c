@@ -13,7 +13,7 @@
 /* ---- External UART interface (provided by arch layer) ------------------ */
 
 extern void uart_init(void);
-extern void uart_putchar(char c);
+extern void uart_putc(char c);
 
 /* ---- Module state ------------------------------------------------------ */
 
@@ -25,14 +25,14 @@ static bool        g_log_initialized = false;
 static void uart_puts(const char *s)
 {
     while (*s) {
-        uart_putchar(*s++);
+        uart_putc(*s++);
     }
 }
 
 static void uart_newline(void)
 {
-    uart_putchar('\r');
-    uart_putchar('\n');
+    uart_putc('\r');
+    uart_putc('\n');
 }
 
 static const char *level_prefix(log_level_t level)
@@ -185,12 +185,34 @@ NORETURN void kpanic(const char *msg)
     uart_puts("*** KERNEL HALTED ***");
     uart_newline();
 
-    /* Disable interrupts and halt */
+    /* Disable interrupts and halt (architecture-specific) */
+#if defined(__i386__) || defined(__x86_64__)
     __asm__ volatile (
         "cli\n"
         "1: hlt\n"
         "   jmp 1b\n"
     );
+#elif defined(__aarch64__)
+    __asm__ volatile (
+        "msr daifset, #0xF\n"   /* Disable all interrupts */
+        "1: wfi\n"
+        "   b 1b\n"
+    );
+#elif defined(__arm__)
+    __asm__ volatile (
+        "cpsid if\n"            /* Disable IRQ and FIQ */
+        "1: wfi\n"
+        "   b 1b\n"
+    );
+#elif defined(__riscv)
+    __asm__ volatile (
+        "csrci mstatus, 0x8\n"  /* Clear MIE bit to disable interrupts */
+        "1: wfi\n"
+        "   j 1b\n"
+    );
+#else
+#error "Unsupported architecture for kpanic halt sequence"
+#endif
 
     /* Never reached, but satisfy compiler */
     for (;;) {}

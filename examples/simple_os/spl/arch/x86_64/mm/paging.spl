@@ -1,0 +1,232 @@
+# x86_64 Four-Level Paging (PML4 -> PDPT -> PD -> PT)
+#
+# 64-bit x86 uses four levels of page tables:
+#   PML4:  512 entries, indexed by vaddr[47:39]
+#   PDPT:  512 entries, indexed by vaddr[38:30]
+#   PD:    512 entries, indexed by vaddr[29:21]
+#   PT:    512 entries, indexed by vaddr[20:12]
+#
+# Each entry is u64. Supports 4 KB pages and 2 MB huge pages.
+
+# ---------- constants ----------
+
+val PAGE_SIZE_4K: u64 = 4096
+val PAGE_SIZE_2M: u64 = 0x200000     # 2 MB
+val ENTRIES_PER_TABLE: i32 = 512
+
+# Page entry flags
+val PAGE_PRESENT: u64 = 0x001
+val PAGE_WRITABLE: u64 = 0x002
+val PAGE_USER: u64 = 0x004
+val PAGE_WRITE_THROUGH: u64 = 0x008
+val PAGE_CACHE_DISABLE: u64 = 0x010
+val PAGE_ACCESSED: u64 = 0x020
+val PAGE_DIRTY: u64 = 0x040
+val PAGE_HUGE_2MB: u64 = 0x080      # PS bit in PD entry
+val PAGE_GLOBAL: u64 = 0x100
+val PAGE_NX: u64 = 0x8000000000000000  # No-Execute (bit 63)
+
+# Masks
+val PAGE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+val PAGE_2MB_ADDR_MASK: u64 = 0x000FFFFFFFE00000
+
+# ---------- structs ----------
+
+struct PageTable64:
+    entries: [u64; 512]
+
+# ---------- static page table pool ----------
+
+val PT_POOL_SIZE: i32 = 32
+var pt_pool: [PageTable64; 32]
+var pt_pool_used: [bool; 32] = [false; 32]
+
+fn pt_pool_alloc() -> i32:
+    for i in 0..PT_POOL_SIZE:
+        if not pt_pool_used[i]:
+            pt_pool_used[i] = true
+            for j in 0..ENTRIES_PER_TABLE:
+                pt_pool[i].entries[j] = 0
+            return i
+    -1
+
+fn pt_pool_free(index: i32):
+    if index >= 0 and index < PT_POOL_SIZE:
+        pt_pool_used[index] = false
+
+fn pt_pool_addr(index: i32) -> u64:
+    var addr: u64 = 0
+    unsafe:
+        asm """
+            lea rax, {pt_pool}
+            mov {addr}, rax
+        """
+    addr + (index as u64 * PAGE_SIZE_4K)
+
+# ---------- index extraction ----------
+
+fn pml4_index(vaddr: u64) -> i32:
+    ((vaddr >> 39) & 0x1FF) as i32
+
+fn pdpt_index(vaddr: u64) -> i32:
+    ((vaddr >> 30) & 0x1FF) as i32
+
+fn pd_index(vaddr: u64) -> i32:
+    ((vaddr >> 21) & 0x1FF) as i32
+
+fn pt_index(vaddr: u64) -> i32:
+    ((vaddr >> 12) & 0x1FF) as i32
+
+# ---------- helpers ----------
+
+fn page_entry(paddr: u64, flags: u64) -> u64:
+    (paddr & PAGE_ADDR_MASK) | (flags & ~PAGE_ADDR_MASK)
+
+fn page_entry_addr(entry: u64) -> u64:
+    entry & PAGE_ADDR_MASK
+
+fn page_entry_present(entry: u64) -> bool:
+    (entry & PAGE_PRESENT) != 0
+
+# Ensure a child table exists at parent[index], allocating if needed
+fn ensure_child_table(parent_addr: u64, index: i32, flags: u64) -> u64:
+    unsafe:
+        val entry_offset = (parent_addr + (index as u64 * 8)) as u64
+        @address(entry_offset) @volatile var entry: u64
+
+        if (entry & PAGE_PRESENT) != 0:
+            return entry & PAGE_ADDR_MASK
+
+        val pool_idx = pt_pool_alloc()
+        if pool_idx < 0:
+            return 0
+
+        val child_addr = pt_pool_addr(pool_idx)
+        entry = child_addr | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER)
+        child_addr
+
+# ---------- public API ----------
+
+# Kernel PML4 table
+var kernel_pml4: PageTable64
+
+fn paging_init():
+    # Zero the PML4
+    for i in 0..ENTRIES_PER_TABLE:
+        kernel_pml4.entries[i] = 0
+
+    # Identity-map first 4 MB using 2 MB huge pages
+    paging_map_2mb(0x00000000, 0x00000000, PAGE_PRESENT | PAGE_WRITABLE)
+    paging_map_2mb(0x00200000, 0x00200000, PAGE_PRESENT | PAGE_WRITABLE)
+
+    # Load PML4
+    val pml4_phys = paging_get_pml4_phys()
+    mmu_load_pml4(pml4_phys)
+
+# Map a single 4 KB page
+fn paging_map(vaddr: u64, paddr: u64, flags: u64) -> bool:
+    val pml4_phys = paging_get_pml4_phys()
+
+    val pdpt_addr = ensure_child_table(pml4_phys, pml4_index(vaddr), flags)
+    if pdpt_addr == 0:
+        return false
+
+    val pd_addr = ensure_child_table(pdpt_addr, pdpt_index(vaddr), flags)
+    if pd_addr == 0:
+        return false
+
+    val pt_addr = ensure_child_table(pd_addr, pd_index(vaddr), flags)
+    if pt_addr == 0:
+        return false
+
+    unsafe:
+        val pte_offset = (pt_addr + (pt_index(vaddr) as u64 * 8)) as u64
+        @address(pte_offset) @volatile var pte: u64
+        pte = page_entry(paddr, flags | PAGE_PRESENT)
+
+    mmu_invalidate_page(vaddr)
+    true
+
+# Map a 2 MB huge page
+fn paging_map_2mb(vaddr: u64, paddr: u64, flags: u64) -> bool:
+    val pml4_phys = paging_get_pml4_phys()
+
+    val pdpt_addr = ensure_child_table(pml4_phys, pml4_index(vaddr), flags)
+    if pdpt_addr == 0:
+        return false
+
+    val pd_addr = ensure_child_table(pdpt_addr, pdpt_index(vaddr), flags)
+    if pd_addr == 0:
+        return false
+
+    unsafe:
+        val pde_offset = (pd_addr + (pd_index(vaddr) as u64 * 8)) as u64
+        @address(pde_offset) @volatile var pde: u64
+        pde = (paddr & PAGE_2MB_ADDR_MASK) | flags | PAGE_HUGE_2MB | PAGE_PRESENT
+
+    mmu_invalidate_page(vaddr)
+    true
+
+# Unmap a 4 KB page
+fn paging_unmap(vaddr: u64):
+    val pml4_phys = paging_get_pml4_phys()
+
+    if not page_entry_present(kernel_pml4.entries[pml4_index(vaddr)]):
+        return
+
+    val pdpt_addr = page_entry_addr(kernel_pml4.entries[pml4_index(vaddr)])
+    unsafe:
+        val pdpte_off = (pdpt_addr + (pdpt_index(vaddr) as u64 * 8)) as u64
+        @address(pdpte_off) @volatile var pdpte: u64
+        if not page_entry_present(pdpte):
+            return
+
+        val pd_addr = page_entry_addr(pdpte)
+        val pde_off = (pd_addr + (pd_index(vaddr) as u64 * 8)) as u64
+        @address(pde_off) @volatile var pde: u64
+        if not page_entry_present(pde):
+            return
+
+        # If 2 MB page, clear PD entry
+        if (pde & PAGE_HUGE_2MB) != 0:
+            pde = 0
+            mmu_invalidate_page(vaddr)
+            return
+
+        val pt_addr = page_entry_addr(pde)
+        val pte_off = (pt_addr + (pt_index(vaddr) as u64 * 8)) as u64
+        @address(pte_off) @volatile var pte: u64
+        pte = 0
+
+    mmu_invalidate_page(vaddr)
+
+# Identity-map a range of 4 KB pages
+fn paging_identity_map(start: u64, size: u64, flags: u64):
+    var addr = start & ~(PAGE_SIZE_4K - 1)
+    val end = start + size
+    while addr < end:
+        paging_map(addr, addr, flags)
+        addr = addr + PAGE_SIZE_4K
+
+# Get physical address of the kernel PML4
+fn paging_get_pml4_phys() -> u64:
+    var addr: u64 = 0
+    unsafe:
+        asm """
+            lea rax, {kernel_pml4}
+            mov {addr}, rax
+        """
+    addr
+
+# Forward declaration for mmu functions used above
+fn mmu_load_pml4(phys_addr: u64):
+    asm """
+        mov rax, {phys_addr}
+        mov cr3, rax
+    """
+
+fn mmu_invalidate_page(vaddr: u64):
+    asm """
+        mov rax, {vaddr}
+        invlpg [rax]
+    """

@@ -1,0 +1,143 @@
+# x86_64 CPU Register State / Thread Context
+#
+# Defines the saved register state for context switching between threads
+# in 64-bit long mode. Used by the context switch assembly (switch.S)
+# and the scheduler.
+#
+# System V AMD64 ABI:
+#   Callee-saved: RBX, RBP, R12-R15
+#   Caller-saved: RAX, RCX, RDX, RSI, RDI, R8-R11
+#   Arguments:    RDI, RSI, RDX, RCX, R8, R9
+#   Return:       RAX
+
+# ---------- segment selector constants ----------
+
+val SEL_KERNEL_CS64: u64 = 0x08
+val SEL_KERNEL_DS64: u64 = 0x10
+val SEL_USER_CS64: u64 = 0x1B    # 0x18 | RPL 3
+val SEL_USER_DS64: u64 = 0x23    # 0x20 | RPL 3
+
+# RFLAGS bits
+val RFLAGS_IF: u64 = 0x0200         # Interrupt enable flag
+val RFLAGS_RESERVED: u64 = 0x0002   # Bit 1 always set
+
+# ---------- register state ----------
+
+@repr(C)
+struct RegisterState64:
+    # General-purpose registers
+    rax: u64
+    rbx: u64
+    rcx: u64
+    rdx: u64
+    rsi: u64
+    rdi: u64
+    rbp: u64
+    rsp: u64
+    r8: u64
+    r9: u64
+    r10: u64
+    r11: u64
+    r12: u64
+    r13: u64
+    r14: u64
+    r15: u64
+
+    # Instruction pointer
+    rip: u64
+
+    # Flags
+    rflags: u64
+
+    # Segment selectors
+    cs: u64
+    ds: u64
+    ss: u64
+
+    # FS/GS base (for TLS and per-CPU data)
+    fs_base: u64
+    gs_base: u64
+
+# ---------- public API ----------
+
+fn context_create_kernel(entry_point: u64, stack_top: u64) -> RegisterState64:
+    RegisterState64(
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0,
+        rbp: stack_top,
+        rsp: stack_top,
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: entry_point,
+        rflags: RFLAGS_IF | RFLAGS_RESERVED,
+        cs: SEL_KERNEL_CS64,
+        ds: SEL_KERNEL_DS64,
+        ss: SEL_KERNEL_DS64,
+        fs_base: 0,
+        gs_base: 0
+    )
+
+fn context_create_user(entry_point: u64, stack_top: u64) -> RegisterState64:
+    RegisterState64(
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0,
+        rbp: stack_top,
+        rsp: stack_top,
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: entry_point,
+        rflags: RFLAGS_IF | RFLAGS_RESERVED,
+        cs: SEL_USER_CS64,
+        ds: SEL_USER_DS64,
+        ss: SEL_USER_DS64,
+        fs_base: 0,
+        gs_base: 0
+    )
+
+fn context_create(entry_point: u64, stack_top: u64, is_user: bool) -> RegisterState64:
+    if is_user:
+        return context_create_user(entry_point, stack_top)
+    context_create_kernel(entry_point, stack_top)
+
+fn context_set_rip(regs: RegisterState64, rip: u64) -> RegisterState64:
+    RegisterState64(
+        rax: regs.rax, rbx: regs.rbx, rcx: regs.rcx, rdx: regs.rdx,
+        rsi: regs.rsi, rdi: regs.rdi,
+        rbp: regs.rbp, rsp: regs.rsp,
+        r8: regs.r8, r9: regs.r9, r10: regs.r10, r11: regs.r11,
+        r12: regs.r12, r13: regs.r13, r14: regs.r14, r15: regs.r15,
+        rip: rip,
+        rflags: regs.rflags,
+        cs: regs.cs, ds: regs.ds, ss: regs.ss,
+        fs_base: regs.fs_base, gs_base: regs.gs_base
+    )
+
+fn context_set_rsp(regs: RegisterState64, rsp: u64) -> RegisterState64:
+    RegisterState64(
+        rax: regs.rax, rbx: regs.rbx, rcx: regs.rcx, rdx: regs.rdx,
+        rsi: regs.rsi, rdi: regs.rdi,
+        rbp: regs.rbp, rsp: rsp,
+        r8: regs.r8, r9: regs.r9, r10: regs.r10, r11: regs.r11,
+        r12: regs.r12, r13: regs.r13, r14: regs.r14, r15: regs.r15,
+        rip: regs.rip,
+        rflags: regs.rflags,
+        cs: regs.cs, ds: regs.ds, ss: regs.ss,
+        fs_base: regs.fs_base, gs_base: regs.gs_base
+    )
+
+# Set argument registers (System V ABI: RDI, RSI, RDX)
+fn context_set_args(regs: RegisterState64, arg0: u64, arg1: u64, arg2: u64) -> RegisterState64:
+    RegisterState64(
+        rax: regs.rax, rbx: regs.rbx, rcx: regs.rcx, rdx: arg2,
+        rsi: arg1, rdi: arg0,
+        rbp: regs.rbp, rsp: regs.rsp,
+        r8: regs.r8, r9: regs.r9, r10: regs.r10, r11: regs.r11,
+        r12: regs.r12, r13: regs.r13, r14: regs.r14, r15: regs.r15,
+        rip: regs.rip,
+        rflags: regs.rflags,
+        cs: regs.cs, ds: regs.ds, ss: regs.ss,
+        fs_base: regs.fs_base, gs_base: regs.gs_base
+    )
+
+fn context_is_user(regs: RegisterState64) -> bool:
+    (regs.cs & 0x03) == 3

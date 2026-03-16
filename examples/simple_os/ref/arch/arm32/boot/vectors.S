@@ -117,4 +117,4 @@ irq_handler:
 fiq_handler:
     EXCEPTION_ENTRY 4, handle_fiq
 
-.size vector_table, . - vector_table
+/* Note: .size omitted — vector_table and handlers span multiple sections */

@@ -47,25 +47,26 @@ _start:
     isb
 
     /* ── Set up mode stacks ── */
+    /* Use msr cpsr_c to set mode + disable IRQ/FIQ simultaneously */
 
     /* IRQ mode stack */
-    cps     #(MODE_IRQ | I_BIT | F_BIT)
+    msr     cpsr_c, #(MODE_IRQ | I_BIT | F_BIT)
     ldr     sp, =irq_stack_top
 
     /* ABT mode stack */
-    cps     #(MODE_ABT | I_BIT | F_BIT)
+    msr     cpsr_c, #(MODE_ABT | I_BIT | F_BIT)
     ldr     sp, =abt_stack_top
 
     /* UND mode stack */
-    cps     #(MODE_UND | I_BIT | F_BIT)
+    msr     cpsr_c, #(MODE_UND | I_BIT | F_BIT)
     ldr     sp, =und_stack_top
 
     /* FIQ mode stack */
-    cps     #(MODE_FIQ | I_BIT | F_BIT)
+    msr     cpsr_c, #(MODE_FIQ | I_BIT | F_BIT)
     ldr     sp, =fiq_stack_top
 
     /* Back to SVC mode for kernel execution */
-    cps     #(MODE_SVC | I_BIT | F_BIT)
+    msr     cpsr_c, #(MODE_SVC | I_BIT | F_BIT)
     ldr     sp, =svc_stack_top
 
     /* ── Zero BSS ── */
