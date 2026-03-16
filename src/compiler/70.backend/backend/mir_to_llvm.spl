@@ -504,15 +504,29 @@ impl MirTextCodegen for MirToLlvm:
     me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
         val dest_name = self.get_local(dest.id)
         val agg_ty = self.get_local_type(dest.id)
-        val agg_ptr = self.builder.fresh_local()
-        self.builder.emit_alloca(agg_ptr, agg_ty)
-        for i in 0..operands.len():
-            val elem_val = self.translate_operand(operands[i])
-            val elem_ty = self.get_operand_type(operands[i])
-            val elem_ptr = self.builder.fresh_local()
-            self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
-            self.builder.emit_store_tbaa(elem_ty, elem_val, elem_ptr)
-        self.builder.emit_load_tbaa(dest_name, agg_ty, agg_ptr)
+        if operands.len() <= 4:
+            # Small aggregate: use insertvalue chain (no alloca needed)
+            var current = "undef"
+            for i in 0..operands.len():
+                val elem_val = self.translate_operand(operands[i])
+                val elem_ty = self.get_operand_type(operands[i])
+                val next = if i == operands.len() - 1: dest_name else: self.builder.fresh_local()
+                self.builder.emit_insertvalue(next, agg_ty, current, elem_ty, elem_val, i)
+                current = next
+            if operands.len() == 0:
+                # Empty aggregate
+                self.builder.emit("  {dest_name} = insertvalue {agg_ty} undef, i32 0, 0")
+        else:
+            # Large aggregate (>4 fields): keep alloca path for efficiency
+            val agg_ptr = self.builder.fresh_local()
+            self.builder.emit_alloca(agg_ptr, agg_ty)
+            for i in 0..operands.len():
+                val elem_val = self.translate_operand(operands[i])
+                val elem_ty = self.get_operand_type(operands[i])
+                val elem_ptr = self.builder.fresh_local()
+                self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
+                self.builder.emit_store_tbaa(elem_ty, elem_val, elem_ptr)
+            self.builder.emit_load_tbaa(dest_name, agg_ty, agg_ptr)
 
     me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
         val dest_name = self.get_local(dest.id)
