@@ -282,8 +282,39 @@ impl BaremetalBuilder:
         else:
             BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Runtime support compilation failed: {stderr}", duration_ms: 0)
 
+    # Assemble an arbitrary .S or .s file to object file
+    fn assemble_file(asm_file: text) -> BuildResult:
+        # Extract base name
+        var base_name = asm_file
+        if base_name.contains("/"):
+            val parts = base_name.split("/")
+            base_name = parts[parts.len() - 1]
+        if base_name.ends_with(".S"):
+            base_name = base_name[0:base_name.len() - 2]
+        elif base_name.ends_with(".s"):
+            base_name = base_name[0:base_name.len() - 2]
+
+        val obj_file = "{self.config.output_dir}/{base_name}.o"
+        var args = self.target_clang_args()
+        args.push("-x")
+        args.push("assembler-with-cpp")
+        args.push("-c")
+        args.push(asm_file)
+        args.push("-o")
+        args.push(obj_file)
+
+        val (stdout, stderr, exit_code) = process_run("clang", args)
+        if exit_code == 0:
+            BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
+        else:
+            BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Assembly failed: {stderr}", duration_ms: 0)
+
     # Compile Simple source to object file
     fn compile_source(source_file: text) -> BuildResult:
+        # Assembly files: route through clang assembler
+        if source_file.ends_with(".S") or source_file.ends_with(".s"):
+            return self.assemble_file(source_file)
+
         # Extract base name
         var base_name = source_file
         if base_name.contains("/"):

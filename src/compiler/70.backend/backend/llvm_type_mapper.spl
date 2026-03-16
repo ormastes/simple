@@ -223,6 +223,107 @@ impl LlvmTypeMapper:
         val ret_type = self.map_type(ret)
         "{ret_type} ({param_types.join(", ")})"
 
+    # === C ABI struct layout with padding ===
+
+    fn map_struct_c_layout(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to LLVM struct type with C ABI-compliant padding.
+
+        Inserts [N x i8] padding fields between struct fields where alignment
+        requires it, and adds trailing padding to match struct alignment.
+
+        Only used for @repr(C) structs. Default Simple layout uses map_struct.
+
+        Example:
+            struct { x: i32, y: i64 }
+            Default:  { i32, i64 }           (no padding)
+            C layout: { i32, [4 x i8], i64 } (4 bytes padding for i64 alignment)
+        """
+        if fields.length == 0:
+            return "{}"
+
+        var llvm_fields: [text] = []
+        var offset: i64 = 0
+        var max_align: i64 = 1
+
+        for field in fields:
+            val field_ty = field.1
+            val field_align = self.align_of(field_ty)
+            val field_size = self.size_of(field_ty)
+
+            if field_align > max_align:
+                max_align = field_align
+
+            # Compute aligned offset and insert padding if needed
+            val aligned_offset = _align_up(offset, field_align)
+            val padding = aligned_offset - offset
+            if padding > 0:
+                llvm_fields.push("[{padding} x i8]")
+
+            llvm_fields.push(self.map_type(field_ty))
+            offset = aligned_offset + field_size
+
+        # Add trailing padding to match struct's overall alignment
+        val final_size = _align_up(offset, max_align)
+        val trailing_pad = final_size - offset
+        if trailing_pad > 0:
+            llvm_fields.push("[{trailing_pad} x i8]")
+
+        "{ {llvm_fields.join(", ")} }"
+
+    fn c_layout_field_index(source_field: i64, fields: [(text, MirType)]) -> i64:
+        """
+        Map a source-level field index to the LLVM struct element index,
+        accounting for inserted padding fields in C layout structs.
+
+        For a struct with fields [i32, i64]:
+          LLVM type: { i32, [4 x i8], i64 }
+          Source field 0 (i32) -> LLVM index 0
+          Source field 1 (i64) -> LLVM index 2 (skipping padding at index 1)
+        """
+        var llvm_index: i64 = 0
+        var offset: i64 = 0
+
+        var i: i64 = 0
+        for field in fields:
+            val field_ty = field.1
+            val field_align = self.align_of(field_ty)
+            val field_size = self.size_of(field_ty)
+
+            # Check if padding was inserted before this field
+            val aligned_offset = _align_up(offset, field_align)
+            val padding = aligned_offset - offset
+            if padding > 0:
+                llvm_index = llvm_index + 1  # Skip the padding field
+
+            if i == source_field:
+                return llvm_index
+
+            llvm_index = llvm_index + 1
+            offset = aligned_offset + field_size
+            i = i + 1
+
+        error("Field index {source_field} out of bounds for struct with {fields.length} fields")
+
+    fn c_layout_size(fields: [(text, MirType)]) -> i64:
+        """
+        Compute total size of a C layout struct including padding.
+        """
+        var offset: i64 = 0
+        var max_align: i64 = 1
+
+        for field in fields:
+            val field_ty = field.1
+            val field_align = self.align_of(field_ty)
+            val field_size = self.size_of(field_ty)
+
+            if field_align > max_align:
+                max_align = field_align
+
+            offset = _align_up(offset, field_align) + field_size
+
+        _align_up(offset, max_align)
+
     # === Size and alignment (LLVM-specific) ===
 
     fn size_of(ty: MirType) -> i64:
@@ -284,7 +385,14 @@ impl LlvmTypeMapper:
                 1  # Default alignment
 
 # ============================================================================
-# Export
+# Helpers
 # ============================================================================
 
+fn _align_up(value: i64, align: i64) -> i64:
+    """Align value up to the next multiple of align."""
+    (value + align - 1) & ~(align - 1)
+
+# ============================================================================
+# Export
+# ============================================================================
 
