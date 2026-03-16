@@ -84,6 +84,8 @@ Create and orchestrate multi-agent teams via MCP tools. Teams coordinate multipl
 |------|---------|
 | `agent_team_create` | Create team with agents and coordination strategy |
 | `agent_team_run` | Get next agent instruction for a prompt |
+| `agent_team_status` | Get team status, current agent index, coordination info |
+| `agent_team_stop` | Stop team early and get summary |
 
 ### Parameters
 
@@ -95,32 +97,49 @@ Create and orchestrate multi-agent teams via MCP tools. Teams coordinate multipl
 #### agent_team_run
 - `team_id` (required) — Team to run
 - `prompt` (required) — Task for the team
+- `result` — Result from previous agent (stored and passed to next agent)
+
+#### agent_team_status
+- `team_id` (required) — Team ID to check
+
+#### agent_team_stop
+- `team_id` (required) — Team ID to stop
 
 ### Coordination Strategies
 
 | Strategy | Behavior |
 |----------|----------|
-| `sequential` | Agents execute in order, one at a time. Each step advances to next agent. |
-| `parallel` | All agents receive the same prompt simultaneously. |
-| `round_robin` | Cycles through agents, wrapping around after the last. |
+| `sequential` | Agents execute in order. Team completes after the last agent finishes. |
+| `parallel` | Returns ALL agents' instructions in one response. Team completes immediately. |
+| `round_robin` | Cycles through agents, wrapping around after the last. Never auto-completes. |
 
 ### State
 
 State files stored in `.build/agent_loop/teams/{id}.state`
 
-### Example Flow
+### Example Flow (Sequential with Result Passing)
 
 ```
 You: Create a code review team
 AI: [calls agent_team_create(name: "review", agents: "coder,reviewer,tester", coordination: "sequential")]
 AI: [calls agent_team_run(team_id: "team_123", prompt: "Implement and review feature X")]
-→ Returns instruction for "coder" agent (step 1/3)
+→ Returns instruction for "coder" (step 1/3), status: "active"
 AI: [implements feature as coder]
-AI: [calls agent_team_run(team_id: "team_123", prompt: "Review the implementation")]
-→ Returns instruction for "reviewer" agent (step 2/3)
+AI: [calls agent_team_run(team_id: "team_123", prompt: "Review the implementation", result: "Added 3 files, 200 lines")]
+→ Returns instruction for "reviewer" (step 2/3), includes previous results, status: "active"
 AI: [reviews as reviewer]
-AI: [calls agent_team_run(team_id: "team_123", prompt: "Write tests")]
-→ Returns instruction for "tester" agent (step 3/3)
+AI: [calls agent_team_run(team_id: "team_123", prompt: "Write tests", result: "LGTM, minor style nit")]
+→ Returns instruction for "tester" (step 3/3), includes all previous results, status: "completed"
+AI: [writes tests — team is done]
+```
+
+### Example Flow (Parallel)
+
+```
+AI: [calls agent_team_create(name: "analysis", agents: "security,performance,style", coordination: "parallel")]
+AI: [calls agent_team_run(team_id: "team_456", prompt: "Analyze module X")]
+→ Returns ALL agents' instructions at once, status: "completed"
+→ AI can dispatch all three analyses simultaneously
 ```
 
 ### Combining with Agent Loop

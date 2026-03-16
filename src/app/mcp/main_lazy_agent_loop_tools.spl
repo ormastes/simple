@@ -1,7 +1,7 @@
 #![allow(unnamed_duplicate_typed_args)]
 # MCP Lazy Server - Agent Loop & Team tool handlers
 # Handles: agent_loop_start, agent_loop_status, agent_loop_step, agent_loop_stop,
-#           agent_team_create, agent_team_run
+#           agent_team_create, agent_team_run, agent_team_status, agent_team_stop
 #
 # Uses file-based state in .build/agent_loop/ — no stdlib imports.
 # AI client drives the loop by calling agent_loop_step repeatedly.
@@ -308,7 +308,7 @@ fn handle_agent_team_create(id: text, body: text) -> text:
     make_tool_result_json(id, result_ext)
 
 # ============================================================================
-# agent_team_run — Execute prompt with team, return first agent instruction
+# agent_team_run — Execute prompt with team, return next agent instruction
 # ============================================================================
 
 fn handle_agent_team_run(id: text, body: text) -> text:
@@ -319,6 +319,8 @@ fn handle_agent_team_run(id: text, body: text) -> text:
     val prompt = extract_field(body, "prompt")
     if prompt == "":
         return make_tool_error(id, -32602, "Missing required parameter: prompt")
+
+    val result_text = extract_field(body, "result")
 
     val state_path = _al_teams_dir() + "/" + team_id + ".state"
     var content = _al_read_state(state_path)
@@ -343,23 +345,78 @@ fn handle_agent_team_run(id: text, body: text) -> text:
     if current_idx >= agent_list.len():
         current_idx = 0
 
+    # Store result from previous agent if provided
+    if result_text != "":
+        var prev_idx = current_idx - 1
+        if prev_idx < 0:
+            prev_idx = agent_list.len() - 1
+        var sanitized = result_text.replace("\n", " ")
+        content = _al_set_state_field(content, "result_" + str(prev_idx), sanitized)
+
+    # Parallel: return ALL agents at once, mark completed
+    if coordination == "parallel":
+        var agents_json = SB_L()
+        var i = 0
+        while i < agent_list.len():
+            val ag = agent_list[i].trim()
+            var entry = LB()
+            entry = entry + jp("agent", js(ag))
+            entry = entry + "," + jp("agent_index", str(i))
+            entry = entry + "," + jp("instruction", js(escape_json("Execute as agent '" + ag + "' in team '" + name + "'. All agents run in parallel. Prompt: " + prompt)))
+            entry = entry + RB()
+            if i > 0:
+                agents_json = agents_json + ","
+            agents_json = agents_json + entry
+            i = i + 1
+        agents_json = agents_json + SB_R()
+
+        content = _al_set_state_field(content, "status", "completed")
+        _al_write_state(state_path, content)
+
+        var result = LB()
+        result = result + jp("team_id", js(team_id))
+        result = result + "," + jp("coordination", js("parallel"))
+        result = result + "," + jp("status", js("completed"))
+        result = result + "," + jp("agents", agents_json)
+        result = result + RB()
+        return make_tool_result_json(id, result)
+
     val current_agent = agent_list[current_idx].trim()
 
-    # Advance index for next call (round-robin / sequential)
+    # Build context from previous agents' results
+    var prev_context = ""
+    if current_idx > 0:
+        var pi = 0
+        while pi < current_idx:
+            val prev_result = _al_extract_state_field(content, "result_" + str(pi))
+            if prev_result != "":
+                val prev_agent = agent_list[pi].trim()
+                prev_context = prev_context + " [" + prev_agent + " result: " + prev_result + "]"
+            pi = pi + 1
+
+    # Advance index for next call
     var next_idx = current_idx + 1
-    if next_idx >= agent_list.len():
-        next_idx = 0
+    var new_status = "active"
+    if coordination == "round_robin":
+        if next_idx >= agent_list.len():
+            next_idx = 0
+    else:
+        # sequential: complete after last agent
+        if next_idx >= agent_list.len():
+            new_status = "completed"
     content = _al_set_state_field(content, "current_agent_index", str(next_idx))
+    content = _al_set_state_field(content, "status", new_status)
     _al_write_state(state_path, content)
 
     # Build instruction for the current agent
     var instruction = ""
-    if coordination == "parallel":
-        instruction = "Execute as agent '" + current_agent + "' in team '" + name + "'. All agents receive the same prompt. Prompt: " + prompt
-    elif coordination == "round_robin":
+    if coordination == "round_robin":
         instruction = "Execute as agent '" + current_agent + "' in team '" + name + "' (round-robin turn). Prompt: " + prompt
     else:
         instruction = "Execute as agent '" + current_agent + "' in team '" + name + "' (step " + str(current_idx + 1) + "/" + str(agent_list.len()) + "). Prompt: " + prompt
+
+    if prev_context != "":
+        instruction = instruction + " Previous results:" + prev_context
 
     var result = LB()
     result = result + jp("team_id", js(team_id))
@@ -367,7 +424,68 @@ fn handle_agent_team_run(id: text, body: text) -> text:
     result = result + "," + jp("agent_index", str(current_idx))
     result = result + "," + jp("total_agents", str(agent_list.len()))
     result = result + "," + jp("coordination", js(coordination))
+    result = result + "," + jp("status", js(new_status))
     result = result + "," + jp("instruction", js(escape_json(instruction)))
+    result = result + RB()
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# agent_team_status — Get team status and current agent index
+# ============================================================================
+
+fn handle_agent_team_status(id: text, body: text) -> text:
+    val team_id = extract_field(body, "team_id")
+    if team_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: team_id")
+
+    val state_path = _al_teams_dir() + "/" + team_id + ".state"
+    val content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Team not found: " + team_id)
+
+    val name = _al_extract_state_field(content, "name")
+    val agents = _al_extract_state_field(content, "agents")
+    val coordination = _al_extract_state_field(content, "coordination")
+    val current_idx = _al_extract_state_field(content, "current_agent_index")
+    val status = _al_extract_state_field(content, "status")
+
+    var result = LB()
+    result = result + jp("team_id", js(team_id))
+    result = result + "," + jp("name", js(name))
+    result = result + "," + jp("agents", js(agents))
+    result = result + "," + jp("coordination", js(coordination))
+    result = result + "," + jp("current_agent_index", current_idx)
+    result = result + "," + jp("status", js(status))
+    result = result + RB()
+    make_tool_result_json(id, result)
+
+# ============================================================================
+# agent_team_stop — Stop team and return summary
+# ============================================================================
+
+fn handle_agent_team_stop(id: text, body: text) -> text:
+    val team_id = extract_field(body, "team_id")
+    if team_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: team_id")
+
+    val state_path = _al_teams_dir() + "/" + team_id + ".state"
+    var content = _al_read_state(state_path)
+    if content == "":
+        return make_tool_error(id, -32602, "Team not found: " + team_id)
+
+    val name = _al_extract_state_field(content, "name")
+    val agents = _al_extract_state_field(content, "agents")
+    val current_idx = _al_extract_state_field(content, "current_agent_index")
+
+    content = _al_set_state_field(content, "status", "stopped")
+    _al_write_state(state_path, content)
+
+    var result = LB()
+    result = result + jp("status", js("stopped"))
+    result = result + "," + jp("team_id", js(team_id))
+    result = result + "," + jp("name", js(name))
+    result = result + "," + jp("agents", js(agents))
+    result = result + "," + jp("agents_completed", current_idx)
     result = result + RB()
     make_tool_result_json(id, result)
 
