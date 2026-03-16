@@ -1,5 +1,86 @@
 # feature/task_runner/queue — Priority queue operations
 
+fn _tq_save():
+    var lines: [text] = []
+    var tmp_nid = TQ_NEXT_ID
+    lines = lines + ["next_id: " + tmp_nid.to_text()]
+    var i = 0
+    while i < TQ_COUNT:
+        var tmp_p = TQ_PRIORITIES[i]
+        lines = lines + ["task:"]
+        lines = lines + ["  id: " + TQ_IDS[i]]
+        lines = lines + ["  content: " + TQ_CONTENTS[i]]
+        lines = lines + ["  priority: " + tmp_p.to_text()]
+        lines = lines + ["  status: " + TQ_STATUSES[i]]
+        lines = lines + ["  agent_id: " + TQ_AGENT_IDS[i]]
+        i = i + 1
+    rt_file_write_text(CFG_TASK_PERSISTENCE_PATH, lines.join("\n") + "\n")
+
+fn _tq_load():
+    if not rt_file_exists(CFG_TASK_PERSISTENCE_PATH):
+        return
+    val content = rt_file_read_text(CFG_TASK_PERSISTENCE_PATH) ?? ""
+    if content == "":
+        return
+    _parse_lines_with_indent(content)
+    var line_idx = 0
+    var in_task = false
+    var t_id = ""
+    var t_content = ""
+    var t_priority = 0
+    var t_status = ""
+    var t_agent_id = ""
+    while line_idx < _PARSED_COUNT:
+        val trimmed = _PARSED_LINES[line_idx]
+        val indent = _PARSED_INDENTS[line_idx]
+        line_idx = line_idx + 1
+        if not trimmed.contains(":"):
+            continue
+        val colon_pos = trimmed.index_of(":") ?? 0
+        val key = trimmed[0:colon_pos].trim()
+        val tlen = trimmed.len()
+        var value = ""
+        if colon_pos + 1 < tlen:
+            value = trimmed[colon_pos + 1:tlen].trim()
+        if indent == 0 and key == "next_id":
+            TQ_NEXT_ID = int(value)
+        elif indent == 0 and key == "task":
+            if in_task and t_id != "":
+                TQ_IDS = TQ_IDS + [t_id]
+                TQ_CONTENTS = TQ_CONTENTS + [t_content]
+                TQ_PRIORITIES = TQ_PRIORITIES + [t_priority]
+                TQ_STATUSES = TQ_STATUSES + [t_status]
+                TQ_AGENT_IDS = TQ_AGENT_IDS + [t_agent_id]
+                TQ_RESULTS = TQ_RESULTS + [""]
+                TQ_ERRORS = TQ_ERRORS + [""]
+                TQ_COUNT = TQ_COUNT + 1
+            in_task = true
+            t_id = ""
+            t_content = ""
+            t_priority = 0
+            t_status = "pending"
+            t_agent_id = ""
+        elif in_task and indent > 0:
+            if key == "id":
+                t_id = value
+            elif key == "content":
+                t_content = value
+            elif key == "priority":
+                t_priority = int(value)
+            elif key == "status":
+                t_status = value
+            elif key == "agent_id":
+                t_agent_id = value
+    if in_task and t_id != "":
+        TQ_IDS = TQ_IDS + [t_id]
+        TQ_CONTENTS = TQ_CONTENTS + [t_content]
+        TQ_PRIORITIES = TQ_PRIORITIES + [t_priority]
+        TQ_STATUSES = TQ_STATUSES + [t_status]
+        TQ_AGENT_IDS = TQ_AGENT_IDS + [t_agent_id]
+        TQ_RESULTS = TQ_RESULTS + [""]
+        TQ_ERRORS = TQ_ERRORS + [""]
+        TQ_COUNT = TQ_COUNT + 1
+
 fn _task_add(content: text, priority: i64) -> text:
     var tmp_id = TQ_NEXT_ID
     val id = "task-" + tmp_id.to_text()
@@ -12,6 +93,7 @@ fn _task_add(content: text, priority: i64) -> text:
     TQ_RESULTS = TQ_RESULTS + [""]
     TQ_ERRORS = TQ_ERRORS + [""]
     TQ_COUNT = TQ_COUNT + 1
+    _tq_save()
     id
 
 fn _task_list_text() -> text:

@@ -107,7 +107,7 @@ fn t32_make_init_response(id: text) -> text:
     val server_info = t32_jo3(
         t32_jp("name", t32_js(T32_SERVER_NAME)),
         t32_jp("version", t32_js(T32_SERVER_VERSION)),
-        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 23 tools for session management, window capture, action invocation, field manipulation, headless setup, and command database."))
+        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 26 tools for lifecycle management, session management, window capture, action invocation, field manipulation, headless setup, and command database."))
     )
     val result = t32_jo3(
         t32_jp("protocolVersion", t32_js("2025-06-18")),
@@ -117,7 +117,7 @@ fn t32_make_init_response(id: text) -> text:
     T32_INIT_CACHE = result
     t32_make_json_result(id, result)
 
-# --- Tools list (23 T32 tools) ---
+# --- Tools list (26 T32 tools) ---
 
 fn t32_make_tools_list(id: text) -> text:
     if T32_TOOLS_CACHE != "":
@@ -155,6 +155,11 @@ fn t32_make_tools_list(id: text) -> text:
     tool_parts.push(t32_make_tool_schema("t32_setup_headless", "One-shot headless setup: SCREEN.OFF + AREA.Create + AREA.Select + SYStem.Option SemiHost ON + error handler"))
     tool_parts.push(t32_make_tool_schema("t32_area_read", "Read AREA buffer content via WinPrint.AREA, optionally clear"))
     tool_parts.push(t32_make_tool_schema("t32_cmm_commands", "Query PRACTICE command database (120+ commands) by group or search"))
+
+    # Lifecycle tools (3)
+    tool_parts.push(t32_make_tool_schema("t32_launch", "Launch PowerView process (headless via xvfb-run or visible), auto-register as session"))
+    tool_parts.push(t32_make_tool_schema("t32_shutdown", "Graceful PowerView shutdown via QUIT, optional force kill"))
+    tool_parts.push(t32_make_tool_schema("t32_status", "T32 installation discovery, running processes, USB probe status, available configs"))
 
     val tools = t32_SB_L() + tool_parts.join(",") + t32_SB_R()
     val result = t32_jo1(t32_jp("tools", tools))
@@ -276,6 +281,25 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
             t32_jp("search", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Search substring in command name or description"))))
         )
 
+    # Lifecycle tools
+    elif name == "t32_launch":
+        var p = t32_LB()
+        p = p + t32_jp("architecture", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Target architecture: arm, arm64, tricore, ppc, riscv, x86 (default: arm)"))))
+        p = p + "," + t32_jp("config", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("T32 config file path (default: config/t32/t32_stm_headless.t32)"))))
+        p = p + "," + t32_jp("headless", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Launch headless via xvfb-run: true/false (default: true)"))))
+        p = p + "," + t32_jp("port", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("RCL NETASSIST port (default: 20000)"))))
+        p = p + "," + t32_jp("startup_script", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("CMM script to run after launch (optional)"))))
+        p = p + t32_RB()
+        props = p
+    elif name == "t32_shutdown":
+        props = t32_jo2(
+            t32_jp("port", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Port of PowerView instance to shutdown")))),
+            t32_jp("force", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', force-kill if QUIT fails (default: false)"))))
+        )
+        req = "[" + t32_js("port") + "]"
+    elif name == "t32_status":
+        props = t32_LB() + t32_RB()
+
     var schema = t32_LB()
     schema = schema + t32_jp("type", t32_js("object"))
     schema = schema + "," + t32_jp("properties", props)
@@ -291,12 +315,14 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         name == "t32_window_describe" or name == "t32_field_get" or
         name == "t32_history_tail" or name == "t32_eval" or
         name == "t32_resources_list" or name == "t32_resource_read" or
-        name == "t32_area_read" or name == "t32_cmm_commands"):
+        name == "t32_area_read" or name == "t32_cmm_commands" or
+        name == "t32_status"):
         read_only = "true"
-    if name == "t32_session_close":
+    if name == "t32_session_close" or name == "t32_shutdown":
         destructive = "true"
     if (name == "t32_cmd_run" or name == "t32_cmm_run" or
-        name == "t32_action_invoke"):
+        name == "t32_action_invoke" or name == "t32_launch" or
+        name == "t32_shutdown"):
         idempotent = "false"
 
     var annotations = t32_LB()
