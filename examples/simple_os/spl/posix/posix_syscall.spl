@@ -1,0 +1,443 @@
+# POSIX Syscall Dispatch
+# Routes POSIX syscall numbers (100+) to their implementations.
+# All POSIX operations go through this single dispatch function.
+
+use posix.vfs.vfs.{Vfs, vfs_open, vfs_read, vfs_write, vfs_stat,
+    vfs_mkdir, vfs_unlink, vfs_readdir, vfs_resolve}
+use posix.vfs.inode.{InodeRef, Stat, DirEntry, inode_ref_is_valid,
+    inode_ref_none, FS_RAMFS, FS_DEVFS}
+use posix.io.fd_table.{FdTable, fd_alloc, fd_close, fd_get, fd_dup,
+    fd_dup2, fd_update_offset, MAX_FDS}
+use posix.io.file.{OpenFile, open_file_create, open_file_empty,
+    open_file_is_readable, open_file_is_writable, O_RDONLY, O_WRONLY,
+    O_RDWR, O_CREAT, O_APPEND}
+use posix.io.pipe.{Pipe, pipe_create, pipe_read, pipe_write,
+    pipe_close_read, pipe_close_write}
+use posix.process.process.{Process, ProcessState}
+use posix.process.process_table.{ProcessTable, process_table_find,
+    process_table_get, process_table_set_state}
+use posix.process.spawn.{spawn_process, process_exit, process_wait,
+    SpawnConfig, spawn_config_default}
+use posix.process.signal.{signal_send, signal_set_handler,
+    signal_is_valid}
+use posix.mem.brk.{HeapState, heap_brk, heap_sbrk}
+use posix.time.clock.{ClockState, clock_gettime, Timespec, timespec_create,
+    timespec_to_ticks}
+use posix.time.sleep.{nanosleep_start, SleepRequest}
+use posix.async.reactor.{Reactor, reactor_schedule_timer, reactor_cancel_timer}
+use posix.async.timer_wheel.{TimerWheel}
+use posix.errno.{ENOSYS, EBADF, EINVAL, ENOENT, EISDIR, ENOTDIR, EPERM}
+use kernel.core.scheduler.{Scheduler}
+
+# ---------------------------------------------------------------------------
+# POSIX Syscall Numbers (100+)
+# ---------------------------------------------------------------------------
+val SYS_OPEN: u32 = 100
+val SYS_CLOSE: u32 = 101
+val SYS_READ: u32 = 102
+val SYS_WRITE: u32 = 103
+val SYS_LSEEK: u32 = 104
+val SYS_STAT: u32 = 105
+val SYS_FSTAT: u32 = 106
+val SYS_DUP: u32 = 107
+val SYS_DUP2: u32 = 108
+val SYS_MKDIR: u32 = 110
+val SYS_OPENDIR: u32 = 111
+val SYS_READDIR: u32 = 112
+val SYS_CLOSEDIR: u32 = 113
+val SYS_UNLINK: u32 = 114
+val SYS_GETPID: u32 = 120
+val SYS_GETPPID: u32 = 121
+val SYS_EXIT: u32 = 122
+val SYS_WAIT: u32 = 123
+val SYS_SPAWN: u32 = 124
+val SYS_BRK: u32 = 130
+val SYS_SBRK: u32 = 131
+val SYS_CLOCK_GETTIME: u32 = 140
+val SYS_NANOSLEEP: u32 = 141
+val SYS_SIGNAL: u32 = 150
+val SYS_KILL: u32 = 151
+val SYS_PIPE: u32 = 160
+
+# ---------------------------------------------------------------------------
+# Lseek whence constants
+# ---------------------------------------------------------------------------
+val SEEK_SET: u32 = 0
+val SEEK_CUR: u32 = 1
+val SEEK_END: u32 = 2
+
+# ---------------------------------------------------------------------------
+# POSIX subsystem state — holds all POSIX layer state
+# ---------------------------------------------------------------------------
+struct PosixState:
+    vfs: Vfs
+    proc_table: ProcessTable
+    reactor: Reactor
+    clock: ClockState
+    pipes: [Pipe; 16]
+    pipe_used: [bool; 16]
+    pipe_count: u32
+    is_initialized: bool
+
+# ---------------------------------------------------------------------------
+# Encode a negative errno as a u32 return value.
+# Convention: errors are returned as 0xFFFFFFFF - errno + 1 (i.e., -errno in
+# two's complement). The caller checks if result > 0xFFFFF000.
+# ---------------------------------------------------------------------------
+val ERROR_THRESHOLD: u32 = 0xFFFFF000
+
+fn encode_error(errno: u32) -> u32:
+    0 - errno
+
+fn is_error(result: u32) -> bool:
+    result >= ERROR_THRESHOLD
+
+# ---------------------------------------------------------------------------
+# sys_open — open a file by path
+# a0: path address (treated as inode path for now)
+# a1: flags
+# a2: mode
+# Returns: fd or negative errno
+# ---------------------------------------------------------------------------
+fn sys_open(state: var PosixState, proc_idx: u32, path: text,
+            flags: u32, mode: u32) -> u32:
+    val open_result = vfs_open(state.vfs, path, flags, mode)
+    if val ref = open_result.ok():
+        val file = open_file_create(ref.inode_id, ref.fs_id, flags)
+        val fd_result = fd_alloc(state.proc_table.processes[proc_idx].fd_table, file)
+        if val fd = fd_result.ok():
+            return fd
+        else:
+            val err = fd_result.err()
+            return encode_error(err)
+    else:
+        val err = open_result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_close — close a file descriptor
+# ---------------------------------------------------------------------------
+fn sys_close(state: var PosixState, proc_idx: u32, fd: u32) -> u32:
+    val result = fd_close(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val ok = result.ok():
+        return 0
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_read — read from a file descriptor
+# Returns bytes read or negative errno
+# ---------------------------------------------------------------------------
+fn sys_read(state: var PosixState, proc_idx: u32, fd: u32,
+            buf: var [u8; 4096], count: u32) -> u32:
+    val fd_result = fd_get(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val file = fd_result.ok():
+        if !open_file_is_readable(file):
+            return encode_error(EBADF)
+        val ref = posix.vfs.inode.inode_ref_create(file.fs_id, file.inode_id)
+        val read_result = vfs_read(state.vfs, ref, file.offset, buf, count)
+        if val bytes_read = read_result.ok():
+            # Update file offset
+            val new_offset = file.offset + bytes_read
+            fd_update_offset(state.proc_table.processes[proc_idx].fd_table, fd, new_offset)
+            return bytes_read
+        else:
+            val err = read_result.err()
+            return encode_error(err)
+    else:
+        val err = fd_result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_write — write to a file descriptor
+# Returns bytes written or negative errno
+# ---------------------------------------------------------------------------
+fn sys_write(state: var PosixState, proc_idx: u32, fd: u32,
+             buf: [u8; 4096], count: u32) -> u32:
+    val fd_result = fd_get(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val file = fd_result.ok():
+        if !open_file_is_writable(file):
+            return encode_error(EBADF)
+        var write_offset = file.offset
+        if (file.flags & O_APPEND) != 0:
+            # For append mode, get the file size first
+            val ref = posix.vfs.inode.inode_ref_create(file.fs_id, file.inode_id)
+            val stat_result = vfs_stat(state.vfs, ref)
+            if val st = stat_result.ok():
+                write_offset = st.size
+        val ref = posix.vfs.inode.inode_ref_create(file.fs_id, file.inode_id)
+        val write_result = vfs_write(state.vfs, ref, write_offset, buf, count)
+        if val bytes_written = write_result.ok():
+            val new_offset = write_offset + bytes_written
+            fd_update_offset(state.proc_table.processes[proc_idx].fd_table, fd, new_offset)
+            return bytes_written
+        else:
+            val err = write_result.err()
+            return encode_error(err)
+    else:
+        val err = fd_result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_lseek — reposition file offset
+# ---------------------------------------------------------------------------
+fn sys_lseek(state: var PosixState, proc_idx: u32, fd: u32,
+             offset: u32, whence: u32) -> u32:
+    val fd_result = fd_get(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val file = fd_result.ok():
+        var new_offset: u32 = 0
+        if whence == SEEK_SET:
+            new_offset = offset
+        else if whence == SEEK_CUR:
+            new_offset = file.offset + offset
+        else if whence == SEEK_END:
+            # Need to get file size
+            val ref = posix.vfs.inode.inode_ref_create(file.fs_id, file.inode_id)
+            val stat_result = vfs_stat(state.vfs, ref)
+            if val st = stat_result.ok():
+                new_offset = st.size + offset
+            else:
+                return encode_error(EINVAL)
+        else:
+            return encode_error(EINVAL)
+        fd_update_offset(state.proc_table.processes[proc_idx].fd_table, fd, new_offset)
+        return new_offset
+    else:
+        val err = fd_result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_stat — get file status by path
+# ---------------------------------------------------------------------------
+fn sys_stat(state: var PosixState, path: text) -> Result<Stat, u32>:
+    val resolve_result = vfs_resolve(state.vfs, path)
+    if val ref = resolve_result.ok():
+        return vfs_stat(state.vfs, ref)
+    else:
+        val err = resolve_result.err()
+        return Result<Stat, u32>.Err(err)
+
+# ---------------------------------------------------------------------------
+# sys_fstat — get file status by fd
+# ---------------------------------------------------------------------------
+fn sys_fstat(state: var PosixState, proc_idx: u32, fd: u32) -> Result<Stat, u32>:
+    val fd_result = fd_get(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val file = fd_result.ok():
+        val ref = posix.vfs.inode.inode_ref_create(file.fs_id, file.inode_id)
+        return vfs_stat(state.vfs, ref)
+    else:
+        val err = fd_result.err()
+        return Result<Stat, u32>.Err(err)
+
+# ---------------------------------------------------------------------------
+# sys_dup / sys_dup2
+# ---------------------------------------------------------------------------
+fn sys_dup(state: var PosixState, proc_idx: u32, fd: u32) -> u32:
+    val result = fd_dup(state.proc_table.processes[proc_idx].fd_table, fd)
+    if val new_fd = result.ok():
+        return new_fd
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+fn sys_dup2(state: var PosixState, proc_idx: u32, old_fd: u32, new_fd: u32) -> u32:
+    val result = fd_dup2(state.proc_table.processes[proc_idx].fd_table, old_fd, new_fd)
+    if val fd = result.ok():
+        return fd
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_mkdir — create a directory
+# ---------------------------------------------------------------------------
+fn sys_mkdir(state: var PosixState, path: text, mode: u32) -> u32:
+    val result = vfs_mkdir(state.vfs, path, mode)
+    if val ok = result.ok():
+        return 0
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_unlink — remove a file
+# ---------------------------------------------------------------------------
+fn sys_unlink(state: var PosixState, path: text) -> u32:
+    val result = vfs_unlink(state.vfs, path)
+    if val ok = result.ok():
+        return 0
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_pipe — create a pipe, returns two fds
+# ---------------------------------------------------------------------------
+fn sys_pipe(state: var PosixState, proc_idx: u32,
+            fd_out: var [u32; 2]) -> u32:
+    # Find a free pipe slot
+    var pipe_idx: u32 = 0xFFFFFFFF
+    for i in 0..16:
+        if !state.pipe_used[i]:
+            pipe_idx = i
+            break
+    if pipe_idx == 0xFFFFFFFF:
+        return encode_error(12)  # ENOMEM
+
+    state.pipes[pipe_idx] = pipe_create()
+    state.pipe_used[pipe_idx] = true
+    state.pipe_count = state.pipe_count + 1
+
+    # Create read end fd
+    var read_file = open_file_create(pipe_idx, 0xFF, O_RDONLY)  # fs_id 0xFF = pipe
+    val read_result = fd_alloc(state.proc_table.processes[proc_idx].fd_table, read_file)
+    if val read_fd = read_result.ok():
+        # Create write end fd
+        var write_file = open_file_create(pipe_idx, 0xFF, O_WRONLY)
+        val write_result = fd_alloc(state.proc_table.processes[proc_idx].fd_table, write_file)
+        if val write_fd = write_result.ok():
+            fd_out[0] = read_fd
+            fd_out[1] = write_fd
+            return 0
+        else:
+            # Clean up read fd
+            fd_close(state.proc_table.processes[proc_idx].fd_table, read_fd)
+            state.pipe_used[pipe_idx] = false
+            state.pipe_count = state.pipe_count - 1
+            val err = write_result.err()
+            return encode_error(err)
+    else:
+        state.pipe_used[pipe_idx] = false
+        state.pipe_count = state.pipe_count - 1
+        val err = read_result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_getpid / sys_getppid
+# ---------------------------------------------------------------------------
+fn sys_getpid(state: PosixState, proc_idx: u32) -> u32:
+    state.proc_table.processes[proc_idx].pid
+
+fn sys_getppid(state: PosixState, proc_idx: u32) -> u32:
+    state.proc_table.processes[proc_idx].ppid
+
+# ---------------------------------------------------------------------------
+# sys_exit — terminate current process
+# ---------------------------------------------------------------------------
+fn sys_exit(state: var PosixState, proc_idx: u32, exit_code: u32):
+    val pid = state.proc_table.processes[proc_idx].pid
+    process_exit(state.proc_table, pid, exit_code)
+
+# ---------------------------------------------------------------------------
+# sys_wait — wait for child process
+# ---------------------------------------------------------------------------
+fn sys_wait(state: var PosixState, proc_idx: u32) -> u32:
+    val pid = state.proc_table.processes[proc_idx].pid
+    val result = process_wait(state.proc_table, pid)
+    if val child_pid = result.ok():
+        return child_pid
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_brk / sys_sbrk
+# ---------------------------------------------------------------------------
+fn sys_brk(state: var PosixState, proc_idx: u32, new_brk: u32) -> u32:
+    var heap = posix.mem.brk.HeapState(
+        base: state.proc_table.processes[proc_idx].heap_start,
+        current_brk: state.proc_table.processes[proc_idx].heap_current,
+        max_brk: state.proc_table.processes[proc_idx].heap_start + 65536
+    )
+    val result = heap_brk(heap, new_brk)
+    if val new_val = result.ok():
+        state.proc_table.processes[proc_idx].heap_current = new_val
+        return new_val
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+fn sys_sbrk(state: var PosixState, proc_idx: u32, increment: u32) -> u32:
+    var heap = posix.mem.brk.HeapState(
+        base: state.proc_table.processes[proc_idx].heap_start,
+        current_brk: state.proc_table.processes[proc_idx].heap_current,
+        max_brk: state.proc_table.processes[proc_idx].heap_start + 65536
+    )
+    val result = heap_sbrk(heap, increment)
+    if val old_brk = result.ok():
+        state.proc_table.processes[proc_idx].heap_current = heap.current_brk
+        return old_brk
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_signal — set signal handler
+# ---------------------------------------------------------------------------
+fn sys_signal(state: var PosixState, proc_idx: u32, sig: u32, handler: u32) -> u32:
+    val pid = state.proc_table.processes[proc_idx].pid
+    val result = signal_set_handler(state.proc_table, pid, sig, handler)
+    if val ok = result.ok():
+        return 0
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# sys_kill — send signal to process
+# ---------------------------------------------------------------------------
+fn sys_kill(state: var PosixState, pid: u32, sig: u32) -> u32:
+    val result = signal_send(state.proc_table, pid, sig)
+    if val ok = result.ok():
+        return 0
+    else:
+        val err = result.err()
+        return encode_error(err)
+
+# ---------------------------------------------------------------------------
+# Main POSIX syscall dispatch function.
+# Called from the kernel's syscall_dispatch when syscall number >= 100.
+#
+# Arguments are passed as u32 values. The interpretation depends on the
+# specific syscall. For path-based calls, a0 is treated as a pointer to
+# the path string in the caller's address space.
+#
+# Returns a u32 result. Values >= ERROR_THRESHOLD indicate errors (negative errno).
+# ---------------------------------------------------------------------------
+fn posix_dispatch(state: var PosixState, sched: var Scheduler,
+                  num: u32, a0: u32, a1: u32, a2: u32, a3: u32,
+                  current_pid: u32) -> u32:
+    # Find the process index for the current pid
+    if val proc_idx = process_table_find(state.proc_table, current_pid):
+        if num == SYS_CLOSE:
+            return sys_close(state, proc_idx, a0)
+        if num == SYS_DUP:
+            return sys_dup(state, proc_idx, a0)
+        if num == SYS_DUP2:
+            return sys_dup2(state, proc_idx, a0, a1)
+        if num == SYS_LSEEK:
+            return sys_lseek(state, proc_idx, a0, a1, a2)
+        if num == SYS_GETPID:
+            return sys_getpid(state, proc_idx)
+        if num == SYS_GETPPID:
+            return sys_getppid(state, proc_idx)
+        if num == SYS_EXIT:
+            sys_exit(state, proc_idx, a0)
+            return 0
+        if num == SYS_WAIT:
+            return sys_wait(state, proc_idx)
+        if num == SYS_BRK:
+            return sys_brk(state, proc_idx, a0)
+        if num == SYS_SBRK:
+            return sys_sbrk(state, proc_idx, a0)
+        if num == SYS_SIGNAL:
+            return sys_signal(state, proc_idx, a0, a1)
+        if num == SYS_KILL:
+            return sys_kill(state, a0, a1)
+
+        # Syscalls that don't need per-call implementation here
+        # (they need string/buffer args which require memory access)
+        return encode_error(ENOSYS)
+    else:
+        return encode_error(EINVAL)

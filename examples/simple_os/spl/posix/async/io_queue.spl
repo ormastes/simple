@@ -1,0 +1,242 @@
+# I/O Submission and Completion Queues
+# Implements io_uring-style submission and completion queues using ring buffers.
+# Operations are submitted to a submission ring, processed externally, and
+# results posted to a completion ring for asynchronous retrieval.
+
+use kernel.lib.ring_buffer.{RingBuffer, ring_buffer_create, ring_buffer_push,
+    ring_buffer_pop, ring_buffer_is_empty, ring_buffer_is_full, ring_buffer_count}
+use posix.async.future.{Waker, waker_create, waker_none, waker_is_valid}
+use posix.errno.{EAGAIN, ENOMEM}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val MAX_IO_OPS: u32 = 64
+
+# ---------------------------------------------------------------------------
+# I/O operation type
+# ---------------------------------------------------------------------------
+enum IoOpType:
+    Read
+    Write
+    Fsync
+    Poll
+    Timer
+
+# ---------------------------------------------------------------------------
+# I/O operation state
+# ---------------------------------------------------------------------------
+enum IoOpState:
+    Pending
+    InProgress
+    Completed
+    Cancelled
+
+# ---------------------------------------------------------------------------
+# I/O operation descriptor
+# ---------------------------------------------------------------------------
+struct IoOp:
+    id: u32
+    op_type: IoOpType
+    state: IoOpState
+    fd: u32                 # File descriptor
+    offset: u32             # File offset for read/write
+    buf_addr: u32           # Buffer address
+    buf_len: u32            # Buffer length
+    result: u32             # Bytes transferred or error
+    error: u32              # errno if failed, 0 if success
+    waker: Waker            # Waker to signal on completion
+
+# ---------------------------------------------------------------------------
+# I/O queue — manages submission and completion of async I/O operations
+# ---------------------------------------------------------------------------
+struct IoQueue:
+    ops: [IoOp; 64]
+    used: [bool; 64]
+    op_count: u32
+    next_id: u32
+    submission_ring: RingBuffer   # Indices of ops ready to process
+    completion_ring: RingBuffer   # Indices of completed ops
+
+# ---------------------------------------------------------------------------
+# Create an empty placeholder I/O operation.
+# ---------------------------------------------------------------------------
+fn io_op_empty() -> IoOp:
+    IoOp(
+        id: 0,
+        op_type: IoOpType.Read,
+        state: IoOpState.Pending,
+        fd: 0,
+        offset: 0,
+        buf_addr: 0,
+        buf_len: 0,
+        result: 0,
+        error: 0,
+        waker: waker_none()
+    )
+
+# ---------------------------------------------------------------------------
+# Create a new I/O queue with empty slots and ring buffers.
+# ---------------------------------------------------------------------------
+fn io_queue_create() -> IoQueue:
+    var ops: [IoOp; 64] = [io_op_empty(); 64]
+    var used: [bool; 64] = [false; 64]
+    IoQueue(
+        ops: ops,
+        used: used,
+        op_count: 0,
+        next_id: 1,
+        submission_ring: ring_buffer_create(MAX_IO_OPS + 1),
+        completion_ring: ring_buffer_create(MAX_IO_OPS + 1)
+    )
+
+# ---------------------------------------------------------------------------
+# Find a free slot in the ops array.
+# Returns the index or None if all slots are occupied.
+# ---------------------------------------------------------------------------
+fn io_queue_find_free_slot(q: IoQueue) -> Option<u32>:
+    for i in 0..MAX_IO_OPS:
+        if !q.used[i]:
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Submit a new I/O operation to the queue.
+# Returns the op id on success, or an errno on failure.
+# ---------------------------------------------------------------------------
+fn io_queue_submit(q: var IoQueue, op_type: IoOpType, fd: u32, offset: u32,
+                   buf_addr: u32, buf_len: u32, waker: Waker) -> Result<u32, u32>:
+    # Check if the submission ring is full
+    if ring_buffer_is_full(q.submission_ring):
+        return Result<u32, u32>.Err(EAGAIN)
+
+    # Find a free slot
+    val slot_opt = io_queue_find_free_slot(q)
+    if val slot = slot_opt:
+        val op_id = q.next_id
+        q.next_id = q.next_id + 1
+
+        q.ops[slot] = IoOp(
+            id: op_id,
+            op_type: op_type,
+            state: IoOpState.Pending,
+            fd: fd,
+            offset: offset,
+            buf_addr: buf_addr,
+            buf_len: buf_len,
+            result: 0,
+            error: 0,
+            waker: waker
+        )
+        q.used[slot] = true
+        q.op_count = q.op_count + 1
+
+        # Push the slot index onto the submission ring
+        ring_buffer_push(q.submission_ring, slot)
+
+        Result<u32, u32>.Ok(op_id)
+    else:
+        Result<u32, u32>.Err(ENOMEM)
+
+# ---------------------------------------------------------------------------
+# Find the slot index for a given op id.
+# Returns the slot index or None if not found.
+# ---------------------------------------------------------------------------
+fn io_queue_find_slot(q: IoQueue, op_id: u32) -> Option<u32>:
+    for i in 0..MAX_IO_OPS:
+        if q.used[i] and q.ops[i].id == op_id:
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Mark an operation as completed and push it to the completion ring.
+# The result is the number of bytes transferred (or 0), and error is
+# the errno code (0 for success).
+# ---------------------------------------------------------------------------
+fn io_queue_complete(q: var IoQueue, op_id: u32, result: u32, error: u32):
+    val slot_opt = io_queue_find_slot(q, op_id)
+    if val slot = slot_opt:
+        q.ops[slot].state = IoOpState.Completed
+        q.ops[slot].result = result
+        q.ops[slot].error = error
+
+        ring_buffer_push(q.completion_ring, slot)
+
+        # Wake the blocked task if a valid waker is attached
+        if waker_is_valid(q.ops[slot].waker):
+            # Waker signalling is handled by the reactor layer
+            pass_dn
+
+# ---------------------------------------------------------------------------
+# Poll the completion ring for the next completed operation.
+# Returns the op id of the completed operation, or None if empty.
+# ---------------------------------------------------------------------------
+fn io_queue_poll_completion(q: var IoQueue) -> Option<u32>:
+    val slot_opt = ring_buffer_pop(q.completion_ring)
+    if val slot = slot_opt:
+        val op_id = q.ops[slot].id
+
+        # Release the slot
+        q.used[slot] = false
+        q.op_count = q.op_count - 1
+
+        Option<u32>.Some(op_id)
+    else:
+        Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Get an I/O operation by its id.
+# Returns None if the op is not found or the slot is not in use.
+# ---------------------------------------------------------------------------
+fn io_queue_get_op(q: IoQueue, op_id: u32) -> Option<IoOp>:
+    val slot_opt = io_queue_find_slot(q, op_id)
+    if val slot = slot_opt:
+        Option<IoOp>.Some(q.ops[slot])
+    else:
+        Option<IoOp>.None
+
+# ---------------------------------------------------------------------------
+# Cancel a pending I/O operation.
+# Only operations in Pending state can be cancelled.
+# Returns Ok with the op id on success, or Err with errno on failure.
+# ---------------------------------------------------------------------------
+fn io_queue_cancel(q: var IoQueue, op_id: u32) -> Result<u32, u32>:
+    val slot_opt = io_queue_find_slot(q, op_id)
+    if val slot = slot_opt:
+        if q.ops[slot].state == IoOpState.Pending:
+            q.ops[slot].state = IoOpState.Cancelled
+            q.ops[slot].error = EAGAIN
+
+            # Push to completion ring so the caller can observe cancellation
+            ring_buffer_push(q.completion_ring, slot)
+
+            Result<u32, u32>.Ok(op_id)
+        else:
+            # Cannot cancel an operation that is already in progress or completed
+            Result<u32, u32>.Err(EAGAIN)
+    else:
+        Result<u32, u32>.Err(EAGAIN)
+
+# ---------------------------------------------------------------------------
+# Count the number of in-flight (Pending or InProgress) operations.
+# ---------------------------------------------------------------------------
+fn io_queue_pending_count(q: IoQueue) -> u32:
+    var count: u32 = 0
+    for i in 0..MAX_IO_OPS:
+        if q.used[i]:
+            if q.ops[i].state == IoOpState.Pending or q.ops[i].state == IoOpState.InProgress:
+                count = count + 1
+    count
+
+# ---------------------------------------------------------------------------
+# Pop the next operation id from the submission ring for processing.
+# The operation state is advanced from Pending to InProgress.
+# Returns the op id or None if no submissions are queued.
+# ---------------------------------------------------------------------------
+fn io_queue_next_submission(q: var IoQueue) -> Option<u32>:
+    val slot_opt = ring_buffer_pop(q.submission_ring)
+    if val slot = slot_opt:
+        q.ops[slot].state = IoOpState.InProgress
+        Option<u32>.Some(q.ops[slot].id)
+    else:
+        Option<u32>.None

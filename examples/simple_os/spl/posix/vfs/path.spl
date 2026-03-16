@@ -1,0 +1,207 @@
+# Path Utilities
+# POSIX-style path manipulation for the virtual file system layer.
+# Handles normalization, splitting, joining, and component extraction
+# of slash-separated paths.
+
+val PATH_SEPARATOR: text = "/"
+val MAX_PATH_LENGTH: u32 = 256
+val MAX_PATH_COMPONENTS: u32 = 32
+
+# Check whether a path is absolute (starts with "/").
+fn path_is_absolute(path: text) -> bool:
+    if path.len() == 0:
+        return false
+    path.char_at(0) == '/'
+
+# Normalize a path by resolving "." and ".." components and removing
+# trailing slashes and duplicate slashes. An absolute path stays absolute;
+# a relative path stays relative.
+fn path_normalize(path: text) -> text:
+    if path.len() == 0:
+        return "."
+
+    val is_abs = path_is_absolute(path)
+
+    # Split the raw path into components, skipping empty segments
+    # (which come from duplicate slashes) and "." entries.
+    var parts: [text; 32] = [""; 32]
+    var part_count: u32 = 0
+
+    var seg_start: u32 = 0
+    var i: u32 = 0
+    val plen = path.len()
+
+    while i <= plen:
+        val is_sep = if i < plen: path.char_at(i) == '/'
+                     else: true
+        if is_sep:
+            if i > seg_start:
+                var seg = path.substring(seg_start, i)
+                if seg == ".":
+                    # Current-dir reference — skip
+                    pass_dn
+                else if seg == "..":
+                    # Parent-dir reference — pop the last component unless
+                    # we are at the root of an absolute path.
+                    if part_count > 0:
+                        val prev = parts[part_count - 1]
+                        if prev == "..":
+                            # Already stacked ".." for a relative path
+                            if part_count < MAX_PATH_COMPONENTS:
+                                parts[part_count] = ".."
+                                part_count = part_count + 1
+                        else:
+                            part_count = part_count - 1
+                    else if not is_abs:
+                        # Relative path goes above start — keep the ".."
+                        if part_count < MAX_PATH_COMPONENTS:
+                            parts[part_count] = ".."
+                            part_count = part_count + 1
+                else:
+                    if part_count < MAX_PATH_COMPONENTS:
+                        parts[part_count] = seg
+                        part_count = part_count + 1
+            seg_start = i + 1
+        i = i + 1
+
+    # Rebuild the path from surviving components.
+    if part_count == 0:
+        if is_abs:
+            return "/"
+        return "."
+
+    var result: text = ""
+    if is_abs:
+        result = "/"
+
+    for j in 0..part_count:
+        if j > 0:
+            result = result + "/"
+        result = result + parts[j]
+
+    result
+
+# Split a path into its individual components.
+# Writes component strings into the caller-supplied `out` array and
+# returns the number of components written.
+fn path_split(path: text, out: var [text; 32]) -> u32:
+    if path.len() == 0:
+        return 0
+
+    var count: u32 = 0
+    var seg_start: u32 = 0
+    var i: u32 = 0
+    val plen = path.len()
+
+    while i <= plen:
+        val is_sep = if i < plen: path.char_at(i) == '/'
+                     else: true
+        if is_sep:
+            if i > seg_start:
+                if count < MAX_PATH_COMPONENTS:
+                    var seg = path.substring(seg_start, i)
+                    out[count] = seg
+                    count = count + 1
+            seg_start = i + 1
+        i = i + 1
+
+    count
+
+# Join two path segments with the path separator.
+# If `child` is absolute the result is just `child`.
+# If `parent` already ends with "/" no extra separator is added.
+fn path_join(parent: text, child: text) -> text:
+    if child.len() > 0 and path_is_absolute(child):
+        return child
+    if parent.len() == 0:
+        return child
+    if child.len() == 0:
+        return parent
+
+    val last_char = parent.char_at(parent.len() - 1)
+    if last_char == '/':
+        return parent + child
+    parent + "/" + child
+
+# Return the directory portion of a path.
+# "/foo/bar" -> "/foo", "/foo" -> "/", "foo" -> ".", "/" -> "/"
+fn path_dirname(path: text) -> text:
+    if path.len() == 0:
+        return "."
+
+    # Find the last slash
+    var last_slash: i32 = -1
+    val plen = path.len()
+    for i in 0..plen:
+        if path.char_at(i) == '/':
+            last_slash = i as i32
+
+    if last_slash < 0:
+        # No slash at all — directory is current dir
+        return "."
+    if last_slash == 0:
+        # Slash is at the very beginning — directory is root
+        return "/"
+
+    path.substring(0, last_slash as u32)
+
+# Return the filename (last component) of a path.
+# "/foo/bar" -> "bar", "/foo/" -> "foo", "/" -> "/"
+fn path_basename(path: text) -> text:
+    if path.len() == 0:
+        return ""
+
+    val plen = path.len()
+
+    # Skip any trailing slashes to find the real end of the last component.
+    var end: u32 = plen
+    while end > 0:
+        if path.char_at(end - 1) == '/':
+            end = end - 1
+        else:
+            break
+
+    if end == 0:
+        # Path was all slashes
+        return "/"
+
+    # Walk backwards to find the start of the last component.
+    var start: u32 = end
+    while start > 0:
+        if path.char_at(start - 1) == '/':
+            break
+        start = start - 1
+
+    path.substring(start, end)
+
+# Check whether `path` starts with the given `prefix` in a
+# path-component-aware way.
+# "/foo/bar" starts_with "/foo" -> true
+# "/foobar" starts_with "/foo" -> false
+fn path_starts_with(path: text, prefix: text) -> bool:
+    if prefix.len() == 0:
+        return true
+
+    val path_len = path.len()
+    val prefix_len = prefix.len()
+
+    if prefix_len > path_len:
+        return false
+
+    # Compare character by character
+    for i in 0..prefix_len:
+        if path.char_at(i) != prefix.char_at(i):
+            return false
+
+    # The prefix matched. Now verify it aligns on a component boundary:
+    # either the prefix covers the whole path, the prefix ends with "/",
+    # or the next character in the path is "/".
+    if prefix_len == path_len:
+        return true
+    if prefix.char_at(prefix_len - 1) == '/':
+        return true
+    if path.char_at(prefix_len) == '/':
+        return true
+
+    # The prefix matched a partial component name — not a real prefix.
+    false

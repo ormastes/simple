@@ -1,0 +1,150 @@
+# POSIX Signal Handling
+
+use posix.process.process.{Process, ProcessState, MAX_SIGNALS}
+use posix.process.process_table.{ProcessTable, process_table_find, MAX_PROCESSES}
+use posix.errno.{ESRCH, EINVAL}
+
+# Signal constants
+val SIGHUP: u32 = 1
+val SIGINT: u32 = 2
+val SIGQUIT: u32 = 3
+val SIGILL: u32 = 4
+val SIGABRT: u32 = 6
+val SIGFPE: u32 = 8
+val SIGKILL: u32 = 9
+val SIGUSR1: u32 = 10
+val SIGSEGV: u32 = 11
+val SIGUSR2: u32 = 12
+val SIGPIPE: u32 = 13
+val SIGALRM: u32 = 14
+val SIGTERM: u32 = 15
+val SIGCHLD: u32 = 17
+val SIGCONT: u32 = 18
+val SIGSTOP: u32 = 19
+val SIGTSTP: u32 = 20
+
+val SIG_DFL: u32 = 0           # Default action
+val SIG_IGN: u32 = 1           # Ignore signal
+
+enum SignalAction:
+    Terminate
+    Ignore
+    Stop
+    Continue
+    CoreDump
+
+# Returns the default action for a given signal number.
+fn signal_default_action(sig: u32) -> SignalAction:
+    if sig == SIGHUP:
+        return SignalAction.Terminate
+    if sig == SIGINT:
+        return SignalAction.Terminate
+    if sig == SIGQUIT:
+        return SignalAction.CoreDump
+    if sig == SIGILL:
+        return SignalAction.CoreDump
+    if sig == SIGABRT:
+        return SignalAction.CoreDump
+    if sig == SIGFPE:
+        return SignalAction.CoreDump
+    if sig == SIGKILL:
+        return SignalAction.Terminate
+    if sig == SIGUSR1:
+        return SignalAction.Terminate
+    if sig == SIGSEGV:
+        return SignalAction.CoreDump
+    if sig == SIGUSR2:
+        return SignalAction.Terminate
+    if sig == SIGPIPE:
+        return SignalAction.Terminate
+    if sig == SIGALRM:
+        return SignalAction.Terminate
+    if sig == SIGTERM:
+        return SignalAction.Terminate
+    if sig == SIGCHLD:
+        return SignalAction.Ignore
+    if sig == SIGCONT:
+        return SignalAction.Continue
+    if sig == SIGSTOP:
+        return SignalAction.Stop
+    if sig == SIGTSTP:
+        return SignalAction.Stop
+    # Default for unknown signals
+    SignalAction.Terminate
+
+# Checks if a signal number is valid (in range [1, MAX_SIGNALS)).
+fn signal_is_valid(sig: u32) -> bool:
+    sig >= 1 and sig < MAX_SIGNALS
+
+# Checks if a signal can be caught. SIGKILL and SIGSTOP cannot be caught.
+fn signal_is_catchable(sig: u32) -> bool:
+    sig != SIGKILL and sig != SIGSTOP
+
+# Delivers a signal to a process by setting the pending bit.
+fn signal_send(table: var ProcessTable, pid: u32, sig: u32) -> Result<u32, u32>:
+    if !signal_is_valid(sig):
+        return Result<u32, u32>.Err(EINVAL)
+    if val idx = process_table_find(table, pid):
+        val bit = 1 as u32 << sig
+        table.processes[idx].signal_pending = table.processes[idx].signal_pending | bit
+        return Result<u32, u32>.Ok(0)
+    Result<u32, u32>.Err(ESRCH)
+
+# Sets a signal handler for a process. Returns EINVAL for SIGKILL/SIGSTOP.
+fn signal_set_handler(table: var ProcessTable, pid: u32, sig: u32, handler: u32) -> Result<u32, u32>:
+    if !signal_is_valid(sig):
+        return Result<u32, u32>.Err(EINVAL)
+    if !signal_is_catchable(sig):
+        return Result<u32, u32>.Err(EINVAL)
+    if val idx = process_table_find(table, pid):
+        table.processes[idx].signal_handlers[sig] = handler
+        return Result<u32, u32>.Ok(0)
+    Result<u32, u32>.Err(ESRCH)
+
+# Checks if a signal is pending on a process.
+fn signal_is_pending(proc: Process, sig: u32) -> bool:
+    val bit = 1 as u32 << sig
+    (proc.signal_pending & bit) != 0
+
+# Clears a pending signal bit.
+fn signal_clear(proc: var Process, sig: u32):
+    val bit = 1 as u32 << sig
+    proc.signal_pending = proc.signal_pending & ~bit
+
+# Blocks a signal by setting the mask bit.
+fn signal_mask_set(proc: var Process, sig: u32):
+    val bit = 1 as u32 << sig
+    proc.signal_mask = proc.signal_mask | bit
+
+# Unblocks a signal by clearing the mask bit.
+fn signal_mask_clear(proc: var Process, sig: u32):
+    val bit = 1 as u32 << sig
+    proc.signal_mask = proc.signal_mask & ~bit
+
+# Checks if a signal is masked (blocked).
+fn signal_is_masked(proc: Process, sig: u32) -> bool:
+    val bit = 1 as u32 << sig
+    (proc.signal_mask & bit) != 0
+
+# Finds the first unmasked pending signal, or None.
+fn signal_next_pending(proc: Process) -> Option<u32>:
+    for sig in 1..MAX_SIGNALS:
+        if signal_is_pending(proc, sig) and !signal_is_masked(proc, sig):
+            return Option<u32>.Some(sig)
+    Option<u32>.None
+
+# Dispatches the next pending unmasked signal.
+# Clears the signal and returns its number.
+# If the handler is SIG_DFL, returns the signal for the caller to handle the default action.
+# If SIG_IGN, clears and skips to the next pending signal.
+fn signal_dispatch(proc: var Process) -> Option<u32>:
+    for sig in 1..MAX_SIGNALS:
+        if signal_is_pending(proc, sig) and !signal_is_masked(proc, sig):
+            signal_clear(proc, sig)
+            val handler = proc.signal_handlers[sig]
+            if handler == SIG_IGN and signal_is_catchable(sig):
+                # Ignored — skip to next
+                continue
+            # SIG_DFL or user handler — return signal for caller
+            return Option<u32>.Some(sig)
+    Option<u32>.None

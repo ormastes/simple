@@ -1,0 +1,324 @@
+# Virtual Filesystem Layer
+# Provides a unified interface for path resolution, mount management, and
+# filesystem dispatch. Routes operations to the appropriate FS backend
+# (ramfs, devfs) based on mount points.
+
+use posix.vfs.inode.{InodeType, InodeRef, Stat, DirEntry, stat_empty,
+    dir_entry_create, dir_entry_empty, inode_ref_create, inode_ref_none,
+    inode_ref_is_valid, FS_RAMFS, FS_DEVFS, INODE_NONE}
+use posix.vfs.ramfs.{RamFs, ramfs_create, ramfs_lookup, ramfs_read, ramfs_write,
+    ramfs_create_file, ramfs_mkdir, ramfs_unlink, ramfs_stat, ramfs_readdir,
+    ramfs_truncate, ramfs_alloc_inode}
+use posix.vfs.devfs.{DevFs, devfs_create, devfs_init_standard, devfs_lookup,
+    devfs_read, devfs_write, devfs_stat, devfs_readdir}
+use posix.vfs.path.{path_normalize, path_split, path_join, path_dirname,
+    path_basename, path_is_absolute, MAX_PATH_COMPONENTS}
+use posix.vfs.dentry.{DentryCache, dentry_cache_create, dentry_cache_lookup,
+    dentry_cache_insert, dentry_cache_invalidate}
+use posix.errno.{ENOENT, EEXIST, ENOTDIR, EISDIR, EINVAL, ENOSYS,
+    ENAMETOOLONG, ELOOP}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val MAX_MOUNTS: u32 = 8
+val VFS_MAX_PATH: u32 = 256
+
+# ---------------------------------------------------------------------------
+# Mount entry — maps a path prefix to a filesystem
+# ---------------------------------------------------------------------------
+struct MountEntry:
+    path: text                 # Mount point path (e.g., "/", "/dev")
+    fs_id: u32                 # Filesystem identifier (FS_RAMFS, FS_DEVFS)
+    is_active: bool
+
+fn mount_entry_empty() -> MountEntry:
+    MountEntry(path: "", fs_id: 0, is_active: false)
+
+# ---------------------------------------------------------------------------
+# VFS state — owns all filesystem instances and mount table
+# ---------------------------------------------------------------------------
+struct Vfs:
+    mounts: [MountEntry; 8]
+    mount_count: u32           # Manual counter
+    ramfs: RamFs               # The RAM filesystem instance
+    devfs: DevFs               # The device filesystem instance
+    dentry_cache: DentryCache  # Path resolution cache
+
+# ---------------------------------------------------------------------------
+# Create and initialize the VFS with root ramfs mounted at "/"
+# ---------------------------------------------------------------------------
+fn vfs_create() -> Vfs:
+    val empty_mount = mount_entry_empty()
+    var vfs = Vfs(
+        mounts: [empty_mount; 8],
+        mount_count: 0,
+        ramfs: ramfs_create(),
+        devfs: devfs_create(),
+        dentry_cache: dentry_cache_create()
+    )
+
+    # Initialize standard devices
+    devfs_init_standard(vfs.devfs)
+
+    # Mount root filesystem
+    vfs.mounts[0] = MountEntry(
+        path: "/",
+        fs_id: FS_RAMFS,
+        is_active: true
+    )
+    vfs.mount_count = 1
+
+    vfs
+
+# ---------------------------------------------------------------------------
+# Mount a filesystem at the given path
+# ---------------------------------------------------------------------------
+fn vfs_mount(vfs: var Vfs, path: text, fs_id: u32) -> Result<u32, u32>:
+    if vfs.mount_count >= MAX_MOUNTS:
+        return Result<u32, u32>.Err(EINVAL)
+
+    # Find free mount slot
+    for i in 0..MAX_MOUNTS:
+        if !vfs.mounts[i].is_active:
+            vfs.mounts[i] = MountEntry(
+                path: path,
+                fs_id: fs_id,
+                is_active: true
+            )
+            vfs.mount_count = vfs.mount_count + 1
+            return Result<u32, u32>.Ok(i)
+    Result<u32, u32>.Err(EINVAL)
+
+# ---------------------------------------------------------------------------
+# Find the mount point that best matches a given path.
+# Returns (mount_index, remaining_path_after_mount_prefix).
+# Longest prefix match wins.
+# ---------------------------------------------------------------------------
+fn vfs_find_mount(vfs: Vfs, path: text) -> Option<u32>:
+    var best_idx: u32 = 0xFFFFFFFF
+    var best_len: u32 = 0
+
+    for i in 0..MAX_MOUNTS:
+        if !vfs.mounts[i].is_active:
+            continue
+        val mount_path = vfs.mounts[i].path
+        if path.starts_with(mount_path):
+            # Calculate mount path length manually
+            var mlen: u32 = 0
+            if mount_path == "/":
+                mlen = 1
+            else:
+                # Count characters
+                var temp = mount_path
+                while temp != "":
+                    val ch = temp.substring(0, 1)
+                    temp = temp.substring(1, temp.length)
+                    mlen = mlen + 1
+            if mlen > best_len:
+                best_len = mlen
+                best_idx = i
+    if best_idx != 0xFFFFFFFF:
+        return Option<u32>.Some(best_idx)
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Get the sub-path relative to a mount point.
+# E.g., path="/dev/null", mount="/dev" -> "null"
+#        path="/foo/bar", mount="/" -> "foo/bar"
+# ---------------------------------------------------------------------------
+fn vfs_relative_path(path: text, mount_path: text) -> text:
+    if mount_path == "/":
+        if path == "/":
+            return ""
+        # Strip leading "/"
+        return path.substring(1, path.length)
+    # Strip the mount prefix
+    val prefix_len = mount_path.length
+    if path.length <= prefix_len:
+        return ""
+    # Skip the mount prefix + "/"
+    val remaining = path.substring(prefix_len, path.length)
+    if remaining.starts_with("/"):
+        return remaining.substring(1, remaining.length)
+    remaining
+
+# ---------------------------------------------------------------------------
+# Resolve a path to an inode reference by walking the directory tree.
+# ---------------------------------------------------------------------------
+fn vfs_resolve(vfs: var Vfs, path: text) -> Result<InodeRef, u32>:
+    val norm_path = path_normalize(path)
+
+    # Check dentry cache first
+    if val cached = dentry_cache_lookup(vfs.dentry_cache, norm_path):
+        return Result<InodeRef, u32>.Ok(cached)
+
+    # Find the mount point
+    if val mount_idx = vfs_find_mount(vfs, norm_path):
+        val fs_id = vfs.mounts[mount_idx].fs_id
+        val rel_path = vfs_relative_path(norm_path, vfs.mounts[mount_idx].path)
+
+        # Split the relative path into components
+        var components: [text; 32] = [""; 32]
+        val num_components = path_split(rel_path, components)
+
+        if fs_id == FS_RAMFS:
+            # Walk the ramfs directory tree
+            var current_inode: u32 = vfs.ramfs.root_inode
+
+            for i in 0..num_components:
+                val component = components[i]
+                if component == "":
+                    continue
+                val lookup_result = ramfs_lookup(vfs.ramfs, current_inode, component)
+                if val ref = lookup_result.ok():
+                    current_inode = ref.inode_id
+                else:
+                    return Result<InodeRef, u32>.Err(ENOENT)
+
+            val result = inode_ref_create(FS_RAMFS, current_inode)
+            dentry_cache_insert(vfs.dentry_cache, norm_path, result, 0)
+            return Result<InodeRef, u32>.Ok(result)
+
+        if fs_id == FS_DEVFS:
+            # DevFS is flat — just look up the device name
+            if rel_path == "":
+                # Root of /dev — return a synthetic directory ref
+                val ref = inode_ref_create(FS_DEVFS, 0xFFFFFFFE)
+                return Result<InodeRef, u32>.Ok(ref)
+            val dev_result = devfs_lookup(vfs.devfs, rel_path)
+            if val ref = dev_result.ok():
+                dentry_cache_insert(vfs.dentry_cache, norm_path, ref, 0)
+                return Result<InodeRef, u32>.Ok(ref)
+            else:
+                return Result<InodeRef, u32>.Err(ENOENT)
+
+        return Result<InodeRef, u32>.Err(ENOSYS)
+
+    Result<InodeRef, u32>.Err(ENOENT)
+
+# ---------------------------------------------------------------------------
+# Open a file by path. Returns the inode ref.
+# Handles O_CREAT by creating the file if it doesn't exist.
+# ---------------------------------------------------------------------------
+fn vfs_open(vfs: var Vfs, path: text, flags: u32, mode: u32) -> Result<InodeRef, u32>:
+    val norm_path = path_normalize(path)
+    val O_CREAT: u32 = 64
+    val O_TRUNC: u32 = 512
+
+    # Try to resolve existing file
+    val resolve_result = vfs_resolve(vfs, norm_path)
+    if val ref = resolve_result.ok():
+        # File exists
+        if (flags & O_TRUNC) != 0:
+            if ref.fs_id == FS_RAMFS:
+                ramfs_truncate(vfs.ramfs, ref.inode_id, 0)
+        return Result<InodeRef, u32>.Ok(ref)
+
+    # File doesn't exist — create if O_CREAT
+    if (flags & O_CREAT) != 0:
+        val dir_path = path_dirname(norm_path)
+        val file_name = path_basename(norm_path)
+
+        val dir_result = vfs_resolve(vfs, dir_path)
+        if val dir_ref = dir_result.ok():
+            if dir_ref.fs_id == FS_RAMFS:
+                val create_result = ramfs_create_file(vfs.ramfs, dir_ref.inode_id, file_name, mode)
+                if val inode_id = create_result.ok():
+                    val new_ref = inode_ref_create(FS_RAMFS, inode_id)
+                    dentry_cache_insert(vfs.dentry_cache, norm_path, new_ref, 0)
+                    return Result<InodeRef, u32>.Ok(new_ref)
+                else:
+                    val err = create_result.err()
+                    return Result<InodeRef, u32>.Err(err)
+            return Result<InodeRef, u32>.Err(ENOSYS)
+        else:
+            return Result<InodeRef, u32>.Err(ENOENT)
+
+    Result<InodeRef, u32>.Err(ENOENT)
+
+# ---------------------------------------------------------------------------
+# Read from a file identified by inode ref
+# ---------------------------------------------------------------------------
+fn vfs_read(vfs: var Vfs, ref: InodeRef, offset: u32, buf: var [u8; 4096], count: u32) -> Result<u32, u32>:
+    if ref.fs_id == FS_RAMFS:
+        return ramfs_read(vfs.ramfs, ref.inode_id, offset, buf, count)
+    if ref.fs_id == FS_DEVFS:
+        return devfs_read(vfs.devfs, ref.inode_id, buf, count)
+    Result<u32, u32>.Err(ENOSYS)
+
+# ---------------------------------------------------------------------------
+# Write to a file identified by inode ref
+# ---------------------------------------------------------------------------
+fn vfs_write(vfs: var Vfs, ref: InodeRef, offset: u32, buf: [u8; 4096], count: u32) -> Result<u32, u32>:
+    if ref.fs_id == FS_RAMFS:
+        return ramfs_write(vfs.ramfs, ref.inode_id, offset, buf, count)
+    if ref.fs_id == FS_DEVFS:
+        return devfs_write(vfs.devfs, ref.inode_id, buf, count)
+    Result<u32, u32>.Err(ENOSYS)
+
+# ---------------------------------------------------------------------------
+# Get file status
+# ---------------------------------------------------------------------------
+fn vfs_stat(vfs: Vfs, ref: InodeRef) -> Result<Stat, u32>:
+    if ref.fs_id == FS_RAMFS:
+        return ramfs_stat(vfs.ramfs, ref.inode_id)
+    if ref.fs_id == FS_DEVFS:
+        return devfs_stat(vfs.devfs, ref.inode_id)
+    Result<Stat, u32>.Err(ENOSYS)
+
+# ---------------------------------------------------------------------------
+# Create a directory
+# ---------------------------------------------------------------------------
+fn vfs_mkdir(vfs: var Vfs, path: text, mode: u32) -> Result<u32, u32>:
+    val norm_path = path_normalize(path)
+    val dir_path = path_dirname(norm_path)
+    val dir_name = path_basename(norm_path)
+
+    val parent_result = vfs_resolve(vfs, dir_path)
+    if val parent_ref = parent_result.ok():
+        if parent_ref.fs_id == FS_RAMFS:
+            val result = ramfs_mkdir(vfs.ramfs, parent_ref.inode_id, dir_name, mode)
+            if val inode_id = result.ok():
+                dentry_cache_invalidate(vfs.dentry_cache, dir_path)
+                return Result<u32, u32>.Ok(inode_id)
+            else:
+                val err = result.err()
+                return Result<u32, u32>.Err(err)
+        return Result<u32, u32>.Err(ENOSYS)
+    else:
+        val err = parent_result.err()
+        return Result<u32, u32>.Err(err)
+
+# ---------------------------------------------------------------------------
+# Remove a file or empty directory
+# ---------------------------------------------------------------------------
+fn vfs_unlink(vfs: var Vfs, path: text) -> Result<u32, u32>:
+    val norm_path = path_normalize(path)
+    val dir_path = path_dirname(norm_path)
+    val file_name = path_basename(norm_path)
+
+    val parent_result = vfs_resolve(vfs, dir_path)
+    if val parent_ref = parent_result.ok():
+        if parent_ref.fs_id == FS_RAMFS:
+            val result = ramfs_unlink(vfs.ramfs, parent_ref.inode_id, file_name)
+            if val ok_val = result.ok():
+                dentry_cache_invalidate(vfs.dentry_cache, norm_path)
+                return Result<u32, u32>.Ok(0)
+            else:
+                val err = result.err()
+                return Result<u32, u32>.Err(err)
+        return Result<u32, u32>.Err(ENOSYS)
+    else:
+        val err = parent_result.err()
+        return Result<u32, u32>.Err(err)
+
+# ---------------------------------------------------------------------------
+# Read directory entry by index
+# ---------------------------------------------------------------------------
+fn vfs_readdir(vfs: Vfs, ref: InodeRef, index: u32) -> Option<DirEntry>:
+    if ref.fs_id == FS_RAMFS:
+        return ramfs_readdir(vfs.ramfs, ref.inode_id, index)
+    if ref.fs_id == FS_DEVFS:
+        return devfs_readdir(vfs.devfs, index)
+    Option<DirEntry>.None

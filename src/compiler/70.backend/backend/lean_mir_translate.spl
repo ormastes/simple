@@ -9,37 +9,59 @@ use compiler.mir.mir_data.*
 # MIR Type to Lean Conversion
 # ============================================================================
 
-fn mir_type_to_lean(ty: MirType) -> text:
+fn mir_type_to_lean(ty: MirType, type_names: Dict) -> text:
     """Convert MIR type to Lean 4 type."""
     match ty.kind:
         case I64: "Int"
         case I32: "Int32"
         case I16: "Int16"
         case I8: "Int8"
+        case U8: "UInt8"
+        case U16: "UInt16"
+        case U32: "UInt32"
+        case U64: "UInt64"
         case F64: "Float"
         case F32: "Float"
         case Bool: "Bool"
+        case Char: "Char"
         case Unit: "Unit"
+        case Never: "Empty"
         case Ptr(inner, _):
-            "Ptr ({mir_type_to_lean(inner)})"
+            "Ptr ({mir_type_to_lean(inner, type_names)})"
+        case Ref(inner, _):
+            "Ptr ({mir_type_to_lean(inner, type_names)})"
+        case FuncPtr(_):
+            "Any /- FuncPtr -/"
         case Array(elem, size):
-            "Vector ({mir_type_to_lean(elem)}) {size}"
+            "Vector ({mir_type_to_lean(elem, type_names)}) {size}"
+        case Slice(elem):
+            "List ({mir_type_to_lean(elem, type_names)})"
         case Struct(id):
-            "Struct{id}"
+            if type_names.contains_key(id):
+                type_names[id]
+            else:
+                "Any /- Struct#{id.id} -/"
+        case Enum(id):
+            if type_names.contains_key(id):
+                type_names[id]
+            else:
+                "Any /- Enum#{id.id} -/"
         case Tuple(elems):
-            val elem_types = elems.map(\e: mir_type_to_lean(e)).join(" × ")
+            val elem_types = elems.map(\e: mir_type_to_lean(e, type_names)).join(" × ")
             "({elem_types})"
-        case Option(inner):
-            "Option ({mir_type_to_lean(inner)})"
-        case Result(ok, err):
-            "Except ({mir_type_to_lean(err)}) ({mir_type_to_lean(ok)})"
+        case Opaque(name):
+            "Any /- opaque: {name} -/"
+        case Vec4f | Vec8f | Vec4d | Vec4i | Vec8i:
+            "Any /- SIMD -/"
+        case Promise(_) | Generator(_, _) | ActorType(_):
+            "Any /- async -/"
         case _: "Any"
 
 # ============================================================================
 # MIR-to-Lean Body Translation
 # ============================================================================
 
-fn translate_mir_body(body: MirBody) -> text:
+fn translate_mir_body(body: MirBody, type_names: Dict) -> text:
     """Translate a MIR function body to a Lean 4 term.
 
     Walks the basic blocks and instructions of the MIR body,
@@ -52,7 +74,7 @@ fn translate_mir_body(body: MirBody) -> text:
     # Translate the entry block and follow the control flow
     var lines: [text] = []
     for block in body.blocks:
-        val block_lines = translate_mir_block(block, body)
+        val block_lines = translate_mir_block(block, body, type_names)
         for line in block_lines:
             lines = lines.push(line)
 
@@ -61,7 +83,7 @@ fn translate_mir_body(body: MirBody) -> text:
 
     lines.join("\n")
 
-fn translate_mir_block(block: MirBlock, body: MirBody) -> [text]:
+fn translate_mir_block(block: MirBlock, body: MirBody, type_names: Dict) -> [text]:
     """Translate a single MIR basic block to Lean let-bindings."""
     var lines: [text] = []
 
@@ -71,7 +93,7 @@ fn translate_mir_block(block: MirBlock, body: MirBody) -> [text]:
 
     # Translate each instruction
     for inst in block.instructions:
-        val translated = translate_mir_inst(inst)
+        val translated = translate_mir_inst(inst, type_names)
         if translated != "":
             lines = lines.push(translated)
 
@@ -82,7 +104,7 @@ fn translate_mir_block(block: MirBlock, body: MirBody) -> [text]:
 
     lines
 
-fn translate_mir_inst(inst: MirInst) -> text:
+fn translate_mir_inst(inst: MirInst, type_names: Dict) -> text:
     """Translate a single MIR instruction to a Lean let-binding."""
     match inst.kind:
         case Const(dest, value, type_):
@@ -113,7 +135,7 @@ fn translate_mir_inst(inst: MirInst) -> text:
             "let _l{dest.id} := {l} {lean_op} {r}  -- checked"
 
         case Alloc(dest, type_):
-            val lean_ty = mir_type_to_lean(type_)
+            val lean_ty = mir_type_to_lean(type_, type_names)
             "let _l{dest.id} : Ptr ({lean_ty}) := Ptr.alloc"
 
         case Load(dest, ptr):
@@ -155,7 +177,7 @@ fn translate_mir_inst(inst: MirInst) -> text:
 
         case Cast(dest, operand, target):
             val o = translate_operand(operand)
-            val lean_ty = mir_type_to_lean(target)
+            val lean_ty = mir_type_to_lean(target, type_names)
             "let _l{dest.id} : {lean_ty} := cast {o}"
 
         case Call(dest, func, args):
@@ -244,7 +266,8 @@ fn translate_const_value(value: MirConstValue) -> text:
             val elems = elements.map(\e: translate_const_value(e))
             "({elems.join(\", \")})"
         case Struct(fields):
-            "Struct.mk"
+            val field_vals = fields.map(\f: translate_const_value(f)).join(" ")
+            if field_vals.is_empty(): "Struct.mk" else: "Struct.mk {field_vals}"
         case Zero:
             "0"
 
@@ -256,7 +279,7 @@ fn translate_binop(op: MirBinOp) -> text:
         case Mul: "*"
         case Div: "/"
         case Rem: "%"
-        case Pow: "^"
+        case Pow: "Int.pow"
         case Eq: "=="
         case Ne: "!="
         case Lt: "<"

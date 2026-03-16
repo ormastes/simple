@@ -1,0 +1,86 @@
+# POSIX Pipe
+# A pipe is a unidirectional byte stream backed by a ring buffer.
+
+use kernel.lib.ring_buffer.{RingBuffer, ring_buffer_create, ring_buffer_push,
+    ring_buffer_pop, ring_buffer_is_empty, ring_buffer_is_full, ring_buffer_count,
+    ring_buffer_free_count}
+use posix.async.future.{Waker, waker_none, waker_is_valid, waker_create}
+use posix.errno.{EAGAIN, EPIPE, EINVAL}
+
+val PIPE_BUF_SIZE: u32 = 256
+
+struct Pipe:
+    buffer: RingBuffer
+    read_open: bool            # Read end still open
+    write_open: bool           # Write end still open
+    reader_waker: Waker        # Wake reader when data available
+    writer_waker: Waker        # Wake writer when space available
+
+# Create a new pipe with an empty ring buffer.
+fn pipe_create() -> Pipe:
+    Pipe(
+        buffer: ring_buffer_create(PIPE_BUF_SIZE),
+        read_open: true,
+        write_open: true,
+        reader_waker: waker_none(),
+        writer_waker: waker_none()
+    )
+
+# Read up to `count` bytes from the pipe into `buf`.
+# Returns Ok(bytes_read) on success.
+# Returns Ok(0) for EOF (write end closed and buffer empty).
+# Returns Err(EAGAIN) if buffer is empty and write end still open.
+fn pipe_read(p: var Pipe, buf: var [u8; 4096], count: u32) -> Result<u32, u32>:
+    if ring_buffer_is_empty(p.buffer):
+        if !p.write_open:
+            return Result<u32, u32>.Ok(0)
+        return Result<u32, u32>.Err(EAGAIN)
+    var bytes_read: u32 = 0
+    for i in 0..count:
+        if val raw = ring_buffer_pop(p.buffer):
+            buf[i] = raw as u8
+            bytes_read = bytes_read + 1
+        else:
+            break
+    Result<u32, u32>.Ok(bytes_read)
+
+# Write up to `count` bytes from `buf` into the pipe.
+# Returns Ok(bytes_written) on success.
+# Returns Err(EPIPE) if the read end is closed.
+# Returns Err(EAGAIN) if the buffer is full.
+fn pipe_write(p: var Pipe, buf: [u8; 4096], count: u32) -> Result<u32, u32>:
+    if !p.read_open:
+        return Result<u32, u32>.Err(EPIPE)
+    if ring_buffer_is_full(p.buffer):
+        return Result<u32, u32>.Err(EAGAIN)
+    var bytes_written: u32 = 0
+    for i in 0..count:
+        val value = buf[i] as u32
+        if !ring_buffer_push(p.buffer, value):
+            break
+        bytes_written = bytes_written + 1
+    Result<u32, u32>.Ok(bytes_written)
+
+# Close the read end of the pipe.
+fn pipe_close_read(p: var Pipe):
+    p.read_open = false
+
+# Close the write end of the pipe.
+fn pipe_close_write(p: var Pipe):
+    p.write_open = false
+
+# Set the waker to be notified when data becomes available for reading.
+fn pipe_set_reader_waker(p: var Pipe, w: Waker):
+    p.reader_waker = w
+
+# Set the waker to be notified when space becomes available for writing.
+fn pipe_set_writer_waker(p: var Pipe, w: Waker):
+    p.writer_waker = w
+
+# Returns the number of bytes available to read from the pipe.
+fn pipe_readable_count(p: Pipe) -> u32:
+    ring_buffer_count(p.buffer)
+
+# Returns the number of bytes that can be written to the pipe.
+fn pipe_writable_count(p: Pipe) -> u32:
+    ring_buffer_free_count(p.buffer)

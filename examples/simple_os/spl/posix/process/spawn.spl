@@ -1,0 +1,136 @@
+# Process Spawning
+# Creates new POSIX processes on top of kernel TCBs.
+# Uses spawn() semantics (no fork) — creates a fresh process with its own
+# fd table, address space, and signal state.
+
+use kernel.core.tcb.{Tcb, tcb_create, tcb_create_named, tcb_set_registers,
+    tcb_resume, MAX_THREADS, TCB_NONE}
+use kernel.core.scheduler.{Scheduler, scheduler_add_thread, scheduler_enqueue}
+use posix.process.process.{Process, ProcessState, process_create, process_set_heap}
+use posix.process.process_table.{ProcessTable, process_table_alloc,
+    process_table_find, process_table_set_state, MAX_PROCESSES}
+use posix.io.fd_table.{FdTable, fd_table_create, fd_alloc_at, MAX_FDS}
+use posix.io.file.{OpenFile, open_file_create}
+use posix.io.stdio.{stdio_init}
+use posix.errno.{EAGAIN, ENOMEM, EINVAL, ESRCH}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val DEFAULT_STACK_SIZE: u32 = 4096
+val DEFAULT_HEAP_BASE: u32 = 0x800000    # 8MB
+val DEFAULT_PRIORITY: u32 = 128
+
+# ---------------------------------------------------------------------------
+# Spawn configuration
+# ---------------------------------------------------------------------------
+struct SpawnConfig:
+    name: text
+    entry_point: u32           # Instruction pointer for new process
+    stack_base: u32            # Stack base address
+    stack_size: u32            # Stack size in bytes
+    priority: u32              # Scheduling priority
+    inherit_stdio: bool        # Whether to inherit parent's stdio fds
+    serial_device_id: u32      # Device id for stdio if not inheriting
+
+fn spawn_config_default(name: text, entry_point: u32) -> SpawnConfig:
+    SpawnConfig(
+        name: name,
+        entry_point: entry_point,
+        stack_base: 0,
+        stack_size: DEFAULT_STACK_SIZE,
+        priority: DEFAULT_PRIORITY,
+        inherit_stdio: true,
+        serial_device_id: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Spawn a new process.
+# Creates a kernel TCB and POSIX process, sets up fd table and registers.
+# Returns the new process PID on success.
+# ---------------------------------------------------------------------------
+fn spawn_process(sched: var Scheduler, proc_table: var ProcessTable,
+                 parent_pid: u32, config: SpawnConfig) -> Result<u32, u32>:
+    # Find a free thread id
+    var thread_id: u32 = TCB_NONE
+    for i in 1..MAX_THREADS:
+        if sched.thread_pool[i].state == kernel.core.tcb.ThreadState.Inactive:
+            thread_id = i
+            break
+    if thread_id == TCB_NONE:
+        return Result<u32, u32>.Err(EAGAIN)
+
+    # Create the kernel TCB
+    var tcb = tcb_create_named(thread_id, config.name, config.priority)
+    val stack_top = config.stack_base + config.stack_size
+    tcb_set_registers(tcb, config.entry_point, stack_top)
+
+    # Register TCB with scheduler
+    scheduler_add_thread(sched, tcb)
+
+    # Create POSIX process
+    val alloc_result = process_table_alloc(proc_table, parent_pid, thread_id, config.name)
+    if val pid = alloc_result.ok():
+        # Find the process slot and set up heap
+        if val slot_idx = process_table_find(proc_table, pid):
+            process_set_heap(proc_table.processes[slot_idx], DEFAULT_HEAP_BASE)
+
+            # Set up stdio
+            if config.inherit_stdio:
+                # Copy parent's stdio fds if parent exists
+                if val parent_idx = process_table_find(proc_table, parent_pid):
+                    # Copy fd 0, 1, 2 from parent
+                    for fd in 0..3:
+                        if proc_table.processes[parent_idx].fd_table.entries[fd].is_open:
+                            var copied_file = proc_table.processes[parent_idx].fd_table.entries[fd]
+                            copied_file.ref_count = 1
+                            fd_alloc_at(proc_table.processes[slot_idx].fd_table, fd, copied_file)
+            else:
+                # Wire stdio to serial device
+                stdio_init(proc_table.processes[slot_idx].fd_table, config.serial_device_id)
+
+            # Mark process as running
+            process_table_set_state(proc_table, pid, ProcessState.Running)
+
+            # Enqueue thread for scheduling
+            scheduler_enqueue(sched, thread_id)
+
+            return Result<u32, u32>.Ok(pid)
+
+    Result<u32, u32>.Err(EAGAIN)
+
+# ---------------------------------------------------------------------------
+# Exit the current process.
+# Sets process state to Zombie, closes all file descriptors.
+# ---------------------------------------------------------------------------
+fn process_exit(proc_table: var ProcessTable, pid: u32, exit_code: u32) -> Result<u32, u32>:
+    if val idx = process_table_find(proc_table, pid):
+        proc_table.processes[idx].exit_code = exit_code
+        proc_table.processes[idx].state = ProcessState.Zombie
+
+        # Close all open file descriptors
+        for fd in 0..MAX_FDS:
+            proc_table.processes[idx].fd_table.entries[fd].is_open = false
+        proc_table.processes[idx].fd_table.fd_count = 0
+
+        return Result<u32, u32>.Ok(0)
+    Result<u32, u32>.Err(ESRCH)
+
+# ---------------------------------------------------------------------------
+# Wait for a child process to exit.
+# Returns the child's PID and exit code if a zombie child is found.
+# If no children are zombies, returns EAGAIN (caller should block).
+# ---------------------------------------------------------------------------
+fn process_wait(proc_table: var ProcessTable, parent_pid: u32) -> Result<u32, u32>:
+    for i in 0..MAX_PROCESSES:
+        if proc_table.used[i]:
+            val proc = proc_table.processes[i]
+            if proc.ppid == parent_pid and proc.state == ProcessState.Zombie:
+                val child_pid = proc.pid
+                # Reap the zombie
+                proc_table.used[i] = false
+                proc_table.process_count = proc_table.process_count - 1
+                return Result<u32, u32>.Ok(child_pid)
+
+    # No zombie children found
+    Result<u32, u32>.Err(EAGAIN)

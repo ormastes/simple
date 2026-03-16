@@ -1,0 +1,80 @@
+# POSIX Subsystem Initialization
+# Bootstraps the POSIX layer on top of the existing microkernel.
+# Called once during system startup to:
+# 1. Create the VFS with root filesystem
+# 2. Mount /dev for device nodes
+# 3. Create the init process (PID 1)
+# 4. Wire stdio to /dev/serial
+# 5. Start the async reactor
+
+use posix.vfs.vfs.{Vfs, vfs_create, vfs_mount, vfs_mkdir}
+use posix.vfs.inode.{FS_DEVFS, FS_RAMFS, DEFAULT_DIR_MODE}
+use posix.vfs.devfs.{devfs_lookup}
+use posix.process.process.{Process, ProcessState, process_create}
+use posix.process.process_table.{ProcessTable, process_table_create,
+    process_table_alloc, process_table_find, process_table_set_state}
+use posix.io.fd_table.{fd_table_create}
+use posix.io.stdio.{stdio_init}
+use posix.async.reactor.{Reactor, reactor_create, reactor_start}
+use posix.time.clock.{ClockState, clock_state_create}
+use posix.io.pipe.{Pipe, pipe_create}
+use posix.posix_syscall.{PosixState}
+use posix.errno.{EINVAL}
+
+# ---------------------------------------------------------------------------
+# Initialize the entire POSIX subsystem.
+# Returns a fully initialized PosixState ready to handle syscalls.
+# ---------------------------------------------------------------------------
+fn posix_init() -> PosixState:
+    # 1. Create VFS with root ramfs
+    var vfs = vfs_create()
+
+    # 2. Mount devfs at /dev
+    vfs_mount(vfs, "/dev", FS_DEVFS)
+
+    # 3. Create standard directories on ramfs
+    vfs_mkdir(vfs, "/tmp", DEFAULT_DIR_MODE)
+    vfs_mkdir(vfs, "/proc", DEFAULT_DIR_MODE)
+    vfs_mkdir(vfs, "/etc", DEFAULT_DIR_MODE)
+
+    # 4. Create process table and init process (PID 1)
+    var proc_table = process_table_create()
+    val init_result = process_table_alloc(proc_table, 0, 0, "init")
+
+    # 5. Wire stdio for init process
+    if val init_pid = init_result.ok():
+        if val init_idx = process_table_find(proc_table, init_pid):
+            # Look up serial device for stdio
+            val serial_result = devfs_lookup(vfs.devfs, "serial")
+            if val serial_ref = serial_result.ok():
+                stdio_init(proc_table.processes[init_idx].fd_table, serial_ref.inode_id)
+
+            process_table_set_state(proc_table, init_pid, ProcessState.Running)
+
+    # 6. Create and start reactor
+    var reactor = reactor_create()
+    reactor_start(reactor)
+
+    # 7. Initialize clock state
+    val clock = clock_state_create()
+
+    # 8. Assemble POSIX state
+    val empty_pipe = pipe_create()
+    var state = PosixState(
+        vfs: vfs,
+        proc_table: proc_table,
+        reactor: reactor,
+        clock: clock,
+        pipes: [empty_pipe; 16],
+        pipe_used: [false; 16],
+        pipe_count: 0,
+        is_initialized: true
+    )
+
+    state
+
+# ---------------------------------------------------------------------------
+# Check if the POSIX subsystem is initialized.
+# ---------------------------------------------------------------------------
+fn posix_is_initialized(state: PosixState) -> bool:
+    state.is_initialized

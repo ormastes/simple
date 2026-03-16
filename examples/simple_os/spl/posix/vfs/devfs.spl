@@ -1,0 +1,241 @@
+# Device Filesystem
+# Implements a /dev filesystem providing standard device nodes:
+# /dev/null, /dev/zero, /dev/serial, /dev/console, /dev/random.
+# Each device supports read/write with appropriate semantics.
+
+use posix.vfs.inode.{InodeType, InodeRef, Stat, DirEntry, stat_empty,
+    dir_entry_create, dir_entry_empty, inode_ref_create, inode_ref_none,
+    FS_DEVFS, DEFAULT_FILE_MODE, INODE_NONE}
+use posix.errno.{ENOENT, ENOSYS, EINVAL, EIO, ENOMEM}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val DEVFS_MAX_DEVICES: u32 = 16
+val DEVFS_MAX_NAME: u32 = 32
+
+# ---------------------------------------------------------------------------
+# Device types
+# ---------------------------------------------------------------------------
+enum DeviceType:
+    Null        # /dev/null — reads return 0, writes succeed silently
+    Zero        # /dev/zero — reads return zero bytes, writes succeed
+    Serial      # /dev/serial — reads/writes to serial UART
+    Random      # /dev/random — reads return pseudo-random bytes
+    Console     # /dev/console — alias for serial
+
+# ---------------------------------------------------------------------------
+# Device node — a single registered device
+# ---------------------------------------------------------------------------
+struct DevNode:
+    id: u32
+    name: text
+    dev_type: DeviceType
+    inode_type: InodeType       # Always CharDevice for these
+    is_used: bool
+    read_count: u32             # Stats: total bytes read
+    write_count: u32            # Stats: total bytes written
+
+fn dev_node_empty() -> DevNode:
+    DevNode(
+        id: 0,
+        name: "",
+        dev_type: DeviceType.Null,
+        inode_type: InodeType.CharDevice,
+        is_used: false,
+        read_count: 0,
+        write_count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Device filesystem state
+# ---------------------------------------------------------------------------
+struct DevFs:
+    devices: [DevNode; 16]
+    device_used: [bool; 16]
+    device_count: u32           # Manual counter
+
+fn devfs_create() -> DevFs:
+    val empty = dev_node_empty()
+    DevFs(
+        devices: [empty; 16],
+        device_used: [false; 16],
+        device_count: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Register a device. Returns the assigned device id or an error.
+# ---------------------------------------------------------------------------
+fn devfs_register(fs: var DevFs, name: text, dev_type: DeviceType) -> Result<u32, u32>:
+    if fs.device_count >= DEVFS_MAX_DEVICES:
+        return Result<u32, u32>.Err(ENOMEM)
+
+    # Find a free slot
+    for i in 0..DEVFS_MAX_DEVICES:
+        if !fs.device_used[i]:
+            fs.devices[i] = DevNode(
+                id: i,
+                name: name,
+                dev_type: dev_type,
+                inode_type: InodeType.CharDevice,
+                is_used: true,
+                read_count: 0,
+                write_count: 0
+            )
+            fs.device_used[i] = true
+            fs.device_count = fs.device_count + 1
+            return Result<u32, u32>.Ok(i)
+
+    Result<u32, u32>.Err(ENOMEM)
+
+# ---------------------------------------------------------------------------
+# Register the standard set of device nodes.
+# ---------------------------------------------------------------------------
+fn devfs_init_standard(fs: var DevFs):
+    devfs_register(fs, "null", DeviceType.Null)
+    devfs_register(fs, "zero", DeviceType.Zero)
+    devfs_register(fs, "serial", DeviceType.Serial)
+    devfs_register(fs, "console", DeviceType.Console)
+    devfs_register(fs, "random", DeviceType.Random)
+
+# ---------------------------------------------------------------------------
+# Look up a device by name. Returns an InodeRef on success.
+# ---------------------------------------------------------------------------
+fn devfs_lookup(fs: DevFs, name: text) -> Result<InodeRef, u32>:
+    for i in 0..DEVFS_MAX_DEVICES:
+        if fs.device_used[i] and fs.devices[i].name == name:
+            val ref = inode_ref_create(FS_DEVFS, i)
+            return Result<InodeRef, u32>.Ok(ref)
+    Result<InodeRef, u32>.Err(ENOENT)
+
+# ---------------------------------------------------------------------------
+# Read from a device.
+# Returns the number of bytes placed into buf, or an error code.
+# ---------------------------------------------------------------------------
+fn devfs_read(fs: var DevFs, dev_id: u32, buf: var [u8; 4096], count: u32) -> Result<u32, u32>:
+    if dev_id >= DEVFS_MAX_DEVICES:
+        return Result<u32, u32>.Err(EINVAL)
+    if !fs.device_used[dev_id]:
+        return Result<u32, u32>.Err(ENOENT)
+
+    val dev_type = fs.devices[dev_id].dev_type
+
+    # Null device — always returns 0 (EOF)
+    if dev_type == DeviceType.Null:
+        return Result<u32, u32>.Ok(0)
+
+    # Zero device — fill buffer with zeroes
+    if dev_type == DeviceType.Zero:
+        var actual = count
+        if actual > 4096:
+            actual = 4096
+        for i in 0..actual:
+            buf[i] = 0
+        fs.devices[dev_id].read_count = fs.devices[dev_id].read_count + actual
+        return Result<u32, u32>.Ok(actual)
+
+    # Serial device — placeholder, returns 0 (no data available)
+    if dev_type == DeviceType.Serial:
+        return Result<u32, u32>.Ok(0)
+
+    # Console device — same as serial
+    if dev_type == DeviceType.Console:
+        return Result<u32, u32>.Ok(0)
+
+    # Random device — fill with pseudo-random bytes using simple LFSR
+    if dev_type == DeviceType.Random:
+        var actual = count
+        if actual > 4096:
+            actual = 4096
+        var state: u32 = dev_id + fs.devices[dev_id].read_count + 1
+        for i in 0..actual:
+            # 16-bit LFSR with taps at bits 16, 14, 13, 11
+            var bit: u32 = ((state >> 0) ^ (state >> 2) ^ (state >> 3) ^ (state >> 5)) & 1
+            state = (state >> 1) | (bit << 15)
+            buf[i] = (state & 0xFF) as u8
+        fs.devices[dev_id].read_count = fs.devices[dev_id].read_count + actual
+        return Result<u32, u32>.Ok(actual)
+
+    Result<u32, u32>.Err(EIO)
+
+# ---------------------------------------------------------------------------
+# Write to a device.
+# Returns the number of bytes consumed, or an error code.
+# ---------------------------------------------------------------------------
+fn devfs_write(fs: var DevFs, dev_id: u32, buf: [u8; 4096], count: u32) -> Result<u32, u32>:
+    if dev_id >= DEVFS_MAX_DEVICES:
+        return Result<u32, u32>.Err(EINVAL)
+    if !fs.device_used[dev_id]:
+        return Result<u32, u32>.Err(ENOENT)
+
+    val dev_type = fs.devices[dev_id].dev_type
+
+    # Null device — discard all data
+    if dev_type == DeviceType.Null:
+        fs.devices[dev_id].write_count = fs.devices[dev_id].write_count + count
+        return Result<u32, u32>.Ok(count)
+
+    # Zero device — discard all data
+    if dev_type == DeviceType.Zero:
+        fs.devices[dev_id].write_count = fs.devices[dev_id].write_count + count
+        return Result<u32, u32>.Ok(count)
+
+    # Serial device — placeholder, accepts data (real impl needs UART driver)
+    if dev_type == DeviceType.Serial:
+        fs.devices[dev_id].write_count = fs.devices[dev_id].write_count + count
+        return Result<u32, u32>.Ok(count)
+
+    # Console device — same as serial
+    if dev_type == DeviceType.Console:
+        fs.devices[dev_id].write_count = fs.devices[dev_id].write_count + count
+        return Result<u32, u32>.Ok(count)
+
+    # Random device — writes not supported
+    if dev_type == DeviceType.Random:
+        return Result<u32, u32>.Err(ENOSYS)
+
+    Result<u32, u32>.Err(EIO)
+
+# ---------------------------------------------------------------------------
+# Return stat information for a device.
+# ---------------------------------------------------------------------------
+fn devfs_stat(fs: DevFs, dev_id: u32) -> Result<Stat, u32>:
+    if dev_id >= DEVFS_MAX_DEVICES:
+        return Result<Stat, u32>.Err(EINVAL)
+    if !fs.device_used[dev_id]:
+        return Result<Stat, u32>.Err(ENOENT)
+
+    var st = stat_empty()
+    st.inode_id = dev_id
+    st.inode_type = InodeType.CharDevice
+    st.mode = DEFAULT_FILE_MODE
+    st.nlink = 1
+    st.dev = dev_id
+    st.blksize = 4096
+    Result<Stat, u32>.Ok(st)
+
+# ---------------------------------------------------------------------------
+# Enumerate devices as directory entries.
+# Returns the device at the given index, or None if past the end.
+# ---------------------------------------------------------------------------
+fn devfs_readdir(fs: DevFs, index: u32) -> Option<DirEntry>:
+    if index >= DEVFS_MAX_DEVICES:
+        return Option<DirEntry>.None
+
+    # Walk used slots, counting up to the requested index
+    var seen: u32 = 0
+    for i in 0..DEVFS_MAX_DEVICES:
+        if fs.device_used[i]:
+            if seen == index:
+                val ref = inode_ref_create(FS_DEVFS, i)
+                val entry = dir_entry_create(fs.devices[i].name, ref)
+                return Option<DirEntry>.Some(entry)
+            seen = seen + 1
+
+    Option<DirEntry>.None
+
+# ---------------------------------------------------------------------------
+# Return the number of registered devices.
+# ---------------------------------------------------------------------------
+fn devfs_device_count(fs: DevFs) -> u32:
+    fs.device_count

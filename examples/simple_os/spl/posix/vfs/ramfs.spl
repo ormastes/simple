@@ -1,0 +1,451 @@
+# RAM Filesystem
+# In-memory filesystem implementation for the Simple OS POSIX layer.
+# Stores file data and directory structure entirely in RAM using
+# fixed-size inode and data arrays. Suitable for tmpfs-style mounts.
+
+use posix.vfs.inode.{InodeType, InodeRef, Stat, DirEntry, stat_empty,
+    dir_entry_create, dir_entry_empty, inode_ref_create, inode_ref_none,
+    FS_RAMFS, DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, INODE_NONE}
+use posix.errno.{ENOENT, EEXIST, ENOTDIR, EISDIR, ENOMEM, EINVAL,
+    ENOSPC, ENOTEMPTY, EBADF}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val RAMFS_MAX_INODES: u32 = 256
+val RAMFS_MAX_FILE_SIZE: u32 = 4096
+val RAMFS_MAX_DIR_ENTRIES: u32 = 32
+val RAMFS_BLOCK_SIZE: u32 = 512
+
+# ---------------------------------------------------------------------------
+# RAM inode — a single file or directory stored in memory
+# ---------------------------------------------------------------------------
+struct RamInode:
+    id: u32
+    inode_type: InodeType
+    mode: u32
+    size: u32
+    data: [u8; 4096]              # File content (for regular files)
+    dir_entries: [DirEntry; 32]    # Directory entries (for directories)
+    dir_count: u32                 # Manual counter for directory entries
+    nlink: u32
+    is_used: bool
+
+# ---------------------------------------------------------------------------
+# RAM filesystem — the top-level filesystem object
+# ---------------------------------------------------------------------------
+struct RamFs:
+    inodes: [RamInode; 256]
+    inode_used: [bool; 256]
+    inode_count: u32               # Manual counter
+    root_inode: u32                # Inode id of root directory
+
+# ---------------------------------------------------------------------------
+# Create an empty RamInode with default values.
+# ---------------------------------------------------------------------------
+fn ram_inode_empty() -> RamInode:
+    RamInode(
+        id: 0,
+        inode_type: InodeType.RegularFile,
+        mode: 0,
+        size: 0,
+        data: [0; 4096],
+        dir_entries: [dir_entry_empty(); 32],
+        dir_count: 0,
+        nlink: 0,
+        is_used: false
+    )
+
+# ---------------------------------------------------------------------------
+# Create a new RAM filesystem with a root directory at inode 0.
+# The root directory contains "." and ".." entries pointing to itself.
+# ---------------------------------------------------------------------------
+fn ramfs_create() -> RamFs:
+    var fs = RamFs(
+        inodes: [ram_inode_empty(); 256],
+        inode_used: [false; 256],
+        inode_count: 0,
+        root_inode: 0
+    )
+
+    # Set up inode 0 as the root directory
+    var root = ram_inode_empty()
+    root.id = 0
+    root.inode_type = InodeType.Directory
+    root.mode = DEFAULT_DIR_MODE
+    root.is_used = true
+    root.nlink = 2    # "." and ".." both point here
+
+    # Add "." entry pointing to self
+    val self_ref = inode_ref_create(FS_RAMFS, 0)
+    root.dir_entries[0] = dir_entry_create(".", self_ref)
+    root.dir_entries[1] = dir_entry_create("..", self_ref)
+    root.dir_count = 2
+
+    fs.inodes[0] = root
+    fs.inode_used[0] = true
+    fs.inode_count = 1
+
+    fs
+
+# ---------------------------------------------------------------------------
+# Allocate a new inode of the given type and mode.
+# Returns the inode id on success, or ENOSPC if no free inodes remain.
+# ---------------------------------------------------------------------------
+fn ramfs_alloc_inode(fs: var RamFs, itype: InodeType, mode: u32) -> Result<u32, u32>:
+    if fs.inode_count >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(ENOSPC)
+
+    # Find a free slot
+    for i in 0..RAMFS_MAX_INODES:
+        if not fs.inode_used[i]:
+            var inode = ram_inode_empty()
+            inode.id = i
+            inode.inode_type = itype
+            inode.mode = mode
+            inode.is_used = true
+            inode.nlink = 1
+
+            fs.inodes[i] = inode
+            fs.inode_used[i] = true
+            fs.inode_count = fs.inode_count + 1
+            return Result<u32, u32>.Ok(i)
+
+    Result<u32, u32>.Err(ENOSPC)
+
+# ---------------------------------------------------------------------------
+# Free an inode, marking its slot as available for reuse.
+# ---------------------------------------------------------------------------
+fn ramfs_free_inode(fs: var RamFs, id: u32):
+    if id >= RAMFS_MAX_INODES:
+        return
+    if not fs.inode_used[id]:
+        return
+
+    fs.inodes[id] = ram_inode_empty()
+    fs.inode_used[id] = false
+    fs.inode_count = fs.inode_count - 1
+
+# ---------------------------------------------------------------------------
+# Read bytes from a file inode starting at `offset`.
+# Copies up to `count` bytes into `buf`. Returns the number of bytes
+# actually read, or an error code.
+# ---------------------------------------------------------------------------
+fn ramfs_read(fs: RamFs, inode_id: u32, offset: u32, buf: var [u8; 4096], count: u32) -> Result<u32, u32>:
+    if inode_id >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[inode_id]:
+        return Result<u32, u32>.Err(EBADF)
+
+    val inode = fs.inodes[inode_id]
+    if inode.inode_type == InodeType.Directory:
+        return Result<u32, u32>.Err(EISDIR)
+
+    # Nothing to read if offset is beyond file size
+    if offset >= inode.size:
+        return Result<u32, u32>.Ok(0)
+
+    # Calculate how many bytes we can actually read
+    var available = inode.size - offset
+    var to_read = count
+    if to_read > available:
+        to_read = available
+    if to_read > RAMFS_MAX_FILE_SIZE:
+        to_read = RAMFS_MAX_FILE_SIZE
+
+    # Copy data into the output buffer
+    for i in 0..to_read:
+        buf[i] = inode.data[offset + i]
+
+    Result<u32, u32>.Ok(to_read)
+
+# ---------------------------------------------------------------------------
+# Write bytes to a file inode starting at `offset`.
+# Grows the file size if the write extends past the current end.
+# Returns the number of bytes written, or an error code.
+# ---------------------------------------------------------------------------
+fn ramfs_write(fs: var RamFs, inode_id: u32, offset: u32, buf: [u8; 4096], count: u32) -> Result<u32, u32>:
+    if inode_id >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[inode_id]:
+        return Result<u32, u32>.Err(EBADF)
+    if fs.inodes[inode_id].inode_type == InodeType.Directory:
+        return Result<u32, u32>.Err(EISDIR)
+
+    # Clamp the write so it does not exceed the maximum file size
+    if offset >= RAMFS_MAX_FILE_SIZE:
+        return Result<u32, u32>.Err(ENOSPC)
+
+    var space = RAMFS_MAX_FILE_SIZE - offset
+    var to_write = count
+    if to_write > space:
+        to_write = space
+
+    # Copy data from buf into the inode
+    for i in 0..to_write:
+        fs.inodes[inode_id].data[offset + i] = buf[i]
+
+    # Grow file size if necessary
+    val new_end = offset + to_write
+    if new_end > fs.inodes[inode_id].size:
+        fs.inodes[inode_id].size = new_end
+
+    Result<u32, u32>.Ok(to_write)
+
+# ---------------------------------------------------------------------------
+# Look up a name within a directory inode.
+# Returns the InodeRef for the matching entry, or ENOENT / ENOTDIR.
+# ---------------------------------------------------------------------------
+fn ramfs_lookup(fs: RamFs, dir_inode: u32, name: text) -> Result<InodeRef, u32>:
+    if dir_inode >= RAMFS_MAX_INODES:
+        return Result<InodeRef, u32>.Err(EBADF)
+    if not fs.inode_used[dir_inode]:
+        return Result<InodeRef, u32>.Err(EBADF)
+
+    val dir = fs.inodes[dir_inode]
+    if dir.inode_type != InodeType.Directory:
+        return Result<InodeRef, u32>.Err(ENOTDIR)
+
+    for i in 0..dir.dir_count:
+        if dir.dir_entries[i].is_used and dir.dir_entries[i].name == name:
+            return Result<InodeRef, u32>.Ok(dir.dir_entries[i].inode_ref)
+
+    Result<InodeRef, u32>.Err(ENOENT)
+
+# ---------------------------------------------------------------------------
+# Create a regular file in a directory. Returns the new file's inode id.
+# Fails with EEXIST if the name already exists, ENOTDIR if the parent
+# is not a directory, or ENOSPC if no slots are available.
+# ---------------------------------------------------------------------------
+fn ramfs_create_file(fs: var RamFs, dir_inode: u32, name: text, mode: u32) -> Result<u32, u32>:
+    if dir_inode >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[dir_inode]:
+        return Result<u32, u32>.Err(EBADF)
+    if fs.inodes[dir_inode].inode_type != InodeType.Directory:
+        return Result<u32, u32>.Err(ENOTDIR)
+
+    # Check for duplicate name
+    val dir_count = fs.inodes[dir_inode].dir_count
+    for i in 0..dir_count:
+        if fs.inodes[dir_inode].dir_entries[i].is_used:
+            if fs.inodes[dir_inode].dir_entries[i].name == name:
+                return Result<u32, u32>.Err(EEXIST)
+
+    # Check directory capacity
+    if dir_count >= RAMFS_MAX_DIR_ENTRIES:
+        return Result<u32, u32>.Err(ENOSPC)
+
+    # Allocate the new file inode
+    val alloc_result = ramfs_alloc_inode(fs, InodeType.RegularFile, mode)
+    if val new_id = alloc_result.ok():
+        # Add directory entry
+        val ref = inode_ref_create(FS_RAMFS, new_id)
+        val entry = dir_entry_create(name, ref)
+
+        # Find a free slot in the directory entries
+        var placed = false
+        for i in 0..RAMFS_MAX_DIR_ENTRIES:
+            if not fs.inodes[dir_inode].dir_entries[i].is_used and not placed:
+                fs.inodes[dir_inode].dir_entries[i] = entry
+                placed = true
+
+        if not placed:
+            # Should not happen since we checked capacity, but be safe
+            ramfs_free_inode(fs, new_id)
+            return Result<u32, u32>.Err(ENOSPC)
+
+        fs.inodes[dir_inode].dir_count = fs.inodes[dir_inode].dir_count + 1
+        return Result<u32, u32>.Ok(new_id)
+
+    Result<u32, u32>.Err(ENOSPC)
+
+# ---------------------------------------------------------------------------
+# Create a subdirectory within a directory. Returns the new dir's inode id.
+# Automatically adds "." and ".." entries in the new directory.
+# ---------------------------------------------------------------------------
+fn ramfs_mkdir(fs: var RamFs, dir_inode: u32, name: text, mode: u32) -> Result<u32, u32>:
+    if dir_inode >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[dir_inode]:
+        return Result<u32, u32>.Err(EBADF)
+    if fs.inodes[dir_inode].inode_type != InodeType.Directory:
+        return Result<u32, u32>.Err(ENOTDIR)
+
+    # Check for duplicate name
+    val dir_count = fs.inodes[dir_inode].dir_count
+    for i in 0..dir_count:
+        if fs.inodes[dir_inode].dir_entries[i].is_used:
+            if fs.inodes[dir_inode].dir_entries[i].name == name:
+                return Result<u32, u32>.Err(EEXIST)
+
+    # Check directory capacity
+    if dir_count >= RAMFS_MAX_DIR_ENTRIES:
+        return Result<u32, u32>.Err(ENOSPC)
+
+    # Allocate the new directory inode
+    val alloc_result = ramfs_alloc_inode(fs, InodeType.Directory, mode)
+    if val new_id = alloc_result.ok():
+        # Add "." entry pointing to the new directory itself
+        val self_ref = inode_ref_create(FS_RAMFS, new_id)
+        fs.inodes[new_id].dir_entries[0] = dir_entry_create(".", self_ref)
+
+        # Add ".." entry pointing to the parent directory
+        val parent_ref = inode_ref_create(FS_RAMFS, dir_inode)
+        fs.inodes[new_id].dir_entries[1] = dir_entry_create("..", parent_ref)
+        fs.inodes[new_id].dir_count = 2
+        fs.inodes[new_id].nlink = 2    # "." points to self
+
+        # Add entry in the parent directory
+        val ref = inode_ref_create(FS_RAMFS, new_id)
+        val entry = dir_entry_create(name, ref)
+
+        var placed = false
+        for i in 0..RAMFS_MAX_DIR_ENTRIES:
+            if not fs.inodes[dir_inode].dir_entries[i].is_used and not placed:
+                fs.inodes[dir_inode].dir_entries[i] = entry
+                placed = true
+
+        if not placed:
+            ramfs_free_inode(fs, new_id)
+            return Result<u32, u32>.Err(ENOSPC)
+
+        fs.inodes[dir_inode].dir_count = fs.inodes[dir_inode].dir_count + 1
+
+        # Parent gains a hard link from the child's ".."
+        fs.inodes[dir_inode].nlink = fs.inodes[dir_inode].nlink + 1
+
+        return Result<u32, u32>.Ok(new_id)
+
+    Result<u32, u32>.Err(ENOSPC)
+
+# ---------------------------------------------------------------------------
+# Remove a directory entry by name. Does not remove directories (use
+# rmdir semantics separately). Frees the inode if its link count drops
+# to zero.
+# ---------------------------------------------------------------------------
+fn ramfs_unlink(fs: var RamFs, dir_inode: u32, name: text) -> Result<u32, u32>:
+    if dir_inode >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[dir_inode]:
+        return Result<u32, u32>.Err(EBADF)
+    if fs.inodes[dir_inode].inode_type != InodeType.Directory:
+        return Result<u32, u32>.Err(ENOTDIR)
+
+    # Cannot unlink "." or ".."
+    if name == "." or name == "..":
+        return Result<u32, u32>.Err(EINVAL)
+
+    # Find the entry
+    val dir_count = fs.inodes[dir_inode].dir_count
+    for i in 0..RAMFS_MAX_DIR_ENTRIES:
+        if fs.inodes[dir_inode].dir_entries[i].is_used:
+            if fs.inodes[dir_inode].dir_entries[i].name == name:
+                val target_id = fs.inodes[dir_inode].dir_entries[i].inode_ref.inode_id
+
+                # If the target is a directory, it must be empty (only "." and "..")
+                if fs.inodes[target_id].inode_type == InodeType.Directory:
+                    if fs.inodes[target_id].dir_count > 2:
+                        return Result<u32, u32>.Err(ENOTEMPTY)
+                    # Removing a subdirectory decreases parent nlink
+                    if fs.inodes[dir_inode].nlink > 0:
+                        fs.inodes[dir_inode].nlink = fs.inodes[dir_inode].nlink - 1
+
+                # Remove the directory entry
+                fs.inodes[dir_inode].dir_entries[i] = dir_entry_empty()
+                fs.inodes[dir_inode].dir_count = fs.inodes[dir_inode].dir_count - 1
+
+                # Decrease link count of target inode
+                if fs.inodes[target_id].nlink > 0:
+                    fs.inodes[target_id].nlink = fs.inodes[target_id].nlink - 1
+
+                # Free the inode if no more links
+                if fs.inodes[target_id].nlink == 0:
+                    ramfs_free_inode(fs, target_id)
+
+                return Result<u32, u32>.Ok(0)
+
+    Result<u32, u32>.Err(ENOENT)
+
+# ---------------------------------------------------------------------------
+# Get file metadata (stat) for a given inode.
+# ---------------------------------------------------------------------------
+fn ramfs_stat(fs: RamFs, inode_id: u32) -> Result<Stat, u32>:
+    if inode_id >= RAMFS_MAX_INODES:
+        return Result<Stat, u32>.Err(EBADF)
+    if not fs.inode_used[inode_id]:
+        return Result<Stat, u32>.Err(EBADF)
+
+    val inode = fs.inodes[inode_id]
+
+    # Calculate blocks allocated (rounded up to block size)
+    var blocks: u32 = 0
+    if inode.size > 0:
+        blocks = (inode.size + RAMFS_BLOCK_SIZE - 1) / RAMFS_BLOCK_SIZE
+
+    val st = Stat(
+        inode_id: inode.id,
+        inode_type: inode.inode_type,
+        size: inode.size,
+        mode: inode.mode,
+        nlink: inode.nlink,
+        uid: 0,
+        gid: 0,
+        dev: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        blksize: RAMFS_BLOCK_SIZE,
+        blocks: blocks
+    )
+
+    Result<Stat, u32>.Ok(st)
+
+# ---------------------------------------------------------------------------
+# Read the nth directory entry from a directory inode.
+# Skips unused slots and returns the `index`-th valid entry.
+# Returns None if the index is out of range.
+# ---------------------------------------------------------------------------
+fn ramfs_readdir(fs: RamFs, dir_inode: u32, index: u32) -> Option<DirEntry>:
+    if dir_inode >= RAMFS_MAX_INODES:
+        return Option<DirEntry>.None
+    if not fs.inode_used[dir_inode]:
+        return Option<DirEntry>.None
+    if fs.inodes[dir_inode].inode_type != InodeType.Directory:
+        return Option<DirEntry>.None
+
+    var seen: u32 = 0
+    for i in 0..RAMFS_MAX_DIR_ENTRIES:
+        if fs.inodes[dir_inode].dir_entries[i].is_used:
+            if seen == index:
+                return Option<DirEntry>.Some(fs.inodes[dir_inode].dir_entries[i])
+            seen = seen + 1
+
+    Option<DirEntry>.None
+
+# ---------------------------------------------------------------------------
+# Truncate (or extend) a file to the given size.
+# If the new size is smaller, data beyond the new size is zeroed.
+# If the new size is larger, the gap is zero-filled.
+# Returns 0 on success.
+# ---------------------------------------------------------------------------
+fn ramfs_truncate(fs: var RamFs, inode_id: u32, size: u32) -> Result<u32, u32>:
+    if inode_id >= RAMFS_MAX_INODES:
+        return Result<u32, u32>.Err(EBADF)
+    if not fs.inode_used[inode_id]:
+        return Result<u32, u32>.Err(EBADF)
+    if fs.inodes[inode_id].inode_type == InodeType.Directory:
+        return Result<u32, u32>.Err(EISDIR)
+    if size > RAMFS_MAX_FILE_SIZE:
+        return Result<u32, u32>.Err(ENOSPC)
+
+    val old_size = fs.inodes[inode_id].size
+
+    # If shrinking, zero out the bytes beyond the new size
+    if size < old_size:
+        for i in size..old_size:
+            fs.inodes[inode_id].data[i] = 0
+
+    fs.inodes[inode_id].size = size
+
+    Result<u32, u32>.Ok(0)

@@ -1,0 +1,192 @@
+# Async Reactor
+# Central polling event loop that drives all async I/O in the POSIX layer.
+# The reactor processes I/O submissions, polls for completions via kernel
+# notifications, and manages timer-based wakeups.
+#
+# Design:
+# - Synchronous POSIX calls (read, write, etc.) have a fast path for
+#   immediate completion (ramfs, /dev/null) and a slow path that submits
+#   to the reactor and blocks the calling thread.
+# - The reactor runs as part of the kernel timer tick, processing one
+#   batch of completions per tick.
+# - Wakers map to kernel Notification objects for zero-cost thread wakeup.
+
+use kernel.core.notification.{Notification, notification_create,
+    notification_signal, notification_poll, notification_wait}
+use kernel.core.scheduler.{Scheduler, scheduler_block, scheduler_unblock}
+use kernel.core.tcb.{ThreadState}
+use posix.async.future.{PollResult, PollValue, Waker, waker_create, waker_none,
+    waker_is_valid, poll_ready, poll_ready_err, poll_pending}
+use posix.async.io_queue.{IoQueue, IoOp, IoOpType, IoOpState, io_queue_create,
+    io_queue_submit, io_queue_complete, io_queue_poll_completion,
+    io_queue_get_op, io_queue_next_submission, io_queue_pending_count}
+use posix.async.timer_wheel.{TimerWheel, timer_wheel_create, timer_wheel_tick,
+    timer_wheel_schedule, timer_wheel_schedule_after, timer_wheel_cancel,
+    timer_wheel_active_count, MAX_TIMERS}
+use posix.errno.{EAGAIN, EINVAL, EIO}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val REACTOR_MAX_EVENTS: u32 = 32
+val REACTOR_NOTIFICATION_BIT: u32 = 1
+
+# ---------------------------------------------------------------------------
+# Reactor state
+# ---------------------------------------------------------------------------
+enum ReactorState:
+    Idle
+    Running
+    Stopped
+
+struct Reactor:
+    state: ReactorState
+    io_queue: IoQueue
+    timer_wheel: TimerWheel
+    notification: Notification     # Shared notification for wakeups
+    pending_wakeups: [u32; 128]    # Thread ids to wake up
+    wakeup_count: u32              # Manual counter
+    total_ops_completed: u64       # Statistics
+    total_ticks: u64               # Total ticks processed
+
+# ---------------------------------------------------------------------------
+# Create a new reactor
+# ---------------------------------------------------------------------------
+fn reactor_create() -> Reactor:
+    Reactor(
+        state: ReactorState.Idle,
+        io_queue: io_queue_create(),
+        timer_wheel: timer_wheel_create(),
+        notification: notification_create(),
+        pending_wakeups: [0 as u32; 128],
+        wakeup_count: 0,
+        total_ops_completed: 0,
+        total_ticks: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Start the reactor
+# ---------------------------------------------------------------------------
+fn reactor_start(reactor: var Reactor):
+    reactor.state = ReactorState.Running
+
+# ---------------------------------------------------------------------------
+# Stop the reactor
+# ---------------------------------------------------------------------------
+fn reactor_stop(reactor: var Reactor):
+    reactor.state = ReactorState.Stopped
+
+# ---------------------------------------------------------------------------
+# Submit an I/O operation to the reactor.
+# Returns the operation id for tracking.
+# ---------------------------------------------------------------------------
+fn reactor_submit_io(reactor: var Reactor, op_type: IoOpType, fd: u32,
+                     offset: u32, buf_addr: u32, buf_len: u32,
+                     thread_id: u32) -> Result<u32, u32>:
+    val waker = waker_create(thread_id, REACTOR_NOTIFICATION_BIT)
+    io_queue_submit(reactor.io_queue, op_type, fd, offset, buf_addr, buf_len, waker)
+
+# ---------------------------------------------------------------------------
+# Schedule a timer wakeup.
+# Returns the timer id.
+# ---------------------------------------------------------------------------
+fn reactor_schedule_timer(reactor: var Reactor, delay_ticks: u32,
+                          thread_id: u32) -> Result<u32, u32>:
+    val waker = waker_create(thread_id, REACTOR_NOTIFICATION_BIT)
+    timer_wheel_schedule_after(reactor.timer_wheel, delay_ticks, waker)
+
+# ---------------------------------------------------------------------------
+# Cancel a timer.
+# ---------------------------------------------------------------------------
+fn reactor_cancel_timer(reactor: var Reactor, timer_id: u32) -> Result<u32, u32>:
+    timer_wheel_cancel(reactor.timer_wheel, timer_id)
+
+# ---------------------------------------------------------------------------
+# Process one tick of the reactor.
+# Called from the kernel timer interrupt handler.
+# Returns the number of threads to wake up (wakeup list in pending_wakeups).
+# ---------------------------------------------------------------------------
+fn reactor_tick(reactor: var Reactor) -> u32:
+    if reactor.state != ReactorState.Running:
+        return 0
+
+    reactor.total_ticks = reactor.total_ticks + 1
+    reactor.wakeup_count = 0
+
+    # 1. Process timer expirations
+    var expired_wakers: [Waker; 128] = [waker_none(); 128]
+    val timer_expired = timer_wheel_tick(reactor.timer_wheel, expired_wakers)
+
+    # Collect thread ids from expired timers
+    for i in 0..timer_expired:
+        if waker_is_valid(expired_wakers[i]):
+            val tid = expired_wakers[i].thread_id
+            if reactor.wakeup_count < 128:
+                reactor.pending_wakeups[reactor.wakeup_count] = tid
+                reactor.wakeup_count = reactor.wakeup_count + 1
+
+    # 2. Process I/O completions
+    var completions_processed: u32 = 0
+    while completions_processed < REACTOR_MAX_EVENTS:
+        if val op_id = io_queue_poll_completion(reactor.io_queue):
+            if val op = io_queue_get_op(reactor.io_queue, op_id):
+                if waker_is_valid(op.waker):
+                    val tid = op.waker.thread_id
+                    if reactor.wakeup_count < 128:
+                        reactor.pending_wakeups[reactor.wakeup_count] = tid
+                        reactor.wakeup_count = reactor.wakeup_count + 1
+                reactor.total_ops_completed = reactor.total_ops_completed + 1
+            completions_processed = completions_processed + 1
+        else:
+            break
+
+    # 3. Process pending I/O submissions (fast-path completions)
+    var submissions_processed: u32 = 0
+    while submissions_processed < REACTOR_MAX_EVENTS:
+        if val op_id = io_queue_next_submission(reactor.io_queue):
+            # For now, all I/O is handled synchronously at the VFS level.
+            # The reactor is here for device-backed async I/O in the future.
+            # Mark the op as needing processing by the VFS layer.
+            submissions_processed = submissions_processed + 1
+        else:
+            break
+
+    reactor.wakeup_count
+
+# ---------------------------------------------------------------------------
+# Apply pending wakeups to the scheduler.
+# Called after reactor_tick with the scheduler reference.
+# ---------------------------------------------------------------------------
+fn reactor_apply_wakeups(reactor: Reactor, sched: var Scheduler):
+    for i in 0..reactor.wakeup_count:
+        val tid = reactor.pending_wakeups[i]
+        scheduler_unblock(sched, tid)
+
+# ---------------------------------------------------------------------------
+# Complete an I/O operation (called by VFS/FS layer when data is ready).
+# ---------------------------------------------------------------------------
+fn reactor_complete_io(reactor: var Reactor, op_id: u32, result: u32, error: u32):
+    io_queue_complete(reactor.io_queue, op_id, result, error)
+
+# ---------------------------------------------------------------------------
+# Check if the reactor has any pending work.
+# ---------------------------------------------------------------------------
+fn reactor_has_work(reactor: Reactor) -> bool:
+    val io_pending = io_queue_pending_count(reactor.io_queue)
+    val timers_active = timer_wheel_active_count(reactor.timer_wheel)
+    io_pending > 0 or timers_active > 0
+
+# ---------------------------------------------------------------------------
+# Get reactor statistics
+# ---------------------------------------------------------------------------
+fn reactor_total_completed(reactor: Reactor) -> u64:
+    reactor.total_ops_completed
+
+fn reactor_total_ticks(reactor: Reactor) -> u64:
+    reactor.total_ticks
+
+fn reactor_pending_io_count(reactor: Reactor) -> u32:
+    io_queue_pending_count(reactor.io_queue)
+
+fn reactor_active_timer_count(reactor: Reactor) -> u32:
+    timer_wheel_active_count(reactor.timer_wheel)

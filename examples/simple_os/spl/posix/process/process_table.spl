@@ -1,0 +1,60 @@
+# Process Table
+
+use posix.process.process.{Process, ProcessState, process_create}
+use posix.errno.{ESRCH, EAGAIN}
+
+val MAX_PROCESSES: u32 = 32
+val PID_NONE: u32 = 0xFFFFFFFF
+
+struct ProcessTable:
+    processes: [Process; 32]
+    used: [bool; 32]           # Track which slots are in use
+    process_count: u32         # Manual counter
+    next_pid: u32              # Next pid to try
+
+fn process_table_create() -> ProcessTable:
+    val empty = process_create(0, 0, 0, "")
+    ProcessTable(
+        processes: [empty; 32],
+        used: [false; 32],
+        process_count: 0,
+        next_pid: 1            # PID 0 reserved for kernel
+    )
+
+fn process_table_alloc(table: var ProcessTable, ppid: u32, tcb_id: u32, name: text) -> Result<u32, u32>:
+    # Find free slot
+    for i in 0..MAX_PROCESSES:
+        if !table.used[i]:
+            val pid = table.next_pid
+            table.next_pid = table.next_pid + 1
+            var proc = process_create(pid, ppid, tcb_id, name)
+            table.processes[i] = proc
+            table.used[i] = true
+            table.process_count = table.process_count + 1
+            return Result<u32, u32>.Ok(pid)
+    Result<u32, u32>.Err(EAGAIN)
+
+fn process_table_find(table: ProcessTable, pid: u32) -> Option<u32>:
+    # Returns the slot index for a given pid
+    for i in 0..MAX_PROCESSES:
+        if table.used[i] and table.processes[i].pid == pid:
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+fn process_table_get(table: ProcessTable, pid: u32) -> Result<Process, u32>:
+    if val idx = process_table_find(table, pid):
+        return Result<Process, u32>.Ok(table.processes[idx])
+    Result<Process, u32>.Err(ESRCH)
+
+fn process_table_remove(table: var ProcessTable, pid: u32) -> Result<u32, u32>:
+    if val idx = process_table_find(table, pid):
+        table.used[idx] = false
+        table.process_count = table.process_count - 1
+        return Result<u32, u32>.Ok(0)
+    Result<u32, u32>.Err(ESRCH)
+
+fn process_table_set_state(table: var ProcessTable, pid: u32, state: ProcessState) -> Result<u32, u32>:
+    if val idx = process_table_find(table, pid):
+        table.processes[idx].state = state
+        return Result<u32, u32>.Ok(0)
+    Result<u32, u32>.Err(ESRCH)

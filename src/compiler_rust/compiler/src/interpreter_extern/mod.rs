@@ -202,6 +202,7 @@ pub(crate) fn call_extern_function(
         }
         "input" => io::input::input(&evaluated),
         "stdin_read_char" => io::input::stdin_read_char(&evaluated),
+        "rt_stdin_read_n" => io::input::rt_stdin_read_n(&evaluated),
         "rt_stdin_read_line" => io::input::input(&[]),
         "stdout_write" => io::stdout_write(&evaluated),
         "stdout_flush" => io::stdout_flush(&evaluated),

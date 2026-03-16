@@ -293,12 +293,17 @@ class LeanBackend:
         # Begin namespace
         builder.begin_namespace("{self.module_prefix}.{module.name}")
 
+        # Build type_names dict: SymbolId -> name for struct/enum resolution
+        var type_names: Dict = {}
+        for sym_id, type_def in module.types:
+            type_names[sym_id] = type_def.name
+
         # Export type definitions
         self.export_types(builder, module)
 
         # Export functions
         for name, body in module.functions:
-            self.export_function(builder, name, body)
+            self.export_function(builder, name, body, type_names)
 
         # Generate proof obligations
         if self.generate_proofs:
@@ -322,17 +327,18 @@ class LeanBackend:
 
         # Would iterate through module type definitions
 
-    fn export_function(builder: LeanBuilder, name: text, body: MirBody):
+    fn export_function(builder: LeanBuilder, name: text, body: MirBody, type_names: Dict):
         """Export a function definition."""
         builder.emit_blank()
         builder.emit_doc_comment("Function: {name}")
 
-        # Build parameters
+        # Build parameters from actual MIR local types
         var params: [(text, text)] = []
         for i in 0..body.arg_count:
-            params = params.push(("arg{i}", "Int"))
+            val param_ty = if i < body.locals.len(): mir_type_to_lean(body.locals[i].type_, type_names) else: "Int"
+            params = params.push(("arg{i}", param_ty))
 
-        val ret_type = mir_type_to_lean(body.return_ty)
+        val ret_type = mir_type_to_lean(body.return_ty, type_names)
 
         # Generate function signature
         if self.level == VerificationLevel.Minimal:
@@ -342,13 +348,8 @@ class LeanBackend:
             builder.emit_axiom(name, full_type)
         else:
             # Generate full definition by translating MIR body
-            val lean_body = translate_mir_body(body)
+            val lean_body = translate_mir_body(body, type_names)
             builder.emit_def(name, params, ret_type, lean_body)
-
-        # Generate contracts if requested
-        if self.level.includes_contracts():
-            val contract = FunctionContract.empty(name)
-            contract.to_lean_spec(builder, params, ret_type)
 
     fn generate_proof_obligations(builder: LeanBuilder, module: MirModule):
         """Generate proof obligations for the module."""
@@ -519,7 +520,7 @@ impl Codegen for LeanBackend:
 
 impl VerificationCodegen for LeanBackend:
     fn export_function(name: text, body: MirBody) -> text:
-        translate_mir_body(body)
+        translate_mir_body(body, {})
 
     fn generate_proof_obligations(module: MirModule) -> [text]:
         []

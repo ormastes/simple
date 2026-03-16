@@ -1,0 +1,83 @@
+# POSIX nanosleep
+
+use posix.time.clock.{Timespec, timespec_to_ticks, TICKS_PER_SECOND}
+use posix.async.future.{Waker, waker_create, waker_is_valid}
+use posix.async.timer_wheel.{TimerWheel, timer_wheel_schedule, timer_wheel_cancel}
+use posix.errno.{EINVAL}
+
+# ---------------------------------------------------------------------------
+# Sleep state enumeration
+# ---------------------------------------------------------------------------
+enum SleepState:
+    Idle
+    Sleeping
+    Completed
+    Interrupted
+
+# ---------------------------------------------------------------------------
+# Sleep request — tracks a pending nanosleep operation
+# ---------------------------------------------------------------------------
+struct SleepRequest:
+    thread_id: u32
+    timer_id: u32
+    state: SleepState
+    remaining: Timespec        # Time remaining if interrupted
+
+# ---------------------------------------------------------------------------
+# Create an empty/default sleep request.
+# ---------------------------------------------------------------------------
+fn sleep_request_empty() -> SleepRequest:
+    SleepRequest(
+        thread_id: 0,
+        timer_id: 0,
+        state: SleepState.Idle,
+        remaining: Timespec(tv_sec: 0, tv_nsec: 0)
+    )
+
+# ---------------------------------------------------------------------------
+# Start a nanosleep by scheduling a timer on the wheel.
+# duration: how long to sleep (as a Timespec)
+# current_tick: the current kernel tick count
+# Returns a SleepRequest with the assigned timer_id.
+# ---------------------------------------------------------------------------
+fn nanosleep_start(wheel: var TimerWheel, thread_id: u32, duration: Timespec, current_tick: u64) -> Result<SleepRequest, u32>:
+    val delay_ticks = timespec_to_ticks(duration)
+    if delay_ticks == 0:
+        # Zero-length sleep completes immediately
+        val req = SleepRequest(
+            thread_id: thread_id,
+            timer_id: 0,
+            state: SleepState.Completed,
+            remaining: Timespec(tv_sec: 0, tv_nsec: 0)
+        )
+        return Result<SleepRequest, u32>.Ok(req)
+
+    val deadline = current_tick + delay_ticks
+    val waker = waker_create(thread_id, 1)
+    val schedule_result = timer_wheel_schedule(wheel, deadline, waker)
+
+    if val timer_id = schedule_result:
+        val req = SleepRequest(
+            thread_id: thread_id,
+            timer_id: timer_id,
+            state: SleepState.Sleeping,
+            remaining: duration
+        )
+        return Result<SleepRequest, u32>.Ok(req)
+
+    Result<SleepRequest, u32>.Err(EINVAL)
+
+# ---------------------------------------------------------------------------
+# Cancel a pending nanosleep. Sets state to Interrupted.
+# The remaining field keeps the original duration (caller may refine it).
+# ---------------------------------------------------------------------------
+fn nanosleep_cancel(wheel: var TimerWheel, req: var SleepRequest):
+    if req.state == SleepState.Sleeping:
+        val _cancel_result = timer_wheel_cancel(wheel, req.timer_id)
+        req.state = SleepState.Interrupted
+
+# ---------------------------------------------------------------------------
+# Check whether a sleep request has completed.
+# ---------------------------------------------------------------------------
+fn nanosleep_is_complete(req: SleepRequest) -> bool:
+    req.state == SleepState.Completed

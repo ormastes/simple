@@ -102,5 +102,5 @@ pub fn stderr_flush(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // Re-export commonly used functions
-pub use input::{input, stdin_read_char};
+pub use input::{input, rt_stdin_read_n, stdin_read_char};
 pub use print::{dprint, eprint, eprint_raw, eprintln, print, print_raw, println};

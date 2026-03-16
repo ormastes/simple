@@ -1,0 +1,150 @@
+# Inode Interface
+# Defines the inode type system and stat structure for the VFS layer.
+# Each filesystem implements these types to represent its files and directories.
+
+use posix.errno.{EINVAL}
+
+# ---------------------------------------------------------------------------
+# File types (matches POSIX mode bits S_IFMT field)
+# ---------------------------------------------------------------------------
+enum InodeType:
+    RegularFile
+    Directory
+    CharDevice
+    BlockDevice
+    Pipe
+    Socket
+    Symlink
+
+# ---------------------------------------------------------------------------
+# Stat structure — file metadata returned by stat/fstat
+# ---------------------------------------------------------------------------
+struct Stat:
+    inode_id: u32
+    inode_type: InodeType
+    size: u32                  # File size in bytes
+    mode: u32                  # Permission bits
+    nlink: u32                 # Number of hard links
+    uid: u32                   # Owner user id
+    gid: u32                   # Owner group id
+    dev: u32                   # Device id (for device files)
+    atime: u64                 # Access time (ticks)
+    mtime: u64                 # Modification time (ticks)
+    ctime: u64                 # Status change time (ticks)
+    blksize: u32               # Preferred block size for I/O
+    blocks: u32                # Number of blocks allocated
+
+fn stat_empty() -> Stat:
+    Stat(
+        inode_id: 0,
+        inode_type: InodeType.RegularFile,
+        size: 0,
+        mode: 0,
+        nlink: 0,
+        uid: 0,
+        gid: 0,
+        dev: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        blksize: 512,
+        blocks: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Permission mode constants
+# ---------------------------------------------------------------------------
+val S_IRWXU: u32 = 448    # 0o700 — owner read/write/execute
+val S_IRUSR: u32 = 256    # 0o400
+val S_IWUSR: u32 = 128    # 0o200
+val S_IXUSR: u32 = 64     # 0o100
+val S_IRWXG: u32 = 56     # 0o070
+val S_IRGRP: u32 = 32     # 0o040
+val S_IWGRP: u32 = 16     # 0o020
+val S_IXGRP: u32 = 8      # 0o010
+val S_IRWXO: u32 = 7      # 0o007
+val S_IROTH: u32 = 4      # 0o004
+val S_IWOTH: u32 = 2      # 0o002
+val S_IXOTH: u32 = 1      # 0o001
+
+# Default permissions for new files and directories
+val DEFAULT_FILE_MODE: u32 = 420  # 0o644 — rw-r--r--
+val DEFAULT_DIR_MODE: u32 = 493   # 0o755 — rwxr-xr-x
+
+# ---------------------------------------------------------------------------
+# Filesystem ID constants — identifies which FS implementation owns an inode
+# ---------------------------------------------------------------------------
+val FS_RAMFS: u32 = 1
+val FS_DEVFS: u32 = 2
+
+# ---------------------------------------------------------------------------
+# Inode data — polymorphic payload per filesystem type.
+# Since Simple has no inheritance, we use a tagged union via fs_id.
+# Each inode is identified by (fs_id, inode_id) globally.
+# ---------------------------------------------------------------------------
+struct InodeRef:
+    fs_id: u32                 # Which filesystem (FS_RAMFS, FS_DEVFS)
+    inode_id: u32              # Inode index within that filesystem
+
+fn inode_ref_create(fs_id: u32, inode_id: u32) -> InodeRef:
+    InodeRef(fs_id: fs_id, inode_id: inode_id)
+
+fn inode_ref_is_valid(ref: InodeRef) -> bool:
+    ref.fs_id != 0
+
+fn inode_ref_none() -> InodeRef:
+    InodeRef(fs_id: 0, inode_id: 0)
+
+# ---------------------------------------------------------------------------
+# Directory entry — a single name->inode mapping within a directory
+# ---------------------------------------------------------------------------
+val MAX_DENTRY_NAME: u32 = 64
+val INODE_NONE: u32 = 0xFFFFFFFF
+
+struct DirEntry:
+    name: text
+    inode_ref: InodeRef
+    is_used: bool
+
+fn dir_entry_create(name: text, inode_ref: InodeRef) -> DirEntry:
+    DirEntry(
+        name: name,
+        inode_ref: inode_ref,
+        is_used: true
+    )
+
+fn dir_entry_empty() -> DirEntry:
+    DirEntry(
+        name: "",
+        inode_ref: inode_ref_none(),
+        is_used: false
+    )
+
+# ---------------------------------------------------------------------------
+# Inode type queries
+# ---------------------------------------------------------------------------
+fn inode_type_is_file(t: InodeType) -> bool:
+    t == InodeType.RegularFile
+
+fn inode_type_is_dir(t: InodeType) -> bool:
+    t == InodeType.Directory
+
+fn inode_type_is_device(t: InodeType) -> bool:
+    t == InodeType.CharDevice or t == InodeType.BlockDevice
+
+fn inode_type_name(t: InodeType) -> text:
+    if t == InodeType.RegularFile:
+        return "file"
+    if t == InodeType.Directory:
+        return "directory"
+    if t == InodeType.CharDevice:
+        return "chardev"
+    if t == InodeType.BlockDevice:
+        return "blockdev"
+    if t == InodeType.Pipe:
+        return "pipe"
+    if t == InodeType.Socket:
+        return "socket"
+    if t == InodeType.Symlink:
+        return "symlink"
+    "unknown"

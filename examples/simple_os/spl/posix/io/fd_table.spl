@@ -1,0 +1,85 @@
+# File Descriptor Table
+
+use posix.io.file.{OpenFile, open_file_create, open_file_empty}
+use posix.errno.{EBADF, EMFILE, EINVAL}
+
+val MAX_FDS: u32 = 32
+
+struct FdTable:
+    entries: [OpenFile; 32]
+    fd_count: u32           # Manual counter (avoid .len() bug)
+
+fn fd_table_create() -> FdTable:
+    val empty = open_file_empty()
+    FdTable(
+        entries: [empty; 32],
+        fd_count: 0
+    )
+
+fn fd_alloc(table: var FdTable, file: OpenFile) -> Result<u32, u32>:
+    # Find first unused slot
+    for i in 0..MAX_FDS:
+        if !table.entries[i].is_open:
+            table.entries[i] = file
+            table.fd_count = table.fd_count + 1
+            return Result<u32, u32>.Ok(i)
+    Result<u32, u32>.Err(EMFILE)
+
+fn fd_alloc_at(table: var FdTable, fd: u32, file: OpenFile) -> Result<u32, u32>:
+    # Allocate at specific fd number (for dup2)
+    if fd >= MAX_FDS:
+        return Result<u32, u32>.Err(EBADF)
+    if table.entries[fd].is_open:
+        # Close existing
+        table.entries[fd].is_open = false
+        table.fd_count = table.fd_count - 1
+    table.entries[fd] = file
+    table.fd_count = table.fd_count + 1
+    Result<u32, u32>.Ok(fd)
+
+fn fd_get(table: FdTable, fd: u32) -> Result<OpenFile, u32>:
+    if fd >= MAX_FDS:
+        return Result<OpenFile, u32>.Err(EBADF)
+    if !table.entries[fd].is_open:
+        return Result<OpenFile, u32>.Err(EBADF)
+    Result<OpenFile, u32>.Ok(table.entries[fd])
+
+fn fd_close(table: var FdTable, fd: u32) -> Result<u32, u32>:
+    if fd >= MAX_FDS:
+        return Result<u32, u32>.Err(EBADF)
+    if !table.entries[fd].is_open:
+        return Result<u32, u32>.Err(EBADF)
+    table.entries[fd].ref_count = table.entries[fd].ref_count - 1
+    if table.entries[fd].ref_count == 0:
+        table.entries[fd].is_open = false
+        table.fd_count = table.fd_count - 1
+    Result<u32, u32>.Ok(0)
+
+fn fd_dup(table: var FdTable, old_fd: u32) -> Result<u32, u32>:
+    if old_fd >= MAX_FDS:
+        return Result<u32, u32>.Err(EBADF)
+    if !table.entries[old_fd].is_open:
+        return Result<u32, u32>.Err(EBADF)
+    # Create a copy with ref_count = 1
+    var new_file = table.entries[old_fd]
+    new_file.ref_count = 1
+    fd_alloc(table, new_file)
+
+fn fd_dup2(table: var FdTable, old_fd: u32, new_fd: u32) -> Result<u32, u32>:
+    if old_fd >= MAX_FDS or new_fd >= MAX_FDS:
+        return Result<u32, u32>.Err(EBADF)
+    if !table.entries[old_fd].is_open:
+        return Result<u32, u32>.Err(EBADF)
+    if old_fd == new_fd:
+        return Result<u32, u32>.Ok(new_fd)
+    var new_file = table.entries[old_fd]
+    new_file.ref_count = 1
+    fd_alloc_at(table, new_fd, new_file)
+
+fn fd_update_offset(table: var FdTable, fd: u32, new_offset: u32) -> Result<u32, u32>:
+    if fd >= MAX_FDS:
+        return Result<u32, u32>.Err(EBADF)
+    if !table.entries[fd].is_open:
+        return Result<u32, u32>.Err(EBADF)
+    table.entries[fd].offset = new_offset
+    Result<u32, u32>.Ok(0)

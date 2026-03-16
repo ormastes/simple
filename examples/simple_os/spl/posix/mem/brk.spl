@@ -1,0 +1,60 @@
+# Heap Management (brk/sbrk)
+# Simple bump allocator for per-process heap.
+
+use posix.errno.{ENOMEM, EINVAL}
+
+val HEAP_MAX_SIZE: u32 = 65536    # 64KB max heap per process
+val HEAP_ALIGN: u32 = 4           # 4-byte alignment
+
+struct HeapState:
+    base: u32                  # Start of heap region
+    current_brk: u32           # Current break (end of heap)
+    max_brk: u32               # Maximum allowed break
+
+# Create a new heap state starting at the given base address.
+fn heap_create(base: u32) -> HeapState:
+    HeapState(
+        base: base,
+        current_brk: base,
+        max_brk: base + HEAP_MAX_SIZE
+    )
+
+# Set the program break to `new_brk`.
+# The new break must be within [base, max_brk].
+# Returns Ok(new_brk) on success, Err(ENOMEM) if out of range.
+fn heap_brk(heap: var HeapState, new_brk: u32) -> Result<u32, u32>:
+    if new_brk < heap.base:
+        return Result<u32, u32>.Err(EINVAL)
+    if new_brk > heap.max_brk:
+        return Result<u32, u32>.Err(ENOMEM)
+    # Align up to HEAP_ALIGN boundary
+    var aligned = new_brk
+    val remainder = new_brk % HEAP_ALIGN
+    if remainder != 0:
+        aligned = new_brk + (HEAP_ALIGN - remainder)
+    if aligned > heap.max_brk:
+        return Result<u32, u32>.Err(ENOMEM)
+    heap.current_brk = aligned
+    Result<u32, u32>.Ok(aligned)
+
+# Increment the program break by `increment` bytes.
+# Returns Ok(old_brk) on success (sbrk semantics: return the previous break).
+# Returns Err(ENOMEM) if the new break would exceed the maximum.
+fn heap_sbrk(heap: var HeapState, increment: u32) -> Result<u32, u32>:
+    val old_brk = heap.current_brk
+    val new_brk = old_brk + increment
+    if new_brk > heap.max_brk:
+        return Result<u32, u32>.Err(ENOMEM)
+    # Align up to HEAP_ALIGN boundary
+    var aligned = new_brk
+    val remainder = new_brk % HEAP_ALIGN
+    if remainder != 0:
+        aligned = new_brk + (HEAP_ALIGN - remainder)
+    if aligned > heap.max_brk:
+        return Result<u32, u32>.Err(ENOMEM)
+    heap.current_brk = aligned
+    Result<u32, u32>.Ok(old_brk)
+
+# Returns the current heap usage in bytes.
+fn heap_size(heap: HeapState) -> u32:
+    heap.current_brk - heap.base

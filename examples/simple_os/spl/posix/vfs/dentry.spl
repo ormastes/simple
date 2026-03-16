@@ -1,0 +1,131 @@
+# Directory Entry Cache
+# Caches path->inode mappings to speed up repeated path resolution.
+# Simple flat cache with LRU-style replacement (oldest entry replaced first).
+
+use posix.vfs.inode.{InodeRef, inode_ref_none, inode_ref_is_valid}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val DENTRY_CACHE_SIZE: u32 = 64
+val DENTRY_NONE: u32 = 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Cached directory entry
+# ---------------------------------------------------------------------------
+struct CachedDentry:
+    path: text                 # Full normalized path
+    inode_ref: InodeRef        # Resolved inode reference
+    parent_idx: u32            # Index of parent dentry in cache (DENTRY_NONE for root)
+    is_valid: bool             # Whether this cache entry is active
+    access_tick: u64           # Last access tick (for LRU eviction)
+
+fn cached_dentry_empty() -> CachedDentry:
+    CachedDentry(
+        path: "",
+        inode_ref: inode_ref_none(),
+        parent_idx: DENTRY_NONE,
+        is_valid: false,
+        access_tick: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Directory entry cache
+# ---------------------------------------------------------------------------
+struct DentryCache:
+    entries: [CachedDentry; 64]
+    entry_count: u32           # Manual counter
+    tick: u64                  # Monotonic tick for LRU
+
+fn dentry_cache_create() -> DentryCache:
+    val empty = cached_dentry_empty()
+    DentryCache(
+        entries: [empty; 64],
+        entry_count: 0,
+        tick: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Look up a path in the cache. Returns the inode ref if found.
+# ---------------------------------------------------------------------------
+fn dentry_cache_lookup(cache: var DentryCache, path: text) -> Option<InodeRef>:
+    for i in 0..DENTRY_CACHE_SIZE:
+        if cache.entries[i].is_valid and cache.entries[i].path == path:
+            cache.tick = cache.tick + 1
+            cache.entries[i].access_tick = cache.tick
+            return Option<InodeRef>.Some(cache.entries[i].inode_ref)
+    Option<InodeRef>.None
+
+# ---------------------------------------------------------------------------
+# Insert or update a path->inode mapping in the cache.
+# If cache is full, evicts the least recently used entry.
+# ---------------------------------------------------------------------------
+fn dentry_cache_insert(cache: var DentryCache, path: text, inode_ref: InodeRef, parent_idx: u32):
+    cache.tick = cache.tick + 1
+
+    # Check if already cached — update in place
+    for i in 0..DENTRY_CACHE_SIZE:
+        if cache.entries[i].is_valid and cache.entries[i].path == path:
+            cache.entries[i].inode_ref = inode_ref
+            cache.entries[i].parent_idx = parent_idx
+            cache.entries[i].access_tick = cache.tick
+            return
+
+    # Find a free slot
+    for i in 0..DENTRY_CACHE_SIZE:
+        if !cache.entries[i].is_valid:
+            cache.entries[i] = CachedDentry(
+                path: path,
+                inode_ref: inode_ref,
+                parent_idx: parent_idx,
+                is_valid: true,
+                access_tick: cache.tick
+            )
+            cache.entry_count = cache.entry_count + 1
+            return
+
+    # Cache full — evict LRU entry
+    var lru_idx: u32 = 0
+    var lru_tick: u64 = cache.entries[0].access_tick
+    for i in 1..DENTRY_CACHE_SIZE:
+        if cache.entries[i].access_tick < lru_tick:
+            lru_tick = cache.entries[i].access_tick
+            lru_idx = i
+    cache.entries[lru_idx] = CachedDentry(
+        path: path,
+        inode_ref: inode_ref,
+        parent_idx: parent_idx,
+        is_valid: true,
+        access_tick: cache.tick
+    )
+
+# ---------------------------------------------------------------------------
+# Invalidate a specific path (and all children).
+# ---------------------------------------------------------------------------
+fn dentry_cache_invalidate(cache: var DentryCache, path: text):
+    for i in 0..DENTRY_CACHE_SIZE:
+        if cache.entries[i].is_valid:
+            # Invalidate exact match
+            if cache.entries[i].path == path:
+                cache.entries[i].is_valid = false
+                cache.entry_count = cache.entry_count - 1
+            # Also invalidate children (path starts with "path/")
+            val prefix = path + "/"
+            val entry_path = cache.entries[i].path
+            if entry_path.starts_with(prefix):
+                cache.entries[i].is_valid = false
+                cache.entry_count = cache.entry_count - 1
+
+# ---------------------------------------------------------------------------
+# Invalidate the entire cache.
+# ---------------------------------------------------------------------------
+fn dentry_cache_flush(cache: var DentryCache):
+    for i in 0..DENTRY_CACHE_SIZE:
+        cache.entries[i].is_valid = false
+    cache.entry_count = 0
+
+# ---------------------------------------------------------------------------
+# Get the number of valid entries in the cache.
+# ---------------------------------------------------------------------------
+fn dentry_cache_count(cache: DentryCache) -> u32:
+    cache.entry_count

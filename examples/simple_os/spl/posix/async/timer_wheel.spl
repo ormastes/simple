@@ -1,0 +1,207 @@
+# Timer Wheel
+# Hierarchical timer for scheduling delayed wakeups (nanosleep, I/O timeouts).
+# Uses a simple flat wheel with fixed-size slots. Each slot holds a linked list
+# of pending timers. The wheel advances on each tick from the kernel timer.
+
+use posix.async.future.{Waker, waker_create, waker_none, waker_is_valid}
+use posix.errno.{EINVAL}
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+val TIMER_WHEEL_SLOTS: u32 = 64
+val MAX_TIMERS: u32 = 128
+val TIMER_NONE: u32 = 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Timer entry
+# ---------------------------------------------------------------------------
+enum TimerState:
+    Free
+    Active
+    Expired
+    Cancelled
+
+struct Timer:
+    id: u32
+    state: TimerState
+    deadline: u64              # Absolute tick when this timer fires
+    waker: Waker               # Who to wake up
+    next: u32                  # Next timer in same slot (intrusive list)
+
+fn timer_empty() -> Timer:
+    Timer(
+        id: 0,
+        state: TimerState.Free,
+        deadline: 0,
+        waker: waker_none(),
+        next: TIMER_NONE
+    )
+
+# ---------------------------------------------------------------------------
+# Timer wheel
+# ---------------------------------------------------------------------------
+struct TimerWheel:
+    slots: [u32; 64]          # Head of timer list per slot (timer id or TIMER_NONE)
+    timers: [Timer; 128]      # Timer pool
+    timer_used: [bool; 128]   # Track allocated timers
+    timer_count: u32           # Manual counter
+    current_tick: u64          # Current absolute tick
+    current_slot: u32          # Current wheel position (0..TIMER_WHEEL_SLOTS-1)
+
+# ---------------------------------------------------------------------------
+# Create an empty timer wheel
+# ---------------------------------------------------------------------------
+fn timer_wheel_create() -> TimerWheel:
+    val empty = timer_empty()
+    TimerWheel(
+        slots: [TIMER_NONE as u32; 64],
+        timers: [empty; 128],
+        timer_used: [false; 128],
+        timer_count: 0,
+        current_tick: 0,
+        current_slot: 0
+    )
+
+# ---------------------------------------------------------------------------
+# Allocate a timer slot from the pool
+# ---------------------------------------------------------------------------
+fn timer_alloc(wheel: var TimerWheel) -> Option<u32>:
+    for i in 0..MAX_TIMERS:
+        if !wheel.timer_used[i]:
+            wheel.timer_used[i] = true
+            wheel.timer_count = wheel.timer_count + 1
+            return Option<u32>.Some(i)
+    Option<u32>.None
+
+# ---------------------------------------------------------------------------
+# Free a timer slot back to the pool
+# ---------------------------------------------------------------------------
+fn timer_free(wheel: var TimerWheel, id: u32):
+    if id >= MAX_TIMERS:
+        return
+    wheel.timer_used[id] = false
+    wheel.timers[id].state = TimerState.Free
+    wheel.timer_count = wheel.timer_count - 1
+
+# ---------------------------------------------------------------------------
+# Schedule a new timer to fire at the given absolute deadline tick.
+# Returns the timer id on success.
+# ---------------------------------------------------------------------------
+fn timer_wheel_schedule(wheel: var TimerWheel, deadline: u64, waker: Waker) -> Result<u32, u32>:
+    if !waker_is_valid(waker):
+        return Result<u32, u32>.Err(EINVAL)
+
+    # Allocate a timer entry
+    if val timer_id = timer_alloc(wheel):
+        # Determine which slot this timer belongs to
+        val ticks_until = if deadline > wheel.current_tick:
+            deadline - wheel.current_tick
+        else:
+            0 as u64
+        # Cast to u32 for slot calculation - timers farther out wrap around
+        val ticks_u32 = ticks_until as u32
+        val slot = (wheel.current_slot + ticks_u32) % TIMER_WHEEL_SLOTS
+
+        # Initialize the timer
+        wheel.timers[timer_id].id = timer_id
+        wheel.timers[timer_id].state = TimerState.Active
+        wheel.timers[timer_id].deadline = deadline
+        wheel.timers[timer_id].waker = waker
+        wheel.timers[timer_id].next = wheel.slots[slot]
+
+        # Insert at head of slot list
+        wheel.slots[slot] = timer_id
+
+        return Result<u32, u32>.Ok(timer_id)
+
+    Result<u32, u32>.Err(12)  # ENOMEM
+
+# ---------------------------------------------------------------------------
+# Schedule a timer relative to current tick (convenience wrapper).
+# ---------------------------------------------------------------------------
+fn timer_wheel_schedule_after(wheel: var TimerWheel, delay_ticks: u32, waker: Waker) -> Result<u32, u32>:
+    val deadline = wheel.current_tick + delay_ticks as u64
+    timer_wheel_schedule(wheel, deadline, waker)
+
+# ---------------------------------------------------------------------------
+# Cancel a timer. Returns Ok if cancelled, Err if not found/already expired.
+# ---------------------------------------------------------------------------
+fn timer_wheel_cancel(wheel: var TimerWheel, timer_id: u32) -> Result<u32, u32>:
+    if timer_id >= MAX_TIMERS:
+        return Result<u32, u32>.Err(EINVAL)
+    if !wheel.timer_used[timer_id]:
+        return Result<u32, u32>.Err(EINVAL)
+    if wheel.timers[timer_id].state != TimerState.Active:
+        return Result<u32, u32>.Err(EINVAL)
+
+    wheel.timers[timer_id].state = TimerState.Cancelled
+    # Note: we don't remove from the slot list here to avoid O(n) scan.
+    # Cancelled timers are skipped during tick processing and cleaned up then.
+    Result<u32, u32>.Ok(0)
+
+# ---------------------------------------------------------------------------
+# Advance the wheel by one tick. Fires all timers whose deadline has passed.
+# Returns an array of wakers to signal (caller must signal them).
+# expired_out: output array of waker thread ids
+# Returns count of expired timers.
+# ---------------------------------------------------------------------------
+fn timer_wheel_tick(wheel: var TimerWheel, expired_wakers: var [Waker; 128]) -> u32:
+    wheel.current_tick = wheel.current_tick + 1
+    wheel.current_slot = (wheel.current_slot + 1) % TIMER_WHEEL_SLOTS
+
+    var expired_count: u32 = 0
+    val slot = wheel.current_slot
+
+    # Walk the timer list for this slot
+    var timer_id = wheel.slots[slot]
+    var prev_id: u32 = TIMER_NONE
+    var new_head: u32 = TIMER_NONE
+    var kept_tail: u32 = TIMER_NONE
+
+    # Collect all timers from this slot, separate expired from kept
+    while timer_id != TIMER_NONE:
+        val next = wheel.timers[timer_id].next
+
+        if wheel.timers[timer_id].state == TimerState.Cancelled:
+            # Clean up cancelled timer
+            timer_free(wheel, timer_id)
+        else if wheel.timers[timer_id].deadline <= wheel.current_tick:
+            # Timer has expired — collect its waker
+            wheel.timers[timer_id].state = TimerState.Expired
+            if expired_count < MAX_TIMERS:
+                expired_wakers[expired_count] = wheel.timers[timer_id].waker
+                expired_count = expired_count + 1
+            timer_free(wheel, timer_id)
+        else:
+            # Timer still active — keep in slot
+            wheel.timers[timer_id].next = TIMER_NONE
+            if new_head == TIMER_NONE:
+                new_head = timer_id
+                kept_tail = timer_id
+            else:
+                wheel.timers[kept_tail].next = timer_id
+                kept_tail = timer_id
+
+        timer_id = next
+
+    # Replace slot head with remaining timers
+    wheel.slots[slot] = new_head
+
+    expired_count
+
+# ---------------------------------------------------------------------------
+# Get the current tick value.
+# ---------------------------------------------------------------------------
+fn timer_wheel_current_tick(wheel: TimerWheel) -> u64:
+    wheel.current_tick
+
+# ---------------------------------------------------------------------------
+# Get the number of active timers.
+# ---------------------------------------------------------------------------
+fn timer_wheel_active_count(wheel: TimerWheel) -> u32:
+    var count: u32 = 0
+    for i in 0..MAX_TIMERS:
+        if wheel.timer_used[i] and wheel.timers[i].state == TimerState.Active:
+            count = count + 1
+    count
