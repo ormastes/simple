@@ -1,0 +1,102 @@
+# RISC-V 64-bit Sv39 MMU Control (satp, sfence.vma)
+#
+# Functions for enabling/disabling Sv39 paging, setting page tables,
+# and flushing the TLB via the satp CSR and sfence.vma instruction.
+#
+# satp register format (RV64):
+#   MODE (bits 63:60) = 8 for Sv39
+#   ASID (bits 59:44) = address space identifier
+#   PPN  (bits 43:0)  = physical page number of root page table
+
+# ---------- constants ----------
+
+# satp MODE values
+val SATP_MODE_BARE: u64 = 0
+val SATP_MODE_SV39: u64 = 8
+val SATP_MODE_SV48: u64 = 9
+
+# satp field positions
+val SATP_MODE_SHIFT: i32 = 60
+val SATP_ASID_SHIFT: i32 = 44
+val SATP_PPN_MASK: u64 = 0x00000FFFFFFFFFFF
+
+# mstatus bits
+val MSTATUS_MIE: u64 = 0x08
+val MSTATUS_MPIE: u64 = 0x80
+val MSTATUS_MPP_M: u64 = 0x1800
+val MSTATUS_MPP_U: u64 = 0x0000
+
+# ---------- helpers ----------
+
+# Build a satp value from mode, asid, and physical page number
+fn satp_value(mode: u64, asid: u16, ppn: u64) -> u64:
+    (mode << 60) | ((asid as u64) << 44) | (ppn & SATP_PPN_MASK)
+
+# ---------- public API ----------
+
+# Initialize MMU: start with paging disabled
+fn mmu_init():
+    mmu_disable()
+    mmu_flush_tlb()
+
+# Enable Sv39 paging with the given root page table physical address
+fn mmu_enable(root_pt_phys: u64, asid: u16):
+    val ppn = root_pt_phys >> 12
+    val satp = satp_value(SATP_MODE_SV39, asid, ppn)
+    unsafe:
+        asm """
+            csrw satp, {satp}
+            sfence.vma zero, zero
+        """
+
+# Disable paging (Bare mode)
+fn mmu_disable():
+    unsafe:
+        asm """
+            csrw satp, zero
+            sfence.vma zero, zero
+        """
+
+# Set page table (same as enable, kept for API symmetry)
+fn mmu_set_page_table(root_pt_phys: u64, asid: u16):
+    mmu_enable(root_pt_phys, asid)
+
+# Full TLB flush
+fn mmu_flush_tlb():
+    unsafe:
+        asm """
+            sfence.vma zero, zero
+        """
+
+# Flush TLB for a single virtual address
+fn mmu_flush_tlb_page(vaddr: u64):
+    unsafe:
+        asm """
+            sfence.vma {vaddr}, zero
+        """
+
+# Flush TLB for a specific ASID
+fn mmu_flush_tlb_asid(asid: u16):
+    val asid_val = asid as u64
+    unsafe:
+        asm """
+            sfence.vma zero, {asid_val}
+        """
+
+# Read the current satp value
+fn mmu_get_satp() -> u64:
+    var result: u64 = 0
+    unsafe:
+        asm """
+            csrr {result}, satp
+        """
+    result
+
+# Read mstatus for diagnostics
+fn mmu_read_mstatus() -> u64:
+    var result: u64 = 0
+    unsafe:
+        asm """
+            csrr {result}, mstatus
+        """
+    result

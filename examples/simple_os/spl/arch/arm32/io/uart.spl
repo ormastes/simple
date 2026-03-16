@@ -1,0 +1,159 @@
+# ARM32 PL011 UART Driver (QEMU virt)
+#
+# PL011 UART at 0x09000000 for QEMU -M virt -cpu cortex-a15.
+# 115200 baud, 8N1 configuration with 24 MHz clock.
+#
+# Usage:
+#   uart_init()
+#   uart_println("Hello from simple_os!")
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u32, value: u32):
+    unsafe:
+        val ptr = addr as u64
+        @address(ptr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u32) -> u32:
+    var result: u32 = 0
+    unsafe:
+        val ptr = addr as u64
+        @address(ptr) @volatile var reg: u32
+        result = reg
+    result
+
+# ---------- constants ----------
+
+# PL011 base address (QEMU virt)
+val UART0_BASE: u32 = 0x09000000
+
+# PL011 register offsets
+val UART_DR: u32 = 0x000       # Data Register
+val UART_RSR: u32 = 0x004      # Receive Status / Error Clear
+val UART_FR: u32 = 0x018       # Flag Register
+val UART_IBRD: u32 = 0x024     # Integer Baud Rate Divisor
+val UART_FBRD: u32 = 0x028     # Fractional Baud Rate Divisor
+val UART_LCR_H: u32 = 0x02C   # Line Control Register
+val UART_CR: u32 = 0x030       # Control Register
+val UART_IMSC: u32 = 0x038     # Interrupt Mask Set/Clear
+val UART_ICR: u32 = 0x044      # Interrupt Clear Register
+
+# Flag Register bits
+val FR_RXFE: u32 = 0x10        # Receive FIFO empty (bit 4)
+val FR_TXFF: u32 = 0x20        # Transmit FIFO full (bit 5)
+val FR_RXFF: u32 = 0x40        # Receive FIFO full (bit 6)
+val FR_TXFE: u32 = 0x80        # Transmit FIFO empty (bit 7)
+
+# Control Register bits
+val CR_UARTEN: u32 = 0x001     # UART enable (bit 0)
+val CR_TXE: u32 = 0x100        # Transmit enable (bit 8)
+val CR_RXE: u32 = 0x200        # Receive enable (bit 9)
+
+# Line Control Register bits
+val LCR_H_WLEN_8: u32 = 0x60   # 8 data bits (bits 6:5 = 11)
+val LCR_H_FEN: u32 = 0x10      # Enable FIFOs (bit 4)
+
+# ---------- global state ----------
+
+var g_initialized: bool = false
+
+# ---------- public API ----------
+
+# Initialize PL011 UART0 at 115200 baud, 8N1
+fn uart_init():
+    if g_initialized:
+        return
+
+    # Disable UART while configuring
+    mmio_write32(UART0_BASE + UART_CR, 0x00)
+
+    # Clear all pending interrupts
+    mmio_write32(UART0_BASE + UART_ICR, 0x7FF)
+
+    # Set baud rate to 115200 with 24 MHz clock
+    # BRD = 24000000 / (16 * 115200) = 13.0208
+    # IBRD = 13, FBRD = round(0.0208 * 64) = 1
+    mmio_write32(UART0_BASE + UART_IBRD, 13)
+    mmio_write32(UART0_BASE + UART_FBRD, 1)
+
+    # 8 data bits, no parity, 1 stop bit, enable FIFOs
+    mmio_write32(UART0_BASE + UART_LCR_H, LCR_H_WLEN_8 | LCR_H_FEN)
+
+    # Mask all interrupts (we poll)
+    mmio_write32(UART0_BASE + UART_IMSC, 0x00)
+
+    # Enable UART, TX, and RX
+    mmio_write32(UART0_BASE + UART_CR, CR_UARTEN | CR_TXE | CR_RXE)
+
+    g_initialized = true
+
+# Check if transmit FIFO has space
+fn uart_is_tx_ready() -> bool:
+    (mmio_read32(UART0_BASE + UART_FR) & FR_TXFF) == 0
+
+# Check if receive FIFO has data
+fn uart_has_data() -> bool:
+    (mmio_read32(UART0_BASE + UART_FR) & FR_RXFE) == 0
+
+# Write a single byte
+fn uart_putc(byte: u32):
+    if not g_initialized:
+        uart_init()
+    # Wait while transmit FIFO is full
+    while not uart_is_tx_ready():
+        pass
+    mmio_write32(UART0_BASE + UART_DR, byte & 0xFF)
+
+# Read a single byte (blocks until data available)
+fn uart_getc() -> u32:
+    if not g_initialized:
+        uart_init()
+    while not uart_has_data():
+        pass
+    mmio_read32(UART0_BASE + UART_DR) & 0xFF
+
+# Print a string
+fn uart_print(s: text):
+    if not g_initialized:
+        uart_init()
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch == 0x0A:
+            uart_putc(0x0D)
+        uart_putc(ch as u32)
+
+# Print a string followed by CR+LF
+fn uart_println(s: text):
+    uart_print(s)
+    uart_putc(0x0D)
+    uart_putc(0x0A)
+
+# Print a 32-bit value in hexadecimal
+fn uart_print_hex(value: u32):
+    val hex_chars = "0123456789abcdef"
+    uart_putc(0x30)  # '0'
+    uart_putc(0x78)  # 'x'
+    var i = 28
+    while i >= 0:
+        val nibble = (value >> (i as u32)) & 0x0F
+        uart_putc(hex_chars.char_at(nibble as i32) as u32)
+        i = i - 4
+
+# Print a 32-bit value in decimal
+fn uart_print_dec(value: u32):
+    if value == 0:
+        uart_putc(0x30)  # '0'
+        return
+    var buf: [u32; 10]
+    var pos: i32 = 0
+    var v = value
+    while v > 0:
+        buf[pos] = 0x30 + (v % 10)
+        v = v / 10
+        pos = pos + 1
+    # Print in reverse
+    var j = pos - 1
+    while j >= 0:
+        uart_putc(buf[j])
+        j = j - 1

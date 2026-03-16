@@ -1,0 +1,144 @@
+# AArch64 GICv2 (Generic Interrupt Controller)
+#
+# GICv2 on QEMU -M virt:
+#   GICD (Distributor)   at 0x08000000
+#   GICC (CPU Interface) at 0x08010000
+#
+# Provides interrupt management for the L4 microkernel.
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u64, value: u32):
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u64) -> u32:
+    var result: u32 = 0
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        result = reg
+    result
+
+# ---------- constants ----------
+
+# GICv2 base addresses
+val GICD_BASE: u64 = 0x08000000
+val GICC_BASE: u64 = 0x08010000
+
+# GICD register offsets
+val GICD_CTLR: u64 = 0x000
+val GICD_TYPER: u64 = 0x004
+val GICD_ISENABLER: u64 = 0x100
+val GICD_ICENABLER: u64 = 0x180
+val GICD_ISPENDR: u64 = 0x200
+val GICD_ICPENDR: u64 = 0x280
+val GICD_IPRIORITYR: u64 = 0x400
+val GICD_ITARGETSR: u64 = 0x800
+val GICD_ICFGR: u64 = 0xC00
+
+# GICC register offsets
+val GICC_CTLR: u64 = 0x000
+val GICC_PMR: u64 = 0x004
+val GICC_IAR: u64 = 0x00C
+val GICC_EOIR: u64 = 0x010
+
+# Special constants
+val GIC_SPURIOUS_IRQ: u32 = 1023
+val GIC_MAX_IRQ: u32 = 256
+
+# Timer PPI numbers
+val GIC_PPI_PHYS_TIMER: u32 = 30
+val GIC_PPI_VIRT_TIMER: u32 = 27
+
+# ---------- public API ----------
+
+# Initialize both GICD and GICC
+fn gic_init():
+    # Disable distributor while configuring
+    mmio_write32(GICD_BASE + GICD_CTLR, 0)
+
+    # Read number of interrupt lines
+    val typer = mmio_read32(GICD_BASE + GICD_TYPER)
+    var num_lines = 32 * ((typer & 0x1F) + 1)
+    if num_lines > GIC_MAX_IRQ:
+        num_lines = GIC_MAX_IRQ
+
+    # Disable all interrupts
+    var i: u32 = 0
+    while i < num_lines / 32:
+        mmio_write32(GICD_BASE + GICD_ICENABLER + (i * 4) as u64, 0xFFFFFFFF)
+        i = i + 1
+
+    # Set all to lowest priority
+    i = 0
+    while i < num_lines / 4:
+        mmio_write32(GICD_BASE + GICD_IPRIORITYR + (i * 4) as u64, 0xFFFFFFFF)
+        i = i + 1
+
+    # Target all SPIs to CPU 0
+    i = 8
+    while i < num_lines / 4:
+        mmio_write32(GICD_BASE + GICD_ITARGETSR + (i * 4) as u64, 0x01010101)
+        i = i + 1
+
+    # All SPIs level-triggered
+    i = 2
+    while i < num_lines / 16:
+        mmio_write32(GICD_BASE + GICD_ICFGR + (i * 4) as u64, 0x00000000)
+        i = i + 1
+
+    # Enable distributor
+    mmio_write32(GICD_BASE + GICD_CTLR, 1)
+
+    # Enable CPU interface
+    mmio_write32(GICC_BASE + GICC_CTLR, 1)
+
+    # Accept all priorities
+    mmio_write32(GICC_BASE + GICC_PMR, 0xFF)
+
+# Enable a specific IRQ
+fn gic_enable_irq(irq: u32):
+    if irq >= GIC_MAX_IRQ:
+        return
+    val reg = irq / 32
+    val bit = irq % 32
+    mmio_write32(GICD_BASE + GICD_ISENABLER + (reg * 4) as u64, 1 << bit)
+
+# Disable a specific IRQ
+fn gic_disable_irq(irq: u32):
+    if irq >= GIC_MAX_IRQ:
+        return
+    val reg = irq / 32
+    val bit = irq % 32
+    mmio_write32(GICD_BASE + GICD_ICENABLER + (reg * 4) as u64, 1 << bit)
+
+# Acknowledge an interrupt (returns IRQ ID)
+fn gic_acknowledge() -> u32:
+    mmio_read32(GICC_BASE + GICC_IAR) & 0x3FF
+
+# Signal end of interrupt
+fn gic_end_interrupt(irq: u32):
+    mmio_write32(GICC_BASE + GICC_EOIR, irq)
+
+# Set priority for a specific IRQ (0 = highest, 0xFF = lowest)
+fn gic_set_priority(irq: u32, priority: u32):
+    if irq >= GIC_MAX_IRQ:
+        return
+    val reg = irq / 4
+    val shift = (irq % 4) * 8
+    var value = mmio_read32(GICD_BASE + GICD_IPRIORITYR + (reg * 4) as u64)
+    value = value & ~(0xFF << shift)
+    value = value | ((priority & 0xFF) << shift)
+    mmio_write32(GICD_BASE + GICD_IPRIORITYR + (reg * 4) as u64, value)
+
+# Set target CPU mask for a specific IRQ
+fn gic_set_target(irq: u32, cpu_mask: u32):
+    if irq >= GIC_MAX_IRQ:
+        return
+    val reg = irq / 4
+    val shift = (irq % 4) * 8
+    var value = mmio_read32(GICD_BASE + GICD_ITARGETSR + (reg * 4) as u64)
+    value = value & ~(0xFF << shift)
+    value = value | ((cpu_mask & 0xFF) << shift)
+    mmio_write32(GICD_BASE + GICD_ITARGETSR + (reg * 4) as u64, value)

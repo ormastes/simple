@@ -1,0 +1,178 @@
+# ARM32 CPU Register State / Thread Context
+#
+# Defines the saved register state for context switching between threads.
+# Used by the context switch assembly (switch.S) and the scheduler.
+
+# ---------- ARM processor mode constants ----------
+
+val MODE_USR: u32 = 0x10
+val MODE_FIQ: u32 = 0x11
+val MODE_IRQ: u32 = 0x12
+val MODE_SVC: u32 = 0x13
+val MODE_ABT: u32 = 0x17
+val MODE_UND: u32 = 0x1B
+val MODE_SYS: u32 = 0x1F
+
+# CPSR flag bits
+val CPSR_I: u32 = 0x80       # IRQ disable
+val CPSR_F: u32 = 0x40       # FIQ disable
+val CPSR_T: u32 = 0x20       # Thumb mode
+
+# ---------- register state ----------
+
+# Full saved register set for a thread / context switch.
+# Layout matches what the switch.S assembly expects.
+@repr(C)
+struct RegisterState:
+    # General-purpose registers
+    r0: u32
+    r1: u32
+    r2: u32
+    r3: u32
+    r4: u32
+    r5: u32
+    r6: u32
+    r7: u32
+    r8: u32
+    r9: u32
+    r10: u32
+    r11: u32     # fp (frame pointer)
+    r12: u32     # ip (intra-procedure scratch)
+
+    # Stack pointer
+    sp: u32
+
+    # Link register
+    lr: u32
+
+    # Program counter
+    pc: u32
+
+    # Current Program Status Register
+    cpsr: u32
+
+# ---------- public API ----------
+
+# Create an initial register state for a new kernel thread (SVC mode).
+# entry_point: address of the function to start executing
+# stack_top:   top of the thread's kernel stack
+fn context_create_kernel(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        r0: 0,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        r4: 0,
+        r5: 0,
+        r6: 0,
+        r7: 0,
+        r8: 0,
+        r9: 0,
+        r10: 0,
+        r11: stack_top,
+        r12: 0,
+        sp: stack_top,
+        lr: 0,
+        pc: entry_point,
+        cpsr: MODE_SVC
+    )
+
+# Create an initial register state for a new user-mode thread (USR mode).
+# entry_point: user-space entry address
+# stack_top:   top of the user-space stack
+fn context_create_user(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        r0: 0,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        r4: 0,
+        r5: 0,
+        r6: 0,
+        r7: 0,
+        r8: 0,
+        r9: 0,
+        r10: 0,
+        r11: stack_top,
+        r12: 0,
+        sp: stack_top,
+        lr: 0,
+        pc: entry_point,
+        cpsr: MODE_USR
+    )
+
+# Create a register state for either kernel or user mode
+fn context_create(entry_point: u32, stack_top: u32, is_user: bool) -> RegisterState:
+    if is_user:
+        return context_create_user(entry_point, stack_top)
+    context_create_kernel(entry_point, stack_top)
+
+# Set the program counter
+fn context_set_pc(regs: RegisterState, pc: u32) -> RegisterState:
+    RegisterState(
+        r0: regs.r0,
+        r1: regs.r1,
+        r2: regs.r2,
+        r3: regs.r3,
+        r4: regs.r4,
+        r5: regs.r5,
+        r6: regs.r6,
+        r7: regs.r7,
+        r8: regs.r8,
+        r9: regs.r9,
+        r10: regs.r10,
+        r11: regs.r11,
+        r12: regs.r12,
+        sp: regs.sp,
+        lr: regs.lr,
+        pc: pc,
+        cpsr: regs.cpsr
+    )
+
+# Set the stack pointer
+fn context_set_sp(regs: RegisterState, sp: u32) -> RegisterState:
+    RegisterState(
+        r0: regs.r0,
+        r1: regs.r1,
+        r2: regs.r2,
+        r3: regs.r3,
+        r4: regs.r4,
+        r5: regs.r5,
+        r6: regs.r6,
+        r7: regs.r7,
+        r8: regs.r8,
+        r9: regs.r9,
+        r10: regs.r10,
+        r11: regs.r11,
+        r12: regs.r12,
+        sp: sp,
+        lr: regs.lr,
+        pc: regs.pc,
+        cpsr: regs.cpsr
+    )
+
+# Set argument registers (r0, r1, r2) for passing data to a new context
+fn context_set_args(regs: RegisterState, arg0: u32, arg1: u32, arg2: u32) -> RegisterState:
+    RegisterState(
+        r0: arg0,
+        r1: arg1,
+        r2: arg2,
+        r3: regs.r3,
+        r4: regs.r4,
+        r5: regs.r5,
+        r6: regs.r6,
+        r7: regs.r7,
+        r8: regs.r8,
+        r9: regs.r9,
+        r10: regs.r10,
+        r11: regs.r11,
+        r12: regs.r12,
+        sp: regs.sp,
+        lr: regs.lr,
+        pc: regs.pc,
+        cpsr: regs.cpsr
+    )
+
+# Check if a register state is for user mode
+fn context_is_user(regs: RegisterState) -> bool:
+    (regs.cpsr & 0x1F) == MODE_USR

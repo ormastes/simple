@@ -1,0 +1,167 @@
+# AArch64 Exception / Interrupt Dispatch
+#
+# Central handler called from the exception vector table after
+# registers are saved. Routes exceptions by ESR_EL1 EC field:
+#   EC 0x15  — SVC (system call from AArch64)
+#   EC 0x24/0x25 — Data Abort (page fault)
+#   EC 0x20/0x21 — Instruction Abort
+#   IRQ vector — GIC interrupt acknowledge/dispatch
+
+use arch.aarch64.boot.gic.{gic_acknowledge, gic_end_interrupt, GIC_SPURIOUS_IRQ, GIC_PPI_PHYS_TIMER}
+use arch.aarch64.boot.timer.{timer_handler}
+
+# ---------- ESR_EL1 Exception Class values ----------
+
+val ESR_EC_SHIFT: u32 = 26
+
+val EC_UNKNOWN: u32 = 0x00
+val EC_WFI_WFE: u32 = 0x01
+val EC_SVC_AARCH64: u32 = 0x15
+val EC_HVC_AARCH64: u32 = 0x16
+val EC_SMC_AARCH64: u32 = 0x17
+val EC_SYSREG: u32 = 0x18
+val EC_IABT_LOWER: u32 = 0x20
+val EC_IABT_CURRENT: u32 = 0x21
+val EC_PC_ALIGN: u32 = 0x22
+val EC_DABT_LOWER: u32 = 0x24
+val EC_DABT_CURRENT: u32 = 0x25
+val EC_SP_ALIGN: u32 = 0x26
+val EC_SERROR: u32 = 0x2F
+val EC_BRK: u32 = 0x3C
+
+# ---------- trap frame ----------
+
+# Register state passed from vector entry (matches vectors.S layout)
+struct TrapFrame:
+    # x0-x30 stored as array would be ideal, but we list key registers
+    x0: u64
+    x1: u64
+    x2: u64
+    x3: u64
+    x4: u64
+    x5: u64
+    x6: u64
+    x7: u64
+    x8: u64       # syscall number
+    x9: u64
+    x10: u64
+    x11: u64
+    x12: u64
+    x13: u64
+    x14: u64
+    x15: u64
+    x16: u64
+    x17: u64
+    x18: u64
+    x19: u64
+    x20: u64
+    x21: u64
+    x22: u64
+    x23: u64
+    x24: u64
+    x25: u64
+    x26: u64
+    x27: u64
+    x28: u64
+    x29: u64      # frame pointer
+    x30: u64      # link register
+    sp: u64
+    elr_el1: u64
+    spsr_el1: u64
+    esr_el1: u64
+    far_el1: u64
+
+# ---------- handler tables ----------
+
+val MAX_IRQ_HANDLERS: i32 = 256
+var irq_handlers: [u64; 256] = [0; 256]
+var sync_handlers: [u64; 64] = [0; 64]
+var syscall_handler_addr: u64 = 0
+
+# ---------- public API ----------
+
+# Main dispatch entry point called from vectors.S
+fn exception_handler(frame: TrapFrame):
+    val esr = frame.esr_el1 as u32
+    val ec = (esr >> ESR_EC_SHIFT) & 0x3F
+
+    if ec == EC_SVC_AARCH64:
+        handle_svc(frame)
+    elif ec == EC_DABT_LOWER or ec == EC_DABT_CURRENT:
+        handle_data_abort(frame)
+    elif ec == EC_IABT_LOWER or ec == EC_IABT_CURRENT:
+        handle_instr_abort(frame)
+    elif ec == EC_UNKNOWN:
+        # Likely an IRQ vector entry
+        handle_irq(frame)
+    else:
+        handle_unknown(frame)
+
+# ---------- synchronous exception handlers ----------
+
+fn handle_svc(frame: TrapFrame):
+    # x8 = syscall number, x0-x5 = arguments
+    # Return value goes in x0
+    if syscall_handler_addr != 0:
+        # TODO: call registered syscall dispatcher
+        pass
+
+fn handle_data_abort(frame: TrapFrame):
+    val ec = ((frame.esr_el1 as u32) >> ESR_EC_SHIFT) & 0x3F
+    if sync_handlers[ec as i32] != 0:
+        # TODO: call registered handler
+        return
+    # Default: halt on unhandled data abort
+    exception_halt()
+
+fn handle_instr_abort(frame: TrapFrame):
+    val ec = ((frame.esr_el1 as u32) >> ESR_EC_SHIFT) & 0x3F
+    if sync_handlers[ec as i32] != 0:
+        # TODO: call registered handler
+        return
+    exception_halt()
+
+fn handle_unknown(frame: TrapFrame):
+    exception_halt()
+
+# ---------- IRQ handling ----------
+
+fn handle_irq(frame: TrapFrame):
+    val irq = gic_acknowledge()
+
+    if irq == GIC_SPURIOUS_IRQ:
+        return
+
+    # Physical timer PPI
+    if irq == GIC_PPI_PHYS_TIMER:
+        timer_handler()
+
+    # Check registered handlers
+    if irq < MAX_IRQ_HANDLERS as u32:
+        if irq_handlers[irq as i32] != 0:
+            # TODO: call registered IRQ handler
+            pass
+
+    gic_end_interrupt(irq)
+
+# ---------- handler registration ----------
+
+fn register_irq_handler(irq: i32, handler: u64):
+    if irq >= 0 and irq < MAX_IRQ_HANDLERS:
+        irq_handlers[irq] = handler
+
+fn register_sync_handler(ec: i32, handler: u64):
+    if ec >= 0 and ec < 64:
+        sync_handlers[ec] = handler
+
+fn register_syscall_handler(handler: u64):
+    syscall_handler_addr = handler
+
+# ---------- halt ----------
+
+fn exception_halt():
+    asm """
+    .exception_halt_loop:
+        wfe
+        b .exception_halt_loop
+    """

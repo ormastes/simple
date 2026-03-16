@@ -1,0 +1,134 @@
+# RISC-V32 CPU Register State / Thread Context
+#
+# Defines the saved register state for context switching between threads.
+# Used by the context switch assembly (switch.S) and the scheduler.
+
+# ---------- mstatus constants ----------
+
+val MSTATUS_MIE: u32 = 0x0008      # Machine Interrupt Enable (bit 3)
+val MSTATUS_MPIE: u32 = 0x0080     # Machine Previous IE (bit 7)
+val MSTATUS_MPP_M: u32 = 0x1800    # Machine Previous Privilege: M-mode (bits 12:11 = 11)
+val MSTATUS_MPP_S: u32 = 0x0800    # Machine Previous Privilege: S-mode (bits 12:11 = 01)
+val MSTATUS_MPP_U: u32 = 0x0000    # Machine Previous Privilege: U-mode (bits 12:11 = 00)
+
+# ---------- register state ----------
+
+# Saved register set for context switching.
+# Layout must match switch.S field offsets exactly.
+@repr(C)
+struct RegisterState:
+    # Return address / entry point
+    ra: u32         # x1
+
+    # Stack pointer
+    sp: u32         # x2
+
+    # Callee-saved registers
+    s0: u32         # x8  (frame pointer)
+    s1: u32         # x9
+    s2: u32         # x18
+    s3: u32         # x19
+    s4: u32         # x20
+    s5: u32         # x21
+    s6: u32         # x22
+    s7: u32         # x23
+    s8: u32         # x24
+    s9: u32         # x25
+    s10: u32        # x26
+    s11: u32        # x27
+
+    # Argument/return registers
+    a0: u32         # x10
+    a1: u32         # x11
+
+    # CSR state
+    mepc: u32       # Machine exception PC
+    mstatus: u32    # Machine status
+
+# ---------- public API ----------
+
+# Create an initial register state for a new kernel thread (M-mode).
+# entry_point: address of the function to start executing
+# stack_top:   top of the thread's kernel stack
+fn context_create_kernel(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        ra: entry_point,
+        sp: stack_top,
+        s0: stack_top,
+        s1: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        a0: 0,
+        a1: 0,
+        mepc: entry_point,
+        mstatus: MSTATUS_MPIE | MSTATUS_MPP_M
+    )
+
+# Create an initial register state for a new user-mode thread (U-mode).
+# MPP = 0 means mret will drop to U-mode.
+fn context_create_user(entry_point: u32, stack_top: u32) -> RegisterState:
+    RegisterState(
+        ra: entry_point,
+        sp: stack_top,
+        s0: stack_top,
+        s1: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        a0: 0,
+        a1: 0,
+        mepc: entry_point,
+        mstatus: MSTATUS_MPIE | MSTATUS_MPP_U
+    )
+
+# Create a register state for either kernel or user mode
+fn context_create(entry_point: u32, stack_top: u32, is_user: bool) -> RegisterState:
+    if is_user:
+        return context_create_user(entry_point, stack_top)
+    context_create_kernel(entry_point, stack_top)
+
+# Set the first argument for a new thread (placed in a0)
+fn context_set_arg(regs: RegisterState, arg: u32) -> RegisterState:
+    RegisterState(
+        ra: regs.ra,
+        sp: regs.sp,
+        s0: regs.s0,
+        s1: regs.s1,
+        s2: regs.s2,
+        s3: regs.s3,
+        s4: regs.s4,
+        s5: regs.s5,
+        s6: regs.s6,
+        s7: regs.s7,
+        s8: regs.s8,
+        s9: regs.s9,
+        s10: regs.s10,
+        s11: regs.s11,
+        a0: arg,
+        a1: regs.a1,
+        mepc: regs.mepc,
+        mstatus: regs.mstatus
+    )
+
+# Get the return value from a context (a0)
+fn context_get_return(regs: RegisterState) -> u32:
+    regs.a0
+
+# Check if a register state is for user mode (MPP == 0)
+fn context_is_user(regs: RegisterState) -> bool:
+    (regs.mstatus & 0x1800) == 0

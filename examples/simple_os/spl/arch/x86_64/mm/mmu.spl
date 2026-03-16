@@ -1,0 +1,138 @@
+# x86_64 MMU Control (CR0, CR3, CR4, EFER, TLB)
+#
+# 64-bit MMU helpers for long mode:
+#   CR3: PML4 base register
+#   CR4: PAE (required), PGE
+#   EFER: LME, NXE, SCE
+#   MSR read/write for EFER and SYSCALL configuration
+
+# ---------- constants ----------
+
+val MSR_EFER: u32 = 0xC0000080
+val EFER_SCE: u64 = 0x01           # System Call Extensions
+val EFER_LME: u64 = 0x100          # Long Mode Enable
+val EFER_NXE: u64 = 0x800          # No-Execute Enable
+
+# ---------- CR3 (PML4 base register) ----------
+
+fn mmu_load_pml4(phys_addr: u64):
+    asm """
+        mov rax, {phys_addr}
+        mov cr3, rax
+    """
+
+fn mmu_get_pml4() -> u64:
+    var result: u64 = 0
+    asm """
+        mov rax, cr3
+        mov {result}, rax
+    """
+    result
+
+# ---------- TLB management ----------
+
+fn mmu_flush_tlb():
+    asm """
+        mov rax, cr3
+        mov cr3, rax
+    """
+
+fn mmu_invalidate_page(vaddr: u64):
+    asm """
+        mov rax, {vaddr}
+        invlpg [rax]
+    """
+
+# ---------- CR0 helpers ----------
+
+fn mmu_enable_write_protect():
+    asm """
+        mov rax, cr0
+        or rax, 0x00010000
+        mov cr0, rax
+    """
+
+fn mmu_disable_write_protect():
+    asm """
+        mov rax, cr0
+        and rax, 0xFFFFFFFFFFFEFFFF
+        mov cr0, rax
+    """
+
+# ---------- CR4 helpers ----------
+
+fn mmu_enable_pge():
+    asm """
+        mov rax, cr4
+        or rax, 0x00000080
+        mov cr4, rax
+    """
+
+# ---------- EFER helpers ----------
+
+fn mmu_enable_nx():
+    var efer = mmu_read_msr(MSR_EFER)
+    efer = efer | EFER_NXE
+    mmu_write_msr(MSR_EFER, efer)
+
+fn mmu_enable_syscall():
+    var efer = mmu_read_msr(MSR_EFER)
+    efer = efer | EFER_SCE
+    mmu_write_msr(MSR_EFER, efer)
+
+# ---------- CR2 (page fault address) ----------
+
+fn mmu_read_cr2() -> u64:
+    var result: u64 = 0
+    asm """
+        mov rax, cr2
+        mov {result}, rax
+    """
+    result
+
+# ---------- CR0 / CR4 diagnostics ----------
+
+fn mmu_read_cr0() -> u64:
+    var result: u64 = 0
+    asm """
+        mov rax, cr0
+        mov {result}, rax
+    """
+    result
+
+fn mmu_read_cr4() -> u64:
+    var result: u64 = 0
+    asm """
+        mov rax, cr4
+        mov {result}, rax
+    """
+    result
+
+# ---------- MSR read/write ----------
+
+fn mmu_read_msr(msr: u32) -> u64:
+    var lo: u32 = 0
+    var hi: u32 = 0
+    asm """
+        mov ecx, {msr}
+        rdmsr
+        mov {lo}, eax
+        mov {hi}, edx
+    """
+    ((hi as u64) << 32) | (lo as u64)
+
+fn mmu_write_msr(msr: u32, value: u64):
+    val lo = (value & 0xFFFFFFFF) as u32
+    val hi = ((value >> 32) & 0xFFFFFFFF) as u32
+    asm """
+        mov ecx, {msr}
+        mov eax, {lo}
+        mov edx, {hi}
+        wrmsr
+    """
+
+# ---------- combined setup ----------
+
+fn mmu_init(pml4_phys: u64):
+    mmu_load_pml4(pml4_phys)
+    mmu_enable_write_protect()

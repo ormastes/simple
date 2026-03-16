@@ -1,0 +1,133 @@
+# AArch64 PL011 UART Driver (QEMU -M virt)
+#
+# PL011 UART at 0x09000000 for kernel debug output.
+# 115200 baud, 8N1, 24 MHz reference clock.
+#
+# Usage:
+#   uart_init()
+#   uart_println("Hello from simple_os!")
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u64, value: u32):
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u64) -> u32:
+    var result: u32 = 0
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        result = reg
+    result
+
+# ---------- constants ----------
+
+# PL011 base address (QEMU -M virt)
+val PL011_BASE: u64 = 0x09000000
+
+# Register offsets
+val UART_DR: u64 = 0x000       # Data Register (R/W)
+val UART_FR: u64 = 0x018       # Flag Register (RO)
+val UART_IBRD: u64 = 0x024     # Integer Baud Rate Divisor
+val UART_FBRD: u64 = 0x028     # Fractional Baud Rate Divisor
+val UART_LCR_H: u64 = 0x02C    # Line Control Register
+val UART_CR: u64 = 0x030       # Control Register
+val UART_IMSC: u64 = 0x038     # Interrupt Mask Set/Clear
+val UART_ICR: u64 = 0x044      # Interrupt Clear Register
+
+# Flag Register bits
+val FR_RXFE: u32 = 0x10        # Receive FIFO empty
+val FR_TXFF: u32 = 0x20        # Transmit FIFO full
+val FR_BUSY: u32 = 0x08        # UART busy
+
+# Control Register bits
+val CR_UARTEN: u32 = 0x01      # UART enable
+val CR_TXE: u32 = 0x100        # Transmit enable
+val CR_RXE: u32 = 0x200        # Receive enable
+
+# Line Control bits
+val LCR_FEN: u32 = 0x10        # FIFO enable
+val LCR_WLEN_8: u32 = 0x60     # Word length 8 bits
+
+# ---------- global state ----------
+
+var g_initialized: bool = false
+
+# ---------- public API ----------
+
+# Initialize PL011 at 115200 baud, 8N1
+fn uart_init():
+    if g_initialized:
+        return
+
+    # Disable UART while configuring
+    mmio_write32(PL011_BASE + UART_CR, 0)
+
+    # Clear all pending interrupts
+    mmio_write32(PL011_BASE + UART_ICR, 0x7FF)
+
+    # Baud rate: 24 MHz / (16 * 115200) = 13.0208
+    # IBRD = 13, FBRD = round(0.0208 * 64) = 1
+    mmio_write32(PL011_BASE + UART_IBRD, 13)
+    mmio_write32(PL011_BASE + UART_FBRD, 1)
+
+    # 8 bits, FIFO enabled, no parity, 1 stop bit
+    mmio_write32(PL011_BASE + UART_LCR_H, LCR_WLEN_8 | LCR_FEN)
+
+    # Mask all interrupts (polling mode)
+    mmio_write32(PL011_BASE + UART_IMSC, 0)
+
+    # Enable UART, TX, RX
+    mmio_write32(PL011_BASE + UART_CR, CR_UARTEN | CR_TXE | CR_RXE)
+
+    g_initialized = true
+
+# Check if transmit FIFO is full
+fn uart_is_tx_full() -> bool:
+    (mmio_read32(PL011_BASE + UART_FR) & FR_TXFF) != 0
+
+# Check whether received data is available
+fn uart_has_data() -> bool:
+    (mmio_read32(PL011_BASE + UART_FR) & FR_RXFE) == 0
+
+# Write a single byte
+fn uart_putc(ch: u32):
+    if not g_initialized:
+        uart_init()
+    while uart_is_tx_full():
+        pass
+    mmio_write32(PL011_BASE + UART_DR, ch & 0xFF)
+
+# Read a single byte (blocks until data available)
+fn uart_getc() -> u32:
+    if not g_initialized:
+        uart_init()
+    while not uart_has_data():
+        pass
+    mmio_read32(PL011_BASE + UART_DR) & 0xFF
+
+# Print a string
+fn uart_print(s: text):
+    if not g_initialized:
+        uart_init()
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        uart_putc(ch as u32)
+
+# Print a string followed by CR+LF
+fn uart_println(s: text):
+    uart_print(s)
+    uart_putc(0x0D)
+    uart_putc(0x0A)
+
+# Print a 64-bit value in hexadecimal
+fn uart_write_hex(value: u64):
+    val hex_chars = "0123456789abcdef"
+    uart_putc(0x30)   # '0'
+    uart_putc(0x78)   # 'x'
+    for i in 0..16:
+        val shift = (15 - i) * 4
+        val nibble = ((value >> shift) & 0xF) as i32
+        val ch = hex_chars.char_at(nibble)
+        uart_putc(ch as u32)

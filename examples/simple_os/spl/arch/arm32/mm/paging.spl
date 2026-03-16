@@ -1,0 +1,201 @@
+# ARM32 Two-Level Page Tables (ARMv7 Short-descriptor)
+#
+# ARMv7 uses a two-level page table:
+#   L1 table: 4096 entries, each u32, indexed by vaddr[31:20] -> 1MB sections or L2 ptr
+#   L2 table: 256 entries, each u32, indexed by vaddr[19:12]  -> 4KB small pages
+#
+# L1 descriptor types (bits [1:0]):
+#   00 = Fault       01 = Page table (L2 pointer)
+#   10 = Section     11 = Reserved
+#
+# L2 descriptor types:
+#   00 = Fault       01 = Large page (64KB)
+#   1x = Small page (4KB)
+
+# ---------- constants ----------
+
+val SECTION_SIZE: u32 = 0x00100000     # 1 MB
+val SMALL_PAGE_SIZE: u32 = 4096        # 4 KB
+
+val L1_ENTRIES: i32 = 4096
+val L2_ENTRIES: i32 = 256
+
+# L1 descriptor types
+val L1_FAULT: u32 = 0x00
+val L1_PAGE_TABLE: u32 = 0x01
+val L1_SECTION: u32 = 0x02
+
+# L1 section flags
+val L1_SEC_B: u32 = 0x004            # Bufferable
+val L1_SEC_C: u32 = 0x008            # Cacheable
+val L1_SEC_XN: u32 = 0x010           # Execute Never
+val L1_SEC_AP0: u32 = 0x400          # Access Permission bit 0
+val L1_SEC_AP1: u32 = 0x800          # Access Permission bit 1
+val L1_SEC_AP2: u32 = 0x8000         # Access Permission bit 2
+val L1_SEC_S: u32 = 0x10000          # Shareable
+val L1_SEC_nG: u32 = 0x20000         # Not Global
+
+# Common L1 section permission combinations
+val L1_SEC_KERN_RW: u32 = 0x402       # Section + AP0 + C + B
+val L1_SEC_DEVICE: u32 = 0x406        # Section + AP0 + B (device)
+
+# L2 small page flags
+val L2_FAULT: u32 = 0x00
+val L2_SMALL_PAGE: u32 = 0x02
+val L2_SP_B: u32 = 0x004             # Bufferable
+val L2_SP_C: u32 = 0x008             # Cacheable
+val L2_SP_AP0: u32 = 0x010           # Access Permission bit 0
+val L2_SP_AP1: u32 = 0x020           # Access Permission bit 1
+val L2_SP_AP2: u32 = 0x200           # Access Permission bit 2
+val L2_SP_S: u32 = 0x400             # Shareable
+val L2_SP_nG: u32 = 0x800            # Not Global
+
+# Common L2 permission combinations
+val L2_SP_KERN_RW: u32 = 0x01E       # Small page + AP0 + C + B
+val L2_SP_USER_RW: u32 = 0x03E       # Small page + AP0 + AP1 + C + B
+
+# ---------- structs ----------
+
+# L1 page table (4096 entries = 16 KB, must be 16KB aligned)
+struct L1Table:
+    entries: [u32; 4096]
+
+# L2 page table (256 entries = 1 KB, must be 1KB aligned)
+struct L2Table:
+    entries: [u32; 256]
+
+# ---------- static page table pool ----------
+
+val L2_POOL_SIZE: i32 = 32
+var l2_pool: [L2Table; 32]
+var l2_pool_used: [bool; 32] = [false; 32]
+
+# Allocate an L2 table from the static pool
+fn l2_pool_alloc() -> i32:
+    for i in 0..L2_POOL_SIZE:
+        if not l2_pool_used[i]:
+            l2_pool_used[i] = true
+            # Zero the table
+            for j in 0..L2_ENTRIES:
+                l2_pool[i].entries[j] = 0
+            return i
+    -1   # pool exhausted
+
+# Free an L2 table back to the pool
+fn l2_pool_free(index: i32):
+    if index >= 0 and index < L2_POOL_SIZE:
+        l2_pool_used[index] = false
+
+# Get the physical address of a pooled L2 table
+fn l2_pool_addr(index: i32) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            ldr r0, {l2_pool}
+            str r0, {addr}
+        """
+    # sizeof(L2Table) = 256 * 4 = 1024
+    addr + (index as u32 * 1024)
+
+# ---------- helpers ----------
+
+# Extract L1 index from virtual address (bits 31:20)
+fn l1_index(vaddr: u32) -> i32:
+    ((vaddr >> 20) & 0xFFF) as i32
+
+# Extract L2 index from virtual address (bits 19:12)
+fn l2_index(vaddr: u32) -> i32:
+    ((vaddr >> 12) & 0xFF) as i32
+
+# ---------- public API ----------
+
+# Create a new zeroed L1 table
+fn l1_table_create() -> L1Table:
+    var l1 = L1Table(entries: [0; 4096])
+    l1
+
+# Map a 1 MB section (direct L1 entry)
+fn paging_map_section(l1: L1Table, vaddr: u32, paddr: u32, flags: u32):
+    val idx = l1_index(vaddr)
+    l1.entries[idx] = (paddr & 0xFFF00000) | flags
+
+# Map a single 4 KB page using L2 table
+fn paging_map(l1: L1Table, vaddr: u32, paddr: u32, flags: u32) -> bool:
+    val l1i = l1_index(vaddr)
+    val l2i = l2_index(vaddr)
+
+    # Ensure an L2 table exists for this L1 entry
+    if (l1.entries[l1i] & 0x03) != L1_PAGE_TABLE:
+        val pool_idx = l2_pool_alloc()
+        if pool_idx < 0:
+            return false
+        val l2_addr = l2_pool_addr(pool_idx)
+        l1.entries[l1i] = (l2_addr & 0xFFFFFC00) | L1_PAGE_TABLE
+
+    # Get the L2 table address
+    val l2_phys = l1.entries[l1i] & 0xFFFFFC00
+
+    # Write the L2 entry
+    unsafe:
+        val entry_addr = (l2_phys + (l2i as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = (paddr & 0xFFFFF000) | (flags & 0xFFF) | L2_SMALL_PAGE
+
+    true
+
+# Unmap a 4 KB page
+fn paging_unmap(l1: L1Table, vaddr: u32):
+    val l1i = l1_index(vaddr)
+    if (l1.entries[l1i] & 0x03) != L1_PAGE_TABLE:
+        return
+
+    val l2i = l2_index(vaddr)
+    val l2_phys = l1.entries[l1i] & 0xFFFFFC00
+
+    unsafe:
+        val entry_addr = (l2_phys + (l2i as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = 0
+
+# Translate virtual to physical address
+fn paging_translate(l1: L1Table, vaddr: u32) -> u32:
+    val l1i = l1_index(vaddr)
+    val l1_entry = l1.entries[l1i]
+
+    # Check for section mapping
+    if (l1_entry & 0x03) == L1_SECTION:
+        return (l1_entry & 0xFFF00000) | (vaddr & 0x000FFFFF)
+
+    # Check for page table mapping
+    if (l1_entry & 0x03) == L1_PAGE_TABLE:
+        val l2i = l2_index(vaddr)
+        val l2_phys = l1_entry & 0xFFFFFC00
+
+        var pte: u32 = 0
+        unsafe:
+            val entry_addr = (l2_phys + (l2i as u32 * 4)) as u64
+            @address(entry_addr) @volatile var entry: u32
+            pte = entry
+
+        if (pte & 0x02) == 0:
+            return 0
+        return (pte & 0xFFFFF000) | (vaddr & 0x00000FFF)
+
+    0   # Fault entry
+
+# Identity-map a range as sections
+fn paging_identity_map_range(l1: L1Table, start: u32, end_addr: u32, flags: u32):
+    var addr = start & 0xFFF00000   # Align down to section boundary
+    while addr < end_addr:
+        paging_map_section(l1, addr, addr, flags)
+        addr = addr + SECTION_SIZE
+
+# Get the physical address of an L1 table (for TTBR)
+fn l1_table_phys_addr(l1: L1Table) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            ldr r0, {l1}
+            str r0, {addr}
+        """
+    addr

@@ -1,0 +1,135 @@
+# x86_64 8259 PIC (Programmable Interrupt Controller)
+#
+# Identical to the x86 version - the PIC hardware interface is unchanged
+# in long mode. Remaps IRQ 0-7 to vectors 32-39, IRQ 8-15 to vectors 40-47.
+
+# ---------- local port I/O ----------
+
+fn outb(port: i32, value: i32):
+    asm """
+        mov dx, {port}
+        mov al, {value}
+        out dx, al
+    """
+
+fn inb(port: i32) -> i32:
+    var result = 0
+    asm """
+        mov dx, {port}
+        in al, dx
+        movzx eax, al
+        mov {result}, eax
+    """
+    result
+
+fn io_wait():
+    outb(0x80, 0)
+
+# ---------- constants ----------
+
+# PIC I/O ports
+val PIC1_CMD: i32 = 0x20
+val PIC1_DATA: i32 = 0x21
+val PIC2_CMD: i32 = 0xA0
+val PIC2_DATA: i32 = 0xA1
+
+# End-of-Interrupt command
+val PIC_EOI: i32 = 0x20
+
+# ICW1 bits
+val ICW1_INIT: i32 = 0x10
+val ICW1_ICW4: i32 = 0x01
+
+# ICW4 bits
+val ICW4_8086: i32 = 0x01
+
+# Remap offsets
+val PIC1_OFFSET: i32 = 32
+val PIC2_OFFSET: i32 = 40
+
+# ---------- public API ----------
+
+fn pic_init():
+    val mask1 = inb(PIC1_DATA)
+    val mask2 = inb(PIC2_DATA)
+
+    outb(PIC1_CMD, ICW1_INIT | ICW1_ICW4)
+    io_wait()
+    outb(PIC2_CMD, ICW1_INIT | ICW1_ICW4)
+    io_wait()
+
+    outb(PIC1_DATA, PIC1_OFFSET)
+    io_wait()
+    outb(PIC2_DATA, PIC2_OFFSET)
+    io_wait()
+
+    outb(PIC1_DATA, 0x04)
+    io_wait()
+    outb(PIC2_DATA, 0x02)
+    io_wait()
+
+    outb(PIC1_DATA, ICW4_8086)
+    io_wait()
+    outb(PIC2_DATA, ICW4_8086)
+    io_wait()
+
+    outb(PIC1_DATA, mask1)
+    outb(PIC2_DATA, mask2)
+
+fn pic_eoi(irq: i32):
+    if irq >= 8:
+        outb(PIC2_CMD, PIC_EOI)
+    outb(PIC1_CMD, PIC_EOI)
+
+fn pic_mask(irq: i32):
+    if irq < 8:
+        val current = inb(PIC1_DATA)
+        outb(PIC1_DATA, current | (1 << irq))
+    else:
+        val line = irq - 8
+        val current = inb(PIC2_DATA)
+        outb(PIC2_DATA, current | (1 << line))
+
+fn pic_unmask(irq: i32):
+    if irq < 8:
+        val current = inb(PIC1_DATA)
+        outb(PIC1_DATA, current & ~(1 << irq))
+    else:
+        val line = irq - 8
+        val current = inb(PIC2_DATA)
+        outb(PIC2_DATA, current & ~(1 << line))
+
+fn pic_disable():
+    outb(PIC1_DATA, 0xFF)
+    outb(PIC2_DATA, 0xFF)
+
+fn pic_enable_all():
+    outb(PIC1_DATA, 0x00)
+    outb(PIC2_DATA, 0x00)
+
+fn pic_get_isr() -> u16:
+    outb(PIC1_CMD, 0x0B)
+    outb(PIC2_CMD, 0x0B)
+    val lo = inb(PIC1_CMD) as u16
+    val hi = inb(PIC2_CMD) as u16
+    (hi << 8) | lo
+
+fn pic_get_irr() -> u16:
+    outb(PIC1_CMD, 0x0A)
+    outb(PIC2_CMD, 0x0A)
+    val lo = inb(PIC1_CMD) as u16
+    val hi = inb(PIC2_CMD) as u16
+    (hi << 8) | lo
+
+fn pic_is_spurious(irq: i32) -> bool:
+    if irq == 7:
+        val isr = pic_get_isr()
+        (isr & 0x80) == 0
+    elif irq == 15:
+        val isr = pic_get_isr()
+        if (isr & 0x8000) == 0:
+            outb(PIC1_CMD, PIC_EOI)
+            return true
+        false
+    else:
+        false

@@ -1,0 +1,194 @@
+# RISC-V32 Sv32 Two-Level Page Tables
+#
+# Sv32 virtual address layout:
+#   [31:22] VPN[1] — 10 bits, index into root page table
+#   [21:12] VPN[0] — 10 bits, index into leaf page table
+#   [11:0]  Offset — 12 bits, page offset
+#
+# Page Table Entry (PTE) — 32 bits:
+#   [31:20] PPN[1] — 12 bits
+#   [19:10] PPN[0] — 10 bits
+#   [9:8]   RSW    — 2 bits (reserved for software)
+#   [7] D — Dirty    [6] A — Accessed    [5] G — Global
+#   [4] U — User     [3] X — Execute     [2] W — Write
+#   [1] R — Read     [0] V — Valid
+
+# ---------- constants ----------
+
+val PAGE_SIZE: u32 = 4096
+val ENTRIES_PER_TABLE: i32 = 1024
+
+# PTE flags (lower 8 bits)
+val PTE_V: u32 = 0x001   # Valid
+val PTE_R: u32 = 0x002   # Read
+val PTE_W: u32 = 0x004   # Write
+val PTE_X: u32 = 0x008   # Execute
+val PTE_U: u32 = 0x010   # User-accessible
+val PTE_G: u32 = 0x020   # Global
+val PTE_A: u32 = 0x040   # Accessed
+val PTE_D: u32 = 0x080   # Dirty
+
+# Common flag combinations
+val PTE_KERN_RW: u32 = 0x0C7    # V|R|W|A|D
+val PTE_KERN_RX: u32 = 0x04B    # V|R|X|A|D
+val PTE_USER_RW: u32 = 0x0D7    # V|R|W|U|A|D
+val PTE_USER_RX: u32 = 0x05B    # V|R|X|U|A|D
+
+# ---------- structs ----------
+
+# A page table containing 1024 entries
+struct PageTable:
+    entries: [u32; 1024]
+
+# ---------- static page table pool ----------
+
+val PT_POOL_SIZE: i32 = 16
+var pt_pool: [PageTable; 16]
+var pt_pool_used: [bool; 16] = [false; 16]
+
+# Allocate a page table from the static pool. Returns index, or -1 if exhausted.
+fn pt_pool_alloc() -> i32:
+    for i in 0..PT_POOL_SIZE:
+        if not pt_pool_used[i]:
+            pt_pool_used[i] = true
+            # Zero out the table
+            for j in 0..ENTRIES_PER_TABLE:
+                pt_pool[i].entries[j] = 0
+            return i
+    -1
+
+# Free a page table back to the pool
+fn pt_pool_free(index: i32):
+    if index >= 0 and index < PT_POOL_SIZE:
+        pt_pool_used[index] = false
+
+# Get the physical address of a pooled page table
+fn pt_pool_addr(index: i32) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            la t0, {pt_pool}
+            mv {addr}, t0
+        """
+    addr + (index as u32 * PAGE_SIZE)
+
+# ---------- helpers ----------
+
+# Extract VPN[1] from virtual address (bits 31:22)
+fn vpn1(vaddr: u32) -> i32:
+    ((vaddr >> 22) & 0x3FF) as i32
+
+# Extract VPN[0] from virtual address (bits 21:12)
+fn vpn0(vaddr: u32) -> i32:
+    ((vaddr >> 12) & 0x3FF) as i32
+
+# Convert physical address + flags to a PTE
+fn phys_to_pte(paddr: u32, flags: u32) -> u32:
+    ((paddr >> 12) << 10) | flags
+
+# Extract physical address from a PTE
+fn pte_to_phys(pte: u32) -> u32:
+    (pte >> 10) << 12
+
+# Check if a PTE is valid
+fn pte_valid(pte: u32) -> bool:
+    (pte & PTE_V) != 0
+
+# Check if a PTE is a leaf (has R, W, or X set)
+fn pte_is_leaf(pte: u32) -> bool:
+    (pte & (PTE_R | PTE_W | PTE_X)) != 0
+
+# ---------- public API ----------
+
+# Create a new zeroed root page table
+fn page_table_create() -> PageTable:
+    var pt = PageTable(entries: [0; 1024])
+    pt
+
+# Map a single 4KB page: vaddr -> paddr with given flags
+# Allocates a leaf page table from the pool if needed.
+# Returns true on success, false if pool exhausted.
+fn page_table_map(root: PageTable, vaddr: u32, paddr: u32, flags: u32) -> bool:
+    val idx1 = vpn1(vaddr)
+    val idx0 = vpn0(vaddr)
+
+    # Ensure a leaf table exists for this VPN[1]
+    if not pte_valid(root.entries[idx1]):
+        val pool_idx = pt_pool_alloc()
+        if pool_idx < 0:
+            return false
+        val pt_addr = pt_pool_addr(pool_idx)
+        # Non-leaf PTE: V bit only (no R/W/X), points to next level
+        root.entries[idx1] = phys_to_pte(pt_addr, PTE_V)
+
+    # Get the leaf table physical address
+    val leaf_phys = pte_to_phys(root.entries[idx1])
+
+    # Write the leaf PTE
+    unsafe:
+        val entry_addr = (leaf_phys + (idx0 as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = phys_to_pte(paddr, flags | PTE_V)
+
+    true
+
+# Unmap a page: clear the leaf PTE for vaddr
+fn page_table_unmap(root: PageTable, vaddr: u32):
+    val idx1 = vpn1(vaddr)
+    if not pte_valid(root.entries[idx1]):
+        return
+
+    val idx0 = vpn0(vaddr)
+    val leaf_phys = pte_to_phys(root.entries[idx1])
+
+    unsafe:
+        val entry_addr = (leaf_phys + (idx0 as u32 * 4)) as u64
+        @address(entry_addr) @volatile var pte: u32
+        pte = 0
+
+# Translate a virtual address to a physical address.
+# Returns 0 if not mapped.
+fn page_table_translate(root: PageTable, vaddr: u32) -> u32:
+    val idx1 = vpn1(vaddr)
+    if not pte_valid(root.entries[idx1]):
+        return 0
+
+    # Check for superpage (4 MB)
+    val root_pte = root.entries[idx1]
+    if pte_is_leaf(root_pte):
+        val base = ((root_pte >> 10) >> 10) << 22
+        return base | (vaddr & 0x003FFFFF)
+
+    val idx0 = vpn0(vaddr)
+    val leaf_phys = pte_to_phys(root_pte)
+
+    var pte: u32 = 0
+    unsafe:
+        val entry_addr = (leaf_phys + (idx0 as u32 * 4)) as u64
+        @address(entry_addr) @volatile var entry: u32
+        pte = entry
+
+    if not pte_valid(pte):
+        return 0
+
+    val page_phys = pte_to_phys(pte)
+    val offset = vaddr & 0xFFF
+    page_phys | offset
+
+# Identity-map a range of physical addresses [start, end) with given flags
+fn page_table_identity_map(root: PageTable, start: u32, size: u32, flags: u32):
+    var addr = start & ~(PAGE_SIZE - 1)
+    val end = start + size
+    while addr < end:
+        page_table_map(root, addr, addr, flags)
+        addr = addr + PAGE_SIZE
+
+# Get the physical address of a page table (for satp)
+fn page_table_phys_addr(pt: PageTable) -> u32:
+    var addr: u32 = 0
+    unsafe:
+        asm """
+            la t0, {pt}
+            mv {addr}, t0
+        """
+    addr

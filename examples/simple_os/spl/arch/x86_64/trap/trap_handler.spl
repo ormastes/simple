@@ -1,0 +1,149 @@
+# x86_64 Trap / Interrupt Dispatch
+#
+# 64-bit trap handler called from the ISR stubs after registers are saved.
+# Routes interrupts to the appropriate subsystem:
+#   Vectors  0-31  : CPU exceptions
+#   Vectors 32-47  : Hardware IRQs (via 8259 PIC)
+#   SYSCALL/SYSRET : Handled separately via MSRs (not through IDT)
+
+use arch.x86_64.boot.pic.{pic_eoi, pic_is_spurious}
+use arch.x86_64.boot.pit.{pit_tick}
+
+# ---------- exception names ----------
+
+val EXCEPTION_NAMES: [text; 32] = [
+    "Division Error",
+    "Debug",
+    "NMI",
+    "Breakpoint",
+    "Overflow",
+    "Bound Range Exceeded",
+    "Invalid Opcode",
+    "Device Not Available",
+    "Double Fault",
+    "Coprocessor Segment",
+    "Invalid TSS",
+    "Segment Not Present",
+    "Stack-Segment Fault",
+    "General Protection Fault",
+    "Page Fault",
+    "Reserved",
+    "x87 FP Exception",
+    "Alignment Check",
+    "Machine Check",
+    "SIMD FP Exception",
+    "Virtualization Exception",
+    "Control Protection",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Hypervisor Injection",
+    "VMM Communication",
+    "Security Exception",
+    "Reserved"
+]
+
+# ---------- 64-bit trap frame ----------
+
+# Matches the push order in isr_common (isr_stubs.S)
+@repr(C)
+struct TrapFrame64:
+    # Pushed by isr_common (individual pushes, reverse order)
+    r15: u64
+    r14: u64
+    r13: u64
+    r12: u64
+    r11: u64
+    r10: u64
+    r9: u64
+    r8: u64
+    rbp: u64
+    rdi: u64
+    rsi: u64
+    rdx: u64
+    rcx: u64
+    rbx: u64
+    rax: u64
+    # Pushed by ISR stub
+    vector: u64
+    error_code: u64
+    # Pushed by CPU
+    rip: u64
+    cs: u64
+    rflags: u64
+    rsp: u64      # Always present in long mode
+    ss: u64       # Always present in long mode
+
+# ---------- handler tables ----------
+
+var irq_handlers: [u64; 16] = [0; 16]
+var exception_handlers: [u64; 32] = [0; 32]
+
+# ---------- public API ----------
+
+fn trap_handler(frame: TrapFrame64):
+    val vector = frame.vector
+
+    if vector < 32:
+        handle_exception(frame)
+    elif vector >= 32 and vector < 48:
+        handle_irq(frame)
+    else:
+        pass
+
+# ---------- exception handling ----------
+
+fn handle_exception(frame: TrapFrame64):
+    val vector = frame.vector as i32
+
+    if exception_handlers[vector] != 0:
+        return
+
+    exception_panic(frame)
+
+fn exception_panic(frame: TrapFrame64):
+    asm """
+        cli
+    .exception_halt64:
+        hlt
+        jmp .exception_halt64
+    """
+
+# ---------- IRQ handling ----------
+
+fn handle_irq(frame: TrapFrame64):
+    val irq = (frame.vector - 32) as i32
+
+    if pic_is_spurious(irq):
+        return
+
+    if irq == 0:
+        pit_tick()
+
+    if irq_handlers[irq] != 0:
+        pass
+
+    pic_eoi(irq)
+
+# ---------- handler registration ----------
+
+fn register_irq_handler(irq: i32, handler: u64):
+    if irq >= 0 and irq < 16:
+        irq_handlers[irq] = handler
+
+fn register_exception_handler(vector: i32, handler: u64):
+    if vector >= 0 and vector < 32:
+        exception_handlers[vector] = handler
+
+# ---------- page fault helper ----------
+
+fn get_page_fault_addr() -> u64:
+    var addr: u64 = 0
+    asm """
+        mov rax, cr2
+        mov {addr}, rax
+    """
+    addr

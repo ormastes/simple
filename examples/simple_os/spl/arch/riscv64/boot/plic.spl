@@ -1,0 +1,120 @@
+# RISC-V 64-bit Platform-Level Interrupt Controller (PLIC)
+#
+# PLIC base address: 0x0C000000 on QEMU virt platform.
+# Manages external interrupt sources and routes them to hart contexts.
+#
+# QEMU virt contexts:
+#   Context 0 = Hart 0, M-mode
+#   Context 1 = Hart 0, S-mode
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u64, value: u32):
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u64) -> u32:
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg
+
+# ---------- constants ----------
+
+# PLIC base address
+val PLIC_BASE: u64 = 0x0C000000
+
+# Register region offsets
+val PLIC_PRIORITY_BASE: u64 = 0x000000
+val PLIC_PENDING_BASE: u64 = 0x001000
+val PLIC_ENABLE_BASE: u64 = 0x002000
+val PLIC_THRESHOLD_BASE: u64 = 0x200000
+val PLIC_CLAIM_BASE: u64 = 0x200004
+
+# Layout parameters
+val PLIC_ENABLE_STRIDE: u64 = 0x80
+val PLIC_CONTEXT_STRIDE: u64 = 0x1000
+
+# Limits
+val PLIC_MAX_SOURCES: u32 = 128
+val PLIC_MAX_PRIORITY: u32 = 7
+
+# Context IDs
+val PLIC_CONTEXT_M0: u32 = 0
+val PLIC_CONTEXT_S0: u32 = 1
+
+# ---------- address helpers ----------
+
+fn plic_priority_addr(source: u32) -> u64:
+    PLIC_BASE + PLIC_PRIORITY_BASE + (source as u64 * 4)
+
+fn plic_pending_addr(source: u32) -> u64:
+    PLIC_BASE + PLIC_PENDING_BASE + ((source / 32) as u64 * 4)
+
+fn plic_enable_addr(context: u32, source: u32) -> u64:
+    PLIC_BASE + PLIC_ENABLE_BASE + (context as u64 * PLIC_ENABLE_STRIDE) + ((source / 32) as u64 * 4)
+
+fn plic_threshold_addr(context: u32) -> u64:
+    PLIC_BASE + PLIC_THRESHOLD_BASE + (context as u64 * PLIC_CONTEXT_STRIDE)
+
+fn plic_claim_addr(context: u32) -> u64:
+    PLIC_BASE + PLIC_CLAIM_BASE + (context as u64 * PLIC_CONTEXT_STRIDE)
+
+# ---------- public API ----------
+
+# Initialize the PLIC: disable all sources, set threshold to 0
+fn plic_init():
+    # Set all source priorities to 0 (disabled)
+    var i: u32 = 1
+    while i < PLIC_MAX_SOURCES:
+        plic_set_priority(i, 0)
+        i = i + 1
+
+    # Set threshold to 0 for M-mode context (accept all priorities > 0)
+    plic_set_threshold(PLIC_CONTEXT_M0, 0)
+
+# Set the priority of an interrupt source (1-7, 0 disables)
+fn plic_set_priority(source: u32, priority: u32):
+    if source == 0 or source >= PLIC_MAX_SOURCES:
+        return
+    var prio = priority
+    if prio > PLIC_MAX_PRIORITY:
+        prio = PLIC_MAX_PRIORITY
+    mmio_write32(plic_priority_addr(source), prio)
+
+# Set the priority threshold for a context
+fn plic_set_threshold(context: u32, threshold: u32):
+    mmio_write32(plic_threshold_addr(context), threshold)
+
+# Enable an interrupt source for a context
+fn plic_enable(context: u32, source: u32):
+    if source == 0 or source >= PLIC_MAX_SOURCES:
+        return
+    val addr = plic_enable_addr(context, source)
+    val bit = 1 << (source % 32)
+    val current = mmio_read32(addr)
+    mmio_write32(addr, current | bit)
+
+# Disable an interrupt source for a context
+fn plic_disable(context: u32, source: u32):
+    if source == 0 or source >= PLIC_MAX_SOURCES:
+        return
+    val addr = plic_enable_addr(context, source)
+    val bit = 1 << (source % 32)
+    val current = mmio_read32(addr)
+    mmio_write32(addr, current & ~bit)
+
+# Claim the highest-priority pending interrupt
+fn plic_claim(context: u32) -> u32:
+    mmio_read32(plic_claim_addr(context))
+
+# Complete (acknowledge) an interrupt
+fn plic_complete(context: u32, source: u32):
+    mmio_write32(plic_claim_addr(context), source)
+
+# Check if an interrupt source is pending
+fn plic_is_pending(source: u32) -> bool:
+    if source == 0 or source >= PLIC_MAX_SOURCES:
+        return false
+    val pending = mmio_read32(plic_pending_addr(source))
+    (pending & (1 << (source % 32))) != 0

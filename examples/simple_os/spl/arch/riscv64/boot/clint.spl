@@ -1,0 +1,110 @@
+# RISC-V 64-bit Core Local Interruptor (CLINT)
+#
+# CLINT base address: 0x02000000 on QEMU virt platform.
+# Provides machine software interrupts (msip) and machine timer (mtime/mtimecmp).
+# Timer frequency: 10 MHz on QEMU virt.
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u64, value: u32):
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u64) -> u32:
+    unsafe:
+        @address(addr) @volatile var reg: u32
+        reg
+
+fn mmio_write64(addr: u64, value: u64):
+    unsafe:
+        @address(addr) @volatile var reg: u64
+        reg = value
+
+fn mmio_read64(addr: u64) -> u64:
+    unsafe:
+        @address(addr) @volatile var reg: u64
+        reg
+
+# ---------- constants ----------
+
+# CLINT base address
+val CLINT_BASE: u64 = 0x02000000
+
+# Register offsets
+val CLINT_MSIP_BASE: u64 = 0x0000
+val CLINT_MTIMECMP_BASE: u64 = 0x4000
+val CLINT_MTIME: u64 = 0xBFF8
+
+# Timer frequency (QEMU virt default: 10 MHz)
+val CLINT_FREQ_HZ: u64 = 10000000
+
+# ---------- global state ----------
+
+var g_timer_ticks: u64 = 0
+var g_timer_interval: u64 = 0
+
+# ---------- address helpers ----------
+
+fn clint_msip_addr(hart_id: u32) -> u64:
+    CLINT_BASE + CLINT_MSIP_BASE + (hart_id as u64 * 4)
+
+fn clint_mtimecmp_addr(hart_id: u32) -> u64:
+    CLINT_BASE + CLINT_MTIMECMP_BASE + (hart_id as u64 * 8)
+
+fn clint_mtime_addr() -> u64:
+    CLINT_BASE + CLINT_MTIME
+
+# ---------- public API ----------
+
+# Initialize the CLINT timer for a hart.
+# Sets up a 100 Hz tick rate (10ms interval).
+fn clint_init(hart_id: u32):
+    g_timer_ticks = 0
+    g_timer_interval = CLINT_FREQ_HZ / 100
+
+    val now = clint_get_mtime()
+    clint_set_mtimecmp(hart_id, now + g_timer_interval)
+
+    # Enable machine timer interrupt (MTIE = bit 7 in mie)
+    unsafe:
+        asm """
+            li t0, 0x80
+            csrs mie, t0
+        """
+
+# Read the current mtime value (native 64-bit on RV64)
+fn clint_get_mtime() -> u64:
+    mmio_read64(clint_mtime_addr())
+
+# Set the mtimecmp register for a hart (native 64-bit write on RV64)
+fn clint_set_mtimecmp(hart_id: u32, value: u64):
+    mmio_write64(clint_mtimecmp_addr(hart_id), value)
+
+# Set a timer to fire after a given interval from now
+fn clint_set_timer(hart_id: u32, interval: u64):
+    g_timer_interval = interval
+    val now = clint_get_mtime()
+    clint_set_mtimecmp(hart_id, now + interval)
+
+# Called from the timer interrupt handler to advance the tick counter
+fn clint_tick():
+    g_timer_ticks = g_timer_ticks + 1
+
+# Get the current tick count
+fn clint_get_ticks() -> u64:
+    g_timer_ticks
+
+# Get elapsed time in milliseconds (approximate)
+fn clint_get_millis() -> u64:
+    if g_timer_interval == 0:
+        return 0
+    (g_timer_ticks * 1000 * g_timer_interval) / CLINT_FREQ_HZ
+
+# Send a machine software interrupt to a hart
+fn clint_send_msip(hart_id: u32):
+    mmio_write32(clint_msip_addr(hart_id), 1)
+
+# Clear a machine software interrupt for a hart
+fn clint_clear_msip(hart_id: u32):
+    mmio_write32(clint_msip_addr(hart_id), 0)

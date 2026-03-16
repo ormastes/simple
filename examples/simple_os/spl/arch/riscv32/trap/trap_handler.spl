@@ -1,0 +1,175 @@
+# RISC-V32 Trap / Interrupt Dispatch (M-mode)
+#
+# Central handler called from trap_entry.S after registers are saved.
+# Routes the trap based on mcause:
+#   MSB=1 (Interrupt):
+#     Code 3  : Machine Software Interrupt (IPI)
+#     Code 7  : Machine Timer Interrupt
+#     Code 11 : Machine External Interrupt (PLIC)
+#   MSB=0 (Exception):
+#     Code 8  : Environment Call from U-mode
+#     Code 9  : Environment Call from S-mode
+#     Code 11 : Environment Call from M-mode
+#     Others  : Faults (page fault, illegal instruction, etc.)
+
+use arch.riscv32.boot.plic.{plic_claim, plic_complete, PLIC_CONTEXT_M0}
+use arch.riscv32.boot.clint.{clint_handler, clint_clear_ipi}
+
+# ---------- exception names (for debug output) ----------
+
+val EXCEPTION_NAMES: [text; 16] = [
+    "Instruction Address Misaligned",   # 0
+    "Instruction Access Fault",         # 1
+    "Illegal Instruction",              # 2
+    "Breakpoint",                       # 3
+    "Load Address Misaligned",          # 4
+    "Load Access Fault",                # 5
+    "Store Address Misaligned",         # 6
+    "Store Access Fault",               # 7
+    "Environment Call from U-mode",     # 8
+    "Environment Call from S-mode",     # 9
+    "Reserved",                         # 10
+    "Environment Call from M-mode",     # 11
+    "Instruction Page Fault",           # 12
+    "Load Page Fault",                  # 13
+    "Reserved",                         # 14
+    "Store Page Fault"                  # 15
+]
+
+# ---------- mcause constants ----------
+
+val MCAUSE_INTERRUPT: u32 = 0x80000000
+
+val EXC_ECALL_U: u32 = 8
+val EXC_ECALL_S: u32 = 9
+val EXC_ECALL_M: u32 = 11
+
+val IRQ_SOFTWARE_M: u32 = 3
+val IRQ_TIMER_M: u32 = 7
+val IRQ_EXTERNAL_M: u32 = 11
+
+# ---------- trap frame ----------
+
+# Register state passed from trap_entry.S
+# Layout must match the assembly push order exactly.
+@repr(C)
+struct TrapFrame:
+    ra: u32         # x1
+    sp: u32         # x2
+    gp: u32         # x3
+    tp: u32         # x4
+    t0: u32         # x5
+    t1: u32         # x6
+    t2: u32         # x7
+    s0: u32         # x8
+    s1: u32         # x9
+    a0: u32         # x10
+    a1: u32         # x11
+    a2: u32         # x12
+    a3: u32         # x13
+    a4: u32         # x14
+    a5: u32         # x15
+    a6: u32         # x16
+    a7: u32         # x17
+    s2: u32         # x18
+    s3: u32         # x19
+    s4: u32         # x20
+    s5: u32         # x21
+    s6: u32         # x22
+    s7: u32         # x23
+    s8: u32         # x24
+    s9: u32         # x25
+    s10: u32        # x26
+    s11: u32        # x27
+    t3: u32         # x28
+    t4: u32         # x29
+    t5: u32         # x30
+    t6: u32         # x31
+    mepc: u32       # Machine exception PC
+    mstatus: u32    # Machine status
+    mcause: u32     # Machine cause
+    mtval: u32      # Machine trap value
+
+# ---------- handler tables ----------
+
+var irq_handlers: [u32; 16] = [0; 16]
+var exception_handlers: [u32; 16] = [0; 16]
+var syscall_handler_addr: u32 = 0
+
+# ---------- public API ----------
+
+# Main dispatch entry point called from trap_entry.S
+fn trap_handler(frame: TrapFrame):
+    val mcause = frame.mcause
+
+    if (mcause & MCAUSE_INTERRUPT) != 0:
+        # Interrupt
+        val code = mcause & ~MCAUSE_INTERRUPT
+        handle_interrupt(frame, code)
+    else:
+        # Exception
+        handle_exception(frame, mcause)
+
+# ---------- interrupt handling ----------
+
+fn handle_interrupt(frame: TrapFrame, code: u32):
+    if code == IRQ_TIMER_M:
+        # Machine timer interrupt
+        clint_handler()
+        if irq_handlers[IRQ_TIMER_M as i32] != 0:
+            pass
+    elif code == IRQ_EXTERNAL_M:
+        # Machine external interrupt — service via PLIC
+        val irq = plic_claim(PLIC_CONTEXT_M0)
+        if irq != 0:
+            if irq_handlers[IRQ_EXTERNAL_M as i32] != 0:
+                pass
+            plic_complete(PLIC_CONTEXT_M0, irq)
+    elif code == IRQ_SOFTWARE_M:
+        # Machine software interrupt (IPI)
+        clint_clear_ipi(0)
+        if irq_handlers[IRQ_SOFTWARE_M as i32] != 0:
+            pass
+
+# ---------- exception handling ----------
+
+fn handle_exception(frame: TrapFrame, code: u32):
+    if code == EXC_ECALL_U or code == EXC_ECALL_S or code == EXC_ECALL_M:
+        handle_ecall(frame)
+    else:
+        exception_panic(frame)
+
+fn handle_ecall(frame: TrapFrame):
+    # a7 = syscall number, a0-a5 = arguments
+    # Return value goes in a0
+    if syscall_handler_addr != 0:
+        pass
+
+    # Advance past the ecall instruction (4 bytes)
+    # Note: mepc update is done in the trap_entry.S restore path
+    # In a full implementation, we'd modify frame.mepc += 4
+
+fn exception_panic(frame: TrapFrame):
+    # Halt the CPU — unhandled exception is fatal
+    asm """
+        csrc mstatus, 8
+    .exception_halt:
+        wfi
+        j .exception_halt
+    """
+
+# ---------- handler registration ----------
+
+# Register an IRQ handler (code 0-15)
+fn register_irq_handler(code: i32, handler: u32):
+    if code >= 0 and code < 16:
+        irq_handlers[code] = handler
+
+# Register an exception handler (code 0-15)
+fn register_exception_handler(code: i32, handler: u32):
+    if code >= 0 and code < 16:
+        exception_handlers[code] = handler
+
+# Register the syscall dispatcher
+fn register_syscall_handler(handler: u32):
+    syscall_handler_addr = handler

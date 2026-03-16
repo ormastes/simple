@@ -1,0 +1,145 @@
+# ARM32 Generic Timer Driver (ARMv7)
+#
+# Uses the ARMv7 physical timer (CNTP) via CP15 MRC/MCR instructions.
+# Timer IRQ is PPI 14 (GIC IRQ 30) on QEMU virt.
+#
+# The generic timer provides a monotonic counter (CNTPCT) and a
+# configurable down-counter (CNTP_TVAL) that generates an interrupt
+# when it reaches zero.
+
+use arch.arm32.boot.gic.{gic_enable_irq, gic_set_priority}
+
+# ---------- constants ----------
+
+# Timer PPI IRQ number (GIC IRQ 30 for physical timer on QEMU virt)
+val TIMER_PPI_IRQ: u32 = 30
+
+# CNTP_CTL bits
+val CNTP_CTL_ENABLE: u32 = 0x01     # Timer enable
+val CNTP_CTL_IMASK: u32 = 0x02      # Interrupt mask
+val CNTP_CTL_ISTATUS: u32 = 0x04    # Timer condition met
+
+# ---------- CP15 timer access ----------
+
+# Read CNTFRQ (Counter Frequency Register)
+fn read_cntfrq() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c14, c0, 0
+        str r0, {result}
+    """
+    result
+
+# Read CNTPCT (Physical Count - 64-bit)
+fn read_cntpct() -> u64:
+    var lo: u32 = 0
+    var hi: u32 = 0
+    asm """
+        mrrc p15, 0, r0, r1, c14
+        str r0, {lo}
+        str r1, {hi}
+    """
+    (hi as u64 << 32) | lo as u64
+
+# Write CNTP_TVAL (Physical Timer Value)
+fn write_cntp_tval(value: u32):
+    asm """
+        ldr r0, {value}
+        mcr p15, 0, r0, c14, c2, 0
+    """
+
+# Read CNTP_TVAL
+fn read_cntp_tval() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c14, c2, 0
+        str r0, {result}
+    """
+    result
+
+# Write CNTP_CTL (Physical Timer Control)
+fn write_cntp_ctl(value: u32):
+    asm """
+        ldr r0, {value}
+        mcr p15, 0, r0, c14, c2, 1
+    """
+
+# Read CNTP_CTL
+fn read_cntp_ctl() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c14, c2, 1
+        str r0, {result}
+    """
+    result
+
+# ---------- global state ----------
+
+# Monotonic tick counter
+var g_ticks: u64 = 0
+
+# Hardware counter frequency (from CNTFRQ)
+var g_freq: u32 = 0
+
+# Reload interval in counter ticks
+var g_interval: u32 = 0
+
+# Configured interrupt frequency
+var g_freq_hz: u32 = 0
+
+# ---------- public API ----------
+
+# Initialize the generic timer to fire at the given frequency (Hz)
+fn timer_init(freq_hz: u32):
+    g_freq = read_cntfrq()
+    g_freq_hz = freq_hz
+    g_ticks = 0
+
+    # Calculate interval: counter_freq / desired_freq
+    var interval = g_freq / freq_hz
+    if interval == 0:
+        interval = 1
+    g_interval = interval
+
+    # Set the timer value
+    write_cntp_tval(g_interval)
+
+    # Enable the timer, unmask interrupts
+    write_cntp_ctl(CNTP_CTL_ENABLE)
+
+    # Enable the timer IRQ in the GIC
+    gic_enable_irq(TIMER_PPI_IRQ)
+    gic_set_priority(TIMER_PPI_IRQ, 0x00)
+
+# Timer IRQ handler - called from trap dispatch
+fn timer_handler():
+    g_ticks = g_ticks + 1
+    # Reload the timer for the next period
+    write_cntp_tval(g_interval)
+
+# Get the current tick count
+fn timer_get_ticks() -> u64:
+    g_ticks
+
+# Get elapsed time in milliseconds
+fn timer_get_ms() -> u64:
+    if g_freq == 0:
+        return 0
+    (read_cntpct() * 1000) / g_freq as u64
+
+# Get the hardware counter frequency
+fn timer_get_frequency() -> u32:
+    g_freq
+
+# Set a new interval (in counter ticks)
+fn timer_set_interval(ticks: u32):
+    g_interval = ticks
+    write_cntp_tval(ticks)
+
+# Busy-wait for a given number of milliseconds
+fn timer_wait_ms(ms: u32):
+    val target = g_ticks + ((ms as u64 * g_freq_hz as u64) / 1000)
+    while g_ticks < target:
+        asm """
+            wfi
+        """

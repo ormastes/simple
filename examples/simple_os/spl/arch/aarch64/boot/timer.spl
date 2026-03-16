@@ -1,0 +1,121 @@
+# AArch64 Generic Timer (EL1 Physical Timer)
+#
+# Uses the ARMv8 architected timer system registers:
+#   CNTFRQ_EL0   — Timer frequency
+#   CNTP_TVAL_EL0 — Timer value (countdown)
+#   CNTP_CTL_EL0  — Timer control
+#   CNTPCT_EL0    — Physical count (monotonic)
+#
+# The physical timer fires PPI 30 (GIC_PPI_PHYS_TIMER).
+
+# ---------- constants ----------
+
+# CNTP_CTL_EL0 bits
+val TIMER_CTL_ENABLE: u64 = 0x01    # Enable timer
+val TIMER_CTL_IMASK: u64 = 0x02     # Interrupt mask (1 = masked)
+val TIMER_CTL_ISTATUS: u64 = 0x04   # Timer condition met
+
+# Default tick interval
+val TIMER_INTERVAL_MS: u32 = 10     # 10 ms tick period
+
+# ---------- global state ----------
+
+var g_tick_count: u64 = 0
+var g_freq_hz: u32 = 0
+var g_interval_ticks: u32 = 0
+
+# ---------- system register accessors ----------
+
+fn read_cntfrq_el0() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, cntfrq_el0
+        mov {result}, x0
+    """
+    result
+
+fn read_cntpct_el0() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, cntpct_el0
+        mov {result}, x0
+    """
+    result
+
+fn write_cntp_tval_el0(value: u64):
+    asm """
+        mov x0, {value}
+        msr cntp_tval_el0, x0
+    """
+
+fn write_cntp_ctl_el0(value: u64):
+    asm """
+        mov x0, {value}
+        msr cntp_ctl_el0, x0
+    """
+
+fn read_cntp_ctl_el0() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, cntp_ctl_el0
+        mov {result}, x0
+    """
+    result
+
+# ---------- public API ----------
+
+# Initialize the physical timer with default interval
+fn timer_init():
+    # Read timer frequency
+    g_freq_hz = read_cntfrq_el0() as u32
+
+    # Calculate ticks per interval
+    g_interval_ticks = g_freq_hz / (1000 / TIMER_INTERVAL_MS)
+
+    # Set initial timer value
+    write_cntp_tval_el0(g_interval_ticks as u64)
+
+    # Enable timer, unmask interrupt
+    write_cntp_ctl_el0(TIMER_CTL_ENABLE)
+
+    g_tick_count = 0
+
+# Get monotonic tick count
+fn timer_get_ticks() -> u64:
+    g_tick_count
+
+# Get elapsed time in milliseconds using physical counter
+fn timer_get_ms() -> u64:
+    if g_freq_hz == 0:
+        return 0
+    (read_cntpct_el0() * 1000) / g_freq_hz as u64
+
+# Get the timer frequency
+fn timer_get_frequency() -> u32:
+    g_freq_hz
+
+# Called from IRQ handler when physical timer PPI fires
+fn timer_handler():
+    g_tick_count = g_tick_count + 1
+
+    # Reload timer for next interval
+    write_cntp_tval_el0(g_interval_ticks as u64)
+
+    # Re-enable timer
+    write_cntp_ctl_el0(TIMER_CTL_ENABLE)
+
+# Set the timer interval in milliseconds
+fn timer_set_interval_ms(ms: u32):
+    if g_freq_hz == 0:
+        return
+    g_interval_ticks = (g_freq_hz * ms) / 1000
+    write_cntp_tval_el0(g_interval_ticks as u64)
+
+# Busy-wait for a given number of milliseconds
+fn timer_wait_ms(ms: u32):
+    val start = read_cntpct_el0()
+    val target_ticks = (g_freq_hz as u64 * ms as u64) / 1000
+    while (read_cntpct_el0() - start) < target_ticks:
+        asm """
+            wfe
+        """

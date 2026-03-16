@@ -1,0 +1,112 @@
+# RISC-V32 PLIC (Platform-Level Interrupt Controller) — QEMU virt
+#
+# PLIC base: 0x0C000000
+# Memory map:
+#   +0x000000 + irq*4       : Priority registers (1 per source)
+#   +0x001000                : Pending bits
+#   +0x002000 + ctx*0x80     : Enable bits (per context)
+#   +0x200000 + ctx*0x1000   : Threshold + claim/complete (per context)
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u32, value: u32):
+    unsafe:
+        asm """
+            sw {value}, 0({addr})
+        """
+
+fn mmio_read32(addr: u32) -> u32:
+    var result: u32 = 0
+    unsafe:
+        asm """
+            lw {result}, 0({addr})
+        """
+    result
+
+# ---------- constants ----------
+
+val PLIC_BASE: u32 = 0x0C000000
+
+val PLIC_PRIORITY_BASE: u32 = 0x0C000000
+val PLIC_PENDING_BASE: u32 = 0x0C001000
+val PLIC_ENABLE_BASE: u32 = 0x0C002000
+val PLIC_THRESHOLD_BASE: u32 = 0x0C200000
+val PLIC_CLAIM_BASE: u32 = 0x0C200004
+
+# Context stride for threshold/claim registers
+val PLIC_CONTEXT_STRIDE: u32 = 0x1000
+# Enable stride per context
+val PLIC_ENABLE_STRIDE: u32 = 0x80
+
+# Maximum interrupt sources
+val PLIC_MAX_IRQS: u32 = 128
+
+# QEMU virt contexts
+val PLIC_CONTEXT_M0: u32 = 0    # M-mode context for hart 0
+val PLIC_CONTEXT_S0: u32 = 1    # S-mode context for hart 0
+
+# Known IRQ numbers on QEMU virt
+val PLIC_UART0_IRQ: u32 = 10
+
+# ---------- public API ----------
+
+# Initialize PLIC: disable all interrupts, set threshold to 0
+fn plic_init():
+    # Set all interrupt priorities to 0 (disabled)
+    for i in 1..PLIC_MAX_IRQS:
+        mmio_write32(PLIC_PRIORITY_BASE + i * 4, 0)
+
+    # Disable all interrupts for M-mode context 0
+    val num_words = (PLIC_MAX_IRQS + 31) / 32
+    for i in 0..num_words:
+        mmio_write32(PLIC_ENABLE_BASE + PLIC_CONTEXT_M0 * PLIC_ENABLE_STRIDE + i * 4, 0)
+
+    # Set threshold to 0 (accept all priorities > 0)
+    plic_set_threshold(PLIC_CONTEXT_M0, 0)
+
+# Enable an interrupt source
+fn plic_enable_irq(irq: u32):
+    if irq == 0 or irq >= PLIC_MAX_IRQS:
+        return
+
+    val word = irq / 32
+    val bit = irq % 32
+    val addr = PLIC_ENABLE_BASE + PLIC_CONTEXT_M0 * PLIC_ENABLE_STRIDE + word * 4
+
+    var current = mmio_read32(addr)
+    current = current | (1 << bit)
+    mmio_write32(addr, current)
+
+# Disable an interrupt source
+fn plic_disable_irq(irq: u32):
+    if irq == 0 or irq >= PLIC_MAX_IRQS:
+        return
+
+    val word = irq / 32
+    val bit = irq % 32
+    val addr = PLIC_ENABLE_BASE + PLIC_CONTEXT_M0 * PLIC_ENABLE_STRIDE + word * 4
+
+    var current = mmio_read32(addr)
+    current = current & ~(1 << bit)
+    mmio_write32(addr, current)
+
+# Set the priority of an interrupt source (0 = disabled, higher = higher priority)
+fn plic_set_priority(irq: u32, priority: u32):
+    if irq == 0 or irq >= PLIC_MAX_IRQS:
+        return
+    mmio_write32(PLIC_PRIORITY_BASE + irq * 4, priority)
+
+# Set the priority threshold for a context
+fn plic_set_threshold(context: u32, threshold: u32):
+    val addr = PLIC_THRESHOLD_BASE + context * PLIC_CONTEXT_STRIDE
+    mmio_write32(addr, threshold)
+
+# Claim the highest-priority pending interrupt (returns IRQ number, 0 if none)
+fn plic_claim(context: u32) -> u32:
+    val addr = PLIC_CLAIM_BASE + context * PLIC_CONTEXT_STRIDE
+    mmio_read32(addr)
+
+# Complete (acknowledge) an interrupt
+fn plic_complete(context: u32, irq: u32):
+    val addr = PLIC_CLAIM_BASE + context * PLIC_CONTEXT_STRIDE
+    mmio_write32(addr, irq)

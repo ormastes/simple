@@ -1,0 +1,90 @@
+# x86_64 Programmable Interval Timer (8253/8254 PIT)
+#
+# Identical to the x86 version - PIT hardware is unchanged in long mode.
+# Channel 0 wired to IRQ0, configured in rate-generator mode (mode 2).
+# Base oscillator frequency: 1,193,182 Hz
+
+# ---------- local port I/O ----------
+
+fn outb(port: i32, value: i32):
+    asm """
+        mov dx, {port}
+        mov al, {value}
+        out dx, al
+    """
+
+fn inb(port: i32) -> i32:
+    var result = 0
+    asm """
+        mov dx, {port}
+        in al, dx
+        movzx eax, al
+        mov {result}, eax
+    """
+    result
+
+# ---------- constants ----------
+
+val PIT_CHANNEL0: i32 = 0x40
+val PIT_CHANNEL1: i32 = 0x41
+val PIT_CHANNEL2: i32 = 0x42
+val PIT_CMD: i32 = 0x43
+
+val PIT_BASE_FREQ: u32 = 1193182
+
+val PIT_CMD_CHANNEL0: i32 = 0x00
+val PIT_CMD_ACCESS_LOHI: i32 = 0x30
+val PIT_CMD_MODE2: i32 = 0x04
+val PIT_CMD_BINARY: i32 = 0x00
+
+# ---------- global state ----------
+
+var g_ticks: u64 = 0
+var g_frequency_hz: u32 = 0
+var g_divisor: u32 = 0
+
+# ---------- public API ----------
+
+fn pit_init(frequency_hz: u32):
+    g_frequency_hz = frequency_hz
+    g_ticks = 0
+
+    var divisor = PIT_BASE_FREQ / frequency_hz
+    if divisor == 0:
+        divisor = 1
+    if divisor > 65535:
+        divisor = 65535
+    g_divisor = divisor
+
+    val cmd = PIT_CMD_CHANNEL0 | PIT_CMD_ACCESS_LOHI | PIT_CMD_MODE2 | PIT_CMD_BINARY
+    outb(PIT_CMD, cmd)
+
+    outb(PIT_CHANNEL0, (divisor & 0xFF) as i32)
+    outb(PIT_CHANNEL0, ((divisor >> 8) & 0xFF) as i32)
+
+fn pit_tick():
+    g_ticks = g_ticks + 1
+
+fn pit_get_ticks() -> u64:
+    g_ticks
+
+fn pit_get_frequency() -> u32:
+    g_frequency_hz
+
+fn pit_get_millis() -> u64:
+    if g_frequency_hz == 0:
+        return 0
+    (g_ticks * 1000) / g_frequency_hz as u64
+
+fn pit_wait_ms(ms: u32):
+    val target = g_ticks + ((ms as u64 * g_frequency_hz as u64) / 1000)
+    while g_ticks < target:
+        asm """
+            hlt
+        """
+
+fn pit_read_count() -> u16:
+    outb(PIT_CMD, 0x00)
+    val lo = inb(PIT_CHANNEL0) as u16
+    val hi = inb(PIT_CHANNEL0) as u16
+    (hi << 8) | lo

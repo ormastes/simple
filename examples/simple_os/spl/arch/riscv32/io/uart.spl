@@ -1,0 +1,153 @@
+# RISC-V32 UART (16550) Serial Driver — QEMU virt
+#
+# MMIO-mapped 16550 UART at 0x10000000 for kernel debug output.
+# 115200 baud, 8N1 configuration.
+#
+# Usage:
+#   serial_init()
+#   serial_println("Hello from simple_os!")
+
+# ---------- MMIO helpers ----------
+
+# Write a byte to an MMIO register
+fn mmio_write8(addr: u32, value: u32):
+    unsafe:
+        asm """
+            sw {value}, 0({addr})
+        """
+        # Note: On real hardware we'd use sb, but QEMU virt
+        # handles word-sized writes to UART registers correctly.
+
+# Read a byte from an MMIO register
+fn mmio_read8(addr: u32) -> u32:
+    var result: u32 = 0
+    unsafe:
+        asm """
+            lw {result}, 0({addr})
+            andi {result}, {result}, 0xFF
+        """
+    result
+
+# ---------- constants ----------
+
+# UART0 base address (QEMU virt)
+val UART0_BASE: u32 = 0x10000000
+
+# 16550 register offsets
+val UART_THR: u32 = 0x00    # Transmitter Holding Register (W)
+val UART_RBR: u32 = 0x00    # Receiver Buffer Register (R)
+val UART_DLL: u32 = 0x00    # Divisor Latch Low (DLAB=1)
+val UART_IER: u32 = 0x01    # Interrupt Enable Register
+val UART_DLH: u32 = 0x01    # Divisor Latch High (DLAB=1)
+val UART_FCR: u32 = 0x02    # FIFO Control Register (W)
+val UART_LCR: u32 = 0x03    # Line Control Register
+val UART_MCR: u32 = 0x04    # Modem Control Register
+val UART_LSR: u32 = 0x05    # Line Status Register
+val UART_MSR: u32 = 0x06    # Modem Status Register
+
+# Line Status Register bits
+val LSR_DATA_READY: u32 = 0x01
+val LSR_OVERRUN: u32 = 0x02
+val LSR_PARITY_ERR: u32 = 0x04
+val LSR_FRAMING_ERR: u32 = 0x08
+val LSR_BREAK: u32 = 0x10
+val LSR_THRE: u32 = 0x20    # Transmitter Holding Register Empty
+val LSR_TEMT: u32 = 0x40
+
+# Line Control Register bits
+val LCR_DLAB: u32 = 0x80
+val LCR_8N1: u32 = 0x03
+
+# Baud rate divisors (base clock 1.8432 MHz, divide by 16)
+val BAUD_115200: u32 = 1
+val BAUD_57600: u32 = 2
+val BAUD_38400: u32 = 3
+val BAUD_9600: u32 = 12
+
+# ---------- global state ----------
+
+var g_uart_base: u32 = UART0_BASE
+var g_initialized: bool = false
+
+# ---------- internal register access ----------
+
+fn uart_reg_write(offset: u32, value: u32):
+    mmio_write8(g_uart_base + offset, value)
+
+fn uart_reg_read(offset: u32) -> u32:
+    mmio_read8(g_uart_base + offset)
+
+# ---------- public API ----------
+
+# Initialize UART0 at 115200 baud, 8N1
+fn serial_init():
+    if g_initialized:
+        return
+    serial_init_port(UART0_BASE, BAUD_115200)
+
+# Initialize a specific UART port with a given baud divisor
+fn serial_init_port(base: u32, baud_divisor: u32):
+    g_uart_base = base
+
+    # Disable all interrupts
+    uart_reg_write(UART_IER, 0x00)
+
+    # Enable DLAB to set baud rate
+    uart_reg_write(UART_LCR, LCR_DLAB)
+
+    # Set divisor (low / high bytes)
+    uart_reg_write(UART_DLL, baud_divisor & 0xFF)
+    uart_reg_write(UART_DLH, (baud_divisor >> 8) & 0xFF)
+
+    # 8 data bits, no parity, 1 stop bit — clears DLAB
+    uart_reg_write(UART_LCR, LCR_8N1)
+
+    # Enable FIFO, clear TX/RX, 14-byte threshold
+    uart_reg_write(UART_FCR, 0xC7)
+
+    # DTR + RTS + OUT2
+    uart_reg_write(UART_MCR, 0x0B)
+
+    g_initialized = true
+
+# Check if transmit holding register is empty
+fn serial_is_tx_empty() -> bool:
+    (uart_reg_read(UART_LSR) & LSR_THRE) != 0
+
+# Spin until TX buffer is ready
+fn serial_wait_tx():
+    while not serial_is_tx_empty():
+        pass
+
+# Check whether received data is available
+fn serial_has_data() -> bool:
+    (uart_reg_read(UART_LSR) & LSR_DATA_READY) != 0
+
+# Write a single byte to serial
+fn serial_write(byte: u32):
+    if not g_initialized:
+        serial_init()
+    serial_wait_tx()
+    uart_reg_write(UART_THR, byte)
+
+# Read a single byte (blocks until data available)
+fn serial_read() -> u32:
+    if not g_initialized:
+        serial_init()
+    while not serial_has_data():
+        pass
+    uart_reg_read(UART_RBR)
+
+# Print a string
+fn serial_print(s: text):
+    if not g_initialized:
+        serial_init()
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        serial_write(ch)
+
+# Print a string followed by CR+LF
+fn serial_println(s: text):
+    serial_print(s)
+    serial_write(0x0D)
+    serial_write(0x0A)

@@ -1,0 +1,186 @@
+# ARM32 Trap / Exception Dispatch
+#
+# Central handler called from the exception vector stubs after
+# registers are saved. Routes exceptions to appropriate subsystems:
+#   Undefined Instruction
+#   SVC (system call)
+#   Prefetch Abort
+#   Data Abort
+#   IRQ (via GIC)
+#   FIQ
+
+use arch.arm32.boot.gic.{gic_acknowledge, gic_end_interrupt}
+use arch.arm32.boot.timer.{timer_handler}
+
+# ---------- constants ----------
+
+val TIMER_PPI_IRQ: u32 = 30
+val GIC_SPURIOUS_IRQ: u32 = 1023
+
+# Exception type names (for debug output)
+val EXCEPTION_NAMES: [text; 7] = [
+    "Unknown",            # 0
+    "Undefined Inst",     # 1
+    "SVC",                # 2
+    "Prefetch Abort",     # 3
+    "Data Abort",         # 4
+    "IRQ",                # 5
+    "FIQ"                 # 6
+]
+
+# ---------- trap frame ----------
+
+# Saved register state passed from the exception vector stubs.
+# Layout matches the push order in vectors.S.
+@repr(C)
+struct TrapFrame:
+    r0: u32
+    r1: u32
+    r2: u32
+    r3: u32
+    r4: u32
+    r5: u32
+    r6: u32
+    r7: u32
+    r8: u32
+    r9: u32
+    r10: u32
+    r11: u32
+    r12: u32
+    pc: u32
+    cpsr: u32
+
+# ---------- handler tables ----------
+
+# IRQ handler addresses stored as u32
+var irq_handlers: [u32; 256] = [0; 256]
+var syscall_handler_addr: u32 = 0
+
+# ---------- fault status register access ----------
+
+# Read DFSR (Data Fault Status Register)
+fn read_dfsr() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c5, c0, 0
+        str r0, {result}
+    """
+    result
+
+# Read DFAR (Data Fault Address Register)
+fn read_dfar() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c6, c0, 0
+        str r0, {result}
+    """
+    result
+
+# Read IFSR (Instruction Fault Status Register)
+fn read_ifsr() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c5, c0, 1
+        str r0, {result}
+    """
+    result
+
+# Read IFAR (Instruction Fault Address Register)
+fn read_ifar() -> u32:
+    var result: u32 = 0
+    asm """
+        mrc p15, 0, r0, c6, c0, 2
+        str r0, {result}
+    """
+    result
+
+# ---------- IRQ handler ----------
+
+fn handle_irq(frame: TrapFrame):
+    val irq = gic_acknowledge()
+
+    if irq == GIC_SPURIOUS_IRQ:
+        return
+
+    # Timer IRQ
+    if irq == TIMER_PPI_IRQ:
+        timer_handler()
+
+    # Dispatch to registered handler
+    if irq < 256:
+        if irq_handlers[irq as i32] != 0:
+            # TODO: call registered handler via function pointer
+            pass
+
+    gic_end_interrupt(irq)
+
+# ---------- SVC handler (syscall) ----------
+
+fn handle_svc(frame: TrapFrame):
+    # ARM L4-style syscall convention:
+    #   r7 = syscall number
+    #   r0-r5 = arguments
+    #   return value in r0
+    val syscall_num = frame.r7
+
+    if syscall_handler_addr != 0:
+        # TODO: call registered syscall dispatcher
+        pass
+
+    # Default: no-op
+
+# ---------- Data Abort handler ----------
+
+fn handle_data_abort(frame: TrapFrame):
+    val dfsr = read_dfsr()
+    val dfar = read_dfar()
+
+    # Fatal: halt the CPU
+    asm """
+        cpsid if
+    .data_abort_halt:
+        wfi
+        b .data_abort_halt
+    """
+
+# ---------- Prefetch Abort handler ----------
+
+fn handle_prefetch_abort(frame: TrapFrame):
+    val ifsr = read_ifsr()
+    val ifar = read_ifar()
+
+    # Fatal: halt the CPU
+    asm """
+        cpsid if
+    .prefetch_abort_halt:
+        wfi
+        b .prefetch_abort_halt
+    """
+
+# ---------- Undefined Instruction handler ----------
+
+fn handle_undef(frame: TrapFrame):
+    # Fatal: halt the CPU
+    asm """
+        cpsid if
+    .undef_halt:
+        wfi
+        b .undef_halt
+    """
+
+# ---------- FIQ handler ----------
+
+fn handle_fiq(frame: TrapFrame):
+    # FIQ not used - ignore
+    pass
+
+# ---------- handler registration ----------
+
+# Register an IRQ handler (irq 0-255)
+fn register_irq_handler(irq: u32, handler: u32):
+    if irq < 256:
+        irq_handlers[irq as i32] = handler
+
+# Register the syscall dispatcher
+fn register_syscall_handler(handler: u32):
+    syscall_handler_addr = handler

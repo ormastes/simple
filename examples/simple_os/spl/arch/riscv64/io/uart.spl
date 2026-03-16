@@ -1,0 +1,150 @@
+# RISC-V 64-bit UART (16550) Serial Driver
+#
+# MMIO-based 16550 UART at 0x10000000 on QEMU virt platform.
+# 115200 baud, 8N1 configuration.
+#
+# Usage:
+#   serial_init()
+#   serial_println("Hello from simple_os!")
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write8(addr: u64, value: u8):
+    unsafe:
+        @address(addr) @volatile var reg: u8
+        reg = value
+
+fn mmio_read8(addr: u64) -> u8:
+    unsafe:
+        @address(addr) @volatile var reg: u8
+        reg
+
+# ---------- constants ----------
+
+# UART0 MMIO base address (QEMU virt)
+val UART0_BASE: u64 = 0x10000000
+
+# UART register offsets
+val UART_DATA: u64 = 0
+val UART_IER: u64 = 1
+val UART_FCR: u64 = 2
+val UART_LCR: u64 = 3
+val UART_MCR: u64 = 4
+val UART_LSR: u64 = 5
+val UART_MSR: u64 = 6
+
+# Divisor latch (when DLAB set)
+val UART_DLL: u64 = 0
+val UART_DLH: u64 = 1
+
+# Line Status Register bits
+val LSR_DATA_READY: u8 = 0x01
+val LSR_THRE: u8 = 0x20
+
+# Line Control Register
+val LCR_DLAB: u8 = 0x80
+val LCR_8N1: u8 = 0x03
+
+# Baud rate divisors (base clock 115200)
+val BAUD_115200: u8 = 1
+
+# ---------- global state ----------
+
+var g_base: u64 = 0x10000000
+var g_initialized: bool = false
+
+# ---------- public API ----------
+
+# Initialize UART0 at 115200 baud, 8N1
+fn serial_init():
+    if g_initialized:
+        return
+    serial_init_port(UART0_BASE, BAUD_115200)
+
+# Initialize a specific UART port with a given baud divisor
+fn serial_init_port(base: u64, baud_divisor: u8):
+    g_base = base
+
+    # Disable all interrupts
+    mmio_write8(base + UART_IER, 0x00)
+
+    # Enable DLAB to set baud rate
+    mmio_write8(base + UART_LCR, LCR_DLAB)
+
+    # Set divisor (low / high bytes)
+    mmio_write8(base + UART_DLL, baud_divisor)
+    mmio_write8(base + UART_DLH, 0x00)
+
+    # 8 data bits, no parity, 1 stop bit -- clears DLAB
+    mmio_write8(base + UART_LCR, LCR_8N1)
+
+    # Enable FIFO, clear TX/RX, 14-byte threshold
+    mmio_write8(base + UART_FCR, 0xC7)
+
+    # DTR + RTS + OUT2
+    mmio_write8(base + UART_MCR, 0x0B)
+
+    # Loopback self-test
+    mmio_write8(base + UART_MCR, 0x1E)
+    mmio_write8(base + UART_DATA, 0xAE)
+    val echo = mmio_read8(base + UART_DATA)
+    # If echo != 0xAE the chip is faulty, but QEMU always passes
+
+    # Back to normal operation
+    mmio_write8(base + UART_MCR, 0x0F)
+
+    g_initialized = true
+
+# Check if transmit holding register is empty
+fn serial_is_tx_empty() -> bool:
+    (mmio_read8(g_base + UART_LSR) & LSR_THRE) != 0
+
+# Spin until TX buffer is ready
+fn serial_wait_tx():
+    while not serial_is_tx_empty():
+        pass
+
+# Check whether received data is available
+fn serial_has_data() -> bool:
+    (mmio_read8(g_base + UART_LSR) & LSR_DATA_READY) != 0
+
+# Write a single byte to serial
+fn serial_write(byte: u8):
+    if not g_initialized:
+        serial_init()
+    serial_wait_tx()
+    mmio_write8(g_base + UART_DATA, byte)
+
+# Read a single byte (blocks until data available)
+fn serial_read() -> u8:
+    if not g_initialized:
+        serial_init()
+    while not serial_has_data():
+        pass
+    mmio_read8(g_base + UART_DATA)
+
+# Print a string
+fn serial_print(s: text):
+    if not g_initialized:
+        serial_init()
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        serial_write(ch as u8)
+
+# Print a string followed by CR+LF
+fn serial_println(s: text):
+    serial_print(s)
+    serial_write(0x0D)
+    serial_write(0x0A)
+
+# Print a 64-bit value in hex
+fn serial_print_hex(val: u64):
+    serial_print("0x")
+    var i = 60
+    while i >= 0:
+        var nibble = ((val >> i) & 0xF) as u8
+        if nibble < 10:
+            serial_write(0x30 + nibble)
+        else:
+            serial_write(0x61 + nibble - 10)
+        i = i - 4

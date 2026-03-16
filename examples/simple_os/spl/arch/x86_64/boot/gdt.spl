@@ -1,0 +1,203 @@
+# x86_64 Global Descriptor Table (GDT) - Long Mode
+#
+# Sets up a 64-bit GDT with the following entries:
+#   0 - Null descriptor
+#   1 - Kernel Code64  (Ring 0, L=1 long mode, D=0)
+#   2 - Kernel Data64  (Ring 0, read/write)
+#   3 - User Code64    (Ring 3, L=1 long mode, D=0)
+#   4 - User Data64    (Ring 3, read/write)
+#   5 - TSS64          (16-byte system descriptor, occupies slots 5+6)
+#
+# In long mode, code segment base/limit are ignored (flat addressing),
+# but L=1 + D=0 flags are required for 64-bit code execution.
+
+# ---------- segment selector constants ----------
+
+val GDT_KERNEL_CODE64: u16 = 0x08   # index 1, RPL 0
+val GDT_KERNEL_DATA64: u16 = 0x10   # index 2, RPL 0
+val GDT_USER_CODE64: u16 = 0x18     # index 3, RPL 3 (selector = 0x1B)
+val GDT_USER_DATA64: u16 = 0x20     # index 4, RPL 3 (selector = 0x23)
+val GDT_TSS64_SEL: u16 = 0x28       # index 5
+
+# Number of GDT entries (TSS64 takes 2 slots)
+val GDT_ENTRY_COUNT: i32 = 7
+
+# ---------- access byte bits ----------
+
+val ACCESS_PRESENT: u32 = 0x80
+val ACCESS_RING0: u32 = 0x00
+val ACCESS_RING3: u32 = 0x60
+val ACCESS_SEGMENT: u32 = 0x10
+val ACCESS_EXECUTABLE: u32 = 0x08
+val ACCESS_READ_WRITE: u32 = 0x02
+val ACCESS_TSS_64: u32 = 0x09      # 64-bit TSS (Available)
+
+# ---------- flags nibble ----------
+
+val FLAG_LONG_MODE: u32 = 0xA0     # L=1, D=0 (64-bit code segment)
+val FLAG_SIZE_32: u32 = 0xC0       # G=1, D/B=1 (32-bit compatible data)
+
+# ---------- GDT table storage ----------
+
+# 7 slots of 8 bytes each (TSS64 spans slots 5-6)
+var gdt_entries: [u64; 7] = [0; 7]
+
+# GDT pointer
+var gdt_pointer_limit: u16 = 0
+var gdt_pointer_base: u64 = 0
+
+# ---------- TSS64 ----------
+
+# 64-bit TSS structure stored as u64 array
+# Layout:
+#   [0] = reserved0(32) + rsp0_low(32) packed
+#   [1] = rsp0_high...  (we store rsp0 as a u64 starting at byte 4)
+# Simplified: store as array of u32 (26 entries = 104 bytes)
+var tss_block: [u32; 26] = [0; 26]
+
+# IST stack entries stored as u64 starting at byte offset 36 in TSS
+# tss_block indices for IST entries:
+# IST1 = index 9,10 (bytes 36-43)
+# IST2 = index 11,12
+# ...up to IST7
+
+# ---------- encoding ----------
+
+fn gdt_encode_entry(base: u32, limit: u32, access: u32, flags: u32) -> u64:
+    var desc: u64 = 0
+
+    # Limit low 16 bits
+    desc = desc | ((limit & 0xFFFF) as u64)
+
+    # Base low 16 bits -> bits 16..31
+    desc = desc | (((base & 0xFFFF) as u64) << 16)
+
+    # Base mid 8 bits -> bits 32..39
+    desc = desc | ((((base >> 16) & 0xFF) as u64) << 32)
+
+    # Access byte -> bits 40..47
+    desc = desc | (((access & 0xFF) as u64) << 40)
+
+    # Limit high 4 bits -> bits 48..51
+    desc = desc | ((((limit >> 16) & 0x0F) as u64) << 48)
+
+    # Flags nibble -> bits 52..55
+    desc = desc | ((((flags >> 4) & 0x0F) as u64) << 52)
+
+    # Base high 8 bits -> bits 56..63
+    desc = desc | ((((base >> 24) & 0xFF) as u64) << 56)
+
+    desc
+
+# ---------- TSS helpers ----------
+
+# Set the kernel stack (RSP0) for ring transitions
+fn tss_set_kernel_stack(rsp0: u64):
+    # RSP0 is at byte offset 4 in the TSS (u32 indices 1 and 2)
+    tss_block[1] = (rsp0 & 0xFFFFFFFF) as u32
+    tss_block[2] = ((rsp0 >> 32) & 0xFFFFFFFF) as u32
+
+# Set an IST entry (1-based: IST1..IST7)
+fn tss_set_ist(ist_num: i32, stack: u64):
+    # IST entries start at byte offset 36 in TSS
+    # Each IST entry is 8 bytes (2 u32 indices)
+    # IST1 at index 9,10; IST2 at index 11,12; etc.
+    val base_idx = 7 + (ist_num * 2)
+    tss_block[base_idx] = (stack & 0xFFFFFFFF) as u32
+    tss_block[base_idx + 1] = ((stack >> 32) & 0xFFFFFFFF) as u32
+
+# Get the physical address of the TSS block
+fn tss_get_address() -> u64:
+    var addr: u64 = 0
+    unsafe:
+        asm """
+            lea rax, {tss_block}
+            mov {addr}, rax
+        """
+    addr
+
+# ---------- public API ----------
+
+fn gdt_init():
+    val limit_flat: u32 = 0xFFFFF
+
+    # 0: Null descriptor
+    gdt_entries[0] = 0
+
+    # 1: Kernel Code64 - Ring 0, L=1 (long mode), D=0
+    val kcode_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_SEGMENT | ACCESS_EXECUTABLE | ACCESS_READ_WRITE
+    gdt_entries[1] = gdt_encode_entry(0, limit_flat, kcode_access, FLAG_LONG_MODE)
+
+    # 2: Kernel Data64 - Ring 0, read/write
+    val kdata_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_SEGMENT | ACCESS_READ_WRITE
+    gdt_entries[2] = gdt_encode_entry(0, limit_flat, kdata_access, FLAG_SIZE_32)
+
+    # 3: User Code64 - Ring 3, L=1 (long mode), D=0
+    val ucode_access = ACCESS_PRESENT | ACCESS_RING3 | ACCESS_SEGMENT | ACCESS_EXECUTABLE | ACCESS_READ_WRITE
+    gdt_entries[3] = gdt_encode_entry(0, limit_flat, ucode_access, FLAG_LONG_MODE)
+
+    # 4: User Data64 - Ring 3, read/write
+    val udata_access = ACCESS_PRESENT | ACCESS_RING3 | ACCESS_SEGMENT | ACCESS_READ_WRITE
+    gdt_entries[4] = gdt_encode_entry(0, limit_flat, udata_access, FLAG_SIZE_32)
+
+    # 5-6: TSS64 descriptor (16 bytes = 2 GDT slots)
+    val tss_base = tss_get_address()
+    val tss_limit: u32 = 103   # TSS is 104 bytes
+    val tss_access = ACCESS_PRESENT | ACCESS_RING0 | ACCESS_TSS_64
+    # Encode the low 8 bytes of the TSS descriptor
+    gdt_entries[5] = gdt_encode_entry(
+        (tss_base & 0xFFFFFFFF) as u32,
+        tss_limit,
+        tss_access,
+        0x00
+    )
+    # High 8 bytes: upper 32 bits of base + reserved
+    gdt_entries[6] = (tss_base >> 32) & 0xFFFFFFFF
+
+    # Set IOPB offset to end of TSS
+    tss_block[25] = 104 << 16
+
+    # Build GDT pointer
+    gdt_pointer_limit = ((GDT_ENTRY_COUNT * 8) - 1) as u16
+    var gdt_base_addr: u64 = 0
+    unsafe:
+        asm """
+            lea rax, {gdt_entries}
+            mov {gdt_base_addr}, rax
+        """
+    gdt_pointer_base = gdt_base_addr
+
+    # Load GDT and reload segments
+    gdt_load()
+
+fn gdt_load():
+    asm """
+        # Build a 10-byte GDT pointer on the stack (2 limit + 8 base)
+        sub rsp, 16
+        mov ax, {gdt_pointer_limit}
+        mov [rsp], ax
+        mov rax, {gdt_pointer_base}
+        mov [rsp+2], rax
+        lgdt [rsp]
+        add rsp, 16
+
+        # Reload CS via far return
+        push 0x08
+        lea rax, [rip + .gdt64_reload_cs]
+        push rax
+        retfq
+    .gdt64_reload_cs:
+        # Reload data segment selectors
+        mov ax, 0x10
+        mov ds, ax
+        mov es, ax
+        mov fs, ax
+        mov gs, ax
+        mov ss, ax
+    """
+
+    # Load TSS register
+    asm """
+        mov ax, 0x28
+        ltr ax
+    """

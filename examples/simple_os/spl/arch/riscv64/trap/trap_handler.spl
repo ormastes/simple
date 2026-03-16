@@ -1,0 +1,175 @@
+# RISC-V 64-bit Trap / Interrupt Dispatch
+#
+# Central handler called from the trap_entry assembly after registers
+# are saved into a TrapFrame. Routes the trap to the appropriate subsystem:
+#   mcause MSB=0 : Synchronous exception (fault, ecall)
+#   mcause MSB=1 : Asynchronous interrupt (timer, external, software)
+
+use arch.riscv64.boot.plic.{plic_claim, plic_complete, PLIC_CONTEXT_M0}
+use arch.riscv64.boot.clint.{clint_tick, clint_get_mtime, clint_set_mtimecmp, CLINT_FREQ_HZ}
+
+# ---------- exception names (for debug output) ----------
+
+val EXCEPTION_NAMES: [text; 16] = [
+    "Instruction address misaligned",   # 0
+    "Instruction access fault",         # 1
+    "Illegal instruction",              # 2
+    "Breakpoint",                       # 3
+    "Load address misaligned",          # 4
+    "Load access fault",                # 5
+    "Store/AMO address misaligned",     # 6
+    "Store/AMO access fault",           # 7
+    "Environment call from U-mode",     # 8
+    "Environment call from S-mode",     # 9
+    "Reserved",                         # 10
+    "Environment call from M-mode",     # 11
+    "Instruction page fault",           # 12
+    "Load page fault",                  # 13
+    "Reserved",                         # 14
+    "Store/AMO page fault"              # 15
+]
+
+# ---------- RISC-V exception codes ----------
+
+val EXC_ECALL_U: u64 = 8
+val EXC_ECALL_S: u64 = 9
+val EXC_ECALL_M: u64 = 11
+
+# ---------- RISC-V interrupt codes ----------
+
+val IRQ_M_SOFTWARE: u64 = 3
+val IRQ_M_TIMER: u64 = 7
+val IRQ_M_EXTERNAL: u64 = 11
+
+# ---------- trap frame passed from assembly ----------
+
+@repr(C)
+struct TrapFrame:
+    # General-purpose registers x1-x31
+    ra: u64       # x1
+    sp: u64       # x2
+    gp: u64       # x3
+    tp: u64       # x4
+    t0: u64       # x5
+    t1: u64       # x6
+    t2: u64       # x7
+    s0: u64       # x8
+    s1: u64       # x9
+    a0: u64       # x10
+    a1: u64       # x11
+    a2: u64       # x12
+    a3: u64       # x13
+    a4: u64       # x14
+    a5: u64       # x15
+    a6: u64       # x16
+    a7: u64       # x17
+    s2: u64       # x18
+    s3: u64       # x19
+    s4: u64       # x20
+    s5: u64       # x21
+    s6: u64       # x22
+    s7: u64       # x23
+    s8: u64       # x24
+    s9: u64       # x25
+    s10: u64      # x26
+    s11: u64      # x27
+    t3: u64       # x28
+    t4: u64       # x29
+    t5: u64       # x30
+    t6: u64       # x31
+    # CSRs
+    mepc: u64
+    mstatus: u64
+    mcause: u64
+    mtval: u64
+
+# ---------- handler tables ----------
+
+var irq_handlers: [u64; 16] = [0; 16]
+var exception_handlers: [u64; 16] = [0; 16]
+var syscall_handler_addr: u64 = 0
+
+# ---------- public API ----------
+
+# Main dispatch entry point called from the assembly trap_entry.
+fn trap_handler(frame: TrapFrame):
+    val mcause = frame.mcause
+    val is_interrupt = (mcause >> 63) != 0
+    val code = mcause & 0x7FFFFFFFFFFFFFFF
+
+    if is_interrupt:
+        handle_interrupt(frame, code)
+    else:
+        handle_exception(frame, code)
+
+# ---------- interrupt handling ----------
+
+fn handle_interrupt(frame: TrapFrame, code: u64):
+    if code == IRQ_M_TIMER:
+        # Timer interrupt: advance tick counter and schedule next
+        clint_tick()
+        val now = clint_get_mtime()
+        clint_set_mtimecmp(0, now + CLINT_FREQ_HZ / 100)
+    elif code == IRQ_M_EXTERNAL:
+        # External interrupt via PLIC
+        val src = plic_claim(PLIC_CONTEXT_M0)
+        if src > 0:
+            # Check for registered handler
+            if src < 16 and irq_handlers[src as i32] != 0:
+                # TODO: call registered handler via function pointer
+                pass
+            plic_complete(PLIC_CONTEXT_M0, src)
+    elif code == IRQ_M_SOFTWARE:
+        # Software interrupt - clear it
+        # TODO: handle IPI
+        pass
+
+# ---------- exception handling ----------
+
+fn handle_exception(frame: TrapFrame, code: u64):
+    if code == EXC_ECALL_U or code == EXC_ECALL_S or code == EXC_ECALL_M:
+        handle_syscall(frame)
+        return
+
+    # Check for registered custom handler
+    if code < 16:
+        val code_i = code as i32
+        if exception_handlers[code_i] != 0:
+            # TODO: call registered handler via function pointer
+            return
+
+    # Default: halt on unhandled exception
+    exception_panic(frame)
+
+fn exception_panic(frame: TrapFrame):
+    # Halt the CPU - unhandled exception is fatal
+    unsafe:
+        asm """
+        .exception_halt:
+            wfi
+            j .exception_halt
+        """
+
+# ---------- syscall handling ----------
+
+fn handle_syscall(frame: TrapFrame):
+    if syscall_handler_addr != 0:
+        # TODO: call registered syscall dispatcher via function pointer
+        pass
+    # If no handler registered, syscall is a no-op
+
+# ---------- handler registration ----------
+
+# Register an IRQ handler (irq 0-15)
+fn register_irq_handler(irq: i32, handler: u64):
+    if irq >= 0 and irq < 16:
+        irq_handlers[irq] = handler
+
+# Register an exception handler (code 0-15)
+fn register_exception_handler(code: i32, handler: u64):
+    if code >= 0 and code < 16:
+        exception_handlers[code] = handler
+
+# Register the syscall dispatcher
+fn register_syscall_handler(handler: u64):
+    syscall_handler_addr = handler

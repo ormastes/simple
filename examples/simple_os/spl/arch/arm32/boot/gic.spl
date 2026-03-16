@@ -1,0 +1,162 @@
+# ARM32 GICv2 Interrupt Controller Driver (QEMU virt)
+#
+# GICv2 with:
+#   GICD (Distributor) at 0x08000000
+#   GICC (CPU Interface) at 0x08010000
+#
+# Provides initialization, IRQ enable/disable, acknowledge, and EOI.
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u32, value: u32):
+    unsafe:
+        val ptr = addr as u64
+        @address(ptr) @volatile var reg: u32
+        reg = value
+
+fn mmio_read32(addr: u32) -> u32:
+    var result: u32 = 0
+    unsafe:
+        val ptr = addr as u64
+        @address(ptr) @volatile var reg: u32
+        result = reg
+    result
+
+# ---------- constants ----------
+
+# GICv2 base addresses (QEMU virt)
+val GICD_BASE: u32 = 0x08000000
+val GICC_BASE: u32 = 0x08010000
+
+# Distributor registers
+val GICD_CTLR: u32 = 0x000       # Control
+val GICD_TYPER: u32 = 0x004      # Type
+val GICD_ISENABLER: u32 = 0x100  # Set-Enable (base)
+val GICD_ICENABLER: u32 = 0x180  # Clear-Enable (base)
+val GICD_ISPENDR: u32 = 0x200    # Set-Pending (base)
+val GICD_ICPENDR: u32 = 0x280    # Clear-Pending (base)
+val GICD_IPRIORITYR: u32 = 0x400 # Priority (base)
+val GICD_ITARGETSR: u32 = 0x800  # Target CPU (base)
+val GICD_ICFGR: u32 = 0xC00      # Configuration (base)
+
+# CPU Interface registers
+val GICC_CTLR: u32 = 0x000       # Control
+val GICC_PMR: u32 = 0x004        # Priority Mask
+val GICC_BPR: u32 = 0x008        # Binary Point
+val GICC_IAR: u32 = 0x00C        # Interrupt Acknowledge
+val GICC_EOIR: u32 = 0x010       # End of Interrupt
+
+# Constants
+val GIC_MAX_IRQS: u32 = 256
+val GIC_SPURIOUS_IRQ: u32 = 1023
+
+# ---------- public API ----------
+
+# Initialize GICv2 distributor and CPU interface
+fn gic_init():
+    # Disable distributor while configuring
+    mmio_write32(GICD_BASE + GICD_CTLR, 0x00)
+
+    # Read TYPER to get number of interrupt lines
+    val typer = mmio_read32(GICD_BASE + GICD_TYPER)
+    var num_lines = ((typer & 0x1F) + 1) * 32
+    if num_lines > GIC_MAX_IRQS:
+        num_lines = GIC_MAX_IRQS
+
+    # Disable all interrupts
+    var i: u32 = 0
+    while i < num_lines / 32:
+        mmio_write32(GICD_BASE + GICD_ICENABLER + i * 4, 0xFFFFFFFF)
+        i = i + 1
+
+    # Clear all pending interrupts
+    i = 0
+    while i < num_lines / 32:
+        mmio_write32(GICD_BASE + GICD_ICPENDR + i * 4, 0xFFFFFFFF)
+        i = i + 1
+
+    # Set all interrupts to lowest priority
+    i = 0
+    while i < num_lines / 4:
+        mmio_write32(GICD_BASE + GICD_IPRIORITYR + i * 4, 0xFFFFFFFF)
+        i = i + 1
+
+    # Target all SPIs to CPU0
+    i = 8
+    while i < num_lines / 4:
+        mmio_write32(GICD_BASE + GICD_ITARGETSR + i * 4, 0x01010101)
+        i = i + 1
+
+    # Configure all SPIs as level-triggered
+    i = 2
+    while i < num_lines / 16:
+        mmio_write32(GICD_BASE + GICD_ICFGR + i * 4, 0x00000000)
+        i = i + 1
+
+    # Enable distributor
+    mmio_write32(GICD_BASE + GICD_CTLR, 0x01)
+
+    # CPU Interface: accept all priorities
+    mmio_write32(GICC_BASE + GICC_PMR, 0xFF)
+
+    # No priority grouping
+    mmio_write32(GICC_BASE + GICC_BPR, 0x00)
+
+    # Enable CPU interface
+    mmio_write32(GICC_BASE + GICC_CTLR, 0x01)
+
+# Enable a specific IRQ
+fn gic_enable_irq(irq: u32):
+    if irq >= GIC_MAX_IRQS:
+        return
+    val reg = irq / 32
+    val bit = irq % 32
+    mmio_write32(GICD_BASE + GICD_ISENABLER + reg * 4, 1 << bit)
+
+# Disable a specific IRQ
+fn gic_disable_irq(irq: u32):
+    if irq >= GIC_MAX_IRQS:
+        return
+    val reg = irq / 32
+    val bit = irq % 32
+    mmio_write32(GICD_BASE + GICD_ICENABLER + reg * 4, 1 << bit)
+
+# Acknowledge an IRQ (read IAR)
+fn gic_acknowledge() -> u32:
+    mmio_read32(GICC_BASE + GICC_IAR) & 0x3FF
+
+# Signal end of interrupt
+fn gic_end_interrupt(irq: u32):
+    mmio_write32(GICC_BASE + GICC_EOIR, irq)
+
+# Set priority for a specific IRQ
+fn gic_set_priority(irq: u32, priority: u32):
+    if irq >= GIC_MAX_IRQS:
+        return
+    val reg_offset = irq / 4
+    val byte_offset = irq % 4
+    val addr = GICD_BASE + GICD_IPRIORITYR + reg_offset * 4
+    var value = mmio_read32(addr)
+    value = value & ~(0xFF << (byte_offset * 8))
+    value = value | ((priority & 0xFF) << (byte_offset * 8))
+    mmio_write32(addr, value)
+
+# Set target CPU for a specific SPI
+fn gic_set_target(irq: u32, cpu_mask: u32):
+    if irq < 32 or irq >= GIC_MAX_IRQS:
+        return
+    val reg_offset = irq / 4
+    val byte_offset = irq % 4
+    val addr = GICD_BASE + GICD_ITARGETSR + reg_offset * 4
+    var value = mmio_read32(addr)
+    value = value & ~(0xFF << (byte_offset * 8))
+    value = value | ((cpu_mask & 0xFF) << (byte_offset * 8))
+    mmio_write32(addr, value)
+
+# Check if an IRQ is pending
+fn gic_is_pending(irq: u32) -> bool:
+    if irq >= GIC_MAX_IRQS:
+        return false
+    val reg = irq / 32
+    val bit = irq % 32
+    (mmio_read32(GICD_BASE + GICD_ISPENDR + reg * 4) & (1 << bit)) != 0

@@ -1,0 +1,120 @@
+# RISC-V32 CLINT (Core-Local Interruptor) Timer — QEMU virt
+#
+# CLINT base: 0x02000000
+# Memory map:
+#   +0x0000 + hart*4   : msip (software interrupt pending)
+#   +0x4000 + hart*8   : mtimecmp (64-bit timer compare)
+#   +0xBFF8            : mtime (64-bit free-running timer)
+#
+# QEMU virt timer frequency: 10 MHz
+
+# ---------- MMIO helpers ----------
+
+fn mmio_write32(addr: u32, value: u32):
+    unsafe:
+        asm """
+            sw {value}, 0({addr})
+        """
+
+fn mmio_read32(addr: u32) -> u32:
+    var result: u32 = 0
+    unsafe:
+        asm """
+            lw {result}, 0({addr})
+        """
+    result
+
+# ---------- constants ----------
+
+val CLINT_BASE: u32 = 0x02000000
+val CLINT_MTIME_LO: u32 = 0x0200BFF8
+val CLINT_MTIME_HI: u32 = 0x0200BFFC
+val CLINT_MTIMECMP_LO: u32 = 0x02004000
+val CLINT_MTIMECMP_HI: u32 = 0x02004004
+val CLINT_MSIP: u32 = 0x02000000
+
+# Timer frequency: QEMU virt uses 10 MHz
+val CLINT_FREQ_HZ: u32 = 10000000
+
+# ---------- global state ----------
+
+var g_ticks: u64 = 0
+var g_interval: u32 = 0
+
+# ---------- public API ----------
+
+# Initialize CLINT timer with a 10ms (100 Hz) tick interval
+fn clint_init():
+    g_ticks = 0
+    # Default interval: 10ms (100 Hz)
+    g_interval = CLINT_FREQ_HZ / 100
+
+    # Set first timer deadline
+    val now = clint_get_time()
+    clint_set_timer(now + g_interval as u64)
+
+    # Enable M-mode timer interrupt via mie CSR (bit 7 = MTIE)
+    var mie: u32 = 0
+    asm """
+        csrr {mie}, mie
+    """
+    mie = mie | (1 << 7)
+    asm """
+        csrw mie, {mie}
+    """
+
+# Read the 64-bit mtime value (handles 32-bit reads with wraparound check)
+fn clint_get_time() -> u64:
+    var lo: u32 = 0
+    var hi1: u32 = 0
+    var hi2: u32 = 0
+    # Read hi, lo, hi again to detect wraparound
+    hi1 = mmio_read32(CLINT_MTIME_HI)
+    lo = mmio_read32(CLINT_MTIME_LO)
+    hi2 = mmio_read32(CLINT_MTIME_HI)
+    while hi1 != hi2:
+        hi1 = mmio_read32(CLINT_MTIME_HI)
+        lo = mmio_read32(CLINT_MTIME_LO)
+        hi2 = mmio_read32(CLINT_MTIME_HI)
+    ((hi2 as u64) << 32) | (lo as u64)
+
+# Set the 64-bit mtimecmp value for hart 0
+fn clint_set_timer(when: u64):
+    val lo = (when & 0xFFFFFFFF) as u32
+    val hi = ((when >> 32) & 0xFFFFFFFF) as u32
+    # Write hi as max first to prevent spurious interrupt
+    mmio_write32(CLINT_MTIMECMP_HI, 0xFFFFFFFF)
+    mmio_write32(CLINT_MTIMECMP_LO, lo)
+    mmio_write32(CLINT_MTIMECMP_HI, hi)
+
+# Set timer to fire after a given number of milliseconds
+fn clint_set_timer_ms(ms: u32):
+    val now = clint_get_time()
+    val delta = (ms as u64) * ((CLINT_FREQ_HZ / 1000) as u64)
+    clint_set_timer(now + delta)
+
+# Timer interrupt handler — called from trap dispatch
+fn clint_handler():
+    g_ticks = g_ticks + 1
+    # Schedule next timer interrupt
+    val now = clint_get_time()
+    clint_set_timer(now + g_interval as u64)
+
+# Get current tick count
+fn clint_get_ticks() -> u64:
+    g_ticks
+
+# Get elapsed time in milliseconds (approximate)
+fn clint_get_millis() -> u64:
+    if g_interval == 0:
+        return 0
+    val freq = CLINT_FREQ_HZ as u64
+    (g_ticks * 1000) / (freq / g_interval as u64)
+
+# Send a software interrupt (IPI) to a hart
+fn clint_send_ipi(hart: u32):
+    mmio_write32(CLINT_MSIP + hart * 4, 1)
+
+# Clear a software interrupt for a hart
+fn clint_clear_ipi(hart: u32):
+    mmio_write32(CLINT_MSIP + hart * 4, 0)

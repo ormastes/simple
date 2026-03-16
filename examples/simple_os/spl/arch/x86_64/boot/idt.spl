@@ -1,0 +1,144 @@
+# x86_64 Interrupt Descriptor Table (IDT) - Long Mode
+#
+# 256-entry IDT for 64-bit mode. Each entry is 16 bytes:
+#   Bits  0..15  : handler offset low
+#   Bits 16..31  : segment selector
+#   Bits 32..34  : IST index (0 = no IST)
+#   Bits 35..39  : reserved (0)
+#   Bits 40..47  : type/attributes
+#   Bits 48..63  : handler offset mid
+#   Bits 64..95  : handler offset high
+#   Bits 96..127 : reserved (0)
+#
+# Total storage: 256 * 2 u64 = 512 u64 values.
+
+# ---------- constants ----------
+
+val IDT_ENTRIES: i32 = 256
+
+# Gate types (type_attr byte)
+val GATE_INTERRUPT_64: u32 = 0x8E   # P=1, DPL=0, 64-bit interrupt gate
+val GATE_TRAP_64: u32 = 0x8F        # P=1, DPL=0, 64-bit trap gate
+val GATE_SYSCALL_64: u32 = 0xEE     # P=1, DPL=3, 64-bit interrupt gate
+
+# Default kernel code selector
+val KERNEL_CS: u32 = 0x08
+
+# ---------- storage ----------
+
+# Each IDT entry is 16 bytes = two u64 (low qword, high qword)
+var idt_low: [u64; 256] = [0; 256]
+var idt_high: [u64; 256] = [0; 256]
+
+# IDT register pointer fields
+var idtr_limit: u16 = 0
+var idtr_base: u64 = 0
+
+# ---------- external ISR stub table ----------
+var isr_stub_table: [u64; 256] = [0; 256]
+
+# ---------- encoding ----------
+
+# Encode the low 8 bytes of a 64-bit IDT gate entry
+fn idt_encode_low(handler_addr: u64, selector: u32, ist: u32, type_attr: u32) -> u64:
+    var entry: u64 = 0
+
+    # Offset low (bits 0..15)
+    entry = entry | (handler_addr & 0xFFFF)
+
+    # Selector (bits 16..31)
+    entry = entry | (((selector & 0xFFFF) as u64) << 16)
+
+    # IST (bits 32..34) + zeros (bits 35..39)
+    entry = entry | (((ist & 0x07) as u64) << 32)
+
+    # Type/attributes (bits 40..47)
+    entry = entry | (((type_attr & 0xFF) as u64) << 40)
+
+    # Offset mid (bits 48..63)
+    entry = entry | ((handler_addr & 0xFFFF0000) << 32)
+
+    entry
+
+# Encode the high 8 bytes of a 64-bit IDT gate entry
+fn idt_encode_high(handler_addr: u64) -> u64:
+    # Offset high (bits 0..31 of high qword = bits 32..63 of handler)
+    val offset_high = (handler_addr >> 32) & 0xFFFFFFFF
+    # Reserved (bits 32..63 of high qword) = 0
+    offset_high
+
+# ---------- public API ----------
+
+# Set a single IDT gate (16-byte entry)
+fn idt_set_gate(vector: i32, handler: u64, selector: u32, ist: u32, type_attr: u32):
+    idt_low[vector] = idt_encode_low(handler, selector, ist, type_attr)
+    idt_high[vector] = idt_encode_high(handler)
+
+# Register all vectors using the ISR stub table, then load IDT
+fn idt_init():
+    # Vectors 0-31: CPU exceptions (interrupt gates, ring 0, IST=0)
+    for i in 0..32:
+        val handler = isr_stub_table[i]
+        var gate_type = GATE_INTERRUPT_64
+        # Use trap gate for breakpoint and overflow
+        if i == 3 or i == 4:
+            gate_type = GATE_TRAP_64
+        var ist_val: u32 = 0
+        # Double fault uses IST1 for clean stack
+        if i == 8:
+            ist_val = 1
+        idt_set_gate(i, handler, KERNEL_CS, ist_val, gate_type)
+
+    # Vectors 32-47: Hardware IRQs (interrupt gates, ring 0)
+    for i in 32..48:
+        val handler = isr_stub_table[i]
+        idt_set_gate(i, handler, KERNEL_CS, 0, GATE_INTERRUPT_64)
+
+    # Vectors 48-255: unused, zero them out
+    for i in 48..256:
+        idt_set_gate(i, 0, 0, 0, 0)
+
+    # Note: x86_64 uses SYSCALL/SYSRET via MSRs, not int 0x80
+
+    # Load IDT register
+    idt_load()
+
+# Load the IDTR register
+fn idt_load():
+    # IDT is 256 entries * 16 bytes = 4096 bytes
+    idtr_limit = ((IDT_ENTRIES * 16) - 1) as u16
+
+    var idt_table_addr: u64 = 0
+    unsafe:
+        asm """
+            lea rax, {idt_low}
+            mov {idt_table_addr}, rax
+        """
+    idtr_base = idt_table_addr
+
+    asm """
+        sub rsp, 16
+        mov ax, {idtr_limit}
+        mov [rsp], ax
+        mov rax, {idtr_base}
+        mov [rsp+2], rax
+        lidt [rsp]
+        add rsp, 16
+    """
+
+# Disable a specific IDT entry
+fn idt_disable_gate(vector: i32):
+    idt_low[vector] = 0
+    idt_high[vector] = 0
+
+# Enable interrupts
+fn idt_enable_interrupts():
+    asm """
+        sti
+    """
+
+# Disable interrupts
+fn idt_disable_interrupts():
+    asm """
+        cli
+    """

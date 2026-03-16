@@ -1,0 +1,170 @@
+# AArch64 MMU Control (SCTLR_EL1, TCR_EL1, MAIR_EL1, TTBR)
+#
+# Functions for configuring the AArch64 MMU, including:
+#   - MAIR_EL1: memory attribute configuration
+#   - TCR_EL1: translation control (VA size, granule, cacheability)
+#   - TTBR0_EL1 / TTBR1_EL1: page table base registers
+#   - SCTLR_EL1: MMU enable/disable, cache control
+#   - TLB invalidation and barriers
+
+# ---------- SCTLR_EL1 bits ----------
+
+val SCTLR_M: u64 = 0x01       # MMU enable
+val SCTLR_A: u64 = 0x02       # Alignment check
+val SCTLR_C: u64 = 0x04       # Data cache enable
+val SCTLR_I: u64 = 0x1000     # Instruction cache enable
+
+# ---------- MAIR attribute values ----------
+
+val MAIR_DEVICE: u64 = 0x00      # Device-nGnRnE
+val MAIR_NORMAL_NC: u64 = 0x44   # Normal non-cacheable
+val MAIR_NORMAL_WB: u64 = 0xFF   # Normal WB-WA (inner + outer)
+
+# MAIR index assignments
+val MAIR_IDX_DEVICE: u64 = 0
+val MAIR_IDX_NORMAL_NC: u64 = 1
+val MAIR_IDX_NORMAL: u64 = 2
+
+# ---------- system register accessors ----------
+
+fn write_mair_el1(value: u64):
+    asm """
+        mov x0, {value}
+        msr mair_el1, x0
+    """
+
+fn write_tcr_el1(value: u64):
+    asm """
+        mov x0, {value}
+        msr tcr_el1, x0
+    """
+
+fn read_sctlr_el1() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, sctlr_el1
+        mov {result}, x0
+    """
+    result
+
+fn write_sctlr_el1(value: u64):
+    asm """
+        mov x0, {value}
+        msr sctlr_el1, x0
+        isb
+    """
+
+# ---------- TTBR0 / TTBR1 ----------
+
+fn mmu_set_ttbr0(phys: u64):
+    asm """
+        mov x0, {phys}
+        msr ttbr0_el1, x0
+        isb
+    """
+
+fn mmu_set_ttbr1(phys: u64):
+    asm """
+        mov x0, {phys}
+        msr ttbr1_el1, x0
+        isb
+    """
+
+fn mmu_get_ttbr0() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, ttbr0_el1
+        mov {result}, x0
+    """
+    result
+
+fn mmu_get_ttbr1() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, ttbr1_el1
+        mov {result}, x0
+    """
+    result
+
+# ---------- TLB management ----------
+
+fn mmu_flush_tlb():
+    asm """
+        dsb ishst
+        tlbi vmalle1is
+        dsb ish
+        isb
+    """
+
+fn mmu_invalidate_addr(vaddr: u64):
+    # TLBI takes VA >> 12 as operand
+    var page = vaddr >> 12
+    asm """
+        mov x0, {page}
+        dsb ishst
+        tlbi vale1is, x0
+        dsb ish
+        isb
+    """
+
+# ---------- barriers ----------
+
+fn mmu_dsb():
+    asm """
+        dsb sy
+    """
+
+fn mmu_isb():
+    asm """
+        isb
+    """
+
+# ---------- MMU enable / disable ----------
+
+fn mmu_enable():
+    var sctlr = read_sctlr_el1()
+    sctlr = sctlr | SCTLR_M | SCTLR_C | SCTLR_I
+    write_sctlr_el1(sctlr)
+
+fn mmu_disable():
+    var sctlr = read_sctlr_el1()
+    sctlr = sctlr & ~(SCTLR_M | SCTLR_C | SCTLR_I)
+    write_sctlr_el1(sctlr)
+
+# ---------- full MMU initialization ----------
+
+# Configure MAIR, TCR, prepare for page table loading
+fn mmu_init():
+    # Configure MAIR_EL1
+    val mair = (MAIR_DEVICE << (8 * MAIR_IDX_DEVICE)) | (MAIR_NORMAL_NC << (8 * MAIR_IDX_NORMAL_NC)) | (MAIR_NORMAL_WB << (8 * MAIR_IDX_NORMAL))
+    write_mair_el1(mair)
+
+    # Configure TCR_EL1:
+    #   T0SZ = 25 (39-bit VA, 512 GB)
+    #   TG0 = 4KB granule (bits [15:14] = 0b00)
+    #   Inner shareable (bits [13:12] = 0b11)
+    #   Outer WB-WA (bit [10] = 1)
+    #   Inner WB-WA (bit [8] = 1)
+    #   IPS = 40-bit PA (bits [34:32] = 0b010)
+    val tcr: u64 = 25 | (0x03 << 12) | (0x01 << 10) | (0x01 << 8) | (0x02 << 32)
+    write_tcr_el1(tcr)
+
+    mmu_isb()
+
+# Read FAR_EL1 (Fault Address Register)
+fn mmu_read_far_el1() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, far_el1
+        mov {result}, x0
+    """
+    result
+
+# Read ESR_EL1 (Exception Syndrome Register)
+fn mmu_read_esr_el1() -> u64:
+    var result: u64 = 0
+    asm """
+        mrs x0, esr_el1
+        mov {result}, x0
+    """
+    result
