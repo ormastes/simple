@@ -1,0 +1,80 @@
+import std.spec
+
+describe "CapTable":
+    context "when newly created":
+        it "has no capabilities":
+            var table = cap_table_create(64)
+            val slot = cap_table_lookup(table, 0)
+            expect(slot.?).to_equal(false)
+
+        it "reports find_free as first slot":
+            var table = cap_table_create(64)
+            val idx = cap_table_find_free(table)
+            expect(idx.?).to_equal(true)
+
+    context "when inserting capabilities":
+        it "inserts and retrieves":
+            var table = cap_table_create(64)
+            var rights = cap_rights_all()
+            val idx = cap_table_insert(table, CapType.Endpoint, 0x1000, rights)
+            expect(idx.?).to_equal(true)
+            val slot = cap_table_lookup(table, 0)
+            expect(slot.?).to_equal(true)
+
+        it "inserts at specific index":
+            var table = cap_table_create(64)
+            var rights = cap_rights_all()
+            val ok = cap_table_insert_at(table, 10, CapType.TCB, 0x2000, rights)
+            expect(ok).to_equal(true)
+            val slot = cap_table_lookup(table, 10)
+            expect(slot.?).to_equal(true)
+
+    context "when minting capabilities":
+        it "creates derived cap with reduced rights":
+            var table = cap_table_create(64)
+            var rights = cap_rights_all()
+            cap_table_insert(table, CapType.Endpoint, 0x1000, rights)
+            var reduced = CapRights(read: true, write: false, grant: false, grant_reply: false)
+            val minted = cap_table_mint(table, 0, reduced, 42)
+            expect(minted.?).to_equal(true)
+
+        it "rejects mint without grant right":
+            var table = cap_table_create(64)
+            var no_grant = CapRights(read: true, write: true, grant: false, grant_reply: false)
+            cap_table_insert(table, CapType.Endpoint, 0x1000, no_grant)
+            var rights = cap_rights_all()
+            val minted = cap_table_mint(table, 0, rights, 0)
+            expect(minted.?).to_equal(false)
+
+    context "when revoking capabilities":
+        it "removes cap and all derived":
+            var table = cap_table_create(64)
+            var rights = cap_rights_all()
+            cap_table_insert(table, CapType.Endpoint, 0x1000, rights)
+            cap_table_mint(table, 0, rights, 1)
+            cap_table_mint(table, 0, rights, 2)
+            cap_table_revoke(table, 0)
+            val slot = cap_table_lookup(table, 0)
+            expect(slot.?).to_equal(false)
+
+    context "when deleting capabilities":
+        it "removes only the target slot":
+            var table = cap_table_create(64)
+            var rights = cap_rights_all()
+            cap_table_insert(table, CapType.Endpoint, 0x1000, rights)
+            cap_table_insert(table, CapType.TCB, 0x2000, rights)
+            cap_table_delete(table, 0)
+            val s0 = cap_table_lookup(table, 0)
+            val s1 = cap_table_lookup(table, 1)
+            expect(s0.?).to_equal(false)
+            expect(s1.?).to_equal(true)
+
+    context "when checking rights":
+        it "validates required rights":
+            var table = cap_table_create(64)
+            var rights = CapRights(read: true, write: false, grant: false, grant_reply: false)
+            cap_table_insert(table, CapType.Endpoint, 0x1000, rights)
+            var need_read = CapRights(read: true, write: false, grant: false, grant_reply: false)
+            var need_write = CapRights(read: false, write: true, grant: false, grant_reply: false)
+            expect(cap_table_check_rights(table, 0, need_read)).to_equal(true)
+            expect(cap_table_check_rights(table, 0, need_write)).to_equal(false)

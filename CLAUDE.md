@@ -69,6 +69,14 @@ Invoke with `/skill-name`. Located in `.claude/skills/`. Key skills:
 - **NEVER convert TODO/FIXME to NOTE** - that hides work, not resolves it
 - Either **implement** the TODO or **delete the code entirely**
 
+### Bug Fixes — Pure Simple First
+- **Fix bugs in Pure Simple source**, NOT Rust — this is a self-hosted compiler
+- Rust interpreter (`src/compiler_rust/compiler/src/interpreter*/`) is **bootstrap only** — NOT used at runtime
+- Runtime method dispatch lives in `src/compiler/10.frontend/core/interpreter/eval_ops.spl`
+- Runtime value system lives in `src/compiler/10.frontend/core/interpreter/value.spl`
+- **NEVER replace `bin/release/simple` with a Rust-built binary** — use the self-hosted binary
+- After fixing Simple interpreter bugs, re-bootstrap to propagate: `bin/simple build bootstrap`
+
 ### Code Style
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely

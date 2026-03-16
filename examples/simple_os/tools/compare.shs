@@ -1,0 +1,70 @@
+#!/bin/bash
+# Binary Equivalence Comparison Tool
+# Usage: ./compare.shs <arch> [function_name]
+# Compares C reference and Simple implementation binaries
+
+ARCH=${1:-x86}
+FUNC=${2:-}
+REF_DIR="ref/build/${ARCH}"
+SPL_DIR="spl/build/${ARCH}"
+
+echo "=== Binary Equivalence Report: ${ARCH} ==="
+echo ""
+
+# Check binaries exist
+if [ ! -f "${REF_DIR}/kernel.elf" ]; then
+    echo "ERROR: C reference binary not found at ${REF_DIR}/kernel.elf"
+    echo "  Run: make -C ref all-${ARCH}"
+    exit 1
+fi
+
+if [ ! -f "${SPL_DIR}/kernel.elf" ]; then
+    echo "ERROR: Simple binary not found at ${SPL_DIR}/kernel.elf"
+    echo "  Run: bin/simple build examples/simple_os/"
+    exit 1
+fi
+
+# Text section size comparison
+echo "--- .text Section Size ---"
+REF_SIZE=$(size "${REF_DIR}/kernel.elf" | tail -1 | awk '{print $1}')
+SPL_SIZE=$(size "${SPL_DIR}/kernel.elf" | tail -1 | awk '{print $1}')
+echo "  C reference: ${REF_SIZE} bytes"
+echo "  Simple:      ${SPL_SIZE} bytes"
+
+if [ -n "${REF_SIZE}" ] && [ -n "${SPL_SIZE}" ] && [ "${REF_SIZE}" -gt 0 ]; then
+    DIFF=$(( (SPL_SIZE - REF_SIZE) * 100 / REF_SIZE ))
+    echo "  Difference:  ${DIFF}%"
+    if [ "${DIFF}" -le 5 ] && [ "${DIFF}" -ge -5 ]; then
+        echo "  Status:      PASS (within 5%)"
+    else
+        echo "  Status:      FAIL (exceeds 5% threshold)"
+    fi
+fi
+
+echo ""
+
+# Per-function comparison
+if [ -n "${FUNC}" ]; then
+    echo "--- Function: ${FUNC} ---"
+    echo "C reference:"
+    objdump -d "${REF_DIR}/kernel.elf" | awk "/<${FUNC}>:/,/^$/" | head -50
+    echo ""
+    echo "Simple:"
+    objdump -d "${SPL_DIR}/kernel.elf" | awk "/<${FUNC}>:/,/^$/" | head -50
+else
+    echo "--- Per-Function Instruction Counts ---"
+    echo "Function                  C-ref  Simple  Diff"
+    echo "-----------------------------------------------"
+
+    # Extract function names from C reference
+    for func in $(objdump -d "${REF_DIR}/kernel.elf" | grep '^[0-9a-f]* <' | sed 's/.*<\(.*\)>:/\1/' | head -50); do
+        REF_COUNT=$(objdump -d "${REF_DIR}/kernel.elf" | awk "/<${func}>:/,/^$/" | grep -c '^\s*[0-9a-f]*:')
+        SPL_COUNT=$(objdump -d "${SPL_DIR}/kernel.elf" | awk "/<${func}>:/,/^$/" | grep -c '^\s*[0-9a-f]*:')
+        if [ "${SPL_COUNT}" -gt 0 ] 2>/dev/null; then
+            printf "  %-24s %5d  %5d  %+d\n" "${func}" "${REF_COUNT}" "${SPL_COUNT}" "$((SPL_COUNT - REF_COUNT))"
+        fi
+    done
+fi
+
+echo ""
+echo "=== End Report ==="
