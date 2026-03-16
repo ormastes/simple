@@ -8,7 +8,7 @@ Add 3 lifecycle management tools to the T32 MCP server (26 total): `t32_launch`,
 |-----------|--------|----------|
 | T32 MCP Server | Real | 23 tools functional, protocol.spl |
 | Session management | Real | session_open/close/resume in session_tools.spl |
-| Backend detection | Real | t32rem + python bridge in session_tools.spl |
+| Backend detection | Real | t32rem backend in session_tools.spl |
 | Process spawning | Missing | No PowerView launch capability |
 | Process shutdown | Missing | No graceful termination |
 | Installation discovery | Missing | No status/discovery tool |
@@ -28,4 +28,6 @@ Add 3 lifecycle management tools to the T32 MCP server (26 total): `t32_launch`,
 
 ## Related
 - Requirement: `doc/requirement/t32_mcp_lifecycle.md`
+- Design: `doc/design/t32_mcp_lifecycle.md`
 - T32 Skill: `.claude/skills/t32.md`
+- MCP Skill: `.claude/skills/mcp.md`
