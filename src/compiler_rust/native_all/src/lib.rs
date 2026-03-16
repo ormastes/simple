@@ -966,28 +966,7 @@ pub extern "C" fn stdin_read_char() -> i64 {
     }
 }
 
-/// Read exactly n bytes from stdin, returning a UTF-8 string.
-/// Platform-independent: uses Rust's std::io::stdin() across all platforms.
-/// Handles multi-byte UTF-8 correctly by decoding the full buffer at once.
-#[no_mangle]
-pub extern "C" fn rt_stdin_read_n(n: i64) -> i64 {
-    use std::io::Read;
-    let n = n as usize;
-    if n == 0 {
-        return stub_make_string("");
-    }
-    let mut buf = vec![0u8; n];
-    let mut total_read = 0;
-    while total_read < n {
-        match std::io::stdin().read(&mut buf[total_read..]) {
-            Ok(0) => break,
-            Ok(bytes_read) => total_read += bytes_read,
-            Err(_) => break,
-        }
-    }
-    buf.truncate(total_read);
-    stub_make_string(&String::from_utf8_lossy(&buf))
-}
+
 
 // -- Memory stubs --
 

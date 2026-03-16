@@ -5,17 +5,16 @@
 use crate::error::CompileError;
 use crate::value::Value;
 
-/// Read a line of input from stdin
+/// Read from stdin — line mode or byte-count mode
 ///
-/// Callable from Simple as: `input()` or `input(prompt)`
+/// Callable from Simple as:
+///   - `input()`          — read one line (strips trailing newline)
+///   - `input("prompt")`  — print prompt, then read one line
+///   - `input(n)`         — read exactly n bytes (for Content-Length framed protocols)
 ///
-/// If a prompt is provided, it will be printed before reading input.
-///
-/// # Arguments
-/// * `args` - Evaluated arguments [optional prompt]
-///
-/// # Returns
-/// * String containing the user input (without trailing newline)
+/// When the first argument is an integer, switches to byte-count mode:
+/// reads exactly that many bytes and decodes as UTF-8 (lossy).
+/// This is platform-independent and handles multi-byte UTF-8 correctly.
 ///
 /// # Effect
 /// * Requires stdin read effect
@@ -23,7 +22,27 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
     use crate::effects::check_effect_violations;
     check_effect_violations("input")?;
 
-    // Print prompt if provided
+    // Byte-count mode: input(n) reads exactly n bytes
+    if let Some(Value::Int(n)) = args.first() {
+        let n = *n as usize;
+        if n == 0 {
+            return Ok(Value::Str(String::new()));
+        }
+        use std::io::Read;
+        let mut buf = vec![0u8; n];
+        let mut total_read = 0;
+        while total_read < n {
+            match std::io::stdin().read(&mut buf[total_read..]) {
+                Ok(0) => break,  // EOF
+                Ok(bytes_read) => total_read += bytes_read,
+                Err(_) => break,
+            }
+        }
+        buf.truncate(total_read);
+        return Ok(Value::Str(String::from_utf8_lossy(&buf).to_string()));
+    }
+
+    // Line mode: print prompt if provided, then read one line
     if let Some(prompt) = args.first() {
         // Use runtime print to respect capture mode
         let prompt_str = prompt.to_display_string();
@@ -54,9 +73,6 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Used for low-level I/O operations (e.g., MCP stdio transport).
 ///
-/// # Arguments
-/// * `args` - Evaluated arguments (none expected)
-///
 /// # Returns
 /// * String containing single character, or empty string on EOF/error
 ///
@@ -73,49 +89,6 @@ pub fn stdin_read_char(_args: &[Value]) -> Result<Value, CompileError> {
         Ok(_) => Ok(Value::Str(String::from_utf8_lossy(&buf).to_string())),
         Err(_) => Ok(Value::Str(String::new())), // Error treated as EOF
     }
-}
-
-/// Read exactly n bytes from stdin, returning a UTF-8 string
-///
-/// Callable from Simple as: `rt_stdin_read_n(n)`
-///
-/// Reads a byte buffer of size n, then decodes as UTF-8 (lossy).
-/// This is the correct way to read Content-Length framed MCP messages,
-/// since Content-Length specifies byte count, not character count.
-///
-/// # Arguments
-/// * `args` - Evaluated arguments [n: i64 byte count]
-///
-/// # Returns
-/// * String containing the decoded text, or empty string on EOF/error
-///
-/// # Effect
-/// * Requires stdin read effect
-pub fn rt_stdin_read_n(args: &[Value]) -> Result<Value, CompileError> {
-    use crate::effects::check_effect_violations;
-    check_effect_violations("rt_stdin_read_n")?;
-
-    let n = match args.first() {
-        Some(Value::Int(i)) => *i as usize,
-        _ => return Ok(Value::Str(String::new())),
-    };
-
-    if n == 0 {
-        return Ok(Value::Str(String::new()));
-    }
-
-    use std::io::Read;
-    let mut buf = vec![0u8; n];
-    let mut total_read = 0;
-    while total_read < n {
-        match std::io::stdin().read(&mut buf[total_read..]) {
-            Ok(0) => break,  // EOF
-            Ok(bytes_read) => total_read += bytes_read,
-            Err(_) => break,
-        }
-    }
-    buf.truncate(total_read);
-    Ok(Value::Str(String::from_utf8_lossy(&buf).to_string()))
 }
 
 #[cfg(test)]
