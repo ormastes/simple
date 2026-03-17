@@ -30,7 +30,6 @@ The following MIR instructions produce stub/warning comments instead of VHDL:
 - **Function calls** (`Call`) — emits `-- Unsupported instruction: Call(...)`
 - **Indirect calls** — not supported
 - **Memory operations** (`Alloc`, `Load`, `Store`) — not synthesizable
-- **Return statements** (`Return`) — entity outputs are mapped as ports instead
 - **String operations** — not synthesizable
 - **Dynamic dispatch** — not supported
 
@@ -38,10 +37,12 @@ The following MIR instructions produce stub/warning comments instead of VHDL:
 
 - `Const` — signal assignment from literal
 - `Copy` / `Move` — signal assignment
-- `BinOp` — arithmetic, comparison, bitwise (add, sub, mul, div, and, or, xor, shifts)
-- `UnaryOp` — negation, bitwise not
+- `BinOp` — arithmetic, comparison, bitwise (add, sub, mul, div, rem, and, or, xor, shifts)
+- `UnaryOp` — negation, logical not, bitwise not (`BitNot`)
 - `Nop` — ignored
-- `VhdlProcess` — combinational, clocked, async-reset processes
+- `VhdlProcess` — combinational, clocked, async-reset processes (with compiled body blocks)
+- `Return` — handled as port assignment to `result_out`
+- `Goto`, `If`, `Switch`, `Unreachable`, `Abort` — block terminators compiled
 - `VhdlSignalAssign` — signal assignment with optional delay
 - `VhdlVarAssign` — variable assignment
 - `VhdlPortMap` — component instantiation
@@ -59,3 +60,17 @@ The following MIR instructions produce stub/warning comments instead of VHDL:
    synthesizable with all tools (uses `'if ... then ... else ...'` pattern)
 3. **Integer constants** always use `to_signed(val, 64)` regardless of target width
 4. **No testbench generation** — only synthesizable RTL is produced
+
+## Supported Types
+
+- Integer types (`I8`-`I64`, `U8`-`U64`) — mapped to `signed`/`unsigned` with appropriate widths
+- `Bool` — mapped to `bit` (or `std_logic` in resolved mode)
+- `Char` — mapped to `unsigned(7 downto 0)`
+- `Array` — mapped to VHDL array types
+- `Unit` — mapped to `-- void` comment
+
+## Supported Constants
+
+- `Int`, `Bool`, `Str`, `Zero` — direct VHDL literals
+- `Array`, `Tuple` — VHDL aggregate literals `(elem1, elem2, ...)`
+- `Struct` — VHDL named aggregate `(name1 => val1, name2 => val2, ...)`

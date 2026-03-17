@@ -170,9 +170,10 @@ class VhdlBackend:
         for block in func.blocks:
             builder.emit_comment("Block BB{block.id.id}")
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst)
+                val result = self.compile_instruction(builder, inst, func.blocks)
                 if result.is_err():
                     return Err(result.unwrap_err())
+            self.compile_terminator(builder, block.terminator)
 
         builder.emit_architecture_end("rtl")
 
@@ -181,7 +182,7 @@ class VhdlBackend:
             port_count: total_ports
         ))
 
-    fn compile_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
+    fn compile_instruction(builder: VhdlBuilder, inst: MirInst, blocks: [MirBlock]) -> Result<(), CompileError>:
         """Compile a single MIR instruction to VHDL."""
         match inst.kind:
             case Const(dest, value, ty):
@@ -209,11 +210,16 @@ class VhdlBackend:
 
             # VHDL-specific instructions
             case VhdlProcess(kind, body_block):
+                val body = self.find_block(blocks, body_block)
                 match kind:
                     case Combinational(sensitivity):
                         builder.emit_process_begin(nil, sensitivity)
                         builder.emit_process_body_begin()
-                        builder.emit_comment("Process body (block {body_block.id})")
+                        if body.?:
+                            val b = body.unwrap()
+                            for inst in b.instructions:
+                                self.compile_instruction(builder, inst, blocks)
+                            self.compile_terminator(builder, b.terminator)
                         builder.emit_process_end(nil)
                     case Clocked(domain):
                         builder.emit_clocked_process_begin(nil, domain.clock_signal, domain.reset_signal)
@@ -223,7 +229,11 @@ class VhdlBackend:
                                 builder.emit_rising_edge_check(domain.clock_signal)
                             case Falling:
                                 builder.emit_falling_edge_check(domain.clock_signal)
-                        builder.emit_comment("Clocked process body (block {body_block.id})")
+                        if body.?:
+                            val b = body.unwrap()
+                            for inst in b.instructions:
+                                self.compile_instruction(builder, inst, blocks)
+                            self.compile_terminator(builder, b.terminator)
                         builder.emit_if_end()
                         builder.emit_process_end(nil)
                     case AsyncReset(domain):
@@ -234,7 +244,11 @@ class VhdlBackend:
                             builder.emit_comment("Reset logic")
                             builder.emit_else()
                             builder.emit_rising_edge_check(domain.clock_signal)
-                            builder.emit_comment("Clocked logic")
+                            if body.?:
+                                val b = body.unwrap()
+                                for inst in b.instructions:
+                                    self.compile_instruction(builder, inst, blocks)
+                                self.compile_terminator(builder, b.terminator)
                             builder.emit_if_end()
                             builder.emit_if_end()
                         builder.emit_process_end(nil)
@@ -288,6 +302,35 @@ class VhdlBackend:
 
         Ok(())
 
+    fn compile_terminator(builder: VhdlBuilder, term: MirTerminator):
+        """Compile a block terminator to VHDL."""
+        match term:
+            case Goto(_):
+                ()  # Linear flow in VHDL processes
+            case Return(value):
+                if value.?:
+                    val val_name = self.operand_to_vhdl(value.unwrap())
+                    builder.emit_signal_assign("result_out", val_name)
+            case If(cond, then_, else_):
+                val cond_name = self.operand_to_vhdl(cond)
+                builder.emit_comment("Branch: if {cond_name} then BB{then_.id} else BB{else_.id}")
+            case Switch(value, targets, default):
+                val val_name = self.operand_to_vhdl(value)
+                builder.emit_comment("Switch on {val_name} -> default BB{default.id}")
+            case Unreachable:
+                builder.emit_assert("false", "Unreachable code reached", "failure")
+            case Abort(message):
+                builder.emit_assert("false", message, "failure")
+            case CallTerminator(_, _, _, _, _):
+                builder.emit_comment("Unsupported: call terminator (not synthesizable)")
+
+    fn find_block(blocks: [MirBlock], id: BlockId) -> MirBlock?:
+        """Find a block by its ID."""
+        for block in blocks:
+            if block.id.id == id.id:
+                return Some(block)
+        nil
+
     fn mir_type_to_vhdl(ty: MirType) -> text:
         """Convert MIR type to VHDL type string."""
         match ty.kind:
@@ -305,6 +348,7 @@ class VhdlBackend:
             case Array(elem, size):
                 val elem_type = self.mir_type_to_vhdl(elem)
                 "array (0 to {size - 1}) of {elem_type}"
+            case Char: "unsigned(7 downto 0)"
             case _: "-- unsupported type"
 
     fn const_value_to_vhdl(value: MirConstValue) -> text:
@@ -323,6 +367,21 @@ class VhdlBackend:
                 "\"{v}\""
             case Zero:
                 "(others => '0')"
+            case Array(elements):
+                var parts: [text] = []
+                for elem in elements:
+                    parts = parts.push(self.const_value_to_vhdl(elem))
+                "({parts.join(", ")})"
+            case Tuple(elements):
+                var parts: [text] = []
+                for elem in elements:
+                    parts = parts.push(self.const_value_to_vhdl(elem))
+                "({parts.join(", ")})"
+            case Struct(fields):
+                var parts: [text] = []
+                for (name, value) in fields:
+                    parts = parts.push("{name} => {self.const_value_to_vhdl(value)}")
+                "({parts.join(", ")})"
             case _:
                 "-- unsupported constant"
 
@@ -352,6 +411,7 @@ class VhdlBackend:
             case BitXor: "{left} xor {right}"
             case Shl: "shift_left({left}, to_integer({right}))"
             case Shr: "shift_right({left}, to_integer({right}))"
+            case Rem: "{left} rem {right}"
             case _: "-- unsupported binop"
 
     fn unaryop_to_vhdl(op: MirUnaryOp, operand: text) -> text:
@@ -359,6 +419,7 @@ class VhdlBackend:
         match op:
             case Neg: "-{operand}"
             case Not: "not {operand}"
+            case BitNot: "not {operand}"
             case _: "-- unsupported unaryop"
 
 # ============================================================================
@@ -412,10 +473,41 @@ impl HardwareCodegen for VhdlBackend:
                 Err(e)
 
     fn compile_package(module: MirModule) -> text:
-        "-- VHDL package"
+        val builder = VhdlBuilder.create(module.name)
+        builder.emit_library_header()
+        self.compile_package(builder, module)
+        builder.build()
 
     fn compile_process(kind: VhdlProcessKind, body_block: MirBlock) -> text:
-        "-- VHDL process"
+        val builder = VhdlBuilder.create("process")
+        match kind:
+            case Combinational:
+                builder.emit_process_begin(nil, [])
+                builder.emit_process_body_begin()
+            case Clocked:
+                builder.emit_clocked_process_begin(nil, "clk", nil)
+                builder.emit_process_body_begin()
+                builder.emit_rising_edge_check("clk")
+            case AsyncReset:
+                builder.emit_clocked_process_begin(nil, "clk", Some("rst"))
+                builder.emit_process_body_begin()
+                builder.emit_if_begin("rst = '1'")
+                builder.emit_comment("Reset logic")
+                builder.emit_else()
+                builder.emit_rising_edge_check("clk")
+        for inst in body_block.instructions:
+            self.compile_instruction(builder, inst, [body_block])
+        self.compile_terminator(builder, body_block.terminator)
+        match kind:
+            case Clocked:
+                builder.emit_if_end()
+            case AsyncReset:
+                builder.emit_if_end()
+                builder.emit_if_end()
+            case _:
+                ()
+        builder.emit_process_end(nil)
+        builder.build()
 
 # ============================================================================
 # Export
