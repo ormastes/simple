@@ -90,7 +90,7 @@ app/logic/components/Counter.spl   ->  class Counter { ... }
 ```html
 {@ page Home @}
 
-{$ let users: List[User] $}
+{$ let users: List<User> $}
 {- users = UserService.list() -}
 
 <main>
@@ -284,32 +284,34 @@ Cross-platform controller input: button states, axis values (sticks, triggers), 
 Compiles Simple MIR to SPIR-V bytecode for GPU execution:
 
 ```simple
-extern fn rt_vk_device_create() -> u64
-extern fn rt_vk_buffer_alloc(device: u64, size: u64) -> u64
-extern fn rt_vk_buffer_upload(buffer: u64, data: *const u8, size: u64) -> i32
-extern fn rt_vk_kernel_compile(device: u64, spirv: *const u8, len: u64) -> u64
-extern fn rt_vk_kernel_launch_1d(...) -> i32
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
 ```
 
 ### Vulkan DSL
 
-Simple reduces Vulkan verbosity by 95-98%:
+Simple reduces Vulkan verbosity by 95-98% using Tier 2 wrappers:
 
 ```simple
-import vulkan.{Device, Swapchain, Pipeline, Buffer}
+import gc_async_mut.io.vulkan_ffi.{vulkan_init, vulkan_alloc_storage,
+    vulkan_compile_glsl, vulkan_create_pipeline, vulkan_begin_compute,
+    vulkan_cmd_bind_pipeline, vulkan_cmd_dispatch, vulkan_submit_and_wait}
 
 fn main():
-    window = Window.new("Vulkan Triangle", 800_600_size)
-    device = Device.new()
-    swapchain = Swapchain.new(device)
-    pipeline = Pipeline.new().render_pass_from(swapchain)
-    vertex_buffer = Buffer.vertex(VERTICES)
-
-    while with window.frame() as frame:
-        frame.draw(pipeline, vertex_buffer)
+    vulkan_init()
+    val buf = vulkan_alloc_storage(1024)
+    val shader = vulkan_compile_glsl(compute_shader_source)
+    val pipe = vulkan_create_pipeline(shader, "main")
+    val cmd = vulkan_begin_compute()
+    vulkan_cmd_bind_pipeline(cmd, pipe)
+    vulkan_cmd_dispatch(cmd, 16, 1, 1)
+    vulkan_submit_and_wait(cmd)
 ```
 
-~20 lines vs ~1,000 in C++.
+~15 lines vs ~1,000 in C++.
 
 ### Widget Systems
 
@@ -319,21 +321,82 @@ fn main():
 
 ---
 
+## SDN Declarative UI Format
+
+The `.ui.sdn` format defines UIs declaratively using Simple's SDN data format. Parsed by `src/lib/common/ui/parse/sdn.spl`.
+
+### Minimal Example
+
+```sdn
+app:
+  title: "Minimal"
+  theme: dark
+
+keybindings:
+  normal:
+    q: quit
+
+layout:
+  type: vbox
+  children:
+    - type: panel
+      id: main
+      title: Hello
+      flex: 1
+      children:
+        - type: text
+          id: greeting
+          content: "Hello from Simple UI!"
+    - type: statusbar
+      id: status
+      left: "{app.mode} MODE"
+      right: "{app.title}"
+```
+
+### Available Widget Types
+
+| Widget | Description |
+|--------|-------------|
+| `vbox` | Vertical box layout |
+| `hbox` | Horizontal box layout |
+| `panel` | Bordered panel with title |
+| `text` | Text display |
+| `progress` | Progress bar |
+| `statusbar` | Status bar with left/right sections |
+| `menubar` | Menu bar |
+| `list` | Selectable list |
+
+See `examples/ui/` for working examples.
+
+---
+
 ## Directory Structure
 
 ```
-app/
-  ui/
-    pages/           # .page.sui files
-    components/      # .ui.sui files
-    layouts/         # Layout wrappers
-  logic/
-    pages/           # .spl paired logic
-    components/
-    layouts/
-  assets/
-    styles/base.css
-    theme.tui.toml
+src/lib/common/ui/       # Core shared UI library
+  widget.spl             # WidgetNode, WidgetKind, UITree
+  layout.spl             # Layout engine (HBox, VBox, Grid)
+  state.spl              # State management
+  backend.spl            # RenderBackend trait
+  builder.spl            # Fluent builder API
+  style.spl              # Theming and styling
+  reactive.spl           # Reactive bindings
+  event.spl              # Event types
+  mode.spl               # UI mode (normal, insert, command)
+  diff.spl               # Tree diffing
+  patch.spl              # Patch application
+  parse/sdn.spl          # .ui.sdn file parser
+  parse/html.spl         # HTML-like markup parser
+
+src/app/ui.core/         # App-level types, parser, state
+src/app/ui.render/       # Widget rendering (TUI + HTML)
+src/app/ui.tui/          # TUI backend (screen, input, app loop)
+src/app/ui.web/          # Web backend (HTML gen, WebSocket, server)
+src/app/ui.vscode/       # VSCode webview backend
+src/app/ui.electron/     # Electron desktop backend
+src/app/ui.mcp/          # MCP tool integration
+
+examples/ui/             # Working UI examples (.ui.sdn)
 ```
 
 ---
@@ -341,9 +404,12 @@ app/
 ## Related Files
 
 - Web framework: `doc/guide/library/web_framework.md`
-- Window SFFI: `src/app/io/window_ffi.spl`
-- Graphics SFFI: `src/app/io/graphics2d_ffi.spl`
-- Physics SFFI: `src/app/io/rapier2d_ffi.spl`
-- Audio SFFI: `src/app/io/audio_ffi.spl`
-- Gamepad SFFI: `src/app/io/gamepad_ffi.spl`
-- Vulkan SFFI: `src/app/io/vulkan_ffi.spl`
+- Window SFFI: `src/lib/nogc_sync_mut/io/window_ffi.spl`
+- Graphics SFFI: `src/lib/nogc_sync_mut/io/graphics2d_ffi.spl`
+- Physics SFFI: `src/lib/nogc_sync_mut/io/rapier2d_ffi.spl`
+- Audio SFFI: `src/lib/nogc_sync_mut/io/audio_ffi.spl`
+- Gamepad SFFI: `src/lib/nogc_sync_mut/io/gamepad_ffi.spl`
+- Vulkan SFFI: `src/lib/gc_async_mut/io/vulkan_ffi.spl`
+- UI core library: `src/lib/common/ui/`
+- UI backends: `src/app/ui.tui/`, `src/app/ui.web/`, `src/app/ui.vscode/`, `src/app/ui.electron/`
+- UI examples: `examples/ui/`
