@@ -529,6 +529,42 @@ pub fn coverage_summary(args: &[Value]) -> Result<Value, CompileError> {
 // FFI functions for coverage.spl (rt_coverage_* interface)
 // ============================================================================
 
+/// Record a decision probe from interpreted Simple code
+/// Args: (file: text, line: i64, decision_id: i64, taken: bool)
+pub fn rt_coverage_decision_probe_interp(args: &[Value]) -> Result<Value, CompileError> {
+    if !crate::coverage::is_coverage_enabled() {
+        return Ok(Value::Nil);
+    }
+    let file = match args.get(0) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let line = match args.get(1) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let decision_id = match args.get(2) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let taken = match args.get(3) {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
+    unsafe {
+        simple_runtime::rt_coverage_decision_probe(decision_id, taken, file_cstr.as_ptr(), line, 0);
+    }
+    Ok(Value::Nil)
+}
+
+/// Enable coverage tracking at runtime
+pub fn rt_coverage_enable(_args: &[Value]) -> Result<Value, CompileError> {
+    // In the bootstrap interpreter, enable the runtime coverage flag
+    simple_runtime::rt_coverage_enable();
+    Ok(Value::Nil)
+}
+
 /// Check if coverage is enabled (always returns true in interpreter)
 pub fn rt_coverage_enabled(_args: &[Value]) -> Result<Value, CompileError> {
     // In the interpreter, coverage tracking is always conceptually available
@@ -538,25 +574,29 @@ pub fn rt_coverage_enabled(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// Clear all coverage data
 pub fn rt_coverage_clear(_args: &[Value]) -> Result<Value, CompileError> {
+    // Clear both compiler-side and runtime-side coverage data
     if let Some(cov) = crate::coverage::get_global_coverage() {
         if let Ok(mut guard) = cov.lock() {
             guard.clear();
         }
     }
+    simple_runtime::rt_coverage_clear();
     Ok(Value::Nil)
 }
 
 /// Get coverage data as SDN format string
 pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
-    if let Some(cov) = crate::coverage::get_global_coverage() {
-        if let Ok(guard) = cov.lock() {
-            // Generate SDN format coverage data
-            let sdn = guard.to_sdn();
-            return Ok(Value::Str(sdn));
+    // Use runtime's coverage data (where decision/condition probes actually record)
+    let sdn = unsafe {
+        let ptr = simple_runtime::rt_coverage_dump_sdn();
+        if ptr.is_null() {
+            return Ok(Value::Str(String::new()));
         }
-    }
-    // Return empty string if no coverage data
-    Ok(Value::Str(String::new()))
+        let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string();
+        simple_runtime::rt_coverage_free_sdn(ptr);
+        s
+    };
+    Ok(Value::Str(sdn))
 }
 
 /// Free SDN string (no-op in interpreter - GC handles memory)

@@ -10,7 +10,9 @@
 # Usage:
 #   val mgr = gen_event_manager_new("my_events")
 #   gen_event_add_handler(mgr, "logger")
-#   gen_event_notify(mgr, "user_logged_in", "handle_event dispatch here")
+#   gen_event_notify(mgr, "user_logged_in", \handler_id, event: handle(handler_id, event))
+
+use std.mailbox.{mailbox_new, mailbox_send, mailbox_receive, Mailbox}
 
 # GenEvent handler behaviour trait.
 # Implement handle_event for your handler logic.
@@ -22,40 +24,68 @@ trait GenEventHandler:
     fn init(args: text) -> text:
         ""
 
+    # Called when an info message arrives. Default: ignore.
+    fn handle_info(msg: text, state: text) -> text:
+        state
+
     # Called when handler is removed.
     fn terminate(reason: text, state: text):
-        pass_do_nothing
+        pass_dn
 
-# GenEventManager — holds registered handler names and dispatches events.
+# Handler entry with state tracking
+struct HandlerEntry:
+    handler_id: text
+    state: text
+
+# GenEventManager — holds registered handlers and dispatches events.
 struct GenEventManager:
     name: text
-    handlers: [text]
+    handlers: [HandlerEntry]
     count: i64
     running: bool
+    mailbox: Mailbox
+    events_dispatched: i64
 
 fn gen_event_manager_new(name: text) -> GenEventManager:
-    GenEventManager(name: name, handlers: [], count: 0, running: false)
+    val mbox = mailbox_new(256)
+    GenEventManager(
+        name: name,
+        handlers: [],
+        count: 0,
+        running: false,
+        mailbox: mbox,
+        events_dispatched: 0
+    )
 
 fn gen_event_start(mgr: GenEventManager):
     mgr.running = true
 
 fn gen_event_stop(mgr: GenEventManager):
     mgr.running = false
+    mailbox_send(mgr.mailbox, "$$stop$$")
 
 fn gen_event_is_running(mgr: GenEventManager) -> bool:
     mgr.running
 
-# Add a handler (by name/identifier) to the manager.
+# Add a handler (by name/identifier) to the manager with initial state.
 fn gen_event_add_handler(mgr: GenEventManager, handler_id: text):
-    mgr.handlers.push(handler_id)
+    """Add a handler by ID with empty initial state."""
+    val entry = HandlerEntry(handler_id: handler_id, state: "")
+    mgr.handlers.push(entry)
+    mgr.count = mgr.count + 1
+
+fn gen_event_add_handler_with_state(mgr: GenEventManager, handler_id: text, initial_state: text):
+    """Add a handler by ID with explicit initial state."""
+    val entry = HandlerEntry(handler_id: handler_id, state: initial_state)
+    mgr.handlers.push(entry)
     mgr.count = mgr.count + 1
 
 # Remove a handler from the manager.
 fn gen_event_remove_handler(mgr: GenEventManager, handler_id: text):
-    var new_handlers: [text] = []
-    for h in mgr.handlers:
-        if h != handler_id:
-            new_handlers.push(h)
+    var new_handlers: [HandlerEntry] = []
+    for entry in mgr.handlers:
+        if entry.handler_id != handler_id:
+            new_handlers.push(entry)
     mgr.handlers = new_handlers
     mgr.count = new_handlers.len()
 
@@ -63,18 +93,72 @@ fn gen_event_remove_handler(mgr: GenEventManager, handler_id: text):
 fn gen_event_handler_count(mgr: GenEventManager) -> i64:
     mgr.count
 
+# Get total events dispatched.
+fn gen_event_dispatched_count(mgr: GenEventManager) -> i64:
+    mgr.events_dispatched
+
+# Get list of handler IDs.
+fn gen_event_handler_ids(mgr: GenEventManager) -> [text]:
+    var ids: [text] = []
+    for entry in mgr.handlers:
+        ids.push(entry.handler_id)
+    ids
+
 # Notify all handlers of an event. Calls dispatch_fn for each handler.
 fn gen_event_notify(mgr: GenEventManager, event: text,
                     dispatch_fn: fn(text, text)):
-    for handler_id in mgr.handlers:
-        dispatch_fn(handler_id, event)
+    """Asynchronous notification — fire and forget."""
+    for entry in mgr.handlers:
+        dispatch_fn(entry.handler_id, event)
+    mgr.events_dispatched = mgr.events_dispatched + 1
+
+# Notify with state updates — calls handler and updates stored state.
+fn gen_event_notify_stateful(mgr: GenEventManager, event: text,
+                              handler_fn: fn(text, text, text) -> text):
+    """Notify all handlers with state tracking.
+
+    handler_fn(handler_id, event, current_state) -> new_state
+    """
+    for entry in mgr.handlers:
+        val new_state = handler_fn(entry.handler_id, event, entry.state)
+        entry.state = new_state
+    mgr.events_dispatched = mgr.events_dispatched + 1
 
 # Synchronous call: notify all and collect responses.
 fn gen_event_call(mgr: GenEventManager, event: text,
                   dispatch_fn: fn(text, text) -> text) -> [text]:
     var responses: [text] = []
-    for handler_id in mgr.handlers:
-        val resp = dispatch_fn(handler_id, event)
+    for entry in mgr.handlers:
+        val resp = dispatch_fn(entry.handler_id, event)
         responses.push(resp)
+    mgr.events_dispatched = mgr.events_dispatched + 1
     responses
 
+# Send event via mailbox (async integration).
+fn gen_event_send(mgr: GenEventManager, event: text):
+    """Send an event via the mailbox for async processing."""
+    mailbox_send(mgr.mailbox, "event:" + event)
+
+# Process one event from the mailbox.
+fn gen_event_process_one(mgr: GenEventManager,
+                          dispatch_fn: fn(text, text)) -> bool:
+    """Process a single event from the manager's mailbox."""
+    val msg = mailbox_receive(mgr.mailbox)
+    if msg == nil:
+        return false
+    if msg == "$$stop$$":
+        mgr.running = false
+        return true
+    if msg.starts_with("event:"):
+        val event = msg.substring(6)
+        gen_event_notify(mgr, event, dispatch_fn)
+        return true
+    false
+
+# Run the event manager loop.
+fn gen_event_loop(mgr: GenEventManager, dispatch_fn: fn(text, text)):
+    """Run the GenEvent loop until stopped."""
+    while mgr.running:
+        val processed = gen_event_process_one(mgr, dispatch_fn)
+        if not processed:
+            pass_dn

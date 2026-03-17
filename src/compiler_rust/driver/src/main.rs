@@ -594,6 +594,9 @@ fn real_main() {
 
     // Initialize coverage if SIMPLE_COVERAGE env var is set
     simple_compiler::init_coverage_from_env();
+    if simple_compiler::is_coverage_enabled() {
+        simple_runtime::rt_coverage_enable();
+    }
 
     // PHASE 1: Early startup - parse args and start prefetching
     let early_config = early_startup(&mut metrics);
@@ -758,6 +761,12 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     let mut options = test_runner::parse_test_args(&test_args);
     options.gc_log = gc_log;
     options.gc_off = gc_off;
+
+    // Initialize coverage if --coverage flag set the env var after initial startup
+    simple_compiler::init_coverage_from_env();
+    if simple_compiler::is_coverage_enabled() {
+        simple_runtime::rt_coverage_enable();
+    }
 
     // Check if watch mode is enabled
     if options.watch {

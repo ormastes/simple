@@ -11,12 +11,11 @@
 # DownEvent: notification sent to monitor when monitored process exits.
 # LinkExitEvent: notification sent when a linked process exits.
 #
-# Runtime FFI stubs: actual inter-process signaling requires runtime support.
-# These stubs provide the data types and API contract for compiled mode.
-#
 # Usage:
 #   val ref = monitor(worker_pid)
 #   link(partner_pid)
+#   # ... later, check for down events
+#   val event = check_down(ref)
 
 # Exit reason constants
 val EXIT_NORMAL = "normal"      # clean exit
@@ -35,26 +34,142 @@ struct LinkExitEvent:
     pid: i64     # pid of the process that exited
     reason: text # exit reason
 
+# ============================================================================
+# Monitor Registry — tracks active monitors and links
+# ============================================================================
+
+var _next_monitor_ref: i64 = 1
+var _monitors: {i64: MonitorEntry} = {}    # ref -> MonitorEntry
+var _links: {i64: [i64]} = {}              # pid -> [linked_pids]
+var _down_events: {i64: [DownEvent]} = {}  # watcher_pid -> pending events
+
+struct MonitorEntry:
+    monitor_ref: i64
+    watcher_pid: i64   # pid that is watching
+    target_pid: i64     # pid being watched
+
 # Monitor a process. Returns a monitor reference id.
-# When the monitored process exits, a DownEvent is delivered to the caller's mailbox.
-# Stub: returns 0 (actual runtime process management required for real dispatch).
-fn monitor(pid: i64) -> i64:
-    0
+fn monitor(target_pid: i64) -> i64:
+    """Monitor a process. Returns a unique monitor reference.
+
+    When the monitored process exits, a DownEvent is delivered
+    to the calling process (identified by watcher_pid 0 = self).
+    """
+    val ref = _next_monitor_ref
+    _next_monitor_ref = _next_monitor_ref + 1
+    val entry = MonitorEntry(
+        monitor_ref: ref,
+        watcher_pid: 0,  # 0 = current process
+        target_pid: target_pid
+    )
+    _monitors[ref] = entry
+    ref
 
 # Demonitor — cancel an active monitor.
-# Stub: no-op until runtime process management is available.
 fn demonitor(monitor_ref: i64):
-    pass_do_nothing
+    """Cancel an active monitor. No further DownEvents will be delivered."""
+    _monitors[monitor_ref] = nil
 
 # Link to another process (bidirectional).
-# If either process exits abnormally, the other receives a LinkExitEvent.
-# Stub: no-op until runtime process management is available.
-fn link(pid: i64):
-    pass_do_nothing
+fn link(target_pid: i64):
+    """Create a bidirectional link to another process.
+
+    If either process exits abnormally, the other receives a LinkExitEvent.
+    """
+    val self_pid: i64 = 0  # 0 = current process
+    # Add target to our link set
+    var our_links = _links[self_pid] ?? []
+    our_links.push(target_pid)
+    _links[self_pid] = our_links
+    # Add us to target's link set
+    var their_links = _links[target_pid] ?? []
+    their_links.push(self_pid)
+    _links[target_pid] = their_links
 
 # Unlink from a process.
-fn unlink(pid: i64):
-    pass_do_nothing
+fn unlink(target_pid: i64):
+    """Remove a bidirectional link to another process."""
+    val self_pid: i64 = 0
+    # Remove target from our links
+    var our_links = _links[self_pid] ?? []
+    var new_our: [i64] = []
+    for pid in our_links:
+        if pid != target_pid:
+            new_our.push(pid)
+    _links[self_pid] = new_our
+    # Remove us from target's links
+    var their_links = _links[target_pid] ?? []
+    var new_their: [i64] = []
+    for pid in their_links:
+        if pid != self_pid:
+            new_their.push(pid)
+    _links[target_pid] = new_their
+
+# ============================================================================
+# Event Notification — called when a process exits
+# ============================================================================
+
+fn notify_exit(pid: i64, reason: text):
+    """Notify all monitors and linked processes that a process has exited.
+
+    Called by the runtime when a process terminates.
+    Generates DownEvents for monitors and LinkExitEvents for links.
+    """
+    # Notify monitors watching this pid
+    for ref_key in _monitors:
+        val entry = _monitors[ref_key]
+        if entry != nil:
+            if entry.target_pid == pid:
+                val event = DownEvent(
+                    monitor_ref: entry.monitor_ref,
+                    pid: pid,
+                    reason: reason
+                )
+                # Queue the DownEvent for the watcher
+                var events = _down_events[entry.watcher_pid] ?? []
+                events.push(event)
+                _down_events[entry.watcher_pid] = events
+                # Remove the monitor (one-shot)
+                _monitors[ref_key] = nil
+    # Notify linked processes (propagate exit if abnormal)
+    val linked = _links[pid] ?? []
+    if reason != EXIT_NORMAL:
+        for linked_pid in linked:
+            val event = DownEvent(
+                monitor_ref: 0,
+                pid: pid,
+                reason: reason
+            )
+            var events = _down_events[linked_pid] ?? []
+            events.push(event)
+            _down_events[linked_pid] = events
+    # Clean up links for the dead process
+    _links[pid] = nil
+
+# Check for pending down events (for current process).
+fn check_down(monitor_ref: i64) -> DownEvent?:
+    """Check if a DownEvent has been received for the given monitor ref.
+
+    Returns the event if available, nil otherwise.
+    """
+    val self_pid: i64 = 0
+    val events = _down_events[self_pid] ?? []
+    for event in events:
+        if event.monitor_ref == monitor_ref:
+            return Some(event)
+    nil
+
+# Drain all pending down events for current process.
+fn drain_down_events() -> [DownEvent]:
+    """Get and clear all pending DownEvents for the current process."""
+    val self_pid: i64 = 0
+    val events = _down_events[self_pid] ?? []
+    _down_events[self_pid] = []
+    events
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
 
 # Create a DownEvent with the given fields.
 fn down_event(monitor_ref: i64, pid: i64, reason: text) -> DownEvent:
@@ -68,3 +183,18 @@ fn link_exit_event(pid: i64, reason: text) -> LinkExitEvent:
 fn down_is_normal(evt: DownEvent) -> bool:
     evt.reason == EXIT_NORMAL
 
+# Check if a DownEvent represents a crash.
+fn down_is_crash(evt: DownEvent) -> bool:
+    evt.reason == EXIT_CRASHED
+
+# Get count of active monitors.
+fn active_monitor_count() -> i64:
+    var count: i64 = 0
+    for ref_key in _monitors:
+        if _monitors[ref_key] != nil:
+            count = count + 1
+    count
+
+# Get linked pids for a process.
+fn linked_pids(pid: i64) -> [i64]:
+    _links[pid] ?? []

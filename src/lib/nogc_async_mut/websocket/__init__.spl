@@ -1,0 +1,165 @@
+# Async WebSocket — Non-Blocking WebSocket using async_host
+#
+# Wraps the sync WebSocket API (nogc_sync_mut/websocket/) with async_host futures.
+# Provides non-blocking WebSocket connections for async contexts.
+#
+# Usage:
+#   use std.async_host.{HostRuntime, run_until_complete}
+#   use std.websocket.{async_ws_connect, async_ws_send, async_ws_receive}
+#
+#   val runtime = HostRuntime.new()
+#   val ws = run_until_complete(runtime, async_ws_connect("ws://localhost:8080/ws"))
+#   run_until_complete(runtime, async_ws_send(ws, "hello"))
+#   val msg = run_until_complete(runtime, async_ws_receive(ws))
+
+use std.async_host.future.{HostFuture, spawn_blocking}
+
+# ============================================================================
+# WebSocket Opcodes
+# ============================================================================
+
+val WS_OPCODE_CONTINUATION: i64 = 0x0
+val WS_OPCODE_TEXT: i64 = 0x1
+val WS_OPCODE_BINARY: i64 = 0x2
+val WS_OPCODE_CLOSE: i64 = 0x8
+val WS_OPCODE_PING: i64 = 0x9
+val WS_OPCODE_PONG: i64 = 0xA
+
+# Close codes
+val WS_CLOSE_NORMAL: i64 = 1000
+val WS_CLOSE_GOING_AWAY: i64 = 1001
+val WS_CLOSE_PROTOCOL_ERROR: i64 = 1002
+val WS_CLOSE_UNSUPPORTED: i64 = 1003
+val WS_CLOSE_ABNORMAL: i64 = 1006
+
+# ============================================================================
+# Async WebSocket Types
+# ============================================================================
+
+struct AsyncWsConnection:
+    """Non-blocking WebSocket connection."""
+    url: text
+    fd: i64
+    connected: bool
+    protocol: text
+
+struct WsMessage:
+    """WebSocket message."""
+    opcode: i64
+    data: text
+    is_final: bool
+
+# ============================================================================
+# Connection Management
+# ============================================================================
+
+fn async_ws_connect(url: text) -> HostFuture:
+    """Connect to a WebSocket endpoint asynchronously.
+
+    Performs the HTTP upgrade handshake on a background thread.
+    Returns a HostFuture resolving to an AsyncWsConnection.
+    """
+    spawn_blocking(\:
+        extern fn rt_ws_connect(url: text) -> i64
+        val fd = rt_ws_connect(url)
+        AsyncWsConnection(
+            url: url,
+            fd: fd,
+            connected: fd >= 0,
+            protocol: ""
+        )
+    )
+
+fn async_ws_connect_with_protocol(url: text, protocol: text) -> HostFuture:
+    """Connect with a specific sub-protocol."""
+    spawn_blocking(\:
+        extern fn rt_ws_connect_protocol(url: text, protocol: text) -> i64
+        val fd = rt_ws_connect_protocol(url, protocol)
+        AsyncWsConnection(
+            url: url,
+            fd: fd,
+            connected: fd >= 0,
+            protocol: protocol
+        )
+    )
+
+# ============================================================================
+# Send / Receive
+# ============================================================================
+
+fn async_ws_send(conn: AsyncWsConnection, data: text) -> HostFuture:
+    """Send a text message over the WebSocket."""
+    spawn_blocking(\:
+        extern fn rt_ws_send(fd: i64, opcode: i64, data: text) -> i64
+        rt_ws_send(conn.fd, WS_OPCODE_TEXT, data)
+    )
+
+fn async_ws_send_binary(conn: AsyncWsConnection, data: text) -> HostFuture:
+    """Send a binary message over the WebSocket."""
+    spawn_blocking(\:
+        extern fn rt_ws_send(fd: i64, opcode: i64, data: text) -> i64
+        rt_ws_send(conn.fd, WS_OPCODE_BINARY, data)
+    )
+
+fn async_ws_receive(conn: AsyncWsConnection) -> HostFuture:
+    """Receive a message from the WebSocket.
+
+    Returns a HostFuture resolving to a WsMessage.
+    Blocks the background thread until a message arrives.
+    """
+    spawn_blocking(\:
+        extern fn rt_ws_recv(fd: i64) -> text
+        extern fn rt_ws_recv_opcode(fd: i64) -> i64
+        val opcode = rt_ws_recv_opcode(conn.fd)
+        val data = rt_ws_recv(conn.fd)
+        WsMessage(opcode: opcode, data: data, is_final: true)
+    )
+
+fn async_ws_ping(conn: AsyncWsConnection) -> HostFuture:
+    """Send a ping frame."""
+    spawn_blocking(\:
+        extern fn rt_ws_send(fd: i64, opcode: i64, data: text) -> i64
+        rt_ws_send(conn.fd, WS_OPCODE_PING, "")
+    )
+
+fn async_ws_close(conn: AsyncWsConnection) -> HostFuture:
+    """Close the WebSocket connection gracefully."""
+    spawn_blocking(\:
+        extern fn rt_ws_close(fd: i64, code: i64) -> i64
+        rt_ws_close(conn.fd, WS_CLOSE_NORMAL)
+        conn.connected = false
+    )
+
+# ============================================================================
+# Message Helpers
+# ============================================================================
+
+fn ws_message_is_text(msg: WsMessage) -> bool:
+    msg.opcode == WS_OPCODE_TEXT
+
+fn ws_message_is_binary(msg: WsMessage) -> bool:
+    msg.opcode == WS_OPCODE_BINARY
+
+fn ws_message_is_close(msg: WsMessage) -> bool:
+    msg.opcode == WS_OPCODE_CLOSE
+
+fn ws_message_is_ping(msg: WsMessage) -> bool:
+    msg.opcode == WS_OPCODE_PING
+
+fn ws_message_is_pong(msg: WsMessage) -> bool:
+    msg.opcode == WS_OPCODE_PONG
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AsyncWsConnection, WsMessage
+export WS_OPCODE_TEXT, WS_OPCODE_BINARY, WS_OPCODE_CLOSE
+export WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_CONTINUATION
+export WS_CLOSE_NORMAL, WS_CLOSE_GOING_AWAY, WS_CLOSE_PROTOCOL_ERROR
+export WS_CLOSE_UNSUPPORTED, WS_CLOSE_ABNORMAL
+export async_ws_connect, async_ws_connect_with_protocol
+export async_ws_send, async_ws_send_binary, async_ws_receive
+export async_ws_ping, async_ws_close
+export ws_message_is_text, ws_message_is_binary, ws_message_is_close
+export ws_message_is_ping, ws_message_is_pong

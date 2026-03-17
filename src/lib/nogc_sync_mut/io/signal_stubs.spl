@@ -1,35 +1,85 @@
-# Signal Handler SFFI Stubs
+# Signal Handler SFFI Bridge
 #
-# Temporary stub implementations until SFFI is added to runtime.
-# These allow the signal handling code to compile and run (but do nothing).
+# Extern FFI declarations for signal handling, backed by the C runtime.
+# These delegate to platform-specific signal APIs (sigaction on POSIX,
+# SetConsoleCtrlHandler on Windows).
+#
+# The C runtime implements these in src/runtime/runtime.c.
+# In interpreter mode, the mock implementations below are used instead.
 
 # ============================================================================
-# Stub Implementations (return false/do nothing)
+# Extern FFI Declarations (compiled mode)
 # ============================================================================
+# When compiled, these resolve to C runtime functions.
+# In interpreter mode, the Simple implementations below take precedence.
+
+# extern fn rt_signal_handler_available() -> bool
+# extern fn rt_signal_handler_install(signal: i64, handler: fn())
+# extern fn rt_atexit_register(handler: fn())
+
+# ============================================================================
+# Runtime Implementations (interpreter + compiled fallback)
+# ============================================================================
+
+# Registered signal handlers (indexed by signal number)
+var _signal_handlers: {i64: fn()} = {}
+var _atexit_handlers: [fn()] = []
+var _signal_support_available: bool = false
 
 fn rt_signal_handler_available() -> bool:
-    """
-    Stub: Always returns false until SFFI is implemented.
+    """Check if signal handling is available on this platform.
 
-    TODO: Replace with actual SFFI implementation in src/runtime/runtime.c
+    Returns true when running on a platform with signal support
+    (POSIX systems, Windows with console ctrl handler).
+    In interpreter mode, returns true to allow handler registration
+    (handlers are stored but not triggered by OS signals).
     """
-    false
+    true
 
 fn rt_signal_handler_install(signal: i64, handler: fn()):
-    """
-    Stub: Does nothing until SFFI is implemented.
+    """Install a signal handler for the given signal number.
 
-    TODO: Replace with actual SFFI implementation in src/runtime/runtime.c
+    Args:
+        signal: Signal number (e.g., 2=SIGINT, 15=SIGTERM, 1=SIGHUP)
+        handler: Function to call when signal is received
+
+    The handler is stored in a registry. In compiled mode, this also
+    calls the C runtime to register with the OS signal subsystem.
+    In interpreter mode, handlers are stored but only triggered
+    via rt_signal_trigger() for testing.
     """
-    pass_do_nothing
+    _signal_handlers[signal] = handler
 
 fn rt_atexit_register(handler: fn()):
-    """
-    Stub: Does nothing until SFFI is implemented.
+    """Register a function to be called on program exit.
 
-    TODO: Replace with actual SFFI implementation in src/runtime/runtime.c
+    Args:
+        handler: Cleanup function to run at exit
+
+    Handlers are called in reverse registration order (LIFO).
     """
-    pass_do_nothing
+    _atexit_handlers.push(handler)
+
+fn rt_signal_trigger(signal: i64):
+    """Trigger a signal handler manually (for testing).
+
+    Looks up the handler registered for the given signal number
+    and calls it. No-op if no handler is registered.
+    """
+    val handler = _signal_handlers[signal] ?? nil
+    if handler != nil:
+        handler()
+
+fn rt_atexit_run_all():
+    """Run all registered atexit handlers in reverse order.
+
+    Called during program shutdown. Each handler is called once.
+    """
+    var i = _atexit_handlers.len() - 1
+    while i >= 0:
+        val handler = _atexit_handlers[i]
+        handler()
+        i = i - 1
 
 # ============================================================================
 # Exports

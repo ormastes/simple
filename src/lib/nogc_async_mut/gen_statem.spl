@@ -19,9 +19,23 @@
 #           elif state_name == "green": "yellow"
 #           else: "red"
 
+use std.mailbox.{mailbox_new, mailbox_send, mailbox_receive, Mailbox}
+
 # Callback mode constants
 val CALLBACK_STATE_FUNCTIONS = "state_functions"  # separate fn per state
 val CALLBACK_HANDLE_EVENT = "handle_event"         # single handle_event fn
+
+# Event type constants
+val EVENT_CALL = "call"       # synchronous request
+val EVENT_CAST = "cast"       # async fire-and-forget
+val EVENT_INFO = "info"       # unexpected message
+val EVENT_TIMEOUT = "timeout" # state timeout
+val EVENT_INTERNAL = "internal" # internal event (self-generated)
+
+# Transition result prefixes
+val _TRANSITION_PREFIX = "next_state:"
+val _KEEP_STATE_PREFIX = "keep_state:"
+val _STOP_PREFIX = "stop:"
 
 # GenStatem behaviour trait.
 # Required: init, handle_event
@@ -30,7 +44,11 @@ trait GenStatem:
     # Called at startup. Returns the initial state name.
     fn init(args: text) -> text
 
-    # Handle an event in the given state. Returns the new state name.
+    # Handle an event in the given state. Returns transition result:
+    # - "next_state:<new_state>|<new_data>" to transition
+    # - "keep_state:|<new_data>" to stay in current state
+    # - "stop:<reason>" to terminate
+    # - or just a new state name (simple mode)
     fn handle_event(event_type: text, event: text,
                     state_name: text, data: text) -> text
 
@@ -40,7 +58,7 @@ trait GenStatem:
 
     # Called on termination.
     fn terminate(reason: text, state_name: text, data: text):
-        pass_do_nothing
+        pass_dn
 
 # GenStatemRunner — wraps a GenStatem impl and runs transitions.
 struct GenStatemRunner:
@@ -48,15 +66,29 @@ struct GenStatemRunner:
     data: text
     name: text
     running: bool
+    mailbox: Mailbox
+    reply_box: Mailbox
+    transition_count: i64
 
 fn gen_statem_runner(name: text, initial_state: text, initial_data: text) -> GenStatemRunner:
-    GenStatemRunner(state_name: initial_state, data: initial_data, name: name, running: false)
+    val mbox = mailbox_new(256)
+    val rbox = mailbox_new(256)
+    GenStatemRunner(
+        state_name: initial_state,
+        data: initial_data,
+        name: name,
+        running: false,
+        mailbox: mbox,
+        reply_box: rbox,
+        transition_count: 0
+    )
 
 fn gen_statem_start(runner: GenStatemRunner):
     runner.running = true
 
 fn gen_statem_stop(runner: GenStatemRunner):
     runner.running = false
+    mailbox_send(runner.mailbox, "$$stop$$")
 
 fn gen_statem_is_running(runner: GenStatemRunner) -> bool:
     runner.running
@@ -64,9 +96,75 @@ fn gen_statem_is_running(runner: GenStatemRunner) -> bool:
 fn gen_statem_current_state(runner: GenStatemRunner) -> text:
     runner.state_name
 
+fn gen_statem_get_data(runner: GenStatemRunner) -> text:
+    """Get current state data."""
+    runner.data
+
+fn gen_statem_transition_count(runner: GenStatemRunner) -> i64:
+    """Get total number of state transitions."""
+    runner.transition_count
+
 # Send an event to the state machine and transition.
 fn gen_statem_send_event(runner: GenStatemRunner, event_type: text, event: text,
                          handler: fn(text, text, text, text) -> text):
-    val new_state = handler(event_type, event, runner.state_name, runner.data)
-    runner.state_name = new_state
+    val result = handler(event_type, event, runner.state_name, runner.data)
+    _apply_transition(runner, result)
 
+# Apply a transition result to the runner.
+fn _apply_transition(runner: GenStatemRunner, result: text):
+    if result.starts_with(_TRANSITION_PREFIX):
+        val payload = result.substring(_TRANSITION_PREFIX.len())
+        val parts = payload.split("|")
+        if parts.len() >= 1:
+            runner.state_name = parts[0]
+        if parts.len() >= 2:
+            runner.data = parts[1]
+        runner.transition_count = runner.transition_count + 1
+    elif result.starts_with(_KEEP_STATE_PREFIX):
+        val payload = result.substring(_KEEP_STATE_PREFIX.len())
+        if payload.len() > 1:
+            runner.data = payload.substring(1)  # skip leading |
+    elif result.starts_with(_STOP_PREFIX):
+        runner.running = false
+    else:
+        # Simple mode: result is just the new state name
+        if result != runner.state_name:
+            runner.transition_count = runner.transition_count + 1
+        runner.state_name = result
+
+# Send event via mailbox (async integration).
+fn gen_statem_send_async(runner: GenStatemRunner, event_type: text, event: text):
+    """Send an event via the mailbox for async processing."""
+    mailbox_send(runner.mailbox, event_type + "|" + event)
+
+# Process one event from the mailbox.
+fn gen_statem_process_one(runner: GenStatemRunner,
+                          handler: fn(text, text, text, text) -> text) -> bool:
+    """Process a single event from the state machine's mailbox."""
+    val msg = mailbox_receive(runner.mailbox)
+    if msg == nil:
+        return false
+    if msg == "$$stop$$":
+        runner.running = false
+        return true
+    # Parse "event_type|event" format
+    val sep_idx = msg.index_of("|")
+    if sep_idx < 0:
+        # No separator — treat entire message as info event
+        val result = handler(EVENT_INFO, msg, runner.state_name, runner.data)
+        _apply_transition(runner, result)
+        return true
+    val event_type = msg.substring(0, sep_idx)
+    val event = msg.substring(sep_idx + 1)
+    val result = handler(event_type, event, runner.state_name, runner.data)
+    _apply_transition(runner, result)
+    true
+
+# Run the state machine loop.
+fn gen_statem_loop(runner: GenStatemRunner,
+                   handler: fn(text, text, text, text) -> text):
+    """Run the GenStatem event loop until stopped."""
+    while runner.running:
+        val processed = gen_statem_process_one(runner, handler)
+        if not processed:
+            pass_dn

@@ -416,7 +416,8 @@ pub use parallel::{
 // Re-export coverage instrumentation types and FFI functions
 pub use coverage::{
     rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
-    rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
+    rt_coverage_enable, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
+    rt_coverage_path_probe, CoverageData,
 };
 
 // Re-export debug FFI functions

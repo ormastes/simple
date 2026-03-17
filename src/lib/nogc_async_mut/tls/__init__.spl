@@ -1,0 +1,156 @@
+# Async TLS — Non-Blocking TLS/SSL using async_host
+#
+# Wraps the sync TLS API (nogc_sync_mut/tls/) with async_host futures.
+# Provides non-blocking TLS connections for secure async communication.
+#
+# Usage:
+#   use std.async_host.{HostRuntime, run_until_complete}
+#   use std.tls.{async_tls_connect, async_tls_send, async_tls_receive}
+#
+#   val runtime = HostRuntime.new()
+#   val tls = run_until_complete(runtime, async_tls_connect("example.com", 443))
+#   run_until_complete(runtime, async_tls_send(tls, request_data))
+#   val response = run_until_complete(runtime, async_tls_receive(tls, 8192))
+
+use std.async_host.future.{HostFuture, spawn_blocking}
+
+# ============================================================================
+# TLS Protocol Versions
+# ============================================================================
+
+val TLS_1_2: text = "TLSv1.2"
+val TLS_1_3: text = "TLSv1.3"
+
+# ============================================================================
+# Async TLS Types
+# ============================================================================
+
+struct TlsConfig:
+    """TLS connection configuration."""
+    min_version: text
+    verify_peer: bool
+    ca_file: text
+    cert_file: text
+    key_file: text
+    alpn_protocols: [text]
+
+struct AsyncTlsConnection:
+    """Non-blocking TLS connection backed by async_host."""
+    hostname: text
+    port: i64
+    fd: i64
+    connected: bool
+    protocol_version: text
+    cipher_suite: text
+
+fn tls_config_default() -> TlsConfig:
+    """Create default TLS config (TLS 1.2+, verify peer)."""
+    TlsConfig(
+        min_version: TLS_1_2,
+        verify_peer: true,
+        ca_file: "",
+        cert_file: "",
+        key_file: "",
+        alpn_protocols: []
+    )
+
+fn tls_config_insecure() -> TlsConfig:
+    """Create TLS config that skips certificate verification.
+
+    WARNING: Only use for testing. Never in production.
+    """
+    TlsConfig(
+        min_version: TLS_1_2,
+        verify_peer: false,
+        ca_file: "",
+        cert_file: "",
+        key_file: "",
+        alpn_protocols: []
+    )
+
+# ============================================================================
+# Connection Management
+# ============================================================================
+
+fn async_tls_connect(hostname: text, port: i64) -> HostFuture:
+    """Connect to a TLS endpoint asynchronously with default config.
+
+    Performs the TLS handshake on a background thread.
+    Returns a HostFuture resolving to an AsyncTlsConnection.
+    """
+    val config = tls_config_default()
+    async_tls_connect_with_config(hostname, port, config)
+
+fn async_tls_connect_with_config(hostname: text, port: i64, config: TlsConfig) -> HostFuture:
+    """Connect to a TLS endpoint with custom configuration."""
+    spawn_blocking(\:
+        extern fn rt_tls_connect(hostname: text, port: i64, verify: bool) -> i64
+        extern fn rt_tls_get_version(fd: i64) -> text
+        extern fn rt_tls_get_cipher(fd: i64) -> text
+
+        val fd = rt_tls_connect(hostname, port, config.verify_peer)
+        val version = rt_tls_get_version(fd)
+        val cipher = rt_tls_get_cipher(fd)
+
+        AsyncTlsConnection(
+            hostname: hostname,
+            port: port,
+            fd: fd,
+            connected: fd >= 0,
+            protocol_version: version,
+            cipher_suite: cipher
+        )
+    )
+
+# ============================================================================
+# Send / Receive
+# ============================================================================
+
+fn async_tls_send(conn: AsyncTlsConnection, data: text) -> HostFuture:
+    """Send data over a TLS connection."""
+    spawn_blocking(\:
+        extern fn rt_tls_send(fd: i64, data: text) -> i64
+        rt_tls_send(conn.fd, data)
+    )
+
+fn async_tls_receive(conn: AsyncTlsConnection, max_size: i64) -> HostFuture:
+    """Receive data from a TLS connection."""
+    spawn_blocking(\:
+        extern fn rt_tls_recv(fd: i64, max_size: i64) -> text
+        rt_tls_recv(conn.fd, max_size)
+    )
+
+fn async_tls_close(conn: AsyncTlsConnection) -> HostFuture:
+    """Close a TLS connection (sends TLS close_notify)."""
+    spawn_blocking(\:
+        extern fn rt_tls_close(fd: i64)
+        rt_tls_close(conn.fd)
+        conn.connected = false
+    )
+
+# ============================================================================
+# Connection Info
+# ============================================================================
+
+fn tls_is_connected(conn: AsyncTlsConnection) -> bool:
+    conn.connected
+
+fn tls_protocol_version(conn: AsyncTlsConnection) -> text:
+    conn.protocol_version
+
+fn tls_cipher_suite(conn: AsyncTlsConnection) -> text:
+    conn.cipher_suite
+
+fn tls_hostname(conn: AsyncTlsConnection) -> text:
+    conn.hostname
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TlsConfig, AsyncTlsConnection
+export TLS_1_2, TLS_1_3
+export tls_config_default, tls_config_insecure
+export async_tls_connect, async_tls_connect_with_config
+export async_tls_send, async_tls_receive, async_tls_close
+export tls_is_connected, tls_protocol_version, tls_cipher_suite, tls_hostname

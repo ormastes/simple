@@ -253,6 +253,11 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     val tmp_path = "/tmp/simple_cov_" + base + coverage_wrapper_suffix(file_path)
 
     var lines: [text] = []
+    # Enable coverage at the top, before any code runs
+    lines.push("# === Coverage Enable (auto-generated) ===")
+    lines.push("extern fn rt_coverage_enable()")
+    lines.push("rt_coverage_enable()")
+    lines.push("")
     lines.push(content)
     lines.push("")
     lines.push("# === Coverage Dump (auto-generated) ===")
@@ -273,9 +278,11 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     file_write(tmp_path, wrapped)
     (tmp_path, tmp_path)
 
-fn extract_coverage_sdn(output: text) -> text:
+fn split_coverage_output(output: text) -> (text, text):
+    """Single-pass extraction: split output into (clean_output, coverage_sdn)."""
     val lines = output.split("\n")
     var in_block = false
+    var kept: [text] = []
     var sdn_lines: [text] = []
     for line in lines:
         val clean = strip_ansi(line).trim()
@@ -287,23 +294,17 @@ fn extract_coverage_sdn(output: text) -> text:
             continue
         if in_block:
             sdn_lines.push(line)
-    sdn_lines.join("\n")
+        else:
+            kept.push(line)
+    (kept.join("\n"), sdn_lines.join("\n"))
+
+fn extract_coverage_sdn(output: text) -> text:
+    val (_, sdn) = split_coverage_output(output)
+    sdn
 
 fn strip_coverage_blocks(output: text) -> text:
-    val lines = output.split("\n")
-    var in_block = false
-    var kept: [text] = []
-    for line in lines:
-        val clean = strip_ansi(line).trim()
-        if clean == COVERAGE_BEGIN:
-            in_block = true
-            continue
-        if clean == COVERAGE_END:
-            in_block = false
-            continue
-        if not in_block:
-            kept.push(line)
-    kept.join("\n")
+    val (clean, _) = split_coverage_output(output)
+    clean
 
 # =========================================================================
 # G3: Static test listing (parse source without execution)

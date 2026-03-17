@@ -70,7 +70,7 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{record_decision_coverage_ffi, decision_id_from_span};
+use super::coverage_helpers::{record_decision_coverage_ffi, decision_id_from_span, current_file_for_coverage};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 #[inline]
@@ -120,7 +120,7 @@ pub(super) fn exec_if(
     let decision_result = cond_val.truthy();
 
     // COVERAGE: Record decision for if statement
-    record_decision_coverage_ffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
+    record_decision_coverage_ffi(&current_file_for_coverage(), if_stmt.span.line, if_stmt.span.column, decision_result);
 
     if decision_result {
         return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
@@ -148,7 +148,7 @@ pub(super) fn exec_if(
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_ffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            record_decision_coverage_ffi(&current_file_for_coverage(), if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
 
             if elif_decision {
                 return exec_block(block, env, functions, classes, enums, impl_methods);

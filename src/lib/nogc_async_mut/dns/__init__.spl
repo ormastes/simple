@@ -1,0 +1,153 @@
+# Async DNS — Non-Blocking DNS Resolution using async_host
+#
+# Wraps the sync DNS API (nogc_sync_mut/dns/) with async_host futures.
+# DNS queries are dispatched to background threads to avoid blocking
+# the async scheduler during name resolution.
+#
+# Usage:
+#   use std.async_host.{HostRuntime, run_until_complete}
+#   use std.dns.{async_dns_resolve, async_dns_resolve_all}
+#
+#   val runtime = HostRuntime.new()
+#   val ip = run_until_complete(runtime, async_dns_resolve("example.com"))
+
+use std.async_host.future.{HostFuture, spawn_blocking}
+
+# ============================================================================
+# DNS Record Types
+# ============================================================================
+
+val DNS_TYPE_A: i64 = 1       # IPv4 address
+val DNS_TYPE_AAAA: i64 = 28   # IPv6 address
+val DNS_TYPE_CNAME: i64 = 5   # Canonical name
+val DNS_TYPE_MX: i64 = 15     # Mail exchange
+val DNS_TYPE_NS: i64 = 2      # Name server
+val DNS_TYPE_TXT: i64 = 16    # Text record
+val DNS_TYPE_SRV: i64 = 33    # Service locator
+val DNS_TYPE_PTR: i64 = 12    # Pointer (reverse)
+val DNS_TYPE_SOA: i64 = 6     # Start of authority
+
+# DNS response codes
+val DNS_RCODE_NOERROR: i64 = 0
+val DNS_RCODE_NXDOMAIN: i64 = 3
+val DNS_RCODE_SERVFAIL: i64 = 2
+val DNS_RCODE_REFUSED: i64 = 5
+
+struct DnsRecord:
+    """A single DNS record."""
+    name: text
+    record_type: i64
+    ttl: i64
+    value: text
+
+struct DnsResult:
+    """Result of a DNS query."""
+    domain: text
+    records: [DnsRecord]
+    response_code: i64
+    authoritative: bool
+
+# ============================================================================
+# Async DNS Resolution
+# ============================================================================
+
+fn async_dns_resolve(domain: text) -> HostFuture:
+    """Resolve a domain name to its first A record (IPv4).
+
+    Returns a HostFuture resolving to a text IP address, or "" on failure.
+    """
+    spawn_blocking(\:
+        extern fn rt_dns_resolve(domain: text) -> text
+        rt_dns_resolve(domain)
+    )
+
+fn async_dns_resolve_all(domain: text) -> HostFuture:
+    """Resolve a domain to all A records.
+
+    Returns a HostFuture resolving to a DnsResult with all records.
+    """
+    spawn_blocking(\:
+        extern fn rt_dns_query(domain: text, qtype: i64) -> text
+        val raw = rt_dns_query(domain, DNS_TYPE_A)
+        _parse_dns_result(domain, raw)
+    )
+
+fn async_dns_query(domain: text, record_type: i64) -> HostFuture:
+    """Query DNS for a specific record type.
+
+    Args:
+        domain: Domain name to query
+        record_type: DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_MX, etc.
+    """
+    spawn_blocking(\:
+        extern fn rt_dns_query(domain: text, qtype: i64) -> text
+        val raw = rt_dns_query(domain, record_type)
+        _parse_dns_result(domain, raw)
+    )
+
+fn async_dns_reverse(ip: text) -> HostFuture:
+    """Perform a reverse DNS lookup (PTR record).
+
+    Returns a HostFuture resolving to the hostname, or "" on failure.
+    """
+    spawn_blocking(\:
+        extern fn rt_dns_reverse(ip: text) -> text
+        rt_dns_reverse(ip)
+    )
+
+fn async_dns_lookup_mx(domain: text) -> HostFuture:
+    """Look up MX records for a domain (mail exchange)."""
+    async_dns_query(domain, DNS_TYPE_MX)
+
+fn async_dns_lookup_txt(domain: text) -> HostFuture:
+    """Look up TXT records for a domain."""
+    async_dns_query(domain, DNS_TYPE_TXT)
+
+fn async_dns_lookup_ns(domain: text) -> HostFuture:
+    """Look up NS records for a domain (name servers)."""
+    async_dns_query(domain, DNS_TYPE_NS)
+
+# ============================================================================
+# Parse Helpers
+# ============================================================================
+
+fn _parse_dns_result(domain: text, raw: text) -> DnsResult:
+    """Parse raw DNS response into DnsResult."""
+    if raw == "" or raw == nil:
+        return DnsResult(
+            domain: domain,
+            records: [],
+            response_code: DNS_RCODE_NXDOMAIN,
+            authoritative: false
+        )
+    # Simple parsing: raw is newline-separated "type|ttl|value" entries
+    val lines = raw.split("\n")
+    var records: [DnsRecord] = []
+    for line in lines:
+        if line.len() > 0:
+            val parts = line.split("|")
+            if parts.len() >= 3:
+                val record = DnsRecord(
+                    name: domain,
+                    record_type: parts[0].to_i64(),
+                    ttl: parts[1].to_i64(),
+                    value: parts[2]
+                )
+                records.push(record)
+    DnsResult(
+        domain: domain,
+        records: records,
+        response_code: DNS_RCODE_NOERROR,
+        authoritative: false
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DnsRecord, DnsResult
+export DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_CNAME, DNS_TYPE_MX
+export DNS_TYPE_NS, DNS_TYPE_TXT, DNS_TYPE_SRV, DNS_TYPE_PTR, DNS_TYPE_SOA
+export DNS_RCODE_NOERROR, DNS_RCODE_NXDOMAIN, DNS_RCODE_SERVFAIL, DNS_RCODE_REFUSED
+export async_dns_resolve, async_dns_resolve_all, async_dns_query
+export async_dns_reverse, async_dns_lookup_mx, async_dns_lookup_txt, async_dns_lookup_ns

@@ -747,6 +747,9 @@ impl ExecCore {
         let module =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("compile failed: {}", e))?;
 
+        // Re-set current file before evaluation (module loading may have changed it)
+        set_current_file(Some(path.to_path_buf()));
+
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 
         // Clear current file after evaluation

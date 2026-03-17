@@ -9,8 +9,6 @@
 # Implement handle_call and handle_cast for your server logic.
 # handle_info and terminate have default no-op implementations.
 #
-# Use @behaviour(GenServer) annotation on implementing class/struct.
-#
 # Usage:
 #   @behaviour(GenServer)
 #   class CounterServer:
@@ -20,6 +18,8 @@
 #           else: state
 #       fn handle_cast(msg: text, state: text) -> text: state
 
+use std.mailbox.{mailbox_new, mailbox_send, mailbox_receive, Mailbox}
+
 # GenServer behaviour trait.
 # Required: init, handle_call, handle_cast
 # Optional (have defaults): handle_info, terminate
@@ -28,7 +28,7 @@ trait GenServer:
     fn init(args: text) -> text
 
     # Handle a synchronous call (request-reply pattern).
-    # Returns the new state (reply is embedded in state convention, or use text).
+    # Returns "reply|<reply>|<new_state>" or just new state text.
     fn handle_call(request: text, state: text) -> text
 
     # Handle an asynchronous cast (fire-and-forget message).
@@ -41,25 +41,42 @@ trait GenServer:
 
     # Called on termination. Default: no cleanup needed.
     fn terminate(reason: text, state: text):
-        pass_do_nothing
+        pass_dn
+
+# Message type prefixes for mailbox dispatch
+val _GS_CALL_PREFIX = "call:"
+val _GS_CAST_PREFIX = "cast:"
+val _GS_INFO_PREFIX = "info:"
+val _GS_STOP_MSG = "$$stop$$"
 
 # GenServerRunner — wraps a GenServer impl and runs its message loop.
 struct GenServerRunner:
     state: text
     name: text
     running: bool
+    mailbox: Mailbox
+    reply_box: Mailbox
 
 # Create a runner for a GenServer with the given initial state.
 fn gen_server_runner(name: text, initial_state: text) -> GenServerRunner:
-    GenServerRunner(state: initial_state, name: name, running: false)
+    val mbox = mailbox_new(256)
+    val rbox = mailbox_new(256)
+    GenServerRunner(
+        state: initial_state,
+        name: name,
+        running: false,
+        mailbox: mbox,
+        reply_box: rbox
+    )
 
 # Start the runner (marks it as running).
 fn gen_server_start(runner: GenServerRunner):
     runner.running = true
 
-# Stop the runner.
+# Stop the runner gracefully.
 fn gen_server_stop(runner: GenServerRunner):
     runner.running = false
+    mailbox_send(runner.mailbox, _GS_STOP_MSG)
 
 # Check if the runner is active.
 fn gen_server_is_running(runner: GenServerRunner) -> bool:
@@ -69,6 +86,14 @@ fn gen_server_is_running(runner: GenServerRunner) -> bool:
 # In interpreter mode this calls handle_call directly.
 fn gen_server_call(runner: GenServerRunner, request: text, handler: fn(text, text) -> text) -> text:
     val new_state = handler(request, runner.state)
+    # Parse reply from state if format is "reply|<reply>|<new_state>"
+    if new_state.starts_with("reply|"):
+        val parts = new_state.split("|")
+        if parts.len() >= 3:
+            val reply = parts[1]
+            val actual_state = parts[2]
+            runner.state = actual_state
+            return reply
     runner.state = new_state
     new_state
 
@@ -77,3 +102,79 @@ fn gen_server_cast(runner: GenServerRunner, msg: text, handler: fn(text, text) -
     val new_state = handler(msg, runner.state)
     runner.state = new_state
 
+# Send a call via mailbox (async integration).
+fn gen_server_send_call(runner: GenServerRunner, request: text):
+    """Send a synchronous call via the mailbox.
+
+    The caller should then read from runner.reply_box to get the reply.
+    """
+    mailbox_send(runner.mailbox, _GS_CALL_PREFIX + request)
+
+# Send a cast via mailbox (async integration).
+fn gen_server_send_cast(runner: GenServerRunner, msg: text):
+    """Send an asynchronous cast via the mailbox."""
+    mailbox_send(runner.mailbox, _GS_CAST_PREFIX + msg)
+
+# Send an info message via mailbox.
+fn gen_server_send_info(runner: GenServerRunner, msg: text):
+    """Send an info message via the mailbox."""
+    mailbox_send(runner.mailbox, _GS_INFO_PREFIX + msg)
+
+# Process one message from the mailbox.
+# Returns true if a message was processed, false if mailbox was empty.
+fn gen_server_process_one(runner: GenServerRunner,
+                          call_handler: fn(text, text) -> text,
+                          cast_handler: fn(text, text) -> text,
+                          info_handler: fn(text, text) -> text) -> bool:
+    """Process a single message from the server's mailbox.
+
+    Dispatches to call_handler, cast_handler, or info_handler
+    based on the message prefix.
+    """
+    val msg = mailbox_receive(runner.mailbox)
+    if msg == nil:
+        return false
+    if msg == _GS_STOP_MSG:
+        runner.running = false
+        return true
+    if msg.starts_with(_GS_CALL_PREFIX):
+        val request = msg.substring(_GS_CALL_PREFIX.len())
+        val result = call_handler(request, runner.state)
+        if result.starts_with("reply|"):
+            val parts = result.split("|")
+            if parts.len() >= 3:
+                mailbox_send(runner.reply_box, parts[1])
+                runner.state = parts[2]
+                return true
+        runner.state = result
+        mailbox_send(runner.reply_box, result)
+        return true
+    if msg.starts_with(_GS_CAST_PREFIX):
+        val payload = msg.substring(_GS_CAST_PREFIX.len())
+        runner.state = cast_handler(payload, runner.state)
+        return true
+    if msg.starts_with(_GS_INFO_PREFIX):
+        val payload = msg.substring(_GS_INFO_PREFIX.len())
+        runner.state = info_handler(payload, runner.state)
+        return true
+    # Unknown message format — treat as info
+    runner.state = info_handler(msg, runner.state)
+    true
+
+# Run the server loop: process messages until stopped.
+fn gen_server_loop(runner: GenServerRunner,
+                   call_handler: fn(text, text) -> text,
+                   cast_handler: fn(text, text) -> text,
+                   info_handler: fn(text, text) -> text):
+    """Run the GenServer message loop.
+
+    Processes messages from the mailbox until the server is stopped.
+    Each message is dispatched to the appropriate handler.
+    """
+    while runner.running:
+        val processed = gen_server_process_one(
+            runner, call_handler, cast_handler, info_handler
+        )
+        if not processed:
+            # No message available — yield to scheduler
+            pass_dn

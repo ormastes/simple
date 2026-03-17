@@ -10,6 +10,7 @@ use app.io.dir_ops.{dir_create_all}
 use app.io.file_ops.{file_write, file_read, file_exists}
 
 # Coverage extern declarations (same as coverage_simple.spl)
+extern fn rt_coverage_enable()
 extern fn rt_coverage_enabled() -> bool
 extern fn rt_coverage_clear()
 extern fn rt_coverage_dump_sdn() -> text
@@ -51,6 +52,8 @@ var condition_keys: [text] = []
 var condition_true = {}  # Dict<text, i64>
 var condition_false = {}  # Dict<text, i64>
 
+var file_path_index = {}  # Dict<text, i64> - O(1) file path lookup for aggregation
+
 fn reset_coverage_state():
     coverage_parts = []
     decision_keys = []
@@ -59,6 +62,7 @@ fn reset_coverage_state():
     condition_keys = []
     condition_true = {}
     condition_false = {}
+    file_path_index = {}
 
 fn decision_key(file: text, line: text, col: text, decision_id: text) -> text:
     "{file}|{line}|{col}|{decision_id}"
@@ -89,6 +93,7 @@ fn parse_i64_safe(s: text) -> i64:
 
 fn setup_coverage():
     env_set("SIMPLE_COVERAGE", "1")
+    rt_coverage_enable()
     rt_coverage_clear()
     reset_coverage_state()
     print "[Coverage] Enabled - tracking decisions and conditions"
@@ -346,19 +351,18 @@ fn render_coverage_sdn() -> text:
     lines.join("\n")
 
 fn find_or_add_file(paths: [text], dec_t: [i64], dec_c: [i64], cond_t: [i64], cond_c: [i64], fpath: text) -> i64:
-    # Find existing file index
-    var i = 0
-    while i < paths.len():
-        if paths[i] == fpath:
-            return i
-        i = i + 1
+    # O(1) lookup via Dict
+    if file_path_index.contains_key(fpath):
+        return file_path_index[fpath]
     # Not found - add new entry
+    val idx = paths.len()
     paths.push(fpath)
     dec_t.push(0)
     dec_c.push(0)
     cond_t.push(0)
     cond_c.push(0)
-    paths.len() - 1
+    file_path_index[fpath] = idx
+    idx
 
 # =========================================================================
 # Summary: Print coverage summary to console
@@ -379,7 +383,7 @@ fn print_coverage_summary(data: CoverageData):
 # =========================================================================
 
 fn generate_coverage_reports(data: CoverageData):
-    dir_create_all(".coverage")
+    dir_create_all("build/coverage")
 
     # 1. Raw SDN data
     file_write("build/coverage/coverage.sdn", data.raw_sdn)
@@ -420,10 +424,10 @@ fn generate_coverage_reports(data: CoverageData):
     uncovered = uncovered + "\nTotal files with gaps: {uncov_count}\n"
     file_write("build/coverage/uncovered.md", uncovered)
 
-    print "[Coverage] Reports written to .coverage/"
-    print "  .coverage/coverage.sdn  (raw data)"
-    print "  .coverage/summary.md    (per-file summary)"
-    print "  .coverage/uncovered.md  (files with gaps)"
+    print "[Coverage] Reports written to build/coverage/"
+    print "  build/coverage/coverage.sdn  (raw data)"
+    print "  build/coverage/summary.md    (per-file summary)"
+    print "  build/coverage/uncovered.md  (files with gaps)"
 
 fn sort_files_by_coverage(files: [FileCoverage]) -> [FileCoverage]:
     # Simple insertion sort by decision_pct ascending (worst coverage first)

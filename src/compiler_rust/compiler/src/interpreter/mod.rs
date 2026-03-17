@@ -86,7 +86,7 @@ mod error_macros;
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
     extract_node_location, record_node_coverage, record_decision_coverage_ffi, record_condition_coverage,
-    decision_id_from_span, is_coverage_enabled,
+    decision_id_from_span, is_coverage_enabled, current_file_for_coverage,
 };
 
 // Node execution

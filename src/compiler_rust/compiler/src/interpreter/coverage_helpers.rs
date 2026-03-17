@@ -49,9 +49,9 @@ pub fn extract_expr_location(_expr: &Expr) -> Option<(String, usize, usize)> {
 /// The file path is extracted from the span's source info if available,
 /// otherwise defaults to "<unknown>".
 fn span_to_location(span: &Span) -> (String, usize, usize) {
-    // In Simple's parser, file information is stored elsewhere in the AST
-    // For now, use a placeholder that can be enhanced with better source tracking
-    let file = "<source>".to_string();
+    let file = super::interpreter_state::get_current_file()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<source>".to_string());
     let line = span.line;
     let column = span.column;
     (file, line, column)
@@ -84,6 +84,14 @@ pub fn decision_id_from_span(span: &Span) -> u32 {
 #[inline]
 pub fn is_coverage_enabled() -> bool {
     crate::coverage::is_coverage_enabled()
+}
+
+/// Get current source file path for coverage reporting
+#[inline]
+pub fn current_file_for_coverage() -> String {
+    super::interpreter_state::get_current_file()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<source>".to_string())
 }
 
 /// Record line coverage for a node if coverage is enabled

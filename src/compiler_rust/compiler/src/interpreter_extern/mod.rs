@@ -948,10 +948,12 @@ pub(crate) fn call_extern_function(
         "coverage_check" => coverage::coverage_check(&evaluated),
         "coverage_summary" => coverage::coverage_summary(&evaluated),
         // FFI functions for coverage.spl
+        "rt_coverage_enable" => coverage::rt_coverage_enable(&evaluated),
         "rt_coverage_enabled" => coverage::rt_coverage_enabled(&evaluated),
         "rt_coverage_clear" => coverage::rt_coverage_clear(&evaluated),
         "rt_coverage_dump_sdn" => coverage::rt_coverage_dump_sdn(&evaluated),
         "rt_coverage_free_sdn" => coverage::rt_coverage_free_sdn(&evaluated),
+        "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_interp(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
 
         // ====================================================================

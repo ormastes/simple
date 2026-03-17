@@ -19,11 +19,17 @@
 extern fn rt_coverage_enabled() -> bool
 extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
 var coverage_counter: i64 = 0
+var eval_current_file: text = ""
+var coverage_is_enabled: bool = false
+var coverage_checked: bool = false
 
-fn record_decision(file: text, line: i64, taken: bool):
-    if rt_coverage_enabled():
+fn record_decision(line: i64, taken: bool):
+    if not coverage_checked:
+        coverage_checked = true
+        coverage_is_enabled = rt_coverage_enabled()
+    if coverage_is_enabled:
         coverage_counter = coverage_counter + 1
-        rt_coverage_decision_probe(file, line, coverage_counter, taken)
+        rt_coverage_decision_probe(eval_current_file, line, coverage_counter, taken)
 
 # ===== Type Checking Integration =====
 # Basic runtime type checking for function parameters
@@ -203,6 +209,9 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    eval_current_file = ""
+    coverage_is_enabled = false
+    coverage_checked = false
     eval_break_label = ""
     eval_continue_label = ""
     eval_label_stack = []
@@ -403,6 +412,9 @@ fn eval_binary(eid: i64) -> i64:
         val err = ops_get_error()
         if err != "":
             eval_set_error(err)
+    # Coverage: record and/or operator results as branch decisions
+    if op == 55 or op == 56:
+        record_decision(eid, val_is_truthy(result))
     result
 
 fn eval_unary(eid: i64) -> i64:
@@ -429,7 +441,7 @@ fn eval_if_expr(eid: i64) -> i64:
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    record_decision("eval", eid, taken)
+    record_decision(eid, taken)
 
     if taken:
         return eval_expr(then_id)
@@ -508,6 +520,7 @@ fn eval_for_expr(eid: i64) -> i64:
     # Iterate over array
     if kind == VAL_ARRAY:
         val elements = val_get_array(iterable)
+        record_decision(eid, elements.len() > 0)
         for elem_vid in elements:
             if eval_breaking: break
             if eval_returning: break
@@ -616,7 +629,9 @@ fn eval_while_expr(eid: i64) -> i64:
         if eval_breaking: break
         val cond_val = eval_expr(cond_eid)
         if eval_had_error: break
-        if val_is_truthy(cond_val) == false: break
+        val while_taken = val_is_truthy(cond_val)
+        record_decision(eid, while_taken)
+        if while_taken == false: break
         eval_continuing = false
         for sid in body_stmts:
             if eval_had_error: break
@@ -651,6 +666,7 @@ fn eval_match_expr(eid: i64) -> i64:
         val body_stmts = arm_get_body(arm_id)
 
         val matched = match_pattern(scrutinee, pattern_eid)
+        record_decision(arm_id, matched)
         if matched:
             # Check guard
             if guard_eid >= 0:

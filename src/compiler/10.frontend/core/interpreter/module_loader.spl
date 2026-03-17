@@ -38,6 +38,25 @@ var _smf_allow_fallback: bool = true
 var _smf_regenerate: bool = false
 var _smf_freshness_cache: {text: bool} = {}
 
+# GC-mode-aware module resolution
+# When set to "gc", lib fallback chain prioritizes gc_* variants.
+# When "nogc" (default), uses the original nogc-first order.
+var _lib_gc_mode: text = "nogc"
+
+fn set_lib_gc_mode(mode: text):
+    """Set GC mode for library module resolution.
+
+    Args:
+        mode: "gc" or "nogc" — determines lib variant priority order.
+              "gc"   → gc_async_mut > gc_sync_mut > common > nogc_async_mut > nogc_sync_mut > nogc_async_mut_noalloc
+              "nogc" → nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
+    """
+    _lib_gc_mode = mode
+
+fn get_lib_gc_mode() -> text:
+    """Get current GC mode for library module resolution."""
+    _lib_gc_mode
+
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
 val DECL_EXTERN_FN = 2
@@ -277,19 +296,22 @@ var _interp_module_cache: {text: text} = {}
 
 fn resolve_module_path(module_name: text, current_file: text) -> text:
     # Fast path: check module-only cache first (no string concat needed)
-    val fast = _interp_module_fast_cache[module_name] ?? ""
+    val fast_lookup_key = module_name + "|" + _lib_gc_mode
+    val fast = _interp_module_fast_cache[fast_lookup_key] ?? ""
     if fast != "":
         return fast
-    # Full path: composite key for relative imports
-    val cache_key = module_name + "|" + current_file
+    # Full path: composite key for relative imports (includes gc mode for lib resolution)
+    val cache_key = module_name + "|" + current_file + "|" + _lib_gc_mode
     val cached = _interp_module_cache[cache_key] ?? ""
     if cached != "":
         return cached
     val result = _resolve_module_path_uncached(module_name, current_file)
     _interp_module_cache[cache_key] = result
     # Cache in fast path if it's a stdlib/lib import (not relative)
+    # Include gc mode in fast cache key since lib resolution depends on it
+    val fast_key = module_name + "|" + _lib_gc_mode
     if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app."):
-        _interp_module_fast_cache[module_name] = result
+        _interp_module_fast_cache[fast_key] = result
     result
 
 fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
@@ -332,26 +354,52 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
         return src_path
 
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
-    #    Default app mode is nogc_async_mut. Search order:
-    #    nogc_async_mut (default) > nogc_sync_mut (sync fallback) > common > gc_async_mut > nogc_async_mut_noalloc
+    #    Resolution order depends on _lib_gc_mode:
+    #    nogc: nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
+    #    gc:   gc_async_mut > gc_sync_mut > common > nogc_async_mut > nogc_sync_mut > nogc_async_mut_noalloc
     if relative_path.starts_with("lib/"):
         val lib_subpath = relative_path.substring(4)
         val lib_dir = rt_path_join("src", "lib")
-        val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
-        if rt_file_exists(nam):
-            return nam
-        val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
-        if rt_file_exists(nsm):
-            return nsm
-        val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
-        if rt_file_exists(cm):
-            return cm
-        val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
-        if rt_file_exists(gam):
-            return gam
-        val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
-        if rt_file_exists(nanm):
-            return nanm
+        if _lib_gc_mode == "gc":
+            # GC mode: prioritize gc_* variants
+            val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
+            if rt_file_exists(gam):
+                return gam
+            val gsm = rt_path_join(lib_dir, rt_path_join("gc_sync_mut", lib_subpath))
+            if rt_file_exists(gsm):
+                return gsm
+            val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
+            if rt_file_exists(cm):
+                return cm
+            val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
+            if rt_file_exists(nam):
+                return nam
+            val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
+            if rt_file_exists(nsm):
+                return nsm
+            val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
+            if rt_file_exists(nanm):
+                return nanm
+        else:
+            # NoGC mode (default): prioritize nogc_* variants
+            val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
+            if rt_file_exists(nam):
+                return nam
+            val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
+            if rt_file_exists(nsm):
+                return nsm
+            val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
+            if rt_file_exists(cm):
+                return cm
+            val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
+            if rt_file_exists(gam):
+                return gam
+            val gsm = rt_path_join(lib_dir, rt_path_join("gc_sync_mut", lib_subpath))
+            if rt_file_exists(gsm):
+                return gsm
+            val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
+            if rt_file_exists(nanm):
+                return nanm
 
     # 5. Try numbered directory resolution (NN.name pattern)
     val numbered_path = resolve_with_numbered_dirs("src", path_parts)

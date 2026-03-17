@@ -774,6 +774,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_coverage_free_sdn", &[I64], &[]),
     // rt_coverage_clear() -> ()
     RuntimeFuncSpec::new("rt_coverage_clear", &[], &[]),
+    // rt_coverage_enable() -> ()
+    RuntimeFuncSpec::new("rt_coverage_enable", &[], &[]),
     // rt_coverage_enabled() -> bool
     RuntimeFuncSpec::new("rt_coverage_enabled", &[], &[I8]),
     // =========================================================================

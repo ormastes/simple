@@ -1,0 +1,60 @@
+# GC Root Pinning for Unsafe Blocks
+#
+# When performing unsafe operations (FFI calls, raw pointer manipulation),
+# objects must be pinned as GC roots to prevent the collector from
+# reclaiming them during the unsafe operation.
+
+use std.gc.{GcHeap, GcPtr}
+
+# ============================================================================
+# GcRoot - Pin Objects During Unsafe Operations
+# ============================================================================
+
+class GcRoot:
+    """Pins an object as a GC root, preventing collection.
+
+    Use gc_root_pin() before unsafe operations and gc_root_unpin() after.
+    While pinned, the object and everything reachable from it is safe
+    from GC collection.
+    """
+    heap: GcHeap
+    gc_ptr: GcPtr
+    pinned: bool
+
+    static fn new(heap: GcHeap, ptr: GcPtr) -> GcRoot:
+        """Create an unpinned root reference."""
+        GcRoot(heap: heap, gc_ptr: ptr, pinned: false)
+
+fn gc_root_pin(root: GcRoot):
+    """Pin object as GC root — prevents collection.
+
+    Must be called before passing pointers to FFI or unsafe code.
+    """
+    if not root.pinned:
+        root.heap.add_root(root.gc_ptr)
+        root.pinned = true
+
+fn gc_root_unpin(root: GcRoot):
+    """Unpin object — allows GC collection again.
+
+    Must be called after the unsafe operation completes.
+    """
+    if root.pinned:
+        root.heap.remove_root(root.gc_ptr)
+        root.pinned = false
+
+fn gc_with_pinned(heap: GcHeap, ptr: GcPtr, action: fn()):
+    """Execute action with ptr pinned as GC root.
+
+    Automatically pins before and unpins after the action,
+    even if the action fails.
+
+    Args:
+        heap: GC heap managing the object
+        ptr: Pointer to pin
+        action: Code to execute while pinned
+    """
+    val root = GcRoot.new(heap, ptr)
+    gc_root_pin(root)
+    action()
+    gc_root_unpin(root)

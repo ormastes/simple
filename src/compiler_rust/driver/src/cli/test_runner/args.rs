@@ -274,6 +274,10 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             arg if arg.starts_with("--runs-status=") => {
                 options.runs_status_filter = Some(arg.trim_start_matches("--runs-status=").to_string());
             }
+            "--coverage" => {
+                // Enable coverage tracking via environment variable
+                std::env::set_var("SIMPLE_COVERAGE", "1");
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }

@@ -1,0 +1,78 @@
+# Async GC Allocator
+#
+# GC-backed allocator for async contexts. Uses the same GcHeap but
+# triggers collection at async yield points rather than inline,
+# avoiding pauses during hot async execution paths.
+
+use std.gc.{GcHeap, GcStats}
+
+# ============================================================================
+# AsyncGcAllocator - Async-Safe GC Allocator
+# ============================================================================
+
+class AsyncGcAllocator:
+    """GC allocator optimized for async contexts.
+
+    Defers GC collection to yield points in the async scheduler,
+    avoiding stop-the-world pauses during task execution.
+    Collection is triggered between task switches.
+    """
+    heap: GcHeap
+    deferred_collections: i64
+    collection_threshold: usize
+
+    static fn new() -> AsyncGcAllocator:
+        """Create async GC allocator with default settings."""
+        val heap = GcHeap.new()
+        AsyncGcAllocator(
+            heap: heap,
+            deferred_collections: 0,
+            collection_threshold: 1024 * 1024  # 1MB before collection hint
+        )
+
+    static fn with_heap(heap: GcHeap) -> AsyncGcAllocator:
+        """Create async GC allocator with existing heap."""
+        AsyncGcAllocator(
+            heap: heap,
+            deferred_collections: 0,
+            collection_threshold: 1024 * 1024
+        )
+
+fn async_gc_allocate(alloc: AsyncGcAllocator, size: usize) -> [u8]?:
+    """Allocate via GC heap (async-safe).
+
+    May set a deferred collection flag if threshold is exceeded.
+    Actual collection happens at the next scheduler yield point.
+    """
+    val ptr = alloc.heap.allocate(size)
+    if ptr == nil:
+        # Try forcing collection and retrying
+        alloc.heap.collect()
+        val retry = alloc.heap.allocate(size)
+        return retry
+    # Check if we should hint for collection at next yield
+    val stats = alloc.heap.stats()
+    if stats.total_allocated > alloc.collection_threshold:
+        alloc.deferred_collections = alloc.deferred_collections + 1
+    Some(ptr)
+
+fn async_gc_deallocate(alloc: AsyncGcAllocator, ptr: [u8], size: usize):
+    """No-op: GC handles deallocation."""
+    # GC reclaims memory during collection cycles
+
+fn async_gc_should_collect(alloc: AsyncGcAllocator) -> bool:
+    """Check if collection should happen at the current yield point.
+
+    Called by the async scheduler between task switches.
+    """
+    alloc.deferred_collections > 0
+
+fn async_gc_yield_collect(alloc: AsyncGcAllocator):
+    """Perform deferred GC collection at yield point.
+
+    Called by the async scheduler when async_gc_should_collect() is true.
+    Resets the deferred collection counter.
+    """
+    if alloc.deferred_collections > 0:
+        alloc.heap.collect()
+        alloc.deferred_collections = 0

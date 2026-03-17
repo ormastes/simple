@@ -1,0 +1,128 @@
+# Async TCP — Non-Blocking TCP using async_host
+#
+# Wraps the sync TCP API (nogc_sync_mut/tcp/) with async_host futures,
+# enabling non-blocking TCP I/O in async contexts.
+#
+# Usage:
+#   use std.async_host.{HostRuntime, run_until_complete}
+#   use std.tcp.{async_tcp_connect, async_tcp_send, async_tcp_receive}
+#
+#   val runtime = HostRuntime.new()
+#   val conn = run_until_complete(runtime, async_tcp_connect("127.0.0.1", 8080))
+#   run_until_complete(runtime, async_tcp_send(conn, "GET / HTTP/1.1\r\n\r\n"))
+#   val response = run_until_complete(runtime, async_tcp_receive(conn, 4096))
+
+use std.async_host.future.{HostFuture, spawn_blocking}
+use std.async_host.handle.{SocketHandle}
+
+# ============================================================================
+# Async TCP Connection
+# ============================================================================
+
+struct AsyncTcpConnection:
+    """Non-blocking TCP connection backed by async_host."""
+    address: text
+    port: i64
+    handle: SocketHandle
+    connected: bool
+
+fn async_tcp_connect(address: text, port: i64) -> HostFuture:
+    """Connect to a TCP endpoint asynchronously.
+
+    Returns a HostFuture that resolves to an AsyncTcpConnection.
+    The connection is established on a background thread via spawn_blocking.
+    """
+    spawn_blocking(\:
+        val handle = SocketHandle.connect(address, port)
+        AsyncTcpConnection(
+            address: address,
+            port: port,
+            handle: handle,
+            connected: true
+        )
+    )
+
+fn async_tcp_send(conn: AsyncTcpConnection, data: text) -> HostFuture:
+    """Send data over an async TCP connection.
+
+    Returns a HostFuture that resolves when the send completes.
+    """
+    spawn_blocking(\:
+        conn.handle.write_async(data)
+    )
+
+fn async_tcp_receive(conn: AsyncTcpConnection, max_size: i64) -> HostFuture:
+    """Receive data from an async TCP connection.
+
+    Returns a HostFuture that resolves to the received text.
+    """
+    spawn_blocking(\:
+        conn.handle.read_async(max_size)
+    )
+
+fn async_tcp_close(conn: AsyncTcpConnection) -> HostFuture:
+    """Close an async TCP connection.
+
+    Returns a HostFuture that resolves when the connection is closed.
+    """
+    spawn_blocking(\:
+        conn.handle.close()
+        conn.connected = false
+    )
+
+# ============================================================================
+# Async TCP Listener
+# ============================================================================
+
+struct AsyncTcpListener:
+    """Non-blocking TCP listener backed by async_host."""
+    address: text
+    port: i64
+    handle: SocketHandle
+    listening: bool
+
+fn async_tcp_listen(address: text, port: i64) -> HostFuture:
+    """Bind and listen on a TCP address asynchronously.
+
+    Returns a HostFuture that resolves to an AsyncTcpListener.
+    """
+    spawn_blocking(\:
+        val handle = SocketHandle.bind(address, port)
+        AsyncTcpListener(
+            address: address,
+            port: port,
+            handle: handle,
+            listening: true
+        )
+    )
+
+fn async_tcp_accept(listener: AsyncTcpListener) -> HostFuture:
+    """Accept an incoming TCP connection asynchronously.
+
+    Returns a HostFuture that resolves to an AsyncTcpConnection.
+    Blocks the background thread until a client connects.
+    """
+    spawn_blocking(\:
+        val client_handle = listener.handle.accept_async()
+        AsyncTcpConnection(
+            address: "",
+            port: 0,
+            handle: client_handle,
+            connected: true
+        )
+    )
+
+fn async_tcp_listener_close(listener: AsyncTcpListener) -> HostFuture:
+    """Stop listening and close the listener socket."""
+    spawn_blocking(\:
+        listener.handle.close()
+        listener.listening = false
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AsyncTcpConnection, AsyncTcpListener
+export async_tcp_connect, async_tcp_send, async_tcp_receive, async_tcp_close
+export async_tcp_listen, async_tcp_accept, async_tcp_listener_close

@@ -1,0 +1,244 @@
+# Async HTTP Client — Non-Blocking HTTP using async_host
+#
+# Wraps the sync HTTP API (nogc_sync_mut/http/) with async_host futures.
+# Uses async TCP connections for non-blocking HTTP request/response cycles.
+#
+# Usage:
+#   use std.async_host.{HostRuntime, run_until_complete}
+#   use std.http.{async_http_get, async_http_post}
+#
+#   val runtime = HostRuntime.new()
+#   val resp = run_until_complete(runtime, async_http_get("http://example.com/api"))
+
+use std.async_host.future.{HostFuture, spawn_blocking}
+
+# ============================================================================
+# Async HTTP Types
+# ============================================================================
+
+struct AsyncHttpResponse:
+    """HTTP response from an async request."""
+    status_code: i64
+    headers: {text: text}
+    body: text
+    version: text
+
+struct AsyncHttpRequest:
+    """HTTP request configuration for async execution."""
+    method: text
+    url: text
+    headers: {text: text}
+    body: text
+    timeout_ms: i64
+
+# ============================================================================
+# Request Builders
+# ============================================================================
+
+fn async_http_request(method: text, url: text) -> AsyncHttpRequest:
+    """Create a basic async HTTP request."""
+    AsyncHttpRequest(
+        method: method,
+        url: url,
+        headers: {},
+        body: "",
+        timeout_ms: 30000
+    )
+
+fn async_http_request_with_body(method: text, url: text, body: text) -> AsyncHttpRequest:
+    """Create an async HTTP request with a body."""
+    AsyncHttpRequest(
+        method: method,
+        url: url,
+        headers: {"Content-Type": "application/json"},
+        body: body,
+        timeout_ms: 30000
+    )
+
+fn async_http_set_header(req: AsyncHttpRequest, key: text, value: text) -> AsyncHttpRequest:
+    """Set a header on the request."""
+    req.headers[key] = value
+    req
+
+fn async_http_set_timeout(req: AsyncHttpRequest, timeout_ms: i64) -> AsyncHttpRequest:
+    """Set request timeout in milliseconds."""
+    req.timeout_ms = timeout_ms
+    req
+
+# ============================================================================
+# Async HTTP Methods
+# ============================================================================
+
+fn async_http_get(url: text) -> HostFuture:
+    """Perform an async HTTP GET request.
+
+    Returns a HostFuture resolving to AsyncHttpResponse.
+    """
+    val req = async_http_request("GET", url)
+    async_http_execute(req)
+
+fn async_http_post(url: text, body: text) -> HostFuture:
+    """Perform an async HTTP POST request."""
+    val req = async_http_request_with_body("POST", url, body)
+    async_http_execute(req)
+
+fn async_http_put(url: text, body: text) -> HostFuture:
+    """Perform an async HTTP PUT request."""
+    val req = async_http_request_with_body("PUT", url, body)
+    async_http_execute(req)
+
+fn async_http_delete(url: text) -> HostFuture:
+    """Perform an async HTTP DELETE request."""
+    val req = async_http_request("DELETE", url)
+    async_http_execute(req)
+
+fn async_http_patch(url: text, body: text) -> HostFuture:
+    """Perform an async HTTP PATCH request."""
+    val req = async_http_request_with_body("PATCH", url, body)
+    async_http_execute(req)
+
+fn async_http_head(url: text) -> HostFuture:
+    """Perform an async HTTP HEAD request."""
+    val req = async_http_request("HEAD", url)
+    async_http_execute(req)
+
+# ============================================================================
+# Core Execution
+# ============================================================================
+
+fn async_http_execute(req: AsyncHttpRequest) -> HostFuture:
+    """Execute an async HTTP request.
+
+    Spawns the blocking HTTP I/O on a background thread.
+    Connects via TCP, sends the HTTP request, reads the response,
+    and parses it into an AsyncHttpResponse.
+    """
+    spawn_blocking(\:
+        # Build raw HTTP request
+        var request_text = "{req.method} {_extract_path(req.url)} HTTP/1.1\r\n"
+        request_text = request_text + "Host: {_extract_host(req.url)}\r\n"
+        for key in req.headers:
+            val value = req.headers[key]
+            request_text = request_text + "{key}: {value}\r\n"
+        if req.body.len() > 0:
+            request_text = request_text + "Content-Length: {req.body.len()}\r\n"
+        request_text = request_text + "Connection: close\r\n\r\n"
+        if req.body.len() > 0:
+            request_text = request_text + req.body
+
+        # Parse URL for host/port and connect via sync TCP (on background thread)
+        val host = _extract_host(req.url)
+        val port = _extract_port(req.url)
+
+        # Use sync TCP operations (this is running on a background thread)
+        extern fn rt_tcp_connect(host: text, port: i64) -> i64
+        extern fn rt_tcp_send(fd: i64, data: text) -> i64
+        extern fn rt_tcp_recv(fd: i64, max_size: i64) -> text
+        extern fn rt_tcp_close(fd: i64)
+
+        val fd = rt_tcp_connect(host, port)
+        rt_tcp_send(fd, request_text)
+        val response_text = rt_tcp_recv(fd, 65536)
+        rt_tcp_close(fd)
+
+        # Parse HTTP response
+        _parse_http_response(response_text)
+    )
+
+# ============================================================================
+# URL Helpers
+# ============================================================================
+
+fn _extract_host(url: text) -> text:
+    """Extract hostname from URL."""
+    var s = url
+    if s.starts_with("http://"):
+        s = s.substring(7)
+    elif s.starts_with("https://"):
+        s = s.substring(8)
+    val slash_idx = s.index_of("/")
+    if slash_idx >= 0:
+        s = s.substring(0, slash_idx)
+    val colon_idx = s.index_of(":")
+    if colon_idx >= 0:
+        s = s.substring(0, colon_idx)
+    s
+
+fn _extract_port(url: text) -> i64:
+    """Extract port from URL (default 80 for http, 443 for https)."""
+    var s = url
+    val is_https = s.starts_with("https://")
+    if s.starts_with("http://"):
+        s = s.substring(7)
+    elif is_https:
+        s = s.substring(8)
+    val slash_idx = s.index_of("/")
+    if slash_idx >= 0:
+        s = s.substring(0, slash_idx)
+    val colon_idx = s.index_of(":")
+    if colon_idx >= 0:
+        val port_str = s.substring(colon_idx + 1)
+        return port_str.to_i64()
+    if is_https: 443 else: 80
+
+fn _extract_path(url: text) -> text:
+    """Extract path from URL (default /)."""
+    var s = url
+    if s.starts_with("http://"):
+        s = s.substring(7)
+    elif s.starts_with("https://"):
+        s = s.substring(8)
+    val slash_idx = s.index_of("/")
+    if slash_idx >= 0:
+        s.substring(slash_idx)
+    else:
+        "/"
+
+fn _parse_http_response(raw: text) -> AsyncHttpResponse:
+    """Parse raw HTTP response text into AsyncHttpResponse."""
+    val header_end = raw.index_of("\r\n\r\n")
+    var headers_text = raw
+    var body = ""
+    if header_end >= 0:
+        headers_text = raw.substring(0, header_end)
+        body = raw.substring(header_end + 4)
+
+    val lines = headers_text.split("\r\n")
+    var status_code: i64 = 0
+    var version = "HTTP/1.1"
+    var headers: {text: text} = {}
+
+    if lines.len() > 0:
+        val status_line = lines[0]
+        val parts = status_line.split(" ")
+        if parts.len() >= 2:
+            version = parts[0]
+            status_code = parts[1].to_i64()
+
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        val colon_idx = line.index_of(": ")
+        if colon_idx >= 0:
+            val key = line.substring(0, colon_idx)
+            val value = line.substring(colon_idx + 2)
+            headers[key] = value
+        i = i + 1
+
+    AsyncHttpResponse(
+        status_code: status_code,
+        headers: headers,
+        body: body,
+        version: version
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AsyncHttpResponse, AsyncHttpRequest
+export async_http_request, async_http_request_with_body
+export async_http_set_header, async_http_set_timeout
+export async_http_get, async_http_post, async_http_put
+export async_http_delete, async_http_patch, async_http_head
+export async_http_execute

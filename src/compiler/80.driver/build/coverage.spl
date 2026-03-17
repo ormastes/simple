@@ -1,14 +1,12 @@
-# Coverage Orchestrator - OPTIMIZED VERSION
+# Coverage Orchestrator - Pure Simple Pipeline
 #
 # Code coverage integration for the Simple build system.
-# Supports multiple coverage levels and report formats.
-#
-# OPTIMIZATIONS APPLIED:
-# 1. Use .? existence check instead of .len() > 0
-# 2. Cache string split results
-# 3. Batch print statements for result output
+# Runs the Pure Simple test runner with --coverage flag
+# instead of cargo llvm-cov.
 
-use std.text.{parse_i64, split_whitespace}
+use app.io.mod (process_run, process_run_timeout, file_exists, file_read, dir_create)
+use app.io.dir_ops.{dir_create_all}
+use app.io.env_ops.{env_set}
 
 # Coverage level
 enum CoverageLevel:
@@ -20,9 +18,9 @@ enum CoverageLevel:
 # Coverage format
 enum CoverageFormat:
     Text          # Plain text summary
-    Html          # HTML report
-    Lcov          # LCOV format for CI
-    Json          # JSON format for tooling
+    Html          # HTML report (not yet supported, falls back to text+markdown)
+    Lcov          # LCOV format (not yet supported, falls back to text+markdown)
+    Json          # JSON format (not yet supported, falls back to text+markdown)
 
 # Coverage configuration
 struct CoverageConfig:
@@ -32,8 +30,7 @@ struct CoverageConfig:
     threshold: f64        # Minimum coverage percentage (0.0 = no threshold)
     fail_on_threshold: bool
     include_doctests: bool
-    workspace: bool       # Cover entire workspace vs single package
-    package: text         # Specific package (empty = workspace)
+    test_path: text       # Test path filter (empty = all tests)
 
 # Coverage result
 struct CoverageResult:
@@ -49,16 +46,15 @@ struct CoverageResult:
 
 impl CoverageResult:
     fn summary() -> text:
-        "Coverage: {self.coverage_percent}% ({self.lines_covered}/{self.lines_total} lines)"
-
-use app.io.mod (process_run, file_exists, dir_create)
+        "Coverage: {self.coverage_percent}% ({self.lines_covered}/{self.lines_total} decisions)"
 
 # Coverage orchestrator class
 class Coverage:
     # Run coverage with configuration
     static fn run(config: CoverageConfig) -> CoverageResult:
-        # Check if cargo-llvm-cov is available
-        if not is_llvm_cov_installed():
+        # Find Simple binary
+        val binary = find_simple_binary_for_cov()
+        if binary == "":
             return CoverageResult(
                 success: false,
                 exit_code: 1,
@@ -67,38 +63,54 @@ class Coverage:
                 lines_total: 0,
                 report_path: "",
                 stdout: "",
-                stderr: "cargo-llvm-cov not installed. Run: cargo install cargo-llvm-cov",
+                stderr: "Simple binary not found (checked bin/release/simple and bin/simple)",
                 met_threshold: false
             )
 
-        # OPTIMIZATION: Use .? existence check
-        # Create output directory
-        if config.output_dir.?:
-            dir_create(config.output_dir, false)
+        # Ensure output directory exists
+        dir_create_all(config.output_dir)
 
-        # Build cargo-llvm-cov command
-        var args = build_coverage_args(config)
+        # Enable coverage via environment variable
+        env_set("SIMPLE_COVERAGE", "1")
 
-        # Run coverage
-        val (stdout, stderr, exit_code) = process_run("cargo", args)
+        # Build test runner args
+        var args: [text] = ["test"]
 
-        # Parse coverage percentage from output
-        val coverage_percent = parse_coverage_percent(stdout)
-        val (lines_covered, lines_total) = parse_coverage_lines(stdout)
+        # Add test path filter
+        if config.test_path != "":
+            args.push(config.test_path)
+
+        # Run test runner with coverage enabled via env var
+        val timeout_ms = 600000  # 10 minute timeout for full coverage run
+        val (stdout, stderr, exit_code) = process_run_timeout(binary, args, timeout_ms)
+
+        # Read coverage data from saved SDN file
+        val sdn_path = "{config.output_dir}/coverage.sdn"
+        var coverage_percent = 0.0
+        var lines_covered = 0
+        var lines_total = 0
+        if file_exists(sdn_path):
+            val sdn_content = file_read(sdn_path)
+            val (cov_pct, cov_covered, cov_total) = parse_sdn_coverage_stats(sdn_content)
+            coverage_percent = cov_pct
+            lines_covered = cov_covered
+            lines_total = cov_total
+        else:
+            # Fallback: parse from stdout
+            coverage_percent = parse_coverage_percent_from_summary(stdout)
+            val (c, t) = parse_coverage_decisions(stdout)
+            lines_covered = c
+            lines_total = t
 
         # Check threshold
-        val met_threshold = if config.threshold > 0.0:
-            coverage_percent >= config.threshold
-        else:
-            true
+        var met_threshold = true
+        if config.threshold > 0.0:
+            met_threshold = coverage_percent >= config.threshold
 
         val success = (exit_code == 0) and (not config.fail_on_threshold or met_threshold)
 
-        # Determine report path
-        val report_path = if config.format == CoverageFormat.Html:
-            "{config.output_dir}/html/index.html"
-        else:
-            ""
+        # Report path
+        val report_path = "{config.output_dir}/summary.md"
 
         CoverageResult(
             success: success,
@@ -122,228 +134,118 @@ class Coverage:
         config.level = level
         Coverage.run(config)
 
-# Check if cargo-llvm-cov is installed
-fn is_llvm_cov_installed() -> bool:
-    val (stdout, stderr, exit_code) = process_run("cargo", ["llvm-cov", "--version"])
-    exit_code == 0
+# Find the Simple binary
+fn find_simple_binary_for_cov() -> text:
+    if file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    ""
 
-# Build coverage arguments for cargo-llvm-cov
-fn build_coverage_args(config: CoverageConfig) -> [text]:
-    var args = ["llvm-cov"]
-
-    # Workspace or package
-    if config.workspace:
-        args = args.merge(["--workspace"])
-    # OPTIMIZATION: Use .? existence check
-    else if config.package.?:
-        args = args.merge(["-p", config.package])
-
-    # Test level filter
-    match config.level:
-        case CoverageLevel.Unit:
-            args = args.merge(["--lib"])
-        case CoverageLevel.Integration:
-            args = args.merge(["--tests"])
-        case CoverageLevel.System:
-            args = args.merge(["--tests"])
-        case CoverageLevel.All:
-            pass  # No filter = all tests
-
-    # Include doctests
-    if config.include_doctests:
-        args = args.merge(["--doc"])
-
-    # OPTIMIZATION: Use .? existence check
-    # Output format
-    match config.format:
-        case CoverageFormat.Text:
-            pass  # Default output
-        case CoverageFormat.Html:
-            args = args.merge(["--html"])
-            if config.output_dir.?:
-                args = args.merge(["--output-dir", config.output_dir])
-        case CoverageFormat.Lcov:
-            args = args.merge(["--lcov"])
-            if config.output_dir.?:
-                args = args.merge(["--output-path", "{config.output_dir}/lcov.info"])
-        case CoverageFormat.Json:
-            args = args.merge(["--json"])
-            if config.output_dir.?:
-                args = args.merge(["--output-path", "{config.output_dir}/coverage.json"])
-
-    args
-
-# Parse coverage percentage from cargo-llvm-cov output
-fn parse_coverage_percent(output: text) -> f64:
-    # Look for lines like: "TOTAL   1234   567   45.93%"
-    # or "test result: ... coverage: 75.5%"
-
-    # OPTIMIZATION: Cache split result
-    # Simple parsing - look for percentage pattern
+# Parse coverage percentage from test runner summary output
+fn parse_coverage_percent_from_summary(output: text) -> f64:
+    # Look for "Decision coverage: XX% (..."
     val lines = output.split("\n")
     for line in lines:
-        if line.contains("%"):
-            # Find the percentage value
-            # Look for pattern: "XX.XX%" or "XX%"
+        if line.contains("Decision coverage:"):
             val trimmed = line.trim()
-
-            # Try to find percentage sign and work backwards
+            # Extract percentage: "Decision coverage: 85% (..."
             val pct_idx = trimmed.index_of("%")
             if pct_idx.?:
                 val idx = pct_idx.unwrap()
-                # Extract digits before %
                 var start = idx - 1
                 var num_str = ""
-
-                # Go backwards to find the start of the number
                 while start >= 0:
                     val ch = trimmed[start]
-                    if ch >= '0' and ch <= '9':
+                    if ch >= "0" and ch <= "9":
                         num_str = ch + num_str
                         start = start - 1
-                    elif ch == '.':
-                        num_str = ch + num_str
-                        start = start - 1
-                    elif num_str.len() > 0:
-                        # Hit a non-digit after finding digits - done
+                    elif num_str != "":
                         break
                     else:
-                        # Still looking for first digit
                         start = start - 1
-
-                # Try to parse the number
-                if num_str.len() > 0:
-                    # Simple string to float conversion
-                    match parse_float(num_str):
-                        Some(pct):
-                            return pct
-                        nil:
-                            continue
+                if num_str != "":
+                    return to_float(num_str)
     0.0
 
-fn parse_float(s: text) -> f64?:
-    """Simple float parser for coverage percentages."""
-    if s.len() == 0:
-        return nil
-
-    # Handle format: "123.45" or "123"
-    if s.contains("."):
-        val parts = s.split(".")
-        if parts.len() == 2:
-            # Parse integer and decimal parts
-            val int_part = parse_int(parts[0])
-            val dec_part = parse_int(parts[1])
-
-            if int_part.? and dec_part.?:
-                val int_val = int_part.unwrap().to_f64()
-                val dec_val = dec_part.unwrap().to_f64()
-                val dec_places = parts[1].len().to_f64()
-                val divisor = power_of_10(dec_places)
-                return Some(int_val + (dec_val / divisor))
-    else:
-        # Just an integer
-        match parse_int(s):
-            Some(n):
-                return Some(n.to_f64())
-            nil:
-                return nil
-
-    nil
-
-fn parse_int(s: text) -> i64?:
-    """Simple integer parser."""
-    if s.len() == 0:
-        return nil
-    # Note: parse_i64 returns 0 on error, so we wrap in Some
-    Some(parse_i64(s))
-
-fn power_of_10(exp: f64) -> f64:
-    """Calculate 10^exp for small exponents."""
-    var result = 1.0
-    var i = 0.0
-    while i < exp:
-        result = result * 10.0
-        i = i + 1.0
-    result
-
-# Parse lines covered/total from output
-fn parse_coverage_lines(output: text) -> (i64, i64):
-    # Parse output for lines covered and total
-    # Format: "TOTAL   1234   567   45.93%"
-    # Where 1234 = total lines, 567 = covered lines
-
-    # Look for TOTAL line
+# Parse decisions covered/total from output
+fn parse_coverage_decisions(output: text) -> (i64, i64):
+    # Look for "Decision coverage: XX% (covered/total decisions)"
     val lines = output.split("\n")
     for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("TOTAL"):
-            # Parse numbers from TOTAL line
-            # Format: "TOTAL   <total>   <covered>   <percent>%"
-            val parts = trimmed.split_whitespace()
-
-            # Need at least: ["TOTAL", total, covered, percent]
-            if parts.len() >= 4:
-                # parts[1] = total lines
-                # parts[2] = covered lines
-                match parse_int(parts[1]):
-                    Some(total):
-                        match parse_int(parts[2]):
-                            Some(covered):
-                                return (covered, total)
-                            nil:
-                                continue
-                    nil:
-                        continue
-
-    # Try alternative format: "lines......: 75.5% (567 of 1234 lines)"
-    for line in lines:
-        if line.contains("lines") and line.contains("of"):
-            # Extract numbers from "567 of 1234"
-            val parts = line.split_whitespace()
-            var i = 0
-            while i < parts.len() - 2:
-                if parts[i + 1] == "of":
-                    # Found pattern: "number of number"
-                    match parse_int(parts[i]):
-                        Some(covered):
-                            match parse_int(parts[i + 2]):
-                                Some(total):
-                                    return (covered, total)
-                                nil:
-                                    ()
-                        nil:
-                            ()
-                i = i + 1
-
+        if line.contains("Decision coverage:") and line.contains("/"):
+            # Extract "123/456" from the parenthesized part
+            val paren_start = line.index_of("(")
+            val paren_end = line.index_of(")")
+            if paren_start.? and paren_end.?:
+                val inner = line[paren_start.unwrap() + 1 : paren_end.unwrap()]
+                # inner is like "123/456 decisions"
+                val slash_idx = inner.index_of("/")
+                if slash_idx.?:
+                    val si = slash_idx.unwrap()
+                    val covered_str = inner[0:si].trim()
+                    val rest = inner[si + 1:]
+                    # rest is like "456 decisions"
+                    val space_idx = rest.index_of(" ")
+                    var total_str = rest.trim()
+                    if space_idx.?:
+                        total_str = rest[0:space_idx.unwrap()].trim()
+                    val covered = to_int(covered_str)
+                    val total = to_int(total_str)
+                    return (covered, total)
     (0, 0)
 
-# split_whitespace() removed — use split_whitespace() from std.text instead
+# Parse coverage stats from SDN file content
+fn parse_sdn_coverage_stats(sdn: text) -> (f64, i64, i64):
+    var total_decisions = 0
+    var covered_decisions = 0
+    var in_decisions = false
+    val lines = sdn.split("\n")
+    # Count decisions: a decision is covered if it has both true>0 and false>0
+    var decision_ids: [text] = []
+    var decision_true_counts: [i64] = []
+    var decision_false_counts: [i64] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("decisions"):
+            in_decisions = true
+            continue
+        if trimmed.starts_with("conditions") or trimmed.starts_with("summary") or trimmed.starts_with("paths"):
+            in_decisions = false
+            continue
+        if in_decisions and trimmed != "" and not trimmed.starts_with("#"):
+            val parts = trimmed.split(",")
+            if parts.len() >= 6:
+                val decision_id = parts[0].trim()
+                val true_count = to_int(parts[4].trim())
+                val false_count = to_int(parts[5].trim())
+                total_decisions = total_decisions + 1
+                if true_count > 0 and false_count > 0:
+                    covered_decisions = covered_decisions + 1
+    var pct = 0.0
+    if total_decisions > 0:
+        pct = (covered_decisions * 100) / total_decisions * 1.0
+    (pct, covered_decisions, total_decisions)
 
-# Print coverage result - OPTIMIZED VERSION
+fn to_float(s: text) -> f64:
+    val n = to_int(s)
+    n * 1.0
+
+# Print coverage result
 fn print_coverage_result(result: CoverageResult):
-    # OPTIMIZATION: Build all output as list then print once
-    var lines = []
-
     if result.success:
-        lines.push("✓ Coverage: {result.coverage_percent}%")
-        lines.push("  Lines covered: {result.lines_covered}/{result.lines_total}")
-
-        # OPTIMIZATION: Use .? existence check
-        if result.report_path.?:
-            lines.push("  Report: {result.report_path}")
-
+        print "Coverage: {result.coverage_percent}%"
+        print "  Decisions covered: {result.lines_covered}/{result.lines_total}"
+        if result.report_path != "":
+            print "  Report: {result.report_path}"
         if result.met_threshold:
-            lines.push("  ✓ Met coverage threshold")
+            print "  Threshold check: passed"
         else:
-            lines.push("  ✗ Below coverage threshold")
+            print "  Threshold check: FAILED"
     else:
-        lines.push("✗ Coverage failed with exit code {result.exit_code}")
-        # OPTIMIZATION: Use .? existence check
-        if result.stderr.?:
-            lines.push(result.stderr)
-
-    # OPTIMIZATION: Single print call
-    print lines.join("\n")
+        print "Coverage failed with exit code {result.exit_code}"
+        if result.stderr != "":
+            print result.stderr
 
 # Default coverage configuration
 fn default_coverage_config() -> CoverageConfig:
@@ -354,8 +256,7 @@ fn default_coverage_config() -> CoverageConfig:
         threshold: 0.0,
         fail_on_threshold: false,
         include_doctests: false,
-        workspace: true,
-        package: ""
+        test_path: ""
     )
 
 # Helper: Convert level to string

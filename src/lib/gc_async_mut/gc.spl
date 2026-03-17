@@ -1,0 +1,47 @@
+# Async GC Re-Export with Async-Safe Collection Triggers
+#
+# Re-exports the GC implementation from nogc_sync_mut/gc.spl
+# with async-aware collection hints. The core GC is the same;
+# collection timing integrates with the async scheduler.
+
+use std.gc.{GcHeap, GcConfig, GcStats, GcPtr, GcColor, GcObjectHeader}
+
+# Re-export core GC types
+export GcHeap
+export GcConfig
+export GcStats
+export GcPtr
+export GcColor
+export GcObjectHeader
+
+# ============================================================================
+# Async-Safe Collection Helpers
+# ============================================================================
+
+var _async_gc_collection_pending: bool = false
+
+fn async_gc_request_collection():
+    """Request GC collection at the next async yield point.
+
+    This does NOT trigger immediate collection. Instead, it sets a flag
+    that the async scheduler checks between task switches.
+    """
+    _async_gc_collection_pending = true
+
+fn async_gc_collection_needed() -> bool:
+    """Check if a GC collection has been requested."""
+    _async_gc_collection_pending
+
+fn async_gc_collection_done():
+    """Mark the pending collection as completed."""
+    _async_gc_collection_pending = false
+
+fn async_gc_safe_point(heap: GcHeap):
+    """GC safe point — check and run collection if pending.
+
+    Call this at async yield points (task switches, channel waits, etc.)
+    to allow the GC to run without pausing active tasks.
+    """
+    if _async_gc_collection_pending:
+        heap.collect()
+        _async_gc_collection_pending = false

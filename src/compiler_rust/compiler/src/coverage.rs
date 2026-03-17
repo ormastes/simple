@@ -126,9 +126,30 @@ pub fn is_coverage_enabled() -> bool {
 }
 
 pub fn save_global_coverage() -> Result<(), String> {
+    // Dump coverage SDN from the runtime and write to file
+    let sdn = unsafe {
+        let ptr = simple_runtime::rt_coverage_dump_sdn();
+        if ptr.is_null() {
+            return Err("Failed to dump coverage SDN".to_string());
+        }
+        let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string();
+        simple_runtime::rt_coverage_free_sdn(ptr);
+        s
+    };
+    if sdn.is_empty() {
+        return Ok(());
+    }
+    let output_dir = "build/coverage";
+    std::fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create {}: {}", output_dir, e))?;
+    let output_path = format!("{}/coverage.sdn", output_dir);
+    std::fs::write(&output_path, &sdn).map_err(|e| format!("Failed to write {}: {}", output_path, e))?;
     Ok(())
 }
 
 pub fn get_coverage_output_path() -> Option<String> {
-    None
+    if is_coverage_enabled() {
+        Some("build/coverage/coverage.sdn".to_string())
+    } else {
+        None
+    }
 }

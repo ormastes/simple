@@ -53,7 +53,7 @@ fn try_dunder_binop(
     }
     None
 }
-use super::super::coverage_helpers::record_condition_coverage;
+use super::super::coverage_helpers::{record_condition_coverage, current_file_for_coverage};
 
 /// Check if a variable name refers to an immutable binding
 fn is_variable_immutable(name: &str) -> bool {
@@ -103,12 +103,12 @@ pub(super) fn eval_op_expr(
                     let left_result = left_val.truthy();
 
                     // COVERAGE: Record left condition of &&~
-                    record_condition_coverage("<source>", 0, 0, 0, left_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 0, left_result);
 
                     if !left_result {
                         // Short-circuit: left is falsy, don't evaluate right
                         // COVERAGE: Record that right side wasn't evaluated (false for completeness)
-                        record_condition_coverage("<source>", 0, 0, 1, false);
+                        record_condition_coverage(&current_file_for_coverage(), 0, 0, 1, false);
                         return Ok(Some(Value::Bool(false)));
                     }
                     // Left is truthy, await right and return logical AND
@@ -117,7 +117,7 @@ pub(super) fn eval_op_expr(
                     let right_result = awaited_right.truthy();
 
                     // COVERAGE: Record right condition of &&~
-                    record_condition_coverage("<source>", 0, 0, 1, right_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 1, right_result);
 
                     return Ok(Some(Value::Bool(right_result)));
                 }
@@ -126,12 +126,12 @@ pub(super) fn eval_op_expr(
                     let left_result = left_val.truthy();
 
                     // COVERAGE: Record left condition of ||~
-                    record_condition_coverage("<source>", 0, 1, 0, left_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 0, left_result);
 
                     if left_result {
                         // Short-circuit: left is truthy, don't evaluate right
                         // COVERAGE: Record that right side wasn't evaluated (true for completeness)
-                        record_condition_coverage("<source>", 0, 1, 1, true);
+                        record_condition_coverage(&current_file_for_coverage(), 0, 1, 1, true);
                         return Ok(Some(Value::Bool(true)));
                     }
                     // Left is falsy, await right and return its truthiness
@@ -140,7 +140,7 @@ pub(super) fn eval_op_expr(
                     let right_result = awaited_right.truthy();
 
                     // COVERAGE: Record right condition of ||~
-                    record_condition_coverage("<source>", 0, 1, 1, right_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 1, right_result);
 
                     return Ok(Some(Value::Bool(right_result)));
                 }
@@ -615,8 +615,8 @@ pub(super) fn eval_op_expr(
                     let combined = left_result && right_result;
 
                     // COVERAGE: Record condition coverage for && operator
-                    record_condition_coverage("<source>", 0, 0, 0, left_result);
-                    record_condition_coverage("<source>", 0, 0, 1, right_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 0, left_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 1, right_result);
 
                     Ok(Value::Bool(combined))
                 }
@@ -626,8 +626,8 @@ pub(super) fn eval_op_expr(
                     let combined = left_result || right_result;
 
                     // COVERAGE: Record condition coverage for || operator
-                    record_condition_coverage("<source>", 0, 1, 0, left_result);
-                    record_condition_coverage("<source>", 0, 1, 1, right_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 0, left_result);
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 1, right_result);
 
                     Ok(Value::Bool(combined))
                 }
