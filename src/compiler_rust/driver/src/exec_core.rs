@@ -716,7 +716,7 @@ impl ExecCore {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
-        use simple_compiler::interpreter::{evaluate_module, set_current_file};
+        use simple_compiler::interpreter::{evaluate_module, set_current_file, set_coverage_file};
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
@@ -749,11 +749,13 @@ impl ExecCore {
 
         // Re-set current file before evaluation (module loading may have changed it)
         set_current_file(Some(path.to_path_buf()));
+        set_coverage_file(&path.display().to_string());
 
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 
         // Clear current file after evaluation
         set_current_file(None);
+        set_coverage_file("");
 
         self.collect_gc();
         Ok(exit_code)

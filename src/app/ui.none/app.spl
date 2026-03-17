@@ -1,0 +1,117 @@
+# Headless Application
+#
+# Runs the UI system without a display for testing and CI.
+# Processes injected events and captures render output.
+
+use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
+use app.ui.core.parser.{parse_ui_file}
+use app.ui.core.state.{init_state, update_state, update_tree, is_quit_event}
+use app.ui.none.backend.{NoneBackend}
+
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# Headless App
+# =========================================================================
+
+class HeadlessApp:
+    file_path: text
+    state: UIState
+    backend: NoneBackend
+
+    static fn new(file_path: text) -> Result<HeadlessApp, text>:
+        val tree_result = parse_ui_file(file_path)
+        match tree_result:
+            Err(e) =>
+                return Err(e)
+            Ok(tree) =>
+                val state = init_state(tree)
+                var backend = NoneBackend.new()
+                val init_result = backend.init()
+                match init_result:
+                    Err(e) =>
+                        return Err(e)
+                    Ok(_) =>
+                        pass_dn
+
+                return Ok(HeadlessApp(
+                    file_path: file_path,
+                    state: state,
+                    backend: backend
+                ))
+
+    fn run() -> Result<bool, text>:
+        """Process all queued events, rendering after each."""
+        # Initial render
+        val render_result = self.backend.render(self.state)
+        match render_result:
+            Err(e) =>
+                return Err(e)
+            Ok(_) =>
+                pass_dn
+
+        # Process all queued events
+        while true:
+            val event = self.backend.poll_event(0)
+            if event == nil:
+                break
+
+            if is_quit_event(event):
+                self.backend.shutdown()
+                return Ok(true)
+
+            self.state = update_state(self.state, event)
+            val r = self.backend.render(self.state)
+            match r:
+                Err(e) =>
+                    return Err(e)
+                Ok(_) =>
+                    pass_dn
+
+        return Ok(true)
+
+    fn run_single_event(event: UIEvent) -> UIState:
+        """Process one event and return the new state."""
+        self.state = update_state(self.state, event)
+        val r = self.backend.render(self.state)
+        return self.state
+
+    fn current_state() -> UIState:
+        return self.state
+
+    fn inject_event(event: UIEvent):
+        self.backend.inject_event(event)
+
+    fn inject_events(events: [UIEvent]):
+        self.backend.inject_events(events)
+
+    fn render_count() -> i32:
+        return self.backend.render_count()
+
+    fn last_html() -> text:
+        return self.backend.last_html()
+
+# =========================================================================
+# Entry Point
+# =========================================================================
+
+fn run_headless(file_path: text) -> i64:
+    """Start headless mode for a .ui.sdn file."""
+    if not rt_file_exists(file_path):
+        print "Error: File not found: {file_path}"
+        return 1
+
+    val app_result = HeadlessApp.new(file_path)
+    match app_result:
+        Err(e) =>
+            print "Error: {e}"
+            return 1
+        Ok(app) =>
+            val run_result = app.run()
+            match run_result:
+                Err(e) =>
+                    print "Error during headless run: {e}"
+                    return 1
+                Ok(_) =>
+                    print "Headless UI completed."
+                    return 0

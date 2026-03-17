@@ -5,8 +5,27 @@
 
 use simple_parser::ast::{Node, Expr};
 use simple_parser::token::Span;
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+// Dedicated coverage file tracker — separate from interpreter state's CURRENT_FILE
+// to avoid being cleared during module loading/import resolution.
+thread_local! {
+    static COVERAGE_CURRENT_FILE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set the current file for coverage tracking. Called from exec_core before evaluation.
+pub fn set_coverage_file(path: &str) {
+    COVERAGE_CURRENT_FILE.with(|cell| {
+        *cell.borrow_mut() = path.to_string();
+    });
+}
+
+/// Get the current file for coverage tracking.
+fn get_coverage_file() -> String {
+    COVERAGE_CURRENT_FILE.with(|cell| cell.borrow().clone())
+}
 
 /// Extract source location from a Node's span
 ///
@@ -89,9 +108,15 @@ pub fn is_coverage_enabled() -> bool {
 /// Get current source file path for coverage reporting
 #[inline]
 pub fn current_file_for_coverage() -> String {
-    super::interpreter_state::get_current_file()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<source>".to_string())
+    let file = get_coverage_file();
+    if file.is_empty() {
+        // Fallback to interpreter state
+        super::interpreter_state::get_current_file()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<source>".to_string())
+    } else {
+        file
+    }
 }
 
 /// Record line coverage for a node if coverage is enabled
@@ -166,9 +191,8 @@ pub fn record_condition_coverage(
     let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
 
     unsafe {
-        // Use decision probe with modified ID to track condition coverage
-        // In the future, we could use rt_coverage_condition_probe when available
-        simple_runtime::rt_coverage_decision_probe(
+        simple_runtime::rt_coverage_condition_probe(
+            base_id,
             condition_id,
             condition_result,
             file_cstr.as_ptr(),
