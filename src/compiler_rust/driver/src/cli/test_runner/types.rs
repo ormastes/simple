@@ -328,11 +328,12 @@ pub struct TestRunResult {
     pub total_skipped: usize,
     pub total_ignored: usize,
     pub total_duration_ms: u64,
+    pub coverage_threshold_failed: bool,
 }
 
 impl TestRunResult {
     pub fn success(&self) -> bool {
-        self.total_failed == 0
+        self.total_failed == 0 && !self.coverage_threshold_failed
     }
 }
 
@@ -349,6 +350,7 @@ mod tests {
             total_skipped: 0,
             total_ignored: 0,
             total_duration_ms: 100,
+            coverage_threshold_failed: false,
         };
         assert!(result.success());
 
@@ -359,6 +361,7 @@ mod tests {
             total_skipped: 0,
             total_ignored: 0,
             total_duration_ms: 100,
+            coverage_threshold_failed: false,
         };
         assert!(!failed_result.success());
     }

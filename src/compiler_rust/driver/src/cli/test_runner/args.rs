@@ -278,6 +278,20 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 // Enable coverage tracking via environment variable
                 std::env::set_var("SIMPLE_COVERAGE", "1");
             }
+            "--threshold" => {
+                i += 1;
+                if i < args.len() {
+                    // Set threshold for coverage check (used by build coverage)
+                    std::env::set_var("SIMPLE_COVERAGE_THRESHOLD", &args[i]);
+                    // Also enable coverage if not already enabled
+                    std::env::set_var("SIMPLE_COVERAGE", "1");
+                }
+            }
+            arg if arg.starts_with("--threshold=") => {
+                let val = arg.trim_start_matches("--threshold=");
+                std::env::set_var("SIMPLE_COVERAGE_THRESHOLD", val);
+                std::env::set_var("SIMPLE_COVERAGE", "1");
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }

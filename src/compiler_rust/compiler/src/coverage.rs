@@ -68,7 +68,8 @@ pub struct CoverageSummary {
 }
 
 pub struct CoverageCollector {
-    _data: Vec<(String, u64)>,
+    lines: std::collections::HashMap<String, std::collections::HashSet<usize>>,
+    function_calls: std::collections::HashMap<String, u64>,
 }
 
 impl Default for CoverageCollector {
@@ -79,24 +80,54 @@ impl Default for CoverageCollector {
 
 impl CoverageCollector {
     pub fn new() -> Self {
-        Self { _data: Vec::new() }
+        Self {
+            lines: std::collections::HashMap::new(),
+            function_calls: std::collections::HashMap::new(),
+        }
     }
     pub fn to_sdn(&self) -> String {
-        String::new()
+        // Delegate to runtime's real coverage data
+        let sdn = unsafe {
+            let ptr = simple_runtime::rt_coverage_dump_sdn();
+            if ptr.is_null() {
+                return String::new();
+            }
+            let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string();
+            simple_runtime::rt_coverage_free_sdn(ptr);
+            s
+        };
+        sdn
     }
-    pub fn record_line(&mut self, _file: impl AsRef<std::path::Path>, _line: usize) {}
-    pub fn record_function_call(&mut self, _name: &str) {}
+    pub fn record_line(&mut self, file: impl AsRef<std::path::Path>, line: usize) {
+        let path = file.as_ref().display().to_string();
+        self.lines.entry(path).or_default().insert(line);
+    }
+    pub fn record_function_call(&mut self, name: &str) {
+        *self.function_calls.entry(name.to_string()).or_insert(0) += 1;
+    }
     pub fn clear(&mut self) {
-        self._data.clear();
+        self.lines.clear();
+        self.function_calls.clear();
     }
     pub fn stats(&self) -> CoverageStats {
-        CoverageStats::default()
+        let total_lines: u64 = self.lines.values().map(|s| s.len() as u64).sum();
+        let total_functions = self.function_calls.len() as u64;
+        let functions_hit = self.function_calls.values().filter(|&&c| c > 0).count() as u64;
+        CoverageStats {
+            total_lines,
+            lines_hit: total_lines, // all recorded lines are covered
+            lines_total: total_lines,
+            total_functions,
+            functions_hit,
+            functions_total: total_functions,
+            ..CoverageStats::default()
+        }
     }
-    pub fn was_function_called(&self, _name: &str) -> bool {
-        false
+    pub fn was_function_called(&self, name: &str) -> bool {
+        self.function_calls.get(name).map_or(false, |&c| c > 0)
     }
     pub fn executed_files(&self) -> Vec<String> {
-        Vec::new()
+        self.lines.keys().cloned().collect()
     }
 }
 

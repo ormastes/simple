@@ -565,11 +565,9 @@ pub fn rt_coverage_enable(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
-/// Check if coverage is enabled (always returns true in interpreter)
+/// Check if coverage is enabled — delegates to runtime's actual flag
 pub fn rt_coverage_enabled(_args: &[Value]) -> Result<Value, CompileError> {
-    // In the interpreter, coverage tracking is always conceptually available
-    // via the global coverage infrastructure
-    Ok(Value::Bool(crate::coverage::get_global_coverage().is_some()))
+    Ok(Value::Bool(simple_runtime::rt_coverage_enabled()))
 }
 
 /// Clear all coverage data

@@ -287,20 +287,24 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     }
 
     let start = Instant::now();
-    let result = TestRunResult {
+    let mut result = TestRunResult {
         files: results,
         total_passed,
         total_failed,
         total_skipped,
         total_ignored,
         total_duration_ms: start.elapsed().as_millis() as u64,
+        coverage_threshold_failed: false,
     };
 
     // Post-processing (skip in list mode)
     if !list_mode {
         generate_diagrams_if_enabled(&options, &result, quiet);
         finalize_profiling(&options, quiet);
-        save_coverage_data(quiet);
+        let coverage_passed = save_coverage_data(quiet);
+        if !coverage_passed {
+            result.coverage_threshold_failed = true;
+        }
     }
 
     // Complete test run tracking
@@ -864,6 +868,7 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
                 total_skipped: 0,
                 total_ignored: 0,
                 total_duration_ms: start.elapsed().as_millis() as u64,
+                coverage_threshold_failed: false,
             };
         }
     };
@@ -897,6 +902,7 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
         total_skipped: registry.skipped_count(),
         total_ignored: registry.ignored_count(),
         total_duration_ms: start.elapsed().as_millis() as u64,
+        coverage_threshold_failed: false,
     }
 }
 
@@ -1065,6 +1071,7 @@ fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: boo
         total_skipped: test_files.len(),
         total_ignored: 0,
         total_duration_ms: start.elapsed().as_millis() as u64,
+        coverage_threshold_failed: false,
     }
 }
 
@@ -1197,5 +1204,6 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
         total_skipped: 0,
         total_ignored: 0,
         total_duration_ms: 0,
+        coverage_threshold_failed: false,
     }
 }

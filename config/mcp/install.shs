@@ -1,11 +1,14 @@
 #!/bin/sh
 # Install platform-specific .mcp.json to project root.
+# Reinstall preserves existing custom MCP server entries while refreshing
+# repo-managed defaults from the selected template.
 # Usage: sh config/mcp/install.shs
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TARGET="$PROJECT_ROOT/.mcp.json"
 
 OS="$(uname -s)"
 
@@ -18,5 +21,44 @@ case "$OS" in
         ;;
 esac
 
-cp "$SRC" "$PROJECT_ROOT/.mcp.json"
-echo "Installed .mcp.json for $OS"
+if [ ! -f "$TARGET" ]; then
+    cp "$SRC" "$TARGET"
+    echo "Installed .mcp.json for $OS"
+    exit 0
+fi
+
+TMP_FILE="$(mktemp)"
+
+if node - "$SRC" "$TARGET" "$TMP_FILE" <<'EOF'
+const fs = require("fs");
+
+const srcPath = process.argv[2];
+const targetPath = process.argv[3];
+const outputPath = process.argv[4];
+
+function readJson(path) {
+  return JSON.parse(fs.readFileSync(path, "utf8"));
+}
+
+const template = readJson(srcPath);
+const existing = readJson(targetPath);
+
+const merged = {
+  ...existing,
+  ...template,
+  mcpServers: {
+    ...(existing.mcpServers || {}),
+    ...(template.mcpServers || {}),
+  },
+};
+
+fs.writeFileSync(outputPath, JSON.stringify(merged, null, 2) + "\n");
+EOF
+then
+    mv "$TMP_FILE" "$TARGET"
+    echo "Merged .mcp.json for $OS and preserved custom MCP entries"
+else
+    rm -f "$TMP_FILE"
+    echo "Failed to merge existing .mcp.json; please fix invalid JSON and rerun." >&2
+    exit 1
+fi
