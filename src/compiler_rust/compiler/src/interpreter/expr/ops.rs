@@ -146,19 +146,35 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::And => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    if !left_val.truthy() {
+                    let left_result = left_val.truthy();
+                    // COVERAGE: Record left condition of &&
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 0, left_result);
+                    if !left_result {
+                        // Short-circuit: right not evaluated, record as false
+                        record_condition_coverage(&current_file_for_coverage(), 0, 0, 1, false);
                         return Ok(Some(Value::Bool(false)));
                     }
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                    return Ok(Some(Value::Bool(right_val.truthy())));
+                    let right_result = right_val.truthy();
+                    // COVERAGE: Record right condition of &&
+                    record_condition_coverage(&current_file_for_coverage(), 0, 0, 1, right_result);
+                    return Ok(Some(Value::Bool(right_result)));
                 }
                 BinOp::Or => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    if left_val.truthy() {
+                    let left_result = left_val.truthy();
+                    // COVERAGE: Record left condition of ||
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 0, left_result);
+                    if left_result {
+                        // Short-circuit: right not evaluated, record as true
+                        record_condition_coverage(&current_file_for_coverage(), 0, 1, 1, true);
                         return Ok(Some(Value::Bool(true)));
                     }
                     let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                    return Ok(Some(Value::Bool(right_val.truthy())));
+                    let right_result = right_val.truthy();
+                    // COVERAGE: Record right condition of ||
+                    record_condition_coverage(&current_file_for_coverage(), 0, 1, 1, right_result);
+                    return Ok(Some(Value::Bool(right_result)));
                 }
                 BinOp::ShiftRight | BinOp::Compose => {
                     // Compose operator: f >> g → \__c0: g(f(__c0))

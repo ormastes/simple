@@ -529,6 +529,43 @@ pub fn coverage_summary(args: &[Value]) -> Result<Value, CompileError> {
 // FFI functions for coverage.spl (rt_coverage_* interface)
 // ============================================================================
 
+/// Record a condition probe from interpreted Simple code
+/// Args: (decision_id: i64, condition_id: i64, result: bool, file: text, line: i64, column: i64)
+pub fn rt_coverage_condition_probe_interp(args: &[Value]) -> Result<Value, CompileError> {
+    if !crate::coverage::is_coverage_enabled() {
+        return Ok(Value::Nil);
+    }
+    let decision_id = match args.get(0) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let condition_id = match args.get(1) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let result = match args.get(2) {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    let file = match args.get(3) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let line = match args.get(4) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let column = match args.get(5) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
+    unsafe {
+        simple_runtime::rt_coverage_condition_probe(decision_id, condition_id, result, file_cstr.as_ptr(), line, column);
+    }
+    Ok(Value::Nil)
+}
+
 /// Record a decision probe from interpreted Simple code
 /// Args: (file: text, line: i64, decision_id: i64, taken: bool)
 pub fn rt_coverage_decision_probe_interp(args: &[Value]) -> Result<Value, CompileError> {

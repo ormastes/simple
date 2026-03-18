@@ -11,14 +11,35 @@ use std::hash::{Hash, Hasher};
 
 // Dedicated coverage file tracker — separate from interpreter state's CURRENT_FILE
 // to avoid being cleared during module loading/import resolution.
+// Uses a stack to support push/pop around sub-module evaluations.
 thread_local! {
     static COVERAGE_CURRENT_FILE: RefCell<String> = const { RefCell::new(String::new()) };
+    static COVERAGE_FILE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Set the current file for coverage tracking. Called from exec_core before evaluation.
 pub fn set_coverage_file(path: &str) {
     COVERAGE_CURRENT_FILE.with(|cell| {
         *cell.borrow_mut() = path.to_string();
+    });
+}
+
+/// Push the current coverage file onto the stack and set a new one.
+/// Used around sub-module evaluations to preserve the parent file.
+pub fn push_coverage_file(path: &str) {
+    COVERAGE_FILE_STACK.with(|stack| {
+        let current = COVERAGE_CURRENT_FILE.with(|cell| cell.borrow().clone());
+        stack.borrow_mut().push(current);
+    });
+    set_coverage_file(path);
+}
+
+/// Pop the previous coverage file from the stack, restoring it.
+pub fn pop_coverage_file() {
+    COVERAGE_FILE_STACK.with(|stack| {
+        if let Some(prev) = stack.borrow_mut().pop() {
+            set_coverage_file(&prev);
+        }
     });
 }
 

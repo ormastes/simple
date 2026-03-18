@@ -18,6 +18,7 @@
 # ===== Coverage Instrumentation =====
 extern fn rt_coverage_enabled() -> bool
 extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
+extern fn rt_coverage_condition_probe(decision_id: i64, condition_id: i64, result: bool, file: text, line: i64, column: i64)
 var coverage_counter: i64 = 0
 var eval_current_file: text = ""
 var coverage_is_enabled: bool = false
@@ -30,6 +31,14 @@ fn record_decision(line: i64, taken: bool):
     if coverage_is_enabled:
         coverage_counter = coverage_counter + 1
         rt_coverage_decision_probe(eval_current_file, line, coverage_counter, taken)
+
+fn record_condition(decision_id: i64, condition_index: i64, result: bool, line: i64):
+    if not coverage_checked:
+        coverage_checked = true
+        coverage_is_enabled = rt_coverage_enabled()
+    if coverage_is_enabled:
+        val cond_id = decision_id * 31 + condition_index
+        rt_coverage_condition_probe(decision_id, cond_id, result, eval_current_file, line, 0)
 
 # ===== Type Checking Integration =====
 # Basic runtime type checking for function parameters
@@ -412,9 +421,13 @@ fn eval_binary(eid: i64) -> i64:
         val err = ops_get_error()
         if err != "":
             eval_set_error(err)
-    # Coverage: record and/or operator results as branch decisions
+    # Coverage: record and/or operator results as decisions + individual conditions
     if op == 55 or op == 56:
+        coverage_counter = coverage_counter + 1
+        val bin_decision_id = coverage_counter
         record_decision(eid, val_is_truthy(result))
+        record_condition(bin_decision_id, 0, val_is_truthy(left), eid)
+        record_condition(bin_decision_id, 1, val_is_truthy(right), eid)
     result
 
 fn eval_unary(eid: i64) -> i64:

@@ -957,6 +957,7 @@ pub(crate) fn call_extern_function(
         "rt_coverage_dump_sdn" => coverage::rt_coverage_dump_sdn(&evaluated),
         "rt_coverage_free_sdn" => coverage::rt_coverage_free_sdn(&evaluated),
         "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_interp(&evaluated),
+        "rt_coverage_condition_probe" => coverage::rt_coverage_condition_probe_interp(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
 
         // ====================================================================

@@ -88,7 +88,7 @@ pub(crate) use coverage_helpers::{
     extract_node_location, record_node_coverage, record_decision_coverage_ffi, record_condition_coverage,
     decision_id_from_span, is_coverage_enabled, current_file_for_coverage,
 };
-pub use coverage_helpers::set_coverage_file;
+pub use coverage_helpers::{set_coverage_file, push_coverage_file, pop_coverage_file};
 
 // Node execution
 mod node_exec;

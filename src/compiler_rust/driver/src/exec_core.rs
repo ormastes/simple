@@ -716,7 +716,7 @@ impl ExecCore {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
-        use simple_compiler::interpreter::{evaluate_module, set_current_file, set_coverage_file};
+        use simple_compiler::interpreter::{evaluate_module, set_current_file, set_coverage_file, push_coverage_file, pop_coverage_file};
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
@@ -744,12 +744,20 @@ impl ExecCore {
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
+        // Push coverage file before module loading so imports preserve the parent file
+        let file_str = path.display().to_string();
+        set_coverage_file(&file_str);
+        push_coverage_file(&file_str);
+
         let module =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("compile failed: {}", e))?;
 
+        // Restore coverage file after module loading (imports may have changed it)
+        pop_coverage_file();
+
         // Re-set current file before evaluation (module loading may have changed it)
         set_current_file(Some(path.to_path_buf()));
-        set_coverage_file(&path.display().to_string());
+        set_coverage_file(&file_str);
 
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 

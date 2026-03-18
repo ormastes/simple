@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::interpreter::{Interpreter, RunConfig};
+use simple_compiler::interpreter::set_coverage_file;
 
 use crate::doctest::parser::{is_definition_like, is_prelude_definition};
 use crate::doctest::types::{DoctestExample, DoctestResult, DoctestStatus, Expected};
@@ -30,6 +31,10 @@ struct EvalState {
 fn run_example(example: &DoctestExample, state: &mut EvalState) -> DoctestResult {
     let mut outputs: Vec<String> = Vec::new();
     let mut halted = false;
+
+    // Set coverage file for doctest so decisions get proper file paths
+    let source_path = example.source.display().to_string();
+    set_coverage_file(&source_path);
 
     let config = RunConfig {
         in_memory: true,
