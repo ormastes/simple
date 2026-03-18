@@ -65,6 +65,7 @@ pub mod cargo;
 pub mod sdn;
 pub mod coverage;
 pub mod cranelift;
+pub mod perf;
 pub mod sandbox;
 pub mod mock_policy;
 pub mod ffi_value;
@@ -952,6 +953,7 @@ pub(crate) fn call_extern_function(
         "coverage_summary" => coverage::coverage_summary(&evaluated),
         // FFI functions for coverage.spl
         "rt_coverage_enable" => coverage::rt_coverage_enable(&evaluated),
+        "rt_coverage_enable_timed" => coverage::rt_coverage_enable_timed(&evaluated),
         "rt_coverage_enabled" => coverage::rt_coverage_enabled(&evaluated),
         "rt_coverage_clear" => coverage::rt_coverage_clear(&evaluated),
         "rt_coverage_dump_sdn" => coverage::rt_coverage_dump_sdn(&evaluated),
@@ -959,6 +961,17 @@ pub(crate) fn call_extern_function(
         "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_interp(&evaluated),
         "rt_coverage_condition_probe" => coverage::rt_coverage_condition_probe_interp(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
+        // Performance measurement functions
+        "rt_perf_enable" => perf::rt_perf_enable(&evaluated),
+        "rt_perf_enabled" => perf::rt_perf_enabled(&evaluated),
+        "rt_perf_clock_ns" => perf::rt_perf_clock_ns(&evaluated),
+        "rt_perf_rdtsc" => perf::rt_perf_rdtsc(&evaluated),
+        "rt_perf_cycles_to_ns" => perf::rt_perf_cycles_to_ns(&evaluated),
+        "rt_perf_region_enter" => perf::rt_perf_region_enter(&evaluated),
+        "rt_perf_region_exit" => perf::rt_perf_region_exit(&evaluated),
+        "rt_perf_dump_sdn" => perf::rt_perf_dump_sdn(&evaluated),
+        "rt_perf_free_sdn" => perf::rt_perf_free_sdn(&evaluated),
+        "rt_perf_clear" => perf::rt_perf_clear(&evaluated),
 
         // ====================================================================
         // Profiler FFI Functions (no-op in interpreter mode)

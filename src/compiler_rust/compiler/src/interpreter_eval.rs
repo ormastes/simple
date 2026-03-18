@@ -1009,7 +1009,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         match &use_stmt.target {
                             ImportTarget::Group(items) => {
                                 // Group import: use module.{Item1, Item2}
-                                // Only add the specified items to env
+                                // Add specified items to env AND functions HashMap
                                 if let Value::Dict(exports) = &value {
                                     for item_target in items {
                                         let item_name = match item_target {
@@ -1017,6 +1017,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             ImportTarget::Aliased { name, alias } => {
                                                 // Import with alias: {Item as alias}
                                                 if let Some(export_value) = exports.get(name) {
+                                                    if let Value::Function { def, .. } = export_value {
+                                                        functions.insert(alias.clone(), *def.clone());
+                                                    }
                                                     env.insert(alias.clone(), export_value.clone());
                                                     MODULE_GLOBALS.with(|cell| {
                                                         cell.borrow_mut().insert(alias.clone(), export_value.clone());
@@ -1027,6 +1030,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             _ => continue, // Nested groups not supported
                                         };
                                         if let Some(export_value) = exports.get(&item_name) {
+                                            if let Value::Function { def, .. } = export_value {
+                                                functions.insert(item_name.clone(), *def.clone());
+                                            }
                                             env.insert(item_name.clone(), export_value.clone());
                                             MODULE_GLOBALS.with(|cell| {
                                                 cell.borrow_mut().insert(item_name.clone(), export_value.clone());
@@ -1037,9 +1043,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
                             ImportTarget::Glob => {
                                 // Glob import: use module.*
-                                // Add all exports to env
+                                // Add all exports to env AND functions HashMap
                                 if let Value::Dict(exports) = &value {
                                     for (name, export_value) in exports {
+                                        if let Value::Function { def, .. } = export_value {
+                                            functions.insert(name.clone(), *def.clone());
+                                        }
                                         env.insert(name.clone(), export_value.clone());
                                         MODULE_GLOBALS.with(|cell| {
                                             cell.borrow_mut().insert(name.clone(), export_value.clone());

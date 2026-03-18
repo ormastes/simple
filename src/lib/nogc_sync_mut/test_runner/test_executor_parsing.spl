@@ -18,6 +18,8 @@ use app.io.cli_ops.{cli_get_args}
 
 val COVERAGE_BEGIN = "__SIMPLE_COVERAGE_SDN_BEGIN__"
 val COVERAGE_END = "__SIMPLE_COVERAGE_SDN_END__"
+val PERF_BEGIN = "__SIMPLE_PERF_SDN_BEGIN__"
+val PERF_END = "__SIMPLE_PERF_SDN_END__"
 
 fn find_simple_new_binary() -> text:
     if file_exists("./rust/target/bootstrap/simple_new1_"):
@@ -305,6 +307,67 @@ fn extract_coverage_sdn(output: text) -> text:
 fn strip_coverage_blocks(output: text) -> text:
     val (clean, _) = split_coverage_output(output)
     clean
+
+# =========================================================================
+# Performance Profiling Wrapper
+# =========================================================================
+
+fn build_perf_wrapper(file_path: text, options: TestOptions) -> (text, text):
+    if not options.profile:
+        return (file_path, "")
+    val content = read_file_content(file_path)
+    if content == "":
+        return (file_path, "")
+
+    var base = file_path.replace("/", "_")
+    base = base.replace(".spl", "")
+    val tmp_path = "/tmp/simple_perf_" + base + coverage_wrapper_suffix(file_path)
+
+    var lines: [text] = []
+    # Enable perf at the top, before any code runs
+    lines.push("# === Perf Enable (auto-generated) ===")
+    lines.push("extern fn rt_perf_enable()")
+    lines.push("rt_perf_enable()")
+    lines.push("")
+    lines.push(content)
+    lines.push("")
+    lines.push("# === Perf Dump (auto-generated) ===")
+    lines.push("extern fn rt_perf_enabled() -> bool")
+    lines.push("extern fn rt_perf_dump_sdn() -> text")
+    lines.push("")
+    lines.push("fn __simple_perf_dump():")
+    lines.push("    if not rt_perf_enabled():")
+    lines.push("        return")
+    lines.push("    val sdn = rt_perf_dump_sdn()")
+    lines.push("    print \"" + PERF_BEGIN + "\"")
+    lines.push("    print sdn")
+    lines.push("    print \"" + PERF_END + "\"")
+    lines.push("")
+    lines.push("__simple_perf_dump()")
+
+    val wrapped = lines.join("\n")
+    file_write(tmp_path, wrapped)
+    (tmp_path, tmp_path)
+
+fn split_perf_output(output: text) -> (text, text):
+    """Single-pass extraction: split output into (clean_output, perf_sdn)."""
+    val lines = output.split("\n")
+    var in_block = false
+    var kept: [text] = []
+    var sdn_lines: [text] = []
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+        if clean == PERF_BEGIN:
+            in_block = true
+            continue
+        if clean == PERF_END:
+            in_block = false
+            continue
+        if in_block:
+            sdn_lines.push(line)
+        else:
+            kept.push(line)
+    (kept.join("\n"), sdn_lines.join("\n"))
 
 # =========================================================================
 # G3: Static test listing (parse source without execution)

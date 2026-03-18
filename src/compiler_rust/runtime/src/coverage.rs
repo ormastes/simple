@@ -14,6 +14,9 @@ use std::sync::{Mutex, OnceLock};
 /// Must be explicitly enabled via `rt_coverage_enable()`.
 static COVERAGE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// When true, coverage probes also record timestamps for perf tracing.
+static COVERAGE_TIMED: AtomicBool = AtomicBool::new(false);
+
 /// Global file path interning table
 static FILE_INTERN: OnceLock<Mutex<FileInternTable>> = OnceLock::new();
 
@@ -87,6 +90,8 @@ struct DecisionProbe {
     line: u32,
     column: u32,
     result: bool,
+    /// Nanoseconds since coverage clock baseline (0 when timed mode is off)
+    timestamp_ns: u64,
 }
 
 struct ConditionProbe {
@@ -96,6 +101,25 @@ struct ConditionProbe {
     line: u32,
     column: u32,
     result: bool,
+    /// Nanoseconds since coverage clock baseline (0 when timed mode is off)
+    timestamp_ns: u64,
+}
+
+/// Clock baseline for timed coverage mode
+static COVERAGE_CLOCK_BASE: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Get or initialize the coverage clock baseline
+fn coverage_clock_base() -> &'static std::time::Instant {
+    COVERAGE_CLOCK_BASE.get_or_init(std::time::Instant::now)
+}
+
+/// Get current timestamp in nanoseconds (0 if timed mode is off)
+fn timed_timestamp_ns() -> u64 {
+    if COVERAGE_TIMED.load(Ordering::Relaxed) {
+        coverage_clock_base().elapsed().as_nanos() as u64
+    } else {
+        0
+    }
 }
 
 thread_local! {
@@ -109,6 +133,7 @@ fn flush_decisions_to_global(probes: &mut Vec<DecisionProbe>) {
     if probes.is_empty() {
         return;
     }
+    let timed = COVERAGE_TIMED.load(Ordering::Relaxed);
     if let Ok(mut data) = get_coverage_data().lock() {
         for probe in probes.drain(..) {
             let key = (probe.decision_id, probe.file_id, probe.line, probe.column);
@@ -117,6 +142,14 @@ fn flush_decisions_to_global(probes: &mut Vec<DecisionProbe>) {
                 entry.0 += 1;
             } else {
                 entry.1 += 1;
+            }
+            if timed && probe.timestamp_ns > 0 {
+                data.timed_traces.push(TimedTraceEntry {
+                    file_id: probe.file_id,
+                    line: probe.line,
+                    decision_id: probe.decision_id,
+                    timestamp_ns: probe.timestamp_ns,
+                });
             }
         }
     }
@@ -127,6 +160,7 @@ fn flush_conditions_to_global(probes: &mut Vec<ConditionProbe>) {
     if probes.is_empty() {
         return;
     }
+    let timed = COVERAGE_TIMED.load(Ordering::Relaxed);
     if let Ok(mut data) = get_coverage_data().lock() {
         for probe in probes.drain(..) {
             let key = (
@@ -141,6 +175,14 @@ fn flush_conditions_to_global(probes: &mut Vec<ConditionProbe>) {
                 entry.0 += 1;
             } else {
                 entry.1 += 1;
+            }
+            if timed && probe.timestamp_ns > 0 {
+                data.timed_traces.push(TimedTraceEntry {
+                    file_id: probe.file_id,
+                    line: probe.line,
+                    decision_id: probe.decision_id,
+                    timestamp_ns: probe.timestamp_ns,
+                });
             }
         }
     }
@@ -160,6 +202,15 @@ fn flush_all_local() {
 // Coverage Data (Global)
 //==============================================================================
 
+/// Timed trace entry for perf_trace section
+#[derive(Debug, Clone)]
+pub struct TimedTraceEntry {
+    pub file_id: u32,
+    pub line: u32,
+    pub decision_id: u32,
+    pub timestamp_ns: u64,
+}
+
 /// Coverage data collected at runtime (uses interned file IDs as keys)
 #[derive(Debug, Default)]
 pub struct CoverageData {
@@ -171,6 +222,8 @@ pub struct CoverageData {
     pub paths: HashMap<(u32, Vec<u32>), u64>,
     /// Current path being traced: path_id -> block sequence
     path_traces: HashMap<u32, Vec<u32>>,
+    /// Timed trace entries (only populated when COVERAGE_TIMED is true)
+    pub timed_traces: Vec<TimedTraceEntry>,
 }
 
 impl CoverageData {
@@ -199,6 +252,7 @@ impl CoverageData {
         self.conditions.clear();
         self.paths.clear();
         self.path_traces.clear();
+        self.timed_traces.clear();
     }
 
     /// Generate SDN format coverage report (resolves file IDs back to names)
@@ -306,6 +360,26 @@ impl CoverageData {
             output.push_str("    path_percent: 100.0\n");
         }
 
+        // Perf trace section (only when timed data exists)
+        if !self.timed_traces.is_empty() {
+            output.push('\n');
+            output.push_str("perf_trace |file, line, decision_id, timestamp_ns, delta_ns|\n");
+            let mut prev_ts: u64 = 0;
+            for entry in &self.timed_traces {
+                let file = intern.get_name(entry.file_id);
+                let delta = if prev_ts > 0 {
+                    entry.timestamp_ns.saturating_sub(prev_ts)
+                } else {
+                    0
+                };
+                output.push_str(&format!(
+                    "    {}, {}, {}, {}, {}\n",
+                    file, entry.line, entry.decision_id, entry.timestamp_ns, delta
+                ));
+                prev_ts = entry.timestamp_ns;
+            }
+        }
+
         output
     }
 }
@@ -324,6 +398,15 @@ fn get_coverage_data() -> &'static Mutex<CoverageData> {
 #[no_mangle]
 pub extern "C" fn rt_coverage_enable() {
     COVERAGE_ENABLED.store(true, Ordering::Release);
+}
+
+/// Enable coverage tracking with timestamps for perf tracing.
+/// Enables both coverage AND timed mode.
+#[no_mangle]
+pub extern "C" fn rt_coverage_enable_timed() {
+    let _ = coverage_clock_base(); // Initialize clock baseline
+    COVERAGE_ENABLED.store(true, Ordering::Release);
+    COVERAGE_TIMED.store(true, Ordering::Release);
 }
 
 /// Check if coverage is enabled (false by default).
@@ -356,6 +439,8 @@ pub unsafe extern "C" fn rt_coverage_decision_probe(
 
     let file_id = intern_file(file_str);
 
+    let ts = timed_timestamp_ns();
+
     LOCAL_DECISIONS.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.push(DecisionProbe {
@@ -364,6 +449,7 @@ pub unsafe extern "C" fn rt_coverage_decision_probe(
             line,
             column,
             result,
+            timestamp_ns: ts,
         });
         if buf.len() >= FLUSH_THRESHOLD {
             flush_decisions_to_global(&mut buf);
@@ -395,6 +481,7 @@ pub unsafe extern "C" fn rt_coverage_condition_probe(
     };
 
     let file_id = intern_file(file_str);
+    let ts = timed_timestamp_ns();
 
     LOCAL_CONDITIONS.with(|buf| {
         let mut buf = buf.borrow_mut();
@@ -405,6 +492,7 @@ pub unsafe extern "C" fn rt_coverage_condition_probe(
             line,
             column,
             result,
+            timestamp_ns: ts,
         });
         if buf.len() >= FLUSH_THRESHOLD {
             flush_conditions_to_global(&mut buf);
@@ -479,12 +567,25 @@ pub extern "C" fn rt_coverage_clear() {
     LOCAL_CONDITIONS.with(|buf| buf.borrow_mut().clear());
     LOCAL_FILE_CACHE.with(|cache| cache.borrow_mut().clear());
 
+    // Reset timed mode
+    COVERAGE_TIMED.store(false, Ordering::Release);
+
     if let Ok(mut data) = get_coverage_data().lock() {
         data.clear();
     }
     if let Ok(mut intern) = get_file_intern().lock() {
         intern.clear();
     }
+}
+
+/// Check if coverage is running in timed mode
+pub fn is_coverage_timed() -> bool {
+    COVERAGE_TIMED.load(Ordering::Relaxed)
+}
+
+/// Check if coverage is enabled (public helper for interpreter_extern)
+pub fn is_coverage_enabled() -> bool {
+    COVERAGE_ENABLED.load(Ordering::Relaxed)
 }
 
 //==============================================================================

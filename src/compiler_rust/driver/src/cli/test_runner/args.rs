@@ -278,6 +278,10 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 // Enable coverage tracking via environment variable
                 std::env::set_var("SIMPLE_COVERAGE", "1");
             }
+            "--profile" => {
+                // Enable performance profiling via environment variable
+                std::env::set_var("SIMPLE_PROFILE", "1");
+            }
             "--threshold" => {
                 i += 1;
                 if i < args.len() {

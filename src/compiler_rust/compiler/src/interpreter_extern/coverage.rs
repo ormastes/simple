@@ -602,6 +602,12 @@ pub fn rt_coverage_enable(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Enable coverage tracking with timestamps for perf tracing
+pub fn rt_coverage_enable_timed(_args: &[Value]) -> Result<Value, CompileError> {
+    simple_runtime::rt_coverage_enable_timed();
+    Ok(Value::Nil)
+}
+
 /// Check if coverage is enabled — delegates to runtime's actual flag
 pub fn rt_coverage_enabled(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(simple_runtime::rt_coverage_enabled()))

@@ -1,0 +1,221 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Test Runner Performance Integration
+#
+# Integrates SIMPLE_PROFILE runtime performance measurement with the test runner.
+# Handles setup, collection, parsing, summary, and report generation.
+# Mirrors test_runner_coverage.spl architecture.
+
+use app.io.env_ops.{env_set, env_get}
+use lib.common.text.{is_empty}
+use app.io.dir_ops.{dir_create_all}
+use app.io.file_ops.{file_write, file_read, file_exists}
+
+# Perf extern declarations
+extern fn rt_perf_enable()
+extern fn rt_perf_enabled() -> bool
+extern fn rt_perf_clear()
+extern fn rt_perf_dump_sdn() -> text
+extern fn rt_perf_clock_ns() -> i64
+
+# =========================================================================
+# Perf Data Types
+# =========================================================================
+
+struct PerfRegion:
+    path: text
+    line: i64
+    region_id: i64
+    count: i64
+    total_ns: i64
+    min_ns: i64
+    max_ns: i64
+    avg_ns: i64
+
+struct PerfData:
+    raw_sdn: text
+    regions: [PerfRegion]
+    total_regions: i64
+    total_time_ns: i64
+    hotspots: [PerfRegion]
+
+# =========================================================================
+# Global State (mirrors coverage pattern)
+# =========================================================================
+
+var perf_parts: [text] = []
+var perf_region_keys: [text] = []
+var perf_region_count = {}
+var perf_region_total_ns = {}
+var perf_region_min_ns = {}
+var perf_region_max_ns = {}
+var perf_file_path_index = {}
+
+# =========================================================================
+# Setup & Collection
+# =========================================================================
+
+fn setup_perf():
+    rt_perf_enable()
+    env_set("SIMPLE_PROFILE", "1")
+
+fn record_perf_sdn(sdn: text):
+    if sdn == "":
+        return
+    perf_parts.push(sdn)
+    accumulate_perf_sdn(sdn)
+
+fn perf_region_key(file: text, line: i64, region_id: i64) -> text:
+    "{file}|{line}|{region_id}"
+
+fn merge_perf_counts(key: text, count: i64, total_ns: i64, min_ns: i64, max_ns: i64):
+    if not perf_file_path_index.contains(key):
+        perf_region_keys.push(key)
+        perf_file_path_index[key] = perf_region_keys.length() - 1
+        perf_region_count[key] = 0
+        perf_region_total_ns[key] = 0
+        perf_region_min_ns[key] = 9223372036854775807
+        perf_region_max_ns[key] = 0
+    perf_region_count[key] = perf_region_count[key] + count
+    perf_region_total_ns[key] = perf_region_total_ns[key] + total_ns
+    if min_ns < perf_region_min_ns[key]:
+        perf_region_min_ns[key] = min_ns
+    if max_ns > perf_region_max_ns[key]:
+        perf_region_max_ns[key] = max_ns
+
+fn accumulate_perf_sdn(sdn: text):
+    val lines = sdn.split("\n")
+    var in_regions = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("regions "):
+            in_regions = true
+            continue
+        if trimmed.starts_with("summary:"):
+            in_regions = false
+            continue
+        if trimmed == "" or trimmed.starts_with("#"):
+            if not in_regions:
+                continue
+            else:
+                in_regions = false
+                continue
+        if in_regions:
+            val parts = trimmed.split(", ")
+            if parts.length() >= 7:
+                val region_id = parts[0].trim().to_i64()
+                val file = parts[1].trim()
+                val line_num = parts[2].trim().to_i64()
+                val count = parts[3].trim().to_i64()
+                val total_ns = parts[4].trim().to_i64()
+                val min_ns = parts[5].trim().to_i64()
+                val max_ns = parts[6].trim().to_i64()
+                val key = perf_region_key(file, line_num, region_id)
+                merge_perf_counts(key, count, total_ns, min_ns, max_ns)
+
+fn collect_perf() -> PerfData:
+    var regions: [PerfRegion] = []
+    var total_time: i64 = 0
+    for key in perf_region_keys:
+        val parts = key.split("|")
+        if parts.length() >= 3:
+            val path = parts[0]
+            val line = parts[1].to_i64()
+            val region_id = parts[2].to_i64()
+            val count = perf_region_count[key]
+            val total_ns = perf_region_total_ns[key]
+            val min_ns = perf_region_min_ns[key]
+            val max_ns = perf_region_max_ns[key]
+            var avg_ns: i64 = 0
+            if count > 0:
+                avg_ns = total_ns / count
+            regions.push(PerfRegion(
+                path: path, line: line, region_id: region_id,
+                count: count, total_ns: total_ns,
+                min_ns: min_ns, max_ns: max_ns, avg_ns: avg_ns
+            ))
+            total_time = total_time + total_ns
+
+    # Sort by total_ns descending to get hotspots
+    var hotspots: [PerfRegion] = []
+    var sorted = regions
+    var i = 0
+    while i < sorted.length() and i < 20:
+        var max_idx = i
+        var j = i + 1
+        while j < sorted.length():
+            if sorted[j].total_ns > sorted[max_idx].total_ns:
+                max_idx = j
+            j = j + 1
+        if max_idx != i:
+            val tmp = sorted[i]
+            sorted[i] = sorted[max_idx]
+            sorted[max_idx] = tmp
+        hotspots.push(sorted[i])
+        i = i + 1
+
+    val raw = perf_parts.join("\n---\n")
+    PerfData(
+        raw_sdn: raw,
+        regions: regions,
+        total_regions: regions.length(),
+        total_time_ns: total_time,
+        hotspots: hotspots
+    )
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn print_perf_summary(data: PerfData):
+    print ""
+    print "╔══════════════════════════════════════════════════════════════╗"
+    print "║                  Performance Profile Summary                ║"
+    print "╚══════════════════════════════════════════════════════════════╝"
+    print ""
+    val total_ms = data.total_time_ns / 1000000
+    print "  Total regions: {data.total_regions}"
+    print "  Total time:    {total_ms}ms ({data.total_time_ns}ns)"
+    print ""
+    if data.hotspots.length() > 0:
+        print "  Top hotspots:"
+        print "  ─────────────────────────────────────────────────────────────"
+        var fmt_header = "  {0:<40} {1:>8} {2:>10} {3:>10}"
+        print "  File:Line                               Count    Total(ms)   Avg(ns)"
+        print "  ─────────────────────────────────────────────────────────────"
+        var i = 0
+        while i < data.hotspots.length():
+            val r = data.hotspots[i]
+            val loc = "{r.path}:{r.line}"
+            var display = loc
+            if loc.length() > 40:
+                display = "..." + loc.substring(loc.length() - 37, loc.length())
+            val total_ms_r = r.total_ns / 1000000
+            print "  {display:<40} {r.count:>8} {total_ms_r:>10} {r.avg_ns:>10}"
+            i = i + 1
+    print ""
+
+fn generate_perf_reports(data: PerfData):
+    dir_create_all("build/perf")
+    # Write raw SDN data
+    if data.raw_sdn != "":
+        file_write("build/perf/perf_raw.sdn", data.raw_sdn)
+    # Write summary report
+    var report: [text] = []
+    report.push("# Performance Profile Report")
+    report.push("version: 1.0")
+    report.push("")
+    report.push("summary:")
+    report.push("    total_regions: {data.total_regions}")
+    report.push("    total_time_ns: {data.total_time_ns}")
+    report.push("")
+    if data.hotspots.length() > 0:
+        report.push("hotspots |file, line, region_id, count, total_ns, min_ns, max_ns, avg_ns|")
+        for r in data.hotspots:
+            report.push("    {r.path}, {r.line}, {r.region_id}, {r.count}, {r.total_ns}, {r.min_ns}, {r.max_ns}, {r.avg_ns}")
+    report.push("")
+    if data.regions.length() > 0:
+        report.push("all_regions |file, line, region_id, count, total_ns, min_ns, max_ns, avg_ns|")
+        for r in data.regions:
+            report.push("    {r.path}, {r.line}, {r.region_id}, {r.count}, {r.total_ns}, {r.min_ns}, {r.max_ns}, {r.avg_ns}")
+    file_write("build/perf/perf_report.sdn", report.join("\n"))
+    print "  Perf reports written to build/perf/"

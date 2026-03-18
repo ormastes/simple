@@ -463,6 +463,16 @@ fn main() -> i64:
     crate::cli::basic::run_code(&code, gc_log, gc_off)
 }
 
+/// Handle 'ui' command - UI application launcher
+pub fn handle_ui(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    let app_path = std::path::PathBuf::from("src/app/ui/main.spl");
+    if !app_path.exists() {
+        eprintln!("error: ui app not found (run from project root)");
+        return 1;
+    }
+    crate::cli::basic::run_file_with_args(&app_path, gc_log, gc_off, args.to_vec())
+}
+
 /// Handle 'dashboard' command - project dashboard CLI
 pub fn handle_dashboard(args: &[String], _gc_log: bool, _gc_off: bool) -> i32 {
     // Skip the command name ("dashboard")

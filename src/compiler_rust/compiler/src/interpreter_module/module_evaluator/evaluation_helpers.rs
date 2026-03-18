@@ -314,6 +314,7 @@ pub(super) fn process_imports_and_assignments(
                     use_stmt,
                     module_path,
                     env,
+                    local_functions,
                     global_functions,
                     global_classes,
                     global_enums,
@@ -384,6 +385,7 @@ fn process_use_stmt(
     use_stmt: &simple_parser::ast::UseStmt,
     module_path: Option<&Path>,
     env: &mut Env,
+    local_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
@@ -424,6 +426,11 @@ fn process_use_stmt(
             // Unpack module exports into current namespace
             if let Value::Dict(exports) = &value {
                 for (name, export_value) in exports {
+                    // Also register imported functions in local_functions so they
+                    // can be re-exported when this module is imported by others
+                    if let Value::Function { def, .. } = export_value {
+                        local_functions.insert(name.clone(), *def.clone());
+                    }
                     env.insert(name.clone(), export_value.clone());
                 }
             }

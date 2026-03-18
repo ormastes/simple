@@ -391,6 +391,14 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_BRIEF_RUST",
         needs_rust_flags: &[],
     },
+    // UI application
+    CommandEntry {
+        name: "ui",
+        app_path: "src/app/ui/main.spl",
+        rust_handler: Handler::ArgsGc(handle_ui),
+        env_override: "SIMPLE_UI_RUST",
+        needs_rust_flags: &[],
+    },
     // Dashboard
     CommandEntry {
         name: "dashboard",

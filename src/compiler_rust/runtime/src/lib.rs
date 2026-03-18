@@ -16,6 +16,7 @@ pub mod compress;
 pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;
+pub mod perf;
 pub mod cuda_runtime;
 pub mod debug;
 pub mod executor;
@@ -416,8 +417,15 @@ pub use parallel::{
 // Re-export coverage instrumentation types and FFI functions
 pub use coverage::{
     rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
-    rt_coverage_enable, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
-    rt_coverage_path_probe, CoverageData,
+    rt_coverage_enable, rt_coverage_enable_timed, rt_coverage_enabled, rt_coverage_free_sdn,
+    rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
+};
+
+// Re-export performance measurement types and FFI functions
+pub use perf::{
+    rt_perf_clear, rt_perf_clock_ns, rt_perf_cycles_to_ns, rt_perf_dump_sdn, rt_perf_enable,
+    rt_perf_enabled, rt_perf_free_sdn, rt_perf_rdtsc, rt_perf_region_enter, rt_perf_region_exit,
+    PerfData,
 };
 
 // Re-export debug FFI functions

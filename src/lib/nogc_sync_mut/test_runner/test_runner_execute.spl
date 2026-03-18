@@ -28,9 +28,11 @@ use test_executor_parsing.{
     coverage_wrapper_suffix, build_coverage_wrapper,
     split_coverage_output, extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
+    build_perf_wrapper, split_perf_output, PERF_BEGIN, PERF_END,
     list_tests_static, extract_static_test_name
 }
 use test_runner_coverage.{record_coverage_sdn}
+use test_runner_perf.{record_perf_sdn}
 use test_native_runner.{run_test_native}
 use test_loader_runner.{run_test_loader}
 use test_executor_composite.{
@@ -50,7 +52,11 @@ use test_executor_composite.{
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
+    val (cov_wrapped_path, cov_cleanup_path) = build_coverage_wrapper(file_path, options)
+    val (wrapped_path, perf_cleanup_path) = build_perf_wrapper(cov_wrapped_path, options)
+    var cleanup_path = cov_cleanup_path
+    if perf_cleanup_path != "":
+        cleanup_path = perf_cleanup_path
     val child_args = build_child_args(wrapped_path, options)
     val timeout_ms = options.timeout * 1000
     val start = time_now_unix_micros()
@@ -78,6 +84,14 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
+    if options.profile:
+        val (perf_clean_stdout, perf_sdn_out) = split_perf_output(stdout)
+        val (perf_clean_stderr, perf_sdn_err) = split_perf_output(stderr)
+        record_perf_sdn(perf_sdn_out)
+        if perf_sdn_err != "":
+            record_perf_sdn(perf_sdn_err)
+        stdout = perf_clean_stdout
+        stderr = perf_clean_stderr
     if options.coverage:
         val (clean_stdout, sdn_out) = split_coverage_output(stdout)
         val (clean_stderr, sdn_err) = split_coverage_output(stderr)
@@ -90,6 +104,10 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if cleanup_path != "" and not options.keep_artifacts:
         if file_exists(cleanup_path):
             file_delete(cleanup_path)
+    # Clean up coverage temp file when both wrappers are active
+    if cov_cleanup_path != "" and cov_cleanup_path != cleanup_path and not options.keep_artifacts:
+        if file_exists(cov_cleanup_path):
+            file_delete(cov_cleanup_path)
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 

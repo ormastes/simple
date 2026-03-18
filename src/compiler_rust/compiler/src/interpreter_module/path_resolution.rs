@@ -255,6 +255,28 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
         }
     }
 
+    // Strategy 4: Try dot-joined directory names (e.g., "ui" + "none" → "ui.none/")
+    // Handles directories with literal dots like src/app/ui.none/, src/app/ui.tui/
+    if depth + 1 < parts.len() {
+        let next_segment = &parts[depth + 1];
+        let dot_joined = format!("{}.{}", segment, next_segment);
+        let dot_dir = current.join(&dot_joined);
+        if dot_dir.exists() && dot_dir.is_dir() {
+            if depth + 1 == parts.len() - 1 {
+                // Dot-joined covers through the last segment — resolve as module
+                let init_path = dot_dir.join("__init__.spl");
+                if init_path.exists() && init_path.is_file() {
+                    return Some(init_path);
+                }
+            } else {
+                // More segments remain — recurse from depth+2
+                if let Some(found) = resolve_with_numbered_dirs_recursive(&dot_dir, parts, depth + 2) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+
     None
 }
 

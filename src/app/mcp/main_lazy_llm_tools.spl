@@ -1,0 +1,254 @@
+#![allow(unnamed_duplicate_typed_args)]
+# MCP Lazy Server - LLM Request tool handlers
+# Handles: llm_request, llm_request_file, llm_verify, llm_design
+#
+# Uses curl + jq for API calls — no stdlib imports.
+# Supports OpenAI (codex_api) and Gemini (gemini_api) providers.
+# Logs to .build/llm_logs/<id>.log
+
+# --- Internal helpers (prefixed _llm_) ---
+
+fn _llm_escape_json(s: text) -> text:
+    var out = s
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out
+
+fn _llm_mkdir_p(path: text):
+    var _out = ""
+    var _code: i64 = 0
+    (_out, _code) = shell_cmd("mkdir -p " + path)
+
+fn _llm_log(agent_id: text, level: text, msg: text):
+    _llm_mkdir_p(".build/llm_logs")
+    var _out = ""
+    var _code: i64 = 0
+    (_out, _code) = shell_cmd("date '+%Y-%m-%d %H:%M:%S'")
+    val ts = _out.trim()
+    val line = "[" + ts + "] [" + level + "] " + msg + "\n"
+    val log_path = ".build/llm_logs/" + agent_id + ".log"
+    var existing = ""
+    if rt_file_exists(log_path):
+        existing = rt_file_read_text(log_path) ?? ""
+    rt_file_write_text(log_path, existing + line)
+
+fn _llm_gen_id(provider: text) -> text:
+    var _out = ""
+    var _code: i64 = 0
+    (_out, _code) = shell_cmd("date +%s%N")
+    val ts = _out.trim()
+    "llm_" + provider + "_" + ts
+
+fn _llm_build_openai_args(system: text, prompt: text, model: text, key: text) -> [text]:
+    val body = "{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"system\",\"content\":\"" + _llm_escape_json(system) + "\"},{\"role\":\"user\",\"content\":\"" + _llm_escape_json(prompt) + "\"}]}"
+    ["-s", "-X", "POST",
+     "https://api.openai.com/v1/chat/completions",
+     "-H", "Content-Type: application/json",
+     "-H", "Authorization: Bearer " + key,
+     "-d", body]
+
+fn _llm_build_gemini_args(system: text, prompt: text, model: text, key: text) -> [text]:
+    val url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key
+    val body = "{\"system_instruction\":{\"parts\":[{\"text\":\"" + _llm_escape_json(system) + "\"}]},\"contents\":[{\"parts\":[{\"text\":\"" + _llm_escape_json(prompt) + "\"}]}]}"
+    ["-s", "-X", "POST", url,
+     "-H", "Content-Type: application/json",
+     "-d", body]
+
+fn _llm_extract_response(provider: text, raw: text, tmp_file: text) -> text:
+    rt_file_write_text(tmp_file, raw)
+    # Check for API error first
+    var err_out = ""
+    var err_err = ""
+    var err_rc: i64 = 0
+    (err_out, err_err, err_rc) = rt_process_run("jq", ["-r", ".error.message // empty", tmp_file])
+    val err_msg = (err_out ?? "").trim()
+    if err_msg != "":
+        return "API_ERROR: " + err_msg
+    var jq_filter = ""
+    if provider == "codex_api":
+        jq_filter = ".choices[0].message.content"
+    elif provider == "gemini_api":
+        jq_filter = ".candidates[0].content.parts[0].text"
+    else:
+        return "ERROR: Unknown provider for extraction: " + provider
+    var jq_out = ""
+    var jq_err = ""
+    var jq_rc: i64 = 0
+    (jq_out, jq_err, jq_rc) = rt_process_run("jq", ["-r", jq_filter, tmp_file])
+    val output = (jq_out ?? "").trim()
+    if output == "" or output == "null":
+        return "ERROR: Could not parse API response: " + raw
+    output
+
+fn _llm_call(provider: text, system: text, prompt: text, model: text) -> text:
+    val agent_id = _llm_gen_id(provider)
+    _llm_log(agent_id, "INFO", "provider=" + provider + " model=" + model)
+    _llm_log(agent_id, "INFO", "prompt_len=" + prompt.len().to_text())
+
+    var api_key = ""
+    if provider == "codex_api":
+        api_key = rt_env_get("OPENAI_API_KEY") ?? ""
+        if api_key == "":
+            _llm_log(agent_id, "ERROR", "OPENAI_API_KEY not set")
+            return "ERROR: OPENAI_API_KEY environment variable not set"
+    elif provider == "gemini_api":
+        api_key = rt_env_get("GEMINI_API_KEY") ?? ""
+        if api_key == "":
+            _llm_log(agent_id, "ERROR", "GEMINI_API_KEY not set")
+            return "ERROR: GEMINI_API_KEY environment variable not set"
+    else:
+        return "ERROR: Unknown provider: " + provider + ". Use codex_api or gemini_api"
+
+    var args: [text] = []
+    if provider == "codex_api":
+        args = _llm_build_openai_args(system, prompt, model, api_key)
+    elif provider == "gemini_api":
+        args = _llm_build_gemini_args(system, prompt, model, api_key)
+
+    _llm_log(agent_id, "INFO", "spawning curl with " + args.len().to_text() + " args")
+
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("curl", args)
+    stdout = stdout ?? ""
+    stderr = stderr ?? ""
+
+    _llm_log(agent_id, "INFO", "exit_code=" + code.to_text() + " stdout_len=" + stdout.len().to_text())
+
+    if code != 0:
+        _llm_log(agent_id, "ERROR", "curl failed: " + stderr)
+        return "ERROR: curl exited with code " + code.to_text() + ": " + stderr
+
+    val tmp_file = "/tmp/llm_mcp_" + agent_id + ".json"
+    val result = _llm_extract_response(provider, stdout, tmp_file)
+    _llm_log(agent_id, "INFO", "response_len=" + result.len().to_text())
+    result
+
+# --- Hardcoded system prompts for verify/design ---
+
+val _VERIFY_SYSTEM_PROMPT = "You are a plan verification agent. Given a plan document, verify:\n1. CURRENT STATUS: For each component marked Real or Done, check if the source file exists and contains no pass_todo, pass_do_nothing, or placeholder stubs. Report any component where status is inaccurate.\n2. ACHIEVABILITY: Check if completing all listed tasks would achieve the stated objective. Report any missing prerequisites or impossible goals.\n\nOutput format:\nSTATUS_CHECK:\n  - component_name: PASS/FAIL (reason)\nACHIEVABILITY_CHECK:\n  - PASS/FAIL (reason)\nOVERALL: PASS/FAIL"
+
+val _DESIGN_SYSTEM_PROMPT = "You are a UI/visual design agent for the Simple language project. Given the design document, produce:\n1. ASCII wireframe of the main interface layout\n2. Component hierarchy (which panels contain what)\n3. Color scheme recommendations (ANSI terminal colors for TUI, or CSS for web)\n4. Interaction flow (key bindings, mouse events, navigation)\n5. Responsive behavior (narrow terminal, small window)"
+
+# ============================================================================
+# llm_request — Generic LLM prompt → response
+# ============================================================================
+
+fn handle_llm_request(id: text, body: text) -> text:
+    val provider = extract_field(body, "provider")
+    if provider == "":
+        return make_tool_error(id, -32602, "Missing required parameter: provider (codex_api or gemini_api)")
+
+    val system_prompt = extract_field(body, "system_prompt")
+    if system_prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: system_prompt")
+
+    val prompt = extract_field(body, "prompt")
+    if prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: prompt")
+
+    var model = extract_field(body, "model")
+    if model == "":
+        if provider == "codex_api":
+            model = "o3-mini"
+        elif provider == "gemini_api":
+            model = "gemini-2.0-flash"
+
+    val result = _llm_call(provider, system_prompt, prompt, model)
+    if result.starts_with("ERROR:") or result.starts_with("API_ERROR:"):
+        return make_tool_error(id, -32603, result)
+
+    make_tool_result(id, result)
+
+# ============================================================================
+# llm_request_file — Like llm_request but reads prompt from file
+# ============================================================================
+
+fn handle_llm_request_file(id: text, body: text) -> text:
+    val provider = extract_field(body, "provider")
+    if provider == "":
+        return make_tool_error(id, -32602, "Missing required parameter: provider (codex_api or gemini_api)")
+
+    val system_prompt = extract_field(body, "system_prompt")
+    if system_prompt == "":
+        return make_tool_error(id, -32602, "Missing required parameter: system_prompt")
+
+    val prompt_file = extract_field(body, "prompt_file")
+    if prompt_file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: prompt_file")
+
+    if not rt_file_exists(prompt_file):
+        return make_tool_error(id, -32602, "Prompt file not found: " + prompt_file)
+
+    val prompt = rt_file_read_text(prompt_file) ?? ""
+    if prompt == "":
+        return make_tool_error(id, -32602, "Prompt file is empty: " + prompt_file)
+
+    var model = extract_field(body, "model")
+    if model == "":
+        if provider == "codex_api":
+            model = "o3-mini"
+        elif provider == "gemini_api":
+            model = "gemini-2.0-flash"
+
+    val result = _llm_call(provider, system_prompt, prompt, model)
+    if result.starts_with("ERROR:") or result.starts_with("API_ERROR:"):
+        return make_tool_error(id, -32603, result)
+
+    make_tool_result(id, result)
+
+# ============================================================================
+# llm_verify — Verification with hardcoded codex-verifier system prompt
+# ============================================================================
+
+fn handle_llm_verify(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+
+    if not rt_file_exists(file):
+        return make_tool_error(id, -32602, "File not found: " + file)
+
+    var prompt = rt_file_read_text(file) ?? ""
+    if prompt == "":
+        return make_tool_error(id, -32602, "File is empty: " + file)
+
+    val extra = extract_field(body, "extra_instructions")
+    if extra != "":
+        prompt = prompt + "\n\nAdditional instructions:\n" + extra
+
+    val result = _llm_call("codex_api", _VERIFY_SYSTEM_PROMPT, prompt, "o3-mini")
+    if result.starts_with("ERROR:") or result.starts_with("API_ERROR:"):
+        return make_tool_error(id, -32603, result)
+
+    make_tool_result(id, result)
+
+# ============================================================================
+# llm_design — Visual design with hardcoded gemini-designer system prompt
+# ============================================================================
+
+fn handle_llm_design(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+
+    if not rt_file_exists(file):
+        return make_tool_error(id, -32602, "File not found: " + file)
+
+    var prompt = rt_file_read_text(file) ?? ""
+    if prompt == "":
+        return make_tool_error(id, -32602, "File is empty: " + file)
+
+    val extra = extract_field(body, "extra_instructions")
+    if extra != "":
+        prompt = prompt + "\n\nAdditional instructions:\n" + extra
+
+    val result = _llm_call("gemini_api", _DESIGN_SYSTEM_PROMPT, prompt, "gemini-2.0-flash")
+    if result.starts_with("ERROR:") or result.starts_with("API_ERROR:"):
+        return make_tool_error(id, -32603, result)
+
+    make_tool_result(id, result)

@@ -42,19 +42,21 @@ review-team:     explore → docs                    (sequential)
 
 | Subagent | Provider | Role | When Used |
 |----------|----------|------|-----------|
-| **codex-verifier** | `codex_cli` | Verification: plan accuracy, test coverage, dummy detection | Phase 4v, 6v |
-| **gemini-designer** | `gemini_cli` | Visual design: UI layout, mockups, image concepts, GUI wireframes | Phase 4g, any visual update |
+| **codex-verifier** | `codex_api` | Verification: plan accuracy, test coverage, dummy detection | Phase 4v, 6v |
+| **gemini-designer** | `gemini_api` | Visual design: UI layout, mockups, image concepts, GUI wireframes | Phase 4g, any visual update |
+
+**Providers:** `codex_api` (OpenAI REST, recommended), `codex_cli` (CLI fallback), `gemini_api` (Gemini REST, recommended), `gemini_cli` (CLI fallback)
 
 **Spawn command** (from `examples/llm_cli_tools/`):
 ```bash
-# Codex verifier
-AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
+# Codex verifier (API — recommended)
+AGENT_CMD=spawn AGENT_PROVIDER=codex_api AGENT_ROLE=verify \
   AGENT_SYSTEM="You are a plan verification agent..." \
   AGENT_PROMPT_FILE=doc/plan/<feature>.md \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
 
-# Gemini designer
-AGENT_CMD=spawn AGENT_PROVIDER=gemini_cli AGENT_ROLE=design \
+# Gemini designer (API — recommended)
+AGENT_CMD=spawn AGENT_PROVIDER=gemini_api AGENT_ROLE=design \
   AGENT_SYSTEM="You are a UI/visual design agent..." \
   AGENT_PROMPT_FILE=doc/design/<feature>.md \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
@@ -454,9 +456,10 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 ### Codex Verifier
 
-**Provider:** `codex_cli` (OpenAI Codex CLI)
-**Binary:** `codex`
-**Flags:** `exec` (non-interactive subcommand)
+**Provider:** `codex_api` (OpenAI REST API — recommended) or `codex_cli` (CLI fallback)
+**Binary:** `curl` (API) or `codex` (CLI)
+**Model:** `o3-mini` (API mode)
+**Env:** `OPENAI_API_KEY` must be set for API mode
 **Role:** Automated verification — never writes code, only reports findings.
 
 **Used in:**
@@ -465,6 +468,13 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 **Spawn from `examples/llm_cli_tools/`:**
 ```bash
+# API mode (recommended)
+AGENT_CMD=spawn AGENT_PROVIDER=codex_api AGENT_ROLE=verify \
+  AGENT_SYSTEM="You are a verification agent. Check for accuracy, do not modify files." \
+  AGENT_PROMPT_FILE=<path_to_verify> \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
+
+# CLI fallback
 AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
   AGENT_SYSTEM="You are a verification agent. Check for accuracy, do not modify files." \
   AGENT_PROMPT_FILE=<path_to_verify> \
@@ -472,12 +482,14 @@ AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
 ```
 
 **Result:** Read via `AGENT_CMD=result AGENT_ID=<id> ... orchestrator.spl`
+**Logs:** `data/agents/logs/<agent_id>.log`
 
 ### Gemini Designer
 
-**Provider:** `gemini_cli` (Google Gemini CLI)
-**Binary:** `gemini`
-**Flags:** `-p` (headless) `--yolo` (auto-approve)
+**Provider:** `gemini_api` (Google Gemini REST API — recommended) or `gemini_cli` (CLI fallback)
+**Binary:** `curl` (API) or `gemini` (CLI)
+**Model:** `gemini-2.0-flash` (API mode)
+**Env:** `GEMINI_API_KEY` must be set for API mode
 **Role:** Visual/UI design — produces layout mockups, wireframes, visual concepts.
 
 **Used in:**
@@ -492,6 +504,13 @@ AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
 
 **Spawn from `examples/llm_cli_tools/`:**
 ```bash
+# API mode (recommended)
+AGENT_CMD=spawn AGENT_PROVIDER=gemini_api AGENT_ROLE=design \
+  AGENT_SYSTEM="You are a UI/visual design agent. Produce ASCII wireframes, layout specs, and visual concepts." \
+  AGENT_PROMPT_FILE=doc/design/<feature>.md \
+  ../../bin/release/simple run src/app/agent/orchestrator.spl
+
+# CLI fallback
 AGENT_CMD=spawn AGENT_PROVIDER=gemini_cli AGENT_ROLE=design \
   AGENT_SYSTEM="You are a UI/visual design agent. Produce ASCII wireframes, layout specs, and visual concepts." \
   AGENT_PROMPT_FILE=doc/design/<feature>.md \
