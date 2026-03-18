@@ -187,6 +187,11 @@ pub(crate) fn evaluate_call(
 
         // If we reach here with an identifier name, the function is not found
         // E1002 - Undefined Function
+        if name == "parse_ui_file" {
+            eprintln!("[CALL-DEBUG] parse_ui_file NOT in functions ({} entries). Looking for it in env: {}", functions.len(), env.contains_key("parse_ui_file"));
+            let matching: Vec<_> = functions.keys().filter(|k| k.contains("parse")).collect();
+            eprintln!("[CALL-DEBUG] Functions containing 'parse': {:?}", matching);
+        }
         let known_names: Vec<&str> = functions.keys().map(|s| s.as_str()).collect();
 
         let suggestion = crate::error::typo::suggest_name(name, known_names.clone());

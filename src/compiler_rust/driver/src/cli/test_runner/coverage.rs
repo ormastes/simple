@@ -64,21 +64,49 @@ pub fn save_coverage_data(quiet: bool) -> bool {
     true
 }
 
-/// Parse total and covered decision counts from SDN text
+/// Parse total and covered decision counts from SDN text.
+/// Only counts decisions from .spl files (filters out .sdt, .md, <source>, etc.).
 fn parse_decision_counts(sdn: &str) -> (usize, usize) {
     let mut total = 0usize;
     let mut covered = 0usize;
+    let mut in_decisions = false;
+
     for line in sdn.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("total_decisions:") {
-            if let Some(val) = trimmed.strip_prefix("total_decisions:") {
-                total = val.trim().parse().unwrap_or(0);
+
+        // Track which section we're in
+        if trimmed.starts_with("decisions ") || trimmed.starts_with("decisions|") {
+            in_decisions = true;
+            continue;
+        }
+        if trimmed.starts_with("conditions ") || trimmed.starts_with("conditions|")
+            || trimmed.starts_with("summary:")
+            || trimmed.starts_with("paths ")
+        {
+            in_decisions = false;
+            continue;
+        }
+
+        if !in_decisions || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Parse decision entry: "id, file, line, column, true_count, false_count"
+        let parts: Vec<&str> = trimmed.splitn(6, ',').collect();
+        if parts.len() >= 6 {
+            let file = parts[1].trim();
+            // Only count .spl files — skip .sdt, .md, <source>, <error>, etc.
+            if !file.ends_with(".spl") {
+                continue;
             }
-        } else if trimmed.starts_with("covered_decisions:") {
-            if let Some(val) = trimmed.strip_prefix("covered_decisions:") {
-                covered = val.trim().parse().unwrap_or(0);
+            let true_count: usize = parts[4].trim().parse().unwrap_or(0);
+            let false_count: usize = parts[5].trim().parse().unwrap_or(0);
+            total += 1;
+            if true_count > 0 && false_count > 0 {
+                covered += 1;
             }
         }
     }
+
     (total, covered)
 }

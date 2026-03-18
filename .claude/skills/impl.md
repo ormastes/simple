@@ -38,31 +38,35 @@ code-team:       code → test                       (sequential)
 review-team:     explore → docs                    (sequential)
 ```
 
-### LLM Subagents (via llm_cli_tools agent worker)
+### LLM Subagents (via simple-mcp LLM tools)
 
-| Subagent | Provider | Role | When Used |
-|----------|----------|------|-----------|
-| **codex-verifier** | `codex_api` | Verification: plan accuracy, test coverage, dummy detection | Phase 4v, 6v |
-| **gemini-designer** | `gemini_api` | Visual design: UI layout, mockups, image concepts, GUI wireframes | Phase 4g, any visual update |
+| Subagent | MCP Tool | Provider | When Used |
+|----------|----------|----------|-----------|
+| **codex-verifier** | `llm_verify` | `codex_api` (OpenAI o3-mini) | Phase 4v, 6v |
+| **gemini-designer** | `llm_design` | `gemini_api` (Gemini Flash) | Phase 4g, any visual update |
 
-**Providers:** `codex_api` (OpenAI REST, recommended), `codex_cli` (CLI fallback), `gemini_api` (Gemini REST, recommended), `gemini_cli` (CLI fallback)
+**MCP tools** (preferred — served by simple-mcp):
+- `llm_verify(file: "doc/plan/<feature>.md")` — Plan/test verification with hardcoded codex-verifier prompt
+- `llm_design(file: "doc/design/<feature>.md")` — Visual design with hardcoded gemini-designer prompt
+- `llm_request(provider: "codex_api", system_prompt: "...", prompt: "...")` — Generic LLM request
+- `llm_request_file(provider: "gemini_api", system_prompt: "...", prompt_file: "path/to/file")` — Generic LLM request from file
 
-**Spawn command** (from `examples/llm_cli_tools/`):
+**Environment:** `OPENAI_API_KEY` for codex tools, `GEMINI_API_KEY` for gemini tools.
+
+**Shell fallback** (from `examples/llm_cli_tools/`):
 ```bash
-# Codex verifier (API — recommended)
+# Codex verifier (shell fallback)
 AGENT_CMD=spawn AGENT_PROVIDER=codex_api AGENT_ROLE=verify \
   AGENT_SYSTEM="You are a plan verification agent..." \
   AGENT_PROMPT_FILE=doc/plan/<feature>.md \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
 
-# Gemini designer (API — recommended)
+# Gemini designer (shell fallback)
 AGENT_CMD=spawn AGENT_PROVIDER=gemini_api AGENT_ROLE=design \
   AGENT_SYSTEM="You are a UI/visual design agent..." \
   AGENT_PROMPT_FILE=doc/design/<feature>.md \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
 ```
-
-Use `agent_team_create` + `agent_team_run` MCP tools, or spawn Task agents manually with the corresponding agent definitions from `.claude/agents/`.
 
 ---
 
@@ -161,6 +165,8 @@ Design doc:
 
 **Output:** Appended to `doc/design/<feature>.md` under `## Visual Design` section, or as separate `doc/design/<feature>_visual.md`.
 
+**Invoke:** Call MCP tool `llm_design(file: "doc/design/<feature>.md")` — or use shell fallback above.
+
 ### Phase 4v: Plan Verification
 
 **Agent:** codex-verifier (LLM subagent)
@@ -198,6 +204,8 @@ OVERALL: PASS/FAIL
 Plan doc:
 <contents of doc/plan/<feature>.md>
 ```
+
+**Invoke:** Call MCP tool `llm_verify(file: "doc/plan/<feature>.md")` — or use shell fallback above.
 
 **If FAIL:** Loop back to Phase 4 to fix the plan before proceeding.
 
@@ -288,6 +296,8 @@ Requirement doc:
 System test:
 <contents>
 ```
+
+**Invoke:** Call MCP tool `llm_verify(file: "test/system/<feature>_spec.spl")` — or use shell fallback above.
 
 **If FAIL:** Loop back to Phase 6 to fix tests before proceeding.
 
@@ -456,41 +466,31 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 ### Codex Verifier
 
-**Provider:** `codex_api` (OpenAI REST API — recommended) or `codex_cli` (CLI fallback)
-**Binary:** `curl` (API) or `codex` (CLI)
-**Model:** `o3-mini` (API mode)
-**Env:** `OPENAI_API_KEY` must be set for API mode
+**MCP tool (preferred):** `llm_verify(file: "<path_to_verify>")`
+**Provider:** `codex_api` (OpenAI REST API) | **Model:** `o3-mini`
+**Env:** `OPENAI_API_KEY` must be set
 **Role:** Automated verification — never writes code, only reports findings.
+**Logs:** `.build/llm_logs/<id>.log`
 
 **Used in:**
 - Phase 4v: Verify plan current-status is real (not dummy/fallback)
 - Phase 6v: Verify system test coverage and integrity
 
-**Spawn from `examples/llm_cli_tools/`:**
+**Shell fallback** (from `examples/llm_cli_tools/`):
 ```bash
-# API mode (recommended)
 AGENT_CMD=spawn AGENT_PROVIDER=codex_api AGENT_ROLE=verify \
-  AGENT_SYSTEM="You are a verification agent. Check for accuracy, do not modify files." \
-  AGENT_PROMPT_FILE=<path_to_verify> \
-  ../../bin/release/simple run src/app/agent/orchestrator.spl
-
-# CLI fallback
-AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
   AGENT_SYSTEM="You are a verification agent. Check for accuracy, do not modify files." \
   AGENT_PROMPT_FILE=<path_to_verify> \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
 ```
 
-**Result:** Read via `AGENT_CMD=result AGENT_ID=<id> ... orchestrator.spl`
-**Logs:** `data/agents/logs/<agent_id>.log`
-
 ### Gemini Designer
 
-**Provider:** `gemini_api` (Google Gemini REST API — recommended) or `gemini_cli` (CLI fallback)
-**Binary:** `curl` (API) or `gemini` (CLI)
-**Model:** `gemini-2.0-flash` (API mode)
-**Env:** `GEMINI_API_KEY` must be set for API mode
+**MCP tool (preferred):** `llm_design(file: "doc/design/<feature>.md")`
+**Provider:** `gemini_api` (Google Gemini REST API) | **Model:** `gemini-2.0-flash`
+**Env:** `GEMINI_API_KEY` must be set
 **Role:** Visual/UI design — produces layout mockups, wireframes, visual concepts.
+**Logs:** `.build/llm_logs/<id>.log`
 
 **Used in:**
 - Phase 4g: GUI/TUI/visual design when feature has UI component
@@ -502,16 +502,9 @@ AGENT_CMD=spawn AGENT_PROVIDER=codex_cli AGENT_ROLE=verify \
 - Design doc includes visual components
 - User explicitly requests visual design
 
-**Spawn from `examples/llm_cli_tools/`:**
+**Shell fallback** (from `examples/llm_cli_tools/`):
 ```bash
-# API mode (recommended)
 AGENT_CMD=spawn AGENT_PROVIDER=gemini_api AGENT_ROLE=design \
-  AGENT_SYSTEM="You are a UI/visual design agent. Produce ASCII wireframes, layout specs, and visual concepts." \
-  AGENT_PROMPT_FILE=doc/design/<feature>.md \
-  ../../bin/release/simple run src/app/agent/orchestrator.spl
-
-# CLI fallback
-AGENT_CMD=spawn AGENT_PROVIDER=gemini_cli AGENT_ROLE=design \
   AGENT_SYSTEM="You are a UI/visual design agent. Produce ASCII wireframes, layout specs, and visual concepts." \
   AGENT_PROMPT_FILE=doc/design/<feature>.md \
   ../../bin/release/simple run src/app/agent/orchestrator.spl
