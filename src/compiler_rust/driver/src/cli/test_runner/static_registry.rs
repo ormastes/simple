@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use simple_parser::test_analyzer::{extract_file_test_meta, merge_content_tags};
 use simple_parser::Parser;
-use simple_parser::ast::nodes::test_meta::{FileTestMeta, TestInfo, TestRef};
+use simple_parser::ast::nodes::test_meta::{CoverageContract, FileTestMeta, TestInfo, TestRef};
 
 /// Static test registry for fast test queries.
 ///
@@ -49,6 +49,8 @@ pub struct StaticTestRegistry {
     pub ignored_refs: Vec<TestRef>,
     /// Time spent parsing (for diagnostics)
     pub parse_time_ms: u64,
+    /// Coverage contracts indexed by test file path
+    pub contracts: HashMap<PathBuf, Vec<CoverageContract>>,
 }
 
 impl StaticTestRegistry {
@@ -108,8 +110,14 @@ impl StaticTestRegistry {
         self.slow_refs.clear();
         self.skipped_refs.clear();
         self.ignored_refs.clear();
+        self.contracts.clear();
 
         for (file_path, file_meta) in &self.files {
+            // Index coverage contracts
+            if !file_meta.coverage_contracts.is_empty() {
+                self.contracts
+                    .insert(file_path.clone(), file_meta.coverage_contracts.clone());
+            }
             let all_tests = file_meta.all_tests();
 
             for (idx, test) in all_tests.into_iter().enumerate() {

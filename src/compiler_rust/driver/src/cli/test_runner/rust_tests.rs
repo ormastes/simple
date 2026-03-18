@@ -231,6 +231,7 @@ fn parse_cargo_test_output(output: &str) -> Vec<TestFileResult> {
                     duration_ms: 0,
                     error: None,
                     individual_results: vec![],
+                    contract_results: vec![],
                 });
             }
             // Extract crate name from line
@@ -310,6 +311,7 @@ fn parse_cargo_test_output(output: &str) -> Vec<TestFileResult> {
             duration_ms: 0,
             error: None,
             individual_results: vec![],
+            contract_results: vec![],
         });
     }
 
@@ -371,6 +373,7 @@ pub fn rust_tests_to_file_results(tests: &[RustTestInfo]) -> Vec<TestFileResult>
             duration_ms: 0,
             error: None,
             individual_results: vec![],
+            contract_results: vec![],
         })
         .collect()
 }

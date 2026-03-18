@@ -297,6 +297,25 @@ impl Default for TestOptions {
     }
 }
 
+/// Result of evaluating a single coverage contract after a test file runs.
+#[derive(Debug)]
+pub struct CoverageContractResult {
+    /// Target source file
+    pub target_path: String,
+    /// Required threshold (None = just touched)
+    pub required_percent: Option<f64>,
+    /// Actual decision coverage percentage achieved
+    pub actual_percent: f64,
+    /// Per-function results: (function_name, was_covered)
+    pub function_results: Vec<(String, bool)>,
+    /// Negative contract (`@not_covers`)
+    pub is_negative: bool,
+    /// Whether the contract passed
+    pub passed: bool,
+    /// Human-readable failure reason (None if passed)
+    pub failure_reason: Option<String>,
+}
+
 /// Individual test case result (one per `it`/`skip`/`slow_it` block)
 #[derive(Debug)]
 pub struct IndividualTestResult {
@@ -317,6 +336,7 @@ pub struct TestFileResult {
     pub duration_ms: u64,
     pub error: Option<String>,
     pub individual_results: Vec<IndividualTestResult>,
+    pub contract_results: Vec<CoverageContractResult>,
 }
 
 /// Overall test run result

@@ -494,6 +494,35 @@ bin/simple gen-lean write --force     # Regenerate Lean files
 - **Don't:** Write specs without running tests -- May have syntax errors
 - **Do:** Test -> Document -> Generate workflow
 
+## Coverage Contracts
+
+Declarative directives that bind a test file to specific source targets with quantitative enforcement. Contracts appear as virtual test cases in output (pass/fail alongside regular `it` blocks). Only evaluated when `--coverage` is enabled.
+
+### Syntax
+
+```simple
+# @covers src/lib/common/array.spl 80%        # File must reach 80% decision coverage
+# @covers src/lib/common/array.spl             # File must be touched (coverage > 0%)
+# @covers_fn src/lib/common/array.spl fn1 fn2  # Named functions must have covered decisions
+# @not_covers src/lib/common/string.spl        # File must NOT be touched
+```
+
+### Directives
+
+| Directive | Meaning |
+|-----------|---------|
+| `# @covers <path> <N>%` | Target file must reach N% decision coverage from this test |
+| `# @covers <path>` | Target file must be touched (coverage > 0%) |
+| `# @covers_fn <path> <fn1> <fn2> ...` | Named functions must have decisions covered |
+| `# @not_covers <path>` | Negative: test must NOT touch target file |
+
+### Example Output
+
+```
+✓ [contract] src/lib/common/array.spl coverage >= 80% (actual: 87.5%)
+✗ [contract] src/lib/common/string.spl NOT covered (actual: 12.3%)
+```
+
 ## See Also
 
 - **[Template](../../.claude/templates/sspec_template.spl)** - Spec file template

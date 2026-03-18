@@ -91,6 +91,7 @@ bin/simple test --only-slow              # Slow tests only
 - ALWAYS fix root cause or ask user
 - One assertion concept per test
 - Use docstrings (`"""..."""`) for test documentation, NOT println()
+- Coverage spec files MUST include `# @covers` directives for all source modules they validate
 
 ## See Also
 

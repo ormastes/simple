@@ -353,6 +353,11 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     if rt_file_exists(src_path):
         return src_path
 
+    # 3.5. Try src/lib/ directory directly (for common.*, gc_async_mut.*, etc.)
+    val src_lib_path = rt_path_join("src/lib", relative_path)
+    if rt_file_exists(src_lib_path):
+        return src_lib_path
+
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
     #    Resolution order depends on _lib_gc_mode:
     #    nogc: nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
@@ -423,12 +428,20 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
             if rt_dir_exists(direct):
                 current_dir = direct
             else:
-                # Try numbered directory
+                # Try numbered directory (e.g., 10.frontend)
                 val numbered = find_numbered_dir_interp(current_dir, part)
                 if numbered != "":
                     current_dir = numbered
                 else:
-                    return ""
+                    # Try dotted directory: combine previous segment with current
+                    # (e.g., src/app/ui + "none" → src/app/ui.none)
+                    val parent_dir = rt_path_dirname(current_dir)
+                    val parent_base = rt_path_basename(current_dir)
+                    val dotted_dir = rt_path_join(parent_dir, parent_base + "." + part)
+                    if rt_dir_exists(dotted_dir):
+                        current_dir = dotted_dir
+                    else:
+                        return ""
         else:
             # Last segment — try as .spl file
             val file_path = rt_path_join(current_dir, part + ".spl")
@@ -510,7 +523,10 @@ fn extract_module_exports() -> [text]:
             # Get exported names from decl_imports field
             val names = decl_get_imports(did)
             for name in names:
-                exports.push(name)
+                if name == "*":
+                    export_all = 1
+                else:
+                    exports.push(name)
 
     # If no explicit exports found, export all functions
     if exports.len() == 0:
@@ -521,6 +537,12 @@ fn extract_module_exports() -> [text]:
             val tag = decl_get_tag(did)
 
             if tag == DECL_FN:
+                val name = decl_get_name(did)
+                exports.push(name)
+            if tag == DECL_STRUCT:
+                val name = decl_get_name(did)
+                exports.push(name)
+            if tag == DECL_ENUM:
                 val name = decl_get_name(did)
                 exports.push(name)
 

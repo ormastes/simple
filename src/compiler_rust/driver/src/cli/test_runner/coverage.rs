@@ -64,6 +64,24 @@ pub fn save_coverage_data(quiet: bool) -> bool {
     true
 }
 
+/// Dump the current coverage SDN data from the runtime.
+/// Returns the raw SDN text, or an empty string if coverage is not enabled.
+pub fn dump_coverage_sdn() -> String {
+    if !is_coverage_enabled() {
+        return String::new();
+    }
+    unsafe {
+        let ptr = simple_runtime::rt_coverage_dump_sdn();
+        if ptr.is_null() {
+            String::new()
+        } else {
+            let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string();
+            simple_runtime::rt_coverage_free_sdn(ptr);
+            s
+        }
+    }
+}
+
 /// Parse total and covered decision counts from SDN text.
 /// Only counts decisions from .spl files (filters out .sdt, .md, <source>, etc.).
 fn parse_decision_counts(sdn: &str) -> (usize, usize) {

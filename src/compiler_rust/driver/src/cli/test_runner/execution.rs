@@ -216,6 +216,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 mem_limit / (1024 * 1024),
             )),
             individual_results: vec![],
+            contract_results: vec![],
         };
     }
 
@@ -317,6 +318,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 mem_limit / (1024 * 1024),
             )),
             individual_results: vec![],
+            contract_results: vec![],
         };
     }
 
@@ -357,6 +359,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 duration_ms,
                 error: None,
                 individual_results,
+                contract_results: vec![],
             }
         }
         Err(e) => {
@@ -380,6 +383,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 duration_ms,
                 error: Some(error_display),
                 individual_results: vec![],
+                contract_results: vec![],
             }
         }
     }
@@ -434,6 +438,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Failed to spawn process: {}", e)),
                 individual_results: vec![],
+                contract_results: vec![],
             };
         }
     };
@@ -485,6 +490,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                     None
                 },
                 individual_results,
+                contract_results: vec![],
             }
         }
         Err(e) => TestFileResult {
@@ -496,6 +502,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
             duration_ms,
             error: Some(e),
             individual_results: vec![],
+            contract_results: vec![],
         },
     }
 }
@@ -651,6 +658,7 @@ pub fn run_test_file_composite_mode(
                 duration_ms: 0,
                 error: Some("Composite mode requires --mode=<spec> (e.g. native(baremetal(riscv32)))".to_string()),
                 individual_results: vec![],
+                contract_results: vec![],
             };
         }
     };
@@ -684,6 +692,7 @@ pub fn run_test_file_composite_mode(
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Failed to spawn composite test runner: {}", e)),
                 individual_results: vec![],
+                contract_results: vec![],
             };
         }
     };
@@ -714,6 +723,7 @@ pub fn run_test_file_composite_mode(
                 duration_ms,
                 error,
                 individual_results: vec![],
+                contract_results: vec![],
             }
         }
         Err(_) => {
@@ -726,6 +736,7 @@ pub fn run_test_file_composite_mode(
                 duration_ms,
                 error: Some(format!("Composite test timed out after {}s", options.safe_mode_timeout)),
                 individual_results: vec![],
+                contract_results: vec![],
             }
         }
     }

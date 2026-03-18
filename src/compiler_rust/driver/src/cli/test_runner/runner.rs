@@ -2,6 +2,7 @@
 //!
 //! Orchestrates test discovery, execution, and reporting.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -17,7 +18,8 @@ use super::doctest::run_cached_doctests;
 use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
 use super::discovery::{discover_all_doctests, print_discovery_summary};
-use super::coverage::save_coverage_data;
+use super::coverage::{save_coverage_data, dump_coverage_sdn};
+use super::contract_validator;
 use super::feature_db::update_feature_database;
 use super::test_db_update::{update_test_database, update_rust_test_database};
 use super::static_registry::StaticTestRegistry;
@@ -643,6 +645,14 @@ fn execute_test_files(
         eprintln!("   Or use test database: cat data/db/test_db.sdn | grep skip\n");
     }
 
+    // Build coverage contracts index from static registry (only when coverage is enabled)
+    let contracts_index = if is_coverage_enabled() {
+        let registry = StaticTestRegistry::from_files(test_files).unwrap_or_default();
+        registry.contracts
+    } else {
+        HashMap::new()
+    };
+
     for (idx, path) in test_files.iter().enumerate() {
         if !quiet && !options.list && !options.list_ignored {
             println!("Running: {}", path.display());
@@ -682,6 +692,7 @@ fn execute_test_files(
                         duration_ms: 0,
                         error: Some("Build cache not initialized for native mode".to_string()),
                         individual_results: vec![],
+                        contract_results: vec![],
                     }
                 }
             }
@@ -694,6 +705,57 @@ fn execute_test_files(
                 super::execution::run_test_file_with_options(path, options)
             }
         };
+
+        // Validate coverage contracts for this test file (if any)
+        let mut result = result;
+        if let Some(file_contracts) = contracts_index.get(path) {
+            if !file_contracts.is_empty() {
+                let sdn = dump_coverage_sdn();
+                let contract_results = contract_validator::validate_contracts(file_contracts, &sdn);
+
+                // Inject virtual test results and print contract outcomes
+                for cr in &contract_results {
+                    let label = if cr.is_negative {
+                        format!("[contract] {} NOT covered", cr.target_path)
+                    } else if let Some(threshold) = cr.required_percent {
+                        format!(
+                            "[contract] {} coverage >= {}% (actual: {:.1}%)",
+                            cr.target_path, threshold, cr.actual_percent
+                        )
+                    } else if !cr.function_results.is_empty() {
+                        let fns: Vec<&str> = cr.function_results.iter().map(|(n, _)| n.as_str()).collect();
+                        format!("[contract] {} fns: {}", cr.target_path, fns.join(", "))
+                    } else {
+                        format!("[contract] {} touched", cr.target_path)
+                    };
+
+                    if !quiet {
+                        let icon = if cr.passed { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+                        println!("  {} {}", icon, label);
+                        if let Some(ref reason) = cr.failure_reason {
+                            println!("    {}", reason);
+                        }
+                    }
+
+                    // Update pass/fail counters
+                    if cr.passed {
+                        result.passed += 1;
+                    } else {
+                        result.failed += 1;
+                    }
+
+                    result.individual_results.push(super::types::IndividualTestResult {
+                        name: label,
+                        group: "[coverage-contract]".to_string(),
+                        passed: cr.passed,
+                        skipped: false,
+                    });
+                }
+
+                result.contract_results = contract_results;
+            }
+        }
+
         total_passed += result.passed;
         total_failed += result.failed;
         total_skipped += result.skipped;

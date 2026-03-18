@@ -387,6 +387,7 @@ fn eval_stmt_for(sid: i64) -> i64:
     val iter_name = s_node.name
     val iterable_eid = s_node.expr_idx
     val body_stmts = s_node.body
+    val for_else_body = s_node.else_body
 
     # Check if iterable is a range expression
     val iterable_tag = expr_get(iterable_eid).tag
@@ -403,10 +404,13 @@ fn eval_stmt_for(sid: i64) -> i64:
         var current = start_n
         var last_val = val_make_nil()
         var iterations: i64 = 0
+        var did_break = false
         while iterations < 1000001:
             if eval_had_error: break
             if eval_returning: break
-            if eval_breaking: break
+            if eval_breaking:
+                did_break = true
+                break
             val should_stop = current > end_n
             val at_limit = current == end_n
             if inclusive != 0:
@@ -426,8 +430,15 @@ fn eval_stmt_for(sid: i64) -> i64:
             env_pop_scope()
             current = current + 1
             iterations = iterations + 1
+        if eval_breaking: did_break = true
         eval_breaking = false
         eval_continuing = false
+        # For-else: run else body if loop completed without break
+        if not did_break and for_else_body.len() > 0 and not eval_had_error and not eval_returning:
+            for else_sid in for_else_body:
+                if eval_had_error: break
+                if eval_returning: break
+                last_val = eval_stmt(else_sid)
         return last_val
 
     # Otherwise evaluate the iterable
@@ -437,10 +448,13 @@ fn eval_stmt_for(sid: i64) -> i64:
     if val_is_array(iterable):
         val elements = val_get_array(iterable)
         var last_val2 = val_make_nil()
+        var did_break2 = false
         for elem_vid in elements:
             if eval_had_error: break
             if eval_returning: break
-            if eval_breaking: break
+            if eval_breaking:
+                did_break2 = true
+                break
             eval_continuing = false
             env_push_scope()
             env_define(iter_name, elem_vid)
@@ -451,19 +465,29 @@ fn eval_stmt_for(sid: i64) -> i64:
                 if eval_continuing: break
                 last_val2 = eval_stmt(sid2)
             env_pop_scope()
+        if eval_breaking: did_break2 = true
         eval_breaking = false
         eval_continuing = false
+        # For-else: run else body if loop completed without break
+        if not did_break2 and for_else_body.len() > 0 and not eval_had_error and not eval_returning:
+            for else_sid in for_else_body:
+                if eval_had_error: break
+                if eval_returning: break
+                last_val2 = eval_stmt(else_sid)
         return last_val2
 
     if val_is_text(iterable):
         val str_val = val_get_text(iterable)
         var last_val3 = val_make_nil()
         var char_idx = 0
+        var did_break3 = false
         for _iter in 0..str_val.len():
             if char_idx >= str_val.len(): break
             if eval_had_error: break
             if eval_returning: break
-            if eval_breaking: break
+            if eval_breaking:
+                did_break3 = true
+                break
             eval_continuing = false
             val ch = str_val.substring(char_idx, char_idx + 1)
             env_push_scope()
@@ -476,8 +500,15 @@ fn eval_stmt_for(sid: i64) -> i64:
                 last_val3 = eval_stmt(sid2)
             env_pop_scope()
             char_idx = char_idx + 1
+        if eval_breaking: did_break3 = true
         eval_breaking = false
         eval_continuing = false
+        # For-else: run else body if loop completed without break
+        if not did_break3 and for_else_body.len() > 0 and not eval_had_error and not eval_returning:
+            for else_sid in for_else_body:
+                if eval_had_error: break
+                if eval_returning: break
+                last_val3 = eval_stmt(else_sid)
         return last_val3
 
     eval_set_error("cannot iterate over " + val_kind_name(val_get_kind(iterable)))

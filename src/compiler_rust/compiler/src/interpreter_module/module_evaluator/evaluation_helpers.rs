@@ -8,7 +8,9 @@ use std::path::Path;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern, Visibility};
+use simple_parser::ast::{
+    ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Visibility,
+};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -610,6 +612,37 @@ pub(super) fn process_bare_exports(
 ) {
     for export_names in bare_exports {
         for name in export_names {
+            // Handle `export *` — export all functions, classes, and enums
+            if name == "*" {
+                for (fn_name, func) in local_functions {
+                    if !exports.contains_key(fn_name) {
+                        exports.insert(fn_name.clone(), Value::Function {
+                            name: fn_name.clone(),
+                            def: Box::new(func.clone()),
+                            captured_env: HashMap::new(),
+                        });
+                    }
+                }
+                for (cls_name, _) in local_classes {
+                    if !exports.contains_key(cls_name) {
+                        exports.insert(cls_name.clone(), Value::Constructor { class_name: cls_name.clone() });
+                    }
+                }
+                for (enum_name, enum_def) in local_enums {
+                    if !exports.contains_key(enum_name) {
+                        for variant in &enum_def.variants {
+                            if !exports.contains_key(&variant.name) {
+                                exports.insert(variant.name.clone(), Value::EnumVariantConstructor {
+                                    enum_name: enum_name.clone(),
+                                    variant_name: variant.name.clone(),
+                                });
+                            }
+                        }
+                        exports.insert(enum_name.clone(), Value::EnumType { enum_name: enum_name.clone() });
+                    }
+                }
+                continue;
+            }
             if let Some(value) = env.get(name) {
                 // Don't override if already exported
                 if !exports.contains_key(name) {

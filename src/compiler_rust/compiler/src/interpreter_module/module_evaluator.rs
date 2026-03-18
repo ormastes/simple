@@ -116,7 +116,14 @@ pub fn evaluate_module_exports_with_preloaded(
     export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
 
     // Process bare export statements
-    process_bare_exports(&bare_exports, &env, &mut exports);
+    process_bare_exports(
+        &bare_exports,
+        &env,
+        &local_functions,
+        &local_classes,
+        &local_enums,
+        &mut exports,
+    );
 
     // Return env, exports, and the local definitions for caching
     Ok((env, exports, local_functions, local_classes, local_enums))

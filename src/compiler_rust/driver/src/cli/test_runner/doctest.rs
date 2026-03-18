@@ -92,6 +92,7 @@ fn run_and_collect(examples: &[DoctestExample], label: &str, quiet: bool, result
             duration_ms: duration_ms / file_count,
             error,
             individual_results: vec![],
+            contract_results: vec![],
         });
     }
 }

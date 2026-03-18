@@ -245,7 +245,8 @@ Assign model per task based on difficulty:
            ...
    ```
 5. Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
-6. See `/test` skill for template and conventions
+6. Add `# @covers` directives for all source modules the test validates (see `/test` skill "Coverage Contracts")
+7. See `/test` skill for template and conventions
 
 ### Phase 6v: Test Verification
 

@@ -20,7 +20,7 @@ use tracing::{debug, error, trace, warn, instrument};
 use simple_parser::ast::{Capability, ClassDef, EnumDef, Effect, ImportTarget, Node, UseStmt};
 
 use crate::error::CompileError;
-use crate::interpreter::coverage_helpers::{push_coverage_file, pop_coverage_file};
+use crate::interpreter::coverage_helpers::{push_coverage_file, pop_coverage_file, register_function_source_file};
 use crate::value::{Env, Value};
 
 use super::module_cache::{
@@ -493,6 +493,11 @@ pub fn load_and_merge_module(
     // Cache the full module exports for future use
     let exports_value = Value::Dict(exports.clone());
     cache_module_exports(&module_path, exports_value);
+
+    // Register function source files for coverage attribution at call sites
+    for (fn_name, _) in &module_functions {
+        register_function_source_file(fn_name, &module_path_str);
+    }
 
     // Also cache the module definitions (classes, functions, enums) for future imports
     cache_module_definitions(&module_path, &module_classes, &module_functions, &module_enums);

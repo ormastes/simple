@@ -67,94 +67,88 @@ fn decode_html_entity(entity: text) -> text:
     if entity == "spades":
         result = "♠"
 
-    # Numeric entities (decimal)
+    # Numeric entities (decimal) - use to_i64() to avoid broken char-by-char loop
     if entity.starts_with("#"):
-        val num_part = entity.substring(1, entity.length())
-        if num_part.length() > 0:
-            var is_hex = false
-            var final_num = num_part
-            if num_part.starts_with("x"):
-                is_hex = true
-                final_num = num_part.substring(1, num_part.length())
-            if final_num.length() > 0:
-                # Simple numeric conversion (limited)
-                var code = 0
-                if is_hex:
-                    # Hex not fully supported in runtime
-                    result = entity
-                else:
-                    # Decimal - parse simple cases
-                    var i = 0
-                    var valid = true
-                    while i < final_num.length():
-                        val c = final_num.substring(i, i + 1)
-                        if is_digit(c):
-                            val digit = c.char_code_at(0) - 48
-                            code = code * 10 + digit
-                        else:
-                            valid = false
-                            i = final_num.length()
-                        i = i + 1
-                    if valid:
-                        if code > 0:
-                            if code < 128:
-                                result = text_from_char_code(code)
+        result = parse_numeric_entity(entity)
 
     result
 
-fn decode_html_entities(input: text) -> text:
-    var parts: [text] = []
-    var i = 0
-    while i < input.length():
-        val c = input.substring(i, i + 1)
-        if c == "&":
-            # Find end of entity
-            var end_pos = i + 1
-            var found_semi = false
-            while end_pos < input.length():
-                val ec = input.substring(end_pos, end_pos + 1)
-                if ec == ";":
-                    found_semi = true
-                    end_pos = end_pos + 1
-                    end_pos = input.length()
-                else:
-                    end_pos = end_pos + 1
-                    if end_pos - i > 20:
-                        end_pos = input.length()
-
-            if found_semi:
-                val entity_full = input.substring(i + 1, end_pos - 1)
-                val decoded = decode_html_entity(entity_full)
-                parts.push(decoded)
-                i = end_pos
-            else:
-                parts.push(c)
-                i = i + 1
+fn parse_numeric_entity(entity: text) -> text:
+    # Copy entity to var before substring (substring mutates source in interpreter)
+    var original = "" + entity
+    var num_part = entity.substring(1, entity.length())
+    if num_part.length() == 0:
+        original
+    else:
+        if num_part.starts_with("x"):
+            # Hex not fully supported in runtime - return entity unchanged
+            original
         else:
-            parts.push(c)
-            i = i + 1
-    parts.join("")
+            # Decimal - use to_i64() (returns 0 for non-numeric strings)
+            # code == 0 means either "0" or invalid input; both return entity unchanged
+            parse_decimal_entity(original, num_part)
+
+fn parse_decimal_entity(original: text, num_part: text) -> text:
+    var result = original
+    var code = num_part.to_i64()
+    if code > 0:
+        if code < 128:
+            result = text_from_char_code(code)
+    result
+
+fn decode_html_entities(input: text) -> text:
+    # Use replace() to avoid broken char-by-char string iteration
+    var result = input
+
+    # Decode numeric entities (&#NN;) for ASCII range 1-127
+    var code = 1
+    while code < 128:
+        var entity_str = "&#" + code.to_text() + ";"
+        var ch = text_from_char_code(code)
+        if ch.length() > 0:
+            result = result.replace(entity_str, ch)
+        code = code + 1
+
+    # Decode named entities - amp must be LAST to avoid double-decoding
+    result = result.replace("&lt;", "<")
+    result = result.replace("&gt;", ">")
+    result = result.replace("&quot;", "\"")
+    result = result.replace("&apos;", "'")
+    result = result.replace("&nbsp;", " ")
+    result = result.replace("&copy;", "©")
+    result = result.replace("&reg;", "®")
+    result = result.replace("&trade;", "™")
+    result = result.replace("&euro;", "€")
+    result = result.replace("&pound;", "£")
+    result = result.replace("&yen;", "¥")
+    result = result.replace("&cent;", "¢")
+    result = result.replace("&sect;", "§")
+    result = result.replace("&deg;", "°")
+    result = result.replace("&plusmn;", "±")
+    result = result.replace("&micro;", "µ")
+    result = result.replace("&para;", "¶")
+    result = result.replace("&middot;", "·")
+    result = result.replace("&frac14;", "¼")
+    result = result.replace("&frac12;", "½")
+    result = result.replace("&frac34;", "¾")
+    result = result.replace("&times;", "×")
+    result = result.replace("&divide;", "÷")
+    result = result.replace("&hearts;", "♥")
+    result = result.replace("&clubs;", "♣")
+    result = result.replace("&diams;", "♦")
+    result = result.replace("&spades;", "♠")
+    result = result.replace("&amp;", "&")
+    result
 
 fn encode_html_entities(input: text) -> text:
-    var parts: [text] = []
-    var i = 0
-    while i < input.length():
-        val c = input.substring(i, i + 1)
-        if c == "<":
-            parts.push("&lt;")
-        else:
-            if c == ">":
-                parts.push("&gt;")
-            else:
-                if c == "&":
-                    parts.push("&amp;")
-                else:
-                    if c == "\"":
-                        parts.push("&quot;")
-                    else:
-                        parts.push(c)
-        i = i + 1
-    parts.join("")
+    # Use replace() to avoid broken char-by-char string iteration
+    # Ampersand MUST be replaced first to avoid double-encoding
+    var result = input
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
 
 # =============================================================================
 # Character Code Conversion

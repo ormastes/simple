@@ -310,6 +310,19 @@ impl TestGroupMeta {
     }
 }
 
+/// A coverage contract declared via `# @covers` / `# @covers_fn` / `# @not_covers` directives.
+#[derive(Debug, Clone)]
+pub struct CoverageContract {
+    /// Source file path the contract targets
+    pub target_path: String,
+    /// Required coverage threshold (None = just touch, i.e. > 0%)
+    pub threshold_percent: Option<f64>,
+    /// Required functions (for `@covers_fn`); empty = file-level only
+    pub required_functions: Vec<String>,
+    /// Negative contract (`@not_covers`)
+    pub is_negative: bool,
+}
+
 /// File-level test metadata aggregation.
 ///
 /// Contains all test groups and provides summary statistics
@@ -330,6 +343,8 @@ pub struct FileTestMeta {
     pub ignored_count: usize,
     /// File-level tags (from __init__.spl or file header)
     pub file_tags: Vec<String>,
+    /// Coverage contracts declared via `# @covers` directives
+    pub coverage_contracts: Vec<CoverageContract>,
 }
 
 impl FileTestMeta {

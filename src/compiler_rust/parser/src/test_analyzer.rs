@@ -48,7 +48,7 @@
 
 use std::path::PathBuf;
 
-use crate::ast::nodes::test_meta::{FileTestMeta, TestGroupMeta, TestKind, TestMeta};
+use crate::ast::nodes::test_meta::{CoverageContract, FileTestMeta, TestGroupMeta, TestKind, TestMeta};
 use crate::ast::{Argument, Block, Expr, Node};
 use crate::token::Span;
 
@@ -382,6 +382,65 @@ pub fn merge_content_tags(file_meta: &mut FileTestMeta, content: &str) {
     }
     file_meta.file_tags.sort();
     file_meta.file_tags.dedup();
+
+    // Extract coverage contracts from comment directives
+    file_meta.coverage_contracts = extract_coverage_contracts(content);
+}
+
+/// Extract coverage contracts from `# @covers`, `# @covers_fn`, `# @not_covers` directives.
+pub fn extract_coverage_contracts(content: &str) -> Vec<CoverageContract> {
+    let mut contracts = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // # @not_covers <path>
+        if let Some(rest) = trimmed.strip_prefix("# @not_covers ") {
+            let path = rest.trim().to_string();
+            if !path.is_empty() {
+                contracts.push(CoverageContract {
+                    target_path: path,
+                    threshold_percent: None,
+                    required_functions: vec![],
+                    is_negative: true,
+                });
+            }
+            continue;
+        }
+
+        // # @covers_fn <path> <fn1> <fn2> ...
+        if let Some(rest) = trimmed.strip_prefix("# @covers_fn ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 2 {
+                contracts.push(CoverageContract {
+                    target_path: parts[0].to_string(),
+                    threshold_percent: None,
+                    required_functions: parts[1..].iter().map(|s| s.to_string()).collect(),
+                    is_negative: false,
+                });
+            }
+            continue;
+        }
+
+        // # @covers <path> [N%]
+        if let Some(rest) = trimmed.strip_prefix("# @covers ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if !parts.is_empty() {
+                let path = parts[0].to_string();
+                let threshold = parts.get(1).and_then(|s| {
+                    s.strip_suffix('%').and_then(|n| n.parse::<f64>().ok())
+                });
+                contracts.push(CoverageContract {
+                    target_path: path,
+                    threshold_percent: threshold,
+                    required_functions: vec![],
+                    is_negative: false,
+                });
+            }
+        }
+    }
+
+    contracts
 }
 
 #[cfg(test)]
@@ -497,6 +556,42 @@ mod tests {
         assert!(tags.contains(&"database".to_string()));
         assert!(tags.contains(&"slow".to_string()));
         assert!(tags.contains(&"network".to_string()));
+    }
+
+    #[test]
+    fn test_extract_coverage_contracts() {
+        let content = r#"
+# @covers src/lib/common/array.spl 80%
+# @covers src/lib/common/string.spl
+# @covers_fn src/lib/common/array.spl array_position array_find
+# @not_covers src/lib/common/date.spl
+
+describe "array coverage":
+    it "tests array functions":
+        pass
+"#;
+        let contracts = extract_coverage_contracts(content);
+        assert_eq!(contracts.len(), 4);
+
+        // @covers with threshold
+        assert_eq!(contracts[0].target_path, "src/lib/common/array.spl");
+        assert_eq!(contracts[0].threshold_percent, Some(80.0));
+        assert!(!contracts[0].is_negative);
+        assert!(contracts[0].required_functions.is_empty());
+
+        // @covers without threshold (touch only)
+        assert_eq!(contracts[1].target_path, "src/lib/common/string.spl");
+        assert_eq!(contracts[1].threshold_percent, None);
+        assert!(!contracts[1].is_negative);
+
+        // @covers_fn with function names
+        assert_eq!(contracts[2].target_path, "src/lib/common/array.spl");
+        assert_eq!(contracts[2].required_functions, vec!["array_position", "array_find"]);
+        assert!(!contracts[2].is_negative);
+
+        // @not_covers
+        assert_eq!(contracts[3].target_path, "src/lib/common/date.spl");
+        assert!(contracts[3].is_negative);
     }
 
     #[test]

@@ -527,6 +527,20 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 return Ok(found);
             }
 
+            // Try src/lib/ directly (for common.*, gc_async_mut.*, etc.
+            // where the first path component IS the lib subdirectory name)
+            let mut src_lib_path = src_candidate.join("lib").join(&relative);
+            src_lib_path.set_extension("spl");
+            if src_lib_path.exists() && src_lib_path.is_file() {
+                return Ok(src_lib_path);
+            }
+            // Also try __init__.spl in src/lib/
+            let mut src_lib_init = src_candidate.join("lib").join(&relative);
+            src_lib_init.push("__init__.spl");
+            if src_lib_init.exists() && src_lib_init.is_file() {
+                return Ok(src_lib_init);
+            }
+
             // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
             if parts.len() > 1 && parts[0] == "compiler" {
                 let compiler_dir = src_candidate.join("compiler");

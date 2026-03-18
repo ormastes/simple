@@ -28,6 +28,7 @@ mod diagrams;
 mod watch;
 mod discovery;
 mod coverage;
+mod contract_validator;
 mod feature_db;
 mod test_db_update;
 mod resource_monitor;
