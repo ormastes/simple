@@ -286,10 +286,13 @@ pub(crate) fn call_extern_function(
         "rt_current_time_ms" => time::rt_current_time_ms(&evaluated),
 
         // ====================================================================
-        // High-Resolution Time Operations (2 functions)
+        // High-Resolution Time Operations (5 functions)
         // ====================================================================
         "rt_time_now_nanos" => time::rt_time_now_nanos(&evaluated),
         "rt_time_now_micros" => time::rt_time_now_micros(&evaluated),
+        "rt_time_monotonic_ns" => time::rt_time_monotonic_ns(&evaluated),
+        "rt_timestamp_iso8601" => time::rt_timestamp_iso8601(&evaluated),
+        "rt_time_ms" => time::rt_time_ms(&evaluated),
 
         // ====================================================================
         // DateTime Operations (11 functions)
@@ -955,6 +958,13 @@ pub(crate) fn call_extern_function(
         "rt_coverage_free_sdn" => coverage::rt_coverage_free_sdn(&evaluated),
         "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_interp(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
+
+        // ====================================================================
+        // Profiler FFI Functions (no-op in interpreter mode)
+        // ====================================================================
+        "rt_profiler_record_call" => time::rt_profiler_record_call(&evaluated),
+        "rt_profiler_record_return" => time::rt_profiler_record_return(&evaluated),
+        "rt_profiler_is_active" => time::rt_profiler_is_active(&evaluated),
 
         // ====================================================================
         // Cranelift FFI Functions (for self-hosting compiler)
