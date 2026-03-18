@@ -1,3 +1,8 @@
+---
+name: sffi
+description: Simple FFI wrappers for interfacing with native C/Rust libraries
+---
+
 # SFFI Skill - Simple FFI Wrappers
 
 ## Overview

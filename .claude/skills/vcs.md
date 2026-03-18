@@ -1,3 +1,8 @@
+---
+name: vcs
+description: JJ (Jujutsu) version control workflow, git sync, conflict resolution, and atomic push
+---
+
 # VCS Skill — JJ (Jujutsu) + Git Workflow & Sync
 
 **Purpose**: Complete version control reference — JJ basics, git equivalents, atomic sync workflow, conflict resolution, and error handling.

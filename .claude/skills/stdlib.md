@@ -1,3 +1,8 @@
+---
+name: stdlib
+description: Standard library development across memory model variants (GC/NoGC, sync/async, mut/immut)
+---
+
 # Stdlib Skill - Simple Standard Library Development
 
 ## Directory Structure

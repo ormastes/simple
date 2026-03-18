@@ -1,3 +1,8 @@
+---
+name: refactor
+description: Code quality refactoring with file size checks, duplication detection, and lint passes
+---
+
 # Refactor Skill
 
 Comprehensive code quality refactoring workflow. Run all checks, fix issues, verify with tests.

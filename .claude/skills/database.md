@@ -1,3 +1,8 @@
+---
+name: database
+description: Unified database library (BugDB, TestDB, FeatureDB) with SDN format and string interning
+---
+
 # Database Library Skill
 
 **Purpose:** Guide for using the unified database library (BugDatabase, TestDatabase, FeatureDatabase)

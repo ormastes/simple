@@ -1,3 +1,8 @@
+---
+name: rule
+description: Engineering rules for architecture, testing, operations, and mandatory project constraints
+---
+
 # Engineering Rules Skill
 
 Reference for the project's mandatory engineering, architectural, testing, and operational rules.

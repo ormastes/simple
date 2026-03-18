@@ -1,3 +1,8 @@
+---
+name: cuda
+description: CUDA, GPU computing, Vulkan SPIR-V, and SIMD development in Simple
+---
+
 # CUDA/GPU/SIMD Skill - Simple Language
 
 ## When to Use This Skill

@@ -1031,10 +1031,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                         };
                                         if let Some(export_value) = exports.get(&item_name) {
                                             if let Value::Function { def, .. } = export_value {
-                                                eprintln!("[IMPORT-DEBUG] Group import: adding '{}' to functions HashMap", item_name);
                                                 functions.insert(item_name.clone(), *def.clone());
-                                            } else {
-                                                eprintln!("[IMPORT-DEBUG] Group import: '{}' is {:?}, not Function", item_name, std::mem::discriminant(export_value));
                                             }
                                             env.insert(item_name.clone(), export_value.clone());
                                             MODULE_GLOBALS.with(|cell| {

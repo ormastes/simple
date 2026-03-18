@@ -1,3 +1,8 @@
+---
+name: mcp-dev
+description: MCP server development, protocol integration, bug database resources, and failure analysis
+---
+
 # MCP Skill - Model Context Protocol for Simple
 
 ## What is MCP?

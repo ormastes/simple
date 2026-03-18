@@ -1,3 +1,8 @@
+---
+name: todo
+description: TODO/FIXME comment format specification and todo-scan tracking
+---
+
 <!-- skip_todo -->
 
 # TODO Skill - Comment Format Specification

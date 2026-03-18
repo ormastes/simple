@@ -1,3 +1,8 @@
+---
+name: deeplearning
+description: Neural network training, progressive LoRA fine-tuning, and experiment tracking
+---
+
 # Deep Learning Skill - Simple Language
 
 ## When to Use This Skill

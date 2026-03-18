@@ -1,3 +1,8 @@
+---
+name: worktree
+description: JJ workspace isolation for parallel development and concurrent testing
+---
+
 # Worktree Skill — JJ Workspace Isolation
 
 **Purpose**: Isolated parallel development using JJ workspaces.

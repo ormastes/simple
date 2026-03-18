@@ -1,3 +1,8 @@
+---
+name: impl
+description: Full 17-phase implementation workflow from requirements through VCS sync with agent teams
+---
+
 # Impl Skill — 17-Phase Implementation Workflow
 
 **Purpose**: Full feature implementation lifecycle from requirements through VCS sync, with agent teams, BDD, duplication checks, codex verification, and gemini visual design.

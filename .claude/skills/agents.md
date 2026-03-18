@@ -1,6 +1,6 @@
 ---
 name: agents
-description: Agent loop iteration patterns and multi-agent team orchestration via MCP tools
+description: Agent loop patterns, team orchestration, and skill/command routing for Claude Code
 ---
 
 # Agents

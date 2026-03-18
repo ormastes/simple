@@ -1,3 +1,8 @@
+---
+name: release
+description: Creating Simple language releases including stable, RC, beta, and alpha channels
+---
+
 # Release Skill
 
 **Purpose**: Guide through creating Simple language releases (stable, RC, beta, alpha)

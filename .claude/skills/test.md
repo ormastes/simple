@@ -1,3 +1,8 @@
+---
+name: test
+description: SSpec BDD testing framework, matchers, fixtures, coverage measurement, and container testing
+---
+
 # Test & SSpec Skill
 
 SSpec is Simple's BDD testing framework that generates documentation from tests.

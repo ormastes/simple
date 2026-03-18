@@ -1,3 +1,8 @@
+---
+name: research
+description: Codebase exploration, file search patterns, documentation discovery, and research workflow
+---
+
 # Research Skill - Codebase Exploration
 
 ## Quick Commands

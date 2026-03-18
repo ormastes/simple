@@ -1,3 +1,8 @@
+---
+name: debug-lsp
+description: DAP and LSP tool chaining for runtime debug sessions with static analysis
+---
+
 # DAP+LSP Tool Chaining for Debug Session Analysis
 
 **Use when:** Enriching active debug sessions with static analysis. The key insight: DAP tools give you runtime state (where paused, variable values), LSP tools give you static knowledge (types, definitions, call graphs). Chain them together for deep understanding.

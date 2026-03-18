@@ -1,3 +1,8 @@
+---
+name: architecture
+description: Compiler pipeline, module structure, backend selection, and project directory layout
+---
+
 # Architecture Skill - Simple Compiler
 
 ## Compilation Pipeline

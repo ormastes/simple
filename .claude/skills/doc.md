@@ -1,3 +1,8 @@
+---
+name: doc
+description: Documentation writing, spec-as-code, document relationship model, and SSpec doc gen
+---
+
 # Documentation Writing Skill
 
 Documentation in Simple follows a "specification as code" philosophy - executable tests generate documentation, and research documents inform implementation.

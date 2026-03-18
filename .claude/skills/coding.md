@@ -1,3 +1,8 @@
+---
+name: coding
+description: Simple language coding rules, conventions, type names, method syntax, and code style
+---
+
 # Coding Skill - Simple Language Compiler
 
 ## Language Rules

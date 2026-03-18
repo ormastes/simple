@@ -1,0 +1,74 @@
+#!/bin/sh
+# Install Claude Code hooks into .claude/settings.json.
+# Preserves existing permissions, deny lists, and the agent-loop Stop hook.
+# Usage: sh scripts/hooks/claude/install.shs
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+TARGET="$PROJECT_ROOT/.claude/settings.json"
+
+if [ ! -f "$TARGET" ]; then
+    echo "Error: $TARGET not found. Run from project root." >&2
+    exit 1
+fi
+
+TMP_FILE="$(mktemp)"
+
+if node - "$TARGET" "$TMP_FILE" <<'EOF'
+const fs = require("fs");
+
+const targetPath = process.argv[2];
+const outputPath = process.argv[3];
+
+const settings = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+
+const newHooks = {
+  PreToolUse: [
+    {
+      matcher: "Bash",
+      hooks: [
+        { type: "command", command: "bash scripts/hooks/claude/binary-guard.sh" }
+      ]
+    }
+  ],
+  PostToolUse: [
+    {
+      matcher: "Edit|Write",
+      hooks: [
+        { type: "command", command: "bash scripts/hooks/claude/comment-replace-detect.sh" },
+        { type: "command", command: "bash scripts/hooks/claude/auto-lint-warn.sh" }
+      ]
+    }
+  ],
+  Stop: [
+    // Preserve existing Stop hooks (agent-loop-hook)
+    ...(settings.hooks && settings.hooks.Stop ? settings.hooks.Stop : []),
+    {
+      hooks: [
+        { type: "command", command: "bash scripts/hooks/claude/todo-check.sh" },
+        { type: "command", command: "bash scripts/hooks/claude/completion-guard.sh" },
+        { type: "command", command: "bash scripts/hooks/claude/auto-checkpoint.sh" },
+        { type: "command", command: "bash scripts/hooks/claude/pure-simple-guard.sh" },
+        { type: "command", command: "bash scripts/hooks/claude/session-summary.sh" }
+      ]
+    }
+  ]
+};
+
+settings.hooks = newHooks;
+
+fs.writeFileSync(outputPath, JSON.stringify(settings, null, 2) + "\n");
+EOF
+then
+    mv "$TMP_FILE" "$TARGET"
+    echo "Installed Claude Code hooks into .claude/settings.json"
+    echo "  PreToolUse: binary-guard (Bash)"
+    echo "  PostToolUse: comment-replace-detect, auto-lint-warn (Edit|Write)"
+    echo "  Stop: todo-check, completion-guard, auto-checkpoint, pure-simple-guard, session-summary"
+else
+    rm -f "$TMP_FILE"
+    echo "Failed to merge hooks into settings.json; please fix invalid JSON and rerun." >&2
+    exit 1
+fi

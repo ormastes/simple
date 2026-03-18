@@ -1,3 +1,8 @@
+---
+name: debug
+description: Reproduce-first bugfix workflow, debug logging, IR export, and fault detection
+---
+
 # Debug Skill - Simple Compiler Debugging
 
 ## Bugfix Workflow (Reproduce-First)

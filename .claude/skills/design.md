@@ -1,3 +1,8 @@
+---
+name: design
+description: Type system design, module patterns, memory model, IR levels, and MDSOC capsules
+---
+
 # Design Skill - Simple Language
 
 ## Design Principles
