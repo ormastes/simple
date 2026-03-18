@@ -448,6 +448,13 @@ pub fn load_module_with_imports_validated(
                     }
                 }
 
+                // Register source files for coverage attribution
+                let resolved_str = resolved.display().to_string();
+                for imported_item in &imported.items {
+                    if let Node::Function(f) = imported_item {
+                        crate::interpreter::register_function_source_file(&f.name, &resolved_str);
+                    }
+                }
                 // Add imported items for flattened access (functions/classes in global scope)
                 items.extend(imported.items);
                 // ALSO keep the UseStmt so evaluate_module can create the module binding

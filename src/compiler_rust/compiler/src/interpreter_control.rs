@@ -147,7 +147,6 @@ pub(super) fn exec_if(
             let elif_decision = elif_val.truthy();
 
             // COVERAGE: Record decision for elif statement
-            let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
             record_decision_coverage_ffi(&current_file_for_coverage(), if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
 
             if elif_decision {
@@ -213,7 +212,7 @@ pub(super) fn exec_while(
 
         // COVERAGE: Record decision for while condition on each iteration
         record_decision_coverage_ffi(
-            "<source>",
+            &current_file_for_coverage(),
             while_stmt.span.line,
             while_stmt.span.column,
             decision_result,
@@ -600,7 +599,7 @@ fn exec_match_core(
 
             // COVERAGE: Record that this match arm was taken
             record_decision_coverage_ffi(
-                "<source>",
+                &current_file_for_coverage(),
                 match_stmt.span.line + arm_index,
                 match_stmt.span.column,
                 true, // We matched an arm
@@ -681,7 +680,11 @@ pub(crate) fn exec_if_expr(
         cond_val
     };
 
-    if cond_val.truthy() {
+    let decision_result = cond_val.truthy();
+    // COVERAGE: Record decision for if-as-expression
+    record_decision_coverage_ffi(&current_file_for_coverage(), if_stmt.span.line, if_stmt.span.column, decision_result);
+
+    if decision_result {
         let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
         return match flow {
             Control::Return(v) => Ok(v),
@@ -689,7 +692,7 @@ pub(crate) fn exec_if_expr(
         };
     }
 
-    for (pattern, cond, block) in if_stmt.elif_branches.iter() {
+    for (idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
         if let Some(pattern) = pattern {
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
@@ -710,7 +713,10 @@ pub(crate) fn exec_if_expr(
             } else {
                 elif_val
             };
-            if elif_val.truthy() {
+            let elif_decision = elif_val.truthy();
+            // COVERAGE: Record decision for elif in if-as-expression
+            record_decision_coverage_ffi(&current_file_for_coverage(), if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            if elif_decision {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
                     Control::Return(v) => Ok(v),

@@ -4,6 +4,7 @@ use simple_parser::ast::{Expr, LambdaParam, Node};
 
 use super::evaluate_expr;
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::interpreter::coverage_helpers::{record_decision_coverage_ffi, current_file_for_coverage};
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{
@@ -42,7 +43,11 @@ pub(super) fn eval_control_expr(
             else_branch,
             ..
         } => {
-            let branch_result = if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?.truthy() {
+            let cond_val = evaluate_expr(condition, env, functions, classes, enums, impl_methods)?;
+            let decision_result = cond_val.truthy();
+            // COVERAGE: Record decision for inline if expression
+            record_decision_coverage_ffi(&current_file_for_coverage(), 0, 0, decision_result);
+            let branch_result = if decision_result {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
                 evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?

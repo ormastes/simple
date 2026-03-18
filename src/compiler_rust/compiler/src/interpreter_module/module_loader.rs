@@ -20,6 +20,7 @@ use tracing::{debug, error, trace, warn, instrument};
 use simple_parser::ast::{Capability, ClassDef, EnumDef, Effect, ImportTarget, Node, UseStmt};
 
 use crate::error::CompileError;
+use crate::interpreter::coverage_helpers::{push_coverage_file, pop_coverage_file};
 use crate::value::{Env, Value};
 
 use super::module_cache::{
@@ -343,6 +344,10 @@ pub fn load_and_merge_module(
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
 
+    // Push coverage file so decisions inside this module are attributed to it
+    let module_path_str = module_path.display().to_string();
+    push_coverage_file(&module_path_str);
+
     // For __init__.spl files with bare exports: preload sibling .spl files.
     // Many __init__.spl files use bare exports (export X, Y, Z) where the symbols
     // come from sibling files (mod.spl, or other .spl files in the same directory).
@@ -432,11 +437,15 @@ pub fn load_and_merge_module(
         ) {
             Ok(result) => result,
             Err(e) => {
+                pop_coverage_file();
                 unmark_module_loading(&module_path);
                 decrement_load_depth();
                 return Err(e);
             }
         };
+
+    // Pop coverage file — restore parent module's file for attribution
+    pop_coverage_file();
 
     // Create exports with the module's environment captured
     // IMPORTANT: Filter out Function values from captured_env to avoid exponential cloning.

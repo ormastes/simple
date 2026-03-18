@@ -411,7 +411,8 @@ fn initialize_profiling(options: &TestOptions, quiet: bool) {
 
 /// Initialize coverage tracking if enabled
 fn initialize_coverage(quiet: bool) {
-    if is_coverage_enabled() {
+    // Check env var (set by --coverage flag) and initialize the global coverage collector
+    if std::env::var("SIMPLE_COVERAGE").is_ok() {
         init_coverage();
         if !quiet {
             println!("Coverage tracking enabled");

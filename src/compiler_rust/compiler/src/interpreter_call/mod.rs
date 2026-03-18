@@ -436,6 +436,129 @@ pub(crate) fn evaluate_call(
                 ctx,
             ));
         }
+
+        // Handle nested FieldAccess: module.Type.method() or module.Type.Variant()
+        // When receiver is a FieldAccess chain like `module.Type`, resolve Type and dispatch method.
+        if let Expr::FieldAccess { receiver: inner_receiver, field: type_name } = receiver.as_ref() {
+            if let Expr::Identifier(module_name) = inner_receiver.as_ref() {
+                // Try looking up the method directly in the module dict
+                if let Some(Value::Dict(module_dict)) = env.get(module_name).cloned() {
+                    if let Some(func_val) = module_dict.get(field).cloned() {
+                        if let Value::Function { def, captured_env, .. } = func_val {
+                            let mut captured_env_clone = captured_env.clone();
+                            return core::exec_function_with_captured_env(
+                                &def, args, env, &mut captured_env_clone,
+                                functions, classes, enums, impl_methods,
+                            );
+                        }
+                    }
+                }
+
+                // Try impl_methods for the type (local first, then GLOBAL_IMPL_METHODS)
+                let nested_impl_methods = impl_methods
+                    .get(type_name.as_str())
+                    .cloned()
+                    .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
+                if let Some(methods) = nested_impl_methods {
+                    if let Some(func) = methods.iter().find(|m| &m.name == field) {
+                        let is_new_method = field == "new";
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                        }
+                        let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                        }
+                        return result;
+                    }
+                }
+
+                // Check classes for static methods
+                if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
+                    if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
+                        let is_new_method = field == "new";
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                        }
+                        let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                        }
+                        return result;
+                    }
+                }
+
+                // Check enums for variant constructors and static methods
+                let nested_enum_def = enums
+                    .get(type_name.as_str())
+                    .cloned()
+                    .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
+                if let Some(enum_def) = nested_enum_def {
+                    if enum_def.variants.iter().any(|v| &v.name == field) {
+                        let payload = if args.is_empty() {
+                            None
+                        } else if args.len() == 1 {
+                            Some(Box::new(evaluate_expr(
+                                &args[0].value, env, functions, classes, enums, impl_methods,
+                            )?))
+                        } else {
+                            let mut values = Vec::new();
+                            for arg in args {
+                                values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                            }
+                            Some(Box::new(Value::Tuple(values)))
+                        };
+                        return Ok(Value::Enum {
+                            enum_name: type_name.clone(),
+                            variant: field.clone(),
+                            payload,
+                        });
+                    }
+                    if let Some(method) = enum_def.methods.iter().find(|m| &m.name == field) {
+                        return core::exec_function(method, args, env, functions, classes, enums, impl_methods, None);
+                    }
+                }
+
+                // Cross-module cache fallback
+                let nested_cached_class: Option<ClassDef> = MODULE_CLASSES_CACHE.with(|cache| {
+                    let cache = cache.borrow();
+                    for (_path, module_classes) in cache.iter() {
+                        if let Some(class_def) = module_classes.get(type_name.as_str()) {
+                            return Some(class_def.clone());
+                        }
+                    }
+                    None
+                });
+                if let Some(class_def) = nested_cached_class {
+                    classes.insert(type_name.clone(), class_def.clone());
+                    if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
+                        let is_new_method = field == "new";
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                        }
+                        let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                        if is_new_method {
+                            core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                        }
+                        return result;
+                    }
+                }
+
+                // Mangled name fallback: Type__method
+                let nested_mangled = format!("{}__{}", type_name, field);
+                if let Some(func) = functions.get(&nested_mangled).cloned() {
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                }
+
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("check that the type and method exist in the module");
+                return Err(CompileError::semantic_with_context(
+                    format!("unknown symbol {}.{}.{}", module_name, type_name, field),
+                    ctx,
+                ));
+            }
+        }
     }
 
     // Handle path calls: Type::method(args) or Type::Variant(args)
@@ -759,6 +882,37 @@ pub(crate) fn evaluate_call(
             let mangled_path_name = format!("{}__{}", type_name, method_name);
             if let Some(func) = functions.get(&mangled_path_name).cloned() {
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+            }
+        }
+
+        // Fallback: try evaluating callee as expression and call if callable
+        if let Ok(val) = evaluate_expr(callee, env, functions, classes, enums, impl_methods) {
+            match val {
+                Value::Function { def, captured_env, .. } => {
+                    let mut captured_env_clone = captured_env.clone();
+                    return core::exec_function_with_captured_env(
+                        &def, args, env, &mut captured_env_clone,
+                        functions, classes, enums, impl_methods,
+                    );
+                }
+                Value::Lambda { params, body, env: captured } => {
+                    let mut captured_clone = captured.clone();
+                    return core::exec_lambda(
+                        &params, &body, args, env, &mut captured_clone,
+                        functions, classes, enums, impl_methods,
+                    );
+                }
+                Value::Constructor { class_name } => {
+                    return core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods);
+                }
+                Value::NativeFunction(native) => {
+                    let evaluated: Vec<Value> = args
+                        .iter()
+                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return (native.func)(&evaluated);
+                }
+                _ => {} // fall through to error
             }
         }
 

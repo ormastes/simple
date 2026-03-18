@@ -9,12 +9,17 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use std::collections::HashMap;
+
 // Dedicated coverage file tracker — separate from interpreter state's CURRENT_FILE
 // to avoid being cleared during module loading/import resolution.
 // Uses a stack to support push/pop around sub-module evaluations.
 thread_local! {
     static COVERAGE_CURRENT_FILE: RefCell<String> = const { RefCell::new(String::new()) };
     static COVERAGE_FILE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Maps function names to their source file paths for coverage attribution.
+    /// Populated during module loading so that function calls can push the correct file.
+    static FUNCTION_SOURCE_FILES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Set the current file for coverage tracking. Called from exec_core before evaluation.
@@ -46,6 +51,26 @@ pub fn pop_coverage_file() {
 /// Get the current file for coverage tracking.
 fn get_coverage_file() -> String {
     COVERAGE_CURRENT_FILE.with(|cell| cell.borrow().clone())
+}
+
+/// Register a function's source file for coverage attribution.
+/// Called during module loading when importing functions from other files.
+pub fn register_function_source_file(fn_name: &str, source_file: &str) {
+    FUNCTION_SOURCE_FILES.with(|cell| {
+        cell.borrow_mut().insert(fn_name.to_string(), source_file.to_string());
+    });
+}
+
+/// Look up the source file for a function name.
+pub fn get_function_source_file(fn_name: &str) -> Option<String> {
+    FUNCTION_SOURCE_FILES.with(|cell| {
+        cell.borrow().get(fn_name).cloned()
+    })
+}
+
+/// Clear function source file registry (between test runs).
+pub fn clear_function_source_files() {
+    FUNCTION_SOURCE_FILES.with(|cell| cell.borrow_mut().clear());
 }
 
 /// Extract source location from a Node's span
@@ -89,9 +114,7 @@ pub fn extract_expr_location(_expr: &Expr) -> Option<(String, usize, usize)> {
 /// The file path is extracted from the span's source info if available,
 /// otherwise defaults to "<unknown>".
 fn span_to_location(span: &Span) -> (String, usize, usize) {
-    let file = super::interpreter_state::get_current_file()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<source>".to_string());
+    let file = current_file_for_coverage();
     let line = span.line;
     let column = span.column;
     (file, line, column)

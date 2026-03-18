@@ -600,7 +600,14 @@ pub(super) fn export_functions(
 }
 
 /// Process bare export statements
-pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, exports: &mut HashMap<String, Value>) {
+pub(super) fn process_bare_exports(
+    bare_exports: &[Vec<String>],
+    env: &Env,
+    local_functions: &HashMap<String, FunctionDef>,
+    local_classes: &HashMap<String, ClassDef>,
+    local_enums: &HashMap<String, EnumDef>,
+    exports: &mut HashMap<String, Value>,
+) {
     for export_names in bare_exports {
         for name in export_names {
             if let Some(value) = env.get(name) {
@@ -608,6 +615,35 @@ pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, expo
                 if !exports.contains_key(name) {
                     trace!(name = %name, "Adding bare export");
                     exports.insert(name.clone(), value.clone());
+                }
+            } else if local_classes.contains_key(name) {
+                if !exports.contains_key(name) {
+                    trace!(name = %name, "Adding bare export (class constructor)");
+                    exports.insert(name.clone(), Value::Constructor { class_name: name.clone() });
+                }
+            } else if let Some(enum_def) = local_enums.get(name) {
+                if !exports.contains_key(name) {
+                    trace!(name = %name, "Adding bare export (enum)");
+                    // Export enum variant constructors
+                    for variant in &enum_def.variants {
+                        if !exports.contains_key(&variant.name) {
+                            exports.insert(variant.name.clone(), Value::EnumVariantConstructor {
+                                enum_name: name.clone(),
+                                variant_name: variant.name.clone(),
+                            });
+                        }
+                    }
+                    // Also export the enum type itself
+                    exports.insert(name.clone(), Value::EnumType { enum_name: name.clone() });
+                }
+            } else if let Some(func) = local_functions.get(name) {
+                if !exports.contains_key(name) {
+                    trace!(name = %name, "Adding bare export (function)");
+                    exports.insert(name.clone(), Value::Function {
+                        name: name.clone(),
+                        def: Box::new(func.clone()),
+                        captured_env: HashMap::new(),
+                    });
                 }
             } else {
                 // Check if it's already in exports (e.g., enums are auto-exported)

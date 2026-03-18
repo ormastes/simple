@@ -313,6 +313,12 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    // Coverage: push source file if this function was imported from a different file
+    let source_file = crate::interpreter::get_function_source_file(&func.name);
+    if let Some(ref sf) = source_file {
+        crate::interpreter::push_coverage_file(sf);
+    }
+
     let result = execute_function_body(
         func,
         bound,
@@ -323,6 +329,11 @@ fn exec_function_inner(
         impl_methods,
         true,
     );
+
+    // Coverage: pop source file after function execution
+    if source_file.is_some() {
+        crate::interpreter::pop_coverage_file();
+    }
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {

@@ -960,7 +960,14 @@ static inline int64_t _rt_now_nanos(void) {{
                     let attr = if use_strong { "" } else { "__attribute__((weak)) " };
                     for sym in &symbols {
                         let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
-                        let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
+                        let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && !matches!(sym.as_str(), "int" | "float" | "double" | "char" | "void" |
+                                "short" | "long" | "signed" | "unsigned" | "struct" | "union" | "enum" |
+                                "const" | "volatile" | "static" | "extern" | "register" | "return" |
+                                "if" | "else" | "while" | "for" | "do" | "switch" | "case" | "break" |
+                                "continue" | "default" | "goto" | "sizeof" | "typedef" | "auto" |
+                                "inline" | "restrict" | "_Bool" | "_Complex" | "_Imaginary" | "bool" |
+                                "true" | "false" | "NULL" | "main");
                         if is_data && valid_ident {
                             code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                         } else if valid_ident {
@@ -1442,7 +1449,14 @@ static inline int64_t _rt_now_nanos(void) {{
                 let attr = if use_strong { "" } else { "__attribute__((weak)) " };
                 for sym in &symbols {
                     let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
-                    let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
+                    let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && !matches!(sym.as_str(), "int" | "float" | "double" | "char" | "void" |
+                            "short" | "long" | "signed" | "unsigned" | "struct" | "union" | "enum" |
+                            "const" | "volatile" | "static" | "extern" | "register" | "return" |
+                            "if" | "else" | "while" | "for" | "do" | "switch" | "case" | "break" |
+                            "continue" | "default" | "goto" | "sizeof" | "typedef" | "auto" |
+                            "inline" | "restrict" | "_Bool" | "_Complex" | "_Imaginary" | "bool" |
+                            "true" | "false" | "NULL" | "main");
                     if is_data && valid_ident {
                         code.push_str(&format!("{1}int64_t {0} = 0;\n", sym, attr));
                     } else if valid_ident {

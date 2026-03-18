@@ -464,13 +464,55 @@ fn main() -> i64:
 }
 
 /// Handle 'ui' command - UI application launcher
+///
+/// The UI app requires the self-hosted binary for full mode execution because
+/// its module dependency graph includes the compiler tree (via SDN parser),
+/// which is too large for the bootstrap interpreter to load.
+/// `--help` works via the bootstrap interpreter; all other modes need
+/// `bin/release/simple` (rebuilt via `simple build bootstrap`).
 pub fn handle_ui(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    let app_path = std::path::PathBuf::from("src/app/ui/main.spl");
-    if !app_path.exists() {
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("--help");
+
+    // --help works through the bootstrap interpreter (no heavy imports)
+    if mode == "-h" || mode == "--help" {
+        let app_path = std::path::PathBuf::from("src/app/ui/main.spl");
+        if app_path.exists() {
+            return crate::cli::basic::run_file_with_args(&app_path, gc_log, gc_off, args.to_vec());
+        }
         eprintln!("error: ui app not found (run from project root)");
         return 1;
     }
-    crate::cli::basic::run_file_with_args(&app_path, gc_log, gc_off, args.to_vec())
+
+    // All other modes: delegate to self-hosted binary
+    let release_bin = std::path::PathBuf::from("bin/release/simple");
+    if release_bin.exists() {
+        // Try the registered 'ui' command first, fall back to running main.spl as a file
+        let status = std::process::Command::new(&release_bin)
+            .args(args)
+            .status();
+        if let Ok(s) = status {
+            let code = s.code().unwrap_or(1);
+            // If the release binary doesn't have 'ui' registered yet, run main.spl
+            if code != 0 {
+                let status2 = std::process::Command::new(&release_bin)
+                    .arg("src/app/ui/main.spl")
+                    .args(args)
+                    .status();
+                if let Ok(s2) = status2 {
+                    return s2.code().unwrap_or(1);
+                }
+            }
+            return code;
+        }
+    }
+
+    // No release binary — fall back to bootstrap interpreter (will be slow)
+    let app_path = std::path::PathBuf::from("src/app/ui/main.spl");
+    if app_path.exists() {
+        return crate::cli::basic::run_file_with_args(&app_path, gc_log, gc_off, args.to_vec());
+    }
+    eprintln!("error: ui app not found (run from project root)");
+    1
 }
 
 /// Handle 'dashboard' command - project dashboard CLI
