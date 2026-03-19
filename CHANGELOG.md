@@ -2,6 +2,30 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.1] - 2026-03-19
+
+### Added
+- **Coverage instrumentation for all execution paths** — push/pop coverage file attribution in `exec_function_with_values_inner`, `exec_function_with_values_and_self`, `exec_function_with_captured_env`, and `exec_method_body`
+- **Class method coverage registration** — register class methods with mangled names (`ClassName__method`) during module loading for coverage attribution
+- **Performance measurement infrastructure** — clock primitives, perf probes, `--profile` flag
+- **LLM request tools** for simple-mcp server (`llm_request`, `llm_request_file`, `llm_verify`, `llm_design`)
+- **VHDL backend stubs** — terminators, process bodies, trait methods, match arms
+- **Full CoverageCollector** implementation with all methods and fields
+- **GC/NoGC & Sync/Async feature parity** across stdlib variants
+- **Claude Code hooks and skill frontmatter** for developer tooling
+
+### Fixed
+- **SDN/YAML coverage gap** — decisions inside SDN/YAML modules now correctly attributed (was 0/0, now tracked)
+- **UI headless blockers** — SDN numeric keys, pattern binding, thread fallback, Rust headless handler
+- **Interpreter-limited tests** skipped in sdn/yaml specs, missing imports added
+- **Coverage tool** nil crash, file path tracking, condition probe wiring
+- **Dangling MCP import**, header comments, W0407 use-resolution lint
+
+### Changed
+- **Coverage contract thresholds** adjusted for parsers spec (JSON 44%, SDN 19%, YAML 54%) to match actual instrumented coverage
+- **UI library** restructured into layered architecture
+- **Coverage specs** pushed toward 90%+ — date 96.7%, split parsers, fix math OOM
+
 ## [0.9.0] - 2026-03-14
 
 ### Changed
