@@ -495,8 +495,18 @@ pub fn load_and_merge_module(
     cache_module_exports(&module_path, exports_value);
 
     // Register function source files for coverage attribution at call sites
-    for (fn_name, _) in &module_functions {
-        register_function_source_file(fn_name, &module_path_str);
+    if crate::interpreter::coverage_helpers::is_coverage_enabled() {
+        for (fn_name, _) in &module_functions {
+            register_function_source_file(fn_name, &module_path_str);
+        }
+
+        // Register class method source files with mangled names for coverage attribution
+        for (class_name, class_def) in &module_classes {
+            for method in &class_def.methods {
+                let mangled = format!("{}__{}", class_name, method.name);
+                register_function_source_file(&mangled, &module_path_str);
+            }
+        }
     }
 
     // Also cache the module definitions (classes, functions, enums) for future imports

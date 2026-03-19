@@ -435,8 +435,23 @@ fn exec_method_body(
         let arg_val = args.get(i).cloned().unwrap_or(Value::Nil);
         local_env.insert(param.name.clone(), arg_val);
     }
+    // Coverage: push source file for method execution
+    let class_name = if let Value::Object { class, .. } = receiver { Some(class.as_str()) } else { None };
+    let mangled = class_name.map(|c| format!("{}__{}", c, method.name));
+    let source_file = mangled.as_ref()
+        .and_then(|mn| crate::interpreter::get_function_source_file(mn))
+        .or_else(|| crate::interpreter::get_function_source_file(&method.name));
+    if let Some(ref sf) = source_file {
+        crate::interpreter::push_coverage_file(sf);
+    }
+
     // Use exec_block_fn to handle implicit returns properly
     let result = exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+
+    // Coverage: pop source file after method execution
+    if source_file.is_some() {
+        crate::interpreter::pop_coverage_file();
+    }
 
     // ALWAYS restore CONST_NAMES and IMMUTABLE_VARS before returning to avoid leaking to caller
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);

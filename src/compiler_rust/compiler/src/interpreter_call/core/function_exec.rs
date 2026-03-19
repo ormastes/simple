@@ -183,7 +183,13 @@ pub(crate) fn exec_function_with_values_and_self(
             self_mode,
         )?;
 
-        execute_function_body(
+        // Coverage: push source file if this function was imported from a different file
+        let source_file = crate::interpreter::get_function_source_file(&func.name);
+        if let Some(ref sf) = source_file {
+            crate::interpreter::push_coverage_file(sf);
+        }
+
+        let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -192,7 +198,14 @@ pub(crate) fn exec_function_with_values_and_self(
             enums,
             impl_methods,
             false,
-        )
+        );
+
+        // Coverage: pop source file after function execution
+        if source_file.is_some() {
+            crate::interpreter::pop_coverage_file();
+        }
+
+        result
     })
 }
 
@@ -222,7 +235,13 @@ pub(crate) fn exec_function_with_captured_env(
             self_mode,
         )?;
 
-        execute_function_body(
+        // Coverage: push source file if this function was imported from a different file
+        let source_file = crate::interpreter::get_function_source_file(&func.name);
+        if let Some(ref sf) = source_file {
+            crate::interpreter::push_coverage_file(sf);
+        }
+
+        let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -231,7 +250,14 @@ pub(crate) fn exec_function_with_captured_env(
             enums,
             impl_methods,
             false,
-        )
+        );
+
+        // Coverage: pop source file after function execution
+        if source_file.is_some() {
+            crate::interpreter::pop_coverage_file();
+        }
+
+        result
     })
 }
 
@@ -386,6 +412,12 @@ fn exec_function_with_values_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    // Coverage: push source file if this function was imported from a different file
+    let source_file = crate::interpreter::get_function_source_file(&func.name);
+    if let Some(ref sf) = source_file {
+        crate::interpreter::push_coverage_file(sf);
+    }
+
     let result = execute_function_body(
         func,
         bound,
@@ -396,6 +428,11 @@ fn exec_function_with_values_inner(
         impl_methods,
         true,
     );
+
+    // Coverage: pop source file after function execution
+    if source_file.is_some() {
+        crate::interpreter::pop_coverage_file();
+    }
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {

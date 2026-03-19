@@ -11,11 +11,45 @@ use crate::interpreter::{
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+
+// Thread-local flags for control flow in exec_block_closure_mut.
+// Needed because the function returns Result<Value, CompileError>
+// and cannot signal break/continue/return through its return type.
+thread_local! {
+    static CLOSURE_BREAK: Cell<bool> = const { Cell::new(false) };
+    static CLOSURE_CONTINUE: Cell<bool> = const { Cell::new(false) };
+    static CLOSURE_RETURN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Extract the variable name from a pattern, unwrapping Typed wrappers.
+/// Returns `None` for complex patterns (tuple, struct, etc.) that require
+/// `bind_pattern_value` instead, and for wildcard patterns that intentionally
+/// bind nothing.
+fn extract_binding_name(pat: &simple_parser::ast::Pattern) -> Option<&str> {
+    match pat {
+        simple_parser::ast::Pattern::Identifier(name) => Some(name),
+        simple_parser::ast::Pattern::MutIdentifier(name) => Some(name),
+        simple_parser::ast::Pattern::MoveIdentifier(name) => Some(name),
+        simple_parser::ast::Pattern::Typed { pattern, .. } => extract_binding_name(pattern),
+        // Wildcard intentionally binds nothing
+        simple_parser::ast::Pattern::Wildcard => None,
+        // Complex patterns need bind_pattern_value — callers must handle None
+        simple_parser::ast::Pattern::Tuple(_)
+        | simple_parser::ast::Pattern::Array(_)
+        | simple_parser::ast::Pattern::Struct { .. }
+        | simple_parser::ast::Pattern::Enum { .. }
+        | simple_parser::ast::Pattern::Or(_)
+        | simple_parser::ast::Pattern::Literal(_)
+        | simple_parser::ast::Pattern::Range { .. }
+        | simple_parser::ast::Pattern::Rest => None,
+    }
+}
 
 /// Inject mixin fields and methods into a ClassDef.
 /// Returns a new ClassDef with mixin fields prepended and mixin methods appended.
@@ -138,6 +172,16 @@ pub(super) fn exec_block_closure(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::bdd::exec_block_value;
+
+    // Save and clear control flow flags so nested exec_block_closure calls
+    // don't clobber flags set by an outer scope (e.g. break inside a loop body
+    // that calls a function which itself goes through exec_block_closure).
+    let saved_break = CLOSURE_BREAK.with(|f| f.get());
+    let saved_continue = CLOSURE_CONTINUE.with(|f| f.get());
+    let saved_return = CLOSURE_RETURN.with(|f| f.get());
+    CLOSURE_BREAK.with(|f| f.set(false));
+    CLOSURE_CONTINUE.with(|f| f.set(false));
+    CLOSURE_RETURN.with(|f| f.set(false));
 
     // Save current CONST_NAMES and IMMUTABLE_VARS, clear for block closure scope
     // This prevents const/immutable names from caller leaking into the block
@@ -444,14 +488,12 @@ pub(super) fn exec_block_closure(
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
                 for val in iter_values {
-                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
+                    if let Some(name) = extract_binding_name(&for_stmt.pattern) {
+                        local_env.insert(name.to_string(), val);
+                    } else if !matches!(for_stmt.pattern, simple_parser::ast::Pattern::Wildcard) {
+                        // Complex pattern (tuple destructuring, etc.) — use full pattern binding
+                        bind_pattern_value(&for_stmt.pattern, val, false, &mut local_env);
                     }
-                    // Use mutable env version so assignments inside the loop persist
                     last_value = exec_block_closure_mut(
                         &for_stmt.body.statements,
                         &mut local_env,
@@ -460,10 +502,20 @@ pub(super) fn exec_block_closure(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::While(while_stmt) => {
-                // Handle while loops inside block closures (like in `it` blocks)
                 loop {
                     if is_interrupted() {
                         return Err(CompileError::InterruptedByUser);
@@ -488,10 +540,20 @@ pub(super) fn exec_block_closure(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::Loop(loop_stmt) => {
-                // Handle infinite loops inside block closures (like in `it` blocks)
                 loop {
                     if is_interrupted() {
                         return Err(CompileError::InterruptedByUser);
@@ -505,6 +567,17 @@ pub(super) fn exec_block_closure(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::Match(match_stmt) => {
@@ -842,6 +915,10 @@ pub(super) fn exec_block_closure(
     // Restore CONST_NAMES and IMMUTABLE_VARS before returning
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+    // Restore outer control flow flags
+    if saved_break { CLOSURE_BREAK.with(|f| f.set(true)); }
+    if saved_continue { CLOSURE_CONTINUE.with(|f| f.set(true)); }
+    if saved_return { CLOSURE_RETURN.with(|f| f.set(true)); }
     Ok(last_value)
 }
 
@@ -855,6 +932,14 @@ pub(crate) fn exec_block_closure_mut(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Save and clear control flow flags so nested calls don't clobber outer flags
+    let saved_break = CLOSURE_BREAK.with(|f| f.get());
+    let saved_continue = CLOSURE_CONTINUE.with(|f| f.get());
+    let saved_return = CLOSURE_RETURN.with(|f| f.get());
+    CLOSURE_BREAK.with(|f| f.set(false));
+    CLOSURE_CONTINUE.with(|f| f.set(false));
+    CLOSURE_RETURN.with(|f| f.set(false));
+
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -882,12 +967,11 @@ pub(crate) fn exec_block_closure_mut(
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
-                    if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
+                    if let Some(name) = extract_binding_name(&let_stmt.pattern) {
+                        local_env.insert(name.to_string(), val.clone());
+                    } else if !matches!(let_stmt.pattern, simple_parser::ast::Pattern::Wildcard) {
+                        // Complex pattern (tuple destructuring, etc.) — use full pattern binding
+                        bind_pattern_value(&let_stmt.pattern, val, let_stmt.mutability.is_mutable(), local_env);
                     }
                 }
                 last_value = Value::Nil;
@@ -1021,12 +1105,11 @@ pub(crate) fn exec_block_closure_mut(
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
                 for val in iter_values {
-                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
+                    if let Some(name) = extract_binding_name(&for_stmt.pattern) {
+                        local_env.insert(name.to_string(), val);
+                    } else if !matches!(for_stmt.pattern, simple_parser::ast::Pattern::Wildcard) {
+                        // Complex pattern (tuple destructuring, etc.) — use full pattern binding
+                        bind_pattern_value(&for_stmt.pattern, val, false, local_env);
                     }
                     last_value = exec_block_closure_mut(
                         &for_stmt.body.statements,
@@ -1036,10 +1119,20 @@ pub(crate) fn exec_block_closure_mut(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::While(while_stmt) => {
-                // Handle while loops inside mutable block closures
                 loop {
                     if is_interrupted() {
                         return Err(CompileError::InterruptedByUser);
@@ -1064,10 +1157,20 @@ pub(crate) fn exec_block_closure_mut(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::Loop(loop_stmt) => {
-                // Handle infinite loops inside mutable block closures
                 loop {
                     if is_interrupted() {
                         return Err(CompileError::InterruptedByUser);
@@ -1081,6 +1184,17 @@ pub(crate) fn exec_block_closure_mut(
                         enums,
                         impl_methods,
                     )?;
+                    if CLOSURE_BREAK.with(|f| f.get()) {
+                        CLOSURE_BREAK.with(|f| f.set(false));
+                        break;
+                    }
+                    if CLOSURE_CONTINUE.with(|f| f.get()) {
+                        CLOSURE_CONTINUE.with(|f| f.set(false));
+                        continue;
+                    }
+                    if CLOSURE_RETURN.with(|f| f.get()) {
+                        return Ok(last_value);
+                    }
                 }
             }
             Node::Match(match_stmt) => {
@@ -1347,11 +1461,46 @@ pub(crate) fn exec_block_closure_mut(
                 );
                 last_value = Value::Nil;
             }
+            Node::Break(_) => {
+                CLOSURE_BREAK.with(|f| f.set(true));
+                if saved_continue { CLOSURE_CONTINUE.with(|f| f.set(true)); }
+                if saved_return { CLOSURE_RETURN.with(|f| f.set(true)); }
+                return Ok(last_value);
+            }
+            Node::Continue(_) => {
+                CLOSURE_CONTINUE.with(|f| f.set(true));
+                if saved_break { CLOSURE_BREAK.with(|f| f.set(true)); }
+                if saved_return { CLOSURE_RETURN.with(|f| f.set(true)); }
+                return Ok(last_value);
+            }
+            Node::Return(ret_stmt) => {
+                let ret_val = if let Some(ref expr) = ret_stmt.value {
+                    evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?
+                } else {
+                    Value::Nil
+                };
+                CLOSURE_RETURN.with(|f| f.set(true));
+                if saved_break { CLOSURE_BREAK.with(|f| f.set(true)); }
+                if saved_continue { CLOSURE_CONTINUE.with(|f| f.set(true)); }
+                return Ok(ret_val);
+            }
             _ => {
                 last_value = Value::Nil;
             }
         }
+        // Check if a nested block signaled break/continue/return
+        if CLOSURE_BREAK.with(|f| f.get()) || CLOSURE_CONTINUE.with(|f| f.get()) || CLOSURE_RETURN.with(|f| f.get()) {
+            // Restore outer flags (merge: inner flags take priority)
+            if saved_break { CLOSURE_BREAK.with(|f| f.set(true)); }
+            if saved_continue { CLOSURE_CONTINUE.with(|f| f.set(true)); }
+            if saved_return { CLOSURE_RETURN.with(|f| f.set(true)); }
+            return Ok(last_value);
+        }
     }
 
+    // Restore outer flags before returning
+    if saved_break { CLOSURE_BREAK.with(|f| f.set(true)); }
+    if saved_continue { CLOSURE_CONTINUE.with(|f| f.set(true)); }
+    if saved_return { CLOSURE_RETURN.with(|f| f.set(true)); }
     Ok(last_value)
 }

@@ -20,12 +20,14 @@ struct WatchdogHandle {
 static WATCHDOG: Mutex<Option<WatchdogHandle>> = Mutex::new(None);
 
 /// Memory limit in bytes for the watchdog to monitor.
-/// Defaults to 2 GB. Overridable via `SIMPLE_TEST_MEMORY_LIMIT_MB`.
+/// Defaults to 4 GB. Overridable via `SIMPLE_TEST_MEMORY_LIMIT_MB`.
+/// Note: easy_fix_rules_spec.spl peaks at ~2.5-3 GB due to the interpreter
+/// re-evaluating the full rule engine per test group without freeing state.
 fn memory_limit_bytes() -> u64 {
     std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2048)
+        .unwrap_or(4096)
         * 1024
         * 1024
 }

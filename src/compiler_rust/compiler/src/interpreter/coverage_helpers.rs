@@ -32,6 +32,7 @@ pub fn set_coverage_file(path: &str) {
 /// Push the current coverage file onto the stack and set a new one.
 /// Used around sub-module evaluations to preserve the parent file.
 pub fn push_coverage_file(path: &str) {
+    if !is_coverage_enabled() { return; }
     COVERAGE_FILE_STACK.with(|stack| {
         let current = COVERAGE_CURRENT_FILE.with(|cell| cell.borrow().clone());
         stack.borrow_mut().push(current);
@@ -41,6 +42,7 @@ pub fn push_coverage_file(path: &str) {
 
 /// Pop the previous coverage file from the stack, restoring it.
 pub fn pop_coverage_file() {
+    if !is_coverage_enabled() { return; }
     COVERAGE_FILE_STACK.with(|stack| {
         if let Some(prev) = stack.borrow_mut().pop() {
             set_coverage_file(&prev);

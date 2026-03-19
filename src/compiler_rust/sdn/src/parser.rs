@@ -204,11 +204,14 @@ impl<'a> Parser<'a> {
 
     /// Check if the current block is a dict (ident: value) or array.
     fn is_dict_block(&self) -> bool {
-        // Look for pattern: identifier followed by colon
-        if let Some(TokenKind::Identifier(_)) = self.peek_kind() {
-            if let Some(TokenKind::Colon) = self.peek_kind_at(1) {
-                return true;
+        // Look for pattern: identifier or number followed by colon
+        match self.peek_kind() {
+            Some(TokenKind::Identifier(_)) | Some(TokenKind::Integer(_)) => {
+                if let Some(TokenKind::Colon) = self.peek_kind_at(1) {
+                    return true;
+                }
             }
+            _ => {}
         }
         false
     }
@@ -227,7 +230,7 @@ impl<'a> Parser<'a> {
                     }
                     break;
                 }
-                Some(TokenKind::Identifier(_)) => {
+                Some(TokenKind::Identifier(_)) | Some(TokenKind::Integer(_)) => {
                     let start_pos = self.pos;
                     let start_span = if start_pos < self.tokens.len() {
                         self.tokens[start_pos].span
@@ -235,7 +238,18 @@ impl<'a> Parser<'a> {
                         Span::default()
                     };
 
-                    let key = self.expect_identifier()?;
+                    // Support both identifier and numeric keys
+                    let key = if matches!(self.peek_kind(), Some(TokenKind::Integer(_))) {
+                        if let Some(TokenKind::Integer(n)) = self.peek_kind() {
+                            let k = n.to_string();
+                            self.advance();
+                            k
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        self.expect_identifier()?
+                    };
                     self.push_path(key.clone());
 
                     let result: Result<()> = match self.peek_kind() {

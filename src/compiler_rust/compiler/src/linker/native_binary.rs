@@ -379,7 +379,9 @@ impl NativeBinaryOptions {
             "target/bootstrap/deps",
             // Rust compiler subdirectory (Simple project layout)
             "src/compiler_rust/target/release",
+            "src/compiler_rust/target/release/deps",
             "src/compiler_rust/target/debug",
+            "src/compiler_rust/target/debug/deps",
             "src/compiler_rust/target/bootstrap",
             "src/compiler_rust/target/bootstrap/deps",
             // Workspace root (when running from subdirectory)

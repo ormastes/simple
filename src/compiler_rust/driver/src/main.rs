@@ -580,18 +580,24 @@ fn main() {
         let builder = std::thread::Builder::new()
             .name("simple-main".to_string())
             .stack_size(DESIRED_STACK);
-        let handler = builder
-            .spawn(|| {
-                // Re-enter main with the large stack.
-                real_main();
-            })
-            .expect("failed to spawn main thread with larger stack");
-        let result = handler.join();
-        match result {
-            Ok(()) => {}
-            Err(_) => std::process::exit(1),
+        match builder.spawn(|| {
+            // Re-enter main with the large stack.
+            real_main();
+        }) {
+            Ok(handler) => {
+                let result = handler.join();
+                match result {
+                    Ok(()) => {}
+                    Err(_) => std::process::exit(1),
+                }
+                return;
+            }
+            Err(_) => {
+                // Thread spawn failed (resource limits, sandbox, etc.) —
+                // fall back to running on the current thread.
+                eprintln!("warning: could not spawn large-stack thread, running on default stack");
+            }
         }
-        return;
     }
     real_main();
 }

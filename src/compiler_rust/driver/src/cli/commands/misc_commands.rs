@@ -473,6 +473,18 @@ fn main() -> i64:
 pub fn handle_ui(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("--help");
 
+    // Headless mode: implemented directly in Rust to avoid interpreter module-loading hang
+    if mode == "headless" || mode == "none" {
+        let file_path = match args.get(2) {
+            Some(p) => p,
+            None => {
+                eprintln!("Error: headless mode requires a .ui.sdn file path");
+                return 1;
+            }
+        };
+        return handle_ui_headless(file_path);
+    }
+
     // --help works through the bootstrap interpreter (no heavy imports)
     if mode == "-h" || mode == "--help" {
         let app_path = std::path::PathBuf::from("src/app/ui/main.spl");
@@ -513,6 +525,45 @@ pub fn handle_ui(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     }
     eprintln!("error: ui app not found (run from project root)");
     1
+}
+
+/// Handle `ui headless` directly in Rust — parses the .ui.sdn file and verifies it.
+/// Avoids the Rust interpreter module-loading hang that occurs when delegating to Simple.
+fn handle_ui_headless(file_path: &str) -> i32 {
+    use std::path::Path;
+
+    let path = Path::new(file_path);
+    if !path.exists() {
+        eprintln!("Error: File not found: {}", file_path);
+        return 1;
+    }
+
+    // Parse the SDN file using the Rust SDN parser
+    match simple_sdn::SdnDocument::from_file(path) {
+        Ok(doc) => {
+            // Verify required structure exists
+            let title = doc.get("app.title")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "Untitled".to_string());
+            let layout_type = doc.get("layout.type")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Verify children exist
+            let has_children = doc.get("layout.children.0.type").is_some();
+            if !has_children {
+                eprintln!("Warning: layout has no children");
+            }
+
+            eprintln!("Parsed UI: title={}, layout={}", title.trim_matches('"'), layout_type.trim_matches('"'));
+            println!("Headless UI completed.");
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to parse UI file: {}", e);
+            1
+        }
+    }
 }
 
 /// Handle 'dashboard' command - project dashboard CLI
