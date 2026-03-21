@@ -62,6 +62,8 @@ mod sync;
 pub mod tags;
 #[cfg(feature = "pytorch")]
 pub mod torch;
+#[cfg(unix)]
+pub mod wffi_native;
 
 // Re-export core types
 pub use core::RuntimeValue;

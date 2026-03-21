@@ -311,11 +311,14 @@ SplArray*   rt_dir_walk(const char* path);
 SplArray*   rt_dir_list_array(const char* path);
 
 /* ===== Dynamic Loading (WFFI) ===== */
-
-void*    spl_dlopen(const char* path);
-void*    spl_dlsym(void* handle, const char* name);
-int64_t  spl_dlclose(void* handle);
-int64_t  spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs);
+/* Now provided by Rust wffi_native.rs (accepts tagged RuntimeValues).
+ * C-only builds can use the static *_c variants in platform headers / runtime.c.
+ *
+ * void*    spl_dlopen(const char* path);
+ * void*    spl_dlsym(void* handle, const char* name);
+ * int64_t  spl_dlclose(void* handle);
+ * int64_t  spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs);
+ */
 
 /* ===== JIT Exec Manager (stubs) ===== */
 

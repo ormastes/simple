@@ -80,7 +80,7 @@ static int64_t cpu_wffi_ptr_as_i64_fn(int64_t p) { return p; }
 
 static int64_t cpu_wffi_reentrant_fn(int64_t x) {
     int64_t args[1] = {0};
-    return spl_wffi_call_i64((void*)cpu_wffi_fn0, args, 0) + x;
+    return spl_wffi_call_i64_c((void*)cpu_wffi_fn0, args, 0) + x;
 }
 
 /* --- Recursion helpers --- */
@@ -208,30 +208,30 @@ TEST(cpu_nested_odd_frame) {
 
 TEST(cpu_wffi_0_arg) {
     int64_t args[1] = {0};
-    ASSERT_EQ_INT(spl_wffi_call_i64((void*)cpu_wffi_fn0, args, 0), 99);
+    ASSERT_EQ_INT(spl_wffi_call_i64_c((void*)cpu_wffi_fn0, args, 0), 99);
 }
 
 TEST(cpu_wffi_4_arg_max) {
     int64_t args[4] = {1, 2, 3, 4};
-    ASSERT_EQ_INT(spl_wffi_call_i64((void*)cpu_wffi_fn4, args, 4), 1234);
+    ASSERT_EQ_INT(spl_wffi_call_i64_c((void*)cpu_wffi_fn4, args, 4), 1234);
 }
 
 TEST(cpu_wffi_large_return) {
     int64_t args[1] = {0};
-    ASSERT_EQ_INT(spl_wffi_call_i64((void*)cpu_wffi_large_ret, args, 0),
+    ASSERT_EQ_INT(spl_wffi_call_i64_c((void*)cpu_wffi_large_ret, args, 0),
                   INT64_MAX);
 }
 
 TEST(cpu_wffi_negative_return) {
     int64_t args[1] = {0};
-    ASSERT_EQ_INT(spl_wffi_call_i64((void*)cpu_wffi_neg_ret, args, 0),
+    ASSERT_EQ_INT(spl_wffi_call_i64_c((void*)cpu_wffi_neg_ret, args, 0),
                   -999999999LL);
 }
 
 TEST(cpu_wffi_ptr_as_i64) {
     volatile int64_t sentinel = 0xBEEF;
     int64_t args[1] = {(int64_t)&sentinel};
-    int64_t result = spl_wffi_call_i64((void*)cpu_wffi_ptr_as_i64_fn,
+    int64_t result = spl_wffi_call_i64_c((void*)cpu_wffi_ptr_as_i64_fn,
                                        args, 1);
     ASSERT(result == (int64_t)&sentinel);
     ASSERT(*(int64_t*)result == 0xBEEF);
@@ -239,7 +239,7 @@ TEST(cpu_wffi_ptr_as_i64) {
 
 TEST(cpu_wffi_reentrant) {
     int64_t args[1] = {10};
-    int64_t result = spl_wffi_call_i64((void*)cpu_wffi_reentrant_fn,
+    int64_t result = spl_wffi_call_i64_c((void*)cpu_wffi_reentrant_fn,
                                        args, 1);
     ASSERT_EQ_INT(result, 109); /* fn0() + 10 = 99 + 10 */
 }

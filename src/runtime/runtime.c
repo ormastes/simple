@@ -1196,7 +1196,9 @@ SplArray* rt_dir_list_array(const char* path) {
 
 /* spl_dlopen, spl_dlsym, spl_dlclose — see platform/ headers */
 
-int64_t spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs) {
+/* spl_wffi_call_i64 is now provided by Rust (wffi_native.rs) which accepts
+ * tagged RuntimeValues. This C version is kept for C-only tests. */
+int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
     typedef int64_t (*fn0)(void);
     typedef int64_t (*fn1)(int64_t);
     typedef int64_t (*fn2)(int64_t, int64_t);

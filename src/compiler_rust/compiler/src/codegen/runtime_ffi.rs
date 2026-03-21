@@ -84,6 +84,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_sdn_")
         || name.starts_with("rt_sandbox_")
         || name.starts_with("rt_coverage_")
+        || name.starts_with("rt_perf_")
         || name.starts_with("rt_decision_probe")
         || name.starts_with("rt_condition_probe")
         || name.starts_with("rt_path_probe")
@@ -103,6 +104,9 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("native_tcp_")
         || name.starts_with("native_udp_")
         || name.starts_with("native_http_")
+        || name.starts_with("rt_io_tcp_")
+        || name.starts_with("spl_dl")
+        || name.starts_with("spl_wffi_")
     {
         return Sys;
     }
@@ -774,8 +778,35 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_coverage_free_sdn", &[I64], &[]),
     // rt_coverage_clear() -> ()
     RuntimeFuncSpec::new("rt_coverage_clear", &[], &[]),
+    // rt_coverage_enable() -> ()
+    RuntimeFuncSpec::new("rt_coverage_enable", &[], &[]),
     // rt_coverage_enabled() -> bool
     RuntimeFuncSpec::new("rt_coverage_enabled", &[], &[I8]),
+    // rt_coverage_enable_timed() -> ()
+    RuntimeFuncSpec::new("rt_coverage_enable_timed", &[], &[]),
+    // =========================================================================
+    // Performance measurement operations
+    // =========================================================================
+    // rt_perf_clock_ns() -> i64
+    RuntimeFuncSpec::new("rt_perf_clock_ns", &[], &[I64]),
+    // rt_perf_rdtsc() -> i64
+    RuntimeFuncSpec::new("rt_perf_rdtsc", &[], &[I64]),
+    // rt_perf_cycles_to_ns(cycles: i64, freq_mhz: i64) -> i64
+    RuntimeFuncSpec::new("rt_perf_cycles_to_ns", &[I64, I64], &[I64]),
+    // rt_perf_enable() -> ()
+    RuntimeFuncSpec::new("rt_perf_enable", &[], &[]),
+    // rt_perf_enabled() -> bool
+    RuntimeFuncSpec::new("rt_perf_enabled", &[], &[I8]),
+    // rt_perf_region_enter(region_id: u32, file: *const i8, line: u32) -> ()
+    RuntimeFuncSpec::new("rt_perf_region_enter", &[I32, I64, I32], &[]),
+    // rt_perf_region_exit(region_id: u32, file: *const i8, line: u32) -> ()
+    RuntimeFuncSpec::new("rt_perf_region_exit", &[I32, I64, I32], &[]),
+    // rt_perf_dump_sdn() -> *mut i8
+    RuntimeFuncSpec::new("rt_perf_dump_sdn", &[], &[I64]),
+    // rt_perf_free_sdn(ptr: *mut i8) -> ()
+    RuntimeFuncSpec::new("rt_perf_free_sdn", &[I64], &[]),
+    // rt_perf_clear() -> ()
+    RuntimeFuncSpec::new("rt_perf_clear", &[], &[]),
     // =========================================================================
     // FFI Object System (object-based FFI for extern class)
     // =========================================================================
@@ -1131,6 +1162,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_profiler_record_call", &[I64], &[]), // name_ptr (C string)
     RuntimeFuncSpec::new("rt_profiler_record_return", &[], &[]),
     RuntimeFuncSpec::new("rt_profiler_is_active", &[], &[I32]),
+    // =========================================================================
+    // Dynamic Loading (WFFI)
+    // =========================================================================
+    RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),                    // (text_rv) -> handle
+    RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),               // (handle, name_rv) -> fptr
+    RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),                   // (handle) -> status
+    RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),  // (fptr, args_rv, nargs) -> result
 ];
 
 #[cfg(test)]
