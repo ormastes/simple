@@ -134,7 +134,12 @@ requirement/<f>.md ↔ plan/<f>.md ↔ design/<f>.md ↔ research/<f>.md
 1. Implement in `src/**/<feature>.spl`
 2. Follow `/coding` skill rules
 3. **Minimize code size** — no over-engineering
-4. **Detect dummy implementations**: grep for bare `pass$`, empty fn bodies
+4. **Stub Prevention Gate** (REQ-PREV-003 — mandatory before marking phase complete):
+   a. Run `bin/simple build lint` on all touched files
+   b. Grep for: `pass$`, `return 0$`, `return ""$`, `return nil$`, `return false$`, `return \[\]$`
+   c. Verify no function ignores all its parameters (STUB001 = hard fail)
+   d. Verify no function returns its input unchanged without `pass_do_nothing` or comment
+   e. Every incomplete function MUST use `pass_todo("reason")` — never bare `pass`
 5. Each agent runs duplication check on touched files after work
 
 ### Phase 9: Unit + Integration Tests
@@ -172,11 +177,11 @@ fn square(x: i64) -> i64:
 2. Output: `doc/bug/<feature>_limitations.md`
 3. Each limitation includes: description, workaround, severity, related issue (if any)
 
-### Phase 12: Duplication Check
+### Phase 12: Duplication + Stub Check
 
 **Agent:** review-agent
 
-Two checks:
+Three checks:
 
 1. **Token duplication (jscpd)**: 5-line minimum, threshold ≤5%
    ```bash
@@ -187,7 +192,14 @@ Two checks:
    - Compare new functions against existing codebase
    - Flag near-duplicates for review
 
-If either check fails, refactor before proceeding.
+3. **Stub Scan** (REQ-PREV-004 — mandatory):
+   a. Run `check_stub_impl()` on all new/modified declarations
+   b. Verify every `pass_todo` has a non-empty reason message
+   c. Report stub stats: count of pass_todo / pass_do_nothing / fully implemented
+   d. Detect identity-return functions (`fn f(x): x`) without documentation (REQ-PREV-005)
+   e. Any STUB001 warning = **hard fail**, loop back to Phase 8
+
+If any check fails, refactor before proceeding.
 
 ### Phase 13: Refactoring
 
@@ -259,7 +271,19 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 Every agent must run after completing its work:
 
-- `code`: compile + touched tests + duplication check
+- `code`: compile + touched tests + duplication check + **stub scan** (STUB001 = hard fail)
 - `test`: tests actually fail-first, coverage target met
-- `review`: cross-ref consistency, no dummy impls missed
-- `main`: docs approved before moving phases
+- `review`: cross-ref consistency + **stub scan** (check_stub_impl on all new decls, verify pass_todo reasons)
+- `main`: docs approved before moving phases + **verify stub stats** in completion report
+
+## Stub Stats (Completion Report Addendum)
+
+Add to the completion report:
+
+```markdown
+## Stub Prevention
+- STUB001 warnings: 0 (must be zero)
+- pass_todo count: N (each with reason)
+- pass_do_nothing count: N (each intentional)
+- Identity-return functions: N (each documented)
+```

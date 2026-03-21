@@ -567,12 +567,60 @@ fn type_to_mangled_str(ty: TypeInfo) -> text:
     type_to_string(ty)
 
 fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Template:
-    """Parse template from serialized bytes.
+    """Parse template from GTPL serialized bytes.
 
-    Proper template parsing not yet implemented.
-    Creates a placeholder template from the symbol metadata and raw bytes.
+    GTPL binary format:
+    - Header: magic 'GTPL' (4 bytes), version (2 bytes), template_count (u32, 4 bytes)
+    - For each template: kind (u8), serialized AST node
+
+    If the bytes contain a valid GTPL header, extracts the template kind.
+    Full AST node deserialization is not yet implemented; body bytes are
+    preserved for downstream compiler FFI to handle.
     """
-    eprint("Warning: proper template parsing not yet implemented; using placeholder for {symbol.name}")
+    # Validate minimum size for GTPL header (4 + 2 + 4 = 10 bytes)
+    if bytes.len() >= 10:
+        # Check GTPL magic: 0x47 0x54 0x50 0x4C
+        val has_magic = (bytes[0] == 0x47 and bytes[1] == 0x54 and bytes[2] == 0x50 and bytes[3] == 0x4C)
+        if has_magic:
+            # Parse version
+            val version_major = bytes[4]
+            val version_minor = bytes[5]
+
+            # Parse template_count (u32 little-endian at offset 6)
+            val tc0 = bytes[6] as i32
+            val tc1 = bytes[7] as i32
+            val tc2 = bytes[8] as i32
+            val tc3 = bytes[9] as i32
+            val template_count = tc0 | (tc1 << 8) | (tc2 << 16) | (tc3 << 24)
+
+            # Extract first template's kind byte if available (offset 10)
+            var kind = TemplateKind.Function
+            if bytes.len() > 10:
+                val kind_byte = bytes[10]
+                kind = match kind_byte:
+                    case 0: TemplateKind.Function
+                    case 1: TemplateKind.Struct
+                    case 2: TemplateKind.Class
+                    case 3: TemplateKind.Enum
+                    case 4: TemplateKind.Trait
+                    case _: TemplateKind.Function
+
+            # Extract body bytes (everything after kind byte)
+            # Full AST deserialization blocked — compiler FFI handles the raw bytes
+            var body: [u8] = []
+            if bytes.len() > 11:
+                body = bytes[11..]
+
+            pass_todo("STUB-009: deserialize GTPL binary format — full AST node deserialization not yet implemented; body bytes passed through for compiler FFI")
+            return Template(
+                name: symbol.name,
+                type_params: generate_type_params(symbol.template_param_count),
+                kind: kind,
+                body: body,
+                constraints: []
+            )
+
+    # No valid GTPL header — treat entire byte array as opaque body
     Template(
         name: symbol.name,
         type_params: generate_type_params(symbol.template_param_count),

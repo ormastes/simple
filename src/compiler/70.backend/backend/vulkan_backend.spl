@@ -107,7 +107,7 @@ class VulkanBackend:
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
-                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _):
+                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
                         return true
                     case _:
                         ()
@@ -270,6 +270,11 @@ class VulkanBackend:
             case GpuAtomicOp(dest, op, ptr, value):
                 self.compile_atomic(builder, dest, op, ptr, value, i32_type)
 
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                builder.emit_comment("atomic compare exchange (CAS)")
+                # OpAtomicCompareExchange %result %ptr %scope %equal_sem %unequal_sem %value %comparator
+                builder.emit("OpAtomicCompareExchange %r{dest.id} %r{ptr} %device_scope %relaxed %relaxed %r{desired} %r{expected}")
+
             case Nop:
                 ()
 
@@ -375,7 +380,8 @@ class VulkanBackend:
             case Exchange:
                 builder.emit_comment("atomic exchange")
             case CompareExchange:
-                builder.emit_comment("atomic compare exchange")
+                # CAS via GpuAtomicOp is deprecated — use GpuAtomicCas instead
+                builder.emit_comment("atom.cas via GpuAtomicOp deprecated; use GpuAtomicCas instruction")
 
     fn compile_terminator(builder: SpirvBuilder, term: MirTerminator):
         """Compile block terminator."""

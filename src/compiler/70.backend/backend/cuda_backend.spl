@@ -159,7 +159,7 @@ class CudaBackend:
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
-                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _):
+                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
                         return true
                     case _:
                         ()
@@ -255,6 +255,9 @@ class CudaBackend:
 
             case GpuAtomicOp(dest, op, ptr, value):
                 self.compile_atomic(builder, dest, op, ptr, value)
+
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                self.compile_atomic_cas(builder, dest, ptr, expected, desired)
 
             # --- Function Calls ---
 
@@ -429,12 +432,19 @@ class CudaBackend:
             case Exchange:
                 builder.emit_atomic_exch(dest_reg, ty, addr_reg, value_reg, MemorySpace.Global)
             case CompareExchange:
-                # CAS requires 3 operands (ptr, compare, new_value) but MIR only provides 2
-                # TODO [mir][P2]: Extend MIR GpuAtomicOp to carry a third operand for CAS
-                builder.emit_comment("atom.cas requires compare operand — MIR extension needed")
-                builder.emit_atomic_cas(dest_reg, ty, addr_reg, value_reg, value_reg, MemorySpace.Global)
+                # CAS via GpuAtomicOp is deprecated — use GpuAtomicCas instead
+                builder.emit_comment("atom.cas via GpuAtomicOp deprecated; use GpuAtomicCas instruction")
             case _:
                 builder.emit_comment("Unsupported atomic op: {op}")
+
+    me compile_atomic_cas(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand):
+        """Compile atomic compare-and-swap (3-operand CAS)."""
+        val dest_reg = "%r{dest.id}"
+        val addr_reg = self.operand_to_reg(builder, ptr)
+        val cmp_reg = self.operand_to_reg(builder, expected)
+        val val_reg = self.operand_to_reg(builder, desired)
+        val ty = PrimitiveType.I64
+        builder.emit_atomic_cas(dest_reg, ty, addr_reg, cmp_reg, val_reg, MemorySpace.Global)
 
     me compile_call(builder: PtxBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]):
         """Compile device function call."""

@@ -177,13 +177,19 @@ impl SmfReaderImpl:
             )
             symbols[name] = symbol
 
+        # STUB-007: populate sections from FFI section table reads
+        # Blocked: rt_smf_reader_read_section_header FFI not yet available.
+        # When the FFI is added, iterate header.section_count and call it for each index.
+        pass_todo("STUB-007: populate sections from FFI section table reads")
+        var sections: [SmfSectionRaw] = []
+
         Ok(SmfReaderImpl(
             ffi: ffi,
             file_path: path,
             header: header,
             symbols: symbols,
             string_table: string_table,
-            sections: [],
+            sections: sections,
             note_sdn_cache: nil
         ))
 
@@ -229,24 +235,58 @@ impl SmfReaderImpl:
         if start >= section_data.len():
             return Err("Template offset out of bounds")
 
-        # Template format: length prefix + data
-        # Proper template parsing not yet implemented; returning raw bytes from offset
-        eprint("Warning: proper template parsing not yet implemented; returning raw section data for {symbol.name}")
-        Ok(section_data[start..])
+        # Template format: 4-byte little-endian length prefix + data
+        if start + 4 > section_data.len():
+            return Err("Template length prefix extends beyond section for {symbol.name}")
+
+        val b0 = section_data[start] as i32
+        val b1 = section_data[start + 1] as i32
+        val b2 = section_data[start + 2] as i32
+        val b3 = section_data[start + 3] as i32
+        val length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+        val data_start = start + 4
+        val data_end = data_start + length
+
+        if data_end > section_data.len():
+            return Err("Template data extends beyond section for {symbol.name}: need {data_end} bytes, section has {section_data.len()}")
+
+        Ok(section_data[data_start..data_end])
 
     fn read_note_sdn() -> NoteSdnMetadata:
-        # Read note.sdn metadata section (stub for runtime).
+        # Read note.sdn metadata section.
         if self.note_sdn_cache != nil:
             return self.note_sdn_cache
+
+        # Try to read note.sdn from section table (type 13)
+        val note_section_index = self.find_note_sdn_section()
+        if note_section_index >= 0:
+            val section_data = self.ffi.read_section(note_section_index)
+            if section_data.len() > 0:
+                val sdn_text = bytes_to_string(section_data)
+                val metadata = parse_note_sdn(sdn_text)
+                self.note_sdn_cache = metadata
+                return metadata
+
+        # Fallback: return empty metadata
+        pass_todo("STUB-010: read note.sdn from section table — FFI section reads may not return valid data yet")
         val metadata = stub_new_note_sdn()
         self.note_sdn_cache = metadata
         metadata
 
     fn find_section_by_type(section_type: i32) -> i32:
         # Find section index by type.
-        # Section table reading not yet implemented; using convention-based index mapping
-        # Real implementation would iterate self.sections and match on section_type field
-        eprint("Warning: section table reading not yet implemented; using default index mapping for type {section_type}")
+        # Iterate self.sections and match on section_type field.
+        # Falls back to convention-based index mapping if sections are not populated.
+        if self.sections.len() > 0:
+            var idx = 0
+            for sec in self.sections:
+                if sec.section_type as i32 == section_type:
+                    return idx
+                idx = idx + 1
+            return -1
+
+        # Fallback: sections not populated (STUB-007 not yet resolved)
         match section_type:
             case 1: 0   # Code
             case 2: 1   # Data

@@ -1,0 +1,1 @@
+/home/ormastes/dev/pub/simple/.claude/skills/debug-lsp.md
