@@ -85,14 +85,47 @@ impl Codegen {
 
         // Emit object code
         let product = self.backend.module.finish();
-        product.emit().map_err(|e| BackendError::ModuleError(e.to_string()))
+        let bytes = product.emit().map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        Ok(fix_macho_strsize(bytes))
     }
 
     /// Finish compilation and get the raw object code.
     pub fn get_object_code(self) -> Vec<u8> {
         let product = self.backend.module.finish();
-        product.emit().unwrap()
+        let bytes = product.emit().unwrap();
+        fix_macho_strsize(bytes)
     }
+}
+
+/// Fix Cranelift Mach-O object emission bug: strsize in LC_SYMTAB is 8 bytes too large.
+/// The cranelift-object emitter miscalculates the string table size, causing libtool
+/// to reject the object file. This pads the file to match the claimed strsize.
+fn fix_macho_strsize(mut bytes: Vec<u8>) -> Vec<u8> {
+    // Only fix Mach-O 64-bit (magic 0xFEEDFACF)
+    if bytes.len() < 32 { return bytes; }
+    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != 0xFEEDFACF { return bytes; }
+
+    let ncmds = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+    let mut offset = 32usize;
+    for _ in 0..ncmds {
+        if offset + 8 > bytes.len() { break; }
+        let cmd = u32::from_le_bytes([bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]]);
+        let cmdsize = u32::from_le_bytes([bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]]) as usize;
+        if cmd == 2 { // LC_SYMTAB
+            if offset + 24 > bytes.len() { break; }
+            let stroff = u32::from_le_bytes([bytes[offset+16], bytes[offset+17], bytes[offset+18], bytes[offset+19]]) as usize;
+            let strsize = u32::from_le_bytes([bytes[offset+20], bytes[offset+21], bytes[offset+22], bytes[offset+23]]) as usize;
+            let needed = stroff + strsize;
+            if needed > bytes.len() {
+                // Pad with zero bytes to match claimed strsize
+                bytes.resize(needed, 0);
+            }
+            break;
+        }
+        offset += cmdsize;
+    }
+    bytes
 }
 
 impl Default for Codegen {

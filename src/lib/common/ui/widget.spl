@@ -33,47 +33,55 @@ enum UIEvent:
 struct WidgetNode:
     id: text
     kind: text
-    props: [WidgetProp]
-    child_ids_text: text
     layout: text
     visible: bool
     focused: bool
 
 struct WidgetProp:
+    node_id: text
     key: text
     value: text
 
-var _widget_registry: Dict<text, WidgetNode> = {}
-var _widget_children: Dict<text, text> = {}
+struct WidgetEdge:
+    parent_id: text
+    child_id: text
+
+var _widget_registry: [WidgetNode] = []
+var _widget_children: [WidgetEdge] = []
 
 fn register_widget(node: WidgetNode) -> WidgetNode:
-    _widget_registry = _widget_registry.set(node.id, node)
+    var updated: [WidgetNode] = []
+    var replaced = false
+    for existing in _widget_registry:
+        if existing.id == node.id:
+            updated = updated.push(node)
+            replaced = true
+        else:
+            updated = updated.push(existing)
+    if not replaced:
+        updated = updated.push(node)
+    _widget_registry = updated
     return node
 
 fn get_widget(id: text) -> WidgetNode?:
-    if _widget_registry.contains_key(id):
-        return _widget_registry[id]
+    for node in _widget_registry:
+        if node.id == id:
+            return node
     return nil
 
 fn get_widget_child_ids(id: text) -> [text]:
-    if _widget_children.contains_key(id):
-        return split_child_ids(_widget_children[id])
-    return []
+    var ids: [text] = []
+    for edge in _widget_children:
+        if edge.parent_id == id:
+            ids = ids.push(edge.child_id)
+    return ids
 
-fn debug_child_blob(id: text) -> text:
-    if _widget_children.contains_key(id):
-        return _widget_children[id]
-    return ""
-
-fn debug_child_count(id: text) -> i32:
-    return get_widget_child_ids(id).len()
-
-fn register_widget_child(parent_id: text, child_id: text):
-    val current_child_blob = if _widget_children.contains_key(parent_id):
-        _widget_children[parent_id]
-    else:
-        ""
-    _widget_children = _widget_children.set(parent_id, append_child_id(current_child_blob, child_id))
+fn register_widget_child(parent_id: text, child_id: text) -> WidgetNode:
+    _widget_children = _widget_children.push(WidgetEdge(parent_id: parent_id, child_id: child_id))
+    val existing = get_widget(parent_id)
+    if existing != nil:
+        return existing
+    return WidgetNode(id: parent_id, kind: "panel", layout: "vbox", visible: true, focused: false)
 
 impl WidgetNode:
 
@@ -81,44 +89,37 @@ impl WidgetNode:
         return register_widget(WidgetNode(
             id: id,
             kind: kind,
-            props: [],
-            child_ids_text: "",
             layout: "vbox",
             visible: true,
             focused: false
         ))
 
     fn set_prop(key: text, value: text) -> WidgetNode:
+        var next_registry: [WidgetNode] = []
+        for node in _widget_registry:
+            next_registry = next_registry.push(node)
+        _widget_registry = next_registry
+
         var new_props: [WidgetProp] = []
         var replaced = false
-        for prop in self.props:
-            if prop.key == key:
-                new_props = new_props.push(WidgetProp(key: key, value: value))
+        for prop in _widget_props():
+            if prop.node_id == self.id and prop.key == key:
+                new_props = new_props.push(WidgetProp(node_id: self.id, key: key, value: value))
                 replaced = true
             else:
                 new_props = new_props.push(prop)
         if not replaced:
-            new_props = new_props.push(WidgetProp(key: key, value: value))
-        return register_widget(WidgetNode(
-            id: self.id,
-            kind: self.kind,
-            props: new_props,
-            child_ids_text: self.child_ids_text,
-            layout: self.layout,
-            visible: self.visible,
-            focused: self.focused
-        ))
+            new_props = new_props.push(WidgetProp(node_id: self.id, key: key, value: value))
+        _set_widget_props(new_props)
+        return self
 
     fn add_child(child: WidgetNode) -> WidgetNode:
-        register_widget_child(self.id, child.id)
-        return self
+        return register_widget_child(self.id, child.id)
 
     fn set_layout(layout: text) -> WidgetNode:
         return register_widget(WidgetNode(
             id: self.id,
             kind: self.kind,
-            props: self.props,
-            child_ids_text: self.child_ids_text,
             layout: layout,
             visible: self.visible,
             focused: self.focused
@@ -128,29 +129,28 @@ impl WidgetNode:
         return register_widget(WidgetNode(
             id: self.id,
             kind: self.kind,
-            props: self.props,
-            child_ids_text: self.child_ids_text,
             layout: self.layout,
             visible: visible,
             focused: self.focused
         ))
 
     fn get_prop(key: text) -> text:
-        for prop in self.props:
-            if prop.key == key:
+        for prop in _widget_props():
+            if prop.node_id == self.id and prop.key == key:
                 return prop.value
         return ""
 
     fn has_prop(key: text) -> bool:
-        for prop in self.props:
-            if prop.key == key:
+        for prop in _widget_props():
+            if prop.node_id == self.id and prop.key == key:
                 return true
         return false
 
     fn prop_keys() -> [text]:
         var keys: [text] = []
-        for prop in self.props:
-            keys = keys.push(prop.key)
+        for prop in _widget_props():
+            if prop.node_id == self.id:
+                keys = keys.push(prop.key)
         return keys
 
     fn children() -> [WidgetNode]:
@@ -196,9 +196,9 @@ impl WidgetNode:
 
 struct UITree:
     root: WidgetNode
-    keybindings: Dict<text, Dict<text, text>>
     title: text
     theme: text
+    keybindings: Dict<text, Dict<text, text>>
 
     static fn new(root: WidgetNode) -> UITree:
         return UITree(
@@ -293,16 +293,10 @@ fn parse_layout_kind(name: text) -> text:
         "fixed" => "fixed"
         _ => "vbox"
 
-fn split_child_ids(blob: text) -> [text]:
-    if blob == "":
-        return []
-    var result: [text] = []
-    for part in blob.split("\n"):
-        if part != "":
-            result = result.push(part)
-    return result
+var __widget_props_store: [WidgetProp] = []
 
-fn append_child_id(blob: text, child_id: text) -> text:
-    if blob == "":
-        return child_id
-    return "{blob}\n{child_id}"
+fn _widget_props() -> [WidgetProp]:
+    return __widget_props_store
+
+fn _set_widget_props(props: [WidgetProp]):
+    __widget_props_store = props
