@@ -17,7 +17,7 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 
 | Asset | Platform | Description |
 |-------|----------|-------------|
-| `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
+| `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 23 MCP tools |
 | `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
 | `cmm-lsp` | Linux, Windows | CMM Language Server executable (LSP over stdio) |
 | `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data for marketplace-based installs from a repo checkout |
@@ -161,7 +161,7 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
 
 ## Tools
 
-### T32 MCP Server (20 tools)
+### T32 MCP Server (23 tools)
 
 Controls live TRACE32 debug sessions. Requires a running TRACE32 PowerView instance.
 
@@ -277,7 +277,7 @@ Once the T32 MCP servers and CMM LSP plugin are installed, try these prompts in 
 ```bash
 cd /path/to/simple
 
-# 1. T32 MCP — live debug session control (20 tools)
+# 1. T32 MCP — live debug session control (23 tools)
 claude mcp add t32-mcp -- \
   /absolute/path/to/simple/bin/release/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl

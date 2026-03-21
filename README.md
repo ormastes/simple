@@ -1030,7 +1030,7 @@ Simple ships with MCP servers, LSP servers, and Claude Code plugins — all writ
 
 ### Install Simple MCP Server
 
-The Simple MCP server exposes 50 tools for code diagnostics, VCS, build, test, debug, and more.
+The Simple MCP server currently exposes 68 tools for code diagnostics, VCS, build, test, debug, and more, plus 3 resources and 2 prompts.
 
 ```bash
 # From a repo checkout — register with Claude Code
@@ -1100,7 +1100,7 @@ MCP servers, CMM language server, and CLI tools for [Lauterbach TRACE32](https:/
 ```bash
 cd /path/to/simple
 
-# T32 MCP — controls live TRACE32 debug sessions (20 tools)
+# T32 MCP — controls live TRACE32 debug sessions (23 tools)
 claude mcp add t32-mcp -- \
   /absolute/path/to/simple/bin/release/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl

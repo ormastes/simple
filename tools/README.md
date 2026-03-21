@@ -89,7 +89,7 @@ Simple ships multiple MCP servers for AI tool integration:
 
 | Server | Command | Tools | Description |
 |--------|---------|-------|-------------|
-| **Simple MCP** | `simple mcp` | 66 | Main server: LSP, code query, project tools |
+| **Simple MCP** | `simple mcp` | 68 | Main server: code query, project tools, build/test/debug, resources, prompts |
 | **MCP T32 LSP/DAP** | `simple src/app/mcp_t32/main.spl` | 26 | TRACE32 session, window, CMM LSP, DAP |
 | **MCP CMM CLI** | `simple examples/10_tooling/cmm_lsp/mod.spl` | 8 | CMM GUI-to-CLI conversion, validation |
 

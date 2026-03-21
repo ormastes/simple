@@ -1,6 +1,6 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server provides 66 tools for code intelligence, debugging, build, VCS, and analysis -- accessible from Claude Code and Claude Desktop.
+The Simple MCP (Model Context Protocol) server currently provides 68 tools, 3 resources, and 2 prompts for code intelligence, debugging, build, VCS, and analysis -- accessible from Claude Code and Claude Desktop.
 
 ---
 
@@ -76,7 +76,7 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: 66 tools
+- **Tool count**: 68 tools
 
 ---
 
