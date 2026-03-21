@@ -58,6 +58,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
+| `impl` | End-to-end implementation workflow from requirements through VCS sync |
 | `design` | Design patterns, type system |
 | `architecture` | Compiler pipeline, module structure |
 | `research` | Codebase exploration techniques |
