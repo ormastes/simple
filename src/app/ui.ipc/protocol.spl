@@ -1,0 +1,129 @@
+# Shared IPC Protocol
+#
+# JSON-based IPC protocol shared between Electron and Tauri backends.
+# Messages are sent over stdin/stdout as newline-delimited JSON.
+
+use common.ui.widget.{UIEvent}
+
+# =========================================================================
+# IPC Message Types
+# =========================================================================
+
+enum IpcMessageKind:
+    Render
+    Event
+    Dialog
+    Tray
+    Menu
+    WindowControl
+    FileDialog
+    Notification
+
+# =========================================================================
+# IPC Message Parsing (from Electron → Simple)
+# =========================================================================
+
+fn parse_ipc_message(json_str: text) -> UIEvent?:
+    """Parse a JSON IPC message from the Electron shell."""
+    # Simple JSON parsing for known message formats
+    if json_str.contains("\"type\":\"keypress\"") or json_str.contains("\"type\": \"keypress\""):
+        val key = extract_json_field(json_str, "key")
+        if key != "":
+            return UIEvent.KeyPress(key: key)
+    elif json_str.contains("\"type\":\"action\"") or json_str.contains("\"type\": \"action\""):
+        val name = extract_json_field(json_str, "name")
+        if name != "":
+            return UIEvent.Action(name: name)
+    elif json_str.contains("\"type\":\"resize\"") or json_str.contains("\"type\": \"resize\""):
+        val w_str = extract_json_field(json_str, "width")
+        val h_str = extract_json_field(json_str, "height")
+        if w_str != "" and h_str != "":
+            return UIEvent.Resize(width: w_str.to_int(), height: h_str.to_int())
+    elif json_str.contains("\"type\":\"quit\"") or json_str.contains("\"type\": \"quit\""):
+        return UIEvent.Quit
+    return nil
+
+# =========================================================================
+# IPC Message Building (Simple → Electron)
+# =========================================================================
+
+fn build_ipc_render(html: text) -> text:
+    """Build an IPC render message."""
+    return "{\"type\":\"render\",\"html\":\"{escape_ipc_json(html)}\"}"
+
+fn build_ipc_dialog(dialog_type: text, title: text, message: text) -> text:
+    """Build an IPC dialog request."""
+    return "{\"type\":\"dialog\",\"dialogType\":\"{dialog_type}\",\"title\":\"{title}\",\"message\":\"{message}\"}"
+
+fn build_ipc_notification(title: text, body: text) -> text:
+    """Build an IPC notification message."""
+    return "{\"type\":\"notification\",\"title\":\"{title}\",\"body\":\"{body}\"}"
+
+fn build_ipc_window_control(action: text) -> text:
+    """Build an IPC window control message (minimize/maximize/close)."""
+    return "{\"type\":\"windowControl\",\"action\":\"{action}\"}"
+
+fn build_ipc_file_dialog(dialog_type: text, filters: text) -> text:
+    """Build an IPC file dialog request (open/save)."""
+    return "{\"type\":\"fileDialog\",\"dialogType\":\"{dialog_type}\",\"filters\":\"{filters}\"}"
+
+# =========================================================================
+# JSON Helpers
+# =========================================================================
+
+fn extract_json_field(json_str: text, field: text) -> text:
+    """Extract a string field value from simple JSON."""
+    val search = "\"{field}\""
+    var idx = json_str.index_of(search)
+    if idx < 0:
+        return ""
+
+    # Skip past "field":
+    idx = idx + search.len()
+    # Skip colon and whitespace
+    while idx < json_str.len():
+        val ch = json_str[idx]
+        if ch == ":" or ch == " ":
+            idx = idx + 1
+        else:
+            break
+
+    # Read quoted value
+    if idx < json_str.len() and json_str[idx] == "\"":
+        idx = idx + 1
+        var value = ""
+        while idx < json_str.len():
+            val ch = json_str[idx]
+            if ch == "\"":
+                return value
+            elif ch == "\\":
+                idx = idx + 1
+                if idx < json_str.len():
+                    value = "{value}{json_str[idx]}"
+            else:
+                value = "{value}{ch}"
+            idx = idx + 1
+
+    return ""
+
+fn escape_ipc_json(s: text) -> text:
+    """Escape a string for JSON in IPC messages."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        match ch:
+            "\"" =>
+                result = "{result}\\\""
+            "\\" =>
+                result = "{result}\\\\"
+            "\n" =>
+                result = "{result}\\n"
+            "\r" =>
+                result = "{result}\\r"
+            "\t" =>
+                result = "{result}\\t"
+            _ =>
+                result = "{result}{ch}"
+        i = i + 1
+    return result

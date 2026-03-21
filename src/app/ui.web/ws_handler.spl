@@ -1,0 +1,108 @@
+# WebSocket Handler
+#
+# Handles WebSocket upgrade handshake and message processing
+# for the web UI renderer.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use common.ui.widget.{UIState, UIEvent}
+use app.ui.render.widgets.{render_html_tree}
+
+extern fn rt_base64_encode(data: text) -> text
+extern fn rt_sha1_hex(data: text) -> text
+
+# =========================================================================
+# WebSocket Upgrade
+# =========================================================================
+
+val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-5AB5A0085731"
+
+fn is_ws_upgrade_request(headers: text) -> bool:
+    return headers.contains("Upgrade: websocket")
+
+fn handle_ws_upgrade(stream: TcpStream, headers: text, state: UIState):
+    """Handle WebSocket upgrade handshake and enter message loop."""
+    # Extract Sec-WebSocket-Key from headers
+    val key = extract_ws_key(headers)
+    if key == "":
+        return
+
+    # Compute accept hash
+    val accept = compute_ws_accept(key)
+
+    # Send upgrade response
+    var response = "HTTP/1.1 101 Switching Protocols\r\n"
+    response = "{response}Upgrade: websocket\r\n"
+    response = "{response}Connection: Upgrade\r\n"
+    response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+    response = "{response}\r\n"
+    stream.write_all(response)
+
+    # Send initial render
+    val html = render_html_tree(state.tree.root, state)
+    val msg = "{\"type\": \"render\", \"html\": \"{escape_json_string(html)}\"}"
+    send_ws_text(stream, msg)
+
+fn extract_ws_key(headers: text) -> text:
+    """Extract the Sec-WebSocket-Key from headers."""
+    val lines = headers.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("Sec-WebSocket-Key:"):
+            val key = trimmed[18:]
+            return key.trim()
+    return ""
+
+fn compute_ws_accept(key: text) -> text:
+    """Compute the Sec-WebSocket-Accept value."""
+    val combined = "{key}{WS_MAGIC}"
+    val hash = rt_sha1_hex(combined)
+    return rt_base64_encode(hash)
+
+# =========================================================================
+# WebSocket Frame Operations
+# =========================================================================
+
+fn send_ws_text(stream: TcpStream, message: text):
+    """Send a text frame over WebSocket."""
+    val len = message.len()
+
+    # Build frame header
+    var header = ""
+    # Opcode 0x81 = final frame + text
+    header = "{header}\u{0081}"
+
+    if len < 126:
+        header = "{header}{chr(len)}"
+    elif len < 65536:
+        header = "{header}\u{007e}"
+        header = "{header}{chr(len / 256)}"
+        header = "{header}{chr(len - ((len / 256) * 256))}"
+
+    stream.write_all("{header}{message}")
+
+fn escape_json_string(s: text) -> text:
+    """Escape a string for JSON embedding."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        match ch:
+            "\"" =>
+                result = "{result}\\\""
+            "\\" =>
+                result = "{result}\\\\"
+            "\n" =>
+                result = "{result}\\n"
+            "\r" =>
+                result = "{result}\\r"
+            "\t" =>
+                result = "{result}\\t"
+            _ =>
+                result = "{result}{ch}"
+        i = i + 1
+    return result
+
+fn chr(code: i32) -> text:
+    """Convert integer to character (placeholder - uses string conversion)."""
+    # The runtime should provide this; fallback to string cast
+    return "{code}" as text

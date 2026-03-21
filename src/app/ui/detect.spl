@@ -1,0 +1,70 @@
+# GUI Backend Auto-Detection
+#
+# Determines the best available GUI backend based on the environment.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# Detection
+# =========================================================================
+
+fn detect_gui_backend() -> text:
+    """Auto-detect the best available GUI backend."""
+    # Explicit override via env var
+    val backend_env = rt_env_get("SIMPLE_GUI_BACKEND")
+    if backend_env != nil and backend_env != "":
+        return backend_env
+
+    # Check if in container / headless
+    if not has_display():
+        return "headless"
+
+    # Check if Tauri shell is available
+    if has_tauri_shell():
+        return "tauri"
+
+    # Fall back to Electron if available
+    if has_electron_shell():
+        return "electron"
+
+    # Fallback to web mode (works everywhere with a browser)
+    return "web"
+
+fn has_display() -> bool:
+    """Check if a display server is available."""
+    # macOS always has a display
+    if is_macos():
+        return true
+
+    # Check X11
+    val display = rt_env_get("DISPLAY")
+    if display != nil and display != "":
+        return true
+
+    # Check Wayland
+    val wayland = rt_env_get("WAYLAND_DISPLAY")
+    if wayland != nil and wayland != "":
+        return true
+
+    return false
+
+fn has_tauri_shell() -> bool:
+    """Check if the Tauri shell binary (simple-gui) exists."""
+    val result = rt_process_run("/bin/sh", ["-c", "which simple-gui 2>/dev/null"])
+    if result.2 == 0:
+        return true
+    # Check local build path
+    return rt_file_exists("tools/tauri-shell/target/release/simple-gui")
+
+fn has_electron_shell() -> bool:
+    """Check if an Electron shell is available."""
+    val result = rt_process_run("/bin/sh", ["-c", "which electron 2>/dev/null"])
+    if result.2 == 0:
+        return true
+    return rt_file_exists("node_modules/.bin/electron")
+
+fn is_macos() -> bool:
+    val result = rt_process_run("/bin/sh", ["-c", "uname -s 2>/dev/null"])
+    return result.2 == 0 and result.0.trim() == "Darwin"

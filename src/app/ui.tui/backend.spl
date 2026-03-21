@@ -1,0 +1,111 @@
+# TUI Render Backend
+#
+# Implements RenderBackend for terminal-based rendering.
+# Wraps the existing Screen buffer, layout engine, and widget renderers.
+
+use common.ui.backend.{RenderBackend}
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.capability.{Capability, NotSupported}
+use common.ui.layout.{compute_layout}
+use common.ui.event.{process_event}
+use app.ui.tui.screen.{Screen, get_terminal_size, ansi_clear_screen, ansi_cursor_home,
+    ansi_hide_cursor, ansi_show_cursor, ansi_enable_alt_screen, ansi_disable_alt_screen}
+use app.ui.tui.input.{parse_input_line, read_user_input}
+use app.ui.render.widgets.{render_tui_tree, render_html_tree}
+
+# =========================================================================
+# TUI Backend
+# =========================================================================
+
+class TuiBackend:
+    width: i32
+    height: i32
+    initialized: bool
+
+    static fn new() -> TuiBackend:
+        val size = get_terminal_size()
+        return TuiBackend(
+            width: size.0,
+            height: size.1,
+            initialized: false
+        )
+
+    # --- Lifecycle ---
+
+    me init() -> Result<bool, text>:
+        print ansi_enable_alt_screen()
+        print ansi_hide_cursor()
+        self.initialized = true
+        val size = get_terminal_size()
+        self.width = size.0
+        self.height = size.1
+        return Ok(true)
+
+    me shutdown():
+        if self.initialized:
+            print ansi_show_cursor()
+            print ansi_disable_alt_screen()
+            self.initialized = false
+
+    # --- Rendering ---
+
+    me render(state: UIState) -> Result<bool, text>:
+        val size = get_terminal_size()
+        self.width = size.0
+        self.height = size.1 - 1  # Reserve one line for input
+
+        var screen = Screen.new(self.width, self.height)
+
+        # Compute layout
+        val rects = compute_layout(state.tree.root, 0, 0, self.width, self.height)
+
+        # Render widget tree to screen buffer
+        screen = render_tui_tree(screen, state.tree.root, rects, state)
+
+        # Output
+        print screen.render()
+        return Ok(true)
+
+    fn render_html(state: UIState) -> text:
+        # TUI backend can still produce HTML for export
+        return render_html_tree(state.tree.root, state)
+
+    # --- Events ---
+
+    fn poll_event(timeout_ms: i32) -> UIEvent?:
+        val user_input = read_user_input()
+        if user_input == "":
+            return nil
+        return parse_input_line(user_input)
+
+    # --- Capabilities ---
+
+    fn capabilities() -> [Capability]:
+        return [Capability.Color]
+
+    fn supports_mouse() -> bool:
+        return false
+
+    fn supports_color() -> bool:
+        return true
+
+    fn supports_images() -> bool:
+        return false
+
+    fn supports_touch() -> bool:
+        return false
+
+    # --- Viewport ---
+
+    fn viewport_width() -> i32:
+        val size = get_terminal_size()
+        return size.0
+
+    fn viewport_height() -> i32:
+        val size = get_terminal_size()
+        return size.1
+
+    # --- Backend Info ---
+
+    fn backend_name() -> text:
+        return "tui"

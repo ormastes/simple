@@ -1,0 +1,213 @@
+# UI SDN Parser
+#
+# Parses .ui.sdn files into UITree structures.
+# Uses SdnDocument for file loading and path-based value access.
+
+use common.sdn.document.{SdnDocument}
+use common.ui.widget.{WidgetNode, WidgetKind, UITree, LayoutKind,
+    parse_widget_kind, parse_layout_kind}
+
+# =========================================================================
+# SDN -> UITree Parsing
+# =========================================================================
+
+fn parse_ui_file(path: text) -> Result<UITree, text>:
+    """Parse a .ui.sdn file into a UITree."""
+    val doc_result = SdnDocument.from_file(path)
+    match doc_result:
+        Err(e) =>
+            return Err("Failed to load UI file: {e}")
+        Ok(doc) =>
+            return parse_ui_doc(doc)
+
+fn parse_ui_doc(doc: SdnDocument) -> Result<UITree, text>:
+    """Parse an SdnDocument into a UITree."""
+    # Parse the root layout node
+    val root = parse_layout_node(doc, "layout")
+
+    # Build the tree
+    var tree = UITree.new(root)
+
+    # Parse app metadata
+    val title = doc.get("app.title")
+    if title != nil:
+        tree = UITree(
+            root: tree.root,
+            title: sdn_to_text(title),
+            theme: tree.theme,
+            keybindings: tree.keybindings
+        )
+
+    val theme = doc.get("app.theme")
+    if theme != nil:
+        tree = UITree(
+            root: tree.root,
+            title: tree.title,
+            theme: sdn_to_text(theme),
+            keybindings: tree.keybindings
+        )
+
+    # Parse keybindings
+    var bindings: Dict<text, Dict<text, text>> = {}
+    val modes = ["normal", "command", "insert", "menu"]
+    for mode in modes:
+        var mode_bindings: Dict<text, text> = {}
+        val mode_path = "keybindings.{mode}"
+        val mode_val = doc.get(mode_path)
+        if mode_val != nil:
+            val keys_opt = doc.keys(mode_path)
+            if keys_opt != nil:
+                match keys_opt:
+                    case Some(keys):
+                        for key in keys:
+                            val action = doc.get("{mode_path}.{key}")
+                            if action != nil:
+                                mode_bindings[key] = sdn_to_text(action)
+            bindings[mode] = mode_bindings
+
+    tree = UITree(
+        root: tree.root,
+        title: tree.title,
+        theme: tree.theme,
+        keybindings: bindings
+    )
+
+    return Ok(tree)
+
+# =========================================================================
+# Node Parsing
+# =========================================================================
+
+fn sdn_to_text(value: any) -> text:
+    """Extract text from an SDN value, handling Option wrapping."""
+    if value == nil:
+        return ""
+    var inner = value
+    match value:
+        case Some(v):
+            inner = v
+    match inner:
+        case SdnValue.String(s):
+            return s
+        case SdnValue.Int(i):
+            return "{i}"
+        case SdnValue.Float(f):
+            return "{f}"
+        case SdnValue.Bool(b):
+            return if b: "true" else: "false"
+        case _:
+            return "{inner}"
+
+fn parse_layout_node(doc: SdnDocument, path: text) -> WidgetNode:
+    """Parse a single widget node from SDN at the given path."""
+    # Get widget type
+    val type_val = doc.get("{path}.type")
+    val type_str = if type_val != nil:
+        sdn_to_text(type_val)
+    else:
+        "panel"
+
+    var kind = parse_widget_kind(type_str)
+    var layout = LayoutKind.VBox
+    if is_layout_alias(type_str):
+        kind = WidgetKind.Panel
+        layout = parse_layout_kind(type_str)
+
+    # Get widget ID
+    val id_val = doc.get("{path}.id")
+    val id = if id_val != nil:
+        sdn_to_text(id_val)
+    else:
+        "{path}"
+
+    var node = WidgetNode.new(id, kind)
+
+    # Parse layout type
+    val layout_val = doc.get("{path}.layout")
+    if layout_val != nil:
+        layout = parse_layout_kind(sdn_to_text(layout_val))
+
+    node = WidgetNode(
+        id: node.id, kind: node.kind, props: node.props,
+        children: node.children, layout: layout,
+        visible: node.visible, focused: node.focused
+    )
+
+    # Parse common properties
+    val prop_keys = ["title", "content", "label", "width", "height",
+        "flex", "left", "right", "action", "view", "items",
+        "placeholder", "value", "checked", "src", "alt", "target"]
+    for key in prop_keys:
+        val val_result = doc.get("{path}.{key}")
+        if val_result != nil:
+            node = node.set_prop(key, sdn_to_text(val_result))
+
+    # Parse children — doc.keys() returns [text]?, unwrap before iterating
+    val children_check = doc.get("{path}.children")
+    if children_check != nil:
+        val child_keys_opt = doc.keys("{path}.children")
+        if child_keys_opt != nil:
+            match child_keys_opt:
+                case Some(child_keys):
+                    for child_key in child_keys:
+                        val child_path = "{path}.children.{child_key}"
+                        val child_node = parse_layout_node(doc, child_path)
+                        node = node.add_child(child_node)
+
+    # Parse list items
+    val items_val = doc.get("{path}.items")
+    if items_val != nil and kind == WidgetKind.List:
+        var item_idx = 0
+        var has_more_items = true
+        while has_more_items:
+            val item_path = "{path}.items.{item_idx}"
+            val item_label = doc.get("{item_path}.label")
+            if item_label != nil:
+                var item_node = WidgetNode.new("{id}_item_{item_idx}", WidgetKind.Text)
+                item_node = item_node.set_prop("label", sdn_to_text(item_label))
+                val item_view = doc.get("{item_path}.view")
+                if item_view != nil:
+                    item_node = item_node.set_prop("view", sdn_to_text(item_view))
+                val item_action = doc.get("{item_path}.action")
+                if item_action != nil:
+                    item_node = item_node.set_prop("action", sdn_to_text(item_action))
+                node = node.add_child(item_node)
+                item_idx = item_idx + 1
+            else:
+                has_more_items = false
+
+    # Parse menubar items
+    if kind == WidgetKind.MenuBar:
+        var menu_idx = 0
+        var has_more_menus = true
+        while has_more_menus:
+            val menu_path = "{path}.items.{menu_idx}"
+            val menu_label = doc.get("{menu_path}.label")
+            if menu_label != nil:
+                var menu_node = WidgetNode.new("{id}_menu_{menu_idx}", WidgetKind.Text)
+                menu_node = menu_node.set_prop("label", sdn_to_text(menu_label))
+                # Parse submenu children
+                var sub_idx = 0
+                var has_more_subs = true
+                while has_more_subs:
+                    val sub_path = "{menu_path}.children.{sub_idx}"
+                    val sub_label = doc.get("{sub_path}.label")
+                    if sub_label != nil:
+                        var sub_node = WidgetNode.new("{id}_sub_{menu_idx}_{sub_idx}", WidgetKind.Text)
+                        sub_node = sub_node.set_prop("label", sdn_to_text(sub_label))
+                        val sub_action = doc.get("{sub_path}.action")
+                        if sub_action != nil:
+                            sub_node = sub_node.set_prop("action", sdn_to_text(sub_action))
+                        menu_node = menu_node.add_child(sub_node)
+                        sub_idx = sub_idx + 1
+                    else:
+                        has_more_subs = false
+                node = node.add_child(menu_node)
+                menu_idx = menu_idx + 1
+            else:
+                has_more_menus = false
+
+    return node
+
+fn is_layout_alias(name: text) -> bool:
+    return (name == "vbox" or name == "hbox" or name == "grid" or name == "fixed")

@@ -1,0 +1,175 @@
+# Simple UI - Main Entry Point
+#
+# CLI entry for the UI rendering system.
+# Usage:
+#   simple ui <file.ui.sdn>                  - Auto-detect best backend
+#   simple ui tui <file.ui.sdn>              - TUI mode
+#   simple ui tauri <file.ui.sdn> [--port N] - Tauri desktop mode
+#   simple ui web <file.ui.sdn> [--port N]   - Web GUI mode
+
+use app.ui.tui.app.{run_tui}
+use app.ui.web.server.{run_web}
+use app.ui.electron.app.{run_electron}
+use app.ui.tauri.app.{run_tauri}
+use app.ui.none.app.{run_headless}
+use app.ui.detect.{detect_gui_backend}
+
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# Main
+# =========================================================================
+
+fn main() -> i64:
+    val args = get_args()
+
+    if args.len() == 0:
+        print_usage()
+        return 1
+
+    val mode = args[0]
+
+    match mode:
+        "tui" =>
+            if args.len() < 2:
+                print "Error: tui mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            return run_tui(file_path)
+
+        "web" =>
+            if args.len() < 2:
+                print "Error: web mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            val port = parse_port(args)
+            return run_web(file_path, port)
+
+        "tauri" =>
+            if args.len() < 2:
+                print "Error: tauri mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            val port = parse_port(args)
+            return run_tauri(file_path, port)
+
+        "electron" =>
+            if args.len() < 2:
+                print "Error: electron mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            val port = parse_port(args)
+            return run_electron(file_path, port)
+
+        "gui" | "desktop" =>
+            if args.len() < 2:
+                print "Error: gui mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            val port = parse_port(args)
+            val backend = detect_gui_backend()
+            return run_detected_backend(backend, file_path, port)
+
+        "headless" | "none" =>
+            if args.len() < 2:
+                print "Error: headless mode requires a .ui.sdn file path"
+                return 1
+            val file_path = args[1]
+            return run_headless(file_path)
+
+        "-h" | "--help" =>
+            print_usage()
+            return 0
+
+        _ =>
+            # If first arg is a file, auto-detect best backend
+            if rt_file_exists(mode):
+                val backend = detect_gui_backend()
+                return run_detected_backend(backend, mode, 3000)
+            print "Error: Unknown mode '{mode}'. Use 'tui', 'web', 'tauri', 'electron', or 'headless'."
+            print_usage()
+            return 1
+
+fn run_detected_backend(backend: text, file_path: text, port: i32) -> i64:
+    """Run the auto-detected or specified backend."""
+    match backend:
+        "tauri" =>
+            return run_tauri(file_path, port)
+        "electron" =>
+            return run_electron(file_path, port)
+        "web" =>
+            return run_web(file_path, port)
+        "tui" =>
+            return run_tui(file_path)
+        "headless" =>
+            return run_headless(file_path)
+        _ =>
+            print "Error: Unknown detected backend '{backend}', falling back to TUI"
+            return run_tui(file_path)
+
+fn print_usage():
+    print "Simple UI Renderer"
+    print ""
+    print "Usage:"
+    print "  simple ui <file.ui.sdn>                      Auto-detect backend (default)"
+    print "  simple ui tui <file.ui.sdn>                  TUI mode (terminal)"
+    print "  simple ui tauri <file.ui.sdn> [--port N]     Tauri desktop mode"
+    print "  simple ui web <file.ui.sdn> [--port N]       Web GUI mode"
+    print "  simple ui electron <file.ui.sdn> [--port N]  Electron desktop mode"
+    print "  simple ui gui <file.ui.sdn> [--port N]       Auto-detect GUI backend"
+    print "  simple ui headless <file.ui.sdn>             Headless mode (testing/CI)"
+    print "  simple ui none <file.ui.sdn>                 Alias for headless"
+    print ""
+    print "Options:"
+    print "  --port N    Port for web/tauri/electron server (default: 3000)"
+    print "  -h, --help  Show this help"
+    print ""
+    print "Environment:"
+    print "  SIMPLE_GUI_BACKEND   Override auto-detection (tauri/web/tui/headless)"
+
+fn parse_port(args: [text]) -> i32:
+    """Parse --port from args, defaulting to 3000."""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--port" and i + 1 < args.len():
+            return args[i + 1].to_int()
+        elif arg.starts_with("--port="):
+            val port_str = arg[7:]
+            return port_str.to_int()
+        i = i + 1
+    return 3000
+
+fn get_args() -> [text]:
+    """Get CLI args passed to this module.
+
+    Supports both:
+    - `simple ui ...` command dispatch, where `ui` appears in argv
+    - direct script execution, where argv looks like `<runtime> <script> ...`
+    """
+    val all_args = rt_cli_get_args()
+
+    # Command dispatch path: return everything after the `ui` subcommand
+    var args: [text] = []
+    var found_ui = false
+    for arg in all_args:
+        if found_ui:
+            args.push(arg)
+        elif arg == "ui":
+            found_ui = true
+    if args.len() > 0:
+        return args
+
+    # Direct script execution path: skip the runtime and script path
+    var i = 0
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg.ends_with(".spl") or arg.ends_with(".simple") or arg.ends_with(".sscript") or arg.ends_with(".shs"):
+            if i + 1 < all_args.len():
+                return all_args[i + 1:]
+            return []
+        i = i + 1
+
+    return args
+
+extern fn rt_cli_get_args() -> [text]

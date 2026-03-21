@@ -1,0 +1,93 @@
+# UI Tree Diffing
+#
+# Computes a minimal set of patches to transform one WidgetNode tree
+# into another. Used by the reactive state system to efficiently
+# update backends.
+
+use common.ui.widget.{WidgetNode, WidgetKind, LayoutKind}
+use common.ui.patch.{UIPatch, PatchKind}
+
+# =========================================================================
+# Tree Diff
+# =========================================================================
+
+fn diff_trees(old_tree: WidgetNode, new_tree: WidgetNode) -> [UIPatch]:
+    """Compute patches to transform old_tree into new_tree."""
+    var patches: [UIPatch] = []
+    diff_node(old_tree, new_tree, patches)
+    return patches
+
+fn diff_node(old_node: WidgetNode, new_node: WidgetNode, patches: [UIPatch]):
+    """Recursively diff two nodes and accumulate patches."""
+    # If IDs differ, this is a full replacement
+    if old_node.id != new_node.id:
+        patches.push(UIPatch.new(PatchKind.ReplaceNode, new_node.id, old_node.id, new_node))
+        return
+
+    # Check for kind change
+    if old_node.kind != new_node.kind:
+        patches.push(UIPatch.new(PatchKind.ReplaceNode, new_node.id, old_node.id, new_node))
+        return
+
+    # Check for layout change
+    if old_node.layout != new_node.layout:
+        patches.push(UIPatch.new_simple(PatchKind.UpdateLayout, new_node.id))
+
+    # Check for visibility change
+    if old_node.visible != new_node.visible:
+        patches.push(UIPatch.new_simple(PatchKind.UpdateVisibility, new_node.id))
+
+    # Diff properties
+    diff_props(old_node, new_node, patches)
+
+    # Diff children
+    diff_children(old_node.children, new_node.children, old_node.id, patches)
+
+fn diff_props(old_node: WidgetNode, new_node: WidgetNode, patches: [UIPatch]):
+    """Diff the props of two nodes."""
+    # Check for changed or new props
+    for key in new_node.props.keys():
+        val new_val = new_node.props[key]
+        if old_node.props.contains_key(key):
+            val old_val = old_node.props[key]
+            if old_val != new_val:
+                patches.push(UIPatch.new_prop(PatchKind.UpdateProp, old_node.id, key, new_val))
+        else:
+            patches.push(UIPatch.new_prop(PatchKind.UpdateProp, old_node.id, key, new_val))
+
+    # Check for removed props
+    for key in old_node.props.keys():
+        if not new_node.props.contains_key(key):
+            patches.push(UIPatch.new_prop(PatchKind.RemoveProp, old_node.id, key, ""))
+
+fn diff_children(old_children: [WidgetNode], new_children: [WidgetNode],
+                 parent_id: text, patches: [UIPatch]):
+    """Diff child lists using a simple index-based strategy."""
+    val old_len = old_children.len()
+    val new_len = new_children.len()
+    val min_len = if old_len < new_len: old_len else: new_len
+
+    # Diff matched children
+    var idx = 0
+    while idx < min_len:
+        val old_child = old_children[idx]
+        val new_child = new_children[idx]
+
+        if old_child.id == new_child.id:
+            # Same node — recurse
+            diff_node(old_child, new_child, patches)
+        else:
+            # Different node at same index — replace
+            patches.push(UIPatch.new(PatchKind.ReplaceNode, new_child.id, parent_id, new_child))
+        idx = idx + 1
+
+    # Handle added children
+    while idx < new_len:
+        patches.push(UIPatch.new(PatchKind.InsertChild, new_children[idx].id, parent_id, new_children[idx]))
+        idx = idx + 1
+
+    # Handle removed children
+    idx = min_len
+    while idx < old_len:
+        patches.push(UIPatch.new_simple(PatchKind.RemoveChild, old_children[idx].id))
+        idx = idx + 1

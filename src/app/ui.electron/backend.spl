@@ -1,0 +1,106 @@
+# Electron Render Backend
+#
+# Implements RenderBackend for Electron desktop applications.
+# Wraps the Web backend's HTML generation and adds IPC for native features.
+
+use common.ui.backend.{RenderBackend}
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.capability.{Capability, NotSupported}
+use app.ui.render.widgets.{render_html_tree}
+use app.ui.web.html.{generate_html_page, generate_css, generate_js}
+use app.ui.electron.ipc.{parse_ipc_message, build_ipc_render}
+
+extern fn rt_stdin_read_line() -> text?
+
+# =========================================================================
+# Electron Backend
+# =========================================================================
+
+class ElectronBackend:
+    port: i32
+    initialized: bool
+
+    static fn new(port: i32) -> Result<ElectronBackend, text>:
+        return Ok(ElectronBackend(
+            port: port,
+            initialized: false
+        ))
+
+    # --- Lifecycle ---
+
+    fn init() -> Result<bool, text>:
+        self.initialized = true
+        return Ok(true)
+
+    fn shutdown():
+        self.initialized = false
+
+    # --- Rendering ---
+
+    fn render(state: UIState) -> Result<bool, text>:
+        val html = render_html_tree(state.tree.root, state)
+        val ipc_msg = build_ipc_render(html)
+        print ipc_msg
+        return Ok(true)
+
+    fn render_html(state: UIState) -> text:
+        return render_html_tree(state.tree.root, state)
+
+    # --- Events ---
+
+    fn poll_event(timeout_ms: i32) -> UIEvent?:
+        val line = rt_stdin_read_line()
+        if line == nil:
+            return nil
+        if line == "":
+            return nil
+        return parse_ipc_message(line)
+
+    # --- Capabilities ---
+
+    fn capabilities() -> [Capability]:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+
+    fn supports_mouse() -> bool:
+        return true
+
+    fn supports_color() -> bool:
+        return true
+
+    fn supports_images() -> bool:
+        return true
+
+    fn supports_touch() -> bool:
+        return false
+
+    fn render_image(node: WidgetNode, rect: WidgetRect) -> Result<bool, NotSupported>:
+        return Ok(true)
+
+    fn show_notification(title: text, body: text) -> Result<bool, NotSupported>:
+        val ipc_msg = "{\"type\":\"notification\",\"title\":\"{title}\",\"body\":\"{body}\"}"
+        print ipc_msg
+        return Ok(true)
+
+    fn show_dialog(kind: text, title: text, message: text) -> Result<text, NotSupported>:
+        val ipc_msg = "{\"type\":\"dialog\",\"kind\":\"{kind}\",\"title\":\"{title}\",\"message\":\"{message}\"}"
+        print ipc_msg
+        return Ok("")
+
+    # --- Viewport ---
+
+    fn viewport_width() -> i32:
+        return 1280
+
+    fn viewport_height() -> i32:
+        return 720
+
+    # --- Backend Info ---
+
+    fn backend_name() -> text:
+        return "electron"
+
+    # --- Electron-specific ---
+
+    fn generate_full_page(state: UIState) -> text:
+        """Generate a complete HTML page for Electron BrowserWindow."""
+        return generate_html_page(state, self.port)

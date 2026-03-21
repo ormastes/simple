@@ -1,0 +1,114 @@
+# VSCode Webview Render Backend
+#
+# Implements RenderBackend for VSCode webview panels.
+# Reuses the Web backend's HTML generation and adds VSCode-specific
+# message protocol for events.
+
+use common.ui.backend.{RenderBackend}
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.capability.{Capability, NotSupported}
+use app.ui.render.widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+
+# =========================================================================
+# VSCode Backend
+# =========================================================================
+
+class VscodeBackend:
+    initialized: bool
+
+    static fn new() -> VscodeBackend:
+        return VscodeBackend(initialized: false)
+
+    # --- Lifecycle ---
+
+    fn init() -> Result<bool, text>:
+        self.initialized = true
+        return Ok(true)
+
+    fn shutdown():
+        self.initialized = false
+
+    # --- Rendering ---
+
+    fn render(state: UIState) -> Result<bool, text>:
+        # VSCode backend generates HTML and sends via postMessage
+        val html = self.render_html(state)
+        send_to_webview("render", html)
+        return Ok(true)
+
+    fn render_html(state: UIState) -> text:
+        return render_html_tree(state.tree.root, state)
+
+    # --- Events ---
+
+    fn poll_event(timeout_ms: i32) -> UIEvent?:
+        # Events come from webview postMessage, handled by protocol.spl
+        return nil
+
+    # --- Capabilities ---
+
+    fn capabilities() -> [Capability]:
+        return [Capability.Mouse, Capability.Color, Capability.Images]
+
+    fn render_image(node: WidgetNode, rect: WidgetRect) -> Result<bool, NotSupported>:
+        return Ok(true)
+
+    # --- Viewport ---
+
+    fn viewport_width() -> i32:
+        return 800
+
+    fn viewport_height() -> i32:
+        return 600
+
+    # --- Backend Info ---
+
+    fn backend_name() -> text:
+        return "vscode"
+
+    # --- VSCode-specific ---
+
+    fn generate_webview_html(state: UIState, nonce: text) -> text:
+        """Generate complete HTML for a VSCode webview panel."""
+        val body = render_html_tree(state.tree.root, state)
+        val css = generate_css(state.tree.theme)
+
+        var html = "<!DOCTYPE html>\n"
+        html = "{html}<html lang=\"en\">\n"
+        html = "{html}<head>\n"
+        html = "{html}  <meta charset=\"UTF-8\">\n"
+        html = "{html}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+        html = "{html}  <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}';\">\n"
+        html = "{html}  <style nonce=\"{nonce}\">{css}</style>\n"
+        html = "{html}</head>\n"
+        html = "{html}<body>\n"
+        html = "{html}  <div id=\"app\">{body}</div>\n"
+        html = "{html}  <script nonce=\"{nonce}\">{generate_vscode_js()}</script>\n"
+        html = "{html}</body>\n"
+        html = "{html}</html>"
+        return html
+
+fn generate_vscode_js() -> text:
+    """Generate JavaScript for VSCode webview communication."""
+    var js = "const vscode = acquireVsCodeApi();\n"
+    js = "{js}document.addEventListener('keydown', function(e) {\n"
+    js = "{js}  vscode.postMessage({ type: 'keypress', key: e.key });\n"
+    js = "{js}});\n"
+    js = "{js}document.addEventListener('click', function(e) {\n"
+    js = "{js}  const target = e.target.closest('[data-action]');\n"
+    js = "{js}  if (target) {\n"
+    js = "{js}    vscode.postMessage({ type: 'action', name: target.dataset.action });\n"
+    js = "{js}  }\n"
+    js = "{js}});\n"
+    js = "{js}window.addEventListener('message', function(e) {\n"
+    js = "{js}  const msg = e.data;\n"
+    js = "{js}  if (msg.type === 'render') {\n"
+    js = "{js}    document.getElementById('app').innerHTML = msg.html;\n"
+    js = "{js}  }\n"
+    js = "{js}});\n"
+    return js
+
+fn send_to_webview(msg_type: text, content: text):
+    """Send a message to the VSCode webview (stub — called from TS host)."""
+    pass_dn
