@@ -676,7 +676,10 @@ int main(int argc, char** argv) {
 
         // For large builds, archive objects into a static library first to avoid
         // linker crashes when passing thousands of individual .o files.
-        if object_paths.len() > 100 {
+        // On macOS, skip archiving due to Cranelift Mach-O n_strx bug —
+        // pass .o files directly to the linker instead.
+        let skip_archive = cfg!(target_os = "macos");
+        if object_paths.len() > 100 && !skip_archive {
             let archive_path = temp_dir.join("libspl_objects.a");
             let ar_tool = find_archive_tool();
             let is_msvc_lib = ar_tool == "lib";
