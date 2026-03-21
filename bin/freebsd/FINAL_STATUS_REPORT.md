@@ -11,10 +11,8 @@
 ### 1. FreeBSD Compiler Binaries (READY TO USE)
 | File | Size | Description |
 |------|------|-------------|
-| `bin/freebsd/simple` | 79KB | FreeBSD seed compiler (seed_cpp) |
-| `build/freebsd/seed_cpp` | 79KB | Source of above binary |
-| `build/freebsd/seed` | 50KB | C version transpiler |
-| `build/freebsd/libspl_runtime.a` | 36KB | Runtime library |
+| `bin/freebsd/simple` | 79KB | FreeBSD seed compiler |
+| `bin/freebsd/simple-full` | 32MB | Linux full compiler binary, not a FreeBSD artifact |
 
 **Binary Verification**:
 ```bash
@@ -30,24 +28,12 @@ FreeBSD-style, with debug_info, not stripped
 - Size under 50MB (only 79KB!)
 - Cross-compiled and verified
 
-### 2. Complete Distribution Package (READY FOR FREEBSD)
-**Package**: `/tmp/freebsd-simple-compiler.tar.gz` (84KB)
+### 2. Repo Deliverables Present
+The current repo contains the checked-in FreeBSD seed compiler and the FreeBSD documentation set.
 
-**Contents** (61 files):
-- FreeBSD binaries (seed_cpp, seed)
-- Runtime library (source + precompiled)
-- Startup code (CRT)
-- Build script (BUILD.sh)
-- Documentation (README.txt, USAGE.txt)
-- Test programs
-
-**Usage on ANY FreeBSD System**:
-```bash
-# Transfer to FreeBSD system (USB, scp, etc.)
-tar xzf freebsd-simple-compiler.tar.gz
-cd freebsd-complete-package
-./BUILD.sh
-```
+The older report sections below mention `/tmp/freebsd-simple-compiler.tar.gz` and `build/freebsd/*`
+artifacts. Those are not present in the current tree and should be treated as historical notes,
+not current checked-in deliverables.
 
 ### 3. Documentation Suite
 | Document | Purpose |
@@ -82,9 +68,8 @@ cd freebsd-complete-package
 - Alternative tools (expect, guestfish, virt-customize) not installed
 
 ### Impact
-**NONE** - The deliverables don't require VM automation:
-- Binaries were cross-compiled (already done)
-- Package is self-contained (works on any FreeBSD system)
+**LOW** - The main checked-in deliverable does not require VM automation:
+- `bin/freebsd/simple` is already present
 - VM testing is optional verification only
 
 ---
@@ -110,15 +95,15 @@ Discovery: FreeBSD binaries already exist from cross-compilation!
    - Designed for simple programs (<50 files)
    - Full compiler needs incremental build (core → full)
 
-2. **FreeBSD seed_cpp already exists**
+2. **FreeBSD seed compiler already exists**
    - Cross-compiled during development
    - Works for Core Simple subset
    - Sufficient for many use cases
 
-3. **Better approach**: Distribute package
+3. **Better approach**: Distribute or copy the checked-in seed binary
    - Works on any FreeBSD system (not just QEMU VM)
-   - No SSH configuration needed
-   - Simpler deployment
+   - No SSH configuration needed for the binary itself
+   - Packaging can be rebuilt separately if needed
 
 ---
 
@@ -131,15 +116,14 @@ file bin/freebsd/simple
 # Copy to FreeBSD system and use
 ```
 
-### Option 2: Deploy Package to FreeBSD (5 minutes)
+### Option 2: Copy Seed Binary to FreeBSD (5 minutes)
 ```bash
-# Copy package to FreeBSD system (USB, network, etc.)
-scp /tmp/freebsd-simple-compiler.tar.gz user@freebsd-host:/tmp/
+# Copy binary to FreeBSD system
+scp bin/freebsd/simple user@freebsd-host:/tmp/simple
 
 # On FreeBSD system:
-cd /tmp && tar xzf freebsd-simple-compiler.tar.gz
-cd freebsd-complete-package
-./BUILD.sh  # Builds and runs test program
+chmod +x /tmp/simple
+/tmp/simple input.spl > output.cpp
 ```
 
 ### Option 3: Manual VM Testing (15 minutes)
@@ -165,12 +149,10 @@ cd freebsd-complete-package
 
 ### Binaries
 - `bin/freebsd/simple` - FreeBSD compiler (ready to use)
-- `build/freebsd/seed_cpp` - Original source
-- `build/freebsd/libspl_runtime.a` - Runtime library
+- `bin/freebsd/simple-full` - Linux full compiler reference binary
 
 ### Package
-- `/tmp/freebsd-simple-compiler.tar.gz` - Complete distribution (84KB)
-- `/tmp/freebsd-complete-package/` - Extracted package
+- Historical reports refer to `/tmp/freebsd-simple-compiler.tar.gz`, but it is not part of the current repo tree
 
 ### Documentation
 - `/tmp/QUICKSTART.md` - Start here!
@@ -188,7 +170,7 @@ cd freebsd-complete-package
 | Criterion | Status | Notes |
 |-----------|--------|-------|
 | FreeBSD native ELF binary | ✅ PASS | bin/freebsd/simple (79KB) |
-| Binary runs in FreeBSD | ✅ READY | Package includes test script |
+| Binary runs in FreeBSD | ✅ READY | Checked-in seed binary is the current deliverable |
 | Correct format (ELF x86-64 FreeBSD) | ✅ PASS | Verified with `file` command |
 | Binary under 50MB | ✅ PASS | Only 79KB! |
 | Build time under 30 minutes | ✅ PASS | Cross-compilation already done |
@@ -197,17 +179,11 @@ cd freebsd-complete-package
 
 ## 🚀 Recommended Next Step
 
-**Use the package!**
+**Use the checked-in seed binary.**
 
 ```bash
-# View package details
-tar -tzf /tmp/freebsd-simple-compiler.tar.gz | head -20
-
-# Read quick start
-cat /tmp/QUICKSTART.md
-
-# Test on FreeBSD system (or transfer to VM manually)
-# See /tmp/VM_TRANSFER_GUIDE.md for transfer options
+file bin/freebsd/simple
+scp bin/freebsd/simple user@freebsd-host:/tmp/simple
 ```
 
 ---
@@ -229,7 +205,7 @@ See `/tmp/FREEBSD_BUILD_STATUS.md` for details.
 
 **What You Have**:
 - ✅ Working FreeBSD Simple compiler binary
-- ✅ Self-contained distribution package (84KB)
+- ✅ Linux full compiler reference binary in the same folder
 - ✅ Complete documentation suite
 - ✅ Build and test scripts
 
@@ -242,4 +218,4 @@ See `/tmp/FREEBSD_BUILD_STATUS.md` for details.
 - ⏳ VM SSH automation (optional, not required for deliverables)
 - ⏳ In-VM testing (manual approach available)
 
-**Bottom Line**: All deliverables complete and ready to use! 🎉
+**Bottom Line**: The checked-in FreeBSD seed binary is ready to use. Older package/build paths in historical notes are not present in the current tree.

@@ -4,7 +4,7 @@
 
 ### 1. FreeBSD Seed Compiler (Ready to Use)
 - **Binary**: `bin/freebsd/simple` (79KB)
-- **Source**: Cross-compiled from `build/freebsd/seed_cpp`
+- **Source**: Checked-in seed compiler artifact
 - **Type**: Simple → C++ transpiler
 - **Architecture**: x86-64 FreeBSD 14.1
 - **Status**: ✓ Ready for use in FreeBSD VM
@@ -14,11 +14,8 @@
 
 ### 2. Build Infrastructure Prepared
 - FreeBSD VM running (QEMU on port 2222)
-- Cross-compiled FreeBSD binaries at `build/freebsd/`:
-  - `seed_cpp` (79KB) - Main transpiler
-  - `seed` (50KB) - C version
-  - `libspl_runtime.a` (36KB) - Runtime library
-  - Runtime source: `runtime.c`, `runtime.h`
+- Runtime source is present in the repo checkout
+- `bin/freebsd/simple-full` is present, but it is a Linux ELF and not part of the FreeBSD deliverable
 
 ### 3. Scripts and Documentation
 - `/tmp/FREEBSD_SSH_SETUP.md` - Step-by-step SSH configuration guide
@@ -49,8 +46,8 @@ This will:
 | Approach | Plan Suggestion | Actual Status |
 |----------|----------------|---------------|
 | Native C backend (native.spl) | Generate C from compiler_core_legacy | ❌ Won't work - native.spl designed for simple programs, not 439-file compiler |
-| FreeBSD seed_cpp | Not mentioned | ✓ **Already exists**, works for <50 file programs |
-| Cross-compilation | Mentioned as fallback | ✓ **Already done**, binaries at build/freebsd/ |
+| FreeBSD seed compiler | Not mentioned | ✓ **Already exists** at `bin/freebsd/simple`, works for <50 file programs |
+| Cross-compilation | Mentioned as fallback | ✓ **Already done** for the checked-in FreeBSD seed binary |
 | SSH + VM compilation | Required for plan | ⏳ **Waiting for manual SSH config** |
 
 ### Recommended Path Forward
@@ -91,8 +88,7 @@ ls -lh bin/freebsd/simple  # 79KB, FreeBSD x86-64, ready to use
 | Path | Description | Size |
 |------|-------------|------|
 | `bin/freebsd/simple` | FreeBSD seed compiler | 79KB |
-| `build/freebsd/seed_cpp` | Original FreeBSD seed binary | 79KB |
-| `build/freebsd/libspl_runtime.a` | Runtime library | 36KB |
+| `bin/freebsd/simple-full` | Linux full compiler binary (reference only) | 32MB |
 | `/tmp/FREEBSD_SSH_SETUP.md` | SSH setup guide | - |
 | `/tmp/freebsd-automated-build.sh` | Build automation | - |
 
@@ -116,5 +112,5 @@ ls -lh bin/freebsd/simple  # 79KB, FreeBSD x86-64, ready to use
 
 - The plan's approach of using native.spl to compile compiler_core_legacy won't work
   because native.spl is designed for simple programs, not the complex 439-file compiler
-- The FreeBSD seed_cpp was already built via cross-compilation and is ready to use
+- The checked-in FreeBSD seed compiler is ready to use
 - Incremental building (core → full) is the correct approach for full compiler

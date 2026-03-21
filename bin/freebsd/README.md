@@ -2,19 +2,18 @@
 
 ## Quick Access
 
-This directory contains the FreeBSD Simple compiler and distribution package.
+This directory contains the checked-in FreeBSD bootstrap artifacts.
 
 ### Files
 
 - **simple** (79KB) - FreeBSD seed compiler binary (x86-64 FreeBSD 14.1)
   - Simple → C++ transpiler
   - Core Simple subset support
-  - Cross-compiled from build/freebsd/seed_cpp
+  - Checked-in artifact
 
-- **freebsd-simple-compiler.tar.gz** (84KB) - Complete distribution package
-  - Ready for any FreeBSD 14.x system
-  - Includes binaries, runtime, build scripts, tests
-  - Extract and run ./BUILD.sh to verify
+- **simple-full** (32MB) - Linux full compiler binary
+  - GNU/Linux ELF, not a FreeBSD binary
+  - Included for comparison/reference only
 
 - **QUICKSTART.md** - Quick start guide (read this first!)
 - **FINAL_STATUS_REPORT.md** - Implementation status and results
@@ -32,17 +31,15 @@ clang++ -std=c++20 -o output output.cpp <runtime.c> -I<runtime_dir>
 
 ### Option 2: Use Complete Package
 ```bash
-# Transfer package to FreeBSD system
-tar xzf freebsd-simple-compiler.tar.gz
-cd freebsd-complete-package
-./BUILD.sh
+# There is no checked-in FreeBSD package tarball in this tree.
+# Use bin/freebsd/simple directly, or rebuild/package separately.
 ```
 
 ## Requirements
 
 - FreeBSD 14.x (x86-64)
 - clang++ or g++ with C++20 support
-- Runtime files from package or build/freebsd/
+- Runtime source files from the repo checkout
 
 ## Features
 
@@ -57,7 +54,7 @@ cd freebsd-complete-package
 ## Building Full Compiler
 
 For full Simple features:
-1. Use seed_cpp to compile src/core/ (31 files) → core compiler
+1. Use `bin/freebsd/simple` to compile src/core/ (31 files) → core compiler
 2. Use core compiler to compile src/compiler/ (411 files) → full compiler
 
 See FREEBSD_BUILD_STATUS.md for details.
@@ -76,5 +73,5 @@ file simple
 ---
 
 **Built**: 2026-02-12
-**Source**: build/freebsd/ (cross-compilation)
+**Artifact Source**: checked-in `bin/freebsd/simple`
 **Status**: ✅ Production ready

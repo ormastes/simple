@@ -65,8 +65,7 @@ After Option 2, build incrementally:
 | File | Purpose |
 |------|---------|
 | `bin/freebsd/simple` | FreeBSD seed compiler (ready to use) |
-| `build/freebsd/seed_cpp` | Source of above (same binary) |
-| `build/freebsd/libspl_runtime.a` | Runtime library for compilation |
+| `bin/freebsd/simple-full` | Linux full compiler binary for reference, not for FreeBSD |
 | `seed/runtime.c` / `.h` | Runtime source code |
 | `/tmp/FREEBSD_SSH_SETUP.md` | Detailed SSH setup instructions |
 | `/tmp/freebsd-automated-build.sh` | Automated build script |
@@ -89,7 +88,7 @@ The original plan suggested using `native.spl` to generate C code for compiler_c
 After investigation:
 
 - ❌ **Won't work**: native.spl is designed for simple programs, not the 439-file compiler_core_legacy
-- ✅ **Better approach**: Use existing FreeBSD seed_cpp (already cross-compiled)
+- ✅ **Better approach**: Use existing FreeBSD seed compiler in `bin/freebsd/simple`
 - ✅ **Full compiler**: Build incrementally (core 31 files → full 411 files)
 
 ## Troubleshooting
@@ -103,7 +102,7 @@ After investigation:
 - Follow `/tmp/FREEBSD_SSH_SETUP.md` to configure SSH first
 - VM must be running with SSH enabled
 
-**"seed_cpp SEGFAULT"**
+**"seed compiler SEGFAULT"**
 - Expected when trying to compile 439 files at once
 - Solution: Build incrementally (core first, then full)
 
@@ -126,6 +125,7 @@ cat /tmp/FREEBSD_SSH_SETUP.md  # Read this first
 ## Success Metrics
 
 - ✅ FreeBSD binary created: `bin/freebsd/simple` (79KB)
+- ℹ️ `bin/freebsd/simple-full` exists but is a Linux ELF, not a FreeBSD artifact
 - ✅ Correct format: ELF 64-bit FreeBSD x86-64
 - ✅ Under 50MB size limit
 - ⏳ VM testing: Pending SSH configuration

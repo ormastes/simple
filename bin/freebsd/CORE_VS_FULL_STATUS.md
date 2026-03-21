@@ -164,7 +164,7 @@ Currently neither path is automated.
 | File | Purpose |
 |------|---------|
 | `bin/freebsd/simple` | Core compiler (ready to use) |
-| `bin/freebsd/freebsd-simple-compiler.tar.gz` | Distribution package |
+| `bin/freebsd/simple-full` | Linux full compiler reference binary |
 | `/tmp/build-freebsd-full-compiler.sh` | VM build script (explains limitations) |
 | `/tmp/freebsd-compiler-build.log` | Failed build attempt log |
 | `/tmp/CORE_VS_FULL_STATUS.md` | This document |
