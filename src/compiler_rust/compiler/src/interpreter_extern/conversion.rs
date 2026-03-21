@@ -97,6 +97,38 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(hash))
 }
 
+/// Convert text to a byte array
+///
+/// Callable from Simple as: `rt_text_to_bytes(text)`
+pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let text = match args.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => "",
+    };
+    let bytes: Vec<Value> = text.as_bytes().iter().map(|b| Value::Int(*b as i64)).collect();
+    Ok(Value::Array(std::sync::Arc::new(bytes)))
+}
+
+/// Convert a byte array to text
+///
+/// Callable from Simple as: `rt_bytes_to_text(bytes)`
+pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(Value::Array(arr)) => {
+            let bytes: Vec<u8> = arr
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Int(i) => Some(*i as u8),
+                    _ => None,
+                })
+                .collect();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            Ok(Value::Str(text))
+        }
+        _ => Ok(Value::Str(String::new())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

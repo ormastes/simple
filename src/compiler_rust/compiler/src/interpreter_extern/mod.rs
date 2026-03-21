@@ -65,7 +65,7 @@ pub mod cargo;
 pub mod sdn;
 pub mod coverage;
 pub mod cranelift;
-pub mod perf;
+// pub mod perf; // TODO: file not yet created
 pub mod sandbox;
 pub mod mock_policy;
 pub mod ffi_value;
@@ -293,7 +293,7 @@ pub(crate) fn call_extern_function(
         "rt_time_now_micros" => time::rt_time_now_micros(&evaluated),
         "rt_time_monotonic_ns" => time::rt_time_monotonic_ns(&evaluated),
         "rt_timestamp_iso8601" => time::rt_timestamp_iso8601(&evaluated),
-        "rt_time_ms" => time::rt_time_ms(&evaluated),
+        "rt_time_ms" => time::rt_time_ms_fn(&evaluated),
 
         // ====================================================================
         // DateTime Operations (11 functions)
@@ -393,8 +393,8 @@ pub(crate) fn call_extern_function(
         "rt_hash_text" => conversion::rt_hash_text(&evaluated),
 
         // Text/bytes conversion (2 functions)
-        "rt_text_to_bytes" => conversion::rt_text_to_bytes(&evaluated),
-        "rt_bytes_to_text" => conversion::rt_bytes_to_text(&evaluated),
+        "rt_text_to_bytes" => conversion::rt_text_to_bytes_fn(&evaluated),
+        "rt_bytes_to_text" => conversion::rt_bytes_to_text_fn(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)
@@ -952,33 +952,30 @@ pub(crate) fn call_extern_function(
         "coverage_check" => coverage::coverage_check(&evaluated),
         "coverage_summary" => coverage::coverage_summary(&evaluated),
         // FFI functions for coverage.spl
-        "rt_coverage_enable" => coverage::rt_coverage_enable(&evaluated),
-        "rt_coverage_enable_timed" => coverage::rt_coverage_enable_timed(&evaluated),
+        "rt_coverage_enable" => coverage::rt_coverage_enable_fn(&evaluated),
+        "rt_coverage_enable_timed" => coverage::rt_coverage_enable_timed_fn(&evaluated),
         "rt_coverage_enabled" => coverage::rt_coverage_enabled(&evaluated),
         "rt_coverage_clear" => coverage::rt_coverage_clear(&evaluated),
         "rt_coverage_dump_sdn" => coverage::rt_coverage_dump_sdn(&evaluated),
         "rt_coverage_free_sdn" => coverage::rt_coverage_free_sdn(&evaluated),
-        "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_interp(&evaluated),
-        "rt_coverage_condition_probe" => coverage::rt_coverage_condition_probe_interp(&evaluated),
+        "rt_coverage_decision_probe" => coverage::rt_coverage_decision_probe_fn(&evaluated),
+        "rt_coverage_condition_probe" => coverage::rt_coverage_condition_probe_fn(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
-        // Performance measurement functions
-        "rt_perf_enable" => perf::rt_perf_enable(&evaluated),
-        "rt_perf_enabled" => perf::rt_perf_enabled(&evaluated),
-        "rt_perf_clock_ns" => perf::rt_perf_clock_ns(&evaluated),
-        "rt_perf_rdtsc" => perf::rt_perf_rdtsc(&evaluated),
-        "rt_perf_cycles_to_ns" => perf::rt_perf_cycles_to_ns(&evaluated),
-        "rt_perf_region_enter" => perf::rt_perf_region_enter(&evaluated),
-        "rt_perf_region_exit" => perf::rt_perf_region_exit(&evaluated),
-        "rt_perf_dump_sdn" => perf::rt_perf_dump_sdn(&evaluated),
-        "rt_perf_free_sdn" => perf::rt_perf_free_sdn(&evaluated),
-        "rt_perf_clear" => perf::rt_perf_clear(&evaluated),
+        // Performance measurement functions (perf module not yet created — stubs)
+        "rt_perf_enable" | "rt_perf_enabled" | "rt_perf_clock_ns" |
+        "rt_perf_rdtsc" | "rt_perf_cycles_to_ns" |
+        "rt_perf_region_enter" | "rt_perf_region_exit" |
+        "rt_perf_dump_sdn" | "rt_perf_free_sdn" | "rt_perf_clear" => {
+            // TODO: implement perf module
+            Ok(Value::Nil)
+        }
 
         // ====================================================================
         // Profiler FFI Functions (no-op in interpreter mode)
         // ====================================================================
-        "rt_profiler_record_call" => time::rt_profiler_record_call(&evaluated),
-        "rt_profiler_record_return" => time::rt_profiler_record_return(&evaluated),
-        "rt_profiler_is_active" => time::rt_profiler_is_active(&evaluated),
+        "rt_profiler_record_call" => time::rt_profiler_record_call_fn(&evaluated),
+        "rt_profiler_record_return" => time::rt_profiler_record_return_fn(&evaluated),
+        "rt_profiler_is_active" => time::rt_profiler_is_active_fn(&evaluated),
 
         // ====================================================================
         // Cranelift FFI Functions (for self-hosting compiler)

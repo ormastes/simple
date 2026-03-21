@@ -266,37 +266,37 @@ pub(crate) fn compile_method_call_static<M: Module>(
             } else {
                 std::borrow::Cow::Borrowed(resolved)
             };
-            let call_conv = platform_call_conv();
-            let mut sig = Signature::new(call_conv);
-            // receiver + args: all i64
-            for _ in 0..args.len() + 1 {
-                sig.params.push(AbiParam::new(types::I64));
-            }
-            sig.returns.push(AbiParam::new(types::I64));
-            match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
-                Ok(fid) => {
-                    let fref = ctx.module.declare_func_in_func(fid, builder.func);
-                    let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
-                    for a in args { call_args.push(get_vreg_or_default(ctx, builder, a)); }
-                    let call_args = super::calls::adapt_args_to_signature(builder, fref, call_args);
-                    let call = adapted_call(builder, fref, &call_args);
-                    if let Some(d) = dest {
-                        let results = builder.inst_results(call);
-                        if !results.is_empty() {
-                            ctx.vreg_values.insert(*d, results[0]);
-                        }
-                    }
+            // Check if the function is already declared (avoids "Incompatible declaration" errors
+            // when the function was already declared with a specific signature in declare_functions)
+            let fid = ctx.func_ids.get(resolved.as_ref()).copied().unwrap_or_else(|| {
+                let call_conv = platform_call_conv();
+                let mut sig = Signature::new(call_conv);
+                // receiver + args: all i64
+                for _ in 0..args.len() + 1 {
+                    sig.params.push(AbiParam::new(types::I64));
                 }
-                Err(_) => {
-                    // Fallback: rt_function_not_found
-                    let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
-                    let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
-                    let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-                    let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
-                    if let Some(d) = dest {
-                        let result = builder.inst_results(call)[0];
-                        ctx.vreg_values.insert(*d, result);
-                    }
+                sig.returns.push(AbiParam::new(types::I64));
+                ctx.module.declare_function(&resolved, Linkage::Import, &sig)
+                    .unwrap_or_else(|_| {
+                        // If declaration fails, try with just i64 params (no receiver)
+                        let mut sig2 = Signature::new(call_conv);
+                        for _ in 0..args.len() {
+                            sig2.params.push(AbiParam::new(types::I64));
+                        }
+                        sig2.returns.push(AbiParam::new(types::I64));
+                        ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
+                            .unwrap_or_else(|_| ctx.runtime_funcs["rt_function_not_found"])
+                    })
+            });
+            let fref = ctx.module.declare_func_in_func(fid, builder.func);
+            let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
+            for a in args { call_args.push(get_vreg_or_default(ctx, builder, a)); }
+            let call_args = super::calls::adapt_args_to_signature(builder, fref, call_args);
+            let call = adapted_call(builder, fref, &call_args);
+            if let Some(d) = dest {
+                let results = builder.inst_results(call);
+                if !results.is_empty() {
+                    ctx.vreg_values.insert(*d, results[0]);
                 }
             }
         } else {

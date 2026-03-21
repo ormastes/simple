@@ -225,7 +225,9 @@ fn adapt_value_to_type(
     }
     // float → float
     if actual_ty.is_float() && expected_ty.is_float() {
-        if actual_ty.bits() < expected_ty.bits() {
+        if actual_ty == expected_ty {
+            return val; // same type, no conversion needed
+        } else if actual_ty.bits() < expected_ty.bits() {
             return builder.ins().fpromote(expected_ty, val);
         } else {
             return builder.ins().fdemote(expected_ty, val);

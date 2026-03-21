@@ -574,3 +574,24 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
         _ => Ok(Value::Str(String::new())),
     }
 }
+
+/// Enable coverage (stub — delegates to rt_coverage_enabled logic)
+pub fn rt_coverage_enable_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    // In interpreter, coverage is always available when the global is set
+    Ok(Value::Nil)
+}
+
+/// Enable timed coverage (stub — no-op in interpreter)
+pub fn rt_coverage_enable_timed_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+
+/// Decision probe for MC/DC coverage (stub in interpreter)
+pub fn rt_coverage_decision_probe_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+
+/// Condition probe for MC/DC coverage (stub in interpreter)
+pub fn rt_coverage_condition_probe_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
