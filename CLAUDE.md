@@ -59,11 +59,13 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
 | `impl` | End-to-end implementation workflow from requirements through VCS sync |
+| `agents` | Agent loop iteration patterns and multi-agent team orchestration |
 | `design` | Design patterns, type system |
 | `architecture` | Compiler pipeline, module structure |
 | `research` | Codebase exploration techniques |
 | `debug` | Debugging, tracing, fault detection |
 | `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
+| `refactor` | Code quality refactoring workflow and verification checklist |
 | `stdlib` | Stdlib module development |
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing workflow — all 10 doc types, relationship model |
@@ -74,6 +76,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
 | `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
+| `vcs` | JJ + Git workflow and sync recovery reference |
+| `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
 
 **Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
