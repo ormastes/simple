@@ -86,6 +86,7 @@ function handleSimpleMessage(line) {
                 }
                 break;
 
+            case 'windowControl':
             case 'window_control':
                 if (mainWindow) {
                     switch (msg.action) {

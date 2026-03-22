@@ -90,7 +90,7 @@ function handleSimpleMessage(line) {
             });
         } else if (msg.type === 'notification') {
             new Notification({ title: msg.title, body: msg.body }).show();
-        } else if (msg.type === 'windowControl') {
+        } else if (msg.type === 'windowControl' || msg.type === 'window_control') {
             switch (msg.action) {
                 case 'minimize': mainWindow.minimize(); break;
                 case 'maximize': mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); break;
