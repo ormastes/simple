@@ -1,0 +1,352 @@
+# IR_TC Common Subexpression Elimination Pass
+#
+# Within each basic block, tracks instruction signatures (opcode + operands).
+# If an identical computation was already performed, replaces the duplicate's
+# destination with the previous result.
+#
+# Only applies to pure (deterministic, no side effects) operations.
+
+use core.types.{IrTcValue, IrTcTypeKind, IrTcCond}
+use core.ops.{IrTcOp, IrTcInst, PhiEntry}
+use core.block.{IrTcBlock, IrTcFunction, IrTcModule}
+
+# ============================================================================
+# Instruction Hashing — fingerprint for (opcode, operands)
+# ============================================================================
+
+struct CseKey:
+    """Fingerprint for an instruction: opcode tag + operand value IDs."""
+    hash: i64
+
+impl CseKey:
+    static fn new(hash: i64) -> CseKey:
+        CseKey(hash: hash)
+
+fn _hash_combine(a: i64, b: i64) -> i64:
+    """Simple hash combination (FNV-inspired)."""
+    ((a * 16777619) ^ b) & 0x7FFFFFFFFFFFFFFF
+
+fn _hash_op(op: IrTcOp) -> i64?:
+    """Compute a hash for a pure instruction. Returns nil for impure ops."""
+    match op:
+        # Arithmetic
+        IrTcOp.Add(_, a, b):
+            val h = _hash_combine(1, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Sub(_, a, b):
+            val h = _hash_combine(2, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Mul(_, a, b):
+            val h = _hash_combine(3, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Div(_, a, b, signed):
+            var h = _hash_combine(4, a.id)
+            h = _hash_combine(h, b.id)
+            val s_val = if signed: 1 else: 0
+            Some(_hash_combine(h, s_val))
+        IrTcOp.Rem(_, a, b, signed):
+            var h = _hash_combine(5, a.id)
+            h = _hash_combine(h, b.id)
+            val s_val = if signed: 1 else: 0
+            Some(_hash_combine(h, s_val))
+        IrTcOp.Neg(_, a):
+            Some(_hash_combine(6, a.id))
+
+        # Bitwise
+        IrTcOp.And(_, a, b):
+            val h = _hash_combine(10, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Or(_, a, b):
+            val h = _hash_combine(11, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Xor(_, a, b):
+            val h = _hash_combine(12, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Not(_, a):
+            Some(_hash_combine(13, a.id))
+        IrTcOp.Shl(_, a, b):
+            val h = _hash_combine(14, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Shr(_, a, b):
+            val h = _hash_combine(15, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.Sar(_, a, b):
+            val h = _hash_combine(16, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.RotL(_, a, b):
+            val h = _hash_combine(17, a.id)
+            Some(_hash_combine(h, b.id))
+        IrTcOp.RotR(_, a, b):
+            val h = _hash_combine(18, a.id)
+            Some(_hash_combine(h, b.id))
+
+        # Comparison
+        IrTcOp.Cmp(_, cond, a, b):
+            var h = _hash_combine(20, a.id)
+            h = _hash_combine(h, b.id)
+            # Encode condition as an integer tag
+            val cond_tag = _cond_tag(cond)
+            Some(_hash_combine(h, cond_tag))
+
+        # Width conversion
+        IrTcOp.Ext(_, src, signed):
+            var h = _hash_combine(30, src.id)
+            val s_val = if signed: 1 else: 0
+            Some(_hash_combine(h, s_val))
+        IrTcOp.Trunc(_, src):
+            Some(_hash_combine(31, src.id))
+        IrTcOp.Bitcast(_, src):
+            Some(_hash_combine(32, src.id))
+
+        # Aggregates (pure)
+        IrTcOp.ExtractValue(_, agg, index):
+            var h = _hash_combine(40, agg.id)
+            Some(_hash_combine(h, index))
+
+        # Everything else is impure (memory, calls, guest state, control flow)
+        _: nil
+
+fn _cond_tag(cond: IrTcCond) -> i64:
+    """Map comparison condition to a unique integer for hashing."""
+    match cond:
+        IrTcCond.Eq: 0
+        IrTcCond.Ne: 1
+        IrTcCond.Lt: 2
+        IrTcCond.Le: 3
+        IrTcCond.Gt: 4
+        IrTcCond.Ge: 5
+        IrTcCond.Ltu: 6
+        IrTcCond.Leu: 7
+        IrTcCond.Gtu: 8
+        IrTcCond.Geu: 9
+
+# ============================================================================
+# CSE Table — maps instruction hashes to their result value
+# ============================================================================
+
+struct CseEntry:
+    """Maps an instruction hash to the value ID that holds its result."""
+    hash: i64
+    dest_id: i64
+
+impl CseEntry:
+    static fn new(hash: i64, dest_id: i64) -> CseEntry:
+        CseEntry(hash: hash, dest_id: dest_id)
+
+struct CseTable:
+    """Hash table for CSE lookups within a single basic block."""
+    entries: [CseEntry]
+
+impl CseTable:
+    static fn new() -> CseTable:
+        CseTable(entries: [])
+
+    me insert(hash: i64, dest_id: i64):
+        self.entries.push(CseEntry.new(hash, dest_id))
+
+    fn lookup(hash: i64) -> i64?:
+        """Returns the dest value ID if this hash was seen before."""
+        for entry in self.entries:
+            if entry.hash == hash:
+                return Some(entry.dest_id)
+        nil
+
+# ============================================================================
+# Value Replacement Map
+# ============================================================================
+
+struct ReplaceEntry:
+    """Maps original value ID to replacement value ID."""
+    from_id: i64
+    to_id: i64
+
+impl ReplaceEntry:
+    static fn new(from_id: i64, to_id: i64) -> ReplaceEntry:
+        ReplaceEntry(from_id: from_id, to_id: to_id)
+
+struct ReplaceMap:
+    """Tracks value ID replacements for CSE."""
+    entries: [ReplaceEntry]
+
+impl ReplaceMap:
+    static fn new() -> ReplaceMap:
+        ReplaceMap(entries: [])
+
+    me add(from_id: i64, to_id: i64):
+        self.entries.push(ReplaceEntry.new(from_id, to_id))
+
+    fn resolve(id: i64) -> i64:
+        """Resolve a value ID through the replacement chain."""
+        var current = id
+        var max_depth = 100   # prevent infinite loops
+        var i = 0
+        while i < max_depth:
+            var found = false
+            for entry in self.entries:
+                if entry.from_id == current:
+                    current = entry.to_id
+                    found = true
+                    # break not available, so we just continue
+            if !found:
+                return current
+            i = i + 1
+        current
+
+    fn resolve_value(val_: IrTcValue) -> IrTcValue:
+        val new_id = self.resolve(val_.id)
+        if new_id != val_.id:
+            IrTcValue.new(new_id, val_.type_)
+        else:
+            val_
+
+# ============================================================================
+# CSE Pass
+# ============================================================================
+
+struct CsePass:
+    """Common subexpression elimination pass.
+
+    Scans each basic block independently. When two instructions compute
+    the same pure operation on the same operands, the second is replaced
+    with a Nop and its destination is redirected to the first's result.
+    """
+    _placeholder: i64
+
+impl CsePass:
+    static fn new() -> CsePass:
+        CsePass(_placeholder: 0)
+
+    fn name() -> text:
+        "cse"
+
+    fn run_on_function(func: IrTcFunction) -> IrTcFunction:
+        """Run CSE on each basic block independently."""
+        var replacements = ReplaceMap.new()
+        var new_blocks: [IrTcBlock] = []
+
+        for block in func.blocks:
+            var table = CseTable.new()
+            var new_block = IrTcBlock.new(block.id)
+            new_block = IrTcBlock(..new_block, label: block.label)
+
+            for inst in block.instructions:
+                # First, rewrite operands using existing replacements
+                val rewritten = _rewrite_operands(inst, replacements)
+
+                # Try to hash the (rewritten) instruction
+                if val Some(hash) = _hash_op(rewritten.kind):
+                    if val Some(existing_id) = table.lookup(hash):
+                        # Duplicate found — redirect dest to existing
+                        if val Some(dest) = rewritten.kind.dest_value():
+                            replacements.add(dest.id, existing_id)
+                            # Emit Nop instead of the duplicate
+                            new_block.append(IrTcInst.new(IrTcOp.Nop))
+                        else:
+                            new_block.append(rewritten)
+                    else:
+                        # New expression — record and keep
+                        if val Some(dest) = rewritten.kind.dest_value():
+                            table.insert(hash, dest.id)
+                        new_block.append(rewritten)
+                else:
+                    # Impure — always keep, rewrite operands only
+                    new_block.append(rewritten)
+
+            new_blocks.push(new_block)
+
+        IrTcFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Operand Rewriting
+# ============================================================================
+
+fn _rw(val_: IrTcValue, rep: ReplaceMap) -> IrTcValue:
+    """Rewrite a single value through the replacement map."""
+    rep.resolve_value(val_)
+
+fn _rewrite_operands(inst: IrTcInst, rep: ReplaceMap) -> IrTcInst:
+    """Rewrite all operand values in an instruction using the replacement map."""
+    val new_kind = match inst.kind:
+        # Arithmetic
+        IrTcOp.Add(d, a, b):      IrTcOp.Add(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Sub(d, a, b):      IrTcOp.Sub(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Mul(d, a, b):      IrTcOp.Mul(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Div(d, a, b, s):   IrTcOp.Div(d, _rw(a, rep), _rw(b, rep), s)
+        IrTcOp.Rem(d, a, b, s):   IrTcOp.Rem(d, _rw(a, rep), _rw(b, rep), s)
+        IrTcOp.Neg(d, a):         IrTcOp.Neg(d, _rw(a, rep))
+
+        # Bitwise
+        IrTcOp.And(d, a, b):      IrTcOp.And(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Or(d, a, b):       IrTcOp.Or(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Xor(d, a, b):      IrTcOp.Xor(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Not(d, a):         IrTcOp.Not(d, _rw(a, rep))
+        IrTcOp.Shl(d, a, b):      IrTcOp.Shl(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Shr(d, a, b):      IrTcOp.Shr(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.Sar(d, a, b):      IrTcOp.Sar(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.RotL(d, a, b):     IrTcOp.RotL(d, _rw(a, rep), _rw(b, rep))
+        IrTcOp.RotR(d, a, b):     IrTcOp.RotR(d, _rw(a, rep), _rw(b, rep))
+
+        # Comparison
+        IrTcOp.Cmp(d, c, a, b):   IrTcOp.Cmp(d, c, _rw(a, rep), _rw(b, rep))
+
+        # Width conversion
+        IrTcOp.Ext(d, src, s):    IrTcOp.Ext(d, _rw(src, rep), s)
+        IrTcOp.Trunc(d, src):     IrTcOp.Trunc(d, _rw(src, rep))
+        IrTcOp.Bitcast(d, src):   IrTcOp.Bitcast(d, _rw(src, rep))
+
+        # Memory
+        IrTcOp.Load(d, addr, m):             IrTcOp.Load(d, _rw(addr, rep), m)
+        IrTcOp.Store(v, addr, m):            IrTcOp.Store(_rw(v, rep), _rw(addr, rep), m)
+        IrTcOp.GuestLoad(d, addr, m, mmu):   IrTcOp.GuestLoad(d, _rw(addr, rep), m, mmu)
+        IrTcOp.GuestStore(v, addr, m, mmu):  IrTcOp.GuestStore(_rw(v, rep), _rw(addr, rep), m, mmu)
+
+        # Control flow
+        IrTcOp.BrCond(c, t, f):   IrTcOp.BrCond(_rw(c, rep), t, f)
+        IrTcOp.Switch(v, cs, d):  IrTcOp.Switch(_rw(v, rep), cs, d)
+        IrTcOp.Ret(v):
+            if val Some(rv) = v:
+                IrTcOp.Ret(Some(_rw(rv, rep)))
+            else:
+                inst.kind
+
+        # Calls
+        IrTcOp.Call(d, func, args, cc):
+            var new_args: [IrTcValue] = []
+            for arg in args:
+                new_args.push(_rw(arg, rep))
+            IrTcOp.Call(d, _rw(func, rep), new_args, cc)
+        IrTcOp.CallHelper(d, hid, args):
+            var new_args: [IrTcValue] = []
+            for arg in args:
+                new_args.push(_rw(arg, rep))
+            IrTcOp.CallHelper(d, hid, new_args)
+
+        # Guest state
+        IrTcOp.WriteGuestReg(reg, v): IrTcOp.WriteGuestReg(reg, _rw(v, rep))
+
+        # TB control
+        IrTcOp.LookupGotoTB(pc): IrTcOp.LookupGotoTB(_rw(pc, rep))
+
+        # Aggregates
+        IrTcOp.GetElementPtr(d, base, indices):
+            var new_idx: [IrTcValue] = []
+            for idx in indices:
+                new_idx.push(_rw(idx, rep))
+            IrTcOp.GetElementPtr(d, _rw(base, rep), new_idx)
+        IrTcOp.ExtractValue(d, agg, idx): IrTcOp.ExtractValue(d, _rw(agg, rep), idx)
+        IrTcOp.InsertValue(d, agg, v, idx): IrTcOp.InsertValue(d, _rw(agg, rep), _rw(v, rep), idx)
+
+        # SSA
+        IrTcOp.Phi(d, incoming):
+            var new_inc: [PhiEntry] = []
+            for entry in incoming:
+                new_inc.push(PhiEntry.new(entry.block, _rw(entry.value, rep)))
+            IrTcOp.Phi(d, new_inc)
+
+        # Special
+        IrTcOp.SyncGuestPC(v): IrTcOp.SyncGuestPC(_rw(v, rep))
+
+        # Unchanged
+        _: inst.kind
+
+    IrTcInst(..inst, kind: new_kind)
