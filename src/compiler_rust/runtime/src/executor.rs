@@ -534,7 +534,7 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -564,7 +564,7 @@ pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValu
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -766,7 +766,7 @@ pub extern "C" fn rt_thread_spawn_limited(
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -842,7 +842,7 @@ pub extern "C" fn rt_thread_spawn_limited2(
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();

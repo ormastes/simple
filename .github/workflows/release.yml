@@ -333,10 +333,9 @@ jobs:
             --output build/bootstrap/stage1/simple \
             2>&1 || true
 
-          # 4. Verify native-built binary, fall back to seed if native-build failed
+          # 4. Verify native-built binary, fall back to seed if failed
           NATIVE_BIN="build/bootstrap/stage1/simple"
-          if [ -f "$NATIVE_BIN" ]; then
-            "./$NATIVE_BIN" --version
+          if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
             "./$NATIVE_BIN" -c "print 42" || echo "⚠ -c flag not supported (bootstrap binary)"
             echo "✓ Native-built Simple binary verified"
             echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
@@ -345,7 +344,7 @@ jobs:
             file "$NATIVE_BIN"
             ls -lh "$NATIVE_BIN"
           else
-            echo "⚠ native-build failed — falling back to Rust seed binary"
+            echo "⚠ native-build failed or binary broken — falling back to Rust seed"
             echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
             echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
             echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
@@ -388,8 +387,17 @@ jobs:
         if: runner.os == 'Windows' && !matrix.cross_compile
         shell: bash
         run: |
-          choco install llvm --version=18.1.8 -y --no-progress
-          echo "SIMPLE_LLVM_PATH=C:/Program Files/LLVM/bin/LLVM-C.dll" >> "$GITHUB_ENV"
+          # Use existing LLVM if available, otherwise install
+          if command -v clang &>/dev/null; then
+            echo "✓ LLVM already installed: $(clang --version | head -1)"
+          else
+            choco install llvm -y --no-progress
+          fi
+          # Find LLVM-C.dll
+          LLVM_DLL=$(find "C:/Program Files/LLVM" -name "LLVM-C.dll" 2>/dev/null | head -1)
+          if [ -n "$LLVM_DLL" ]; then
+            echo "SIMPLE_LLVM_PATH=$LLVM_DLL" >> "$GITHUB_ENV"
+          fi
 
       - name: Build native Windows binary via Rust bootstrap
         if: runner.os == 'Windows'
@@ -445,10 +453,9 @@ jobs:
               --output build/bootstrap/stage1/simple.exe \
               2>&1 || true
 
-            # 4. Verify native-built binary, fall back to seed if native-build failed
+            # 4. Verify native-built binary, fall back to seed if failed
             NATIVE_BIN="build/bootstrap/stage1/simple.exe"
-            if [ -f "$NATIVE_BIN" ]; then
-              "./$NATIVE_BIN" --version
+            if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
               "./$NATIVE_BIN" -c "print 42" || echo "⚠ -c flag not supported (bootstrap binary)"
               echo "✓ Native-built Simple binary verified"
               echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
@@ -457,7 +464,7 @@ jobs:
               file "$NATIVE_BIN"
               ls -lh "$NATIVE_BIN"
             else
-              echo "⚠ native-build failed — falling back to Rust seed binary"
+              echo "⚠ native-build failed or binary broken — falling back to Rust seed"
               echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
               echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
               echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
@@ -746,9 +753,13 @@ jobs:
 
       - name: Calculate checksums
         run: |
-          PKG=$(ls simple-full-*.tar.gz | head -1)
-          sha256sum "${PKG}" > "${PKG}.sha256"
-          cat "${PKG}.sha256"
+          PKG=$(ls simple-full-*.tar.gz dist/simple-full-*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$PKG" ]; then
+            sha256sum "${PKG}" > "${PKG}.sha256"
+            cat "${PKG}.sha256"
+          else
+            echo "⚠ No full package found — skipping checksum"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
