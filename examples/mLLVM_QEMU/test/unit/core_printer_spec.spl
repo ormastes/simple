@@ -1,0 +1,122 @@
+"""
+IR_TC Printer Specification
+
+Tests for IrTcPrinter: module printing, instruction formatting,
+and output content verification.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.ops.{IrTcOp, IrTcInst}
+use core.mem_op.{MemOp, Endian}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+use core.printer.{IrTcPrinter}
+
+# ============================================================================
+# Printer — Module output
+# ============================================================================
+
+describe "IrTcPrinter module output":
+    it "contains 'define' for a function definition":
+        var builder = IrTcBuilder.new("print_test", IrTcModuleMode.Compilation)
+        builder.begin_function("add_fn", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val result = builder.add(a, b)
+        builder.ret(Some(result))
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("define")
+        expect(output).to_contain("add_fn")
+
+    it "contains module name in header comment":
+        var builder = IrTcBuilder.new("my_module", IrTcModuleMode.Compilation)
+        builder.begin_function("noop", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        builder.ret(nil)
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("my_module")
+
+    it "contains mode in header":
+        var builder = IrTcBuilder.new("emu", IrTcModuleMode.Emulation)
+        builder.begin_function("tb", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        builder.ret(nil)
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("emulation")
+
+# ============================================================================
+# Printer — Instruction format
+# ============================================================================
+
+describe "IrTcPrinter instruction format":
+    it "prints add instruction with operands":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("add_fn", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val result = builder.add(a, b)
+        builder.ret(Some(result))
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("add")
+
+    it "prints ret void correctly":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("void_fn", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        builder.ret(nil)
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("ret")
+
+    it "prints function parameters with types":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("typed_fn", [
+            IrTcParam.new("x", IrTcTypeKind.I64)
+        ], IrTcTypeKind.I64)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val x = builder.param_value(0)
+        builder.ret(Some(x))
+        builder.end_function()
+
+        val module = builder.finish()
+        val output = IrTcPrinter.print_module(module)
+
+        expect(output).to_contain("i64")
+        expect(output).to_contain("typed_fn")

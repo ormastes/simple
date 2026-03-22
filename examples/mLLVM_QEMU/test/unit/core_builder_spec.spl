@@ -1,0 +1,159 @@
+"""
+IR_TC Builder Specification
+
+Tests for IrTcBuilder: function construction, block management,
+instruction emission, and emulation module building.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.ops.{IrTcOp, IrTcInst}
+use core.mem_op.{MemOp, Endian, GuestRegId}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+
+# ============================================================================
+# Builder — Simple function construction
+# ============================================================================
+
+describe "IrTcBuilder simple function":
+    it "builds a function with add and ret":
+        var builder = IrTcBuilder.new("test_mod", IrTcModuleMode.Compilation)
+        builder.begin_function("add_i32", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val result = builder.add(a, b)
+        builder.ret(Some(result))
+        builder.end_function()
+
+        val module = builder.finish()
+        expect(module.name).to_equal("test_mod")
+        expect(module.functions.len()).to_equal(1)
+
+    it "creates function with correct name and params":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("my_fn", [
+            IrTcParam.new("x", IrTcTypeKind.I64),
+            IrTcParam.new("y", IrTcTypeKind.I64)
+        ], IrTcTypeKind.I64)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val x = builder.param_value(0)
+        builder.ret(Some(x))
+        builder.end_function()
+
+        val module = builder.finish()
+        val func = module.functions[0]
+        expect(func.name).to_equal("my_fn")
+        expect(func.params.len()).to_equal(2)
+        expect(func.params[0].name).to_equal("x")
+        expect(func.params[1].name).to_equal("y")
+
+    it "verifies correct return type":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("ret_void", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        builder.ret(nil)
+        builder.end_function()
+
+        val module = builder.finish()
+        val func = module.functions[0]
+        expect(func.return_type.to_text()).to_equal("void")
+
+    it "creates correct number of blocks":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("multi_block", [
+            IrTcParam.new("cond", IrTcTypeKind.I1)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        val then_ = builder.new_block("then")
+        val else_ = builder.new_block("else")
+
+        builder.set_block(entry)
+        val c = builder.param_value(0)
+        builder.br_cond(c, then_, else_)
+
+        builder.set_block(then_)
+        val v1 = builder.new_value(IrTcTypeKind.I32)
+        builder.ret(Some(v1))
+
+        builder.set_block(else_)
+        val v2 = builder.new_value(IrTcTypeKind.I32)
+        builder.ret(Some(v2))
+
+        builder.end_function()
+        val module = builder.finish()
+        val func = module.functions[0]
+        expect(func.blocks.len()).to_equal(3)
+
+    it "counts instructions in a block":
+        var builder = IrTcBuilder.new("mod", IrTcModuleMode.Compilation)
+        builder.begin_function("arith", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val sum = builder.add(a, b)
+        val diff = builder.sub(a, b)
+        val prod = builder.mul(sum, diff)
+        builder.ret(Some(prod))
+        builder.end_function()
+
+        val module = builder.finish()
+        val func = module.functions[0]
+        val block = func.blocks[0]
+        # 3 arithmetic ops + 1 ret = 4 instructions
+        expect(block.instructions.len()).to_equal(4)
+
+# ============================================================================
+# Builder — Emulation module
+# ============================================================================
+
+describe "IrTcBuilder emulation module":
+    it "builds emulation module with guest_load and write_guest_reg":
+        var builder = IrTcBuilder.new("emu_mod", IrTcModuleMode.Emulation)
+        builder.set_target(GuestArch.Avr)
+
+        builder.begin_function("translate_ld", [
+            IrTcParam.new("addr", IrTcTypeKind.I16)
+        ], IrTcTypeKind.Void)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+
+        val addr = builder.param_value(0)
+        val mem = MemOp.new(1, false, Endian.Little)
+        val loaded = builder.guest_load(addr, IrTcTypeKind.I8, mem, 0)
+
+        val reg = GuestRegId.new(GuestArch.Avr, 0, "r0")
+        builder.write_guest_reg(reg, loaded)
+        builder.exit_tb(0)
+
+        builder.end_function()
+        val module = builder.finish()
+
+        expect(module.mode.to_text()).to_equal("emulation")
+        expect(module.functions.len()).to_equal(1)
+
+    it "verifies module mode is set correctly":
+        var builder = IrTcBuilder.new("mixed", IrTcModuleMode.Mixed)
+        val module = builder.finish()
+        expect(module.mode.allows_emulation_ops()).to_equal(true)
+
+    it "compilation mode disallows emulation ops":
+        val mode = IrTcModuleMode.Compilation
+        expect(mode.allows_emulation_ops()).to_equal(false)

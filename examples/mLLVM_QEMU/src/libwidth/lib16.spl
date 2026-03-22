@@ -1,0 +1,212 @@
+# 16-bit Width Support Library
+#
+# Wires 8086 decoder + 8086 runtime (memory, I/O, interrupts) into a
+# complete 16-bit emulation environment. Provides a factory for creating
+# fully configured X86Emulator instances.
+
+use core.types.{GuestArch}
+use core.ops.{IrTcOp}
+use core.block.{IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.i8086.cpu.{build_i8086_cpu_def, X86_REG_AX, X86_REG_BX, X86_REG_CX, X86_REG_DX}
+use guest.i8086.cpu.{X86_REG_SI, X86_REG_DI, X86_REG_BP, X86_REG_SP}
+use guest.i8086.cpu.{X86_REG_CS, X86_REG_DS, X86_REG_SS, X86_REG_ES}
+use guest.i8086.cpu.{X86_REG_IP, X86_REG_FLAGS}
+use guest.i8086.decoder.{I8086Decoder}
+use runtime.memory.{GuestMemory}
+use runtime.io.{IoController, X86SerialIO, X86PicIO}
+use runtime.interrupt.{InterruptController}
+
+# ============================================================================
+# Width16 Library
+# ============================================================================
+
+class Width16Lib:
+    """16-bit width support library for 8086 architecture.
+
+    Provides factory methods and configuration for complete 16-bit
+    emulation environments with segment:offset memory model.
+    """
+    cpu_def: GuestCpuDef
+
+impl Width16Lib:
+    static fn new() -> Width16Lib:
+        Width16Lib(cpu_def: build_i8086_cpu_def())
+
+    fn word_size() -> i64:
+        16
+
+    fn arch() -> GuestArch:
+        GuestArch.I8086
+
+    fn create_8086_emulator() -> X86Emulator:
+        """Factory: create a fully wired 8086 emulation environment.
+
+        Includes:
+        - Guest CPU state (8 GPRs + 4 segment regs + IP + FLAGS)
+        - 1MB real-mode address space (flat 20-bit physical)
+        - I/O controller with COM1 serial (0x3F8) and PIC 8259 (0x20/0xA0)
+        - Interrupt controller
+        - 8086 instruction decoder
+        """
+        val cpu_def = self.cpu_def
+        val state = GuestState.new(cpu_def)
+        val memory = GuestMemory.new(cpu_def)
+
+        # Wire I/O devices
+        var io = IoController.new()
+        # COM1 serial port (0x3F8-0x3FF)
+        io.register_x86_serial(0x3F8, 0x3FF, X86SerialIO.new())
+        # Master PIC (0x20-0x21)
+        io.register_x86_pic(0x20, 0x21, X86PicIO.new())
+
+        val interrupt = InterruptController.new(GuestArch.I8086)
+
+        # Create decoder with a fresh emulation builder
+        var builder = IrTcBuilder.new("x86_tb", IrTcModuleMode.Emulation)
+        val decoder = I8086Decoder.create(builder, cpu_def)
+
+        X86Emulator(
+            cpu_def: cpu_def,
+            state: state,
+            memory: memory,
+            decoder: decoder,
+            io: io,
+            interrupt: interrupt,
+            cycle_count: 0,
+            halted: false
+        )
+
+# ============================================================================
+# 8086 Emulator
+# ============================================================================
+
+class X86Emulator:
+    """Complete 8086 emulation environment.
+
+    Combines guest state, memory, decoder, I/O, and interrupts into
+    a single step-able emulation engine. Uses segment:offset addressing
+    with 20-bit physical addresses (segment * 16 + offset).
+    """
+    cpu_def: GuestCpuDef
+    state: GuestState
+    memory: GuestMemory
+    decoder: I8086Decoder
+    io: IoController
+    interrupt: InterruptController
+    cycle_count: i64
+    halted: bool
+
+impl X86Emulator:
+    me step() -> i64:
+        """Execute one 8086 instruction.
+
+        Returns the number of cycles consumed by the instruction.
+        Fetches instruction bytes from CS:IP, decodes and executes.
+        """
+        if self.halted:
+            return 0
+
+        # Check and deliver pending interrupts
+        self.state = self.interrupt.deliver_i8086(
+            self.state,
+            self.memory.memory,
+            self.memory.memory_size
+        )
+
+        # Compute physical address: CS * 16 + IP
+        val cs = self.state.get_reg(X86_REG_CS)
+        val ip = self.state.get_reg(X86_REG_IP)
+        val phys_addr = (cs * 16 + ip) & 0xFFFFF  # 20-bit mask
+
+        # Fetch up to 6 bytes (max 8086 instruction length)
+        var bytes: [i64] = []
+        for i in 0..6:
+            val addr = (phys_addr + i) & 0xFFFFF
+            if addr < self.memory.memory_size:
+                bytes.push(self.memory.memory[addr] & 0xFF)
+            else:
+                bytes.push(0)
+
+        # Decode and execute
+        val result = self.decoder.decode_instruction(bytes, 0, ip)
+        match result:
+            Ok(bytes_consumed):
+                val cycles = 4  # Approximate: 4 cycles per instruction average
+                self.cycle_count = self.cycle_count + cycles
+                # Advance IP
+                val new_ip = (ip + bytes_consumed) & 0xFFFF
+                self.state.set_reg(X86_REG_IP, new_ip)
+                cycles
+            Err(_):
+                # Unknown instruction or HLT: halt
+                self.halted = true
+                0
+
+    me run(max_cycles: i64):
+        """Run the 8086 emulator until halted or max_cycles reached."""
+        var remaining = max_cycles
+        while not self.halted:
+            if remaining <= 0:
+                return
+            val cycles = self.step()
+            if cycles == 0:
+                return
+            remaining = remaining - cycles
+
+    me load_program(segment: i64, offset: i64, data: [i64]):
+        """Load a program at segment:offset into memory.
+
+        Computes physical address = segment * 16 + offset and copies
+        data bytes sequentially.
+        """
+        val base = (segment * 16 + offset) & 0xFFFFF
+        for i in 0..data.len():
+            val addr = (base + i) & 0xFFFFF
+            if addr < self.memory.memory_size:
+                self.memory.memory[addr] = data[i] & 0xFF
+
+    me load_flat(phys_addr: i64, data: [i64]):
+        """Load data at a physical address."""
+        for i in 0..data.len():
+            val addr = (phys_addr + i) & 0xFFFFF
+            if addr < self.memory.memory_size:
+                self.memory.memory[addr] = data[i] & 0xFF
+
+    me set_segments(cs: i64, ds: i64, ss: i64, es: i64):
+        """Configure all four segment registers."""
+        self.state.set_reg(X86_REG_CS, cs & 0xFFFF)
+        self.state.set_reg(X86_REG_DS, ds & 0xFFFF)
+        self.state.set_reg(X86_REG_SS, ss & 0xFFFF)
+        self.state.set_reg(X86_REG_ES, es & 0xFFFF)
+
+    me reset():
+        """Reset the 8086 to power-on state.
+
+        Sets CS=0xFFFF, IP=0x0000 (standard 8086 reset vector).
+        """
+        self.state = GuestState.new(self.cpu_def)
+        # 8086 reset vector: CS=0xFFFF, IP=0x0000 -> physical 0xFFFF0
+        self.state.set_reg(X86_REG_CS, 0xFFFF)
+        self.state.set_reg(X86_REG_IP, 0x0000)
+        self.cycle_count = 0
+        self.halted = false
+
+    fn get_reg(name: text) -> i64?:
+        """Read a register by name (e.g., "AX", "CS", "FLAGS")."""
+        self.state.get_reg_by_name(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        """Write a register by name."""
+        self.state.set_reg_by_name(name, value)
+
+    fn physical_address(segment: i64, offset: i64) -> i64:
+        """Compute 20-bit physical address from segment:offset."""
+        (segment * 16 + offset) & 0xFFFFF
+
+    fn stats_text() -> text:
+        """Return emulation statistics as text."""
+        val cs = self.state.get_reg(X86_REG_CS)
+        val ip = self.state.get_reg(X86_REG_IP)
+        "8086: {self.cycle_count} cycles, CS:IP={cs}:{ip}, halted={self.halted}"

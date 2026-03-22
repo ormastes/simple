@@ -1,0 +1,174 @@
+"""
+IR_TC Builder + Verifier + Printer Integration Specification
+
+End-to-end test: build a function with multiple operations,
+verify it passes validation, and print it to check output.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.ops.{IrTcOp, IrTcInst}
+use core.mem_op.{MemOp, Endian, GuestRegId}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+use core.verify.{IrTcVerifier, VerifyError}
+use core.printer.{IrTcPrinter}
+
+# ============================================================================
+# Integration — Build, Verify, Print round-trip
+# ============================================================================
+
+describe "Builder + Verifier + Printer round-trip":
+    it "builds a branching function that passes verification":
+        # Build: function with add, sub, cmp, br_cond, ret
+        var builder = IrTcBuilder.new("integration_mod", IrTcModuleMode.Compilation)
+        builder.begin_function("max_i32", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        val then_block = builder.new_block("then")
+        val else_block = builder.new_block("else")
+
+        # Entry: compare a > b, branch
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val cmp_result = builder.cmp(IrTcCond.Gt, a, b)
+        builder.br_cond(cmp_result, then_block, else_block)
+
+        # Then: return a
+        builder.set_block(then_block)
+        builder.ret(Some(a))
+
+        # Else: return b
+        builder.set_block(else_block)
+        builder.ret(Some(b))
+
+        builder.end_function()
+        val module = builder.finish()
+
+        # Verify: should produce 0 errors
+        val errors = IrTcVerifier.verify_module(module)
+        expect(errors.len()).to_equal(0)
+
+    it "prints the branching function with expected keywords":
+        var builder = IrTcBuilder.new("print_mod", IrTcModuleMode.Compilation)
+        builder.begin_function("max_i32", [
+            IrTcParam.new("a", IrTcTypeKind.I32),
+            IrTcParam.new("b", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        val then_block = builder.new_block("then")
+        val else_block = builder.new_block("else")
+
+        builder.set_block(entry)
+        val a = builder.param_value(0)
+        val b = builder.param_value(1)
+        val cmp_result = builder.cmp(IrTcCond.Gt, a, b)
+        builder.br_cond(cmp_result, then_block, else_block)
+
+        builder.set_block(then_block)
+        builder.ret(Some(a))
+
+        builder.set_block(else_block)
+        builder.ret(Some(b))
+
+        builder.end_function()
+        val module = builder.finish()
+
+        val output = IrTcPrinter.print_module(module)
+
+        # Check key strings present
+        expect(output).to_contain("define")
+        expect(output).to_contain("max_i32")
+        expect(output).to_contain("i32")
+        expect(output).to_contain("ret")
+
+    it "builds arithmetic chain that passes verification":
+        var builder = IrTcBuilder.new("arith_mod", IrTcModuleMode.Compilation)
+        builder.begin_function("compute", [
+            IrTcParam.new("x", IrTcTypeKind.I32),
+            IrTcParam.new("y", IrTcTypeKind.I32)
+        ], IrTcTypeKind.I32)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+
+        val x = builder.param_value(0)
+        val y = builder.param_value(1)
+
+        # result = (x + y) - (x * y)
+        val sum = builder.add(x, y)
+        val prod = builder.mul(x, y)
+        val result = builder.sub(sum, prod)
+        builder.ret(Some(result))
+
+        builder.end_function()
+        val module = builder.finish()
+
+        val errors = IrTcVerifier.verify_module(module)
+        expect(errors.len()).to_equal(0)
+
+        val output = IrTcPrinter.print_module(module)
+        expect(output).to_contain("add")
+        expect(output).to_contain("sub")
+        expect(output).to_contain("mul")
+
+    it "builds emulation module that passes verification":
+        var builder = IrTcBuilder.new("emu_mod", IrTcModuleMode.Emulation)
+        builder.set_target(GuestArch.Avr)
+
+        builder.begin_function("translate_add_r0_r1", [], IrTcTypeKind.Void)
+
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+
+        # Read r0 and r1
+        val r0_id = GuestRegId.new(GuestArch.Avr, 0, "r0")
+        val r1_id = GuestRegId.new(GuestArch.Avr, 1, "r1")
+        val r0 = builder.read_guest_reg(r0_id, IrTcTypeKind.I8)
+        val r1 = builder.read_guest_reg(r1_id, IrTcTypeKind.I8)
+
+        # Add r0 + r1
+        val result = builder.add(r0, r1)
+
+        # Write back to r0
+        builder.write_guest_reg(r0_id, result)
+        builder.exit_tb(0)
+
+        builder.end_function()
+        val module = builder.finish()
+
+        val errors = IrTcVerifier.verify_module(module)
+        expect(errors.len()).to_equal(0)
+
+    it "verification catches multiple errors in one module":
+        # Build a function with type mismatch AND emulation op in compilation mode
+        var func = IrTcFunction.new("bad_fn", [], IrTcTypeKind.Void)
+        val bid = func.new_block_with_label("entry")
+
+        var block = func.blocks[0]
+
+        # Type mismatch: Add(i32, i32, i16)
+        val a = IrTcValue.new(0, IrTcTypeKind.I32)
+        val b = IrTcValue.new(1, IrTcTypeKind.I16)
+        val dest = IrTcValue.new(2, IrTcTypeKind.I32)
+        block.append(IrTcInst.new(IrTcOp.Add(dest: dest, a: a, b: b)))
+
+        # Emulation op in compilation mode
+        val reg = GuestRegId.new(GuestArch.Avr, 0, "r0")
+        val rd = IrTcValue.new(3, IrTcTypeKind.I8)
+        block.append(IrTcInst.new(IrTcOp.ReadGuestReg(dest: rd, guest_reg: reg)))
+
+        block.append(IrTcInst.new(IrTcOp.Ret(value: nil)))
+        func.blocks[0] = block
+
+        var module = IrTcModule.new("bad_mod", IrTcModuleMode.Compilation)
+        module.add_function(func)
+
+        val errors = IrTcVerifier.verify_module(module)
+        # Should have at least 2 errors: type mismatch + emulation enforcement
+        expect(errors.len()).to_be_greater_than(1)
