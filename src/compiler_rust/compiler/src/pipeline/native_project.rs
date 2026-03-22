@@ -587,9 +587,11 @@ extern "C" {
     void __attribute__((weak)) rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
+    void __attribute__((weak)) __simple_call_module_inits(void);
 }
 int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
+    if (__simple_call_module_inits) __simple_call_module_inits();
     if (rt_set_args) rt_set_args(argc, argv);
     int r = spl_main ? spl_main() : 0;
     if (__simple_runtime_shutdown) __simple_runtime_shutdown();
@@ -656,12 +658,14 @@ int main(int argc, char** argv) {
         init_names.sort();
         init_names.dedup();
 
-        // Generate C source
-        let mut code = String::from("// Auto-generated: calls all __module_init_* functions at startup\n");
+        // Generate C source — NOT constructor, called from main() AFTER runtime init
+        let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
+        code.push_str("extern \"C\" {\n");
         for name in &init_names {
-            code.push_str(&format!("extern \"C\" void __attribute__((weak)) {}(void);\n", name));
+            code.push_str(&format!("    void __attribute__((weak)) {}(void);\n", name));
         }
-        code.push_str("__attribute__((constructor)) static void __simple_call_module_inits(void) {\n");
+        code.push_str("}\n");
+        code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
         for name in &init_names {
             code.push_str(&format!("    if ({}) {}();\n", name, name));
         }

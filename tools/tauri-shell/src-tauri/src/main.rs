@@ -411,7 +411,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(process_for_tauri)
+        .manage(process_for_tauri.clone())
         .invoke_handler(tauri::generate_handler![
             send_keypress,
             send_action,

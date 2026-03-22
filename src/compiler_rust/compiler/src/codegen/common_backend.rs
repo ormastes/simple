@@ -743,7 +743,15 @@ impl<M: Module> CodegenBackend<M> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
         let init_name = match &self.module_prefix {
-            Some(prefix) => format!("__module_init_{}", prefix),
+            Some(prefix) => {
+                // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
+                let sanitized = if cfg!(target_os = "macos") {
+                    prefix.replace('.', "_dot_")
+                } else {
+                    prefix.to_string()
+                };
+                format!("__module_init_{}", sanitized)
+            }
             None => "__module_init".to_string(),
         };
 
