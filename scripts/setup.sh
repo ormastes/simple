@@ -202,6 +202,17 @@ ln -sf "${link_target}" "simple${exe}"
 echo ""
 echo "Created: bin/simple${exe} → ${link_target}"
 
+# Also create bin/release/simple → <platform>/simple symlink
+release_link_path="${release_dir}/simple${exe}"
+release_link_target="${release_bin}"
+if [ -L "${release_link_path}" ] || [ -f "${release_link_path}" ]; then
+  rm -f "${release_link_path}"
+fi
+cd "${release_dir}"
+ln -sf "${release_link_target}" "simple${exe}"
+
+echo "Created: bin/release/simple${exe} → ${release_link_target}"
+
 # ===========================================================================
 # Verify
 # ===========================================================================

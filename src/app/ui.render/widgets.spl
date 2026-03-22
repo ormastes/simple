@@ -69,6 +69,14 @@ fn render_tui_widget(screen: Screen, node: WidgetNode, rect: WidgetRect, state: 
             return render_tui_tree_widget(screen, node, rect, state)
         "treenode" =>
             return render_tui_tree_node(screen, node, rect, is_focused, 0, theme)
+        "scroll" =>
+            return render_tui_scroll(screen, node, rect, state)
+        "textarea" =>
+            return render_tui_textarea(screen, node, rect, is_focused, theme)
+        "heading" =>
+            return render_tui_heading(screen, node, rect, theme)
+        "label" =>
+            return render_tui_text(screen, node, rect, is_focused, theme)
 
 fn render_tui_tree_widget(screen: Screen, node: WidgetNode, rect: WidgetRect, state: UIState) -> Screen:
     """Render a tree container by rendering each child treenode at depth 0."""
@@ -170,7 +178,8 @@ fn render_tui_list(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: 
         val label = child.get_prop("label")
         if label != "":
             val is_selected = idx == sel_idx
-            val prefix = if is_selected: "> " else: "  "
+            # Use Unicode triangle for selected indicator (matches HTML)
+            val prefix = if is_selected: "\u{25b8} " else: "  "
             if is_selected:
                 val inv = "\u{001b}[7m"
                 s = s.put_styled(row, rect.x, "{prefix}{label}", "{inv}{selected_style}")
@@ -299,12 +308,32 @@ fn render_tui_table(screen: Screen, node: WidgetNode, rect: WidgetRect, focused:
 fn render_tui_progress(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
     val value_str = node.get_prop("value")
     val value = if value_str != "": value_str.to_int() else: 0
-    val bar_width = rect.w - 10
+    val label = node.get_prop("label")
+    val pct_text = " {value}%"
+    val label_w = if label != "": label.len() + 1 else: 0
+    val bar_width = rect.w - pct_text.len() - label_w - 2
     if bar_width <= 0:
         return screen
+    var s = screen
+    # Label prefix
+    if label != "":
+        s = s.put_styled(rect.y, rect.x, "{label} ", get_theme_color(theme, "text"))
+
+    # Build bar with Unicode block chars
+    val filled = (value * bar_width) / 100
     val fill_style = get_theme_color(theme, "progress_fill")
-    val bar = render_progress_bar((value as f64), bar_width)
-    return screen.put_styled(rect.y, rect.x, bar, fill_style)
+    val empty_style = get_theme_color(theme, "progress_empty")
+    var bar = ""
+    var i = 0
+    while i < bar_width:
+        if i < filled:
+            bar = "{bar}\u{2588}"
+        else:
+            bar = "{bar}\u{2591}"
+        i = i + 1
+    s = s.put_styled(rect.y, rect.x + label_w, bar, fill_style)
+    s = s.put_styled(rect.y, rect.x + label_w + bar_width, pct_text, get_theme_color(theme, "text"))
+    return s
 
 fn render_tui_menubar(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
     var s = screen
@@ -355,26 +384,77 @@ fn render_tui_statusbar(screen: Screen, node: WidgetNode, rect: WidgetRect, stat
 
 fn render_tui_input(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
     val placeholder = node.get_prop("placeholder")
-    val display = if placeholder != "": placeholder else: ""
+    val value = node.get_prop("value")
+    val display = if value != "": value elif placeholder != "": placeholder else: ""
+    val is_error = node.get_prop("error") == "true"
     var s = screen
-    val style = if focused: get_theme_color(theme, "input_focused") else: get_theme_color(theme, "input")
-    s = s.put_styled(rect.y, rect.x, "> {display}", style)
+    val style = if is_error:
+        get_theme_color(theme, "error_fg")
+    elif focused:
+        get_theme_color(theme, "input_focused")
+    else:
+        get_theme_color(theme, "input")
+    # Show text style: dim for placeholder, normal for value
+    val text_style = if value != "": style else: get_theme_color(theme, "text_dim")
+    val prompt = if focused: "\u{25b8} " else: "  "
+    # Underline indicator for input field
+    val max_display_w = rect.w - 3
+    val trimmed = if display.len() > max_display_w: display.slice(0, max_display_w) else: display
+    s = s.put_styled(rect.y, rect.x, "{prompt}{trimmed}", text_style)
+    # Draw underline on next row if space
+    if rect.h > 1:
+        var underline = "  "
+        var i = 0
+        while i < rect.w - 2:
+            underline = "{underline}\u{2500}"
+            i = i + 1
+        val ul_style = if is_error: get_theme_color(theme, "error_border") elif focused: get_theme_color(theme, "accent") else: get_theme_color(theme, "border")
+        s = s.put_styled(rect.y + 1, rect.x, underline, ul_style)
+    # Error message below
+    if is_error and rect.h > 2:
+        val err_msg = node.get_prop("error_message")
+        if err_msg != "":
+            s = s.put_styled(rect.y + 2, rect.x + 2, err_msg, get_theme_color(theme, "error_fg"))
     return s
 
 fn render_tui_tabs(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
     var s = screen
     var col = rect.x
     var idx = 0
+    val active_idx_str = node.get_prop("active_index")
+    val active_idx = if active_idx_str != "": active_idx_str.to_int() else: 0
     val active_style = get_theme_color(theme, "tab_active")
     val inactive_style = get_theme_color(theme, "tab_inactive")
+    val sep_style = get_theme_color(theme, "border")
     for child in node.children():
         val label = child.get_prop("label")
         if label != "":
-            val style = if idx == 0: active_style else: inactive_style
+            val is_active = idx == active_idx
+            val style = if is_active: active_style else: inactive_style
             val tab_text = " {label} "
             s = s.put_styled(rect.y, col, tab_text, style)
-            col = col + tab_text.len() + 1
+            col = col + tab_text.len()
+            # Separator between tabs
+            s = s.put_styled(rect.y, col, "\u{2502}", sep_style)
+            col = col + 1
         idx = idx + 1
+    # Underline for active tab indicator (on second row if space)
+    if rect.h > 1:
+        var ul_col = rect.x
+        var ui = 0
+        for child in node.children():
+            val label = child.get_prop("label")
+            if label != "":
+                val tab_w = label.len() + 2
+                if ui == active_idx:
+                    var underline = ""
+                    var uli = 0
+                    while uli < tab_w:
+                        underline = "{underline}\u{2501}"
+                        uli = uli + 1
+                    s = s.put_styled(rect.y + 1, ul_col, underline, get_theme_color(theme, "accent"))
+                ul_col = ul_col + tab_w + 1
+            ui = ui + 1
     return s
 
 # =========================================================================
@@ -383,31 +463,52 @@ fn render_tui_tabs(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: 
 
 fn render_tui_button(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
     val label = node.get_prop("label")
-    val style = if focused: get_theme_color(theme, "button_focused") else: get_theme_color(theme, "button")
-    val btn_text = "[ {label} ]"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val style = if is_disabled:
+        get_theme_color(theme, "disabled")
+    elif focused:
+        get_theme_color(theme, "button_focused")
+    else:
+        get_theme_color(theme, "button")
+    # Use Unicode rounded brackets for polished button look
+    val btn_text = if focused: "\u{2523} {label} \u{252b}" else: "\u{2503} {label} \u{2503}"
     return screen.put_styled(rect.y, rect.x, btn_text, style)
 
 fn render_tui_checkbox(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
     val label = node.get_prop("label")
     val checked = node.get_prop("checked")
-    val marker = if checked == "true": "x" else: " "
-    val style = if checked == "true":
+    val is_disabled = node.get_prop("disabled") == "true"
+    # Use Unicode check mark for checked state
+    val marker = if checked == "true": "\u{2713}" else: " "
+    val style = if is_disabled:
+        get_theme_color(theme, "disabled")
+    elif checked == "true":
         get_theme_color(theme, "checkbox_checked")
     elif focused:
         get_theme_color(theme, "text")
     else:
         get_theme_color(theme, "checkbox")
-    return screen.put_styled(rect.y, rect.x, "[{marker}] {label}", style)
+    val focus_indicator = if focused: "\u{25b8} " else: "  "
+    return screen.put_styled(rect.y, rect.x, "{focus_indicator}[{marker}] {label}", style)
 
 fn render_tui_dropdown(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
     var s = screen
-    val style = if focused: get_theme_color(theme, "input_focused") else: get_theme_color(theme, "input")
-    if node.child_count() > 0:
-        val first = node.child_at(0)
-        val selected = if first != nil: first.get_prop("label") else: "(none)"
-        s = s.put_styled(rect.y, rect.x, "[v] {selected}", style)
+    val is_disabled = node.get_prop("disabled") == "true"
+    val style = if is_disabled:
+        get_theme_color(theme, "disabled")
+    elif focused:
+        get_theme_color(theme, "input_focused")
     else:
-        s = s.put_styled(rect.y, rect.x, "[v] (none)", style)
+        get_theme_color(theme, "input")
+    val sel_str = node.get_prop("selected_index")
+    var sel_idx = 0
+    if sel_str != "":
+        sel_idx = sel_str.to_int()
+    val child = node.child_at(sel_idx)
+    val selected = if child != nil: child.get_prop("label") else: "(none)"
+    # Unicode down-pointing triangle for dropdown indicator
+    val arrow = if focused: "\u{25be}" else: "\u{25bf}"
+    s = s.put_styled(rect.y, rect.x, "[{arrow}] {selected}", style)
     return s
 
 fn render_tui_textfield(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
@@ -415,13 +516,27 @@ fn render_tui_textfield(screen: Screen, node: WidgetNode, rect: WidgetRect, focu
     val placeholder = node.get_prop("placeholder")
     val display = if value != "": value else: placeholder
     val is_readonly = node.get_prop("readonly") == "true"
-    val style = if is_readonly:
+    val is_error = node.get_prop("error") == "true"
+    val style = if is_error:
+        get_theme_color(theme, "error_fg")
+    elif is_readonly:
         get_theme_color(theme, "readonly")
     elif focused:
         get_theme_color(theme, "input_focused")
     else:
         get_theme_color(theme, "input")
-    return screen.put_styled(rect.y, rect.x, "|{display}|", style)
+    # Use box-drawing chars for field border
+    val max_w = rect.w - 2
+    val trimmed = if display.len() > max_w: display.slice(0, max_w) else: display
+    val text_style = if value != "": style else: get_theme_color(theme, "text_dim")
+    var s = screen
+    s = s.put_styled(rect.y, rect.x, "\u{2502}{trimmed}\u{2502}", text_style)
+    # Cursor block when focused
+    if focused and not is_readonly:
+        val cursor_pos = rect.x + 1 + trimmed.len()
+        if cursor_pos < rect.x + rect.w - 1:
+            s = s.put_styled(rect.y, cursor_pos, "\u{2588}", get_theme_color(theme, "accent"))
+    return s
 
 fn render_tui_image(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
     val alt = node.get_prop("alt")
@@ -430,19 +545,144 @@ fn render_tui_image(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: t
     return screen.put_styled(rect.y, rect.x, display, style)
 
 fn render_tui_divider(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
-    return screen.draw_hline(rect.y, rect.x, rect.w, "-")
+    """Render a horizontal divider using thin Unicode line."""
+    val style = get_theme_color(theme, "border")
+    var s = screen
+    var line = ""
+    var i = 0
+    while i < rect.w:
+        line = "{line}\u{2500}"
+        i = i + 1
+    s = s.put_styled(rect.y, rect.x, line, style)
+    return s
 
 fn render_tui_dialog(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
+    """Render a dialog with double-line border for visual distinction."""
     val title = node.get_prop("title")
     val border_style = get_theme_color(theme, "dialog_border")
-    return screen.draw_box(rect.y, rect.x, rect.w, rect.h, title)
+    var s = screen
+    # Use double-line border to visually distinguish dialogs from panels
+    s = s.draw_box_double(rect.y, rect.x, rect.w, rect.h, title)
+    return s
 
 fn render_tui_tooltip(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
-    """Render a tooltip as [?] content_text in dim style."""
+    """Render a tooltip with rounded border box."""
     val content = node.get_prop("content")
-    val display = "[?] {content}"
-    val style = get_theme_color(theme, "text_dim")
-    return screen.put_styled(rect.y, rect.x, display, style)
+    var s = screen
+    if rect.h >= 3 and rect.w >= 4:
+        s = s.draw_box_rounded(rect.y, rect.x, rect.w, rect.h, "")
+        val style = get_theme_color(theme, "text_dim")
+        val max_text_w = rect.w - 4
+        val display = if content.len() > max_text_w: content.slice(0, max_text_w) else: content
+        s = s.put_styled(rect.y + 1, rect.x + 2, display, style)
+    else:
+        val style = get_theme_color(theme, "text_dim")
+        s = s.put_styled(rect.y, rect.x, "[?] {content}", style)
+    return s
+
+fn render_tui_scroll(screen: Screen, node: WidgetNode, rect: WidgetRect, state: UIState) -> Screen:
+    """Render a scroll container with scrollbar indicator."""
+    var s = screen
+    val theme = resolve_theme(state)
+    val offset_str = node.get_prop("scroll_offset")
+    val offset = if offset_str != "": offset_str.to_int() else: 0
+    val total_children = node.child_count()
+
+    # Render visible children within the rect
+    var row = rect.y
+    var child_idx = offset
+    while child_idx < total_children and row < rect.y + rect.h:
+        val child = node.child_at(child_idx)
+        if child != nil:
+            val is_child_focused = child.id == state.focused_id
+            val child_theme = resolve_theme(state)
+            s = render_tui_widget(s, child, WidgetRect.new(child.id, rect.x, row, rect.w - 1, 1), state)
+            row = row + 1
+        child_idx = child_idx + 1
+
+    # Draw scrollbar track on right edge
+    if total_children > rect.h and rect.h > 0:
+        val scrollbar_col = rect.x + rect.w - 1
+        val track_style = get_theme_color(theme, "text_dim")
+        val thumb_style = get_theme_color(theme, "accent")
+        val thumb_pos = if total_children > 0: (offset * rect.h) / total_children else: 0
+        val thumb_size = if total_children > 0: (rect.h * rect.h) / total_children else: 1
+        val actual_thumb = if thumb_size < 1: 1 else: thumb_size
+        var si = 0
+        while si < rect.h:
+            val is_thumb = si >= thumb_pos and si < thumb_pos + actual_thumb
+            if is_thumb:
+                s = s.put_styled(rect.y + si, scrollbar_col, "\u{2588}", thumb_style)
+            else:
+                s = s.put_styled(rect.y + si, scrollbar_col, "\u{2591}", track_style)
+            si = si + 1
+
+    return s
+
+fn render_tui_textarea(screen: Screen, node: WidgetNode, rect: WidgetRect, focused: bool, theme: text) -> Screen:
+    """Render a multi-line text area with border."""
+    var s = screen
+    val value = node.get_prop("value")
+    val placeholder = node.get_prop("placeholder")
+    val is_readonly = node.get_prop("readonly") == "true"
+
+    val border_style = if focused: get_theme_color(theme, "border_focused") elif is_readonly: get_theme_color(theme, "text_dim") else: get_theme_color(theme, "border")
+
+    # Draw border
+    s = s.draw_box(rect.y, rect.x, rect.w, rect.h, "")
+
+    # Render text content inside border
+    val display = if value != "": value else: placeholder
+    val content_style = if value != "":
+        if is_readonly: get_theme_color(theme, "readonly") else: get_theme_color(theme, "text")
+    else:
+        get_theme_color(theme, "text_dim")
+
+    if display != "":
+        val inner_w = rect.w - 2
+        var row = rect.y + 1
+        var text_pos = 0
+        while row < rect.y + rect.h - 1 and text_pos < display.len():
+            # Extract a line worth of text
+            var line_text = ""
+            var col_count = 0
+            while text_pos < display.len() and col_count < inner_w:
+                val ch = display[text_pos]
+                if ch == "\n":
+                    text_pos = text_pos + 1
+                    break
+                line_text = "{line_text}{ch}"
+                col_count = col_count + 1
+                text_pos = text_pos + 1
+            s = s.put_styled(row, rect.x + 1, line_text, content_style)
+            row = row + 1
+
+    # Show cursor indicator when focused
+    if focused and not is_readonly:
+        val cursor_style = get_theme_color(theme, "accent")
+        s = s.put_styled(rect.y + 1, rect.x + rect.w - 2, "\u{2588}", cursor_style)
+
+    return s
+
+fn render_tui_heading(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
+    """Render a heading with bold underlined style."""
+    val content = node.get_prop("content")
+    val label = node.get_prop("label")
+    val display = if content != "": content else: label
+    if display == "":
+        return screen
+    var s = screen
+    val style = get_theme_color(theme, "title")
+    s = s.put_styled(rect.y, rect.x, display, style)
+    # Draw underline
+    if rect.h > 1:
+        var underline = ""
+        var i = 0
+        while i < display.len() and i < rect.w:
+            underline = "{underline}\u{2500}"
+            i = i + 1
+        s = s.put_styled(rect.y + 1, rect.x, underline, get_theme_color(theme, "accent"))
+    return s
 
 # =========================================================================
 # Template Expansion
@@ -562,6 +802,14 @@ fn render_html_widget(node: WidgetNode, state: UIState) -> text:
             return render_html_tree_widget(node, state, focus_class)
         "treenode" =>
             return render_html_tree_node(node, state)
+        "scroll" =>
+            return render_html_scroll(node, state, focus_class)
+        "textarea" =>
+            return render_html_textarea(node, focus_class)
+        "heading" =>
+            return render_html_heading(node, focus_class)
+        "label" =>
+            return render_html_text(node, focus_class)
 
 fn render_html_tree_widget(node: WidgetNode, state: UIState, focus_class: text) -> text:
     """Render a tree widget to HTML."""
@@ -599,16 +847,23 @@ fn render_html_panel(node: WidgetNode, state: UIState, focus_class: text) -> tex
 
     val flex_prop = node.get_prop("flex")
     val width_prop = node.get_prop("width")
-    val style = if flex_prop != "":
-        "flex: {flex_prop};"
+    val height_prop = node.get_prop("height")
+    var style = ""
+    if flex_prop != "":
+        style = "flex: {flex_prop};"
     elif width_prop != "":
-        "width: {width_prop}px;"
+        style = "width: {width_prop}px; flex: none;"
     else:
-        "flex: 1;"
+        style = "flex: 1;"
+    if height_prop != "":
+        style = "{style} height: {height_prop}em;"
 
-    val layout_class = if node.layout_name() == "hbox": "layout-hbox" else: "layout-vbox"
+    val layout_class = if node.layout_name() == "hbox": "layout-hbox" elif node.layout_name() == "grid": "layout-grid" else: "layout-vbox"
 
-    return "<div class=\"widget-panel {layout_class}{focus_class}\" id=\"{node.id}\" style=\"{style}\"><div class=\"panel-title\">{title}</div><div class=\"panel-content\">{children_html}</div></div>"
+    # Omit empty title header for layout-only containers
+    val title_html = if title != "": "<div class=\"panel-title\">{title}</div>" else: ""
+
+    return "<div class=\"widget-panel {layout_class}{focus_class}\" id=\"{node.id}\" style=\"{style}\">{title_html}<div class=\"panel-content\">{children_html}</div></div>"
 
 fn render_html_text(node: WidgetNode, focus_class: text) -> text:
     val content = node.get_prop("content")
@@ -626,7 +881,9 @@ fn render_html_list(node: WidgetNode, state: UIState, focus_class: text) -> text
     for child in node.children():
         val label = child.get_prop("label")
         val item_class = if idx == sel_idx: "list-item selected" else: "list-item"
-        items_html = "{items_html}<li class=\"{item_class}\">{label}</li>"
+        # Include prefix indicator matching TUI's "> " for selected items
+        val prefix = if idx == sel_idx: "\u{25b8} " else: ""
+        items_html = "{items_html}<li class=\"{item_class}\" data-index=\"{idx}\">{prefix}{label}</li>"
         idx = idx + 1
     return "<ul class=\"widget-list{focus_class}\" id=\"{node.id}\">{items_html}</ul>"
 
@@ -675,7 +932,9 @@ fn render_html_table(node: WidgetNode, state: UIState, focus_class: text) -> tex
 fn render_html_progress(node: WidgetNode, focus_class: text) -> text:
     val value_str = node.get_prop("value")
     val value = if value_str != "": value_str else: "0"
-    return "<div class=\"widget-progress{focus_class}\" id=\"{node.id}\"><div class=\"progress-bar\" style=\"width: {value}%\"></div><span>{value}%</span></div>"
+    val label = node.get_prop("label")
+    val label_html = if label != "": "<span class=\"progress-label\">{label}</span>" else: ""
+    return "<div class=\"widget-progress{focus_class}\" id=\"{node.id}\">{label_html}<div style=\"flex:1;background:{if value_str != \"\": \"#45475a\" else: \"#45475a\"};border-radius:4px;height:8px;overflow:hidden\"><div class=\"progress-bar\" style=\"width: {value}%\"></div></div><span>{value}%</span></div>"
 
 fn render_html_menubar(node: WidgetNode, state: UIState) -> text:
     var items_html = ""
@@ -706,12 +965,14 @@ fn render_html_input(node: WidgetNode, focus_class: text) -> text:
     return "<input class=\"widget-input{focus_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\" />"
 
 fn render_html_tabs(node: WidgetNode, focus_class: text) -> text:
+    val active_idx_str = node.get_prop("active_index")
+    val active_idx = if active_idx_str != "": active_idx_str.to_int() else: 0
     var tabs_html = ""
     var idx = 0
     for child in node.children():
         val label = child.get_prop("label")
-        val active_class = if idx == 0: " active" else: ""
-        tabs_html = "{tabs_html}<span class=\"tab-item{active_class}\">{label}</span>"
+        val active_class = if idx == active_idx: " active" else: ""
+        tabs_html = "{tabs_html}<span class=\"tab-item{active_class}\" data-index=\"{idx}\">{label}</span>"
         idx = idx + 1
     return "<div class=\"widget-tabs{focus_class}\" id=\"{node.id}\">{tabs_html}</div>"
 
@@ -722,7 +983,9 @@ fn render_html_tabs(node: WidgetNode, focus_class: text) -> text:
 fn render_html_button(node: WidgetNode, focus_class: text) -> text:
     val label = node.get_prop("label")
     val action = node.get_prop("action")
-    return "<button class=\"widget-button{focus_class}\" id=\"{node.id}\" data-action=\"{action}\">{label}</button>"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val disabled_attr = if is_disabled: " disabled" else: ""
+    return "<button class=\"widget-button{focus_class}\" id=\"{node.id}\" data-action=\"{action}\"{disabled_attr}>{label}</button>"
 
 fn render_html_checkbox(node: WidgetNode, focus_class: text) -> text:
     val label = node.get_prop("label")
@@ -761,6 +1024,38 @@ fn render_html_tooltip(node: WidgetNode, focus_class: text) -> text:
     val content = node.get_prop("content")
     val target = node.get_prop("target")
     return "<div class=\"widget-tooltip{focus_class}\" id=\"{node.id}\" data-target=\"{target}\"><span class=\"tooltip-trigger\">[?]</span><span class=\"tooltip-content\">{content}</span></div>"
+
+fn render_html_scroll(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    """Render a scrollable container as a div with overflow:auto."""
+    val max_h = node.get_prop("max_height")
+    val style_attr = if max_h != "": "max-height: {max_h}em; overflow-y: auto;" else: "overflow-y: auto;"
+    var children_html = ""
+    for child in node.children():
+        children_html = "{children_html}{render_html_widget(child, state)}"
+    return "<div class=\"widget-scroll{focus_class}\" id=\"{node.id}\" style=\"{style_attr}\">{children_html}</div>"
+
+fn render_html_textarea(node: WidgetNode, focus_class: text) -> text:
+    """Render a multi-line textarea."""
+    val value = node.get_prop("value")
+    val placeholder = node.get_prop("placeholder")
+    val rows = node.get_prop("rows")
+    val is_readonly = node.get_prop("readonly") == "true"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val is_error = node.get_prop("error") == "true"
+    val rows_attr = if rows != "": " rows=\"{rows}\"" else: " rows=\"4\""
+    val readonly_attr = if is_readonly: " readonly" else: ""
+    val disabled_attr = if is_disabled: " disabled" else: ""
+    val error_class = if is_error: " error" else: ""
+    return "<textarea class=\"widget-textarea{focus_class}{error_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\"{rows_attr}{readonly_attr}{disabled_attr}>{value}</textarea>"
+
+fn render_html_heading(node: WidgetNode, focus_class: text) -> text:
+    """Render a heading element."""
+    val content = node.get_prop("content")
+    val label = node.get_prop("label")
+    val display = if content != "": content else: label
+    val level = node.get_prop("level")
+    val tag = if level == "1": "h1" elif level == "2": "h2" elif level == "3": "h3" else: "h2"
+    return "<{tag} class=\"widget-heading{focus_class}\" id=\"{node.id}\">{display}</{tag}>"
 
 # =========================================================================
 # Full HTML Tree Render
