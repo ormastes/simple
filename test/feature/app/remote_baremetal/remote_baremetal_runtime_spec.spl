@@ -466,6 +466,67 @@ describe "STM debugger readiness":
         val status = stlink_tools_stm_status()
         expect(status_is_acceptable(status)).to_equal(true)
 
+fn wlink_live_status(chip: text, expected_chip_name: text) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink status --chip {chip} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains(expected_chip_name):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    if combined.contains("No such device") or combined.contains("not found"):
+        return "blocked: wlink device not connected"
+    "blocked: {combined}"
+
+fn wlink_live_register_read_status(chip: text) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink regs --chip {chip} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains("dpc(pc):") and combined.contains("x0"):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    "blocked: {combined}"
+
+fn wlink_live_memory_read_status(chip: text, addr: text, size: i32) -> text:
+    if not command_available("wlink"):
+        return "skip: wlink unavailable"
+    val run = shell("timeout 10 wlink dump {addr} {size} 2>&1")
+    val combined = (run.stdout + run.stderr).trim()
+    if combined.contains("Read memory from"):
+        return "ok"
+    if combined.contains("Access denied"):
+        return "blocked: wlink usb permission denied"
+    "blocked: {combined}"
+
+describe "WCH-Link RISC-V live smoke":
+
+    it "detects CH32V307 through wlink status":
+        val status = wlink_live_status("CH32V30X", "CH32V307")
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 registers through wlink":
+        val status = wlink_live_register_read_status("CH32V30X")
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 flash memory through wlink":
+        val status = wlink_live_memory_read_status("CH32V30X", "0x08000000", 64)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
+    it "reads CH32V307 RAM through wlink":
+        val status = wlink_live_memory_read_status("CH32V30X", "0x20000000", 64)
+        expect(status_is_acceptable(status)).to_equal(true)
+        if not status.starts_with("skip:") and not status.starts_with("blocked:"):
+            expect(status).to_equal("ok")
+
 describe "STM live debugger smoke":
 
     it "reads the H7 cpuid through openocd plus gdb":
