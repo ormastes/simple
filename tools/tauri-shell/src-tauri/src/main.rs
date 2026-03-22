@@ -12,41 +12,29 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // ---------------------------------------------------------------------------
 // IPC message types (subprocess → shell)
 // ---------------------------------------------------------------------------
 
-/// Incoming messages from the Simple subprocess.
-///
-/// The canonical protocol (protocol.spl) uses camelCase for the `type` tag
-/// (e.g. `"windowControl"`), but the user-facing spec uses snake_case
-/// (e.g. `"window_control"`).  We accept both via serde aliases.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum SubprocessMessage {
     #[serde(rename = "render")]
-    Render {
-        html: String,
-    },
+    Render { html: String },
     #[serde(rename = "dialog")]
     Dialog {
+        #[allow(dead_code)]
         #[serde(alias = "dialogType", alias = "dialog_type")]
         dialog_type: String,
         title: String,
         message: String,
     },
     #[serde(rename = "notification")]
-    Notification {
-        title: String,
-        body: String,
-    },
-    /// Accepts both `"type":"windowControl"` and `"type":"window_control"`
+    Notification { title: String, body: String },
     #[serde(rename = "windowControl", alias = "window_control")]
-    WindowControl {
-        action: String,
-    },
+    WindowControl { action: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -86,14 +74,39 @@ impl SimpleProcess {
     }
 }
 
+fn js_escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace("${", "\\${")
+}
+
+fn update_status(app: &AppHandle, message: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let escaped = js_escape(message);
+        let js = format!(
+            r#"
+            (function() {{
+                if (typeof window.simpleStatus === 'function') {{
+                    window.simpleStatus(`{}`);
+                    return;
+                }}
+                var app = document.getElementById('app');
+                if (app) {{
+                    app.innerHTML = '<div style="padding:24px;font-family:monospace"><h2>Simple UI - Tauri</h2><pre style="white-space:pre-wrap;margin-top:12px">' + `{}` + '</pre></div>';
+                }}
+            }})();
+            "#,
+            escaped, escaped
+        );
+        let _ = win.eval(&js);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Subprocess stdout reader
 // ---------------------------------------------------------------------------
 
-fn read_subprocess_stdout(
-    reader: BufReader<std::process::ChildStdout>,
-    app: AppHandle,
-) {
+fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: AppHandle) {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -110,27 +123,45 @@ fn read_subprocess_stdout(
         match serde_json::from_str::<SubprocessMessage>(trimmed) {
             Ok(msg) => handle_subprocess_message(msg, &app),
             Err(e) => {
-                eprintln!("[tauri-shell] failed to parse IPC: {} — line: {}", e, trimmed);
+                eprintln!("[tauri-shell] parse error: {} — line: {}", e, trimmed);
+                update_status(
+                    &app,
+                    &format!("Subprocess produced non-IPC stdout:\n{}\n\nParse error: {}", trimmed, e),
+                );
             }
         }
     }
-    // Subprocess exited — close the window.
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.close();
+    eprintln!("[tauri-shell] subprocess stdout closed");
+    update_status(&app, "Simple subprocess stdout closed before a valid render arrived.");
+}
+
+fn read_subprocess_stderr(reader: BufReader<std::process::ChildStderr>, app: AppHandle) {
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        eprintln!("[tauri-shell] raw stderr: {}", trimmed);
+        update_status(&app, &format!("Simple subprocess stderr:\n{}", trimmed));
     }
+
+    eprintln!("[tauri-shell] subprocess stderr closed");
 }
 
 fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
     match msg {
         SubprocessMessage::Render { html } => {
-            eprintln!("[tauri-shell] got render, html_len={}", html.len());
+            eprintln!("[tauri-shell] render, html_len={}", html.len());
             if let Some(win) = app.get_webview_window("main") {
-                let escaped = html
-                    .replace('\\', "\\\\")
-                    .replace('`', "\\`")
-                    .replace("${", "\\${");
-                // Inject HTML + re-attach click/key handlers each render
-                let js = format!(r#"
+                let escaped = js_escape(&html);
+                let js = format!(
+                    r#"
                     (function() {{
                         var el = document.getElementById('app');
                         if (!el) {{
@@ -139,60 +170,46 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                         }}
                         el.innerHTML = `{}`;
 
-                        // Attach click handler for buttons
-                        if (!window._simpleClickHandler) {{
-                            window._simpleClickHandler = true;
+                        if (!window._evtBound) {{
+                            window._evtBound = true;
                             document.addEventListener('click', function(e) {{
                                 var btn = e.target.closest('[data-action]');
-                                if (btn) {{
-                                    window.__TAURI_INTERNALS__.invoke(
-                                        'send_action',
-                                        {{ name: btn.getAttribute('data-action') }}
-                                    );
+                                if (btn && window.__TAURI_INTERNALS__) {{
+                                    window.__TAURI_INTERNALS__.invoke('send_action', {{ name: btn.getAttribute('data-action') }});
                                 }}
                             }});
                             document.addEventListener('keydown', function(e) {{
                                 var key = e.key;
-                                if (key.length === 1 || ['Enter','Escape','Backspace','Tab',
-                                    'ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {{
-                                    window.__TAURI_INTERNALS__.invoke(
-                                        'send_keypress',
-                                        {{ key: key }}
-                                    );
+                                if (window.__TAURI_INTERNALS__ && (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0)) {{
+                                    window.__TAURI_INTERNALS__.invoke('send_keypress', {{ key: key }});
                                 }}
                             }});
                         }}
                     }})();
-                "#, escaped);
+                    "#,
+                    escaped
+                );
                 match win.eval(&js) {
-                    Ok(_) => eprintln!("[tauri-shell] render applied to webview"),
-                    Err(err) => eprintln!("[tauri-shell] webview eval failed: {}", err),
+                    Ok(_) => eprintln!("[tauri-shell] eval OK"),
+                    Err(e) => eprintln!("[tauri-shell] eval FAIL: {}", e),
                 }
+            } else {
+                eprintln!("[tauri-shell] window 'main' not found!");
             }
         }
         SubprocessMessage::Dialog {
-            dialog_type,
+            dialog_type: _,
             title,
             message,
         } => {
             if let Some(win) = app.get_webview_window("main") {
                 use tauri_plugin_dialog::DialogExt;
-                match dialog_type.as_str() {
-                    "confirm" => {
-                        win.dialog()
-                            .message(&message)
-                            .title(&title)
-                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                            .blocking_show();
-                    }
-                    "alert" | _ => {
-                        win.dialog()
-                            .message(&message)
-                            .title(&title)
-                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                            .blocking_show();
-                    }
-                }
+                let _ = win
+                    .dialog()
+                    .message(&message)
+                    .title(&title)
+                    .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                    .blocking_show();
             }
         }
         SubprocessMessage::Notification { title, body } => {
@@ -207,18 +224,10 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
         SubprocessMessage::WindowControl { action } => {
             if let Some(win) = app.get_webview_window("main") {
                 match action.as_str() {
-                    "minimize" => {
-                        let _ = win.minimize();
-                    }
-                    "maximize" => {
-                        let _ = win.maximize();
-                    }
-                    "close" => {
-                        let _ = win.close();
-                    }
-                    other => {
-                        eprintln!("[tauri-shell] unknown window action: {}", other);
-                    }
+                    "minimize" => { let _ = win.minimize(); }
+                    "maximize" => { let _ = win.maximize(); }
+                    "close" => { let _ = win.close(); }
+                    _ => {}
                 }
             }
         }
@@ -226,7 +235,7 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands (invoked from the webview JS)
+// Tauri commands
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -249,22 +258,18 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 // ---------------------------------------------------------------------------
 
 fn resolve_simple_binary() -> String {
-    // 1. CLI arg: first argument after the program name
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && !args[1].starts_with('-') {
         return args[1].clone();
     }
-    // 2. SIMPLE_BIN env var
     if let Ok(bin) = env::var("SIMPLE_BIN") {
         return bin;
     }
-    // 3. Default relative path
     "../../bin/simple".to_string()
 }
 
 fn resolve_entry_file() -> Option<String> {
     let args: Vec<String> = env::args().collect();
-    // The entry .spl file is the second positional arg (after the binary path)
     if args.len() > 2 && !args[2].starts_with('-') {
         Some(args[2].clone())
     } else if let Ok(entry) = env::var("SIMPLE_ENTRY") {
@@ -281,7 +286,7 @@ fn main() {
     eprintln!("[tauri-shell] binary: {}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
 
-    // Build subprocess command
+    // Spawn subprocess
     let mut cmd = Command::new(&simple_bin);
     if let Some(ref entry) = entry_file {
         if entry.ends_with(".ui.sdn") {
@@ -292,21 +297,17 @@ fn main() {
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-
-    eprintln!("[tauri-shell] spawn command: {:?}", cmd);
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().unwrap_or_else(|e| {
-        eprintln!(
-            "[tauri-shell] failed to spawn Simple binary at '{}': {}",
-            simple_bin, e
-        );
+        eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
         std::process::exit(1);
     });
-    eprintln!("[tauri-shell] subprocess spawned, pid={}", child.id());
+    eprintln!("[tauri-shell] subprocess pid={}", child.id());
 
-    let child_stdout = child.stdout.take().expect("failed to capture subprocess stdout");
-    let child_stdin = child.stdin.take().expect("failed to capture subprocess stdin");
+    let child_stdout = child.stdout.take().expect("no stdout");
+    let child_stderr = child.stderr.take().expect("no stderr");
+    let child_stdin = child.stdin.take().expect("no stdin");
 
     let process = Arc::new(SimpleProcess {
         stdin: Arc::new(Mutex::new(Some(child_stdin))),
@@ -325,43 +326,41 @@ fn main() {
             send_resize,
         ])
         .setup(move |app| {
+            eprintln!("[tauri-shell] creating window from app://index.html");
+
+            let _win = WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::App("index.html".into()),
+            )
+            .title("Simple UI")
+            .inner_size(1280.0, 720.0)
+            .build()?;
+
+            // Uncomment to debug: win.open_devtools();
+
+            eprintln!("[tauri-shell] window created");
+
+            // Start subprocess reader threads
             let handle = app.handle().clone();
-
-            // Inject base HTML into the webview immediately
-            if let Some(win) = app.get_webview_window("main") {
-                #[cfg(debug_assertions)]
-                win.open_devtools();
-                let base_html = r#"
-                    document.head.innerHTML = `
-                        <meta charset="UTF-8">
-                        <style>
-                            * { margin:0; padding:0; box-sizing:border-box; }
-                            body { background:#1e1e2e; color:#cdd6f4; font-family:-apple-system,BlinkMacSystemFont,monospace; font-size:13px; }
-                            #app { width:100%; min-height:100vh; padding:20px; }
-                        </style>
-                    `;
-                    document.body.innerHTML = '<div id="app"><h2 style="color:#89b4fa">Simple UI — Tauri</h2><p style="color:#a6adc8;margin:16px 0">Connecting to subprocess...</p></div>';
-                "#;
-                let _ = win.eval(base_html);
-            }
-
-            // Spawn a thread to read from subprocess stdout
-            let reader = BufReader::new(child_stdout);
             thread::spawn(move || {
-                read_subprocess_stdout(reader, handle);
+                // Small delay to let the webview load the frontend shell first.
+                thread::sleep(std::time::Duration::from_millis(500));
+                update_status(&handle, "Waiting for first render from Simple subprocess...");
+                read_subprocess_stdout(BufReader::new(child_stdout), handle);
+            });
+            let handle = app.handle().clone();
+            thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_millis(500));
+                read_subprocess_stderr(BufReader::new(child_stderr), handle);
             });
 
             Ok(())
         })
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Send quit message to subprocess
                 process.send(&ShellMessage::Quit);
-
-                // Give subprocess a moment then kill it
-                let stdin_handle = Arc::clone(&process.stdin);
-                if let Ok(mut guard) = stdin_handle.lock() {
-                    // Drop stdin to signal EOF
+                if let Ok(mut guard) = process.stdin.lock() {
                     *guard = None;
                 }
                 if let Ok(mut guard) = process.child.lock() {
@@ -374,5 +373,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("tauri error");
 }

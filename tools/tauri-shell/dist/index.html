@@ -1,7 +1,154 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="background:#1e1e2e;color:white;font-size:24px;padding:40px">
-  <div id="app">BASE HTML LOADED</div>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple UI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, monospace;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      width: 100vw;
+      height: 100vh;
+      overflow: auto;
+    }
+    #app { width: 100%; min-height: 100%; }
+    #debug {
+      position: fixed; top: 0; right: 0;
+      background: rgba(0,0,0,0.85); color: #a6e3a1;
+      font-size: 11px; padding: 8px; max-width: 400px;
+      max-height: 200px; overflow-y: auto; z-index: 9999;
+      border-left: 2px solid #a6e3a1; border-bottom: 2px solid #a6e3a1;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div style="padding:40px;text-align:center">
+      <h2 style="color:#89b4fa">Simple UI — Tauri</h2>
+      <p style="margin:16px 0;color:#a6adc8">Initializing...</p>
+      <div id="init-status" style="color:#f9e2af"></div>
+    </div>
+  </div>
+  <div id="debug"></div>
+
+  <script>
+    const dbg = document.getElementById("debug");
+    const status = document.getElementById("init-status");
+    window.simpleStatus = function(msg) {
+      status.textContent = msg;
+      log("status: " + msg);
+    };
+    function log(msg) {
+      const t = new Date().toLocaleTimeString('en',{hour12:false});
+      const line = document.createElement("div");
+      line.textContent = `[${t}] ${msg}`;
+      dbg.appendChild(line);
+      dbg.scrollTop = dbg.scrollHeight;
+      console.log(`[tauri-debug] ${msg}`);
+    }
+
+    log("Page loaded");
+    log("window.__TAURI__: " + (typeof window.__TAURI__));
+
+    async function init() {
+      const appEl = document.getElementById("app");
+
+      if (!window.__TAURI__) {
+        log("ERROR: window.__TAURI__ not found!");
+        window.simpleStatus("Tauri API not available. withGlobalTauri may be false.");
+        return;
+      }
+
+      log("Tauri API found. Keys: " + Object.keys(window.__TAURI__).join(", "));
+
+      let listenFn = null;
+      let invokeFn = null;
+
+      if (window.__TAURI__.event && window.__TAURI__.event.listen) {
+        listenFn = window.__TAURI__.event.listen;
+        log("Found event.listen");
+      } else if (window.__TAURI__.event && window.__TAURI__.event.TauriEvent) {
+        log("Found event.TauriEvent but no listen");
+      } else {
+        log("event keys: " + (window.__TAURI__.event ? Object.keys(window.__TAURI__.event).join(", ") : "N/A"));
+      }
+
+      if (window.__TAURI__.core && window.__TAURI__.core.invoke) {
+        invokeFn = window.__TAURI__.core.invoke;
+        log("Found core.invoke");
+      } else if (window.__TAURI__.tauri && window.__TAURI__.tauri.invoke) {
+        invokeFn = window.__TAURI__.tauri.invoke;
+        log("Found tauri.invoke (legacy)");
+      } else {
+        log("core keys: " + (window.__TAURI__.core ? Object.keys(window.__TAURI__.core).join(", ") : "N/A"));
+      }
+
+      if (!listenFn) {
+        if (window.__TAURI_INTERNALS__) {
+          log("Found __TAURI_INTERNALS__");
+        }
+        window.simpleStatus("Cannot find listen function");
+      }
+
+      if (listenFn) {
+        try {
+          await listenFn("render", (event) => {
+            log("Render event received! payload type=" + typeof event.payload + " len=" + (event.payload ? event.payload.length : 0));
+            appEl.innerHTML = event.payload;
+            status.textContent = "";
+            dbg.style.maxHeight = "100px";
+          });
+          log("Listening for 'render' events");
+          window.simpleStatus("Listening for render events from subprocess...");
+        } catch(e) {
+          log("listen error: " + e.message);
+          window.simpleStatus("Listen error: " + e.message);
+        }
+      }
+
+      if (invokeFn) {
+        document.addEventListener("keydown", (e) => {
+          let key = e.key;
+          if (key.length === 1 || ["Enter","Escape","Backspace","Tab","Delete",
+              "ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(key)) {
+            invokeFn("send_keypress", { key }).catch(err => log("invoke err: " + err));
+            log("Key: " + key);
+          }
+        });
+
+        document.addEventListener("click", (e) => {
+          const btn = e.target.closest("[data-action]");
+          if (btn) {
+            const name = btn.getAttribute("data-action");
+            invokeFn("send_action", { name }).catch(err => log("invoke err: " + err));
+            log("Click: " + name);
+          }
+        });
+
+        let resizeTimer = null;
+        window.addEventListener("resize", () => {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => {
+            invokeFn("send_resize", {
+              width: Math.round(window.innerWidth),
+              height: Math.round(window.innerHeight)
+            }).catch(() => {});
+          }, 150);
+        });
+
+        log("Event forwarding active");
+      }
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", init);
+    } else {
+      init();
+    }
+  </script>
 </body>
 </html>
