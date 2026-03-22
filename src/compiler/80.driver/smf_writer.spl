@@ -46,6 +46,7 @@ struct SmfBuildOptions:
     metadata: MonomorphizationMetadata?
     note_sdn: NoteSdnMetadata?
     target: Target
+    deps: [SmfDependencyEntry]  # Dependency interface hashes for staleness checking
 
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
@@ -53,11 +54,98 @@ impl SmfBuildOptions:
             templates: nil,
             metadata: nil,
             note_sdn: nil,
-            target: target
+            target: target,
+            deps: []
         )
 
     fn has_any_sections() -> bool:
-        self.templates.? or self.metadata.? or self.note_sdn.?
+        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0
+
+# ============================================================================
+# Dependency Tracking for SMF Staleness
+# ============================================================================
+
+struct SmfDependencyEntry:
+    module_path: text
+    interface_hash: i64
+
+fn serialize_smf_dependencies(deps: [SmfDependencyEntry]) -> [u8]:
+    """Serialize dependency list to binary format for .note.deps section.
+
+    Format: [u32: count] + per entry: [u32: path_len][path_bytes][i64: interface_hash]
+    """
+    var buf: [u8] = []
+    buf = buf.concat(u32_to_bytes(deps.len()))
+    for dep in deps:
+        val path_bytes = dep.module_path.to_bytes()
+        buf = buf.concat(u32_to_bytes(path_bytes.len()))
+        buf = buf.concat(path_bytes)
+        buf = buf.concat(u64_to_bytes(dep.interface_hash))
+    buf
+
+fn deserialize_smf_dependencies(data: [u8]) -> [SmfDependencyEntry]:
+    """Deserialize dependency list from binary .note.deps section."""
+    if data.len() < 4:
+        return []
+
+    val count = bytes_to_u32_le(data, 0)
+    var deps: [SmfDependencyEntry] = []
+    var offset = 4
+
+    var i = 0
+    while i < count:
+        if offset + 4 > data.len():
+            break
+        val path_len = bytes_to_u32_le(data, offset)
+        offset = offset + 4
+
+        if offset + path_len > data.len():
+            break
+        val path_bytes = data[offset:offset + path_len]
+        val module_path = bytes_to_text(path_bytes)
+        offset = offset + path_len
+
+        if offset + 8 > data.len():
+            break
+        val interface_hash = bytes_to_i64_le(data, offset)
+        offset = offset + 8
+
+        deps = deps + [SmfDependencyEntry(module_path: module_path, interface_hash: interface_hash)]
+        i = i + 1
+    deps
+
+fn bytes_to_u32_le(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn bytes_to_i64_le(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    val b4 = data[offset + 4] as i64
+    val b5 = data[offset + 5] as i64
+    val b6 = data[offset + 6] as i64
+    val b7 = data[offset + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+fn bytes_to_text(data: [u8]) -> text:
+    """Convert byte array to text (UTF-8)."""
+    var chars: [text] = []
+    for b in data:
+        chars = chars + [char_from_byte_smf(b)]
+    chars.join("")
+
+fn char_from_byte_smf(b: u8) -> text:
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i64) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        ascii_table[idx:idx + 1]
+    else:
+        "?"
 
 # Generate SMF from object code with optional template sections
 #
@@ -138,6 +226,13 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val has_metadata = not metadata_bytes.is_empty()
     val has_note_sdn = not note_sdn_bytes.is_empty()
 
+    # Serialize dependency entries for .note.deps section
+    val deps_bytes = if options.deps.len() > 0:
+        serialize_smf_dependencies(options.deps)
+    else:
+        []
+    val has_deps = not deps_bytes.is_empty()
+
     # Calculate section count
     var section_count = 1  # Code section
     if has_templates:
@@ -146,6 +241,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         section_count = section_count + 1
     if has_note_sdn:
         section_count = section_count + 1  # note.sdn section
+    if has_deps:
+        section_count = section_count + 1  # note.deps section
 
     # Calculate offsets (sections come FIRST now, not after header)
     val header_size = 128  # SmfHeader::SIZE (written at END)
@@ -154,7 +251,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val template_offset = code_offset + code_bytes.len()
     val metadata_offset = template_offset + template_bytes.len()
     val note_sdn_offset = metadata_offset + metadata_bytes.len()
-    val section_table_offset = note_sdn_offset + note_sdn_bytes.len()
+    val deps_offset = note_sdn_offset + note_sdn_bytes.len()
+    val section_table_offset = deps_offset + deps_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
     val string_table_offset = symbol_table_offset + 72  # One symbol
@@ -174,6 +272,10 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     # Write note.sdn section
     if has_note_sdn:
         buf = buf.concat(note_sdn_bytes)
+
+    # Write note.deps section (dependency interface hashes)
+    if has_deps:
+        buf = buf.concat(deps_bytes)
 
     # 2. Write section table
 
@@ -214,6 +316,16 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             offset: note_sdn_offset,
             size: 0,  # Zero-size trick: actual size determined by scanning for terminator
             name: "note.sdn"
+        ))
+
+    # note.deps section (dependency interface hashes for staleness checking)
+    if has_deps:
+        buf = buf.concat(build_section_entry(
+            section_type: 7,  # SectionType::Note
+            flags: 0x01,  # READ
+            offset: deps_offset,
+            size: deps_bytes.len(),
+            name: "note.deps"
         ))
 
     # 3. Write symbol table

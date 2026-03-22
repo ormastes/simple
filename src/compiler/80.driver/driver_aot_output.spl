@@ -12,7 +12,7 @@
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
-use compiler.driver.smf_writer.{generate_smf_with_templates, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions}
+use compiler.driver.smf_writer.{generate_smf_with_templates, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat}
 use compiler.driver.driver.{CompilerDriver}
@@ -280,6 +280,9 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             if module.object_code.?:
                 all_object_bytes = all_object_bytes.concat(module.object_code.unwrap())
 
+        # Collect dependency interface hashes for staleness tracking
+        val deps = collect_dependency_hashes(self.ctx)
+
         # Wrap object code into SMF format
         val target = Target.host()
         val smf_mode = self.ctx.options.smf_output_mode
@@ -288,10 +291,13 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             build_smf_with_elf_embedded(all_object_bytes, target)
         elif smf_mode == "reloc_sections":
             # Phase 2: Extract .text + relocations into separate sections
-            val opts = SmfBuildOptions.create(target)
+            var opts = SmfBuildOptions.create(target)
+            opts.deps = deps
             build_smf_with_relocations(all_object_bytes, opts)
         else:
-            # Default: strip ELF to raw .text bytes
+            # Default: strip ELF to raw .text bytes, with dependency tracking
+            var opts = SmfBuildOptions.create(target)
+            opts.deps = deps
             generate_smf_with_templates(all_object_bytes, nil, nil, target)
         CompileResult.Success(smf_bytes)
 
@@ -305,4 +311,33 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
 
         var config = NativeLinkConfig.default()
         link_to_native(objects, output, config)
+
+# ============================================================================
+# Dependency Collection for SMF Staleness Tracking
+# ============================================================================
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+
+fn collect_dependency_hashes(ctx: any) -> [SmfDependencyEntry]:
+    """Collect interface hashes of all imported modules for SMF dependency tracking.
+
+    Reads SHB interface hashes for each module's imports. If SHB files are not
+    available yet, returns empty list (backward compatible — deps section omitted).
+    """
+    use compiler.driver.cache.cache_validator.{source_to_cache_path, get_shb_interface_hash}
+
+    var deps: [SmfDependencyEntry] = []
+    var seen: Dict<text, bool> = {}
+
+    # Collect input file paths as dependency sources
+    val input_files = ctx.options.input_files
+    for input_path in input_files:
+        # Look up SHB for this input's imports
+        val hash = get_shb_interface_hash(input_path)
+        if hash != 0 and not seen.contains_key(input_path):
+            seen[input_path] = true
+            deps = deps + [SmfDependencyEntry(module_path: input_path, interface_hash: hash)]
+
+    deps
 

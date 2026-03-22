@@ -312,6 +312,10 @@ class CompilerDriver:
                 log_debug("aot mode")
                 return self.aot_compile()
 
+            case CompileMode.SmfExec:
+                log_debug("smf_exec mode — loading pre-compiled SMF")
+                return self.execute_smf()
+
         log_warn("no mode matched, falling through")
         CompileResult.Success(nil)
 
@@ -656,6 +660,29 @@ class CompilerDriver:
                 CompileResult.RuntimeError(e.message)
 
     # --------------------------------------------------------------------------
+    # Mode: SMF Exec (load and execute pre-compiled SMF)
+    # --------------------------------------------------------------------------
+
+    me execute_smf() -> CompileResult:
+        """Load a pre-compiled SMF file and execute its main function.
+
+        Uses JIT infrastructure to map SMF code into executable memory.
+        Falls back to interpret mode if SMF loading fails.
+        """
+        val smf_path = self.ctx.options.input_files[0]
+        log_debug("execute_smf: loading {smf_path}")
+
+        # Use JIT pipeline to load and execute the SMF
+        var pipeline = CodegenPipeline.jit()
+        match pipeline.load_smf_and_execute(smf_path):
+            case Ok(result):
+                CompileResult.Success(result)
+            case Err(e):
+                # Fallback: log and return error (caller can retry with interpret)
+                log_warn("SMF exec failed: {e}, falling back")
+                CompileResult.RuntimeError("SMF execution failed: {e}")
+
+    # --------------------------------------------------------------------------
     # Mode: AOT Compile
     # --------------------------------------------------------------------------
 
@@ -708,13 +735,22 @@ class CompilerDriver:
             case OutputFormat.SelfContained:
                 return self.compile_to_self_contained(output)
             case OutputFormat.Both:
-                # Compile native first, then SMF
+                # Compile native (LLVM) first, then SMF (Cranelift) to cache
                 val native_result = CompilerDriver_dot_compile_to_native(self, output)
                 if not native_result.is_success():
                     return native_result
-                val smf_result = self.compile_to_smf("{output}.smf")
-                if not smf_result.is_success():
-                    return smf_result
+                # SMF goes to build/smf/ cache directory
+                use compiler.driver.cache.cache_validator.{source_to_cache_path}
+                use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
+                val source_path = self.ctx.options.input_files[0]
+                val smf_cache_path = source_to_cache_path(source_path, "build/smf", ".smf")
+                val smf_result = self.compile_to_smf(smf_cache_path)
+                if smf_result.is_success():
+                    extern fn rt_hash_text(s: text) -> i64
+                    extern fn rt_file_read_text(path: text) -> text
+                    val src = rt_file_read_text(source_path) ?? ""
+                    val src_hash = rt_hash_text(src)
+                    update_smf_manifest_entry(source_path, smf_cache_path, src_hash, "cranelift")
                 return CompileResult.Success(output)
             case _:
                 # Native (default)
