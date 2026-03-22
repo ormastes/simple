@@ -1,0 +1,372 @@
+# Interrupt Controller
+#
+# Manages pending interrupts for emulated guest CPUs.
+# Supports AVR and 8086 interrupt models:
+# - AVR: Vector table at 0x0000 in program memory, SREG.I flag
+# - 8086: IVT at 0x0000:0x0000, FLAGS.IF flag
+#
+# The interrupt controller is checked between translation block executions
+# to inject pending interrupts into the guest CPU state.
+
+use core.types.{GuestArch}
+use guest.cpu_def.{GuestState}
+use guest.avr.cpu.{AVR_REG_SREG, AVR_REG_SP, AVR_REG_PC, AVR_SREG_I}
+use guest.i8086.cpu.{X86_REG_SP, X86_REG_CS, X86_REG_SS, X86_REG_IP, X86_REG_FLAGS, X86_FLAG_IF, X86_FLAG_TF}
+
+# ============================================================================
+# Pending Interrupt Entry
+# ============================================================================
+
+struct PendingInterrupt:
+    """A pending interrupt request."""
+    vector: i64
+    priority: i64       # Lower number = higher priority
+    is_nmi: bool        # Non-maskable (ignores IF/I flag)
+
+impl PendingInterrupt:
+    static fn new(vector: i64, priority: i64) -> PendingInterrupt:
+        PendingInterrupt(vector: vector, priority: priority, is_nmi: false)
+
+    static fn nmi(vector: i64) -> PendingInterrupt:
+        PendingInterrupt(vector: vector, priority: 0, is_nmi: true)
+
+# ============================================================================
+# Interrupt Controller
+# ============================================================================
+
+val MAX_PENDING: i64 = 64
+
+struct InterruptController:
+    """Architecture-aware interrupt controller.
+
+    Maintains a queue of pending interrupts and handles the architecture-specific
+    sequence when an interrupt is acknowledged (push state, jump to vector, etc.).
+    """
+    arch: GuestArch
+    pending: [PendingInterrupt]
+    pending_count: i64
+
+    # Statistics
+    total_requested: i64
+    total_acknowledged: i64
+    total_dropped: i64
+
+impl InterruptController:
+    static fn new(arch: GuestArch) -> InterruptController:
+        InterruptController(
+            arch: arch,
+            pending: [],
+            pending_count: 0,
+            total_requested: 0,
+            total_acknowledged: 0,
+            total_dropped: 0
+        )
+
+    # ========================================================================
+    # Request / queue
+    # ========================================================================
+
+    me request_interrupt(vector: i64):
+        """Queue an interrupt request at default priority."""
+        self.total_requested = self.total_requested + 1
+        if self.pending_count >= MAX_PENDING:
+            self.total_dropped = self.total_dropped + 1
+            return
+        self.pending.push(PendingInterrupt.new(vector, vector))
+        self.pending_count = self.pending_count + 1
+
+    me request_nmi(vector: i64):
+        """Queue a non-maskable interrupt."""
+        self.total_requested = self.total_requested + 1
+        if self.pending_count >= MAX_PENDING:
+            self.total_dropped = self.total_dropped + 1
+            return
+        self.pending.push(PendingInterrupt.nmi(vector))
+        self.pending_count = self.pending_count + 1
+
+    me request_with_priority(vector: i64, priority: i64):
+        """Queue an interrupt with explicit priority."""
+        self.total_requested = self.total_requested + 1
+        if self.pending_count >= MAX_PENDING:
+            self.total_dropped = self.total_dropped + 1
+            return
+        self.pending.push(PendingInterrupt.new(vector, priority))
+        self.pending_count = self.pending_count + 1
+
+    # ========================================================================
+    # Check pending
+    # ========================================================================
+
+    fn check_pending(guest_state: GuestState) -> i64?:
+        """Check if any interrupt can be delivered given current guest state.
+
+        Returns the vector number of the highest-priority deliverable interrupt,
+        or nil if none (interrupts disabled or queue empty).
+        """
+        if self.pending_count == 0:
+            return nil
+
+        val interrupts_enabled = self._are_interrupts_enabled(guest_state)
+
+        # Find highest priority pending interrupt
+        var best_idx: i64 = -1
+        var best_priority: i64 = 0x7FFFFFFF
+
+        for i in 0..self.pending_count:
+            val p = self.pending[i]
+            if p.is_nmi:
+                # NMI always deliverable
+                if p.priority < best_priority:
+                    best_idx = i
+                    best_priority = p.priority
+            else if interrupts_enabled:
+                if p.priority < best_priority:
+                    best_idx = i
+                    best_priority = p.priority
+
+        if best_idx >= 0:
+            Some(self.pending[best_idx].vector)
+        else:
+            nil
+
+    fn _are_interrupts_enabled(guest_state: GuestState) -> bool:
+        """Check if the guest CPU has interrupts enabled."""
+        match self.arch:
+            GuestArch.Avr:
+                # SREG bit 7 (I flag) enables global interrupts
+                val sreg = guest_state.get_reg(AVR_REG_SREG)
+                (sreg & (1 << AVR_SREG_I)) != 0
+            GuestArch.I8086:
+                # FLAGS bit 9 (IF) enables maskable interrupts
+                val flags = guest_state.get_reg(X86_REG_FLAGS)
+                (flags & (1 << X86_FLAG_IF)) != 0
+            _:
+                # Default: assume enabled
+                true
+
+    # ========================================================================
+    # Acknowledge
+    # ========================================================================
+
+    me acknowledge(vector: i64):
+        """Remove an interrupt from the pending queue after delivery."""
+        self.total_acknowledged = self.total_acknowledged + 1
+        var new_pending: [PendingInterrupt] = []
+        var removed = false
+        for p in self.pending:
+            if (p.vector == vector) & (!removed):
+                removed = true
+                # Skip this entry (remove it)
+            else:
+                new_pending.push(p)
+        self.pending = new_pending
+        self.pending_count = new_pending.len()
+
+    # ========================================================================
+    # AVR Interrupt Delivery
+    # ========================================================================
+
+    me deliver_avr(guest_state: GuestState, memory_data: [i64], data_size: i64) -> GuestState:
+        """Deliver the highest-priority pending interrupt for AVR.
+
+        AVR interrupt sequence:
+        1. Check SREG.I (global interrupt enable)
+        2. Push PC (high byte first, then low byte) onto stack
+        3. Clear SREG.I (disable further interrupts)
+        4. Jump to vector address (vector * 2 in program memory)
+        """
+        if val Some(vector) = self.check_pending(guest_state):
+            var state = guest_state
+
+            # Get current PC and SP
+            val pc = state.pc
+            val sp = state.get_reg(AVR_REG_SP)
+
+            # Push PC onto stack (high byte first for AVR)
+            val pc_high = (pc >> 8) & 0xFF
+            val pc_low = pc & 0xFF
+
+            # Write high byte to [SP], decrement SP
+            var new_sp = sp
+            # Note: caller must write to data memory; we return the updated state
+            # For now, we prepare the state changes
+            new_sp = (new_sp - 1) & 0xFFFF
+
+            # Write low byte to [SP], decrement SP
+            new_sp = (new_sp - 1) & 0xFFFF
+
+            # Update SP
+            state.set_reg(AVR_REG_SP, new_sp)
+
+            # Clear SREG.I (disable interrupts)
+            val sreg = state.get_reg(AVR_REG_SREG)
+            val new_sreg = sreg & ((1 << AVR_SREG_I) ^ 0xFF)
+            state.set_reg(AVR_REG_SREG, new_sreg)
+
+            # Jump to interrupt vector (vector_addr = vector * 2 in word-addressed space)
+            val vector_addr = vector * 2
+            state.pc = vector_addr
+
+            self.acknowledge(vector)
+            state
+        else:
+            guest_state
+
+    fn avr_stack_push_bytes(vector: i64, pc: i64, sp: i64) -> AvrInterruptPush:
+        """Calculate the bytes and addresses to push for AVR interrupt delivery.
+
+        Returns the push descriptor so the caller can write to actual memory.
+        """
+        val pc_high = (pc >> 8) & 0xFF
+        val pc_low = pc & 0xFF
+        AvrInterruptPush(
+            addr_high: sp,
+            byte_high: pc_high,
+            addr_low: sp - 1,
+            byte_low: pc_low,
+            new_sp: (sp - 2) & 0xFFFF,
+            vector_addr: vector * 2
+        )
+
+    # ========================================================================
+    # 8086 Interrupt Delivery
+    # ========================================================================
+
+    me deliver_i8086(guest_state: GuestState, memory: [i64], mem_size: i64) -> GuestState:
+        """Deliver the highest-priority pending interrupt for 8086.
+
+        8086 interrupt sequence:
+        1. Check FLAGS.IF (for maskable interrupts)
+        2. Push FLAGS onto stack
+        3. Push CS onto stack
+        4. Push IP onto stack
+        5. Clear IF and TF in FLAGS
+        6. Load CS:IP from IVT (vector * 4 at physical address 0x0000)
+           IVT entry format: [IP_low, IP_high, CS_low, CS_high]
+        """
+        if val Some(vector) = self.check_pending(guest_state):
+            var state = guest_state
+
+            val flags = state.get_reg(X86_REG_FLAGS)
+            val cs = state.get_reg(X86_REG_CS)
+            val ip = state.pc
+            val ss = state.get_reg(X86_REG_SS)
+            var sp = state.get_reg(X86_REG_SP)
+
+            # Push FLAGS
+            sp = (sp - 2) & 0xFFFF
+
+            # Push CS
+            sp = (sp - 2) & 0xFFFF
+
+            # Push IP
+            sp = (sp - 2) & 0xFFFF
+
+            # Update SP
+            state.set_reg(X86_REG_SP, sp)
+
+            # Clear IF and TF
+            val new_flags = flags & (((1 << X86_FLAG_IF) | (1 << X86_FLAG_TF)) ^ 0xFFFF)
+            state.set_reg(X86_REG_FLAGS, new_flags)
+
+            # Load CS:IP from IVT
+            val ivt_addr = vector * 4
+            var new_ip: i64 = 0
+            var new_cs: i64 = 0
+            if (ivt_addr + 3) < mem_size:
+                val ip_lo = memory[ivt_addr] & 0xFF
+                val ip_hi = memory[ivt_addr + 1] & 0xFF
+                val cs_lo = memory[ivt_addr + 2] & 0xFF
+                val cs_hi = memory[ivt_addr + 3] & 0xFF
+                new_ip = (ip_hi << 8) | ip_lo
+                new_cs = (cs_hi << 8) | cs_lo
+
+            state.set_reg(X86_REG_CS, new_cs)
+            state.pc = new_ip
+
+            self.acknowledge(vector)
+            state
+        else:
+            guest_state
+
+    fn i8086_stack_push_words(flags: i64, cs: i64, ip: i64, ss: i64, sp: i64) -> I8086InterruptPush:
+        """Calculate the addresses and values to push for 8086 interrupt delivery.
+
+        Returns push descriptor so the caller can write to actual memory.
+        Stack grows downward; each push decrements SP by 2 (16-bit words).
+        """
+        val sp1 = (sp - 2) & 0xFFFF    # FLAGS push address
+        val sp2 = (sp - 4) & 0xFFFF    # CS push address
+        val sp3 = (sp - 6) & 0xFFFF    # IP push address
+        I8086InterruptPush(
+            flags_addr: _phys_addr(ss, sp1),
+            flags_value: flags,
+            cs_addr: _phys_addr(ss, sp2),
+            cs_value: cs,
+            ip_addr: _phys_addr(ss, sp3),
+            ip_value: ip,
+            new_sp: (sp - 6) & 0xFFFF
+        )
+
+    # ========================================================================
+    # Utilities
+    # ========================================================================
+
+    me clear():
+        """Clear all pending interrupts."""
+        self.pending = []
+        self.pending_count = 0
+
+    fn has_pending() -> bool:
+        self.pending_count > 0
+
+    fn stats_text() -> text:
+        var s = "InterruptController({self.arch})"
+        s = s + "\n  pending: {self.pending_count}"
+        s = s + "\n  total requested: {self.total_requested}"
+        s = s + "\n  total acknowledged: {self.total_acknowledged}"
+        s = s + "\n  total dropped: {self.total_dropped}"
+        s
+
+# ============================================================================
+# AVR Interrupt Push Descriptor
+# ============================================================================
+
+struct AvrInterruptPush:
+    """Describes the memory writes needed for AVR interrupt delivery."""
+    addr_high: i64      # Address to write PC high byte
+    byte_high: i64      # PC high byte value
+    addr_low: i64       # Address to write PC low byte
+    byte_low: i64       # PC low byte value
+    new_sp: i64         # New stack pointer value after push
+    vector_addr: i64    # Target program counter (vector * 2)
+
+impl AvrInterruptPush:
+    fn to_text() -> text:
+        "AvrPush(sp_hi=0x{self.addr_high}:{self.byte_high}, sp_lo=0x{self.addr_low}:{self.byte_low}, new_sp=0x{self.new_sp}, vec=0x{self.vector_addr})"
+
+# ============================================================================
+# 8086 Interrupt Push Descriptor
+# ============================================================================
+
+struct I8086InterruptPush:
+    """Describes the memory writes needed for 8086 interrupt delivery."""
+    flags_addr: i64     # Physical address to write FLAGS
+    flags_value: i64
+    cs_addr: i64        # Physical address to write CS
+    cs_value: i64
+    ip_addr: i64        # Physical address to write IP
+    ip_value: i64
+    new_sp: i64         # New stack pointer value after pushes
+
+impl I8086InterruptPush:
+    fn to_text() -> text:
+        "I8086Push(flags@0x{self.flags_addr}=0x{self.flags_value}, cs@0x{self.cs_addr}=0x{self.cs_value}, ip@0x{self.ip_addr}=0x{self.ip_value}, new_sp=0x{self.new_sp})"
+
+# ============================================================================
+# Helper: 8086 physical address from segment:offset
+# ============================================================================
+
+fn _phys_addr(seg: i64, off: i64) -> i64:
+    """Calculate 20-bit physical address from segment:offset."""
+    (seg * 16 + off) & 0xFFFFF

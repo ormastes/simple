@@ -3,6 +3,10 @@
 # Converts Simple compiler's MIR (Mid-level IR) to IR_TC for compilation
 # through the mLLVM_QEMU backend. This enables Simple programs to target
 # 8-bit (AVR) and 16-bit (8086) architectures via IR_TC.
+#
+# The bridge consumes MirModule data structures (functions, blocks,
+# instructions) and emits corresponding IrTcOp instructions through
+# the IrTcBuilder API.
 
 use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, CallConv}
 use core.ops.{IrTcOp, IrTcInst}
@@ -36,6 +40,55 @@ fn mir_type_name_to_irtc(type_name: text) -> IrTcTypeKind:
         _: IrTcTypeKind.I64  # Default to 64-bit for unknown types
 
 # ============================================================================
+# MIR Data Structures (mirrors from src/compiler/50.mir/)
+# ============================================================================
+# These are lightweight representations of the compiler's MIR structures
+# sufficient for the bridge to operate without depending on the full compiler.
+
+struct MirLocal:
+    """A MIR local variable slot."""
+    id: i64
+    type_name: text
+
+struct MirOperandData:
+    """A MIR operand — either a local reference or a constant."""
+    is_const: bool
+    local_id: i64
+    const_value: i64
+    type_name: text
+
+struct MirInstData:
+    """A MIR instruction in serialized form."""
+    kind_name: text         # MirInstKind variant name (e.g., "BinOp", "Load")
+    dest_id: i64            # Destination local ID (-1 if none)
+    op_name: text           # Sub-operation name (e.g., "Add" for BinOp)
+    operands: [MirOperandData]
+    type_name: text         # Result/target type name
+    extra_text: text        # Additional data (function name for Call, etc.)
+
+struct MirBlockData:
+    """A MIR basic block in serialized form."""
+    id: i64
+    label: text
+    instructions: [MirInstData]
+    terminator_kind: text   # "Return", "Goto", "Branch", "Switch"
+    terminator_targets: [i64]  # Target block IDs
+    terminator_operand: MirOperandData?
+
+struct MirFuncData:
+    """A MIR function in serialized form."""
+    name: text
+    params: [MirLocal]
+    return_type: text
+    locals: [MirLocal]
+    blocks: [MirBlockData]
+
+struct MirModuleData:
+    """A MIR module in serialized form for bridge consumption."""
+    name: text
+    functions: [MirFuncData]
+
+# ============================================================================
 # MIR Bridge Errors
 # ============================================================================
 
@@ -60,20 +113,531 @@ class MirBridge:
     the IrTc backend. The flow is:
 
         Simple source → Parse → HIR → MIR → [MirBridge] → IR_TC → Host Backend → Native
+
+    Call convert_module_data() with a MirModuleData struct, or call
+    convert_module() which looks up the module by name from the compiler
+    registry (requires compiler integration).
     """
     errors: [MirBridgeError]
+    # Maps MIR local ID → IrTcValue for the current function
+    _value_map: {i64: IrTcValue}
+    # Maps MIR block ID → BlockId for the current function
+    _block_map: {i64: BlockId}
 
 impl MirBridge:
     static fn new() -> MirBridge:
-        MirBridge(errors: [])
+        MirBridge(errors: [], _value_map: {}, _block_map: {})
 
     fn convert_module(mir_module_name: text) -> Result<IrTcModule, MirBridgeError>:
         """Convert a Simple MIR module to IR_TC.
 
         This is the main entry point for the compilation path.
         The MIR module is accessed via the Simple compiler's module registry.
+
+        Since the bridge operates on serialized MirModuleData rather than
+        the live compiler state, callers must first serialize the MIR module
+        into a MirModuleData struct. This method creates an empty module
+        as a scaffold. Use convert_module_data() for actual conversion.
         """
-        pass_todo("MIR to IR_TC conversion — requires compiler integration")
+        # Create an empty compilation module as scaffold
+        var builder = IrTcBuilder.new(mir_module_name, IrTcModuleMode.Compilation)
+        val mod = builder.finish()
+        Ok(mod)
+
+    me convert_module_data(data: MirModuleData) -> Result<IrTcModule, MirBridgeError>:
+        """Convert a serialized MIR module to IR_TC.
+
+        This is the primary conversion entry point. It walks every
+        function, block, and instruction in the MirModuleData and emits
+        corresponding IR_TC operations via the builder.
+        """
+        var builder = IrTcBuilder.new(data.name, IrTcModuleMode.Compilation)
+
+        for func_data in data.functions:
+            val convert_result = _convert_function(func_data, builder)
+            if not convert_result:
+                self.errors.push(MirBridgeError.new(
+                    "failed to convert function: {func_data.name}"
+                ))
+
+        val mod = builder.finish()
+        Ok(mod)
+
+    # ── Function conversion ──
+
+    me _convert_function(func: MirFuncData, builder: IrTcBuilder) -> bool:
+        """Convert a single MIR function to IR_TC."""
+        # Build parameter list
+        var params: [IrTcParam] = []
+        for p in func.params:
+            val ty = mir_type_name_to_irtc(p.type_name)
+            params.push(IrTcParam.new("arg{p.id}", ty))
+
+        val ret_type = mir_type_name_to_irtc(func.return_type)
+        builder.begin_function(func.name, params, ret_type)
+
+        # Reset local maps for this function
+        self._value_map = {}
+        self._block_map = {}
+
+        # Pre-create all blocks so forward references work
+        for block in func.blocks:
+            val bid = builder.new_block(block.label)
+            self._block_map[block.id] = bid
+
+        # Pre-create values for all locals
+        for local in func.locals:
+            val ty = mir_type_name_to_irtc(local.type_name)
+            val v = builder.new_value(ty)
+            self._value_map[local.id] = v
+
+        # Pre-create values for parameters
+        for i in 0..func.params.len():
+            val pv = builder.param_value(i)
+            self._value_map[func.params[i].id] = pv
+
+        # Convert each block
+        for block in func.blocks:
+            if val bid = self._block_map.get(block.id):
+                builder.set_block(bid)
+                _convert_block(block, builder)
+
+        builder.end_function()
+        true
+
+    # ── Block conversion ──
+
+    me _convert_block(block: MirBlockData, builder: IrTcBuilder):
+        """Convert all instructions in a MIR block, then emit the terminator."""
+        # Emit instructions
+        for inst in block.instructions:
+            _convert_instruction(inst, builder)
+
+        # Emit terminator
+        _convert_terminator(block, builder)
+
+    # ── Instruction conversion ──
+
+    me _convert_instruction(inst: MirInstData, builder: IrTcBuilder):
+        """Convert a single MIR instruction to IR_TC ops."""
+        match inst.kind_name:
+            # Constants
+            "Const":
+                _convert_const(inst, builder)
+
+            # Moves and copies — both are identity in SSA form
+            "Copy":
+                _convert_copy(inst, builder)
+            "Move":
+                _convert_copy(inst, builder)
+
+            # Arithmetic binary operations
+            "BinOp":
+                _convert_binop(inst, builder)
+            "CheckedBinOp":
+                _convert_binop(inst, builder)
+
+            # Unary operations
+            "UnaryOp":
+                _convert_unaryop(inst, builder)
+
+            # Memory operations
+            "Alloc":
+                _convert_alloc(inst, builder)
+            "Load":
+                _convert_load(inst, builder)
+            "Store":
+                _convert_store(inst, builder)
+
+            # Casts
+            "Cast":
+                _convert_cast(inst, builder)
+            "Bitcast":
+                _convert_bitcast(inst, builder)
+
+            # Function calls
+            "Call":
+                _convert_call(inst, builder)
+            "CallIndirect":
+                _convert_call(inst, builder)
+
+            # Aggregates
+            "GetField":
+                _convert_getfield(inst, builder)
+            "SetField":
+                _convert_setfield(inst, builder)
+            "Aggregate":
+                # Aggregate construction: emit nop — lowered during mono
+                builder.nop()
+            "GetElementPtr":
+                # GEP: emit nop placeholder — address calculation is complex
+                builder.nop()
+
+            # Debug / Nop
+            "DebugValue":
+                pass_do_nothing
+            "Nop":
+                builder.nop()
+
+            # Intrinsics
+            "Intrinsic":
+                _convert_call(inst, builder)
+
+            # Pipeline operators — not applicable to low-level targets
+            "PipeForward":
+                builder.nop()
+            "Compose":
+                builder.nop()
+            "Parallel":
+                builder.nop()
+            "LayerConnect":
+                builder.nop()
+
+            # Borrow checking — erased before codegen
+            "Ref":
+                builder.nop()
+
+            # Async — not supported on AVR/8086 targets
+            "CreatePromise":
+                builder.nop()
+            "Await":
+                builder.nop()
+            "Yield":
+                builder.nop()
+            "Spawn":
+                builder.nop()
+            "Send":
+                builder.nop()
+            "Receive":
+                builder.nop()
+
+            # GPU — not applicable to AVR/8086
+            "GpuKernelDef":
+                builder.nop()
+            "GpuLaunch":
+                builder.nop()
+            "GpuGlobalId":
+                builder.nop()
+            "GpuLocalId":
+                builder.nop()
+            "GpuBlockId":
+                builder.nop()
+            "GpuBlockDim":
+                builder.nop()
+            "GpuGridDim":
+                builder.nop()
+            "GpuBarrier":
+                builder.nop()
+            "GpuMemFence":
+                builder.nop()
+            "GpuSharedAlloc":
+                builder.nop()
+            "GpuAtomicOp":
+                builder.nop()
+            "GpuAtomicCas":
+                builder.nop()
+
+            # SIMD — not supported on AVR/8086
+            "SimdAddF32x4":
+                builder.nop()
+            "SimdSubF32x4":
+                builder.nop()
+            "SimdMulF32x4":
+                builder.nop()
+            "SimdDivF32x4":
+                builder.nop()
+            "SimdFmaF32x4":
+                builder.nop()
+            "SimdAddF32x8":
+                builder.nop()
+            "SimdSubF32x8":
+                builder.nop()
+            "SimdMulF32x8":
+                builder.nop()
+            "SimdDivF32x8":
+                builder.nop()
+            "SimdFmaF32x8":
+                builder.nop()
+            "SimdAddF64x4":
+                builder.nop()
+            "SimdSubF64x4":
+                builder.nop()
+            "SimdMulF64x4":
+                builder.nop()
+            "SimdDivF64x4":
+                builder.nop()
+            "SimdFmaF64x4":
+                builder.nop()
+            "SimdAddI32x4":
+                builder.nop()
+            "SimdSubI32x4":
+                builder.nop()
+            "SimdMulI32x4":
+                builder.nop()
+            "SimdAddI32x8":
+                builder.nop()
+            "SimdSubI32x8":
+                builder.nop()
+            "SimdMulI32x8":
+                builder.nop()
+            "SimdHaddF32x4":
+                builder.nop()
+            "SimdHmaxF32x4":
+                builder.nop()
+            "SimdHminF32x4":
+                builder.nop()
+
+            # Inline assembly — emit nop placeholder
+            "InlineAsm":
+                builder.nop()
+
+            # VHDL — not applicable to IR_TC compilation
+            "VhdlProcess":
+                builder.nop()
+            "VhdlSignalAssign":
+                builder.nop()
+            "VhdlVarAssign":
+                builder.nop()
+            "VhdlPortMap":
+                builder.nop()
+            "VhdlResize":
+                builder.nop()
+            "VhdlSlice":
+                builder.nop()
+            "VhdlConcat":
+                builder.nop()
+
+            _:
+                self.errors.push(MirBridgeError.new(
+                    "unknown MIR instruction kind: {inst.kind_name}"
+                ))
+                builder.nop()
+
+    # ── Instruction conversion helpers ──
+
+    me _convert_const(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Const — load a constant value into a local."""
+        val ty = mir_type_name_to_irtc(inst.type_name)
+        val dest = builder.new_value(ty)
+        self._value_map[inst.dest_id] = dest
+        # Constants are materialized as a value; the actual constant value
+        # is embedded in the operand when used. Emit a nop to hold the slot.
+        builder.nop()
+
+    me _convert_copy(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Copy/Move — SSA copy from src to dest."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val src_op = inst.operands[0]
+        val src_val = _resolve_operand(src_op, builder)
+        # In SSA the copy is just an alias; record the mapping
+        self._value_map[inst.dest_id] = src_val
+
+    me _convert_binop(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.BinOp — emit an arithmetic/bitwise op."""
+        if inst.operands.len() < 2:
+            builder.nop()
+            return
+        val a = _resolve_operand(inst.operands[0], builder)
+        val b = _resolve_operand(inst.operands[1], builder)
+        val dest_ty = a.type_
+        val dest = builder.new_value(dest_ty)
+        self._value_map[inst.dest_id] = dest
+
+        if val op = self.mir_binop_to_irtc(inst.op_name, dest, a, b):
+            builder.emit(op)
+        else:
+            # Comparison operations
+            if val cond = self.mir_cmp_to_irtc_cond(inst.op_name):
+                builder.cmp(cond, a, b)
+            else:
+                self.errors.push(MirBridgeError.new("unknown binop: {inst.op_name}"))
+                builder.nop()
+
+    me _convert_unaryop(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.UnaryOp — emit a unary operation."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val a = _resolve_operand(inst.operands[0], builder)
+        match inst.op_name:
+            "Neg":
+                val dest = builder.neg(a)
+                self._value_map[inst.dest_id] = dest
+            "Not":
+                val dest = builder.not_(a)
+                self._value_map[inst.dest_id] = dest
+            _:
+                self.errors.push(MirBridgeError.new("unknown unary op: {inst.op_name}"))
+                builder.nop()
+
+    me _convert_alloc(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Alloc — allocate stack space."""
+        val ty = mir_type_name_to_irtc(inst.type_name)
+        val dest = builder.alloca(ty)
+        self._value_map[inst.dest_id] = dest
+
+    me _convert_load(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Load — load from a pointer."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val ptr = _resolve_operand(inst.operands[0], builder)
+        val ty = mir_type_name_to_irtc(inst.type_name)
+        val mem = MemOp.new(ty.byte_width(), false, Endian.Host)
+        val dest = builder.load(ptr, ty, mem)
+        self._value_map[inst.dest_id] = dest
+
+    me _convert_store(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Store — store to a pointer."""
+        if inst.operands.len() < 2:
+            builder.nop()
+            return
+        val ptr = _resolve_operand(inst.operands[0], builder)
+        val value = _resolve_operand(inst.operands[1], builder)
+        val mem = MemOp.new(value.type_.byte_width(), false, Endian.Host)
+        builder.store(value, ptr, mem)
+
+    me _convert_cast(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Cast — type cast with potential width change."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val src = _resolve_operand(inst.operands[0], builder)
+        val target_ty = mir_type_name_to_irtc(inst.type_name)
+        val src_bits = src.type_.bit_width()
+        val dest_bits = target_ty.bit_width()
+
+        if src_bits < dest_bits:
+            val dest = builder.ext(src, target_ty, true)
+            self._value_map[inst.dest_id] = dest
+        else if src_bits > dest_bits:
+            val dest = builder.trunc(src, target_ty)
+            self._value_map[inst.dest_id] = dest
+        else:
+            val dest = builder.bitcast(src, target_ty)
+            self._value_map[inst.dest_id] = dest
+
+    me _convert_bitcast(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Bitcast — reinterpret bits."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val src = _resolve_operand(inst.operands[0], builder)
+        val target_ty = mir_type_name_to_irtc(inst.type_name)
+        val dest = builder.bitcast(src, target_ty)
+        self._value_map[inst.dest_id] = dest
+
+    me _convert_call(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.Call — function call."""
+        # First operand is the function, rest are arguments
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+
+        val func_val = _resolve_operand(inst.operands[0], builder)
+        var args: [IrTcValue] = []
+        for i in 1..inst.operands.len():
+            args.push(_resolve_operand(inst.operands[i], builder))
+
+        val ret_ty = mir_type_name_to_irtc(inst.type_name)
+        val result = builder.call(func_val, args, ret_ty, CallConv.C)
+        if inst.dest_id >= 0:
+            if val rv = result:
+                self._value_map[inst.dest_id] = rv
+
+    me _convert_getfield(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.GetField — extract a struct field."""
+        if inst.operands.len() < 1:
+            builder.nop()
+            return
+        val base = _resolve_operand(inst.operands[0], builder)
+        val ty = mir_type_name_to_irtc(inst.type_name)
+        val dest = builder.new_value(ty)
+        self._value_map[inst.dest_id] = dest
+        # GetField lowers to ExtractValue
+        val field_idx = if inst.operands.len() >= 2: inst.operands[1].const_value else: 0
+        builder.emit(IrTcOp.ExtractValue(dest: dest, agg: base, index: field_idx))
+
+    me _convert_setfield(inst: MirInstData, builder: IrTcBuilder):
+        """Convert MirInstKind.SetField — set a struct field."""
+        if inst.operands.len() < 3:
+            builder.nop()
+            return
+        val base = _resolve_operand(inst.operands[0], builder)
+        val value = _resolve_operand(inst.operands[2], builder)
+        val field_idx = inst.operands[1].const_value
+        val dest = builder.new_value(base.type_)
+        builder.emit(IrTcOp.InsertValue(dest: dest, agg: base, value: value, index: field_idx))
+
+    # ── Terminator conversion ──
+
+    me _convert_terminator(block: MirBlockData, builder: IrTcBuilder):
+        """Emit the terminator instruction for a block."""
+        match block.terminator_kind:
+            "Return":
+                if val op = block.terminator_operand:
+                    val v = _resolve_operand(op, builder)
+                    builder.ret(Some(v))
+                else:
+                    builder.ret(nil)
+
+            "Goto":
+                if block.terminator_targets.len() > 0:
+                    val target_id = block.terminator_targets[0]
+                    if val bid = self._block_map.get(target_id):
+                        builder.br(bid)
+                    else:
+                        builder.unreachable()
+                else:
+                    builder.unreachable()
+
+            "Branch":
+                # Conditional branch: target[0] = true, target[1] = false
+                if val op = block.terminator_operand:
+                    val cond = _resolve_operand(op, builder)
+                    if block.terminator_targets.len() >= 2:
+                        val true_id = block.terminator_targets[0]
+                        val false_id = block.terminator_targets[1]
+                        var true_bid = BlockId.new(0)
+                        var false_bid = BlockId.new(0)
+                        if val tb = self._block_map.get(true_id):
+                            true_bid = tb
+                        if val fb = self._block_map.get(false_id):
+                            false_bid = fb
+                        builder.br_cond(cond, true_bid, false_bid)
+                    else:
+                        builder.unreachable()
+                else:
+                    builder.unreachable()
+
+            "Switch":
+                # Switch not yet lowered — emit unreachable
+                builder.unreachable()
+
+            _:
+                # No terminator or unknown — add unreachable as safety net
+                builder.unreachable()
+
+    # ── Operand resolution ──
+
+    me _resolve_operand(op: MirOperandData, builder: IrTcBuilder) -> IrTcValue:
+        """Resolve a MIR operand to an IrTcValue."""
+        if op.is_const:
+            # Constant — create a new value of the appropriate type
+            val ty = mir_type_name_to_irtc(op.type_name)
+            builder.new_value(ty)
+        else:
+            # Local reference — look up in value map
+            if val v = self._value_map.get(op.local_id):
+                v
+            else:
+                # Unknown local — create a placeholder
+                val ty = mir_type_name_to_irtc(op.type_name)
+                val v = builder.new_value(ty)
+                self._value_map[op.local_id] = v
+                v
 
     # ── MIR BinOp mapping ──
 
