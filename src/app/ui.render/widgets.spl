@@ -117,9 +117,9 @@ fn render_tui_tree_node_rows(screen: Screen, node: WidgetNode, x: i32, y: i32, w
     var marker = "  "
     if has_children:
         if expanded == "true":
-            marker = "v "
+            marker = "\u{25bc} "
         else:
-            marker = "> "
+            marker = "\u{25b6} "
 
     val line = "{indent}{marker}{label}"
     val style = if focused: get_theme_color(theme, "list_selected") else: get_theme_color(theme, "list_item")
@@ -307,7 +307,8 @@ fn render_tui_table(screen: Screen, node: WidgetNode, rect: WidgetRect, focused:
 
 fn render_tui_progress(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
     val value_str = node.get_prop("value")
-    val value = if value_str != "": value_str.to_int() else: 0
+    var raw_val = if value_str != "": value_str.to_int() else: 0
+    val value = if raw_val < 0: 0 elif raw_val > 100: 100 else: raw_val
     val label = node.get_prop("label")
     val pct_text = " {value}%"
     val label_w = if label != "": label.len() + 1 else: 0
@@ -387,9 +388,15 @@ fn render_tui_input(screen: Screen, node: WidgetNode, rect: WidgetRect, focused:
     val value = node.get_prop("value")
     val display = if value != "": value elif placeholder != "": placeholder else: ""
     val is_error = node.get_prop("error") == "true"
+    val is_readonly = node.get_prop("readonly") == "true"
+    val is_disabled = node.get_prop("disabled") == "true"
     var s = screen
-    val style = if is_error:
+    val style = if is_disabled:
+        get_theme_color(theme, "disabled")
+    elif is_error:
         get_theme_color(theme, "error_fg")
+    elif is_readonly:
+        get_theme_color(theme, "readonly")
     elif focused:
         get_theme_color(theme, "input_focused")
     else:
@@ -827,7 +834,7 @@ fn render_html_tree_node(node: WidgetNode, state: UIState) -> text:
 
     var toggle_html = ""
     if has_children:
-        val toggle_marker = if expanded == "true": "v" else: ">"
+        val toggle_marker = if expanded == "true": "\u{25bc}" else: "\u{25b6}"
         toggle_html = "<span class=\"tree-toggle\" data-action=\"toggle_{node.id}\">{toggle_marker}</span>"
 
     var children_html = ""
@@ -933,8 +940,8 @@ fn render_html_progress(node: WidgetNode, focus_class: text) -> text:
     val value_str = node.get_prop("value")
     val value = if value_str != "": value_str else: "0"
     val label = node.get_prop("label")
-    val label_html = if label != "": "<span class=\"progress-label\">{label}</span>" else: ""
-    return "<div class=\"widget-progress{focus_class}\" id=\"{node.id}\">{label_html}<div style=\"flex:1;background:{if value_str != \"\": \"#45475a\" else: \"#45475a\"};border-radius:4px;height:8px;overflow:hidden\"><div class=\"progress-bar\" style=\"width: {value}%\"></div></div><span>{value}%</span></div>"
+    val label_html = if label != "": "<div class=\"widget-text\" style=\"font-size:12px;margin-bottom:4px;\">{label}</div>" else: ""
+    return "{label_html}<div class=\"widget-progress{focus_class}\" id=\"{node.id}\"><div class=\"progress-bar\" style=\"width: {value}%\"></div><span class=\"progress-label\">{value}%</span></div>"
 
 fn render_html_menubar(node: WidgetNode, state: UIState) -> text:
     var items_html = ""
@@ -949,8 +956,12 @@ fn render_html_menubar(node: WidgetNode, state: UIState) -> text:
             for sub_child in child.children():
                 val sub_label = sub_child.get_prop("label")
                 val sub_action = sub_child.get_prop("action")
-                submenu_html = "{submenu_html}<li class=\"submenu-item\" data-action=\"{sub_action}\">{sub_label}</li>"
-            items_html = "{items_html}<span class=\"menu-item has-submenu\">{label} \u{25be}<ul class=\"submenu\">{submenu_html}</ul></span>"
+                val is_sep = sub_child.get_prop("is_separator")
+                if is_sep == "true":
+                    submenu_html = "{submenu_html}<div class=\"menu-separator\"></div>"
+                else:
+                    submenu_html = "{submenu_html}<div class=\"submenu-item\" data-action=\"{sub_action}\">{sub_label}</div>"
+            items_html = "{items_html}<div class=\"menu-item\">{label}<div class=\"menu-submenu\">{submenu_html}</div></div>"
         else:
             items_html = "{items_html}<span class=\"menu-item\">{label}</span>"
     return "<div class=\"widget-menubar\" id=\"{node.id}\">{items_html}</div>"
@@ -962,7 +973,14 @@ fn render_html_statusbar(node: WidgetNode, state: UIState) -> text:
 
 fn render_html_input(node: WidgetNode, focus_class: text) -> text:
     val placeholder = node.get_prop("placeholder")
-    return "<input class=\"widget-input{focus_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\" />"
+    val value = node.get_prop("value")
+    val is_error = node.get_prop("error") == "true"
+    val is_readonly = node.get_prop("readonly") == "true"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val error_class = if is_error: " error" else: ""
+    val readonly_attr = if is_readonly: " readonly" else: ""
+    val disabled_attr = if is_disabled: " disabled" else: ""
+    return "<input class=\"widget-input{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{readonly_attr}{disabled_attr} />"
 
 fn render_html_tabs(node: WidgetNode, focus_class: text) -> text:
     val active_idx_str = node.get_prop("active_index")
@@ -985,25 +1003,41 @@ fn render_html_button(node: WidgetNode, focus_class: text) -> text:
     val action = node.get_prop("action")
     val is_disabled = node.get_prop("disabled") == "true"
     val disabled_attr = if is_disabled: " disabled" else: ""
-    return "<button class=\"widget-button{focus_class}\" id=\"{node.id}\" data-action=\"{action}\"{disabled_attr}>{label}</button>"
+    return "<button type=\"button\" class=\"widget-button{focus_class}\" id=\"{node.id}\" data-action=\"{action}\"{disabled_attr}>{label}</button>"
 
 fn render_html_checkbox(node: WidgetNode, focus_class: text) -> text:
     val label = node.get_prop("label")
     val checked = node.get_prop("checked")
-    val checked_attr = if checked == "true": " checked" else: ""
-    return "<label class=\"widget-checkbox{focus_class}\" id=\"{node.id}\"><input type=\"checkbox\"{checked_attr} />{label}</label>"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val checked_class = if checked == "true": " checked" else: ""
+    val disabled_class = if is_disabled: " disabled" else: ""
+    val check_mark = if checked == "true": "\u{2713}" else: ""
+    return "<div class=\"widget-checkbox{checked_class}{disabled_class}{focus_class}\" id=\"{node.id}\" data-action=\"toggle_{node.id}\"><div class=\"check-box\">{check_mark}</div><span>{label}</span></div>"
 
 fn render_html_dropdown(node: WidgetNode, focus_class: text) -> text:
+    val is_disabled = node.get_prop("disabled") == "true"
+    val disabled_attr = if is_disabled: " disabled" else: ""
+    val sel_str = node.get_prop("selected_index")
+    var sel_idx = if sel_str != "": sel_str.to_int() else: 0
     var options_html = ""
+    var idx = 0
     for child in node.children():
         val label = child.get_prop("label")
-        options_html = "{options_html}<option>{label}</option>"
-    return "<select class=\"widget-dropdown{focus_class}\" id=\"{node.id}\">{options_html}</select>"
+        val selected_attr = if idx == sel_idx: " selected" else: ""
+        options_html = "{options_html}<option{selected_attr}>{label}</option>"
+        idx = idx + 1
+    return "<select class=\"widget-dropdown{focus_class}\" id=\"{node.id}\"{disabled_attr}>{options_html}</select>"
 
 fn render_html_textfield(node: WidgetNode, focus_class: text) -> text:
     val value = node.get_prop("value")
     val placeholder = node.get_prop("placeholder")
-    return "<input type=\"text\" class=\"widget-textfield{focus_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\" />"
+    val is_readonly = node.get_prop("readonly") == "true"
+    val is_disabled = node.get_prop("disabled") == "true"
+    val is_error = node.get_prop("error") == "true"
+    val readonly_attr = if is_readonly: " readonly" else: ""
+    val disabled_attr = if is_disabled: " disabled" else: ""
+    val error_class = if is_error: " error" else: ""
+    return "<input type=\"text\" class=\"widget-textfield{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{readonly_attr}{disabled_attr} />"
 
 fn render_html_image(node: WidgetNode, focus_class: text) -> text:
     val src = node.get_prop("src")
@@ -1018,7 +1052,7 @@ fn render_html_dialog(node: WidgetNode, state: UIState, focus_class: text) -> te
     var children_html = ""
     for child in node.children():
         children_html = "{children_html}{render_html_widget(child, state)}"
-    return "<div class=\"widget-dialog{focus_class}\" id=\"{node.id}\"><div class=\"dialog-title\">{title}</div><div class=\"dialog-content\">{children_html}</div></div>"
+    return "<div class=\"widget-dialog-overlay\"><div class=\"widget-dialog{focus_class}\" id=\"{node.id}\"><div class=\"dialog-title\">{title}</div><div class=\"dialog-content\">{children_html}</div></div></div>"
 
 fn render_html_tooltip(node: WidgetNode, focus_class: text) -> text:
     val content = node.get_prop("content")
