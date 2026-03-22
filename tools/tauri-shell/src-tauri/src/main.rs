@@ -105,6 +105,8 @@ fn read_subprocess_stdout(
             continue;
         }
 
+        eprintln!("[tauri-shell] raw stdout: {}", trimmed);
+
         match serde_json::from_str::<SubprocessMessage>(trimmed) {
             Ok(msg) => handle_subprocess_message(msg, &app),
             Err(e) => {
@@ -162,7 +164,10 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                         }}
                     }})();
                 "#, escaped);
-                let _ = win.eval(&js);
+                match win.eval(&js) {
+                    Ok(_) => eprintln!("[tauri-shell] render applied to webview"),
+                    Err(err) => eprintln!("[tauri-shell] webview eval failed: {}", err),
+                }
             }
         }
         SubprocessMessage::Dialog {
@@ -279,11 +284,17 @@ fn main() {
     // Build subprocess command
     let mut cmd = Command::new(&simple_bin);
     if let Some(ref entry) = entry_file {
-        cmd.arg("run").arg(entry);
+        if entry.ends_with(".ui.sdn") {
+            cmd.arg("ui").arg("tauri").arg(entry);
+        } else {
+            cmd.arg("run").arg(entry);
+        }
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+
+    eprintln!("[tauri-shell] spawn command: {:?}", cmd);
 
     let mut child = cmd.spawn().unwrap_or_else(|e| {
         eprintln!(
