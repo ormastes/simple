@@ -143,35 +143,87 @@ fi
 
 release_dir="${repo_root}/bin/release"
 
-# Try new triple-based path first, then legacy <os>-<arch> path, then flat
-if [ -x "${release_dir}/${PLATFORM}/simple${exe}" ]; then
-  release_bin="${PLATFORM}/simple${exe}"
-elif [ -x "${release_dir}/${os}-${arch}/simple${exe}" ]; then
-  # Legacy 2-part naming (linux-x86_64, windows-x86_64, etc.)
-  release_bin="${os}-${arch}/simple${exe}"
-elif [ -x "${release_dir}/simple${exe}" ]; then
-  release_bin="simple${exe}"
-else
-  echo "error: no release binary found for ${PLATFORM}" >&2
-  echo "" >&2
-  echo "Searched:" >&2
-  echo "  ${release_dir}/${PLATFORM}/simple${exe}" >&2
-  echo "  ${release_dir}/${os}-${arch}/simple${exe}" >&2
-  echo "  ${release_dir}/simple${exe}" >&2
-  echo "" >&2
-  echo "Run the bootstrap first:" >&2
-  if [ "${os}" = "windows" ]; then
-    echo "  scripts/bootstrap/bootstrap-windows.sh --deploy" >&2
-  else
-    echo "  scripts/bootstrap/bootstrap-from-scratch.sh --deploy" >&2
+# Resolve a release binary: tries triple path, legacy path, flat path
+# Usage: find_release_bin <platform> <os> <arch> <ext>
+find_release_bin() {
+  local plat="$1" fos="$2" farch="$3" fext="$4"
+  if [ -f "${release_dir}/${plat}/simple${fext}" ]; then
+    echo "${plat}/simple${fext}"; return 0
+  elif [ -f "${release_dir}/${fos}-${farch}/simple${fext}" ]; then
+    echo "${fos}-${farch}/simple${fext}"; return 0
+  elif [ -f "${release_dir}/simple${fext}" ]; then
+    echo "simple${fext}"; return 0
   fi
-  exit 1
+  return 1
+}
+
+# On Windows, create two links: bin/simple → MinGW, bin/simple.exe → MSVC
+# On other platforms, create single link: bin/simple → release binary
+if [ "${os}" = "windows" ]; then
+  msvc_triple="${arch}-pc-windows-msvc"
+  mingw_triple="${arch}-pc-windows-gnu"
+
+  msvc_bin=""
+  mingw_bin=""
+
+  # Find MSVC binary
+  if find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
+    msvc_bin="$(find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe")"
+  fi
+
+  # Find MinGW binary
+  if find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
+    mingw_bin="$(find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe")"
+  fi
+
+  if [ -z "${msvc_bin}" ] && [ -z "${mingw_bin}" ]; then
+    echo "error: no release binary found for Windows" >&2
+    echo "" >&2
+    echo "Searched:" >&2
+    echo "  ${release_dir}/${msvc_triple}/simple.exe" >&2
+    echo "  ${release_dir}/${mingw_triple}/simple.exe" >&2
+    echo "  ${release_dir}/simple.exe" >&2
+    echo "" >&2
+    echo "Run the bootstrap first:" >&2
+    echo "  scripts/bootstrap/bootstrap-windows.sh --msvc --deploy" >&2
+    echo "  scripts/bootstrap/bootstrap-windows.sh --mingw --deploy" >&2
+    exit 1
+  fi
+
+  if [ -n "${msvc_bin}" ]; then
+    echo "MSVC binary:  bin/release/${msvc_bin}"
+  else
+    echo "warning: no MSVC binary found (${msvc_triple})" >&2
+  fi
+  if [ -n "${mingw_bin}" ]; then
+    echo "MinGW binary: bin/release/${mingw_bin}"
+  else
+    echo "warning: no MinGW binary found (${mingw_triple})" >&2
+  fi
+else
+  release_bin=""
+  if find_release_bin "${PLATFORM}" "${os}" "${arch}" "" >/dev/null 2>&1; then
+    release_bin="$(find_release_bin "${PLATFORM}" "${os}" "${arch}" "")"
+  fi
+
+  if [ -z "${release_bin}" ]; then
+    echo "error: no release binary found for ${PLATFORM}" >&2
+    echo "" >&2
+    echo "Searched:" >&2
+    echo "  ${release_dir}/${PLATFORM}/simple" >&2
+    echo "  ${release_dir}/${os}-${arch}/simple" >&2
+    echo "  ${release_dir}/simple" >&2
+    echo "" >&2
+    echo "Run the bootstrap first:" >&2
+    echo "  scripts/bootstrap/bootstrap-from-scratch.sh --deploy" >&2
+    exit 1
+  fi
+
+  echo "Release binary: bin/release/${release_bin}"
 fi
 
-echo "Release binary: bin/release/${release_bin}"
-
 # ===========================================================================
-# Create symlink
+# Create symlinks
 # ===========================================================================
 
 bin_dir="${repo_root}/bin"
@@ -180,27 +232,44 @@ if [ -n "${prefix}" ]; then
   mkdir -p "${bin_dir}"
 fi
 
-link_target="release/${release_bin}"
-link_path="${bin_dir}/simple${exe}"
+create_link() {
+  local target="$1" name="$2"
+  local lpath="${bin_dir}/${name}"
+  if [ -L "${lpath}" ] || [ -f "${lpath}" ]; then
+    rm -f "${lpath}"
+  fi
+  cd "${bin_dir}"
+  ln -sf "${target}" "${name}"
+  echo "  ${name} → ${target}"
+}
 
 if [ "${dry_run}" -eq 1 ]; then
   echo ""
   echo "[dry-run] would create:"
-  echo "  ${link_path} → ${link_target}"
+  if [ "${os}" = "windows" ]; then
+    [ -n "${mingw_bin}" ] && echo "  bin/simple → release/${mingw_bin}"
+    [ -n "${msvc_bin}" ]  && echo "  bin/simple.exe → release/${msvc_bin}"
+  else
+    echo "  bin/simple → release/${release_bin}"
+  fi
   exit 0
 fi
 
-# Remove existing link or file (but not if it's a directory)
-if [ -L "${link_path}" ] || [ -f "${link_path}" ]; then
-  rm -f "${link_path}"
-fi
-
-# Create symlink (relative so the repo is relocatable)
-cd "${bin_dir}"
-ln -sf "${link_target}" "simple${exe}"
-
 echo ""
-echo "Created: bin/simple${exe} → ${link_target}"
+echo "Creating links:"
+
+if [ "${os}" = "windows" ]; then
+  # bin/simple (no ext) → MinGW binary (for MSYS2 / Git Bash)
+  if [ -n "${mingw_bin}" ]; then
+    create_link "release/${mingw_bin}" "simple"
+  fi
+  # bin/simple.exe → MSVC binary (for CMD / PowerShell)
+  if [ -n "${msvc_bin}" ]; then
+    create_link "release/${msvc_bin}" "simple.exe"
+  fi
+else
+  create_link "release/${release_bin}" "simple"
+fi
 
 # Also create bin/release/simple → <platform>/simple symlink
 release_link_path="${release_dir}/simple${exe}"
@@ -217,13 +286,13 @@ echo "Created: bin/release/simple${exe} → ${release_link_target}"
 # Verify
 # ===========================================================================
 
-if [ -x "${link_path}" ] || [ "${os}" = "windows" ]; then
-  echo ""
-  echo "Verify:"
-  echo "  bin/simple${exe} --version"
+echo ""
+echo "Verify:"
+if [ "${os}" = "windows" ]; then
+  [ -n "${mingw_bin}" ] && echo "  bin/simple --version       (MinGW, for bash)"
+  [ -n "${msvc_bin}" ]  && echo "  bin\\simple.exe --version   (MSVC, for CMD)"
 else
-  echo ""
-  echo "warning: binary is not executable, run: chmod +x ${release_dir}/${release_bin}" >&2
+  echo "  bin/simple --version"
 fi
 
 echo ""

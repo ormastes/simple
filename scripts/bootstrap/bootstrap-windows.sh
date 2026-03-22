@@ -247,9 +247,11 @@ if [[ "${hash2}" != "${hash3}" ]]; then
 fi
 
 if (( deploy )); then
-  mkdir -p bin/release
-  cp "${stage3_bin}" "bin/release/simple.exe"
-  echo "Deployed verified binary to bin/release/simple.exe"
+  # Deploy to triple-specific directory
+  deploy_dir="bin/release/${PLATFORM}"
+  mkdir -p "${deploy_dir}"
+  cp "${stage3_bin}" "${deploy_dir}/simple.exe"
+  echo "Deployed verified binary to ${deploy_dir}/simple.exe"
 fi
 
 echo ""

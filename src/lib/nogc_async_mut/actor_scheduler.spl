@@ -4,7 +4,7 @@
 # Uses priority run queues with round-robin within each level.
 
 use mailbox.{
-    Mailbox, Mailbox.new, MailboxConfig.default,
+    Mailbox, MailboxConfig,
     SEND_SUCCESS, SendResult
 }
 use types.{ActorId, Reductions, Capacity, Count}
@@ -301,25 +301,37 @@ class ActorScheduler:
     me spawn_actor(name) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
-        val ctx = ActorContext.with_defaults(id, name, self.config.reductions_per_timeslice.value)
+        val cfg = self.config
+        val reductions_val = cfg.reductions_per_timeslice.value
+        val ctx = ActorContext.with_defaults(id, name, reductions_val)
         self.actors.push(ctx)
         self.run_queue.enqueue(id, ActorPriority.Normal)
-        self.stats.total_actors_created = Count(value: self.stats.total_actors_created.value + 1)
-        self.stats.current_actor_count = Count(value: self.stats.current_actor_count.value + 1)
-        if self.stats.current_actor_count.value > self.stats.peak_actor_count.value:
+        var st = self.stats
+        val created_val = st.total_actors_created.value
+        self.stats.total_actors_created = Count(value: created_val + 1)
+        val current_val = st.current_actor_count.value
+        self.stats.current_actor_count = Count(value: current_val + 1)
+        val peak_val = st.peak_actor_count.value
+        if current_val + 1 > peak_val:
             self.stats.peak_actor_count = self.stats.current_actor_count
         id
 
     me spawn_with_priority(name, priority: ActorPriority) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
-        var ctx = ActorContext.with_defaults(id, name, self.config.reductions_per_timeslice.value)
+        val cfg = self.config
+        val reductions_val = cfg.reductions_per_timeslice.value
+        var ctx = ActorContext.with_defaults(id, name, reductions_val)
         ctx.priority = priority
         self.actors.push(ctx)
         self.run_queue.enqueue(id, priority)
-        self.stats.total_actors_created = Count(value: self.stats.total_actors_created.value + 1)
-        self.stats.current_actor_count = Count(value: self.stats.current_actor_count.value + 1)
-        if self.stats.current_actor_count.value > self.stats.peak_actor_count.value:
+        var st = self.stats
+        val created_val = st.total_actors_created.value
+        self.stats.total_actors_created = Count(value: created_val + 1)
+        val current_val = st.current_actor_count.value
+        self.stats.current_actor_count = Count(value: current_val + 1)
+        val peak_val = st.peak_actor_count.value
+        if current_val + 1 > peak_val:
             self.stats.peak_actor_count = self.stats.current_actor_count
         id
 
@@ -334,8 +346,11 @@ class ActorScheduler:
             if act.id.value == id:
                 act.set_dead()
                 self.run_queue.remove(id)
-                self.stats.total_actors_terminated = Count(value: self.stats.total_actors_terminated.value + 1)
-                self.stats.current_actor_count = Count(value: self.stats.current_actor_count.value - 1)
+                var st = self.stats
+                val terminated_val = st.total_actors_terminated.value
+                self.stats.total_actors_terminated = Count(value: terminated_val + 1)
+                val current_val = st.current_actor_count.value
+                self.stats.current_actor_count = Count(value: current_val - 1)
                 return ()
         ()
 
@@ -348,13 +363,19 @@ class ActorScheduler:
             return false
         act.set_running()
         # Simulate running one timeslice worth of reductions
-        act.consume_reductions(self.config.reductions_per_timeslice.value)
-        act.reset_reductions(self.config.reductions_per_timeslice.value)
+        val cfg = self.config
+        val timeslice_reductions = cfg.reductions_per_timeslice.value
+        act.consume_reductions(timeslice_reductions)
+        act.reset_reductions(timeslice_reductions)
         act.set_runnable()
         self.run_queue.enqueue(aid, act.priority)
-        self.stats.total_context_switches = Count(value: self.stats.total_context_switches.value + 1)
-        self.stats.total_reductions_executed = Reductions(value: self.stats.total_reductions_executed.value + self.config.reductions_per_timeslice.value)
-        self.stats.total_timeslices = Count(value: self.stats.total_timeslices.value + 1)
+        var st = self.stats
+        val switches_val = st.total_context_switches.value
+        self.stats.total_context_switches = Count(value: switches_val + 1)
+        val reductions_val = st.total_reductions_executed.value
+        self.stats.total_reductions_executed = Reductions(value: reductions_val + timeslice_reductions)
+        val timeslices_val = st.total_timeslices.value
+        self.stats.total_timeslices = Count(value: timeslices_val + 1)
         true
 
     me run_n_timeslices(n: i64):
@@ -368,7 +389,8 @@ class ActorScheduler:
         not self.run_queue.is_empty()
 
     fn actor_count() -> i64:
-        self.stats.current_actor_count.value
+        val stats = self.stats
+        stats.current_actor_count.value
 
     me suspend_actor(id: i64):
         for act in self.actors:
@@ -389,14 +411,16 @@ class ActorScheduler:
     me send_message(id: i64, data_ref: i64, size: i64, sender) -> bool:
         for act in self.actors:
             if act.id.value == id:
-                val result = act.mailbox.send_normal(data_ref, size, sender)
+                val mb = act.mailbox
+                val result = mb.send_normal(data_ref, size, sender)
                 return result == SEND_SUCCESS
         false
 
     me send_high_priority(id: i64, data_ref: i64, size: i64, sender) -> bool:
         for act in self.actors:
             if act.id.value == id:
-                val result = act.mailbox.send_high(data_ref, size, sender)
+                val mb = act.mailbox
+                val result = mb.send_high(data_ref, size, sender)
                 return result == SEND_SUCCESS
         false
 
@@ -440,7 +464,10 @@ class ActorScheduler:
         )
 
     fn fmt() -> text:
-        "ActorScheduler(actors={self.stats.current_actor_count.value}, switches={self.stats.total_context_switches.value})"
+        val stats = self.stats
+        val actor_count = stats.current_actor_count.value
+        val switch_count = stats.total_context_switches.value
+        "ActorScheduler(actors={actor_count}, switches={switch_count})"
 
     static fn default() -> ActorScheduler:
         ActorScheduler.new(SchedulerConfig.default())

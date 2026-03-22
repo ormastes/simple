@@ -5,8 +5,8 @@
 # Uses copy-on-write strategy based on value size.
 
 use memory.refc_binary.{
-    BinaryRef, BinaryRef.new,
-    SharedHeap, SharedHeap.new, SharedHeapConfig, SharedHeapConfig.default, SharedHeapConfig.small
+    BinaryRef,
+    SharedHeap, SharedHeapConfig
 }
 use types.{RefId, Offset, Length, Count, ByteSize, MessageId, SenderId}
 
@@ -88,13 +88,17 @@ class ValueWrapper:
         if self.tag == ValueTag.Int: return 8
         if self.tag == ValueTag.Float: return 8
         if self.tag == ValueTag.Bool: return 1
-        if self.tag == ValueTag.SmallText: return self.text_val.len()
+        if self.tag == ValueTag.SmallText:
+            val tv = self.text_val
+            return tv.len()
         if self.tag == ValueTag.SmallArray:
             var total = 0
             for item in self.items:
                 total = total + item.estimated_size()
             return total
-        if self.tag == ValueTag.SharedRef: return self.ref_length.value
+        if self.tag == ValueTag.SharedRef:
+            val rl = self.ref_length
+            return rl.value
         if self.tag == ValueTag.Composite:
             var total = 0
             for item in self.items:
@@ -104,7 +108,10 @@ class ValueWrapper:
 
     fn shared_refs():
         if self.tag == ValueTag.SharedRef:
-            return [BinaryRef.new(self.ref_id.value, self.ref_offset.value, self.ref_length.value)]
+            val rid = self.ref_id
+            val roff = self.ref_offset
+            val rlen = self.ref_length
+            return [BinaryRef.new(rid.value, roff.value, rlen.value)]
         var is_container = false
         if self.tag == ValueTag.Composite: is_container = true
         if self.tag == ValueTag.SmallArray: is_container = true
@@ -123,9 +130,16 @@ class ValueWrapper:
         if self.tag == ValueTag.Float: return "Float({self.float_val})"
         if self.tag == ValueTag.Bool: return "Bool({self.bool_val})"
         if self.tag == ValueTag.SmallText: return "SmallText({self.text_val})"
-        if self.tag == ValueTag.SmallArray: return "SmallArray({self.items.len()} items)"
-        if self.tag == ValueTag.SharedRef: return "Shared(id={self.ref_id.value}, len={self.ref_length.value})"
-        if self.tag == ValueTag.Composite: return "Composite({self.items.len()} items)"
+        if self.tag == ValueTag.SmallArray:
+            val itms = self.items
+            return "SmallArray({itms.len()} items)"
+        if self.tag == ValueTag.SharedRef:
+            val rid = self.ref_id
+            val rlen = self.ref_length
+            return "Shared(id={rid.value}, len={rlen.value})"
+        if self.tag == ValueTag.Composite:
+            val itms = self.items
+            return "Composite({itms.len()} items)"
         "Unknown"
 
     static fn composite(items) -> ValueWrapper:
@@ -184,7 +198,9 @@ class TransferResult:
         nil
 
     fn fmt() -> text:
-        if self.tag == TransferStatus.Success: return "Success({self.wrapper_val.fmt()})"
+        if self.tag == TransferStatus.Success:
+            val wv = self.wrapper_val
+            return "Success({wv.fmt()})"
         if self.tag == TransferStatus.OutOfMemory: return "OutOfMemory"
         if self.tag == TransferStatus.TooLarge: return "TooLarge"
         "Unknown"
@@ -209,16 +225,22 @@ class TransferStats:
     bytes_saved: ByteSize
 
     fn sharing_ratio() -> f64:
-        if self.total_transfers.value == 0: return 0.0
-        self.shared_transfers.value * 1.0 / self.total_transfers.value
+        val tt = self.total_transfers
+        if tt.value == 0: return 0.0
+        val st = self.shared_transfers
+        st.value * 1.0 / tt.value
 
     fn efficiency() -> f64:
-        val total_bytes = self.inline_bytes.value + self.shared_bytes.value
+        val ib = self.inline_bytes
+        val sb = self.shared_bytes
+        val total_bytes = ib.value + sb.value
         if total_bytes == 0: return 1.0
-        self.shared_bytes.value * 1.0 / total_bytes
+        sb.value * 1.0 / total_bytes
 
     fn fmt() -> text:
-        "TransferStats(total={self.total_transfers.value}, shared={self.shared_transfers.value})"
+        val tt = self.total_transfers
+        val st = self.shared_transfers
+        "TransferStats(total={tt.value}, shared={st.value})"
 
     static fn new() -> TransferStats:
         TransferStats(total_transfers: Count(value: 0), inline_transfers: Count(value: 0), shared_transfers: Count(value: 0), inline_bytes: ByteSize(value: 0), shared_bytes: ByteSize(value: 0), bytes_saved: ByteSize(value: 0))
@@ -232,13 +254,16 @@ class MailboxMessage:
     wrapped: ValueWrapper
 
     fn size() -> i64:
-        self.wrapped.estimated_size()
+        val w = self.wrapped
+        w.estimated_size()
 
     fn is_shared() -> bool:
-        self.wrapped.is_shared()
+        val w = self.wrapped
+        w.is_shared()
 
     fn fmt() -> text:
-        "MailboxMessage(id={self.id.value}, size={self.size()})"
+        val mid = self.id
+        "MailboxMessage(id={mid.value}, size={self.size()})"
 
     static fn new(msg_id: i64, sender, wrapper: ValueWrapper) -> MailboxMessage:
         var sid = 0
@@ -257,43 +282,76 @@ class MessageTransfer:
     stats: TransferStats
 
     me wrap_nil() -> TransferResult:
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 1)
+        var s = self.stats
+        val tt = s.total_transfers
+        s.total_transfers = Count(value: tt.value + 1)
+        val it = s.inline_transfers
+        s.inline_transfers = Count(value: it.value + 1)
+        val ib = s.inline_bytes
+        s.inline_bytes = ByteSize(value: ib.value + 1)
+        self.stats = s
         TransferResult.success(ValueWrapper.nil())
 
     me wrap_int(v: i64) -> TransferResult:
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 8)
+        var s = self.stats
+        val tt = s.total_transfers
+        s.total_transfers = Count(value: tt.value + 1)
+        val it = s.inline_transfers
+        s.inline_transfers = Count(value: it.value + 1)
+        val ib = s.inline_bytes
+        s.inline_bytes = ByteSize(value: ib.value + 8)
+        self.stats = s
         TransferResult.success(ValueWrapper.int(v))
 
     me wrap_float(v: f64) -> TransferResult:
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 8)
+        var s = self.stats
+        val tt = s.total_transfers
+        s.total_transfers = Count(value: tt.value + 1)
+        val it = s.inline_transfers
+        s.inline_transfers = Count(value: it.value + 1)
+        val ib = s.inline_bytes
+        s.inline_bytes = ByteSize(value: ib.value + 8)
+        self.stats = s
         TransferResult.success(ValueWrapper.float(v))
 
     me wrap_bool(v: bool) -> TransferResult:
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 1)
+        var s = self.stats
+        val tt = s.total_transfers
+        s.total_transfers = Count(value: tt.value + 1)
+        val it = s.inline_transfers
+        s.inline_transfers = Count(value: it.value + 1)
+        val ib = s.inline_bytes
+        s.inline_bytes = ByteSize(value: ib.value + 1)
+        self.stats = s
         TransferResult.success(ValueWrapper.bool(v))
 
     me wrap_text(s: text) -> TransferResult:
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        var st = self.stats
+        val tt = st.total_transfers
+        st.total_transfers = Count(value: tt.value + 1)
         if s.len() < SMALL_BINARY_THRESHOLD:
-            self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-            self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + s.len())
+            val it = st.inline_transfers
+            st.inline_transfers = Count(value: it.value + 1)
+            val ib = st.inline_bytes
+            st.inline_bytes = ByteSize(value: ib.value + s.len())
+            self.stats = st
             return TransferResult.success(ValueWrapper.small_text(s))
-        self.stats.shared_transfers = Count(value: self.stats.shared_transfers.value + 1)
-        self.stats.shared_bytes = ByteSize(value: self.stats.shared_bytes.value + s.len())
-        self.stats.bytes_saved = ByteSize(value: self.stats.bytes_saved.value + s.len())
+        val sht = st.shared_transfers
+        st.shared_transfers = Count(value: sht.value + 1)
+        val sb = st.shared_bytes
+        st.shared_bytes = ByteSize(value: sb.value + s.len())
+        val bs = st.bytes_saved
+        st.bytes_saved = ByteSize(value: bs.value + s.len())
+        self.stats = st
         if self.has_heap:
-            val result = self.heap.allocate(0, s.len())
+            val hp = self.heap
+            val result = hp.allocate(0, s.len())
             if result.is_success():
                 val ref_val = result.unwrap()
-                return TransferResult.success(ValueWrapper.shared_ref_from(ref_val.id.value, ref_val.offset.value, ref_val.length.value))
+                val rv_id = ref_val.id
+                val rv_off = ref_val.offset
+                val rv_len = ref_val.length
+                return TransferResult.success(ValueWrapper.shared_ref_from(rv_id.value, rv_off.value, rv_len.value))
             return TransferResult.out_of_memory()
         val fake_ref = ValueWrapper.shared_ref_from(0, 0, s.len())
         TransferResult.success(fake_ref)
@@ -301,21 +359,36 @@ class MessageTransfer:
     me wrap_for_send(process_id: i64, size: i64, type_tag: ValueKind) -> TransferResult:
         val should_share = self.should_share(size)
         if should_share:
-            self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-            self.stats.shared_transfers = Count(value: self.stats.shared_transfers.value + 1)
-            self.stats.shared_bytes = ByteSize(value: self.stats.shared_bytes.value + size)
-            self.stats.bytes_saved = ByteSize(value: self.stats.bytes_saved.value + size)
+            var st = self.stats
+            val tt = st.total_transfers
+            st.total_transfers = Count(value: tt.value + 1)
+            val sht = st.shared_transfers
+            st.shared_transfers = Count(value: sht.value + 1)
+            val sb = st.shared_bytes
+            st.shared_bytes = ByteSize(value: sb.value + size)
+            val bs = st.bytes_saved
+            st.bytes_saved = ByteSize(value: bs.value + size)
+            self.stats = st
             if self.has_heap:
-                val result = self.heap.allocate(process_id, size)
+                val hp = self.heap
+                val result = hp.allocate(process_id, size)
                 if result.is_success():
                     val ref_val = result.unwrap()
-                    return TransferResult.success(ValueWrapper.shared_ref_from(ref_val.id.value, ref_val.offset.value, ref_val.length.value))
+                    val rv_id = ref_val.id
+                    val rv_off = ref_val.offset
+                    val rv_len = ref_val.length
+                    return TransferResult.success(ValueWrapper.shared_ref_from(rv_id.value, rv_off.value, rv_len.value))
                 return TransferResult.out_of_memory()
             val fake = ValueWrapper.shared_ref_from(0, 0, size)
             return TransferResult.success(fake)
-        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
-        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
-        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + size)
+        var st2 = self.stats
+        val tt2 = st2.total_transfers
+        st2.total_transfers = Count(value: tt2.value + 1)
+        val it2 = st2.inline_transfers
+        st2.inline_transfers = Count(value: it2.value + 1)
+        val ib2 = st2.inline_bytes
+        st2.inline_bytes = ByteSize(value: ib2.value + size)
+        self.stats = st2
         TransferResult.success(ValueWrapper.int(0))
 
     fn should_share(size: i64) -> bool:
@@ -326,58 +399,74 @@ class MessageTransfer:
     me share_wrapper(wrapper: ValueWrapper):
         if wrapper.is_shared():
             if self.has_heap:
-                self.heap.incref(wrapper.ref_id.value)
+                val rid = wrapper.ref_id
+                val hp = self.heap
+                hp.incref(rid.value)
 
     me release_wrapper(wrapper: ValueWrapper):
         if wrapper.is_shared():
             if self.has_heap:
-                self.heap.decref(wrapper.ref_id.value)
+                val rid = wrapper.ref_id
+                val hp = self.heap
+                hp.decref(rid.value)
 
     fn get_stats() -> TransferStats:
+        val s = self.stats
         TransferStats(
-            total_transfers: self.stats.total_transfers,
-            inline_transfers: self.stats.inline_transfers,
-            shared_transfers: self.stats.shared_transfers,
-            inline_bytes: self.stats.inline_bytes,
-            shared_bytes: self.stats.shared_bytes,
-            bytes_saved: self.stats.bytes_saved
+            total_transfers: s.total_transfers,
+            inline_transfers: s.inline_transfers,
+            shared_transfers: s.shared_transfers,
+            inline_bytes: s.inline_bytes,
+            shared_bytes: s.shared_bytes,
+            bytes_saved: s.bytes_saved
         )
 
     fn heap_stats():
         if self.has_heap:
-            return self.heap.get_stats()
+            val h = self.heap
+            return h.get_stats()
         nil
 
     static fn with_heap(heap: SharedHeap) -> MessageTransfer:
+        val s = TransferStats.new()
         MessageTransfer(
             strategy: TransferStrategy.Hybrid,
             heap: heap,
             has_heap: true,
-            stats: TransferStats.new()
+            stats: s
         )
 
     static fn always_share() -> MessageTransfer:
+        val cfg = SharedHeapConfig.default()
+        val h = SharedHeap.new(cfg)
+        val s = TransferStats.new()
         MessageTransfer(
             strategy: TransferStrategy.ShareRef,
-            heap: SharedHeap.new(SharedHeapConfig.default()),
+            heap: h,
             has_heap: true,
-            stats: TransferStats.new()
+            stats: s
         )
 
     static fn always_copy() -> MessageTransfer:
+        val cfg = SharedHeapConfig.default()
+        val h = SharedHeap.new(cfg)
+        val s = TransferStats.new()
         MessageTransfer(
             strategy: TransferStrategy.DeepCopy,
-            heap: SharedHeap.new(SharedHeapConfig.default()),
+            heap: h,
             has_heap: false,
-            stats: TransferStats.new()
+            stats: s
         )
 
     static fn new() -> MessageTransfer:
+        val cfg = SharedHeapConfig.default()
+        val h = SharedHeap.new(cfg)
+        val s = TransferStats.new()
         MessageTransfer(
             strategy: TransferStrategy.Hybrid,
-            heap: SharedHeap.new(SharedHeapConfig.default()),
+            heap: h,
             has_heap: true,
-            stats: TransferStats.new()
+            stats: s
         )
 
 # --- Convenience functions ---

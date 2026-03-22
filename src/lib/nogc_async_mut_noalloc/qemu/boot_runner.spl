@@ -7,7 +7,7 @@
 # - Timeout and crash handling
 # - Architecture-specific test helpers
 
-use std.qemu.mod.{QemuArch, QemuConfig, QemuInstance, ExitCodeResult, QemuConfig.for_test_runner, QemuInstance.start, interpret_exit_code}
+use std.qemu.mod.{QemuArch, QemuConfig, QemuInstance, ExitCodeResult, interpret_exit_code}
 use app.io.{shell, ProcessResult}
 
 
@@ -113,24 +113,25 @@ class BootTestRunner:
 impl BootTestRunner:
     fn run() -> BootTestResult:
         val start_time = get_timestamp_ms()
+        val cfg = self.config
 
         # Build QEMU config
         var qemu_config = QemuConfig.for_test_runner(
-            self.config.arch,
-            self.config.kernel_path
+            cfg.arch,
+            cfg.kernel_path
         )
 
         # Override machine if specified
-        if self.config.machine.?:
-            qemu_config.machine = self.config.machine.unwrap()
+        if cfg.machine.?:
+            qemu_config.machine = cfg.machine.unwrap()
 
         # Set timeout
-        qemu_config.timeout_ms = self.config.timeout_ms
+        qemu_config.timeout_ms = cfg.timeout_ms
 
         # Redirect serial to file for capture
         qemu_config.serial_stdio = false
         qemu_config.serial_file = self.output_file
-        qemu_config.extra_args = self.config.extra_args
+        qemu_config.extra_args = cfg.extra_args
 
         # Start QEMU
         val start_result = QemuInstance.start(qemu_config)
@@ -160,7 +161,7 @@ impl BootTestRunner:
         # Check result
         if not wait_result.is_ok():
             # Timeout
-            return BootTestResult.timeout(output, self.config.timeout_ms)
+            return BootTestResult.timeout(output, cfg.timeout_ms)
 
         val exit_code = wait_result.ok.unwrap()
 
@@ -171,10 +172,11 @@ impl BootTestRunner:
             return BootTestResult.crash(output, exit_code)
 
         # Check expected output
-        if self.config.expected_output.len() > 0:
-            if not output.contains(self.config.expected_output):
+        val expected = cfg.expected_output
+        if expected.len() > 0:
+            if not output.contains(expected):
                 return BootTestResult.failure(
-                    "Expected output not found: '{self.config.expected_output}'",
+                    "Expected output not found: '{expected}'",
                     output,
                     exit_code
                 )
