@@ -8,8 +8,11 @@
 # Usage:
 #   bin/simple src/app/test/freebsd_qemu_setup.spl [--download] [--quick] [--full]
 
-use app.io.mod.{shell, shell_bool, shell_output, env_get, file_exists, exit, get_args, dir_create_all}
-use std.text.{contains, trim}
+use std.nogc_sync_mut.io.process_ops.{shell, shell_bool, shell_output}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.io.cli_ops.{exit, get_args}
+use std.text.{contains}
 
 # ============================================================================
 # Configuration
@@ -17,31 +20,31 @@ use std.text.{contains, trim}
 
 fn get_config_vm_path() -> text:
     val env_val = env_get("QEMU_VM_PATH")
-    if env_val != "":
+    if env_val != nil and env_val != "":
         return env_val
     return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
 
 fn get_config_port() -> text:
     val env_val = env_get("QEMU_PORT")
-    if env_val != "":
+    if env_val != nil and env_val != "":
         return env_val
     return "2222"
 
 fn get_config_user() -> text:
     val env_val = env_get("QEMU_USER")
-    if env_val != "":
+    if env_val != nil and env_val != "":
         return env_val
     return "root"
 
 fn get_config_mem() -> text:
     val env_val = env_get("QEMU_MEM")
-    if env_val != "":
+    if env_val != nil and env_val != "":
         return env_val
     return "4G"
 
 fn get_config_cpus() -> text:
     val env_val = env_get("QEMU_CPUS")
-    if env_val != "":
+    if env_val != nil and env_val != "":
         return env_val
     return "4"
 
@@ -70,6 +73,9 @@ fn check_command(cmd: text, desc: text) -> bool:
 
 fn ssh_cmd(port: text, user: text, remote_cmd: text) -> text:
     return "SSH_AUTH_SOCK= ssh -o ConnectTimeout=5 -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -p {port} {user}@localhost \"{remote_cmd}\""
+
+fn path_exists(path: text) -> bool:
+    shell_bool("test -e '{path}'")
 
 # ============================================================================
 # Test 0: Prerequisites
@@ -100,7 +106,7 @@ fn test_prerequisites() -> bool:
     pass_msg("ssh: {ssh_ver}")
 
     # Check for KVM support (optional)
-    if file_exists("/dev/kvm"):
+    if path_exists("/dev/kvm"):
         pass_msg("KVM available: /dev/kvm exists")
     else:
         log("WARNING: KVM not available, will use TCG (slower)")
@@ -114,18 +120,20 @@ fn test_prerequisites() -> bool:
 
 fn test_vm_image(download_vm: bool) -> bool:
     val vm_path = get_config_vm_path()
+    val port = get_config_port()
+    val user = get_config_user()
     log("================================================================")
     log("Test 1: FreeBSD VM Image")
     log("================================================================")
     print ""
 
-    if file_exists(vm_path):
-        val size = trim(shell_output("du -h '{vm_path}' | cut -f1", ""))
+    if path_exists(vm_path):
+        val size = shell_output("du -h '{vm_path}' | cut -f1", "").trim()
         pass_msg("VM image exists: {vm_path} ({size})")
     else if download_vm:
         log("Downloading FreeBSD 14.3 VM image...")
-        val vm_dir = shell_output("dirname '{vm_path}'", "")
-        dir_create_all(trim(vm_dir))
+        val vm_dir = shell_output("dirname '{vm_path}'", "").trim()
+        dir_create_all(vm_dir)
 
         val url = "https://download.freebsd.org/releases/amd64/14.3-RELEASE/FreeBSD-14.3-RELEASE-amd64.qcow2.xz"
         val compressed = "{vm_path}.xz"
@@ -143,21 +151,25 @@ fn test_vm_image(download_vm: bool) -> bool:
         log("Extracting VM image (this may take 5-10 minutes)...")
         shell("xz -d '{compressed}'")
 
-        if file_exists(vm_path):
-            val size = trim(shell_output("du -h '{vm_path}' | cut -f1", ""))
+        if path_exists(vm_path):
+            val size = shell_output("du -h '{vm_path}' | cut -f1", "").trim()
             pass_msg("VM image downloaded and extracted: {vm_path} ({size})")
         else:
             fail_msg("VM image extraction failed")
             return false
     else:
-        fail_msg("VM image not found: {vm_path}")
-        log("Run with --download to download FreeBSD VM image")
-        return false
+        val alive_cmd = ssh_cmd(port, user, "echo VM alive")
+        if shell_bool("{alive_cmd} >/dev/null 2>&1"):
+            pass_msg("VM image not found locally, but active VM is already reachable on port {port}")
+        else:
+            fail_msg("VM image not found: {vm_path}")
+            log("Run with --download to download FreeBSD VM image")
+            return false
 
     # Verify qcow2 format
     val has_qemu_img = shell_bool("command -v qemu-img >/dev/null 2>&1")
-    if has_qemu_img:
-        val format = trim(shell_output("qemu-img info '{vm_path}' | grep 'file format' | awk '{{print $3}}'", ""))
+    if has_qemu_img and path_exists(vm_path):
+        val format = shell_output("qemu-img info '{vm_path}' | grep 'file format' | awk '{{print $3}}'", "").trim()
         if format == "qcow2":
             pass_msg("VM image format: qcow2")
         else:
@@ -193,7 +205,7 @@ fn test_start_vm() -> bool:
 
     log("Starting QEMU VM...")
     var accel = "kvm:tcg"
-    if file_exists("/dev/kvm") == false:
+    if path_exists("/dev/kvm") == false:
         accel = "tcg"
         log("Using TCG acceleration (KVM not available)")
 
@@ -204,7 +216,7 @@ fn test_start_vm() -> bool:
     val start_result = shell(start_cmd)
 
     if start_result.exit_code == 0:
-        val pid = trim(shell_output("cat '{pid_file}' 2>/dev/null || echo unknown", ""))
+        val pid = shell_output("cat '{pid_file}' 2>/dev/null || echo unknown", "").trim()
         pass_msg("QEMU VM started (PID: {pid})")
     else:
         fail_msg("QEMU VM failed to start")
@@ -256,7 +268,7 @@ fn test_ssh_connectivity() -> bool:
 
     # Test FreeBSD version
     val ver_cmd = ssh_cmd(port, user, "uname -r")
-    val version = trim(shell_output(ver_cmd, ""))
+    val version = shell_output(ver_cmd, "").trim()
     if contains(version, "14.3-RELEASE"):
         pass_msg("FreeBSD version: {version}")
     else:
@@ -264,7 +276,7 @@ fn test_ssh_connectivity() -> bool:
 
     # Test home directory
     val home_cmd = ssh_cmd(port, user, "pwd")
-    val home_dir = trim(shell_output(home_cmd, ""))
+    val home_dir = shell_output(home_cmd, "").trim()
     pass_msg("Home directory: {home_dir}")
 
     print ""
@@ -298,7 +310,7 @@ fn test_rsync() -> bool:
 
     # Verify file exists on VM
     val cat_cmd = ssh_cmd(port, user, "cat ~/{test_file}")
-    val remote_content = trim(shell_output(cat_cmd, ""))
+    val remote_content = shell_output(cat_cmd, "").trim()
     if remote_content == "FreeBSD QEMU test":
         pass_msg("Remote file verified: content matches")
     else:
@@ -313,7 +325,7 @@ fn test_rsync() -> bool:
     if sync_from.exit_code != 0:
         fail_msg("Rsync from VM failed")
         return false
-    if file_exists(test_file) == false:
+    if path_exists(test_file) == false:
         fail_msg("Rsync from VM failed - file not created")
         return false
     pass_msg("Rsync from VM successful")
@@ -341,7 +353,7 @@ fn test_toolchain() -> bool:
 
     # Check clang++
     val clang_cmd = ssh_cmd(port, user, "clang++ --version 2>&1 | head -1")
-    val clang_version = trim(shell_output(clang_cmd, ""))
+    val clang_version = shell_output(clang_cmd, "").trim()
     if contains(clang_version, "clang"):
         pass_msg("Clang C++ compiler: {clang_version}")
     else:
@@ -350,7 +362,7 @@ fn test_toolchain() -> bool:
 
     # Check cmake
     val cmake_cmd = ssh_cmd(port, user, "cmake --version 2>&1 | head -1")
-    val cmake_version = trim(shell_output(cmake_cmd, ""))
+    val cmake_version = shell_output(cmake_cmd, "").trim()
     if contains(cmake_version, "cmake"):
         pass_msg("CMake: {cmake_version}")
     else:
@@ -358,7 +370,7 @@ fn test_toolchain() -> bool:
 
     # Check gmake
     val gmake_cmd = ssh_cmd(port, user, "gmake --version 2>&1 | head -1")
-    val gmake_version = trim(shell_output(gmake_cmd, ""))
+    val gmake_version = shell_output(gmake_cmd, "").trim()
     if contains(gmake_version, "GNU Make"):
         pass_msg("GNU Make: {gmake_version}")
     else:
@@ -382,7 +394,7 @@ fn test_bootstrap_dry_run() -> bool:
 
     # Sync project to VM
     log("Syncing project files to VM...")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' . {user}@localhost:~/simple/ 2>&1")
+    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
     if sync_result.exit_code == 0:
         pass_msg("Project files synced to VM")
     else:
@@ -391,7 +403,7 @@ fn test_bootstrap_dry_run() -> bool:
 
     # Check bootstrap script exists
     val script_cmd = ssh_cmd(port, user, "test -f ~/simple/scripts/bootstrap/bootstrap-from-scratch.sh && echo yes")
-    val script_exists = trim(shell_output(script_cmd, ""))
+    val script_exists = shell_output(script_cmd, "").trim()
     if script_exists == "yes":
         pass_msg("Bootstrap script found on VM")
     else:
@@ -442,13 +454,13 @@ fn test_full_bootstrap() -> bool:
     if retrieve_result.exit_code != 0:
         fail_msg("Binary retrieval failed")
         return false
-    if file_exists("bin/simple") == false:
+    if path_exists("bin/simple") == false:
         fail_msg("Binary retrieval failed")
         return false
     pass_msg("Binary retrieved: bin/simple")
 
     # Verify binary
-    val file_info = trim(shell_output("file bin/simple", ""))
+    val file_info = shell_output("file bin/simple", "").trim()
     if contains(file_info, "FreeBSD"):
         pass_msg("Binary verified: FreeBSD ELF")
         log("  {file_info}")
@@ -457,7 +469,7 @@ fn test_full_bootstrap() -> bool:
         log("  {file_info}")
         return false
 
-    val size = trim(shell_output("du -h bin/simple | cut -f1", ""))
+    val size = shell_output("du -h bin/simple | cut -f1", "").trim()
     pass_msg("Binary size: {size}")
 
     print ""
@@ -474,8 +486,8 @@ fn cleanup_vm():
     print ""
 
     val pid_file = "build/freebsd/vm/qemu.pid"
-    if file_exists(pid_file):
-        val pid = trim(shell_output("cat '{pid_file}'", ""))
+    if path_exists(pid_file):
+        val pid = shell_output("cat '{pid_file}'", "").trim()
         log("Stopping QEMU VM (PID: {pid})...")
         shell("kill '{pid}' 2>/dev/null")
         shell("rm -f '{pid_file}'")
@@ -490,15 +502,12 @@ fn cleanup_vm():
 # ============================================================================
 
 fn main():
-    print "TRACE main:start"
     val args = get_args()
-    print "TRACE main:got_args"
     var download_vm = false
     var quick_test = false
     var full_test = false
 
     for arg in args:
-        print "TRACE main:arg={arg}"
         if not arg.starts_with("--"):
             continue
         if arg == "--download":
@@ -525,7 +534,6 @@ fn main():
 
     val port = get_config_port()
 
-    print "TRACE main:before_log"
     log("========================================================")
     log("FreeBSD QEMU Bootstrap Setup Test")
     log("========================================================")
