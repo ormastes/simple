@@ -40,8 +40,9 @@ struct WidgetProp:
 struct UITree:
     root_id: text
 
-var _widget_registry: Dict<text, WidgetRecord> = {}
-var _widget_props_store: Dict<text, text> = {}
+var _widget_registry: [WidgetRecord] = []
+var _widget_props_store: [WidgetProp] = []
+
 fn parse_widget_kind(name: text) -> text:
     val kind = name.to_lower()
     match kind:
@@ -89,10 +90,23 @@ fn default_widget_record(id: text, kind: text) -> WidgetRecord:
     )
 
 fn upsert_widget_record(record: WidgetRecord):
-    _widget_registry[record.id] = record
+    var updated: [WidgetRecord] = []
+    var replaced = false
+    for existing in _widget_registry:
+        if existing.id == record.id:
+            updated = updated.push(record)
+            replaced = true
+        else:
+            updated = updated.push(existing)
+    if not replaced:
+        updated = updated.push(record)
+    _widget_registry = updated
 
 fn get_widget_record(id: text) -> WidgetRecord?:
-    return _widget_registry.get(id)
+    for record in _widget_registry:
+        if record.id == id:
+            return record
+    return nil
 
 fn require_widget_record(id: text) -> WidgetRecord:
     val found = get_widget_record(id)
@@ -119,24 +133,33 @@ fn register_widget_child(parent_id: text, child_id: text):
     val updated = existing + [child_id]
     set_internal_prop(parent_id, "ui_children", encode_child_ids(updated))
 
+fn widget_props() -> [WidgetProp]:
+    return _widget_props_store
+
+fn set_widget_props(props: [WidgetProp]):
+    _widget_props_store = props
+
 fn get_internal_prop(node_id: text, key: text) -> text:
-    val v = _widget_props_store.get("{node_id}::{key}")
-    if v == nil:
-        return ""
-    return v
+    for prop in _widget_props_store:
+        if prop.node_id == node_id and prop.key == key:
+            return prop.value
+    return ""
 
 fn set_internal_prop(node_id: text, key: text, value: text):
-    _widget_props_store["{node_id}::{key}"] = value
+    var props: [WidgetProp] = []
+    var replaced = false
+    for prop in _widget_props_store:
+        if prop.node_id == node_id and prop.key == key:
+            props = props.push(WidgetProp(node_id: node_id, key: key, value: value))
+            replaced = true
+        else:
+            props = props.push(prop)
+    if not replaced:
+        props = props.push(WidgetProp(node_id: node_id, key: key, value: value))
+    _widget_props_store = props
 
 fn encode_child_ids(ids: [text]) -> text:
-    var blob = ""
-    var idx = 0
-    for id in ids:
-        if idx > 0:
-            blob = "{blob},"
-        blob = "{blob}{id}"
-        idx = idx + 1
-    return blob
+    return ids.join(",")
 
 fn decode_child_ids(blob: text) -> [text]:
     if blob == "":
@@ -179,17 +202,7 @@ impl WidgetNode:
     fn focused() -> bool: self.is_focused()
 
     fn set_prop(key: text, value: text) -> WidgetNode:
-        var new_props: [WidgetProp] = []
-        var replaced = false
-        for prop in widget_props():
-            if prop.node_id == self.id and prop.key == key:
-                new_props = new_props.push(WidgetProp(node_id: self.id, key: key, value: value))
-                replaced = true
-            else:
-                new_props = new_props.push(prop)
-        if not replaced:
-            new_props = new_props.push(WidgetProp(node_id: self.id, key: key, value: value))
-        set_widget_props(new_props)
+        set_internal_prop(self.id, key, value)
         return self
 
     fn add_child(child: WidgetNode) -> WidgetNode:
@@ -219,20 +232,17 @@ impl WidgetNode:
         return self
 
     fn get_prop(key: text) -> text:
-        for prop in widget_props():
-            if prop.node_id == self.id and prop.key == key:
-                return prop.value
-        return ""
+        return get_internal_prop(self.id, key)
 
     fn has_prop(key: text) -> bool:
-        for prop in widget_props():
+        for prop in _widget_props_store:
             if prop.node_id == self.id and prop.key == key:
                 return true
         return false
 
     fn prop_keys() -> [text]:
         var keys: [text] = []
-        for prop in widget_props():
+        for prop in _widget_props_store:
             if prop.node_id == self.id:
                 keys = keys.push(prop.key)
         return keys
@@ -259,35 +269,21 @@ impl WidgetNode:
         return result
 
     fn child_count() -> i32:
+        val ids = decode_child_ids(get_internal_prop(self.id, "ui_children"))
         var count: i32 = 0
-        var idx: i32 = 0
-        while true:
-            val child = self.child_at(idx)
-            if child == nil:
-                break
+        for id in ids:
             count = count + 1
-            idx = idx + 1
         return count
 
     fn child_at(index: i32) -> WidgetNode?:
         if index < 0:
             return nil
-        val blob = get_internal_prop(self.id, "ui_children")
-        if blob == "":
-            return nil
-        var current = ""
-        var current_index: i32 = 0
-        for ch in blob:
-            if ch == ",":
-                if current != "":
-                    if current_index == index:
-                        return get_widget(current)
-                    current = ""
-                    current_index = current_index + 1
-            else:
-                current = "{current}{ch}"
-        if current != "" and current_index == index:
-            return get_widget(current)
+        val ids = decode_child_ids(get_internal_prop(self.id, "ui_children"))
+        var i: i32 = 0
+        for id in ids:
+            if i == index:
+                return get_widget(id)
+            i = i + 1
         return nil
 
     fn find_by_id(target_id: text) -> WidgetNode?:
