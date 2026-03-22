@@ -2,6 +2,31 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.2] - 2026-03-22
+
+### Added
+- **mLLVM_QEMU unified compiler backend** — guest decoders (AVR + 8086), x86_64 host backend, optimizer passes, binary format serialization, linker, emulation runtime
+- **mLLVM_QEMU IrTc backend integration** into Simple compiler with MDSOC transforms, width libraries, and test suite
+- **Full-feature async UI framework** — 21 widgets, 4 backends (Electron/Tauri), lifecycle hooks, 10 demo apps
+- **Headless UI system test infrastructure** with widget rendering verification
+- **Platform-aware bootstrap layout** with setup script, verified on macOS
+- **Windows LLVM-lib backend**, linker, test runner, MCP shell port
+- **SMF (Simple Module Format)** — manifest writer, cache loading, dependency validation
+
+### Fixed
+- **UI framework backends** — interpreter workarounds, SDN tree parser, IPC protocol rewrite
+- **Rust seed parser compatibility** — remove dotted exports and chained field access
+- **Tauri integration** — end-to-end widget rendering in Tauri window
+- **Cranelift Mach-O corruption** — `define_zeroinit` → `define` for data with relocations
+- **macOS** `_dot_` suffix in method resolution, Mach-O define_zeroinit fix
+- **FreeBSD cross-compile** shell syntax, deduplicate MSVC lib path discovery
+- **module_init** via constructor function instead of `.init_array`
+- **nil-guards** for parser/lexer module-level var arrays
+- **EffectSolver** free function wrappers, skip effect pass for bootstrap
+
+### Changed
+- Platform-aware binary layout with `bin/release/<triple>/simple` organization
+
 ## [0.8.8c] - 2026-03-09
 
 ### Added
