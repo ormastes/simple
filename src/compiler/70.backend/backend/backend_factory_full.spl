@@ -37,6 +37,11 @@ class BackendFactory:
             debug("backend", "User override: backend={override_kind}")
             return Self.create_specific(override_kind, target, options)
 
+        # IrTc targets always use IrTc backend
+        if target == CodegenTarget.Avr or target == CodegenTarget.I8086:
+            debug("backend", "IrTc target detected: target={target}")
+            return Self.create_specific(BackendKind.IrTc, target, options)
+
         # Auto-select based on target and build mode
         val kind = Self.auto_select(target, options.build_mode)
         debug("backend", "Auto-selected backend={kind} for target={target}, mode={options.build_mode}")
@@ -118,6 +123,9 @@ class BackendFactory:
 
             case BackendKind.Vulkan:
                 VulkanBackend.create(target, options)
+
+            case BackendKind.IrTc:
+                IrTcBackend.create(target, options)
 
     static fn try_create(target: CodegenTarget, options: CompileOptions)
         -> Result<Backend, BackendError>:
@@ -206,6 +214,11 @@ class BackendFactory:
             case BackendKind.Vulkan:
                 true
 
+            case BackendKind.IrTc:
+                match target:
+                    case Avr | I8086: true
+                    case _: false
+
     static fn available_backends() -> [BackendKind]:
         """List all available backends."""
         [
@@ -217,7 +230,8 @@ class BackendFactory:
             BackendKind.Vhdl,
             BackendKind.CCodegen,
             BackendKind.Cuda,
-            BackendKind.Vulkan
+            BackendKind.Vulkan,
+            BackendKind.IrTc
         ]
 
     static fn get_description(kind: BackendKind) -> text:
@@ -250,11 +264,30 @@ class BackendFactory:
             case BackendKind.Vulkan:
                 "Vulkan - Vulkan compute backend (generates SPIR-V)"
 
+            case BackendKind.IrTc:
+                "IrTc - mLLVM_QEMU unified backend for 8/16-bit targets (AVR, 8086)"
+
 # ============================================================================
 # Helper Extensions for CodegenTarget
 # ============================================================================
 
 impl CodegenTarget:
+    fn is_8bit() -> bool:
+        """Check if target is 8-bit architecture."""
+        match self:
+            case Avr:
+                true
+            case _:
+                false
+
+    fn is_16bit() -> bool:
+        """Check if target is 16-bit architecture."""
+        match self:
+            case I8086:
+                true
+            case _:
+                false
+
     fn is_32bit() -> bool:
         """Check if target is 32-bit architecture."""
         match self:
@@ -267,6 +300,14 @@ impl CodegenTarget:
         """Check if target is 64-bit architecture."""
         match self:
             case X86_64 | AArch64 | Riscv64 | Wasm64 | Host | AArch64_MacOS | X86_64_MacOS:
+                true
+            case _:
+                false
+
+    fn is_irtc() -> bool:
+        """Check if target uses the IrTc (mLLVM_QEMU) backend."""
+        match self:
+            case Avr | I8086:
                 true
             case _:
                 false
