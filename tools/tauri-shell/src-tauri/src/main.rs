@@ -279,39 +279,100 @@ fn resolve_entry_file() -> Option<String> {
     }
 }
 
+fn binary_supports_ui_command(simple_bin: &str) -> bool {
+    let output = match Command::new(simple_bin).args(["ui", "--help"]).output() {
+        Ok(out) => out,
+        Err(err) => {
+            eprintln!("[tauri-shell] failed to probe '{} ui --help': {}", simple_bin, err);
+            return false;
+        }
+    };
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+
+    !text.contains("file not found: ui")
+}
+
+fn log_entry_file_status(entry_file: &Option<String>) {
+    if let Some(entry) = entry_file {
+        let path = std::path::Path::new(entry);
+        let exists = path.exists();
+        let readable = std::fs::File::open(path).is_ok();
+        eprintln!(
+            "[tauri-shell] entry file status: path='{}' exists={} readable={}",
+            entry, exists, readable
+        );
+    } else {
+        eprintln!("[tauri-shell] entry file status: no entry file provided");
+    }
+}
+
 fn main() {
     let simple_bin = resolve_simple_binary();
     let entry_file = resolve_entry_file();
 
     eprintln!("[tauri-shell] binary: {}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
+    log_entry_file_status(&entry_file);
 
-    // Spawn subprocess
-    let mut cmd = Command::new(&simple_bin);
-    if let Some(ref entry) = entry_file {
-        if entry.ends_with(".ui.sdn") {
-            cmd.arg("ui").arg("tauri").arg(entry);
-        } else {
-            cmd.arg("run").arg(entry);
+    let mut startup_error: Option<String> = None;
+    let mut child_stdout = None;
+    let mut child_stderr = None;
+    let mut child_stdin = None;
+    let mut child_slot = None;
+
+    let ui_entry = entry_file
+        .as_ref()
+        .map(|entry| entry.ends_with(".ui.sdn"))
+        .unwrap_or(false);
+
+    if ui_entry && !binary_supports_ui_command(&simple_bin) {
+        startup_error = Some(format!(
+            "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
+            simple_bin,
+            entry_file.clone().unwrap_or_default()
+        ));
+        eprintln!(
+            "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
+            simple_bin
+        );
+    } else {
+        let mut cmd = Command::new(&simple_bin);
+        if let Some(ref entry) = entry_file {
+            if entry.ends_with(".ui.sdn") {
+                cmd.arg("ui").arg("tauri").arg(entry);
+            } else {
+                cmd.arg("run").arg(entry);
+            }
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                eprintln!("[tauri-shell] subprocess pid={}", child.id());
+                child_stdout = child.stdout.take();
+                child_stderr = child.stderr.take();
+                child_stdin = child.stdin.take();
+                child_slot = Some(child);
+            }
+            Err(e) => {
+                startup_error = Some(format!(
+                    "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
+                    simple_bin, entry_file, e
+                ));
+                eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+            }
         }
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().unwrap_or_else(|e| {
-        eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
-        std::process::exit(1);
-    });
-    eprintln!("[tauri-shell] subprocess pid={}", child.id());
-
-    let child_stdout = child.stdout.take().expect("no stdout");
-    let child_stderr = child.stderr.take().expect("no stderr");
-    let child_stdin = child.stdin.take().expect("no stdin");
 
     let process = Arc::new(SimpleProcess {
-        stdin: Arc::new(Mutex::new(Some(child_stdin))),
-        child: Mutex::new(Some(child)),
+        stdin: Arc::new(Mutex::new(child_stdin)),
+        child: Mutex::new(child_slot),
     });
 
     let process_for_tauri = Arc::clone(&process);
@@ -341,19 +402,29 @@ fn main() {
 
             eprintln!("[tauri-shell] window created");
 
-            // Start subprocess reader threads
-            let handle = app.handle().clone();
-            thread::spawn(move || {
-                // Small delay to let the webview load the frontend shell first.
-                thread::sleep(std::time::Duration::from_millis(500));
-                update_status(&handle, "Waiting for first render from Simple subprocess...");
-                read_subprocess_stdout(BufReader::new(child_stdout), handle);
-            });
-            let handle = app.handle().clone();
-            thread::spawn(move || {
-                thread::sleep(std::time::Duration::from_millis(500));
-                read_subprocess_stderr(BufReader::new(child_stderr), handle);
-            });
+            if let Some(message) = startup_error.clone() {
+                let handle = app.handle().clone();
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_millis(500));
+                    update_status(&handle, &message);
+                });
+            } else {
+                if let Some(stdout) = child_stdout {
+                    let handle = app.handle().clone();
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_millis(500));
+                        update_status(&handle, "Waiting for first render from Simple subprocess...");
+                        read_subprocess_stdout(BufReader::new(stdout), handle);
+                    });
+                }
+                if let Some(stderr) = child_stderr {
+                    let handle = app.handle().clone();
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_millis(500));
+                        read_subprocess_stderr(BufReader::new(stderr), handle);
+                    });
+                }
+            }
 
             Ok(())
         })

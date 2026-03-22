@@ -1,0 +1,212 @@
+# Async WebSocket Handler
+#
+# WebSocket frame reader and sender for the async web server.
+# The reader runs in a dedicated thread per client and pushes
+# parsed UI events into the shared event channel.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_async_mut.concurrent.channel.{Channel}
+use common.ui.widget.{UIEvent}
+use app.ui.web.ws_handler.{send_ws_text}
+
+# =========================================================================
+# WebSocket Reader (runs in client thread)
+# =========================================================================
+
+fn start_ws_reader(stream: Any, event_channel: Any):
+    """Read WebSocket frames from a client and push events to channel.
+
+    Runs in a dedicated thread. Exits when the connection closes
+    or an unrecoverable read error occurs.
+    """
+    val tcp = stream as TcpStream
+    val ch = event_channel as Channel
+
+    loop:
+        val frame = read_ws_frame(tcp)
+        if frame == nil:
+            # Connection closed or error
+            break
+
+        val event = parse_ws_event(frame)
+        if event != nil:
+            ch.send(event)
+
+fn read_ws_frame(stream: TcpStream) -> text?:
+    """Read a single WebSocket text frame.
+
+    Returns the decoded payload text, or nil on error/close.
+    Handles masking as required by RFC 6455 for client-to-server frames.
+    """
+    # Read first 2 bytes: FIN+opcode and mask+length
+    match stream.read(2):
+        Err(_) =>
+            return nil
+        Ok(header) =>
+            if header.len() < 2:
+                return nil
+
+            val opcode = header[0] & 0x0F
+            # Close frame
+            if opcode == 0x08:
+                return nil
+
+            # Only handle text frames (opcode 1)
+            if opcode != 0x01:
+                return nil
+
+            val masked = (header[1] & 0x80) != 0
+            var payload_len = (header[1] & 0x7F) as i64
+
+            # Extended payload length
+            if payload_len == 126:
+                match stream.read(2):
+                    Ok(ext) =>
+                        if ext.len() < 2:
+                            return nil
+                        payload_len = (ext[0] as i64) * 256 + (ext[1] as i64)
+                    Err(_) =>
+                        return nil
+            elif payload_len == 127:
+                match stream.read(8):
+                    Ok(ext) =>
+                        if ext.len() < 8:
+                            return nil
+                        # Simplified: only use lower 4 bytes
+                        payload_len = (ext[4] as i64) * 16777216 + (ext[5] as i64) * 65536 + (ext[6] as i64) * 256 + (ext[7] as i64)
+                    Err(_) =>
+                        return nil
+
+            # Read mask key (4 bytes) if masked
+            var mask_key: [u8] = []
+            if masked:
+                match stream.read(4):
+                    Ok(mk) =>
+                        if mk.len() < 4:
+                            return nil
+                        mask_key = mk
+                    Err(_) =>
+                        return nil
+
+            # Read payload
+            if payload_len == 0:
+                return ""
+
+            match stream.read_exact(payload_len):
+                Err(_) =>
+                    return nil
+                Ok(payload) =>
+                    # Unmask payload
+                    var decoded: [u8] = []
+                    var i = 0
+                    while i < payload.len():
+                        if masked:
+                            val unmasked = payload[i] ^ mask_key[i % 4]
+                            decoded = decoded + [unmasked]
+                        else:
+                            decoded = decoded + [payload[i]]
+                        i = i + 1
+
+                    # Convert bytes to text
+                    return bytes_to_text_simple(decoded)
+
+fn bytes_to_text_simple(data: [u8]) -> text:
+    """Convert byte array to text (ASCII subset)."""
+    var result = ""
+    for b in data:
+        result = "{result}{b as text}"
+    return result
+
+# =========================================================================
+# Event Parsing
+# =========================================================================
+
+fn parse_ws_event(message: text) -> UIEvent?:
+    """Parse a JSON WebSocket message into a UIEvent.
+
+    Expected formats:
+        {"type": "key", "key": "q"}
+        {"type": "action", "name": "save"}
+        {"type": "resize", "width": "120", "height": "40"}
+        {"type": "quit"}
+    """
+    val msg_type = extract_field(message, "type")
+
+    match msg_type:
+        "key" =>
+            val key = extract_field(message, "key")
+            if key != "":
+                return UIEvent.KeyPress(key: key)
+            return nil
+        "keypress" =>
+            val key = extract_field(message, "key")
+            if key != "":
+                return UIEvent.KeyPress(key: key)
+            return nil
+        "action" =>
+            val name = extract_field(message, "name")
+            if name != "":
+                return UIEvent.Action(name: name)
+            return nil
+        "resize" =>
+            val w = extract_field(message, "width")
+            val h = extract_field(message, "height")
+            if w != "" and h != "":
+                return UIEvent.Resize(width: w.to_i32(), height: h.to_i32())
+            return nil
+        "quit" =>
+            return UIEvent.Quit
+        _ =>
+            return nil
+
+fn extract_field(json: text, field: text) -> text:
+    """Extract a simple JSON string field value.
+
+    Handles formats like:
+        "field": "value"
+        "field":"value"
+    """
+    val search = "\"{field}\""
+    val idx = json.find(search)
+    if idx < 0:
+        return ""
+
+    # Find the colon after the field name
+    var pos = idx + search.len()
+    while pos < json.len() and json[pos] == " ":
+        pos = pos + 1
+    if pos >= json.len() or json[pos] != ":":
+        return ""
+    pos = pos + 1
+
+    # Skip whitespace after colon
+    while pos < json.len() and json[pos] == " ":
+        pos = pos + 1
+
+    # Expect opening quote
+    if pos >= json.len() or json[pos] != "\"":
+        return ""
+    pos = pos + 1
+
+    # Read until closing quote
+    var value = ""
+    while pos < json.len() and json[pos] != "\"":
+        value = "{value}{json[pos]}"
+        pos = pos + 1
+
+    return value
+
+# =========================================================================
+# WebSocket Send
+# =========================================================================
+
+fn ws_send_render(stream: TcpStream, message: text) -> bool:
+    """Send a render message to a WebSocket client.
+
+    Returns true if send succeeded, false if connection is broken.
+    """
+    if not stream.is_open():
+        return false
+
+    send_ws_text(stream, message)
+    return true

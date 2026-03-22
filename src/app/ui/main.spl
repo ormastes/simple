@@ -21,60 +21,60 @@ extern fn rt_file_exists(path: text) -> bool
 # =========================================================================
 
 fn main() -> i64:
-    val args = get_args()
+    val cli_args = get_args()
 
-    if args.len() == 0:
+    if cli_args.len() == 0:
         print_usage()
         return 1
 
-    val mode = args[0]
+    val mode = cli_args[0]
 
     match mode:
         "tui" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: tui mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
+            val file_path = cli_args[1]
             return run_tui(file_path)
 
         "web" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: web mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
-            val port = parse_port(args)
+            val file_path = cli_args[1]
+            val port = parse_port(cli_args)
             return run_web(file_path, port)
 
         "tauri" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: tauri mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
-            val port = parse_port(args)
+            val file_path = cli_args[1]
+            val port = parse_port(cli_args)
             return run_tauri(file_path, port)
 
         "electron" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: electron mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
-            val port = parse_port(args)
+            val file_path = cli_args[1]
+            val port = parse_port(cli_args)
             return run_electron(file_path, port)
 
         "gui" | "desktop" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: gui mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
-            val port = parse_port(args)
+            val file_path = cli_args[1]
+            val port = parse_port(cli_args)
             val backend = detect_gui_backend()
             return run_detected_backend(backend, file_path, port)
 
         "headless" | "none" =>
-            if args.len() < 2:
+            if cli_args.len() < 2:
                 print "Error: headless mode requires a .ui.sdn file path"
                 return 1
-            val file_path = args[1]
+            val file_path = cli_args[1]
             return run_headless(file_path)
 
         "-h" | "--help" =>
@@ -127,13 +127,13 @@ fn print_usage():
     print "Environment:"
     print "  SIMPLE_GUI_BACKEND   Override auto-detection (tauri/web/tui/headless)"
 
-fn parse_port(args: [text]) -> i32:
+fn parse_port(port_args: [text]) -> i32:
     """Parse --port from args, defaulting to 3000."""
     var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--port" and i + 1 < args.len():
-            return args[i + 1].to_int()
+    while i < port_args.len():
+        val arg = port_args[i]
+        if arg == "--port" and i + 1 < port_args.len():
+            return port_args[i + 1].to_int()
         elif arg.starts_with("--port="):
             val port_str = arg[7:]
             return port_str.to_int()
@@ -147,29 +147,38 @@ fn get_args() -> [text]:
     - `simple ui ...` command dispatch, where `ui` appears in argv
     - direct script execution, where argv looks like `<runtime> <script> ...`
     """
-    val all_args = rt_cli_get_args()
+    val raw_args = rt_cli_get_args()
 
     # Command dispatch path: return everything after the `ui` subcommand
-    var args: [text] = []
+    var ui_args: [text] = []
     var found_ui = false
-    for arg in all_args:
+    for arg in raw_args:
         if found_ui:
-            args.push(arg)
+            ui_args.push(arg)
         elif arg == "ui":
             found_ui = true
-    if args.len() > 0:
-        return args
+    if ui_args.len() > 0:
+        return ui_args
 
-    # Direct script execution path: skip the runtime and script path
-    var i = 0
-    while i < all_args.len():
-        val arg = all_args[i]
+    # Direct script execution path: skip everything through the script path.
+    var direct_args: [text] = []
+    var skip_until_script = true
+    for arg in raw_args:
+        if skip_until_script:
+            if arg.ends_with(".spl") or arg.ends_with(".simple") or arg.ends_with(".sscript") or arg.ends_with(".shs"):
+                skip_until_script = false
+        else:
+            direct_args.push(arg)
+    if direct_args.len() > 0:
+        return direct_args
+
+    # Fallback: if the first non-runtime arg is already a .ui.sdn file, pass it through.
+    for arg in raw_args:
         if arg.ends_with(".spl") or arg.ends_with(".simple") or arg.ends_with(".sscript") or arg.ends_with(".shs"):
-            if i + 1 < all_args.len():
-                return all_args[i + 1:]
-            return []
-        i = i + 1
+            continue
+        if arg.ends_with(".ui.sdn"):
+            return [arg]
 
-    return args
+    return ui_args
 
 extern fn rt_cli_get_args() -> [text]

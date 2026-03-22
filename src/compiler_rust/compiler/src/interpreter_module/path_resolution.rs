@@ -515,11 +515,11 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 }
             }
 
-            // Strategy: "app.*" → src/compiler/ with numbered prefix support
+            // Strategy: "app.*" → src/app/ with numbered prefix support
             if parts.len() > 1 && parts[0] == "app" {
-                let compiler_dir = src_candidate.join("compiler");
-                if compiler_dir.is_dir() {
-                    if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                let app_dir = src_candidate.join("app");
+                if app_dir.is_dir() {
+                    if let Some(found) = resolve_with_numbered_dirs(&app_dir, &parts[1..]) {
                         return Ok(found);
                     }
                 }

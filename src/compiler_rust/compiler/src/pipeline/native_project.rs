@@ -625,6 +625,64 @@ int main(int argc, char** argv) {
         Ok(main_o)
     }
 
+    /// Generate a constructor function that calls all __module_init_* functions.
+    /// Scans object files with `nm` to find init function names.
+    fn generate_init_caller(&self, temp_dir: &Path, object_paths: &[PathBuf]) -> Result<Option<PathBuf>, String> {
+        // Scan objects for __module_init_* symbols
+        let mut init_names = Vec::new();
+        for obj in object_paths {
+            let output = std::process::Command::new("nm")
+                .arg("-g") // global symbols only
+                .arg(obj)
+                .output()
+                .map_err(|e| format!("nm: {e}"))?;
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(name) = line.split_whitespace().last() {
+                        let name = name.strip_prefix('_').unwrap_or(name);
+                        if name.starts_with("__module_init_") {
+                            // Sanitize dots → _dot_ for C identifier validity
+                            let sanitized = name.replace('.', "_dot_");
+                            init_names.push(sanitized);
+                        }
+                    }
+                }
+            }
+        }
+        if init_names.is_empty() {
+            return Ok(None);
+        }
+        init_names.sort();
+        init_names.dedup();
+
+        // Generate C source
+        let mut code = String::from("// Auto-generated: calls all __module_init_* functions at startup\n");
+        for name in &init_names {
+            code.push_str(&format!("extern \"C\" void __attribute__((weak)) {}(void);\n", name));
+        }
+        code.push_str("__attribute__((constructor)) static void __simple_call_module_inits(void) {\n");
+        for name in &init_names {
+            code.push_str(&format!("    if ({}) {}();\n", name, name));
+        }
+        code.push_str("}\n");
+
+        let init_cpp = temp_dir.join("_init_all.cpp");
+        std::fs::write(&init_cpp, &code).map_err(|e| format!("write init_all: {e}"))?;
+
+        let init_o = temp_dir.join("_init_all.o");
+        let cxx = find_cxx_compiler();
+        let status = std::process::Command::new(&cxx)
+            .arg("-c").arg("-O2")
+            .arg(&init_cpp).arg("-o").arg(&init_o)
+            .status()
+            .map_err(|e| format!("compile init_all: {e}"))?;
+        if !status.success() {
+            return Err("compile init_all.cpp failed".into());
+        }
+        Ok(Some(init_o))
+    }
+
     /// Compile C runtime sources to object files.
     ///
     /// Currently disabled: the Rust runtime library (libsimple_runtime.a) already
@@ -640,6 +698,11 @@ int main(int argc, char** argv) {
 
         // Compile the C main stub (defines main() which calls spl_main())
         let main_o = self.compile_main_stub(temp_dir)?;
+
+        // Generate module init caller: scans object files for __module_init_* symbols
+        // and generates a __attribute__((constructor)) function that calls them all.
+        // This replaces .init_array (which corrupts Mach-O due to object crate bug).
+        let init_o = self.generate_init_caller(temp_dir, object_paths)?;
 
         // Use clang/clang++ as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
         // libc initialization, and library paths automatically.
@@ -667,9 +730,11 @@ int main(int argc, char** argv) {
 
         if is_clang_cl {
             cmd.arg(&main_o);
+            if let Some(ref init) = init_o { cmd.arg(init); }
             cmd.arg(format!("/Fe:{}", self.output.display()));
         } else {
             cmd.arg("-o").arg(&self.output).arg(&main_o);
+            if let Some(ref init) = init_o { cmd.arg(init); }
         }
 
         // For large builds, archive objects into a static library first to avoid

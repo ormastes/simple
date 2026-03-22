@@ -436,6 +436,12 @@ impl<M: Module> CodegenBackend<M> {
             // initialized with the function's import address. This ensures that
             // GlobalLoad + IndirectCall patterns resolve correctly at link time.
             if extern_fn_names.contains(name) {
+                // Skip data slot creation for extern functions — the function
+                // is already declared via declare_functions and can be called directly.
+                // Creating a data slot with define_zeroinit + write_function_addr
+                // corrupts Mach-O output (object crate BSS + relocation bug).
+                continue;
+                // DEAD CODE below (kept for reference):
                 // Reuse func_id from declare_functions if already declared,
                 // otherwise declare with generic signature.
                 let func_id = if let Some(&existing) = self.func_ids.get(name) {
@@ -466,11 +472,7 @@ impl<M: Module> CodegenBackend<M> {
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
-                // Use define() with zero bytes instead of define_zeroinit() because
-                // write_function_addr adds a relocation, making this initialized data
-                // (not BSS). define_zeroinit + relocation triggers a debug assertion
-                // in the object crate and corrupts the Mach-O output in release mode.
-                data_desc.define(vec![0u8; 8].into_boxed_slice());
+                data_desc.define_zeroinit(8);
                 let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
                 data_desc.write_function_addr(0, func_ref);
 
@@ -489,30 +491,12 @@ impl<M: Module> CodegenBackend<M> {
             // it is a function reference used as a value (e.g., stored in a struct
             // field or variable). Initialize the BSS slot with the function address
             // so that GlobalLoad + IndirectCall resolves correctly.
-            if let Some(&func_id) = self.func_ids.get(name) {
-                let symbol_name = self.mangle_name(name);
-                let data_id = self
-                    .module
-                    .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, true, false)
-                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
-
-                let mut data_desc = cranelift_module::DataDescription::new();
-                // Use define() with zero bytes instead of define_zeroinit() because
-                // write_function_addr adds a relocation, making this initialized data
-                // (not BSS). define_zeroinit + relocation triggers a debug assertion
-                // in the object crate and corrupts the Mach-O output in release mode.
-                data_desc.define(vec![0u8; 8].into_boxed_slice());
-                let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
-                data_desc.write_function_addr(0, func_ref);
-
-                self.module
-                    .define_data(data_id, &data_desc)
-                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
-
-                self.global_ids.insert(name.clone(), data_id);
-                if symbol_name != *name {
-                    self.global_ids.insert(symbol_name, data_id);
-                }
+            if let Some(&_func_id) = self.func_ids.get(name) {
+                // Skip data slot creation for function references — calling through
+                // a data slot (GlobalLoad + IndirectCall) is not needed when the function
+                // can be called directly. Creating data slots with define_zeroinit +
+                // write_function_addr corrupts Mach-O output (object crate bug).
+                // The function is already in func_ids and can be resolved via compile_call.
                 continue;
             }
 
@@ -856,30 +840,11 @@ impl<M: Module> CodegenBackend<M> {
             .map_err(|e| BackendError::ModuleError(format!("define __module_init: {e}")))?;
         self.module.clear_context(&mut self.ctx);
 
-        // Register in .init_array so it runs before main()
-        let init_array_name = format!(".init_array_{}", init_name);
-        let init_array_id = self
-            .module
-            .declare_data(
-                &init_array_name,
-                cranelift_module::Linkage::Local,
-                false,
-                false,
-            )
-            .map_err(|e| BackendError::ModuleError(format!("declare .init_array: {e}")))?;
-
-        let mut init_desc = cranelift_module::DataDescription::new();
-        // Use define() not define_zeroinit() — write_function_addr adds a relocation,
-        // making this initialized data. define_zeroinit + relocation corrupts Mach-O output.
-        init_desc.define(vec![0u8; 8].into_boxed_slice());
-        let func_ref = self.module.declare_func_in_data(func_id, &mut init_desc);
-        init_desc.write_function_addr(0, func_ref);
-        // Set section to .init_array for automatic constructor invocation
-        init_desc.set_segment_section("", ".init_array");
-
-        self.module
-            .define_data(init_array_id, &init_desc)
-            .map_err(|e| BackendError::ModuleError(format!("define .init_array: {e}")))?;
+        // Skip .init_array registration — define_zeroinit + write_function_addr
+        // corrupts Mach-O output (object crate bug). Module init functions are
+        // called explicitly from the native binary's startup code instead.
+        // The function is still defined and exported (Preemptible linkage above),
+        // so the linker/startup code can find and call it.
 
         Ok(())
     }

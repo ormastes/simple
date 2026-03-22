@@ -1,0 +1,126 @@
+# Simple UI - Minimal CLI Entry
+#
+# A narrow entrypoint for `simple ui ...` command dispatch from the Rust driver.
+# This keeps argument parsing simple and avoids the direct-script fallback logic
+# used by src/app/ui/main.spl.
+
+use app.ui.tui.{run_tui}
+use app.ui.web.{run_web}
+use app.ui.electron.{run_electron}
+use app.ui.tauri.{run_tauri}
+use app.ui.none.{run_headless}
+use app.ui.detect.{detect_gui_backend}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+fn main() -> i64:
+    val parsed = parse_ui_cli()
+    val arg_count = parsed.0
+    val mode = parsed.1
+    val file_path = parsed.2
+    val port = parsed.3
+
+    if arg_count == 0:
+        print_usage()
+        return 1
+
+    if mode == "-h" or mode == "--help":
+        print_usage()
+        return 0
+
+    if mode == "tui":
+        if arg_count < 2:
+            print "Error: tui mode requires a .ui.sdn file path"
+            return 1
+        return run_tui(file_path)
+
+    if mode == "tauri":
+        if arg_count < 2:
+            print "Error: tauri mode requires a .ui.sdn file path"
+            return 1
+        return run_tauri(file_path, port)
+
+    if mode == "web":
+        if arg_count < 2:
+            print "Error: web mode requires a .ui.sdn file path"
+            return 1
+        return run_web(file_path, port)
+
+    if mode == "electron":
+        if arg_count < 2:
+            print "Error: electron mode requires a .ui.sdn file path"
+            return 1
+        return run_electron(file_path, port)
+
+    if mode == "headless" or mode == "none":
+        if arg_count < 2:
+            print "Error: headless mode requires a .ui.sdn file path"
+            return 1
+        return run_headless(file_path)
+
+    if mode == "gui" or mode == "desktop":
+        if arg_count < 2:
+            print "Error: gui mode requires a .ui.sdn file path"
+            return 1
+        return run_detected_backend(detect_gui_backend(), file_path, port)
+
+    if rt_file_exists(mode):
+        return run_detected_backend(detect_gui_backend(), mode, 3000)
+
+    print "Error: Unknown mode '{mode}'. Use 'tui', 'web', 'tauri', 'electron', or 'headless'."
+    print_usage()
+    return 1
+
+fn parse_ui_cli() -> (i64, text, text, i32):
+    val raw_args = rt_cli_get_args()
+    var found_ui = false
+    var arg_count = 0
+    var mode = ""
+    var file_path = ""
+    var port = 3000
+    var prev_was_port = false
+    for arg in raw_args:
+        if not found_ui:
+            if arg == "ui":
+                found_ui = true
+            continue
+
+        if arg_count == 0:
+            mode = arg
+        elif arg_count == 1:
+            file_path = arg
+
+        if prev_was_port:
+            port = arg.to_int()
+            prev_was_port = false
+        elif arg == "--port":
+            prev_was_port = true
+        elif arg.starts_with("--port="):
+            port = arg[7:].to_int()
+
+        arg_count = arg_count + 1
+    return (arg_count, mode, file_path, port)
+
+fn run_detected_backend(backend: text, file_path: text, port: i32) -> i64:
+    if backend == "tauri":
+        return run_tauri(file_path, port)
+    if backend == "electron":
+        return run_electron(file_path, port)
+    if backend == "web":
+        return run_web(file_path, port)
+    if backend == "headless":
+        return run_headless(file_path)
+    return run_tui(file_path)
+
+fn print_usage():
+    print "Simple UI Renderer"
+    print ""
+    print "Usage:"
+    print "  simple ui <file.ui.sdn>                      Auto-detect backend (default)"
+    print "  simple ui tui <file.ui.sdn>                  TUI mode (terminal)"
+    print "  simple ui tauri <file.ui.sdn> [--port N]     Tauri desktop mode"
+    print "  simple ui web <file.ui.sdn> [--port N]       Web GUI mode"
+    print "  simple ui electron <file.ui.sdn> [--port N]  Electron desktop mode"
+    print "  simple ui gui <file.ui.sdn> [--port N]       Auto-detect GUI backend"
+    print "  simple ui headless <file.ui.sdn>             Headless mode (testing/CI)"

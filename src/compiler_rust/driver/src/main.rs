@@ -159,6 +159,12 @@ fn handle_i18n_wrapper(args: &[String]) -> i32 {
     simple_driver::cli::i18n::run_i18n(args)
 }
 
+fn handle_ui_wrapper(_ctx: &CommandContext) -> i32 {
+    eprintln!("error: the UI command requires Simple app dispatch support");
+    eprintln!("Use a Simple binary built with UI app support, or run the UI app source directly.");
+    1
+}
+
 fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     handle_run(args, gc_log, gc_off)
 }
@@ -212,6 +218,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/web/main.spl",
         rust_handler: Handler::Args(handle_web),
         env_override: "SIMPLE_WEB_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "ui",
+        app_path: "src/app/ui/cli_entry.spl",
+        rust_handler: Handler::Custom(handle_ui_wrapper),
+        env_override: "",
         needs_rust_flags: &[],
     },
     // File watching
@@ -744,11 +757,20 @@ fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
-    // Simple app dispatch is disabled for the Rust bootstrap binary.
-    // The interpreter cannot handle full compilation pipelines (e.g. compile --native --backend=llvm-lib).
-    // Use a natively-compiled stage1+ binary for Simple app dispatch.
-    let _ = (app_relative_path, args, gc_log, gc_off);
-    None
+    // Keep Simple app dispatch narrow. Most compiler/build commands still rely on
+    // Rust handlers, but the UI command needs a real `simple ui ...` surface.
+    if app_relative_path != "src/app/ui/cli_entry.spl" {
+        return None;
+    }
+
+    let path = resolve_app_path(app_relative_path)?;
+
+    // Preserve the original command token in argv so src/app/ui/main.spl can
+    // detect `ui` in rt_cli_get_args() and parse the remaining subcommand args.
+    let mut full_args = vec![path.to_string_lossy().to_string()];
+    full_args.extend(args.iter().cloned());
+
+    Some(run_file_with_args(&path, gc_log, gc_off, full_args))
 }
 
 /// Original Rust test runner implementation (fallback)

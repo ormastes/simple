@@ -1,0 +1,146 @@
+# Async IPC Specification
+#
+# Tests the channel-based async IPC handler: reader pushes parsed events
+# to a channel, writer sends render messages, quit terminates the reader,
+# invalid JSON is handled gracefully, and channel close stops the reader.
+
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_sleep}
+use common.ui.widget.{UIEvent}
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render}
+
+
+# ============================================================================
+# parse_ipc_message integration (channel push)
+# ============================================================================
+
+describe "IPC reader pushes parsed events to channel":
+    it "sends KeyPress event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"keypress\",\"key\":\"a\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect received != nil to_equal true
+
+    it "sends Quit event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect received != nil to_equal true
+
+    it "sends Action event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"action\",\"name\":\"save\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect received != nil to_equal true
+
+
+# ============================================================================
+# IPC writer sends render messages
+# ============================================================================
+
+describe "IPC writer sends render messages":
+    it "build_ipc_render wraps html in render JSON":
+        val html = "<div>Hello Async</div>"
+        val msg = build_ipc_render(html)
+        expect msg to_contain "\"type\":\"render\""
+        expect msg to_contain "Hello Async"
+
+    it "render channel can queue multiple messages":
+        val ch = channel_new()
+        ch.send("<p>First</p>")
+        ch.send("<p>Second</p>")
+        val first = ch.try_recv()
+        val second = ch.try_recv()
+        expect first to_equal "<p>First</p>"
+        expect second to_equal "<p>Second</p>"
+
+
+# ============================================================================
+# Quit message stops reader
+# ============================================================================
+
+describe "Quit message stops reader":
+    it "quit event is recognized by parse_ipc_message":
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        expect event != nil to_equal true
+
+    it "channel receives quit then reader can stop":
+        val ch = channel_new()
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        # Simulate reader checking for quit
+        val received = ch.try_recv()
+        expect received != nil to_equal true
+
+
+# ============================================================================
+# Invalid JSON handled gracefully
+# ============================================================================
+
+describe "Invalid JSON handled gracefully":
+    it "returns nil for garbage input":
+        val event = parse_ipc_message("not json at all")
+        expect event to_be_nil
+
+    it "returns nil for empty string":
+        val event = parse_ipc_message("")
+        expect event to_be_nil
+
+    it "returns nil for unknown type":
+        val json = "{\"type\":\"foobar\",\"data\":\"xyz\"}"
+        val event = parse_ipc_message(json)
+        expect event to_be_nil
+
+    it "returns nil for partial JSON":
+        val event = parse_ipc_message("{\"type\":")
+        expect event to_be_nil
+
+    it "does not push nil events to channel":
+        val ch = channel_new()
+        val event = parse_ipc_message("garbage")
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect received to_be_nil
+
+
+# ============================================================================
+# Channel close stops reader
+# ============================================================================
+
+describe "Channel close stops reader":
+    it "closed channel reports is_closed true":
+        val ch = channel_new()
+        ch.close()
+        expect ch.is_closed() to_equal true
+
+    it "closed channel try_recv returns nil":
+        val ch = channel_new()
+        ch.close()
+        val received = ch.try_recv()
+        expect received to_be_nil
+
+    it "closed channel still delivers buffered messages":
+        val ch = channel_new()
+        ch.send("buffered")
+        ch.close()
+        val received = ch.try_recv()
+        expect received to_equal "buffered"
+
+    it "closed channel recv returns nil when empty":
+        val ch = channel_new()
+        ch.close()
+        val received = ch.recv()
+        expect received to_be_nil

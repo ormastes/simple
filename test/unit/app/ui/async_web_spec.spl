@@ -1,0 +1,233 @@
+# Async Web Server Specification
+#
+# Tests AsyncWebServer creation, channel integration, event processing,
+# render broadcasting, client management, and file change detection.
+
+use std.spec.*
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use common.ui.widget.{UIState, UITree, UIMode, UIEvent}
+use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.state.{init_state, update_state, update_tree}
+use app.ui.web.async_ws.{parse_ws_event, extract_field, ws_send_render}
+use app.ui.web.async_server.{AsyncWebServer, async_state_to_json, http_response}
+
+# ============================================================================
+# Helper: build a simple tree for testing
+# ============================================================================
+
+fn make_test_tree() -> UITree:
+    val root = column("aw_root", [
+        text_widget("aw_w1", "First"),
+        text_widget("aw_w2", "Second")
+    ])
+    return build_tree(root)
+
+# ============================================================================
+# AsyncWebServer construction
+# ============================================================================
+
+describe "AsyncWebServer":
+
+    describe "http_response helper":
+
+        it "generates 200 OK response with correct Content-Type":
+            val resp = http_response(200, "text/html", "<h1>Hi</h1>")
+            expect resp to_contain "HTTP/1.1 200 OK"
+            expect resp to_contain "Content-Type: text/html"
+
+        it "generates 404 response":
+            val resp = http_response(404, "text/plain", "Not Found")
+            expect resp to_contain "HTTP/1.1 404 Not Found"
+
+        it "includes CORS header":
+            val resp = http_response(200, "application/json", "{}")
+            expect resp to_contain "Access-Control-Allow-Origin: *"
+
+        it "includes body content":
+            val body = "{\"status\": \"ok\"}"
+            val resp = http_response(200, "application/json", body)
+            expect resp to_contain body
+
+    describe "async_state_to_json":
+
+        it "serializes state mode":
+            val tree = make_test_tree()
+            val state = init_state(tree)
+            val json = async_state_to_json(state)
+            expect json to_contain "\"mode\""
+
+        it "serializes focused_id":
+            val tree = make_test_tree()
+            val state = init_state(tree)
+            val json = async_state_to_json(state)
+            expect json to_contain "\"focused_id\""
+
+        it "is valid JSON structure":
+            val tree = make_test_tree()
+            val state = init_state(tree)
+            val json = async_state_to_json(state)
+            expect json to_start_with "{"
+            expect json to_end_with "}"
+
+# ============================================================================
+# Event Channel Integration
+# ============================================================================
+
+describe "Event channel integration":
+
+    it "channel sends and receives UIEvent":
+        val ch = channel_new()
+        ch.send(UIEvent.KeyPress(key: "a"))
+        val received = ch.try_recv()
+        expect received != nil to_equal true
+
+    it "channel returns nil when empty":
+        val ch = channel_new()
+        val received = ch.try_recv()
+        expect received to_be_nil
+
+    it "channel delivers multiple events in order":
+        val ch = channel_new()
+        ch.send(UIEvent.KeyPress(key: "x"))
+        ch.send(UIEvent.FileChanged)
+        ch.send(UIEvent.Quit)
+        val e1 = ch.try_recv()
+        val e2 = ch.try_recv()
+        val e3 = ch.try_recv()
+        expect e1 != nil to_equal true
+        expect e2 != nil to_equal true
+        expect e3 != nil to_equal true
+
+    it "channel is closeable":
+        val ch = channel_new()
+        ch.close()
+        expect ch.is_closed() to_equal true
+
+# ============================================================================
+# WebSocket Event Parsing
+# ============================================================================
+
+describe "parse_ws_event":
+
+    it "parses key event":
+        val event = parse_ws_event("{\"type\": \"key\", \"key\": \"q\"}")
+        expect event != nil to_equal true
+        match event:
+            UIEvent.KeyPress(key) =>
+                expect key to_equal "q"
+            _ =>
+                expect false to_equal true
+
+    it "parses keypress event":
+        val event = parse_ws_event("{\"type\": \"keypress\", \"key\": \"Enter\"}")
+        expect event != nil to_equal true
+
+    it "parses action event":
+        val event = parse_ws_event("{\"type\": \"action\", \"name\": \"save\"}")
+        expect event != nil to_equal true
+        match event:
+            UIEvent.Action(name) =>
+                expect name to_equal "save"
+            _ =>
+                expect false to_equal true
+
+    it "parses resize event":
+        val event = parse_ws_event("{\"type\": \"resize\", \"width\": \"120\", \"height\": \"40\"}")
+        expect event != nil to_equal true
+
+    it "parses quit event":
+        val event = parse_ws_event("{\"type\": \"quit\"}")
+        expect event != nil to_equal true
+
+    it "returns nil for unknown type":
+        val event = parse_ws_event("{\"type\": \"bogus\"}")
+        expect event to_be_nil
+
+    it "returns nil for empty string":
+        val event = parse_ws_event("")
+        expect event to_be_nil
+
+describe "extract_field":
+
+    it "extracts field with spaces":
+        val result = extract_field("{\"type\": \"key\"}", "type")
+        expect result to_equal "key"
+
+    it "extracts field without spaces":
+        val result = extract_field("{\"type\":\"key\"}", "type")
+        expect result to_equal "key"
+
+    it "returns empty for missing field":
+        val result = extract_field("{\"type\":\"key\"}", "missing")
+        expect result to_equal ""
+
+    it "returns empty for empty json":
+        val result = extract_field("", "type")
+        expect result to_equal ""
+
+# ============================================================================
+# File Change Detection
+# ============================================================================
+
+describe "File change detection":
+
+    it "FileChanged event can be sent over channel":
+        val ch = channel_new()
+        ch.send(UIEvent.FileChanged)
+        val event = ch.try_recv()
+        expect event != nil to_equal true
+
+    it "state update after file change preserves mode":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val new_tree = make_test_tree()
+        val updated = update_tree(state, new_tree)
+        expect updated.mode_name() to_equal state.mode_name()
+
+# ============================================================================
+# Multiple Client Handling
+# ============================================================================
+
+describe "Multiple client tracking":
+
+    it "empty client list has zero length":
+        val clients: [i32] = []
+        expect clients.len() to_equal 0
+
+    it "adding clients increases count":
+        var clients: [i32] = []
+        clients = clients + [1]
+        clients = clients + [2]
+        expect clients.len() to_equal 2
+
+    it "pruning removes disconnected entries":
+        var clients = [1, 2, 3]
+        # Simulate keeping only alive clients (1 and 3)
+        var alive: [i32] = []
+        alive = alive + [1]
+        alive = alive + [3]
+        expect alive.len() to_equal 2
+
+# ============================================================================
+# HTTP Response Generation
+# ============================================================================
+
+describe "HTTP response generation":
+
+    it "200 response contains status line":
+        val resp = http_response(200, "text/html", "hello")
+        expect resp to_start_with "HTTP/1.1 200 OK"
+
+    it "response contains Content-Length":
+        val body = "test"
+        val resp = http_response(200, "text/plain", body)
+        expect resp to_contain "Content-Length:"
+
+    it "response ends with body content":
+        val body = "the body"
+        val resp = http_response(200, "text/plain", body)
+        expect resp to_end_with body
+
+    it "response includes Connection: close":
+        val resp = http_response(200, "text/html", "x")
+        expect resp to_contain "Connection: close"

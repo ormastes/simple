@@ -1,0 +1,219 @@
+# Async TUI Application
+#
+# Replaces the blocking TuiApp.run() loop with a channel-based
+# async event architecture:
+#   - Input reading runs in a separate thread, pushing UIEvents to a channel
+#   - File watching runs in a separate thread, pushing FileChanged events
+#   - Main loop polls the channel non-blocking via try_recv()
+#   - Rendering is triggered only on state changes, not every iteration
+#
+# This decouples event producers (input, file watcher) from the
+# consumer (main render loop) and allows future event sources
+# (timers, network, resize signals) to push into the same channel.
+
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_spawn2, thread_sleep}
+use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
+use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
+use common.ui.event.{process_event}
+use common.ui.parse.sdn.{parse_ui_file}
+use app.ui.tui.screen.{Screen, get_terminal_size, ansi_clear_screen, ansi_cursor_home,
+    ansi_hide_cursor, ansi_show_cursor, ansi_enable_alt_screen, ansi_disable_alt_screen}
+use app.ui.tui.input.{parse_input_line, format_input_prompt}
+use app.ui.tui.async_input.{start_input_reader, start_raw_input_reader}
+use app.ui.render.widgets.{render_tui_tree}
+use common.ui.layout.{compute_layout}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# File Watcher Task
+# =========================================================================
+
+fn start_file_watcher_task(channel: Channel, file_path: text, initial_content: text):
+    """Poll the UI file for changes and push FileChanged events.
+
+    Checks the file content every 500ms. When the content differs from
+    the last known snapshot, sends UIEvent.FileChanged to the channel.
+    """
+    val poll_interval_ms = 500
+    var last_content = initial_content
+
+    while not channel.is_closed():
+        thread_sleep(poll_interval_ms)
+
+        if channel.is_closed():
+            return
+
+        if not rt_file_exists(file_path):
+            pass_do_nothing
+        else:
+            val current_content = rt_file_read_text(file_path)
+            if current_content != last_content:
+                last_content = current_content
+                channel.send(UIEvent.FileChanged)
+
+# =========================================================================
+# AsyncTuiApp
+# =========================================================================
+
+class AsyncTuiApp:
+    file_path: text
+    state: UIState
+    event_channel: Channel
+    running: bool
+    last_file_content: text
+
+    static fn new(file_path: text) -> Result<AsyncTuiApp, text>:
+        """Create a new AsyncTuiApp by parsing the given .ui.sdn file."""
+        val tree_result = parse_ui_file(file_path)
+        match tree_result:
+            Err(e) =>
+                return Err(e)
+            Ok(tree) =>
+                val state = init_state(tree)
+                val content = if rt_file_exists(file_path):
+                    rt_file_read_text(file_path)
+                else:
+                    ""
+                val ch = channel_new()
+                return Ok(AsyncTuiApp(
+                    file_path: file_path,
+                    state: state,
+                    event_channel: ch,
+                    running: true,
+                    last_file_content: content
+                ))
+
+    me run():
+        """Main async event loop.
+
+        1. Spawn input reader thread  -> pushes UIEvents to channel
+        2. Spawn file watcher thread  -> pushes FileChanged to channel
+        3. Loop: try_recv() from channel, update state, render on change
+        """
+        print ansi_enable_alt_screen()
+        print ansi_hide_cursor()
+
+        # Initial render
+        self.render_frame()
+
+        # Spawn background tasks
+        self.start_input_task()
+        self.start_file_watcher_task()
+
+        # Main event loop -- poll channel non-blocking
+        val loop_sleep_ms = 16  # ~60 fps cap
+
+        while self.running:
+            var state_changed = false
+
+            # Drain all pending events from channel
+            var event = self.event_channel.try_recv()
+            while event != nil:
+                val ui_event: UIEvent = event
+                state_changed = self.handle_event(ui_event) or state_changed
+                if not self.running:
+                    break
+                event = self.event_channel.try_recv()
+
+            # Only re-render when state actually changed
+            if state_changed and self.running:
+                self.render_frame()
+
+            # Brief sleep to avoid busy-spinning
+            if self.running:
+                thread_sleep(loop_sleep_ms)
+
+        # Cleanup
+        self.event_channel.close()
+        print ansi_show_cursor()
+        print ansi_disable_alt_screen()
+        print "UI closed."
+
+    me handle_event(event: UIEvent) -> bool:
+        """Process a single event. Returns true if state changed."""
+        match event:
+            UIEvent.Quit =>
+                self.running = false
+                return true
+            UIEvent.FileChanged =>
+                self.reload_file()
+                return true
+            _ =>
+                val new_state = update_state(self.state, event)
+                # Detect whether state actually changed
+                val changed = (new_state.focused_id != self.state.focused_id
+                    or new_state.mode_name() != self.state.mode_name()
+                    or new_state.command_buffer != self.state.command_buffer)
+                self.state = new_state
+                return changed
+
+    fn render_frame():
+        """Render a single frame to the terminal."""
+        val size = get_terminal_size()
+        val width = size.0
+        val height = size.1 - 1  # Reserve one line for input
+
+        var screen = Screen.new(width, height)
+
+        # Compute layout
+        val rects = compute_layout(self.state.tree.root_node(), 0, 0, width, height)
+
+        # Render widget tree
+        screen = render_tui_tree(screen, self.state.tree.root_node(), rects, self.state)
+
+        # Output
+        print screen.render()
+
+    fn start_input_task():
+        """Spawn the input reader on a background thread."""
+        val ch = self.event_channel
+        thread_spawn(\:
+            start_input_reader(ch)
+        )
+
+    fn start_file_watcher_task():
+        """Spawn the file watcher on a background thread."""
+        val ch = self.event_channel
+        val path = self.file_path
+        val content = self.last_file_content
+        thread_spawn(\:
+            start_file_watcher_task(ch, path, content)
+        )
+
+    me reload_file():
+        """Reload the .ui.sdn file and update the tree."""
+        if not rt_file_exists(self.file_path):
+            return
+
+        val current_content = rt_file_read_text(self.file_path)
+        if current_content != self.last_file_content:
+            self.last_file_content = current_content
+            val tree_result = parse_ui_file(self.file_path)
+            match tree_result:
+                Ok(new_tree) =>
+                    self.state = update_tree(self.state, new_tree)
+                Err(e) =>
+                    # Keep old state on parse error
+                    print "Warning: UI parse error: {e}"
+
+# =========================================================================
+# Entry Point
+# =========================================================================
+
+fn run_async_tui(file_path: text) -> i64:
+    """Start async TUI mode for a .ui.sdn file."""
+    if not rt_file_exists(file_path):
+        print "Error: File not found: {file_path}"
+        return 1
+
+    val app_result = AsyncTuiApp.new(file_path)
+    match app_result:
+        Err(e) =>
+            print "Error: {e}"
+            return 1
+        Ok(app) =>
+            app.run()
+            return 0
