@@ -1,0 +1,240 @@
+# IR_TC Core Types
+#
+# Type system for the unified compiler backend + emulator IR.
+# All integer widths (i1/i8/i16/i32/i64) are first-class — no implicit promotion.
+
+# ============================================================================
+# IR Type Kinds
+# ============================================================================
+
+enum IrTcTypeKind:
+    """IR_TC type system — covers both compilation and emulation paths."""
+    # Integer types — all widths native
+    I1                  # Boolean / flag
+    I8                  # 8-bit (AVR native word)
+    I16                 # 16-bit (8086 native word)
+    I32                 # 32-bit
+    I64                 # 64-bit
+
+    # Floating point
+    F32                 # IEEE 754 single
+    F64                 # IEEE 754 double
+
+    # Pointer — width determined by target
+    # addr_space: 0=default, 1=program (AVR Flash), 2=IO, 3=data (AVR SRAM)
+    Ptr(addr_space: i64)
+
+    # Vector (SIMD)
+    Vec(elem: IrTcTypeKind, count: i64)
+
+    # Aggregates
+    Struct(fields: [IrTcTypeKind])
+    Array(elem: IrTcTypeKind, count: i64)
+
+    # Special
+    Void
+    Flag                # CPU condition flags (emulation-specific)
+
+impl IrTcTypeKind:
+    fn is_integer() -> bool:
+        match self:
+            I1: true
+            I8: true
+            I16: true
+            I32: true
+            I64: true
+            _: false
+
+    fn is_float() -> bool:
+        match self:
+            F32: true
+            F64: true
+            _: false
+
+    fn is_pointer() -> bool:
+        match self:
+            Ptr(_): true
+            _: false
+
+    fn is_aggregate() -> bool:
+        match self:
+            Struct(_): true
+            Array(_, _): true
+            _: false
+
+    fn bit_width() -> i64:
+        """Returns bit width for scalar types. 0 for aggregates/void."""
+        match self:
+            I1: 1
+            I8: 8
+            I16: 16
+            I32: 32
+            I64: 64
+            F32: 32
+            F64: 64
+            Flag: 8
+            _: 0
+
+    fn byte_width() -> i64:
+        """Returns byte width (rounded up) for scalar types."""
+        val bits = self.bit_width()
+        if bits == 0:
+            0
+        else:
+            (bits + 7) / 8
+
+    fn to_text() -> text:
+        match self:
+            I1: "i1"
+            I8: "i8"
+            I16: "i16"
+            I32: "i32"
+            I64: "i64"
+            F32: "f32"
+            F64: "f64"
+            Ptr(as_): "ptr.{as_}"
+            Vec(elem, count): "vec<{elem.to_text()}, {count}>"
+            Struct(fields):
+                var parts: [text] = []
+                for f in fields:
+                    parts.push(f.to_text())
+                "struct({parts.join(", ")})"
+            Array(elem, count): "[{elem.to_text()}; {count}]"
+            Void: "void"
+            Flag: "flag"
+
+# ============================================================================
+# Address Space Constants
+# ============================================================================
+
+val ADDR_SPACE_DEFAULT: i64 = 0
+val ADDR_SPACE_PROGRAM: i64 = 1   # AVR Flash / Harvard program memory
+val ADDR_SPACE_IO: i64 = 2        # I/O ports
+val ADDR_SPACE_DATA: i64 = 3      # AVR SRAM / Harvard data memory
+
+# ============================================================================
+# Values (Virtual Registers / Constants)
+# ============================================================================
+
+struct IrTcValue:
+    """A typed value in IR_TC — SSA virtual register or constant."""
+    id: i64
+    type_: IrTcTypeKind
+
+impl IrTcValue:
+    static fn new(id: i64, type_: IrTcTypeKind) -> IrTcValue:
+        IrTcValue(id: id, type_: type_)
+
+    fn to_text() -> text:
+        "%{self.id}:{self.type_.to_text()}"
+
+enum IrTcValueKind:
+    """Distinguishes value origins for register allocation and emulation."""
+    # SSA virtual register (used in both compilation and emulation)
+    Virtual(id: i64)
+
+    # Named guest CPU register (emulation only)
+    GuestReg(arch: GuestArch, reg: i64)
+
+    # Immediate constant
+    Const(value: i64, type_: IrTcTypeKind)
+
+    # Guest program counter (emulation only — special tracking)
+    GuestPC
+
+# ============================================================================
+# Guest Architecture Identifier
+# ============================================================================
+
+enum GuestArch:
+    """Supported guest CPU architectures."""
+    Avr         # 8-bit Atmel AVR
+    I8086       # 16-bit Intel 8086
+    Arm         # 32-bit ARM
+    Riscv32     # 32-bit RISC-V
+    X86         # 32-bit x86
+    AArch64     # 64-bit ARM
+    Riscv64     # 64-bit RISC-V
+    X86_64      # 64-bit x86
+
+impl GuestArch:
+    fn word_size() -> i64:
+        """Native word size in bits."""
+        match self:
+            Avr: 8
+            I8086: 16
+            Arm: 32
+            Riscv32: 32
+            X86: 32
+            AArch64: 64
+            Riscv64: 64
+            X86_64: 64
+
+    fn to_text() -> text:
+        match self:
+            Avr: "avr"
+            I8086: "i8086"
+            Arm: "arm"
+            Riscv32: "riscv32"
+            X86: "x86"
+            AArch64: "aarch64"
+            Riscv64: "riscv64"
+            X86_64: "x86_64"
+
+# ============================================================================
+# Comparison Conditions
+# ============================================================================
+
+enum IrTcCond:
+    """Comparison conditions for Cmp instruction."""
+    Eq          # Equal
+    Ne          # Not equal
+    Lt          # Less than (signed)
+    Le          # Less or equal (signed)
+    Gt          # Greater than (signed)
+    Ge          # Greater or equal (signed)
+    Ltu         # Less than (unsigned)
+    Leu         # Less or equal (unsigned)
+    Gtu         # Greater than (unsigned)
+    Geu         # Greater or equal (unsigned)
+
+impl IrTcCond:
+    fn to_text() -> text:
+        match self:
+            Eq: "eq"
+            Ne: "ne"
+            Lt: "lt"
+            Le: "le"
+            Gt: "gt"
+            Ge: "ge"
+            Ltu: "ltu"
+            Leu: "leu"
+            Gtu: "gtu"
+            Geu: "geu"
+
+# ============================================================================
+# Calling Convention
+# ============================================================================
+
+enum CallConv:
+    """Calling conventions for Call instruction."""
+    Default         # Target default
+    C               # C calling convention
+    Fast            # Fast call (callee-saved minimal)
+    Cold            # Infrequently called (optimize for size)
+    AvrInterrupt    # AVR interrupt handler
+    X86Stdcall      # x86 stdcall
+    X86Fastcall     # x86 fastcall
+    Helper          # TCG-style helper (emulation)
+
+impl CallConv:
+    fn to_text() -> text:
+        match self:
+            Default: "default"
+            C: "ccc"
+            Fast: "fastcc"
+            Cold: "coldcc"
+            AvrInterrupt: "avr_intr"
+            X86Stdcall: "x86_stdcallcc"
+            X86Fastcall: "x86_fastcallcc"
+            Helper: "helpercc"

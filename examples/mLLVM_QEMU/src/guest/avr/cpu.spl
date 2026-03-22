@@ -1,0 +1,105 @@
+# AVR Guest CPU Definition
+#
+# Atmel AVR 8-bit microcontroller (ATmega328P as reference).
+# - 32 x 8-bit general purpose registers (r0-r31)
+# - 16-bit register pairs for indirect addressing (X=r27:r26, Y=r29:r28, Z=r31:r30)
+# - 16-bit program counter (PC)
+# - 8-bit status register (SREG): I T H S V N Z C
+# - 16-bit stack pointer (SP = SPH:SPL)
+# - Harvard architecture: separate program (Flash) and data (SRAM) address spaces
+
+use core.types.{GuestArch}
+use core.mem_op.{Endian, GuestRegId, ADDR_SPACE_DEFAULT, ADDR_SPACE_PROGRAM, ADDR_SPACE_DATA}
+use guest.cpu_def.{GuestCpuDef, GuestRegDef, GuestRegAlias, AddrSpaceDef}
+
+# ============================================================================
+# AVR Register Indices
+# ============================================================================
+
+# General purpose registers r0-r31 (indices 0-31)
+# SREG (index 32)
+# SP (index 33) — 16-bit stack pointer
+# PC (index 34) — 16-bit program counter
+
+val AVR_REG_SREG: i64 = 32
+val AVR_REG_SP: i64 = 33
+val AVR_REG_PC: i64 = 34
+
+# SREG bit positions
+val AVR_SREG_C: i64 = 0    # Carry
+val AVR_SREG_Z: i64 = 1    # Zero
+val AVR_SREG_N: i64 = 2    # Negative
+val AVR_SREG_V: i64 = 3    # Overflow
+val AVR_SREG_S: i64 = 4    # Sign (N xor V)
+val AVR_SREG_H: i64 = 5    # Half carry
+val AVR_SREG_T: i64 = 6    # Transfer bit
+val AVR_SREG_I: i64 = 7    # Global interrupt enable
+
+# ============================================================================
+# AVR CPU Definition Builder
+# ============================================================================
+
+fn build_avr_cpu_def() -> GuestCpuDef:
+    """Build the complete AVR CPU definition."""
+    var registers: [GuestRegDef] = []
+
+    # r0-r31: 8-bit general purpose registers
+    for i in 0..32:
+        val reg_id = GuestRegId.new(GuestArch.Avr, i, "r{i}")
+        registers.push(GuestRegDef.new(reg_id, 8))
+
+    # SREG: 8-bit status register
+    val sreg_id = GuestRegId.new(GuestArch.Avr, AVR_REG_SREG, "SREG")
+    registers.push(GuestRegDef.new(sreg_id, 8))
+
+    # SP: 16-bit stack pointer (SPH:SPL)
+    val sp_id = GuestRegId.new(GuestArch.Avr, AVR_REG_SP, "SP")
+    var sp_reg = GuestRegDef.new(sp_id, 16)
+    sp_reg = sp_reg.with_alias(GuestRegAlias.new("SPL", AVR_REG_SP, 0, 8))
+    sp_reg = sp_reg.with_alias(GuestRegAlias.new("SPH", AVR_REG_SP, 8, 8))
+    registers.push(sp_reg)
+
+    # PC: 16-bit program counter
+    val pc_id = GuestRegId.new(GuestArch.Avr, AVR_REG_PC, "PC")
+    registers.push(GuestRegDef.new(pc_id, 16))
+
+    # Address spaces (Harvard architecture)
+    val addr_spaces = [
+        # Data memory (SRAM): 0x0000-0x08FF for ATmega328P (2KB + I/O + registers)
+        AddrSpaceDef.new(ADDR_SPACE_DEFAULT, "data", 16, 2304),
+        # Program memory (Flash): 0x0000-0x7FFF for ATmega328P (32KB)
+        AddrSpaceDef.new(ADDR_SPACE_PROGRAM, "program", 16, 32768),
+        # I/O space: 0x00-0x3F (64 I/O registers)
+        AddrSpaceDef.new(2, "io", 8, 64)
+    ]
+
+    GuestCpuDef(
+        name: "avr",
+        arch: GuestArch.Avr,
+        word_size: 8,
+        endian: Endian.Little,
+        registers: registers,
+        pc_reg: pc_id,
+        sp_reg: Some(sp_id),
+        flags_reg: Some(sreg_id),
+        addr_spaces: addr_spaces
+    )
+
+# ============================================================================
+# 16-bit Register Pair Helpers
+# ============================================================================
+
+fn avr_reg_pair_value(state: GuestState, high_idx: i64, low_idx: i64) -> i64:
+    """Read a 16-bit register pair (e.g., X = r27:r26)."""
+    val high = state.get_reg(high_idx)
+    val low = state.get_reg(low_idx)
+    (high << 8) | low
+
+fn avr_x_reg(state: GuestState) -> i64:
+    avr_reg_pair_value(state, 27, 26)
+
+fn avr_y_reg(state: GuestState) -> i64:
+    avr_reg_pair_value(state, 29, 28)
+
+fn avr_z_reg(state: GuestState) -> i64:
+    avr_reg_pair_value(state, 31, 30)
