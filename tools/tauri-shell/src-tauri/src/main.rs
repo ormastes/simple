@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 // ---------------------------------------------------------------------------
 // IPC message types (subprocess → shell)
@@ -121,7 +121,49 @@ fn read_subprocess_stdout(
 fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
     match msg {
         SubprocessMessage::Render { html } => {
-            let _ = app.emit("render", html);
+            eprintln!("[tauri-shell] got render, html_len={}", html.len());
+            if let Some(win) = app.get_webview_window("main") {
+                let escaped = html
+                    .replace('\\', "\\\\")
+                    .replace('`', "\\`")
+                    .replace("${", "\\${");
+                // Inject HTML + re-attach click/key handlers each render
+                let js = format!(r#"
+                    (function() {{
+                        var el = document.getElementById('app');
+                        if (!el) {{
+                            document.body.innerHTML = '<div id="app"></div>';
+                            el = document.getElementById('app');
+                        }}
+                        el.innerHTML = `{}`;
+
+                        // Attach click handler for buttons
+                        if (!window._simpleClickHandler) {{
+                            window._simpleClickHandler = true;
+                            document.addEventListener('click', function(e) {{
+                                var btn = e.target.closest('[data-action]');
+                                if (btn) {{
+                                    window.__TAURI_INTERNALS__.invoke(
+                                        'send_action',
+                                        {{ name: btn.getAttribute('data-action') }}
+                                    );
+                                }}
+                            }});
+                            document.addEventListener('keydown', function(e) {{
+                                var key = e.key;
+                                if (key.length === 1 || ['Enter','Escape','Backspace','Tab',
+                                    'ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {{
+                                    window.__TAURI_INTERNALS__.invoke(
+                                        'send_keypress',
+                                        {{ key: key }}
+                                    );
+                                }}
+                            }});
+                        }}
+                    }})();
+                "#, escaped);
+                let _ = win.eval(&js);
+            }
         }
         SubprocessMessage::Dialog {
             dialog_type,
@@ -231,6 +273,9 @@ fn main() {
     let simple_bin = resolve_simple_binary();
     let entry_file = resolve_entry_file();
 
+    eprintln!("[tauri-shell] binary: {}", simple_bin);
+    eprintln!("[tauri-shell] entry: {:?}", entry_file);
+
     // Build subprocess command
     let mut cmd = Command::new(&simple_bin);
     if let Some(ref entry) = entry_file {
@@ -247,6 +292,7 @@ fn main() {
         );
         std::process::exit(1);
     });
+    eprintln!("[tauri-shell] subprocess spawned, pid={}", child.id());
 
     let child_stdout = child.stdout.take().expect("failed to capture subprocess stdout");
     let child_stdin = child.stdin.take().expect("failed to capture subprocess stdin");
@@ -269,6 +315,24 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Inject base HTML into the webview immediately
+            if let Some(win) = app.get_webview_window("main") {
+                #[cfg(debug_assertions)]
+                win.open_devtools();
+                let base_html = r#"
+                    document.head.innerHTML = `
+                        <meta charset="UTF-8">
+                        <style>
+                            * { margin:0; padding:0; box-sizing:border-box; }
+                            body { background:#1e1e2e; color:#cdd6f4; font-family:-apple-system,BlinkMacSystemFont,monospace; font-size:13px; }
+                            #app { width:100%; min-height:100vh; padding:20px; }
+                        </style>
+                    `;
+                    document.body.innerHTML = '<div id="app"><h2 style="color:#89b4fa">Simple UI — Tauri</h2><p style="color:#a6adc8;margin:16px 0">Connecting to subprocess...</p></div>';
+                "#;
+                let _ = win.eval(base_html);
+            }
 
             // Spawn a thread to read from subprocess stdout
             let reader = BufReader::new(child_stdout);

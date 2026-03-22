@@ -466,7 +466,11 @@ impl<M: Module> CodegenBackend<M> {
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
-                data_desc.define_zeroinit(8);
+                // Use define() with zero bytes instead of define_zeroinit() because
+                // write_function_addr adds a relocation, making this initialized data
+                // (not BSS). define_zeroinit + relocation triggers a debug assertion
+                // in the object crate and corrupts the Mach-O output in release mode.
+                data_desc.define(vec![0u8; 8].into_boxed_slice());
                 let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
                 data_desc.write_function_addr(0, func_ref);
 
@@ -493,7 +497,11 @@ impl<M: Module> CodegenBackend<M> {
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
-                data_desc.define_zeroinit(8);
+                // Use define() with zero bytes instead of define_zeroinit() because
+                // write_function_addr adds a relocation, making this initialized data
+                // (not BSS). define_zeroinit + relocation triggers a debug assertion
+                // in the object crate and corrupts the Mach-O output in release mode.
+                data_desc.define(vec![0u8; 8].into_boxed_slice());
                 let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
                 data_desc.write_function_addr(0, func_ref);
 
@@ -760,7 +768,7 @@ impl<M: Module> CodegenBackend<M> {
         let sig = cranelift_codegen::ir::Signature::new(call_conv);
         let func_id = self
             .module
-            .declare_function(&init_name, cranelift_module::Linkage::Export, &sig)
+            .declare_function(&init_name, cranelift_module::Linkage::Preemptible, &sig)
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
 
         // Get rt_string_new function ID
@@ -861,7 +869,9 @@ impl<M: Module> CodegenBackend<M> {
             .map_err(|e| BackendError::ModuleError(format!("declare .init_array: {e}")))?;
 
         let mut init_desc = cranelift_module::DataDescription::new();
-        init_desc.define_zeroinit(8); // 8 bytes for function pointer
+        // Use define() not define_zeroinit() — write_function_addr adds a relocation,
+        // making this initialized data. define_zeroinit + relocation corrupts Mach-O output.
+        init_desc.define(vec![0u8; 8].into_boxed_slice());
         let func_ref = self.module.declare_func_in_data(func_id, &mut init_desc);
         init_desc.write_function_addr(0, func_ref);
         // Set section to .init_array for automatic constructor invocation

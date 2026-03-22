@@ -657,9 +657,7 @@ int main(int argc, char** argv) {
             cmd.arg("-fPIC");
         }
 
-        // macOS: Apple's new ld (ld-1230+) crashes on some Cranelift-generated Mach-O objects
-        // (missing LC_BUILD_VERSION, unusual relocation patterns). Use -ld_classic as workaround.
-        // PIE is the default on macOS so -no-pie is not needed.
+        // macOS: Use ld_classic (Apple's older linker) which is more tolerant
         #[cfg(target_os = "macos")]
         cmd.arg("-Wl,-ld_classic");
 
@@ -676,10 +674,7 @@ int main(int argc, char** argv) {
 
         // For large builds, archive objects into a static library first to avoid
         // linker crashes when passing thousands of individual .o files.
-        // On macOS, skip archiving due to Cranelift Mach-O n_strx bug —
-        // pass .o files directly to the linker instead.
-        let skip_archive = cfg!(target_os = "macos");
-        if object_paths.len() > 100 && !skip_archive {
+        if object_paths.len() > 100 {
             let archive_path = temp_dir.join("libspl_objects.a");
             let ar_tool = find_archive_tool();
             let is_msvc_lib = ar_tool == "lib";
