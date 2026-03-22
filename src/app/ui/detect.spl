@@ -1,10 +1,22 @@
 # GUI Backend Auto-Detection
 #
 # Determines the best available GUI backend based on the environment.
+# Cross-platform: uses rt_platform_name() for reliable OS detection.
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_platform_name() -> text
+
+# =========================================================================
+# Platform Detection
+# =========================================================================
+
+fn is_windows() -> bool:
+    rt_platform_name() == "windows"
+
+fn is_macos() -> bool:
+    rt_platform_name() == "macos"
 
 # =========================================================================
 # Detection
@@ -34,6 +46,10 @@ fn detect_gui_backend() -> text:
 
 fn has_display() -> bool:
     """Check if a display server is available."""
+    # Windows always has a display (DWM)
+    if is_windows():
+        return true
+
     # macOS always has a display
     if is_macos():
         return true
@@ -52,19 +68,26 @@ fn has_display() -> bool:
 
 fn has_tauri_shell() -> bool:
     """Check if the Tauri shell binary (simple-tauri-shell) exists."""
-    val result = rt_process_run("/bin/sh", ["-c", "which simple-tauri-shell 2>/dev/null"])
-    if result.2 == 0:
-        return true
-    # Check local build path
-    return rt_file_exists("tools/tauri-shell/target/release/simple-tauri-shell")
+    if is_windows():
+        val result = rt_process_run("cmd", ["/c", "where simple-tauri-shell 2>nul"])
+        if result.2 == 0:
+            return true
+        return rt_file_exists("tools/tauri-shell/target/release/simple-tauri-shell.exe")
+    else:
+        val result = rt_process_run("/bin/sh", ["-c", "which simple-tauri-shell 2>/dev/null"])
+        if result.2 == 0:
+            return true
+        return rt_file_exists("tools/tauri-shell/target/release/simple-tauri-shell")
 
 fn has_electron_shell() -> bool:
     """Check if an Electron shell is available."""
-    val result = rt_process_run("/bin/sh", ["-c", "which electron 2>/dev/null"])
-    if result.2 == 0:
-        return true
-    return rt_file_exists("node_modules/.bin/electron")
-
-fn is_macos() -> bool:
-    val result = rt_process_run("/bin/sh", ["-c", "uname -s 2>/dev/null"])
-    return result.2 == 0 and result.0.trim() == "Darwin"
+    if is_windows():
+        val result = rt_process_run("cmd", ["/c", "where electron 2>nul"])
+        if result.2 == 0:
+            return true
+        return rt_file_exists("node_modules/.bin/electron.cmd")
+    else:
+        val result = rt_process_run("/bin/sh", ["-c", "which electron 2>/dev/null"])
+        if result.2 == 0:
+            return true
+        return rt_file_exists("node_modules/.bin/electron")

@@ -226,10 +226,11 @@ class Screen:
 extern fn rt_env_get(key: text) -> text
 extern fn rt_term_get_size() -> (i32, i32)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_platform_name() -> text
 
 fn get_terminal_size() -> (i32, i32):
     """Get terminal width and height. Returns (width, height).
-    Tries native rt_term_get_size first, then env vars, then stty fallback."""
+    Tries native rt_term_get_size first, then env vars, then platform-specific fallback."""
     # Try native FFI first
     val native_size = rt_term_get_size()
     if native_size.0 > 0 and native_size.1 > 0:
@@ -245,15 +246,43 @@ fn get_terminal_size() -> (i32, i32):
         h = rows.to_int()
     if w > 0 and h > 0:
         return (w, h)
-    # Try stty fallback
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "stty size 2>/dev/null"])
-    if code == 0 and stdout.trim() != "":
-        val parts = stdout.trim().split(" ")
-        if parts.len() == 2:
-            h = parts[0].to_int()
-            w = parts[1].to_int()
+    # Platform-specific fallback
+    if rt_platform_name() == "windows":
+        val (stdout, stderr, code) = rt_process_run("cmd", ["/c", "mode con 2>nul"])
+        if code == 0 and stdout.trim() != "":
+            val parsed_w = parse_mode_con_value(stdout, "columns")
+            val parsed_h = parse_mode_con_value(stdout, "lines")
+            if parsed_w > 0:
+                w = parsed_w
+            if parsed_h > 0:
+                h = parsed_h
+    else:
+        # Unix: Try stty fallback
+        val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "stty size 2>/dev/null"])
+        if code == 0 and stdout.trim() != "":
+            val parts = stdout.trim().split(" ")
+            if parts.len() == 2:
+                h = parts[0].to_int()
+                w = parts[1].to_int()
     if w <= 0:
         w = 80
     if h <= 0:
         h = 24
     return (w, h)
+
+fn parse_mode_con_value(output: text, key: text) -> i32:
+    """Parse 'mode con' output for a key like 'Columns' or 'Lines'.
+    Format: '    Columns:      120' — extract the number after ':'."""
+    val key_lower = key.to_lower()
+    val lines = output.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val label = parts[0].trim().to_lower()
+                if label.contains(key_lower):
+                    val num_str = parts[1].trim()
+                    if num_str != "":
+                        return num_str.to_int()
+    return 0

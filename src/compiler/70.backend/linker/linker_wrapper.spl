@@ -451,42 +451,152 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = link_err ?? "Unknown linking error"
         Err("cc linking failed: {err_msg}")
 
-fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    # Windows linking via lld-link or MSVC link.exe
-    # Try lld-link first
-    val (lld_out, lld_err, lld_code) = shell("where lld-link 2>nul")
-    var linker_cmd = "link"
-    if lld_code == 0:
-        linker_cmd = "lld-link"
+fn _is_mingw_env() -> bool:
+    """Check if running under MinGW/MSYS2."""
+    val msystem = env_get("MSYSTEM")
+    if msystem != "" and msystem != nil:
+        return true
+    val linker_flavor = env_get("SIMPLE_LINKER_FLAVOR")
+    linker_flavor == "gnu"
 
+fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # MinGW: use gcc driver (Unix-style linking)
+    if _is_mingw_env():
+        return _link_native_mingw(object_files, output, config)
+
+    # MSVC: delegate to MsvcLinker with proper CRT paths
+    return _link_native_msvc(object_files, output, config)
+
+fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link using MSVC toolchain (link.exe or lld-link)."""
+    use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe}
+
+    var msvc_config = MsvcConfig.default()
+    msvc_config.debug = config.debug
+
+    # Populate CRT library paths from VS/SDK detection
+    val crt_paths = _find_msvc_lib_paths()
+    for p in crt_paths:
+        msvc_config.lib_paths.push(p)
+
+    # Add user library paths
+    for lp in config.library_paths:
+        msvc_config.lib_paths.push(lp)
+
+    # Add user libraries
+    for lib in config.libraries:
+        if lib.ends_with(".lib"):
+            msvc_config.libs.push(lib)
+        else:
+            msvc_config.libs.push("{lib}.lib")
+
+    # Add essential Windows libraries
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib"]
+    for wlib in win_libs:
+        if not msvc_config.libs.contains(wlib):
+            msvc_config.libs.push(wlib)
+
+    # Auto-detect runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        msvc_config.lib_paths.push(runtime_dir)
+        msvc_config.libs.push("simple_compiler.lib")
+
+    # Extra flags
+    msvc_config.extra_args = config.extra_flags
+
+    if config.verbose:
+        print "[linker-wrapper] MSVC linking: {object_files.len()} objects -> {output}"
+        print "[linker-wrapper] lib_paths: {msvc_config.lib_paths.join(', ')}"
+
+    val linker = MsvcLinker.new(msvc_config)
+    val result = linker.link(output, object_files)
+    match result:
+        case Ok(_):
+            Ok(output)
+        case Err(e):
+            Err("Windows MSVC linking failed: {e}")
+
+fn _find_msvc_lib_paths() -> [text]:
+    """Find MSVC CRT and Windows SDK library paths."""
+    use compiler.backend.linker.msvc.{find_visual_studio}
+    var paths: [text] = []
+
+    val vs_opt = find_visual_studio()
+    match vs_opt:
+        case Some(vs_path):
+            # Find MSVC lib dir: VC\Tools\MSVC\<ver>\lib\x64
+            val (msvc_out, msvc_err, msvc_code) = shell("dir /b \"{vs_path}\\VC\\Tools\\MSVC\" 2>nul")
+            if msvc_code == 0:
+                val versions = msvc_out.trim().split("\n")
+                if versions.len() > 0:
+                    val ver = versions[versions.len() - 1].trim()
+                    val lib_dir = "{vs_path}\\VC\\Tools\\MSVC\\{ver}\\lib\\x64"
+                    paths.push(lib_dir)
+        case nil:
+            pass
+
+    # Find Windows SDK lib dirs
+    val sdk_base = "C:\\Program Files (x86)\\Windows Kits\\10\\Lib"
+    val (sdk_out, sdk_err, sdk_code) = shell("dir /b \"{sdk_base}\" 2>nul")
+    if sdk_code == 0:
+        val sdk_versions = sdk_out.trim().split("\n")
+        if sdk_versions.len() > 0:
+            val sdk_ver = sdk_versions[sdk_versions.len() - 1].trim()
+            paths.push("{sdk_base}\\{sdk_ver}\\ucrt\\x64")
+            paths.push("{sdk_base}\\{sdk_ver}\\um\\x64")
+
+    paths
+
+fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link using MinGW gcc driver."""
     val sb = StringBuilder(parts: [])
-    sb.push(linker_cmd)
+    sb.push("gcc")
     for obj in object_files:
         sb.push(" ")
         sb.push(obj)
 
-    sb.push(" /OUT:{output}")
+    # Library paths
+    for lp in config.library_paths:
+        sb.push(" -L")
+        sb.push(lp)
 
-    # Libraries
+    # Auto-detect runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        sb.push(" -L{runtime_dir} -lsimple_compiler")
+
+    # Windows system libraries (MinGW names)
+    val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll", "ole32", "synchronization"]
+    for lib in mingw_libs:
+        sb.push(" -l{lib}")
+
+    # Libraries from config
     for lib in config.libraries:
-        sb.push(" {lib}.lib")
+        sb.push(" -l{lib}")
 
     # Extra flags
     for flag in config.extra_flags:
         sb.push(" ")
         sb.push(flag)
 
+    sb.push(" -o ")
+    sb.push(output)
     val cmd = sb.to_text()
 
     if config.verbose:
-        print "[linker-wrapper] Windows linker: {cmd}"
+        print "[linker-wrapper] MinGW command: {cmd}"
 
-    val (wlink_out, wlink_err, wlink_code) = shell(cmd)
-    if wlink_code == 0:
+    val (link_out, link_err, link_code) = shell(cmd)
+    if link_code == 0:
         Ok(output)
     else:
-        val err_msg = wlink_err ?? "Unknown linking error"
-        Err("Windows linking failed: {err_msg}")
+        val err_msg = link_err ?? "Unknown linking error"
+        Err("MinGW linking failed: {err_msg}")
 
 # ============================================================================
 # Exports

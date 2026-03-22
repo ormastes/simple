@@ -249,9 +249,9 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     // Testing - always use Rust handler (mature implementation with Rust test integration + DB tracking)
     CommandEntry {
         name: "test",
-        app_path: "", // Rust handler is primary (has cargo test integration)
+        app_path: "src/app/cli/test_entry.spl",
         rust_handler: Handler::ArgsGc(handle_test_rust),
-        env_override: "",
+        env_override: "SIMPLE_TEST_RUST",
         needs_rust_flags: &[],
     },
     // Code quality

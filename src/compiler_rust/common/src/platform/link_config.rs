@@ -119,6 +119,29 @@ impl PlatformLinkConfig {
         }
     }
 
+    /// Adjust Windows config for MinGW toolchain (GNU ABI instead of MSVC).
+    pub fn windows_mingw() -> Self {
+        Self {
+            // Rust std + crate dependencies on MinGW require these system libs.
+            // Matches what rustc normally passes for x86_64-pc-windows-gnu.
+            libraries: vec![
+                "kernel32", "ntdll", "userenv", "ws2_32", "dbghelp",
+                "advapi32", "bcrypt", "ole32", "oleaut32", "shell32",
+                "propsys", "runtimeobject", "synchronization",
+                "crypt32", "secur32", "ncrypt", "iphlpapi",
+                "user32", "winmm", "shlwapi",
+                "gcc_eh", "msvcrt", "mingwex", "mingw32", "gcc",
+            ],
+            library_search_paths: vec![],
+            system_scan_libs: vec![],
+            nm_flags: vec![],
+            stub_strategy: StubStrategy::Weak,
+            asm_label_extra_chars: vec!['.', '$'],
+            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition"],
+            disable_pie: false,
+        }
+    }
+
     /// Check if a symbol name is valid as an assembly label on this platform.
     pub fn is_valid_asm_label(&self, sym: &str) -> bool {
         !sym.is_empty()

@@ -333,13 +333,34 @@ fn strip_ansi(s: text) -> text:
         return s
     s.replace(e_out, "")
 
+fn _strip_timeout_prefix(command: text) -> text:
+    """Strip Unix 'timeout N' prefix for cmd.exe compatibility.
+    Git Bash has coreutils timeout, so only strip for cmd."""
+    if not command.starts_with("timeout "):
+        return command
+    # Skip "timeout " then skip the number and trailing space
+    var i = 8
+    var found_digit = false
+    for ch in command[8:]:
+        if ch >= "0" and ch <= "9":
+            i = i + 1
+            found_digit = true
+        elif ch == " " and found_digit:
+            i = i + 1
+            return command[i:]
+        else:
+            return command
+    command
+
 fn shell_cmd(command: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
     val shell = _get_shell()
     if shell == "cmd":
-        (stdout, stderr, code) = rt_process_run("cmd", ["/C", command])
+        # Strip Unix timeout prefix — cmd.exe doesn't have coreutils timeout
+        val cmd = _strip_timeout_prefix(command)
+        (stdout, stderr, code) = rt_process_run("cmd", ["/C", cmd])
     elif shell == "sh":
         # Windows Git Bash: < /dev/null breaks piped commands, so omit it
         (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])

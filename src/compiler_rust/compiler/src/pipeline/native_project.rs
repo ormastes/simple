@@ -343,6 +343,35 @@ impl NativeProjectBuilder {
             eprintln!(); // spacer
         }
 
+        if failed > 0 {
+            // Only abort if compiler-critical files failed (src/compiler/, src/app/)
+            let critical_failures: Vec<_> = failures.iter()
+                .filter(|(path, _)| {
+                    let p = path.display().to_string();
+                    p.contains("/src/compiler/") || p.contains("\\src\\compiler\\")
+                        || p.contains("/src/app/") || p.contains("\\src\\app\\")
+                })
+                .collect();
+
+            if !critical_failures.is_empty() {
+                let summary = critical_failures
+                    .iter()
+                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "native-build aborted: {} critical file(s) failed to compile\n{}",
+                    critical_failures.len(),
+                    summary
+                ));
+            }
+
+            eprintln!(
+                "\nWarning: {} non-critical file(s) failed to compile (skipped)",
+                failed
+            );
+        }
+
         if self.config.verbose {
             eprintln!(
                 "Compiled: {}/{} ({} cached, {} fresh, {} failed) in {:.1}s",
@@ -352,6 +381,35 @@ impl NativeProjectBuilder {
                 freshly_compiled.len(),
                 failed,
                 compile_time.as_secs_f64()
+            );
+        }
+
+        if failed > 0 {
+            // Only abort if compiler-critical files failed (src/compiler/, src/app/)
+            let critical_failures: Vec<_> = failures.iter()
+                .filter(|(path, _)| {
+                    let p = path.display().to_string();
+                    p.contains("/src/compiler/") || p.contains("\\src\\compiler\\")
+                        || p.contains("/src/app/") || p.contains("\\src\\app\\")
+                })
+                .collect();
+
+            if !critical_failures.is_empty() {
+                let summary = critical_failures
+                    .iter()
+                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "native-build aborted: {} critical file(s) failed to compile\n{}",
+                    critical_failures.len(),
+                    summary
+                ));
+            }
+
+            eprintln!(
+                "\nWarning: {} non-critical file(s) failed to compile (skipped)",
+                failed
             );
         }
 
@@ -548,14 +606,11 @@ impl NativeProjectBuilder {
     /// proper static constructor/destructor ordering.
     fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        // Use platform-appropriate weak symbol declarations:
-        // - GCC/Clang (Linux, macOS, FreeBSD, MinGW): __attribute__((weak))
-        // - MSVC/clang-cl: no weak symbols, use linker /FORCE:UNRESOLVED instead
         let cxx = find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
+        let is_msvc = cxx.contains("clang-cl") || simple_common::platform::cc_detect::is_msvc_target(&cxx);
 
-        let stub_code = if is_clang_cl {
-            // MSVC ABI: declare as regular extern, linker resolves
+        let stub_code = if is_msvc {
+            // MSVC/clang-cl: no __attribute__((weak)), use pragma alternativename
             r#"
 extern "C" {
     int spl_main(void);
@@ -580,7 +635,7 @@ int main(int argc, char** argv) {
 }
 "#
         } else {
-            // GCC/Clang: use __attribute__((weak)) for all platforms
+            // GCC/MinGW: use __attribute__((weak))
             r#"
 extern "C" {
     int __attribute__((weak)) spl_main(void);
@@ -605,7 +660,7 @@ int main(int argc, char** argv) {
 
         let main_o = temp_dir.join("_main_stub.o");
         // Use C++ compiler for main stub — ensures C++ runtime init hooks
-        let output = if is_clang_cl {
+        let output = if cxx.contains("clang-cl") {
             std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(format!("/Fo{}", main_o.display()))
@@ -829,14 +884,12 @@ int main(int argc, char** argv) {
             }
             #[cfg(target_os = "windows")]
             {
-                if is_msvc {
-                    // MSVC-compatible linker: use /WHOLEARCHIVE
-                    if is_clang_cl {
-                        cmd.arg("-Xlinker").arg("/WHOLEARCHIVE").arg(&archive_path);
-                    } else {
-                        // clang targeting MSVC: use -Wl, prefix for lld-link
-                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
-                    }
+                if is_clang_cl {
+                    // clang-cl: archive + MSVC linker flags via /link at end
+                    cmd.arg(&archive_path);
+                } else if is_msvc {
+                    // clang targeting MSVC: use -Wl, prefix for lld-link
+                    cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                 } else {
                     // MinGW/GNU linker
                     cmd.arg("-Wl,--whole-archive")
@@ -895,12 +948,13 @@ int main(int argc, char** argv) {
             cmd.arg(flag);
         }
         #[cfg(target_os = "windows")]
-        if is_msvc {
-            if is_clang_cl {
-                cmd.arg("-Xlinker").arg("/FORCE:UNRESOLVED");
-            } else {
-                cmd.arg("-Wl,/FORCE:UNRESOLVED");
-            }
+        if is_clang_cl {
+            // /link passes remaining args to MSVC linker
+            cmd.arg("/link")
+                .arg("/WHOLEARCHIVE")
+                .arg("/FORCE:MULTIPLE,UNRESOLVED");
+        } else if is_msvc {
+            cmd.arg("-Wl,/FORCE:UNRESOLVED");
         }
 
         if self.config.strip {
@@ -909,12 +963,10 @@ int main(int argc, char** argv) {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
-            if is_msvc {
-                if is_clang_cl {
-                    cmd.arg("-Xlinker").arg("/DEBUG:NONE");
-                } else {
-                    cmd.arg("-Wl,/DEBUG:NONE");
-                }
+            if is_clang_cl {
+                cmd.arg("/link").arg("/DEBUG:NONE");
+            } else if is_msvc {
+                cmd.arg("-Wl,/DEBUG:NONE");
             } else {
                 cmd.arg("-Wl,-s");
             }
@@ -990,37 +1042,28 @@ fn generate_stub_object(
         }
     }
 
-    // Also scan the runtime library for defined symbols
-    if let Some(native_all) = find_native_all_library() {
+    // Also scan the runtime library for defined AND undefined symbols.
+    // Undefined symbols in the runtime lib (e.g., MSVC __security_cookie from
+    // ring/lzma-sys C code) need stubs when linking with MinGW.
+    let runtime_lib = find_native_all_library().or_else(find_runtime_library);
+    if let Some(ref rt_path) = runtime_lib {
         let output = std::process::Command::new("nm")
             .arg("-g")
             .arg("-p")
-            .arg(&native_all)
+            .arg(rt_path)
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let [_addr, sym_type, name] = parts.as_slice() {
-                if *sym_type != "U" {
+            match parts.as_slice() {
+                [sym_type, name] if *sym_type == "U" => {
+                    undefined.insert(name.to_string());
+                }
+                [_addr, sym_type, name] if *sym_type != "U" => {
                     defined.insert(name.to_string());
                 }
-            }
-        }
-    } else if let Some(runtime) = find_runtime_library() {
-        let output = std::process::Command::new("nm")
-            .arg("-g")
-            .arg("-p")
-            .arg(&runtime)
-            .output()
-            .map_err(|e| format!("nm runtime: {e}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if let [_addr, sym_type, name] = parts.as_slice() {
-                if *sym_type != "U" {
-                    defined.insert(name.to_string());
-                }
+                _ => {}
             }
         }
     }
@@ -1056,6 +1099,10 @@ fn generate_stub_object(
         .filter(|s| !s.starts_with("_dyld_") && *s != "_main" && *s != "main")
         // Skip known C standard library / system builtins
         .filter(|s| !is_system_symbol(s))
+        // Skip MSVC C++ mangled symbols (start with ?) and __imp_ import thunks
+        // These come from MSVC-compiled objects in the runtime lib and are
+        // resolved by the system DLLs at load time, not by our stubs.
+        .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
 
     if needs_stub.is_empty() {

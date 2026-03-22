@@ -14,7 +14,7 @@ use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llc_available}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
-use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
 
 extern fn rt_file_delete(path: text) -> bool
@@ -51,8 +51,10 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
     val cc = find_c_compiler()
     if cc == "":
         return Err("No C compiler found")
-    val entry_c = "/tmp/simple_entry_{pid}.c"
-    val entry_o = "/tmp/simple_entry_{pid}.o"
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    val entry_c = "{tmp_dir}/simple_entry_{pid}.c"
+    val entry_o = "{tmp_dir}/simple_entry_{pid}{ext}"
     val c_source = "extern void spl_init_args(int argc, char** argv);\n" +
         "extern void __simple_runtime_init(void);\n" +
         "extern long long __simple_main(void);\n" +
@@ -65,14 +67,21 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
         "    return (int)result;\n" +
         "}\n"
     rt_file_write_text(entry_c, c_source)
-    val (ep_out, ep_err, ep_code) = rt_process_run(cc, [
-        "-c",
-        "-fPIC",
-        "-O2",
-        "-o",
-        entry_o,
-        entry_c
-    ])
+
+    val use_msvc = _is_msvc_cc(cc)
+    var comp_args: [text] = []
+    if use_msvc:
+        comp_args = ["/c", "/O2", "/Fo{entry_o}", entry_c]
+    else:
+        comp_args = ["-c"]
+        if not _is_windows():
+            comp_args.push("-fPIC")
+        comp_args.push("-O2")
+        comp_args.push("-o")
+        comp_args.push(entry_o)
+        comp_args.push(entry_c)
+
+    val (ep_out, ep_err, ep_code) = rt_process_run(cc, comp_args)
     rt_file_delete(entry_c)
     if ep_code != 0:
         return Err("Entry point compilation failed: {ep_out}{ep_err}")
@@ -152,7 +161,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     match link_result:
         case Ok(path):
             if verbose:
-                shell("echo '[llvm-link] Native executable: {path}' >&2")
+                print "[llvm-link] Native executable: {path}"
             Ok(path)
         case Err(e):
             Err("Linking failed: {e}")

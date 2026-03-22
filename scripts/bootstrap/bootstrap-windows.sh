@@ -34,7 +34,7 @@ Options:
 EOF
 }
 
-backend="llvm-lib"
+backend=""
 output_dir="bootstrap"
 deploy=0
 force_toolchain=""
@@ -110,9 +110,14 @@ if [[ ! -f "${seed_bin}" ]]; then
   cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 fi
 
+backend_flag=()
+if [[ -n "${backend}" ]]; then
+  backend_flag=(--backend "${backend}")
+fi
+
 echo ""
 echo "Running Windows bootstrap pipeline..."
-echo "  backend:    ${backend}"
+echo "  backend:    ${backend:-default}"
 echo "  output:     ${output_dir}"
 echo "  toolchain:  ${toolchain}"
 echo ""
@@ -124,7 +129,7 @@ echo "=== Stage 1: Rust seed → stage1 ==="
 RUST_LOG="${RUST_LOG:-error}" \
   "${seed_bin}" native-build \
     --source src/compiler --source src/lib --source src/app \
-    --entry src/app/cli/main.spl \
+    --entry src/app/cli/bootstrap_main.spl \
     -o "${output_dir}/simple_stage1.exe" \
     --clean
 
@@ -135,13 +140,13 @@ fi
 
 echo "Stage 1 complete: ${output_dir}/simple_stage1.exe"
 
-# Stage 2: stage1 → stage2 (with llvm-lib backend)
+# Stage 2: stage1 → stage2
 echo ""
-echo "=== Stage 2: stage1 → stage2 (${backend}) ==="
+echo "=== Stage 2: stage1 → stage2 (${backend:-default}) ==="
 "${output_dir}/simple_stage1.exe" native-build \
   --source src/compiler --source src/lib --source src/app \
-  --entry src/app/cli/main.spl \
-  --backend "${backend}" \
+  --entry src/app/cli/bootstrap_main.spl \
+  "${backend_flag[@]}" \
   -o "${output_dir}/simple_stage2.exe" \
   --clean
 
@@ -154,11 +159,11 @@ echo "Stage 2 complete: ${output_dir}/simple_stage2.exe"
 
 # Stage 3: stage2 → stage3 (verify)
 echo ""
-echo "=== Stage 3: stage2 → stage3 (${backend}, verify) ==="
+echo "=== Stage 3: stage2 → stage3 (${backend:-default}, verify) ==="
 "${output_dir}/simple_stage2.exe" native-build \
   --source src/compiler --source src/lib --source src/app \
-  --entry src/app/cli/main.spl \
-  --backend "${backend}" \
+  --entry src/app/cli/bootstrap_main.spl \
+  "${backend_flag[@]}" \
   -o "${output_dir}/simple_stage3.exe" \
   --clean
 

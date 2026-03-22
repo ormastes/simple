@@ -701,6 +701,12 @@ pub fn run_bug_update(args: &[String]) -> i32 {
     0
 }
 
+/// Run statistics-gen command (stub — delegates to Simple app at runtime)
+pub fn run_statistics_gen(_args: &[String]) -> i32 {
+    eprintln!("statistics-gen: Rust fallback not implemented, use Simple app");
+    1
+}
+
 /// Print help for doc generation commands
 pub fn print_doc_gen_help() {
     eprintln!("Documentation Generation Commands");

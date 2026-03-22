@@ -6,6 +6,12 @@
 use app.io.{shell, rt_file_exists, rt_env_get}
 use std.platform.{is_windows, normalize_path, join_path}
 use compiler.backend.linker.link.{LinkConfig, LinkError, Linker}
+# ===========================================================================
+# Windows Library Names
+# ===========================================================================
+
+fn default_windows_libs_with_suffix() -> [text]:
+    ["kernel32.lib", "user32.lib", "ws2_32.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "msvcrt.lib"]
 
 # ===========================================================================
 # MSVC Linker Configuration
@@ -25,8 +31,8 @@ impl MsvcConfig:
     static fn default() -> MsvcConfig:
         MsvcConfig(
             link_exe: "",
-            lib_paths: [],
-            libs: ["kernel32.lib", "user32.lib"],
+            lib_paths: find_msvc_crt_paths(),
+            libs: default_windows_libs_with_suffix(),
             entry_point: "mainCRTStartup",
             subsystem: "console",
             machine: "X64",
@@ -209,6 +215,49 @@ fn find_link_exe() -> text?:
             return Some(link_path)
 
     nil
+
+# ===========================================================================
+# MSVC CRT Library Path Discovery
+# ===========================================================================
+
+fn find_msvc_crt_paths() -> [text]:
+    """Discover MSVC CRT, UCRT, and Windows SDK library paths for x64."""
+    var paths: [text] = []
+
+    # 1. MSVC CRT: VC\Tools\MSVC\<ver>\lib\x64
+    val vs_opt = find_visual_studio()
+    match vs_opt:
+        case Some(vs_path):
+            val msvc_base = "{vs_path}\\VC\\Tools\\MSVC"
+            val result = shell("dir /b \"{msvc_base}\" 2>nul")
+            if result.exit_code == 0:
+                val versions = result.stdout.trim().split("\n")
+                if versions.len() > 0:
+                    # Use the latest version (last in sorted list)
+                    val ver = versions[versions.len() - 1].trim()
+                    if ver != "":
+                        val lib_dir = "{msvc_base}\\{ver}\\lib\\x64"
+                        if rt_file_exists(lib_dir):
+                            paths.push(lib_dir)
+        case nil:
+            pass
+
+    # 2. Windows SDK: Windows Kits\10\Lib\<ver>\ucrt\x64 and um\x64
+    val sdk_base = "C:\\Program Files (x86)\\Windows Kits\\10\\Lib"
+    val sdk_result = shell("dir /b \"{sdk_base}\" 2>nul")
+    if sdk_result.exit_code == 0:
+        val sdk_versions = sdk_result.stdout.trim().split("\n")
+        if sdk_versions.len() > 0:
+            val sdk_ver = sdk_versions[sdk_versions.len() - 1].trim()
+            if sdk_ver != "":
+                val ucrt_dir = "{sdk_base}\\{sdk_ver}\\ucrt\\x64"
+                if rt_file_exists(ucrt_dir):
+                    paths.push(ucrt_dir)
+                val um_dir = "{sdk_base}\\{sdk_ver}\\um\\x64"
+                if rt_file_exists(um_dir):
+                    paths.push(um_dir)
+
+    paths
 
 # Check if MSVC linker is available
 fn is_msvc_available() -> bool:

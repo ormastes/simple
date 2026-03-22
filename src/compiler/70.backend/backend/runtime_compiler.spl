@@ -13,7 +13,46 @@
 use app.io.mod (shell, file_exists, getpid)
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# Platform Helpers
+# ============================================================================
+
+fn _is_windows() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env != "" and os_env != nil:
+        return os_env.lower().contains("windows")
+    false
+
+fn _is_msvc_cc(cc: text) -> bool:
+    cc == "cl" or cc == "cl.exe" or cc.ends_with("\\cl.exe")
+
+fn _is_mingw() -> bool:
+    val msystem = rt_env_get("MSYSTEM")
+    msystem != "" and msystem != nil
+
+fn _get_temp_dir() -> text:
+    val tmpdir = rt_env_get("TMPDIR")
+    if tmpdir != "" and tmpdir != nil:
+        return tmpdir
+    val tmp = rt_env_get("TMP")
+    if tmp != "" and tmp != nil:
+        return tmp
+    val temp = rt_env_get("TEMP")
+    if temp != "" and temp != nil:
+        return temp
+    if _is_windows():
+        return "C:/Windows/Temp"
+    "/tmp"
+
+fn _obj_ext() -> text:
+    if _is_windows() and not _is_mingw():
+        ".obj"
+    else:
+        ".o"
 
 # ============================================================================
 # C Compiler Discovery
@@ -22,9 +61,18 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 fn find_c_compiler() -> text:
     """Find a C compiler on the system.
 
-    Tries clang variants first (better LLVM compatibility), then gcc, then cc.
+    Tries SIMPLE_CC env var first, then platform-specific discovery.
     Returns the command name or empty string if none found.
     """
+    # User override via env var
+    val simple_cc = rt_env_get("SIMPLE_CC")
+    if simple_cc != "" and simple_cc != nil:
+        return simple_cc
+
+    if _is_windows():
+        return _find_c_compiler_windows()
+
+    # Unix: check well-known paths first
     if rt_file_exists("/usr/bin/clang"):
         return "clang"
     if rt_file_exists("/usr/bin/gcc"):
@@ -39,6 +87,29 @@ fn find_c_compiler() -> text:
             return candidate
     ""
 
+fn _find_c_compiler_windows() -> text:
+    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang)."""
+    # MinGW: prefer gcc/clang
+    if _is_mingw():
+        val mingw_candidates = ["gcc", "clang", "cc"]
+        for candidate in mingw_candidates:
+            val (out, err, code) = shell("where {candidate} 2>nul")
+            if code == 0:
+                return candidate
+
+    # MSVC: try cl.exe (available in VS Developer Command Prompt)
+    val (cl_out, cl_err, cl_code) = shell("where cl.exe 2>nul")
+    if cl_code == 0:
+        return "cl.exe"
+
+    # Try clang/gcc on PATH (works in both MSVC and MinGW)
+    val candidates = ["clang", "clang-cl", "gcc"]
+    for candidate in candidates:
+        val (out, err, code) = shell("where {candidate} 2>nul")
+        if code == 0:
+            return candidate
+    ""
+
 # ============================================================================
 # Runtime Source Directory Discovery
 # ============================================================================
@@ -46,24 +117,33 @@ fn find_c_compiler() -> text:
 fn find_runtime_source_dir() -> text:
     """Find the runtime source directory.
 
-    Tries src/runtime/ relative to cwd first, then common install paths.
+    Tries src/runtime/ relative to cwd first, then SIMPLE_PROJECT_ROOT,
+    then (on Unix) resolves via /proc/self/exe.
     Returns the path or empty string if not found.
     """
     # Try relative to current working directory
     if rt_file_exists("src/runtime/runtime.c"):
         return "src/runtime"
 
-    # Try relative to executable location (common for installed binaries)
-    val (exe_out, exe_err, exe_code) = shell("readlink -f /proc/self/exe 2>/dev/null")
-    if exe_code == 0:
-        val exe_dir = exe_out.trim()
-        # Go up from bin/release/simple to project root
-        val (pr_out, pr_err, pr_code) = shell("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
-        if pr_code == 0:
-            val project_root = pr_out.trim()
-            val rt_path = "{project_root}/src/runtime/runtime.c"
-            if rt_file_exists(rt_path):
-                return "{project_root}/src/runtime"
+    # Try SIMPLE_PROJECT_ROOT env var (works on all platforms)
+    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
+    if project_root != "" and project_root != nil:
+        val rt_path = "{project_root}/src/runtime/runtime.c"
+        if rt_file_exists(rt_path):
+            return "{project_root}/src/runtime"
+
+    # Unix-only: try relative to executable location
+    if not _is_windows():
+        val (exe_out, exe_err, exe_code) = shell("readlink -f /proc/self/exe 2>/dev/null")
+        if exe_code == 0:
+            val exe_dir = exe_out.trim()
+            # Go up from bin/release/simple to project root
+            val (pr_out, pr_err, pr_code) = shell("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
+            if pr_code == 0:
+                val pr = pr_out.trim()
+                val rt_path = "{pr}/src/runtime/runtime.c"
+                if rt_file_exists(rt_path):
+                    return "{pr}/src/runtime"
 
     ""
 
@@ -94,6 +174,10 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
     var object_files: [text] = []
     print "[RT-COMPILE] starting loop over {sources.len()} sources"
 
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    val use_msvc = _is_msvc_cc(cc)
+
     for name in sources:
         print "[RT-COMPILE] processing: {name}"
         val src_path = "{rt_dir}/{name}.c"
@@ -101,27 +185,34 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
         if not rt_file_exists(src_path):
             return Err("Required runtime source not found: {src_path}")
 
-        val obj_path = "/tmp/simple_rt_{name}.o"
+        val obj_path = "{tmp_dir}/simple_rt_{name}{ext}"
         print "[RT-COMPILE] compiling: {name}.c"
 
-        val (comp_out, comp_err, comp_code) = rt_process_run(cc, [
-            "-c",
-            "-fPIC",
-            "-O2",
-            "-std=gnu11",
-            "-I",
-            rt_dir,
-            "-I",
-            "{rt_dir}/platform",
-            "-o",
-            obj_path,
-            src_path
-        ])
+        var comp_args: [text] = []
+        if use_msvc:
+            # MSVC cl.exe flags
+            comp_args = ["/c", "/O2", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+        else:
+            # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
+            comp_args = ["-c"]
+            if not _is_windows():
+                comp_args.push("-fPIC")
+            comp_args.push("-O2")
+            comp_args.push("-std=gnu11")
+            comp_args.push("-I")
+            comp_args.push(rt_dir)
+            comp_args.push("-I")
+            comp_args.push("{rt_dir}/platform")
+            comp_args.push("-o")
+            comp_args.push(obj_path)
+            comp_args.push(src_path)
+
+        val (comp_out, comp_err, comp_code) = rt_process_run(cc, comp_args)
         print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
             # Clean up already-compiled objects
             for obj in object_files:
-                shell("rm -f {obj}")
+                rt_file_delete(obj)
             return Err("Failed to compile {name}.c:\n{comp_out}{comp_err}")
 
         object_files.push(obj_path)
@@ -136,7 +227,7 @@ fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
 fn cleanup_runtime_objects(objects: [text]):
     """Remove temporary runtime object files."""
     for obj in objects:
-        shell("rm -f {obj}")
+        rt_file_delete(obj)
 
 # ============================================================================
 # Exports
