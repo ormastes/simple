@@ -1165,10 +1165,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Dynamic Loading (WFFI)
     // =========================================================================
-    // NOTE: spl_dl*/spl_wffi NOT in RUNTIME_FUNCS — they are resolved via import_map
-    // to avoid Cranelift object emission bug where extra function imports cause
-    // relocation overflow into the symbol table.
-    // The Rust wffi_native.rs implementations are linked via normal symbol resolution.
+    RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
+    RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
 ];
 
 #[cfg(test)]

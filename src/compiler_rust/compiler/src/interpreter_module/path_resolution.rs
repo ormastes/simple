@@ -530,6 +530,30 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 }
             }
 
+            // Strategy: bare stdlib subdir prefix (common.*, nogc_sync_mut.*, etc.)
+            // Handles imports like `use common.ui.widget.{...}` without `std.` prefix
+            // by resolving through src/lib/ directly.
+            {
+                const STDLIB_SUBDIRS: &[&str] = &[
+                    "common",
+                    "nogc_sync_mut",
+                    "nogc_async_mut",
+                    "nogc_async_immut",
+                    "gc_async_mut",
+                    "nogc_async_mut_noalloc",
+                ];
+                if parts.len() > 1 && STDLIB_SUBDIRS.contains(&parts[0].as_str()) {
+                    for lib_path in &["src/lib", "src/std"] {
+                        let lib_candidate = src_candidate.join(lib_path.trim_start_matches("src/"));
+                        if lib_candidate.is_dir() {
+                            if let Some(found) = resolve_with_numbered_dirs(&lib_candidate, parts) {
+                                return Ok(found);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Strategy: "app.*" → src/app/ with numbered prefix support
             if parts.len() > 1 && parts[0] == "app" {
                 let app_dir = src_candidate.join("app");
