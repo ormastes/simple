@@ -80,6 +80,30 @@ fn js_escape(text: &str) -> String {
         .replace("${", "\\${")
 }
 
+fn show_error(app: &AppHandle, title: &str, detail: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let escaped_title = js_escape(title);
+        let escaped_detail = js_escape(detail);
+        let js = format!(
+            r#"
+            (function() {{
+                var app = document.getElementById('app');
+                if (!app) {{
+                    document.body.innerHTML = '<div id="app"></div>';
+                    app = document.getElementById('app');
+                }}
+                app.innerHTML = '<div style="padding:24px;font-family:monospace">'
+                    + '<h2 style="color:#e53e3e;margin-bottom:12px">' + `{}` + '</h2>'
+                    + '<pre style="white-space:pre-wrap;background:#2d1b1b;color:#feb2b2;padding:16px;border-radius:8px;overflow:auto;max-height:80vh">'
+                    + `{}` + '</pre></div>';
+            }})();
+            "#,
+            escaped_title, escaped_detail
+        );
+        let _ = win.eval(&js);
+    }
+}
+
 fn update_status(app: &AppHandle, message: &str) {
     if let Some(win) = app.get_webview_window("main") {
         let escaped = js_escape(message);
@@ -135,19 +159,26 @@ fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: App
     update_status(&app, "Simple subprocess stdout closed before a valid render arrived.");
 }
 
-fn read_subprocess_stderr(reader: BufReader<std::process::ChildStderr>, app: AppHandle) {
+fn read_subprocess_stderr(
+    reader: BufReader<std::process::ChildStderr>,
+    app: AppHandle,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
+) {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
             Err(_) => break,
         };
 
-        let trimmed = line.trim();
+        let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
             continue;
         }
 
         eprintln!("[tauri-shell] raw stderr: {}", trimmed);
+        if let Ok(mut lines) = stderr_lines.lock() {
+            lines.push(trimmed.clone());
+        }
         update_status(&app, &format!("Simple subprocess stderr:\n{}", trimmed));
     }
 
@@ -402,11 +433,13 @@ fn main() {
 
             eprintln!("[tauri-shell] window created");
 
+            let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
             if let Some(message) = startup_error.clone() {
                 let handle = app.handle().clone();
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_millis(500));
-                    update_status(&handle, &message);
+                    show_error(&handle, "Startup Error", &message);
                 });
             } else {
                 if let Some(stdout) = child_stdout {
@@ -419,9 +452,46 @@ fn main() {
                 }
                 if let Some(stderr) = child_stderr {
                     let handle = app.handle().clone();
+                    let lines = Arc::clone(&stderr_lines);
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_millis(500));
-                        read_subprocess_stderr(BufReader::new(stderr), handle);
+                        read_subprocess_stderr(BufReader::new(stderr), handle, lines);
+                    });
+                }
+                // Monitor subprocess exit code
+                {
+                    let handle = app.handle().clone();
+                    let proc = Arc::clone(&process_for_tauri);
+                    let lines = Arc::clone(&stderr_lines);
+                    thread::spawn(move || {
+                        let exit_status = {
+                            let mut guard = match proc.child.lock() {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                            match guard.as_mut() {
+                                Some(child) => child.wait().ok(),
+                                None => return,
+                            }
+                        };
+                        if let Some(status) = exit_status {
+                            if !status.success() {
+                                let code = status.code().unwrap_or(-1);
+                                let collected = lines.lock().map(|l| l.join("\n")).unwrap_or_default();
+                                let msg = if collected.is_empty() {
+                                    format!("Simple subprocess exited with code {}.", code)
+                                } else {
+                                    format!(
+                                        "Simple subprocess exited with code {}.\n\nStderr:\n{}",
+                                        code, collected
+                                    )
+                                };
+                                eprintln!("[tauri-shell] subprocess exited with code {}", code);
+                                show_error(&handle, "Subprocess Failed", &msg);
+                            } else {
+                                eprintln!("[tauri-shell] subprocess exited successfully");
+                            }
+                        }
                     });
                 }
             }

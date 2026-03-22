@@ -255,6 +255,21 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
         }
     }
 
+    // Strategy 4: Try dotted directory — join current dir name with segment via dot.
+    // e.g., for current=src/app/ui/ and segment="tauri", try src/app/ui.tauri/
+    // This supports the app module layout where backends live in ui.tauri/, ui.tui/, etc.
+    if let Some(parent) = current.parent() {
+        if let Some(current_name) = current.file_name().and_then(|n| n.to_str()) {
+            let dotted = format!("{}.{}", current_name, segment);
+            let dotted_dir = parent.join(&dotted);
+            if dotted_dir.exists() && dotted_dir.is_dir() {
+                if let Some(found) = resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+
     None
 }
 
