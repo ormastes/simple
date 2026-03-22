@@ -408,7 +408,7 @@ pub fn execute_kernel_3d(kernel: GpuKernelFn, global_size: [u32; 3], local_size:
 /// lx, ly, lz: Local work group size
 #[no_mangle]
 pub extern "C" fn rt_gpu_launch(kernel_ptr: u64, gx: u32, gy: u32, gz: u32, lx: u32, ly: u32, lz: u32) -> i32 {
-    let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr) };
+    let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };
     execute_kernel_3d(kernel, [gx, gy, gz], [lx, ly, lz]);
     0 // Success
 }
@@ -416,7 +416,7 @@ pub extern "C" fn rt_gpu_launch(kernel_ptr: u64, gx: u32, gy: u32, gz: u32, lx: 
 /// Launch a 1D GPU kernel (convenience FFI entry point)
 #[no_mangle]
 pub extern "C" fn rt_gpu_launch_1d(kernel_ptr: u64, global_size: u32, local_size: u32) -> i32 {
-    let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr) };
+    let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };
     execute_kernel_1d(kernel, global_size, local_size);
     0 // Success
 }

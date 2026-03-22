@@ -324,7 +324,7 @@ fn execute_kernel_parallel(kernel: KernelFn, global_size: [i64; 3], local_size: 
 /// 0 on success
 #[no_mangle]
 pub extern "C" fn rt_par_launch_1d(kernel_ptr: u64, global_size: i64, local_size: i64) -> i32 {
-    let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr) };
+    let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };
     let local = if local_size <= 0 { 256 } else { local_size };
     execute_kernel_parallel(kernel, [global_size, 1, 1], [local, 1, 1]);
     0
@@ -341,7 +341,7 @@ pub extern "C" fn rt_par_launch_1d(kernel_ptr: u64, global_size: i64, local_size
 /// 0 on success
 #[no_mangle]
 pub extern "C" fn rt_par_launch(kernel_ptr: u64, gx: i64, gy: i64, gz: i64, lx: i64, ly: i64, lz: i64) -> i32 {
-    let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr) };
+    let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };
     let local_size = [
         if lx <= 0 { 16 } else { lx },
         if ly <= 0 { 16 } else { ly },

@@ -116,7 +116,7 @@ pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
         // Submit the task to the executor
         crate::executor::spawn(move || {
             // Execute the future's body function
-            let func: extern "C" fn(RuntimeValue) -> RuntimeValue = std::mem::transmute(body_func);
+            let func: extern "C" fn(RuntimeValue) -> RuntimeValue = std::mem::transmute(body_func as usize);
             let result = func(ctx);
 
             // Resolve the promise with the result

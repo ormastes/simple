@@ -81,6 +81,10 @@ impl<'a> Parser<'a> {
             self.advance();
             false
         } else {
+            // Skip `async` keyword before `fn` (treat async fn as fn)
+            if self.check(&TokenKind::Async) {
+                self.advance();
+            }
             self.expect(&TokenKind::Fn)?;
             false
         };

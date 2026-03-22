@@ -434,6 +434,11 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
+            TokenKind::Async => {
+                // `async fn` — skip async keyword, parse as regular function
+                self.advance();
+                self.parse_function_with_doc(doc_comment)
+            }
             TokenKind::Fn => {
                 // Disambiguate: fn name(...) is function definition,
                 // fn(...) is lambda or function call (expression statement)
