@@ -484,9 +484,54 @@ pub fn native_get_term_size(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn native_get_term_size(_args: &[Value]) -> Result<Value, CompileError> {
-    // Default size for non-Unix
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct ConsoleScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attrs: u16,
+        window: SmallRect,
+        max_size: Coord,
+    }
+
+    extern "system" {
+        fn GetConsoleScreenBufferInfo(
+            handle: isize,
+            info: *mut ConsoleScreenBufferInfo,
+        ) -> i32;
+    }
+
+    let handle = std::io::stdout().as_raw_handle() as isize;
+    unsafe {
+        let mut info: ConsoleScreenBufferInfo = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+            let cols = (info.window.right - info.window.left + 1) as i64;
+            let rows = (info.window.bottom - info.window.top + 1) as i64;
+            Ok(Value::array(vec![Value::Int(rows), Value::Int(cols)]))
+        } else {
+            Ok(Value::array(vec![Value::Int(24), Value::Int(80)]))
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn native_get_term_size(_args: &[Value]) -> Result<Value, CompileError> {
+    // Default size for unknown platforms
     Ok(Value::array(vec![Value::Int(24), Value::Int(80)]))
 }
 

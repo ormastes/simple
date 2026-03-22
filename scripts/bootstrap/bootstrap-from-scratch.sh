@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+# Bootstrap wrapper for Linux and FreeBSD.
+#
+# Output layout uses <arch>-<vendor>-<os>-<abi> target triple:
+#   build/bootstrap/stage{1,2,3}/<triple>/simple
+#
+# Triple examples:
+#   Linux:   x86_64-unknown-linux-gnu
+#   FreeBSD: x86_64-unknown-freebsd-elf
+
 usage() {
   cat <<'EOF'
 Usage: scripts/bootstrap/bootstrap-from-scratch.sh [options]
@@ -13,9 +22,11 @@ Linux:
 FreeBSD / --target=freebsd-x86_64:
   Runs the FreeBSD seed bootstrap verifier using bin/freebsd/simple.
 
+Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
+
 Options:
   --backend=<name>   Backend for Linux stage2/stage3 (default: llvm-lib)
-  --output=<dir>     Output directory for bootstrap artifacts (default: bootstrap)
+  --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 dispatches to FreeBSD flow)
   --verbose          Accepted for compatibility
@@ -27,7 +38,7 @@ EOF
 }
 
 backend="llvm-lib"
-output_dir="bootstrap"
+output_dir="build/bootstrap"
 deploy=0
 target=""
 verbose=0
@@ -72,7 +83,13 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
 
+# ===========================================================================
+# Platform detection — <arch>-<vendor>-<os>-<abi> target triple
+# ===========================================================================
+
 host_os=$(uname -s 2>/dev/null || echo unknown)
+
+# FreeBSD dispatch (separate script)
 if [ "${target}" = "freebsd-x86_64" ] || [ "${host_os}" = "FreeBSD" ]; then
   freebsd_args="--output=${output_dir}"
   if [ "${deploy}" -eq 1 ]; then
@@ -87,6 +104,43 @@ if [ "${target}" = "freebsd-x86_64" ] || [ "${host_os}" = "FreeBSD" ]; then
   exec "${repo_root}/scripts/bootstrap/bootstrap-freebsd-seed.sh" ${freebsd_args}
 fi
 
+# Detect arch
+arch=$(uname -m 2>/dev/null || echo x86_64)
+case "${arch}" in
+  x86_64|amd64)  arch="x86_64" ;;
+  aarch64|arm64) arch="aarch64" ;;
+  i686|i386)     arch="i686" ;;
+esac
+
+# Build target triple
+vendor="unknown"
+case "${host_os}" in
+  Linux)
+    os="linux"
+    abi="gnu"
+    ;;
+  Darwin)
+    os="darwin"
+    vendor="apple"
+    abi="macho"
+    ;;
+  FreeBSD)
+    os="freebsd"
+    abi="elf"
+    ;;
+  *)
+    os=$(echo "${host_os}" | tr '[:upper:]' '[:lower:]')
+    abi="elf"
+    ;;
+esac
+
+PLATFORM="${arch}-${vendor}-${os}-${abi}"
+echo "Platform: ${PLATFORM}"
+
+# ===========================================================================
+# Bootstrap pipeline
+# ===========================================================================
+
 seed_bin="src/compiler_rust/target/bootstrap/simple"
 
 if [ ! -x "${seed_bin}" ]; then
@@ -99,15 +153,25 @@ if [ ! -x "bin/release/simple" ]; then
   exit 1
 fi
 
-echo "Running Linux bootstrap pipeline..."
-echo "  backend: ${backend}"
-echo "  output:  ${output_dir}"
+echo "Running bootstrap pipeline..."
+echo "  platform: ${PLATFORM}"
+echo "  backend:  ${backend}"
+echo "  output:   ${output_dir}"
 
 RUST_LOG="${RUST_LOG:-error}" \
   bin/release/simple build bootstrap "--backend=${backend}" "--output=${output_dir}"
 
-stage2="${output_dir}/simple_stage2"
-stage3="${output_dir}/simple_stage3"
+# Locate stage outputs — check new layout first, fall back to flat
+if [ -x "${output_dir}/stage2/${PLATFORM}/simple" ]; then
+  stage2="${output_dir}/stage2/${PLATFORM}/simple"
+  stage3="${output_dir}/stage3/${PLATFORM}/simple"
+elif [ -x "${output_dir}/simple_stage2" ]; then
+  stage2="${output_dir}/simple_stage2"
+  stage3="${output_dir}/simple_stage3"
+else
+  echo "error: expected bootstrap artifacts were not produced" >&2
+  exit 1
+fi
 
 if [ ! -x "${stage2}" ] || [ ! -x "${stage3}" ]; then
   echo "error: expected bootstrap artifacts were not produced" >&2
@@ -131,3 +195,4 @@ if [ "${deploy}" -eq 1 ]; then
 fi
 
 echo "Bootstrap verification passed."
+echo "Final binary: ${stage3}"

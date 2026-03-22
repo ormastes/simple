@@ -67,6 +67,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_set_env")
         || name.starts_with("rt_get_args")
         || name.starts_with("rt_platform_name")
+        || name.starts_with("rt_term_enable_ansi")
         || name.starts_with("rt_exit")
         || name.starts_with("rt_file_")
         || name.starts_with("rt_dir_")
@@ -1069,6 +1070,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_exit", &[I32], &[]),            // code -> ! (never returns)
     RuntimeFuncSpec::new("rt_get_args", &[], &[I64]),        // () -> RuntimeValue (array of args)
     RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]),   // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
     // =========================================================================
     // File I/O Metadata Operations
     // =========================================================================

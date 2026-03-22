@@ -143,6 +143,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_set_env")
         || name.starts_with("rt_get_args")
         || name.starts_with("rt_platform_name")
+        || name.starts_with("rt_term_enable_ansi")
         || name.starts_with("rt_exit")
         || name.starts_with("rt_file_")
         || name.starts_with("rt_dir_")
@@ -364,6 +365,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_kill",
     "rt_process_execute",
     "rt_platform_name",
+    "rt_term_enable_ansi",
     "rt_decision_probe",
     "rt_condition_probe",
     "rt_path_probe",

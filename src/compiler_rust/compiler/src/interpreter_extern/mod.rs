@@ -519,6 +519,7 @@ pub(crate) fn call_extern_function(
         "rt_env_temp" => system::rt_env_temp(&evaluated),
         "rt_env_cwd" => system::rt_env_cwd(&evaluated),
         "rt_platform_name" => system::rt_platform_name(&evaluated),
+        "rt_term_enable_ansi" => system::rt_term_enable_ansi(&evaluated),
         "rt_exit" => system::rt_exit(&evaluated),
 
         // ====================================================================

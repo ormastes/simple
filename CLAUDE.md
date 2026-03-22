@@ -128,6 +128,10 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 ## Setup
 
 ```bash
+# Create bin/simple symlink (auto-detects platform triple)
+scripts/setup.sh
+# Windows CMD: scripts\setup.cmd
+
 # Install MCP config (auto-detects OS)
 sh config/mcp/install.shs
 # Windows without sh: manually copy config/mcp/win/.mcp.json to .mcp.json

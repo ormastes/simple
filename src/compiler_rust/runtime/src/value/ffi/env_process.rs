@@ -883,6 +883,33 @@ pub extern "C" fn rt_platform_name() -> RuntimeValue {
     unsafe { rt_string_new(PLATFORM.as_ptr(), PLATFORM.len() as u64) }
 }
 
+/// Enable ANSI virtual terminal processing on Windows console.
+/// No-op on non-Windows platforms.
+/// Callable from Simple as: `rt_term_enable_ansi()`
+#[no_mangle]
+pub extern "C" fn rt_term_enable_ansi() -> RuntimeValue {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+
+        extern "system" {
+            fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+        }
+
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+        let handle = std::io::stdout().as_raw_handle() as isize;
+        unsafe {
+            let mut mode: u32 = 0;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+    RuntimeValue::from_bool(true)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

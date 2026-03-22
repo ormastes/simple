@@ -84,10 +84,40 @@ $path = [Environment]::GetEnvironmentVariable("Path", "User")
 [Environment]::SetEnvironmentVariable("Path", "$path;$env:LOCALAPPDATA\Simple\bin", "User")
 ```
 
+### From Source (Development)
+
+```bash
+git clone https://github.com/simple-lang/simple.git
+cd simple
+scripts/setup.sh                    # Creates bin/simple → release binary
+```
+
+On Windows (CMD/PowerShell):
+
+```cmd
+git clone https://github.com/simple-lang/simple.git
+cd simple
+scripts\setup.cmd                   :: Creates bin\simple.exe → release binary
+```
+
+If no pre-built release binary exists yet, bootstrap first:
+
+```bash
+# Linux / macOS
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+scripts/setup.sh
+
+# Windows (Git Bash / MSYS2)
+scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/setup.sh
+```
+
 ### Verify Installation
 
 ```bash
 simple --version
+# or from the repo:
+bin/simple --version
 ```
 
 ### System Requirements

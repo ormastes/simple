@@ -1,217 +1,95 @@
-# Bootstrap Binaries - Multi-Platform Support
+# Release Binaries - Multi-Platform
 
-This directory contains pre-built Simple runtime binaries for different platforms.
+Pre-built Simple compiler binaries, one per target triple.
 
 ## Directory Structure
 
+Uses `<arch>-<vendor>-<os>-<abi>` target triples (matches `TargetPreset` and `LlvmTargetTriple`):
+
 ```
 bin/release/
-├── linux-x86_64/simple       # Linux Intel/AMD 64-bit
-├── linux-arm64/simple        # Linux ARM 64-bit
-├── linux-riscv64/simple      # Linux RISC-V 64-bit
-├── macos-x86_64/simple       # macOS Intel
-├── macos-arm64/simple        # macOS Apple Silicon (M1/M2/M3)
-├── windows-x86_64/simple.exe # Windows Intel/AMD 64-bit
-└── windows-arm64/simple.exe  # Windows ARM 64-bit
+├── x86_64-unknown-linux-gnu/simple           # Linux x86_64 (ELF, GNU libc)
+├── aarch64-unknown-linux-gnu/simple          # Linux ARM64 (ELF, GNU libc)
+├── riscv64-unknown-linux-gnu/simple          # Linux RISC-V 64 (ELF, GNU libc)
+├── x86_64-apple-darwin-macho/simple          # macOS Intel (Mach-O)
+├── aarch64-apple-darwin-macho/simple         # macOS Apple Silicon (Mach-O)
+├── x86_64-pc-windows-msvc/simple.exe         # Windows x86_64 MSVC (PE/COFF)
+├── x86_64-pc-windows-gnu/simple.exe          # Windows x86_64 MinGW (PE/COFF)
+├── aarch64-pc-windows-msvc/simple.exe        # Windows ARM64 MSVC (PE/COFF)
+└── x86_64-unknown-freebsd-elf/simple         # FreeBSD x86_64 (ELF)
+```
+
+## Triple Format
+
+```
+<arch>-<vendor>-<os>-<abi>
+  │       │       │     └─ ABI / object format (gnu, msvc, elf, macho)
+  │       │       └─ Operating system (linux, windows, darwin, freebsd)
+  │       └─ Vendor (pc, unknown, apple)
+  └─ CPU architecture (x86_64, aarch64, i686, riscv64)
 ```
 
 ## Platform Support
 
-| Platform | Architecture | Status | Size |
-|----------|--------------|--------|------|
-| **Linux** | x86_64 | ✅ Tested | ~32 MB |
-| **Linux** | ARM64 | ✅ Builds | ~32 MB |
-| **Linux** | RISC-V 64 | 🔄 Experimental | ~32 MB |
-| **macOS** | x86_64 (Intel) | ✅ Tested | ~32 MB |
-| **macOS** | ARM64 (M-series) | ✅ Tested | ~32 MB |
-| **Windows** | x86_64 | ✅ Builds | ~32 MB |
-| **Windows** | ARM64 | 🔄 Experimental | ~32 MB |
+| Triple | Status |
+|--------|--------|
+| `x86_64-unknown-linux-gnu` | Active |
+| `aarch64-unknown-linux-gnu` | Builds |
+| `riscv64-unknown-linux-gnu` | Experimental |
+| `x86_64-apple-darwin-macho` | Prepared |
+| `aarch64-apple-darwin-macho` | Prepared |
+| `x86_64-pc-windows-msvc` | Builds |
+| `x86_64-pc-windows-gnu` | Prepared |
+| `aarch64-pc-windows-msvc` | Experimental |
+| `x86_64-unknown-freebsd-elf` | Prepared |
 
-## Usage
+## Setup
 
-### Automatic Platform Detection
-
-The `bin/simple` wrapper automatically detects your platform:
-
-```bash
-bin/simple --version
-bin/simple your_script.spl
-```
-
-### Direct Execution
-
-You can also run the bootstrap binary directly:
-
-**Linux x86_64:**
-```bash
-bin/release/linux-x86_64/simple your_script.spl
-```
-
-**macOS ARM64:**
-```bash
-bin/release/macos-arm64/simple your_script.spl
-```
-
-**Windows x86_64:**
-```powershell
-bin\bootstrap\windows-x86_64\simple.exe your_script.spl
-```
-
-## Building Bootstrap Binaries
-
-### Local Build (All Platforms)
+After cloning or bootstrapping, run setup to create the `bin/simple` symlink:
 
 ```bash
-# Install cross-compilation tool (optional, for other platforms)
-cargo install cross --git https://github.com/cross-rs/cross
+# Linux / macOS / Git Bash
+scripts/setup.sh
 
-# Build all platforms
-scripts/build-bootstrap-multi-platform.sh
+# Windows CMD / PowerShell
+scripts\setup.cmd
 ```
 
-### Build Specific Platform
+This creates `bin/simple(.exe)` pointing to the correct `bin/release/<triple>/simple(.exe)`.
+
+## Direct Execution
 
 ```bash
-# Linux ARM64
-cross build --release --target aarch64-unknown-linux-gnu
-cp target/aarch64-unknown-linux-gnu/release/simple_runtime \
-   bin/release/linux-arm64/simple
+# Linux x86_64
+bin/release/x86_64-unknown-linux-gnu/simple your_script.spl
 
-# macOS Apple Silicon
-cargo build --release --target aarch64-apple-darwin
-cp target/aarch64-apple-darwin/release/simple_runtime \
-   bin/release/macos-arm64/simple
+# macOS ARM64
+bin/release/aarch64-apple-darwin-macho/simple your_script.spl
 
-# Windows x86_64
-cargo build --release --target x86_64-pc-windows-msvc
-cp target/x86_64-pc-windows-msvc/release/simple_runtime.exe \
-   bin/release/windows-x86_64/simple.exe
+# Windows x86_64 MSVC
+bin\release\x86_64-pc-windows-msvc\simple.exe your_script.spl
 ```
 
-### GitHub Actions (CI/CD)
+## Building
 
-The `.github/workflows/bootstrap-build.yml` workflow automatically builds
-all platforms on push to main:
+```bash
+# Bootstrap from source (Linux)
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+scripts/setup.sh
 
-- Runs on Ubuntu (Linux), macOS, Windows runners
-- Uses `cross` for cross-compilation when needed
-- Uploads artifacts for each platform
-- Creates multi-platform release package
+# Bootstrap from source (Windows)
+scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/setup.sh
+```
 
 ## Binary Characteristics
 
-- **Format**: Native executable (ELF for Linux, Mach-O for macOS, PE for Windows)
+- **Format**: Native executable (ELF, Mach-O, or PE per platform)
 - **Linking**: Dynamically linked (requires system libc)
-- **Size**: ~32 MB (release build)
+- **Size**: ~22-64 MB (release build, varies by backend)
 - **Debug Info**: Stripped for release
-- **Optimizations**: Maximum speed + size optimizations
 
-## Downloading Pre-Built Binaries
+## Gitignore
 
-If you don't have a bootstrap binary for your platform:
-
-1. **Automatic download (recommended):**
-   ```bash
-   # Auto-detects platform, downloads latest, verifies
-   scripts/bootstrap/download-release.sh --output=bin/release/simple
-
-   # Or pin a specific version
-   scripts/bootstrap/download-release.sh --version=0.7.0 --output=bin/release/simple
-   ```
-
-2. **Full bootstrap with fallback:**
-   ```bash
-   # Tries release download first, falls back to C bootstrap
-   scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-   ```
-
-3. **GitHub Releases (manual):**
-   ```bash
-   wget https://github.com/ormastes/simple/releases/latest/download/simple-bootstrap-0.7.0-linux-x86_64.spk
-   tar xzf simple-bootstrap-0.7.0-linux-x86_64.spk
-   # Find and copy the binary to bin/release/simple
-   ```
-
-4. **Manual Installation:**
-   - Download from: https://github.com/ormastes/simple/releases
-   - Extract to `bin/release/<platform>/`
-   - Make executable: `chmod +x bin/release/<platform>/simple`
-
-## Platform Detection Algorithm
-
-The `bin/simple` wrapper uses this detection logic:
-
-1. **Architecture Detection:**
-   - `uname -m` → x86_64, aarch64, riscv64
-   - Normalizes to: x86_64, arm64, riscv64
-
-2. **OS Detection:**
-   - `uname -s` → Linux, Darwin, MINGW*/MSYS*/CYGWIN*
-   - Normalizes to: linux, macos, windows
-
-3. **Binary Selection:**
-   - First: `bin/release/<os>-<arch>/simple[.exe]`
-   - Fallback 1: `bin/release/simple_runtime` (legacy)
-   - Fallback 2: `bin/simple_runtime` (development)
-   - Fallback 3: `release/simple-0.4.0-beta/bin/simple_runtime`
-
-## Troubleshooting
-
-### Binary Not Found
-
-```
-Error: No Simple runtime found for platform: linux-x86_64
-```
-
-**Solution:**
-1. Download the bootstrap binary for your platform
-2. Place it in `bin/release/linux-x86_64/simple`
-3. Make it executable: `chmod +x bin/release/linux-x86_64/simple`
-
-### Permission Denied
-
-```
-bash: bin/release/linux-x86_64/simple: Permission denied
-```
-
-**Solution:**
-```bash
-chmod +x bin/release/linux-x86_64/simple
-```
-
-### Wrong Architecture
-
-```
-Error: Unsupported architecture: i686
-```
-
-**Solution:** 32-bit architectures are not supported. Use 64-bit system.
-
-### Cross-Platform Notes
-
-- **Windows:** Use PowerShell or Git Bash for running scripts
-- **macOS:** May need to allow unsigned binaries: System Preferences → Security
-- **Linux:** Requires GLIBC 2.17+ (CentOS 7+, Ubuntu 14.04+, Debian 8+)
-
-## Future Plans
-
-- [ ] ARM32 support (armv7)
-- [ ] FreeBSD x86_64
-- [ ] Static linking option (for embedded/container use)
-- [ ] Cross-compile to WebAssembly (WASM)
-- [ ] Android ARM64
-- [ ] iOS ARM64
-
-## Contributing
-
-To add support for a new platform:
-
-1. Add platform to `PLATFORMS` in `scripts/build-bootstrap-multi-platform.sh`
-2. Add platform to matrix in `.github/workflows/bootstrap-build.yml`
-3. Test on the target platform
-4. Update this README with status
-5. Submit PR with test results
-
-## License
-
-Same as Simple Language project (see LICENSE file in project root).
+All binaries under `bin/release/` are git-ignored. Only this `README.md` is tracked.
+After cloning, either download pre-built binaries or bootstrap from source, then run `scripts/setup.sh`.

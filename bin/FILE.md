@@ -21,10 +21,11 @@
 
 ## 🔧 Core Executables
 
-### `simple` (6.5KB shell script)
-**Main CLI wrapper and platform detector**
+### `simple` (symlink)
+**Symlink to release binary for current platform**
 
-Automatically detects platform (Linux/macOS/FreeBSD/Windows × x86_64/ARM64/RISC-V) and uses appropriate bootstrap binary from `release/`.
+Created by `scripts/setup.sh` — points to `release/<arch>-<vendor>-<os>-<abi>/simple(.exe)`.
+Run `scripts/setup.sh` after cloning or bootstrapping.
 
 **Features:**
 - Multi-platform support (9 architectures)

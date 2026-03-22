@@ -154,11 +154,24 @@ Stage 3: Self-Hosted (compiled by Stage 2)
 ### Quick Bootstrap
 
 ```bash
-# Verified Linux bootstrap
+# Linux / macOS
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+scripts/setup.sh
+
+# Windows (Git Bash / MSYS2)
+scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/setup.sh          # or: scripts\setup.cmd
 
 # Keep artifacts in a separate directory
-scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
+scripts/bootstrap/bootstrap-from-scratch.sh --output=build/bootstrap
+```
+
+Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
+
+```
+build/bootstrap/stage1/x86_64-unknown-linux-gnu/simple
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
 ```
 
 ### Bootstrap Flags
@@ -189,7 +202,10 @@ Status in this checkout:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux bootstrap wrapper |
+| `scripts/setup.sh` | Post-bootstrap setup — creates `bin/simple` symlink |
+| `scripts/setup.cmd` | Windows CMD/PowerShell equivalent |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux/FreeBSD bootstrap |
+| `scripts/bootstrap/bootstrap-windows.sh` | Windows bootstrap (MSVC / MinGW auto-detect) |
 | `scripts/bootstrap/bootstrap-c.sh` | Experimental C bootstrap wrapper |
 
 ---

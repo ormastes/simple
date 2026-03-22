@@ -10,6 +10,7 @@ use simple_runtime::value::{
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
     rt_platform_name as ffi_platform_name,
+    rt_term_enable_ansi as ffi_term_enable_ansi,
 };
 use simple_runtime::value::ffi::config::{
     rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
@@ -510,6 +511,19 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_platform_name(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let result = ffi_platform_name();
+        Ok(runtime_to_value(result))
+    }
+}
+
+/// Enable ANSI virtual terminal processing on Windows
+///
+/// Callable from Simple as: `rt_term_enable_ansi()`
+///
+/// # Returns
+/// * Bool: always true
+pub fn rt_term_enable_ansi(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let result = ffi_term_enable_ansi();
         Ok(runtime_to_value(result))
     }
 }
