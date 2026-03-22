@@ -1,0 +1,609 @@
+# AVR Opcode Table — ATmega328P Instruction Set
+#
+# 16-bit instruction word decoding for AVR core.
+# Reference: Atmel AVR Instruction Set Manual (doc0856).
+#
+# Most instructions are 16-bit (1 word). LDS/STS/JMP/CALL are 32-bit (2 words).
+
+# ============================================================================
+# AVR Opcode Enum
+# ============================================================================
+
+enum AvrOpcode:
+    """All ATmega328P instructions, grouped by category."""
+
+    # ---- Arithmetic (15 ops) ----
+    ADD(rd: i64, rr: i64)       # Rd <- Rd + Rr
+    ADC(rd: i64, rr: i64)       # Rd <- Rd + Rr + C
+    SUB(rd: i64, rr: i64)       # Rd <- Rd - Rr
+    SBC(rd: i64, rr: i64)       # Rd <- Rd - Rr - C
+    SUBI(rd: i64, k: i64)       # Rd <- Rd - K (d: 16-31)
+    SBCI(rd: i64, k: i64)       # Rd <- Rd - K - C (d: 16-31)
+    MUL(rd: i64, rr: i64)       # R1:R0 <- Rd * Rr (unsigned)
+    NEG(rd: i64)                # Rd <- 0x00 - Rd (two's complement)
+    INC(rd: i64)                # Rd <- Rd + 1
+    DEC(rd: i64)                # Rd <- Rd - 1
+    CP(rd: i64, rr: i64)        # Rd - Rr (compare, flags only)
+    CPC(rd: i64, rr: i64)       # Rd - Rr - C (compare with carry)
+    CPI(rd: i64, k: i64)        # Rd - K (compare immediate, d: 16-31)
+    ADIW(rd: i64, k: i64)       # Rd+1:Rd <- Rd+1:Rd + K (d: 24,26,28,30)
+    SBIW(rd: i64, k: i64)       # Rd+1:Rd <- Rd+1:Rd - K (d: 24,26,28,30)
+
+    # ---- Logic (11 ops) ----
+    AND(rd: i64, rr: i64)       # Rd <- Rd & Rr
+    ANDI(rd: i64, k: i64)       # Rd <- Rd & K (d: 16-31)
+    OR(rd: i64, rr: i64)        # Rd <- Rd | Rr
+    ORI(rd: i64, k: i64)        # Rd <- Rd | K (d: 16-31)
+    EOR(rd: i64, rr: i64)       # Rd <- Rd ^ Rr
+    COM(rd: i64)                # Rd <- 0xFF - Rd (one's complement)
+    SBR(rd: i64, k: i64)        # Rd <- Rd | K (alias for ORI)
+    CBR(rd: i64, k: i64)        # Rd <- Rd & (~K) (alias for ANDI with complement)
+    TST(rd: i64)                # Rd & Rd (test, alias for AND Rd,Rd)
+    CLR(rd: i64)                # Rd <- 0 (alias for EOR Rd,Rd)
+    SER(rd: i64)                # Rd <- 0xFF (d: 16-31)
+
+    # ---- Branch (11 ops) ----
+    RJMP(k: i64)                # PC <- PC + k + 1 (12-bit signed offset)
+    RCALL(k: i64)               # Push PC, PC <- PC + k + 1
+    RET                         # Pop PC (return from subroutine)
+    RETI                        # Pop PC, set I flag (return from interrupt)
+    BRBS(s: i64, k: i64)        # if SREG(s)==1: PC <- PC + k + 1 (7-bit signed)
+    BRBC(s: i64, k: i64)        # if SREG(s)==0: PC <- PC + k + 1
+    SBRC(rr: i64, b: i64)       # if Rr(b)==0: skip next instruction
+    SBRS(rr: i64, b: i64)       # if Rr(b)==1: skip next instruction
+    SBIC(a: i64, b: i64)        # if I/O(a,b)==0: skip next
+    SBIS(a: i64, b: i64)        # if I/O(a,b)==1: skip next
+    CPSE(rd: i64, rr: i64)      # if Rd==Rr: skip next instruction
+
+    # ---- Data Transfer (17 ops) ----
+    MOV(rd: i64, rr: i64)       # Rd <- Rr
+    MOVW(rd: i64, rr: i64)      # Rd+1:Rd <- Rr+1:Rr (even regs)
+    LDI(rd: i64, k: i64)        # Rd <- K (d: 16-31)
+    LD_X(rd: i64)               # Rd <- (X)
+    LD_X_INC(rd: i64)           # Rd <- (X), X <- X + 1
+    LD_X_DEC(rd: i64)           # X <- X - 1, Rd <- (X)
+    LD_Y_INC(rd: i64)           # Rd <- (Y), Y <- Y + 1
+    LD_Y_DEC(rd: i64)           # Y <- Y - 1, Rd <- (Y)
+    LDD_Y(rd: i64, q: i64)     # Rd <- (Y + q)
+    LD_Z_INC(rd: i64)           # Rd <- (Z), Z <- Z + 1
+    LD_Z_DEC(rd: i64)           # Z <- Z - 1, Rd <- (Z)
+    LDD_Z(rd: i64, q: i64)     # Rd <- (Z + q)
+    LDS(rd: i64, k: i64)        # Rd <- (k) — 32-bit instruction
+    ST_X(rr: i64)               # (X) <- Rr
+    ST_X_INC(rr: i64)           # (X) <- Rr, X <- X + 1
+    ST_X_DEC(rr: i64)           # X <- X - 1, (X) <- Rr
+    ST_Y_INC(rr: i64)           # (Y) <- Rr, Y <- Y + 1
+    ST_Y_DEC(rr: i64)           # Y <- Y - 1, (Y) <- Rr
+    STD_Y(rr: i64, q: i64)     # (Y + q) <- Rr
+    ST_Z_INC(rr: i64)           # (Z) <- Rr, Z <- Z + 1
+    ST_Z_DEC(rr: i64)           # Z <- Z - 1, (Z) <- Rr
+    STD_Z(rr: i64, q: i64)     # (Z + q) <- Rr
+    STS(k: i64, rr: i64)        # (k) <- Rr — 32-bit instruction
+    LPM_R0                      # R0 <- (Z) program memory
+    LPM(rd: i64)                # Rd <- (Z) program memory
+    LPM_INC(rd: i64)            # Rd <- (Z), Z <- Z + 1
+    SPM                         # (Z) <- R1:R0 program memory write
+    IN(rd: i64, a: i64)         # Rd <- I/O(a)
+    OUT(a: i64, rr: i64)        # I/O(a) <- Rr
+    PUSH(rr: i64)               # (SP) <- Rr, SP <- SP - 1
+    POP(rd: i64)                # SP <- SP + 1, Rd <- (SP)
+
+    # ---- Bit & Bit-test (12 ops) ----
+    LSL(rd: i64)                # Logical shift left (alias for ADD Rd,Rd)
+    LSR(rd: i64)                # Logical shift right
+    ROL(rd: i64)                # Rotate left through carry (alias for ADC Rd,Rd)
+    ROR(rd: i64)                # Rotate right through carry
+    ASR(rd: i64)                # Arithmetic shift right
+    SWAP(rd: i64)               # Swap nibbles
+    BSET(s: i64)                # SREG(s) <- 1
+    BCLR(s: i64)                # SREG(s) <- 0
+    BST(rd: i64, b: i64)        # T <- Rd(b)
+    BLD(rd: i64, b: i64)        # Rd(b) <- T
+    SBI(a: i64, b: i64)         # I/O(a,b) <- 1
+    CBI(a: i64, b: i64)         # I/O(a,b) <- 0
+
+    # ---- Misc (4 ops) ----
+    NOP                         # No operation
+    SLEEP                       # Enter sleep mode
+    WDR                         # Watchdog reset
+    BREAK                       # Debug break
+
+impl AvrOpcode:
+    fn to_text() -> text:
+        match self:
+            ADD(rd, rr): "add r{rd}, r{rr}"
+            ADC(rd, rr): "adc r{rd}, r{rr}"
+            SUB(rd, rr): "sub r{rd}, r{rr}"
+            SBC(rd, rr): "sbc r{rd}, r{rr}"
+            SUBI(rd, k): "subi r{rd}, {k}"
+            SBCI(rd, k): "sbci r{rd}, {k}"
+            MUL(rd, rr): "mul r{rd}, r{rr}"
+            NEG(rd): "neg r{rd}"
+            INC(rd): "inc r{rd}"
+            DEC(rd): "dec r{rd}"
+            CP(rd, rr): "cp r{rd}, r{rr}"
+            CPC(rd, rr): "cpc r{rd}, r{rr}"
+            CPI(rd, k): "cpi r{rd}, {k}"
+            ADIW(rd, k): "adiw r{rd}, {k}"
+            SBIW(rd, k): "sbiw r{rd}, {k}"
+            AND(rd, rr): "and r{rd}, r{rr}"
+            ANDI(rd, k): "andi r{rd}, {k}"
+            OR(rd, rr): "or r{rd}, r{rr}"
+            ORI(rd, k): "ori r{rd}, {k}"
+            EOR(rd, rr): "eor r{rd}, r{rr}"
+            COM(rd): "com r{rd}"
+            SBR(rd, k): "sbr r{rd}, {k}"
+            CBR(rd, k): "cbr r{rd}, {k}"
+            TST(rd): "tst r{rd}"
+            CLR(rd): "clr r{rd}"
+            SER(rd): "ser r{rd}"
+            RJMP(k): "rjmp {k}"
+            RCALL(k): "rcall {k}"
+            RET: "ret"
+            RETI: "reti"
+            BRBS(s, k): "brbs {s}, {k}"
+            BRBC(s, k): "brbc {s}, {k}"
+            SBRC(rr, b): "sbrc r{rr}, {b}"
+            SBRS(rr, b): "sbrs r{rr}, {b}"
+            SBIC(a, b): "sbic {a}, {b}"
+            SBIS(a, b): "sbis {a}, {b}"
+            CPSE(rd, rr): "cpse r{rd}, r{rr}"
+            MOV(rd, rr): "mov r{rd}, r{rr}"
+            MOVW(rd, rr): "movw r{rd}, r{rr}"
+            LDI(rd, k): "ldi r{rd}, {k}"
+            LD_X(rd): "ld r{rd}, X"
+            LD_X_INC(rd): "ld r{rd}, X+"
+            LD_X_DEC(rd): "ld r{rd}, -X"
+            LD_Y_INC(rd): "ld r{rd}, Y+"
+            LD_Y_DEC(rd): "ld r{rd}, -Y"
+            LDD_Y(rd, q): "ldd r{rd}, Y+{q}"
+            LD_Z_INC(rd): "ld r{rd}, Z+"
+            LD_Z_DEC(rd): "ld r{rd}, -Z"
+            LDD_Z(rd, q): "ldd r{rd}, Z+{q}"
+            LDS(rd, k): "lds r{rd}, {k}"
+            ST_X(rr): "st X, r{rr}"
+            ST_X_INC(rr): "st X+, r{rr}"
+            ST_X_DEC(rr): "st -X, r{rr}"
+            ST_Y_INC(rr): "st Y+, r{rr}"
+            ST_Y_DEC(rr): "st -Y, r{rr}"
+            STD_Y(rr, q): "std Y+{q}, r{rr}"
+            ST_Z_INC(rr): "st Z+, r{rr}"
+            ST_Z_DEC(rr): "st -Z, r{rr}"
+            STD_Z(rr, q): "std Z+{q}, r{rr}"
+            STS(k, rr): "sts {k}, r{rr}"
+            LPM_R0: "lpm"
+            LPM(rd): "lpm r{rd}, Z"
+            LPM_INC(rd): "lpm r{rd}, Z+"
+            SPM: "spm"
+            IN(rd, a): "in r{rd}, {a}"
+            OUT(a, rr): "out {a}, r{rr}"
+            PUSH(rr): "push r{rr}"
+            POP(rd): "pop r{rd}"
+            LSL(rd): "lsl r{rd}"
+            LSR(rd): "lsr r{rd}"
+            ROL(rd): "rol r{rd}"
+            ROR(rd): "ror r{rd}"
+            ASR(rd): "asr r{rd}"
+            SWAP(rd): "swap r{rd}"
+            BSET(s): "bset {s}"
+            BCLR(s): "bclr {s}"
+            BST(rd, b): "bst r{rd}, {b}"
+            BLD(rd, b): "bld r{rd}, {b}"
+            SBI(a, b): "sbi {a}, {b}"
+            CBI(a, b): "cbi {a}, {b}"
+            NOP: "nop"
+            SLEEP: "sleep"
+            WDR: "wdr"
+            BREAK: "break"
+
+    fn is_two_word() -> bool:
+        """Returns true if this opcode is a 32-bit (2-word) instruction."""
+        match self:
+            LDS(_, _): true
+            STS(_, _): true
+            _: false
+
+    fn byte_count() -> i64:
+        """Returns the instruction size in bytes."""
+        if self.is_two_word(): 4 else: 2
+
+# ============================================================================
+# Instruction Decoder — 16-bit word to AvrOpcode
+# ============================================================================
+
+fn decode_avr_opcode(word: i64) -> AvrOpcode?:
+    """Decode a 16-bit AVR instruction word into an AvrOpcode.
+
+    For 32-bit instructions (LDS, STS), only the first word is decoded here;
+    the caller must supply the second word separately.
+
+    Bit extraction uses the standard AVR opcode encoding formats.
+    Returns nil for unrecognized encodings.
+    """
+    # Mask to 16 bits
+    val w = word & 0xFFFF
+
+    # ---- NOP: 0000 0000 0000 0000 ----
+    if w == 0x0000:
+        return Some(AvrOpcode.NOP)
+
+    # ---- MOVW: 0000 0001 dddd rrrr ----
+    if (w & 0xFF00) == 0x0100:
+        val rd = ((w >> 4) & 0x0F) * 2
+        val rr = (w & 0x0F) * 2
+        return Some(AvrOpcode.MOVW(rd: rd, rr: rr))
+
+    # ---- MUL: 1001 11rd dddd rrrr ----
+    if (w & 0xFC00) == 0x9C00:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.MUL(rd: rd, rr: rr))
+
+    # ---- CPC: 0000 01rd dddd rrrr ----
+    if (w & 0xFC00) == 0x0400:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.CPC(rd: rd, rr: rr))
+
+    # ---- SBC: 0000 10rd dddd rrrr ----
+    if (w & 0xFC00) == 0x0800:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.SBC(rd: rd, rr: rr))
+
+    # ---- ADD: 0000 11rd dddd rrrr ----
+    # Also LSL when rd==rr
+    if (w & 0xFC00) == 0x0C00:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        if rd == rr:
+            return Some(AvrOpcode.LSL(rd: rd))
+        return Some(AvrOpcode.ADD(rd: rd, rr: rr))
+
+    # ---- CPSE: 0001 00rd dddd rrrr ----
+    if (w & 0xFC00) == 0x1000:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.CPSE(rd: rd, rr: rr))
+
+    # ---- CP: 0001 01rd dddd rrrr ----
+    if (w & 0xFC00) == 0x1400:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.CP(rd: rd, rr: rr))
+
+    # ---- SUB: 0001 10rd dddd rrrr ----
+    if (w & 0xFC00) == 0x1800:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.SUB(rd: rd, rr: rr))
+
+    # ---- ADC: 0001 11rd dddd rrrr ---- (also ROL when rd==rr)
+    if (w & 0xFC00) == 0x1C00:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        if rd == rr:
+            return Some(AvrOpcode.ROL(rd: rd))
+        return Some(AvrOpcode.ADC(rd: rd, rr: rr))
+
+    # ---- AND: 0010 00rd dddd rrrr ---- (also TST when rd==rr)
+    if (w & 0xFC00) == 0x2000:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        if rd == rr:
+            return Some(AvrOpcode.TST(rd: rd))
+        return Some(AvrOpcode.AND(rd: rd, rr: rr))
+
+    # ---- EOR: 0010 01rd dddd rrrr ---- (also CLR when rd==rr)
+    if (w & 0xFC00) == 0x2400:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        if rd == rr:
+            return Some(AvrOpcode.CLR(rd: rd))
+        return Some(AvrOpcode.EOR(rd: rd, rr: rr))
+
+    # ---- OR: 0010 10rd dddd rrrr ----
+    if (w & 0xFC00) == 0x2800:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.OR(rd: rd, rr: rr))
+
+    # ---- MOV: 0010 11rd dddd rrrr ----
+    if (w & 0xFC00) == 0x2C00:
+        val rd = (w >> 4) & 0x1F
+        val rr = ((w >> 5) & 0x10) | (w & 0x0F)
+        return Some(AvrOpcode.MOV(rd: rd, rr: rr))
+
+    # ---- CPI: 0011 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0x3000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        # Recalculate K: high nibble from bits 11:8, low nibble from bits 3:0
+        val k2 = ((w >> 4) & 0xF0) | (w & 0x0F)
+        return Some(AvrOpcode.CPI(rd: rd, k: k2))
+
+    # ---- SBCI: 0100 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0x4000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        return Some(AvrOpcode.SBCI(rd: rd, k: k))
+
+    # ---- SUBI: 0101 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0x5000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        return Some(AvrOpcode.SUBI(rd: rd, k: k))
+
+    # ---- ORI (SBR): 0110 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0x6000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        return Some(AvrOpcode.ORI(rd: rd, k: k))
+
+    # ---- ANDI (CBR): 0111 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0x7000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        return Some(AvrOpcode.ANDI(rd: rd, k: k))
+
+    # ---- LDD/STD with Z+q or Y+q: 10q0 qq0d dddd 0qqq (Z) / 10q0 qq0d dddd 1qqq (Y) ----
+    # LDD Z+q: 10q0 qq0d dddd 0qqq
+    if (w & 0xD208) == 0x8000:
+        val rd = (w >> 4) & 0x1F
+        val q = ((w >> 8) & 0x20) | ((w >> 7) & 0x18) | (w & 0x07)
+        return Some(AvrOpcode.LDD_Z(rd: rd, q: q))
+
+    # LDD Y+q: 10q0 qq0d dddd 1qqq
+    if (w & 0xD208) == 0x8008:
+        val rd = (w >> 4) & 0x1F
+        val q = ((w >> 8) & 0x20) | ((w >> 7) & 0x18) | (w & 0x07)
+        return Some(AvrOpcode.LDD_Y(rd: rd, q: q))
+
+    # STD Z+q: 10q0 qq1r rrrr 0qqq
+    if (w & 0xD208) == 0x8200:
+        val rr = (w >> 4) & 0x1F
+        val q = ((w >> 8) & 0x20) | ((w >> 7) & 0x18) | (w & 0x07)
+        return Some(AvrOpcode.STD_Z(rr: rr, q: q))
+
+    # STD Y+q: 10q0 qq1r rrrr 1qqq
+    if (w & 0xD208) == 0x8208:
+        val rr = (w >> 4) & 0x1F
+        val q = ((w >> 8) & 0x20) | ((w >> 7) & 0x18) | (w & 0x07)
+        return Some(AvrOpcode.STD_Y(rr: rr, q: q))
+
+    # ---- Single-register ops: 1001 010d dddd xxxx ----
+    if (w & 0xFE00) == 0x9400:
+        val rd = (w >> 4) & 0x1F
+        val low4 = w & 0x000F
+        match low4:
+            0x0: return Some(AvrOpcode.COM(rd: rd))
+            0x1: return Some(AvrOpcode.NEG(rd: rd))
+            0x2: return Some(AvrOpcode.SWAP(rd: rd))
+            0x3: return Some(AvrOpcode.INC(rd: rd))
+            0x5: return Some(AvrOpcode.ASR(rd: rd))
+            0x6: return Some(AvrOpcode.LSR(rd: rd))
+            0x7: return Some(AvrOpcode.ROR(rd: rd))
+            0xA: return Some(AvrOpcode.DEC(rd: rd))
+            _: pass_dn
+
+    # ---- BSET: 1001 0100 0sss 1000 ----
+    if (w & 0xFF8F) == 0x9408:
+        val s = (w >> 4) & 0x07
+        return Some(AvrOpcode.BSET(s: s))
+
+    # ---- BCLR: 1001 0100 1sss 1000 ----
+    if (w & 0xFF8F) == 0x9488:
+        val s = (w >> 4) & 0x07
+        return Some(AvrOpcode.BCLR(s: s))
+
+    # ---- RET: 1001 0101 0000 1000 ----
+    if w == 0x9508:
+        return Some(AvrOpcode.RET)
+
+    # ---- RETI: 1001 0101 0001 1000 ----
+    if w == 0x9518:
+        return Some(AvrOpcode.RETI)
+
+    # ---- SLEEP: 1001 0101 1000 1000 ----
+    if w == 0x9588:
+        return Some(AvrOpcode.SLEEP)
+
+    # ---- BREAK: 1001 0101 1001 1000 ----
+    if w == 0x9598:
+        return Some(AvrOpcode.BREAK)
+
+    # ---- WDR: 1001 0101 1010 1000 ----
+    if w == 0x95A8:
+        return Some(AvrOpcode.WDR)
+
+    # ---- LPM R0: 1001 0101 1100 1000 ----
+    if w == 0x95C8:
+        return Some(AvrOpcode.LPM_R0)
+
+    # ---- SPM: 1001 0101 1110 1000 ----
+    if w == 0x95E8:
+        return Some(AvrOpcode.SPM)
+
+    # ---- LD/ST with X/Y/Z (post-inc, pre-dec): 1001 00xd dddd xxxx ----
+    if (w & 0xFE00) == 0x9000:
+        val rd = (w >> 4) & 0x1F
+        val low4 = w & 0x000F
+        val is_store = (w & 0x0200) != 0
+        if is_store:
+            match low4:
+                0xC: return Some(AvrOpcode.ST_X(rr: rd))
+                0xD: return Some(AvrOpcode.ST_X_INC(rr: rd))
+                0xE: return Some(AvrOpcode.ST_X_DEC(rr: rd))
+                0x9: return Some(AvrOpcode.ST_Y_INC(rr: rd))
+                0xA: return Some(AvrOpcode.ST_Y_DEC(rr: rd))
+                0x1: return Some(AvrOpcode.ST_Z_INC(rr: rd))
+                0x2: return Some(AvrOpcode.ST_Z_DEC(rr: rd))
+                _: pass_dn
+        else:
+            match low4:
+                0xC: return Some(AvrOpcode.LD_X(rd: rd))
+                0xD: return Some(AvrOpcode.LD_X_INC(rd: rd))
+                0xE: return Some(AvrOpcode.LD_X_DEC(rd: rd))
+                0x9: return Some(AvrOpcode.LD_Y_INC(rd: rd))
+                0xA: return Some(AvrOpcode.LD_Y_DEC(rd: rd))
+                0x1: return Some(AvrOpcode.LD_Z_INC(rd: rd))
+                0x2: return Some(AvrOpcode.LD_Z_DEC(rd: rd))
+                0x0: return Some(AvrOpcode.LDS(rd: rd, k: 0))   # Second word needed
+                0x4: return Some(AvrOpcode.LPM(rd: rd))
+                0x5: return Some(AvrOpcode.LPM_INC(rd: rd))
+                _: pass_dn
+
+    # ---- STS: 1001 001d dddd 0000 + 16-bit address ----
+    if (w & 0xFE0F) == 0x9200:
+        val rr = (w >> 4) & 0x1F
+        return Some(AvrOpcode.STS(k: 0, rr: rr))   # Second word needed
+
+    # ---- PUSH: 1001 001d dddd 1111 ----
+    if (w & 0xFE0F) == 0x920F:
+        val rr = (w >> 4) & 0x1F
+        return Some(AvrOpcode.PUSH(rr: rr))
+
+    # ---- POP: 1001 000d dddd 1111 ----
+    if (w & 0xFE0F) == 0x900F:
+        val rd = (w >> 4) & 0x1F
+        return Some(AvrOpcode.POP(rd: rd))
+
+    # ---- ADIW: 1001 0110 KKdd KKKK ----
+    if (w & 0xFF00) == 0x9600:
+        val pair = ((w >> 4) & 0x03) * 2 + 24
+        val k = ((w >> 2) & 0x30) | (w & 0x0F)
+        return Some(AvrOpcode.ADIW(rd: pair, k: k))
+
+    # ---- SBIW: 1001 0111 KKdd KKKK ----
+    if (w & 0xFF00) == 0x9700:
+        val pair = ((w >> 4) & 0x03) * 2 + 24
+        val k = ((w >> 2) & 0x30) | (w & 0x0F)
+        return Some(AvrOpcode.SBIW(rd: pair, k: k))
+
+    # ---- CBI: 1001 1000 AAAA Abbb ----
+    if (w & 0xFF00) == 0x9800:
+        val a = (w >> 3) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.CBI(a: a, b: b))
+
+    # ---- SBIC: 1001 1001 AAAA Abbb ----
+    if (w & 0xFF00) == 0x9900:
+        val a = (w >> 3) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.SBIC(a: a, b: b))
+
+    # ---- SBI: 1001 1010 AAAA Abbb ----
+    if (w & 0xFF00) == 0x9A00:
+        val a = (w >> 3) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.SBI(a: a, b: b))
+
+    # ---- SBIS: 1001 1011 AAAA Abbb ----
+    if (w & 0xFF00) == 0x9B00:
+        val a = (w >> 3) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.SBIS(a: a, b: b))
+
+    # ---- SBRC: 1111 110r rrrr 0bbb ----
+    if (w & 0xFE08) == 0xFC00:
+        val rr = (w >> 4) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.SBRC(rr: rr, b: b))
+
+    # ---- SBRS: 1111 111r rrrr 0bbb ----
+    if (w & 0xFE08) == 0xFE00:
+        val rr = (w >> 4) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.SBRS(rr: rr, b: b))
+
+    # ---- BST: 1111 101d dddd 0bbb ----
+    if (w & 0xFE08) == 0xFA00:
+        val rd = (w >> 4) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.BST(rd: rd, b: b))
+
+    # ---- BLD: 1111 100d dddd 0bbb ----
+    if (w & 0xFE08) == 0xF800:
+        val rd = (w >> 4) & 0x1F
+        val b = w & 0x07
+        return Some(AvrOpcode.BLD(rd: rd, b: b))
+
+    # ---- IN: 1011 0AAd dddd AAAA ----
+    if (w & 0xF800) == 0xB000:
+        val rd = (w >> 4) & 0x1F
+        val a = ((w >> 5) & 0x30) | (w & 0x0F)
+        return Some(AvrOpcode.IN(rd: rd, a: a))
+
+    # ---- OUT: 1011 1AAr rrrr AAAA ----
+    if (w & 0xF800) == 0xB800:
+        val rr = (w >> 4) & 0x1F
+        val a = ((w >> 5) & 0x30) | (w & 0x0F)
+        return Some(AvrOpcode.OUT(a: a, rr: rr))
+
+    # ---- LDI (SER when K=0xFF): 1110 KKKK dddd KKKK ----
+    if (w & 0xF000) == 0xE000:
+        val rd = ((w >> 4) & 0x0F) + 16
+        val k = ((w >> 4) & 0xF0) | (w & 0x0F)
+        if k == 0xFF:
+            return Some(AvrOpcode.SER(rd: rd))
+        return Some(AvrOpcode.LDI(rd: rd, k: k))
+
+    # ---- RJMP: 1100 kkkk kkkk kkkk ----
+    if (w & 0xF000) == 0xC000:
+        var k = w & 0x0FFF
+        # Sign-extend 12-bit offset
+        if (k & 0x0800) != 0:
+            k = k - 0x1000
+        return Some(AvrOpcode.RJMP(k: k))
+
+    # ---- RCALL: 1101 kkkk kkkk kkkk ----
+    if (w & 0xF000) == 0xD000:
+        var k = w & 0x0FFF
+        # Sign-extend 12-bit offset
+        if (k & 0x0800) != 0:
+            k = k - 0x1000
+        return Some(AvrOpcode.RCALL(k: k))
+
+    # ---- BRBS: 1111 00kk kkkk ksss ----
+    if (w & 0xFC00) == 0xF000:
+        val s = w & 0x07
+        var k = (w >> 3) & 0x7F
+        # Sign-extend 7-bit offset
+        if (k & 0x40) != 0:
+            k = k - 0x80
+        return Some(AvrOpcode.BRBS(s: s, k: k))
+
+    # ---- BRBC: 1111 01kk kkkk ksss ----
+    if (w & 0xFC00) == 0xF400:
+        val s = w & 0x07
+        var k = (w >> 3) & 0x7F
+        # Sign-extend 7-bit offset
+        if (k & 0x40) != 0:
+            k = k - 0x80
+        return Some(AvrOpcode.BRBC(s: s, k: k))
+
+    # Unrecognized instruction
+    nil
+
+# ============================================================================
+# Convenience: BRBS/BRBC mnemonic aliases
+# ============================================================================
+
+fn avr_breq_bit() -> i64: 1   # Z flag
+fn avr_brne_bit() -> i64: 1   # Z flag (BRBC)
+fn avr_brcs_bit() -> i64: 0   # C flag (BRBS)
+fn avr_brcc_bit() -> i64: 0   # C flag (BRBC)
+fn avr_brsh_bit() -> i64: 0   # C flag (BRBC) — same as BRCC
+fn avr_brlo_bit() -> i64: 0   # C flag (BRBS) — same as BRCS
+fn avr_brmi_bit() -> i64: 2   # N flag
+fn avr_brpl_bit() -> i64: 2   # N flag (BRBC)
+fn avr_brvs_bit() -> i64: 3   # V flag
+fn avr_brvc_bit() -> i64: 3   # V flag (BRBC)
+fn avr_brlt_bit() -> i64: 4   # S flag
+fn avr_brge_bit() -> i64: 4   # S flag (BRBC)
+fn avr_brhs_bit() -> i64: 5   # H flag
+fn avr_brhc_bit() -> i64: 5   # H flag (BRBC)
+fn avr_brts_bit() -> i64: 6   # T flag
+fn avr_brtc_bit() -> i64: 6   # T flag (BRBC)
+fn avr_brie_bit() -> i64: 7   # I flag
+fn avr_brid_bit() -> i64: 7   # I flag (BRBC)

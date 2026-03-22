@@ -1,0 +1,839 @@
+# 8086 Opcode Table and Decode Helpers
+#
+# Covers the full Intel 8086 instruction set.
+# Provides opcode enum, ModR/M decoding, and opcode byte -> X86Opcode mapping.
+
+# ============================================================================
+# 8086 Opcode Enum
+# ============================================================================
+
+enum X86Opcode:
+    """Intel 8086 instruction opcodes."""
+
+    # ── Arithmetic ──
+    ADD
+    ADC
+    SUB
+    SBB
+    MUL
+    IMUL
+    DIV
+    IDIV
+    INC
+    DEC
+    NEG
+    CMP
+    DAA
+    DAS
+    AAA
+    AAS
+    CBW
+    CWD
+
+    # ── Logic / Bitwise ──
+    AND
+    OR
+    XOR
+    NOT
+    TEST
+    SHL
+    SHR
+    SAR
+    ROL
+    ROR
+    RCL
+    RCR
+
+    # ── Data Movement ──
+    MOV
+    XCHG
+    LEA
+    LDS
+    LES
+    PUSH
+    POP
+    PUSHF
+    POPF
+    XLAT
+    IN
+    OUT
+    LAHF
+    SAHF
+
+    # ── String Operations ──
+    MOVSB
+    MOVSW
+    CMPSB
+    CMPSW
+    STOSB
+    STOSW
+    LODSB
+    LODSW
+    SCASB
+    SCASW
+
+    # ── Control Flow ──
+    JMP
+    CALL
+    RET
+    RETF
+    # Conditional jumps — single enum variant, condition encoded in DecodedInst
+    JO
+    JNO
+    JB
+    JNB
+    JE
+    JNE
+    JBE
+    JA
+    JS
+    JNS
+    JP
+    JNP
+    JL
+    JGE
+    JLE
+    JG
+    LOOP
+    LOOPE
+    LOOPNE
+    JCXZ
+    INT
+    INTO
+    IRET
+
+    # ── Flag Control ──
+    STC
+    CLC
+    CMC
+    STD
+    CLD
+    STI
+    CLI
+
+    # ── Miscellaneous ──
+    HLT
+    NOP
+
+# ============================================================================
+# Operand Kind — how a decoded operand should be interpreted
+# ============================================================================
+
+enum OperandKind:
+    """Describes a decoded operand."""
+    Reg8(index: i64)            # 8-bit register (AL/CL/DL/BL/AH/CH/DH/BH)
+    Reg16(index: i64)           # 16-bit register (AX/CX/DX/BX/SP/BP/SI/DI)
+    SegReg(index: i64)          # Segment register (ES/CS/SS/DS)
+    Imm8(value: i64)            # 8-bit immediate
+    Imm16(value: i64)           # 16-bit immediate
+    Mem(ea_base: i64, ea_index: i64, disp: i64, width: i64)
+        # ea_base/ea_index: -1 if absent; width: 8 or 16
+    None_                       # No operand
+
+# ============================================================================
+# Decoded Instruction
+# ============================================================================
+
+struct DecodedInst:
+    """Result of decoding one 8086 instruction."""
+    opcode: X86Opcode
+    dst: OperandKind
+    src: OperandKind
+    bytes_consumed: i64
+
+impl DecodedInst:
+    static fn new(opcode: X86Opcode, dst: OperandKind, src: OperandKind, bytes_consumed: i64) -> DecodedInst:
+        DecodedInst(opcode: opcode, dst: dst, src: src, bytes_consumed: bytes_consumed)
+
+    static fn simple(opcode: X86Opcode, bytes_consumed: i64) -> DecodedInst:
+        DecodedInst(opcode: opcode, dst: OperandKind.None_, src: OperandKind.None_, bytes_consumed: bytes_consumed)
+
+# ============================================================================
+# ModR/M Decoding
+# ============================================================================
+
+fn decode_modrm(byte: i64) -> (i64, i64, i64):
+    """Decode a ModR/M byte into (mod, reg, rm) fields.
+
+    mod = bits [7:6]  — addressing mode (0-3)
+    reg = bits [5:3]  — register or opcode extension
+    rm  = bits [2:0]  — register or memory operand
+    """
+    val mod_ = (byte >> 6) & 0x03
+    val reg = (byte >> 3) & 0x07
+    val rm = byte & 0x07
+    (mod_, reg, rm)
+
+# ============================================================================
+# 8-bit Register Index Mapping
+# ============================================================================
+# ModR/M reg field -> (parent_reg_index, is_high_byte)
+# 0=AL(AX,lo) 1=CL(CX,lo) 2=DL(DX,lo) 3=BL(BX,lo)
+# 4=AH(AX,hi) 5=CH(CX,hi) 6=DH(DX,hi) 7=BH(BX,hi)
+
+fn reg8_parent(reg_field: i64) -> i64:
+    """Map 8-bit register field to parent 16-bit register index."""
+    match reg_field:
+        0: 0    # AL -> AX
+        1: 2    # CL -> CX
+        2: 3    # DL -> DX
+        3: 1    # BL -> BX
+        4: 0    # AH -> AX
+        5: 2    # CH -> CX
+        6: 3    # DH -> DX
+        7: 1    # BH -> BX
+        _: 0
+
+fn reg8_is_high(reg_field: i64) -> bool:
+    """True if the 8-bit reg field selects the high byte."""
+    reg_field >= 4
+
+# ============================================================================
+# 16-bit Register Index Mapping
+# ============================================================================
+# ModR/M reg field -> GuestRegId index
+# 0=AX 1=CX 2=DX 3=BX 4=SP 5=BP 6=SI 7=DI
+
+fn reg16_index(reg_field: i64) -> i64:
+    """Map 16-bit register field to guest register index."""
+    match reg_field:
+        0: 0    # AX
+        1: 2    # CX
+        2: 3    # DX
+        3: 1    # BX
+        4: 7    # SP
+        5: 6    # BP
+        6: 4    # SI
+        7: 5    # DI
+        _: 0
+
+# ============================================================================
+# Segment Register Mapping
+# ============================================================================
+
+fn seg_reg_index(reg_field: i64) -> i64:
+    """Map 2-bit segment register field to guest register index."""
+    match reg_field:
+        0: 11   # ES
+        1: 8    # CS
+        2: 10   # SS
+        3: 9    # DS
+        _: 9
+
+# ============================================================================
+# ModR/M Effective Address Decoding
+# ============================================================================
+
+fn modrm_ea_operand(mod_: i64, rm: i64, bytes: [i64], offset: i64, width: i64) -> (OperandKind, i64):
+    """Decode the r/m operand from ModR/M byte.
+
+    Returns (operand, extra_bytes_consumed).
+    width: 8 or 16 — the data width of the operand.
+    """
+    if mod_ == 3:
+        # Register direct
+        if width == 8:
+            return (OperandKind.Reg8(index: rm), 0)
+        else:
+            return (OperandKind.Reg16(index: reg16_index(rm)), 0)
+
+    # Memory modes — determine base and index registers
+    # rm encoding for mod != 3:
+    #   0: [BX+SI+disp]  1: [BX+DI+disp]  2: [BP+SI+disp]  3: [BP+DI+disp]
+    #   4: [SI+disp]     5: [DI+disp]      6: [BP+disp]/[disp16]  7: [BX+disp]
+
+    var ea_base: i64 = -1
+    var ea_index: i64 = -1
+
+    match rm:
+        0:
+            ea_base = 1     # BX
+            ea_index = 4    # SI
+        1:
+            ea_base = 1     # BX
+            ea_index = 5    # DI
+        2:
+            ea_base = 6     # BP
+            ea_index = 4    # SI
+        3:
+            ea_base = 6     # BP
+            ea_index = 5    # DI
+        4:
+            ea_index = 4    # SI
+        5:
+            ea_index = 5    # DI
+        6:
+            if mod_ != 0:
+                ea_base = 6 # BP
+            # else: direct address (no base)
+        7:
+            ea_base = 1     # BX
+        _:
+            pass_do_nothing
+
+    var disp: i64 = 0
+    var extra: i64 = 0
+
+    if mod_ == 0:
+        if rm == 6:
+            # Direct 16-bit displacement
+            disp = bytes[offset] | (bytes[offset + 1] << 8)
+            extra = 2
+        # else: no displacement
+    else:
+        if mod_ == 1:
+            # 8-bit signed displacement
+            disp = bytes[offset]
+            if disp >= 128:
+                disp = disp - 256
+            extra = 1
+        else:
+            # mod == 2: 16-bit signed displacement
+            disp = bytes[offset] | (bytes[offset + 1] << 8)
+            if disp >= 32768:
+                disp = disp - 65536
+            extra = 2
+
+    (OperandKind.Mem(ea_base: ea_base, ea_index: ea_index, disp: disp, width: width), extra)
+
+# ============================================================================
+# Sign-extend 8-bit value to 16-bit
+# ============================================================================
+
+fn sign_extend_8to16(value: i64) -> i64:
+    if value >= 128:
+        value - 256
+    else:
+        value
+
+# ============================================================================
+# Opcode Decoding — Map byte stream to DecodedInst
+# ============================================================================
+
+fn decode_opcode(bytes: [i64], offset: i64) -> DecodedInst?:
+    """Decode one 8086 instruction starting at bytes[offset].
+
+    Returns DecodedInst with opcode, operands, and bytes consumed.
+    Returns nil for unrecognized opcodes.
+    """
+    if offset >= bytes.len():
+        return nil
+
+    val b0 = bytes[offset]
+    var pos = offset + 1
+
+    # ── NOP (0x90 = XCHG AX,AX) ──
+    if b0 == 0x90:
+        return Some(DecodedInst.simple(X86Opcode.NOP, 1))
+
+    # ── HLT (0xF4) ──
+    if b0 == 0xF4:
+        return Some(DecodedInst.simple(X86Opcode.HLT, 1))
+
+    # ── Flag control ──
+    if b0 == 0xF8: return Some(DecodedInst.simple(X86Opcode.CLC, 1))
+    if b0 == 0xF9: return Some(DecodedInst.simple(X86Opcode.STC, 1))
+    if b0 == 0xF5: return Some(DecodedInst.simple(X86Opcode.CMC, 1))
+    if b0 == 0xFC: return Some(DecodedInst.simple(X86Opcode.CLD, 1))
+    if b0 == 0xFD: return Some(DecodedInst.simple(X86Opcode.STD, 1))
+    if b0 == 0xFA: return Some(DecodedInst.simple(X86Opcode.CLI, 1))
+    if b0 == 0xFB: return Some(DecodedInst.simple(X86Opcode.STI, 1))
+
+    # ── CBW / CWD ──
+    if b0 == 0x98: return Some(DecodedInst.simple(X86Opcode.CBW, 1))
+    if b0 == 0x99: return Some(DecodedInst.simple(X86Opcode.CWD, 1))
+
+    # ── BCD adjust ──
+    if b0 == 0x27: return Some(DecodedInst.simple(X86Opcode.DAA, 1))
+    if b0 == 0x2F: return Some(DecodedInst.simple(X86Opcode.DAS, 1))
+    if b0 == 0x37: return Some(DecodedInst.simple(X86Opcode.AAA, 1))
+    if b0 == 0x3F: return Some(DecodedInst.simple(X86Opcode.AAS, 1))
+
+    # ── LAHF / SAHF ──
+    if b0 == 0x9F: return Some(DecodedInst.simple(X86Opcode.LAHF, 1))
+    if b0 == 0x9E: return Some(DecodedInst.simple(X86Opcode.SAHF, 1))
+
+    # ── PUSHF / POPF ──
+    if b0 == 0x9C: return Some(DecodedInst.simple(X86Opcode.PUSHF, 1))
+    if b0 == 0x9D: return Some(DecodedInst.simple(X86Opcode.POPF, 1))
+
+    # ── XLAT ──
+    if b0 == 0xD7: return Some(DecodedInst.simple(X86Opcode.XLAT, 1))
+
+    # ── INTO / IRET ──
+    if b0 == 0xCE: return Some(DecodedInst.simple(X86Opcode.INTO, 1))
+    if b0 == 0xCF: return Some(DecodedInst.simple(X86Opcode.IRET, 1))
+
+    # ── String ops ──
+    if b0 == 0xA4: return Some(DecodedInst.simple(X86Opcode.MOVSB, 1))
+    if b0 == 0xA5: return Some(DecodedInst.simple(X86Opcode.MOVSW, 1))
+    if b0 == 0xA6: return Some(DecodedInst.simple(X86Opcode.CMPSB, 1))
+    if b0 == 0xA7: return Some(DecodedInst.simple(X86Opcode.CMPSW, 1))
+    if b0 == 0xAA: return Some(DecodedInst.simple(X86Opcode.STOSB, 1))
+    if b0 == 0xAB: return Some(DecodedInst.simple(X86Opcode.STOSW, 1))
+    if b0 == 0xAC: return Some(DecodedInst.simple(X86Opcode.LODSB, 1))
+    if b0 == 0xAD: return Some(DecodedInst.simple(X86Opcode.LODSW, 1))
+    if b0 == 0xAE: return Some(DecodedInst.simple(X86Opcode.SCASB, 1))
+    if b0 == 0xAF: return Some(DecodedInst.simple(X86Opcode.SCASW, 1))
+
+    # ── PUSH/POP register (0x50-0x5F) ──
+    if b0 >= 0x50 and b0 <= 0x57:
+        val reg = reg16_index(b0 - 0x50)
+        return Some(DecodedInst.new(X86Opcode.PUSH, OperandKind.Reg16(index: reg), OperandKind.None_, 1))
+    if b0 >= 0x58 and b0 <= 0x5F:
+        val reg = reg16_index(b0 - 0x58)
+        return Some(DecodedInst.new(X86Opcode.POP, OperandKind.Reg16(index: reg), OperandKind.None_, 1))
+
+    # ── PUSH/POP segment registers ──
+    if b0 == 0x06: return Some(DecodedInst.new(X86Opcode.PUSH, OperandKind.SegReg(index: 11), OperandKind.None_, 1))  # ES
+    if b0 == 0x0E: return Some(DecodedInst.new(X86Opcode.PUSH, OperandKind.SegReg(index: 8), OperandKind.None_, 1))   # CS
+    if b0 == 0x16: return Some(DecodedInst.new(X86Opcode.PUSH, OperandKind.SegReg(index: 10), OperandKind.None_, 1))  # SS
+    if b0 == 0x1E: return Some(DecodedInst.new(X86Opcode.PUSH, OperandKind.SegReg(index: 9), OperandKind.None_, 1))   # DS
+    if b0 == 0x07: return Some(DecodedInst.new(X86Opcode.POP, OperandKind.SegReg(index: 11), OperandKind.None_, 1))    # ES
+    if b0 == 0x17: return Some(DecodedInst.new(X86Opcode.POP, OperandKind.SegReg(index: 10), OperandKind.None_, 1))    # SS
+    if b0 == 0x1F: return Some(DecodedInst.new(X86Opcode.POP, OperandKind.SegReg(index: 9), OperandKind.None_, 1))     # DS
+
+    # ── INC/DEC register (0x40-0x4F) ──
+    if b0 >= 0x40 and b0 <= 0x47:
+        val reg = reg16_index(b0 - 0x40)
+        return Some(DecodedInst.new(X86Opcode.INC, OperandKind.Reg16(index: reg), OperandKind.None_, 1))
+    if b0 >= 0x48 and b0 <= 0x4F:
+        val reg = reg16_index(b0 - 0x48)
+        return Some(DecodedInst.new(X86Opcode.DEC, OperandKind.Reg16(index: reg), OperandKind.None_, 1))
+
+    # ── XCHG AX, reg16 (0x91-0x97) ──
+    if b0 >= 0x91 and b0 <= 0x97:
+        val reg = reg16_index(b0 - 0x90)
+        return Some(DecodedInst.new(X86Opcode.XCHG, OperandKind.Reg16(index: 0), OperandKind.Reg16(index: reg), 1))
+
+    # ── MOV reg, imm8 (0xB0-0xB7) ──
+    if b0 >= 0xB0 and b0 <= 0xB7:
+        if pos >= bytes.len(): return nil
+        val reg = b0 - 0xB0
+        val imm = bytes[pos]
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Reg8(index: reg), OperandKind.Imm8(value: imm), 2))
+
+    # ── MOV reg, imm16 (0xB8-0xBF) ──
+    if b0 >= 0xB8 and b0 <= 0xBF:
+        if pos + 1 >= bytes.len(): return nil
+        val reg = reg16_index(b0 - 0xB8)
+        val imm = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Reg16(index: reg), OperandKind.Imm16(value: imm), 3))
+
+    # ── MOV AL/AX, moffs (0xA0-0xA3) ──
+    if b0 == 0xA0:
+        if pos + 1 >= bytes.len(): return nil
+        val addr = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Reg8(index: 0), OperandKind.Mem(ea_base: -1, ea_index: -1, disp: addr, width: 8), 3))
+    if b0 == 0xA1:
+        if pos + 1 >= bytes.len(): return nil
+        val addr = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Reg16(index: 0), OperandKind.Mem(ea_base: -1, ea_index: -1, disp: addr, width: 16), 3))
+    if b0 == 0xA2:
+        if pos + 1 >= bytes.len(): return nil
+        val addr = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Mem(ea_base: -1, ea_index: -1, disp: addr, width: 8), OperandKind.Reg8(index: 0), 3))
+    if b0 == 0xA3:
+        if pos + 1 >= bytes.len(): return nil
+        val addr = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.MOV, OperandKind.Mem(ea_base: -1, ea_index: -1, disp: addr, width: 16), OperandKind.Reg16(index: 0), 3))
+
+    # ── Conditional jumps (0x70-0x7F): Jcc rel8 ──
+    if b0 >= 0x70 and b0 <= 0x7F:
+        if pos >= bytes.len(): return nil
+        val rel8 = sign_extend_8to16(bytes[pos])
+        val jcc_opcodes: [X86Opcode] = [
+            X86Opcode.JO, X86Opcode.JNO, X86Opcode.JB, X86Opcode.JNB,
+            X86Opcode.JE, X86Opcode.JNE, X86Opcode.JBE, X86Opcode.JA,
+            X86Opcode.JS, X86Opcode.JNS, X86Opcode.JP, X86Opcode.JNP,
+            X86Opcode.JL, X86Opcode.JGE, X86Opcode.JLE, X86Opcode.JG
+        ]
+        val opc = jcc_opcodes[b0 - 0x70]
+        return Some(DecodedInst.new(opc, OperandKind.Imm16(value: rel8), OperandKind.None_, 2))
+
+    # ── LOOP/LOOPE/LOOPNE/JCXZ (0xE0-0xE3) ──
+    if b0 >= 0xE0 and b0 <= 0xE3:
+        if pos >= bytes.len(): return nil
+        val rel8 = sign_extend_8to16(bytes[pos])
+        val loop_opcodes: [X86Opcode] = [
+            X86Opcode.LOOPNE, X86Opcode.LOOPE, X86Opcode.LOOP, X86Opcode.JCXZ
+        ]
+        val opc = loop_opcodes[b0 - 0xE0]
+        return Some(DecodedInst.new(opc, OperandKind.Imm16(value: rel8), OperandKind.None_, 2))
+
+    # ── JMP rel8 (0xEB) ──
+    if b0 == 0xEB:
+        if pos >= bytes.len(): return nil
+        val rel8 = sign_extend_8to16(bytes[pos])
+        return Some(DecodedInst.new(X86Opcode.JMP, OperandKind.Imm16(value: rel8), OperandKind.None_, 2))
+
+    # ── JMP rel16 (0xE9) ──
+    if b0 == 0xE9:
+        if pos + 1 >= bytes.len(): return nil
+        var rel16 = bytes[pos] | (bytes[pos + 1] << 8)
+        if rel16 >= 32768:
+            rel16 = rel16 - 65536
+        return Some(DecodedInst.new(X86Opcode.JMP, OperandKind.Imm16(value: rel16), OperandKind.None_, 3))
+
+    # ── CALL rel16 (0xE8) ──
+    if b0 == 0xE8:
+        if pos + 1 >= bytes.len(): return nil
+        var rel16 = bytes[pos] | (bytes[pos + 1] << 8)
+        if rel16 >= 32768:
+            rel16 = rel16 - 65536
+        return Some(DecodedInst.new(X86Opcode.CALL, OperandKind.Imm16(value: rel16), OperandKind.None_, 3))
+
+    # ── RET (0xC3) ──
+    if b0 == 0xC3:
+        return Some(DecodedInst.simple(X86Opcode.RET, 1))
+
+    # ── RET imm16 (0xC2) ──
+    if b0 == 0xC2:
+        if pos + 1 >= bytes.len(): return nil
+        val imm = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.RET, OperandKind.Imm16(value: imm), OperandKind.None_, 3))
+
+    # ── RETF (0xCB) ──
+    if b0 == 0xCB:
+        return Some(DecodedInst.simple(X86Opcode.RETF, 1))
+
+    # ── RETF imm16 (0xCA) ──
+    if b0 == 0xCA:
+        if pos + 1 >= bytes.len(): return nil
+        val imm = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.RETF, OperandKind.Imm16(value: imm), OperandKind.None_, 3))
+
+    # ── INT imm8 (0xCD) ──
+    if b0 == 0xCD:
+        if pos >= bytes.len(): return nil
+        val imm = bytes[pos]
+        return Some(DecodedInst.new(X86Opcode.INT, OperandKind.Imm8(value: imm), OperandKind.None_, 2))
+
+    # ── INT 3 (0xCC) ──
+    if b0 == 0xCC:
+        return Some(DecodedInst.new(X86Opcode.INT, OperandKind.Imm8(value: 3), OperandKind.None_, 1))
+
+    # ── IN/OUT fixed port (0xE4-0xE7) ──
+    if b0 == 0xE4:
+        if pos >= bytes.len(): return nil
+        return Some(DecodedInst.new(X86Opcode.IN, OperandKind.Reg8(index: 0), OperandKind.Imm8(value: bytes[pos]), 2))
+    if b0 == 0xE5:
+        if pos >= bytes.len(): return nil
+        return Some(DecodedInst.new(X86Opcode.IN, OperandKind.Reg16(index: 0), OperandKind.Imm8(value: bytes[pos]), 2))
+    if b0 == 0xE6:
+        if pos >= bytes.len(): return nil
+        return Some(DecodedInst.new(X86Opcode.OUT, OperandKind.Imm8(value: bytes[pos]), OperandKind.Reg8(index: 0), 2))
+    if b0 == 0xE7:
+        if pos >= bytes.len(): return nil
+        return Some(DecodedInst.new(X86Opcode.OUT, OperandKind.Imm8(value: bytes[pos]), OperandKind.Reg16(index: 0), 2))
+
+    # ── IN/OUT DX port (0xEC-0xEF) ──
+    if b0 == 0xEC:
+        return Some(DecodedInst.new(X86Opcode.IN, OperandKind.Reg8(index: 0), OperandKind.Reg16(index: 3), 1))   # DX
+    if b0 == 0xED:
+        return Some(DecodedInst.new(X86Opcode.IN, OperandKind.Reg16(index: 0), OperandKind.Reg16(index: 3), 1))
+    if b0 == 0xEE:
+        return Some(DecodedInst.new(X86Opcode.OUT, OperandKind.Reg16(index: 3), OperandKind.Reg8(index: 0), 1))
+    if b0 == 0xEF:
+        return Some(DecodedInst.new(X86Opcode.OUT, OperandKind.Reg16(index: 3), OperandKind.Reg16(index: 0), 1))
+
+    # ── LEA (0x8D) ──
+    if b0 == 0x8D:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val mod_ = fields.0
+        val reg = fields.1
+        val rm = fields.2
+        val result = modrm_ea_operand(mod_, rm, bytes, pos, 16)
+        val ea_op = result.0
+        val extra = result.1
+        return Some(DecodedInst.new(X86Opcode.LEA, OperandKind.Reg16(index: reg16_index(reg)), ea_op, 2 + extra))
+
+    # ── LDS (0xC5) / LES (0xC4) ──
+    if b0 == 0xC5:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, 16)
+        return Some(DecodedInst.new(X86Opcode.LDS, OperandKind.Reg16(index: reg16_index(fields.1)), result.0, 2 + result.1))
+    if b0 == 0xC4:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, 16)
+        return Some(DecodedInst.new(X86Opcode.LES, OperandKind.Reg16(index: reg16_index(fields.1)), result.0, 2 + result.1))
+
+    # ── ALU r/m, r and r, r/m (0x00-0x3F block) ──
+    # Opcode layout: aaa_dd_dw where aaa=alu_op, d=direction, w=width
+    # 0x00-0x05 ADD, 0x08-0x0D OR, 0x10-0x15 ADC, 0x18-0x1D SBB
+    # 0x20-0x25 AND, 0x28-0x2D SUB, 0x30-0x35 XOR, 0x38-0x3D CMP
+    val alu_group = b0 >> 3
+    val alu_sub = b0 & 0x07
+    val alu_opcodes: [X86Opcode] = [
+        X86Opcode.ADD, X86Opcode.OR, X86Opcode.ADC, X86Opcode.SBB,
+        X86Opcode.AND, X86Opcode.SUB, X86Opcode.XOR, X86Opcode.CMP
+    ]
+
+    # Check if this is in the valid ALU range (groups 0,1,2,3,4,5,6,7)
+    if alu_sub <= 5 and alu_group < 8:
+        val alu_op = alu_opcodes[alu_group]
+        val is_word = (alu_sub & 1) == 1
+
+        if alu_sub <= 3:
+            # ModR/M forms
+            if pos >= bytes.len(): return nil
+            val modrm = bytes[pos]
+            pos = pos + 1
+            val fields = decode_modrm(modrm)
+            val mod_ = fields.0
+            val reg = fields.1
+            val rm = fields.2
+            val width = if is_word: 16 else: 8
+            val result = modrm_ea_operand(mod_, rm, bytes, pos, width)
+            val rm_op = result.0
+            val extra = result.1
+            val d_bit = (alu_sub >> 1) & 1   # direction: 0=rm is dst, 1=reg is dst
+            val reg_op = if is_word: OperandKind.Reg16(index: reg16_index(reg)) else: OperandKind.Reg8(index: reg)
+            if d_bit == 0:
+                return Some(DecodedInst.new(alu_op, rm_op, reg_op, 2 + extra))
+            else:
+                return Some(DecodedInst.new(alu_op, reg_op, rm_op, 2 + extra))
+        else:
+            # alu_sub 4 or 5: AL/AX, imm
+            if alu_sub == 4:
+                # AL, imm8
+                if pos >= bytes.len(): return nil
+                val imm = bytes[pos]
+                return Some(DecodedInst.new(alu_op, OperandKind.Reg8(index: 0), OperandKind.Imm8(value: imm), 2))
+            else:
+                # AX, imm16
+                if pos + 1 >= bytes.len(): return nil
+                val imm = bytes[pos] | (bytes[pos + 1] << 8)
+                return Some(DecodedInst.new(alu_op, OperandKind.Reg16(index: 0), OperandKind.Imm16(value: imm), 3))
+
+    # ── Immediate ALU group (0x80-0x83) ──
+    if b0 >= 0x80 and b0 <= 0x83:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val mod_ = fields.0
+        val reg = fields.1
+        val rm = fields.2
+        val alu_op = alu_opcodes[reg]
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(mod_, rm, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        pos = pos + extra
+
+        if b0 == 0x80:
+            # r/m8, imm8
+            if pos >= bytes.len(): return nil
+            return Some(DecodedInst.new(alu_op, rm_op, OperandKind.Imm8(value: bytes[pos]), 2 + extra + 1))
+        if b0 == 0x81:
+            # r/m16, imm16
+            if pos + 1 >= bytes.len(): return nil
+            val imm = bytes[pos] | (bytes[pos + 1] << 8)
+            return Some(DecodedInst.new(alu_op, rm_op, OperandKind.Imm16(value: imm), 2 + extra + 2))
+        if b0 == 0x82:
+            # r/m8, imm8 (same as 0x80)
+            if pos >= bytes.len(): return nil
+            return Some(DecodedInst.new(alu_op, rm_op, OperandKind.Imm8(value: bytes[pos]), 2 + extra + 1))
+        if b0 == 0x83:
+            # r/m16, sign-extended imm8
+            if pos >= bytes.len(): return nil
+            val imm = sign_extend_8to16(bytes[pos])
+            return Some(DecodedInst.new(alu_op, rm_op, OperandKind.Imm16(value: imm), 2 + extra + 1))
+
+    # ── TEST r/m, r (0x84-0x85) ──
+    if b0 == 0x84 or b0 == 0x85:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        val reg_op = if is_word: OperandKind.Reg16(index: reg16_index(fields.1)) else: OperandKind.Reg8(index: fields.1)
+        return Some(DecodedInst.new(X86Opcode.TEST, rm_op, reg_op, 2 + extra))
+
+    # ── TEST AL/AX, imm (0xA8-0xA9) ──
+    if b0 == 0xA8:
+        if pos >= bytes.len(): return nil
+        return Some(DecodedInst.new(X86Opcode.TEST, OperandKind.Reg8(index: 0), OperandKind.Imm8(value: bytes[pos]), 2))
+    if b0 == 0xA9:
+        if pos + 1 >= bytes.len(): return nil
+        val imm = bytes[pos] | (bytes[pos + 1] << 8)
+        return Some(DecodedInst.new(X86Opcode.TEST, OperandKind.Reg16(index: 0), OperandKind.Imm16(value: imm), 3))
+
+    # ── MOV r/m, r and r, r/m (0x88-0x8B) ──
+    if b0 >= 0x88 and b0 <= 0x8B:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val d_bit = (b0 >> 1) & 1
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        val reg_op = if is_word: OperandKind.Reg16(index: reg16_index(fields.1)) else: OperandKind.Reg8(index: fields.1)
+        if d_bit == 0:
+            return Some(DecodedInst.new(X86Opcode.MOV, rm_op, reg_op, 2 + extra))
+        else:
+            return Some(DecodedInst.new(X86Opcode.MOV, reg_op, rm_op, 2 + extra))
+
+    # ── MOV r/m, imm (0xC6/0xC7) ──
+    if b0 == 0xC6 or b0 == 0xC7:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        pos = pos + extra
+        if is_word:
+            if pos + 1 >= bytes.len(): return nil
+            val imm = bytes[pos] | (bytes[pos + 1] << 8)
+            return Some(DecodedInst.new(X86Opcode.MOV, rm_op, OperandKind.Imm16(value: imm), 2 + extra + 2))
+        else:
+            if pos >= bytes.len(): return nil
+            return Some(DecodedInst.new(X86Opcode.MOV, rm_op, OperandKind.Imm8(value: bytes[pos]), 2 + extra + 1))
+
+    # ── MOV seg, r/m16 (0x8E) and r/m16, seg (0x8C) ──
+    if b0 == 0x8C or b0 == 0x8E:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, 16)
+        val rm_op = result.0
+        val extra = result.1
+        val seg_op = OperandKind.SegReg(index: seg_reg_index(fields.1 & 0x03))
+        if b0 == 0x8C:
+            return Some(DecodedInst.new(X86Opcode.MOV, rm_op, seg_op, 2 + extra))
+        else:
+            return Some(DecodedInst.new(X86Opcode.MOV, seg_op, rm_op, 2 + extra))
+
+    # ── XCHG r/m, r (0x86-0x87) ──
+    if b0 == 0x86 or b0 == 0x87:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        val reg_op = if is_word: OperandKind.Reg16(index: reg16_index(fields.1)) else: OperandKind.Reg8(index: fields.1)
+        return Some(DecodedInst.new(X86Opcode.XCHG, reg_op, rm_op, 2 + extra))
+
+    # ── Shift/Rotate group (0xD0-0xD3) ──
+    if b0 >= 0xD0 and b0 <= 0xD3:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val use_cl = (b0 & 2) == 2
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        val shift_opcodes: [X86Opcode] = [
+            X86Opcode.ROL, X86Opcode.ROR, X86Opcode.RCL, X86Opcode.RCR,
+            X86Opcode.SHL, X86Opcode.SHR, X86Opcode.SHL, X86Opcode.SAR
+        ]
+        val shift_op = shift_opcodes[fields.1]
+        val count_op = if use_cl: OperandKind.Reg8(index: 1) else: OperandKind.Imm8(value: 1)    # CL or 1
+        return Some(DecodedInst.new(shift_op, rm_op, count_op, 2 + extra))
+
+    # ── Unary group 0xF6/0xF7 (TEST, NOT, NEG, MUL, IMUL, DIV, IDIV) ──
+    if b0 == 0xF6 or b0 == 0xF7:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+        pos = pos + extra
+
+        match fields.1:
+            0:
+                # TEST r/m, imm
+                if is_word:
+                    if pos + 1 >= bytes.len(): return nil
+                    val imm = bytes[pos] | (bytes[pos + 1] << 8)
+                    return Some(DecodedInst.new(X86Opcode.TEST, rm_op, OperandKind.Imm16(value: imm), 2 + extra + 2))
+                else:
+                    if pos >= bytes.len(): return nil
+                    return Some(DecodedInst.new(X86Opcode.TEST, rm_op, OperandKind.Imm8(value: bytes[pos]), 2 + extra + 1))
+            2: return Some(DecodedInst.new(X86Opcode.NOT, rm_op, OperandKind.None_, 2 + extra))
+            3: return Some(DecodedInst.new(X86Opcode.NEG, rm_op, OperandKind.None_, 2 + extra))
+            4: return Some(DecodedInst.new(X86Opcode.MUL, rm_op, OperandKind.None_, 2 + extra))
+            5: return Some(DecodedInst.new(X86Opcode.IMUL, rm_op, OperandKind.None_, 2 + extra))
+            6: return Some(DecodedInst.new(X86Opcode.DIV, rm_op, OperandKind.None_, 2 + extra))
+            7: return Some(DecodedInst.new(X86Opcode.IDIV, rm_op, OperandKind.None_, 2 + extra))
+            _: return nil
+
+    # ── INC/DEC/CALL/JMP/PUSH group 0xFE/0xFF ──
+    if b0 == 0xFE or b0 == 0xFF:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        val is_word = (b0 & 1) == 1
+        val width = if is_word: 16 else: 8
+        val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, width)
+        val rm_op = result.0
+        val extra = result.1
+
+        match fields.1:
+            0: return Some(DecodedInst.new(X86Opcode.INC, rm_op, OperandKind.None_, 2 + extra))
+            1: return Some(DecodedInst.new(X86Opcode.DEC, rm_op, OperandKind.None_, 2 + extra))
+            2:
+                if is_word:
+                    return Some(DecodedInst.new(X86Opcode.CALL, rm_op, OperandKind.None_, 2 + extra))
+                else:
+                    return nil
+            4:
+                if is_word:
+                    return Some(DecodedInst.new(X86Opcode.JMP, rm_op, OperandKind.None_, 2 + extra))
+                else:
+                    return nil
+            6:
+                if is_word:
+                    return Some(DecodedInst.new(X86Opcode.PUSH, rm_op, OperandKind.None_, 2 + extra))
+                else:
+                    return nil
+            _: return nil
+
+    # ── POP r/m16 (0x8F) ──
+    if b0 == 0x8F:
+        if pos >= bytes.len(): return nil
+        val modrm = bytes[pos]
+        pos = pos + 1
+        val fields = decode_modrm(modrm)
+        if fields.1 == 0:
+            val result = modrm_ea_operand(fields.0, fields.2, bytes, pos, 16)
+            return Some(DecodedInst.new(X86Opcode.POP, result.0, OperandKind.None_, 2 + result.1))
+        return nil
+
+    # Unrecognized opcode
+    nil
