@@ -374,7 +374,7 @@ fn main() {
         let mut cmd = Command::new(&simple_bin);
         if let Some(ref entry) = entry_file {
             if entry.ends_with(".ui.sdn") {
-                cmd.arg("ui").arg("tauri").arg(entry);
+                cmd.arg("tauri-entry").arg(entry);
             } else {
                 cmd.arg("run").arg(entry);
             }

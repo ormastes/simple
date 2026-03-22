@@ -6,8 +6,11 @@
 use std.sdn.value.{SdnValue, Span}
 use std.sdn.error.{SdnError}
 use std.sdn.parser.{parse}
-use std.db_atomic.{atomic_read, atomic_write, DbConfig}
 use std.json.builder.{escape_json}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
 # SdnDocument
@@ -37,11 +40,14 @@ impl SdnDocument:
 
     static fn from_file(path: text) -> Result<SdnDocument, SdnError>:
         """Load document from file."""
-        val read_result = atomic_read(path, DbConfig.defaults())
-        if not read_result.is_ok():
-            return Err(SdnError.IoError("Failed to read file: {path} - {read_result.unwrap_err()}"))
+        if not rt_file_exists(path):
+            return Err(SdnError.IoError("File not found: {path}"))
 
-        val source = read_result.unwrap()
+        var source = rt_file_read_text(path)
+        # Interpreter may return Some(text) instead of text
+        match source:
+            case Some(s):
+                source = s
         if source.is_empty():
             return Err(SdnError.IoError("File is empty: {path}"))
         SdnDocument.parse_doc(source)
@@ -121,11 +127,11 @@ impl SdnDocument:
         render_json(self.root)
 
     fn write_file(path: text) -> Result<(), SdnError>:
-        """Write document to file atomically with backup."""
+        """Write document to file."""
         val content = self.to_sdn()
-        val write_result = atomic_write(path, content, DbConfig.defaults())
-        if not write_result.is_ok():
-            return Err(SdnError.IoError("Failed to write file: {path} - {write_result.unwrap_err()}"))
+        val success = rt_file_write_text(path, content)
+        if not success:
+            return Err(SdnError.IoError("Failed to write file: {path}"))
         Ok(())
 
 # ============================================================================

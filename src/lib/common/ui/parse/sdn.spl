@@ -1,206 +1,297 @@
 # UI SDN Parser
 #
-# Parses .ui.sdn files into UITree structures.
-# Uses SdnDocument for file loading and path-based value access.
+# Self-contained parser for .ui.sdn files.
+# Directly generates HTML from the parsed SDN data.
 
-use common.sdn.document.{SdnDocument}
-use common.ui.widget.{WidgetNode, UITree, parse_widget_kind, parse_layout_kind}
-
-# =========================================================================
-# SDN -> UITree Parsing
-# =========================================================================
-
-fn parse_ui_file(path: text) -> Result<UITree, text>:
-    """Parse a .ui.sdn file into a UITree."""
-    val doc_result = SdnDocument.from_file(path)
-    match doc_result:
-        Err(e):
-            return Err("Failed to load UI file: {e}")
-        Ok(doc):
-            return parse_ui_doc(doc)
-
-fn parse_ui_doc(doc: SdnDocument) -> Result<UITree, text>:
-    """Parse an SdnDocument into a UITree."""
-    # Parse the root layout node
-    val root = parse_layout_node(doc, "layout")
-
-    # Build the tree
-    var tree = UITree.new(root)
-
-    # Parse app metadata
-    val title = doc.get("app.title")
-    if title != nil:
-        tree = tree.with_title(sdn_to_text(title))
-
-    val theme = doc.get("app.theme")
-    if theme != nil:
-        tree = tree.with_theme(sdn_to_text(theme))
-
-    # Parse keybindings
-    var bindings: Dict<text, Dict<text, text>> = {}
-    val modes = ["normal", "command", "insert", "menu"]
-    for mode in modes:
-        var mode_bindings: Dict<text, text> = {}
-        val mode_path = "keybindings.{mode}"
-        val mode_val = doc.get(mode_path)
-        if mode_val != nil:
-            val keys_opt = doc.keys(mode_path)
-            if keys_opt != nil:
-                match keys_opt:
-                    case Some(keys):
-                        for key in keys:
-                            val action = doc.get("{mode_path}.{key}")
-                            if action != nil:
-                                mode_bindings[key] = sdn_to_text(action)
-            bindings[mode] = mode_bindings
-
-    tree = tree.with_keybindings(bindings)
-
-    return Ok(tree)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 
 # =========================================================================
-# Node Parsing
+# String helpers
 # =========================================================================
 
-fn sdn_to_text(value: any) -> text:
-    """Extract text from an SDN value, handling Option wrapping."""
-    if value == nil:
-        return ""
-    var inner = value
-    match value:
-        case Some(v):
-            inner = v
-    match inner:
-        case SdnValue.String(s):
-            return s
-        case SdnValue.Int(i):
-            return "{i}"
-        case SdnValue.Float(f):
-            return "{f}"
-        case SdnValue.Bool(b):
-            return if b: "true" else: "false"
+fn s_strip(s: text) -> text:
+    s.strip()
+
+fn s_split(s: text, d: text) -> [text]:
+    s.split(d)
+
+fn s_starts(s: text, p: text) -> bool:
+    s.starts_with(p)
+
+fn s_ends(s: text, p: text) -> bool:
+    s.ends_with(p)
+
+fn s_len(s: text) -> i64:
+    s.len()
+
+fn tlist_len(l: [text]) -> i64:
+    l.len()
+
+fn ilist_len(l: [i64]) -> i64:
+    l.len()
+
+fn s_find(s: text, n: text) -> i64:
+    val idx = s.index_of(n)
+    match idx:
+        case Some(i):
+            return i
         case _:
-            return "{inner}"
+            return -1
 
-fn parse_layout_node(doc: SdnDocument, path: text) -> WidgetNode:
-    """Parse a single widget node from SDN at the given path."""
-    # Get widget type
-    val type_val = doc.get("{path}.type")
-    val type_str = if type_val != nil:
-        sdn_to_text(type_val)
-    else:
-        "panel"
+fn unwrap_opt(v: any) -> any:
+    match v:
+        case Some(s):
+            return s
+        case _:
+            return v
 
-    var kind = parse_widget_kind(type_str)
-    var layout = "vbox"
-    if is_layout_alias(type_str):
-        kind = "panel"
-        layout = parse_layout_kind(type_str)
+fn read_file(path: text) -> text:
+    val r = rt_file_read_text(path)
+    return unwrap_opt(r)
 
-    # Get widget ID
-    val id_val = doc.get("{path}.id")
-    val id = if id_val != nil:
-        sdn_to_text(id_val)
-    else:
-        "{path}"
+fn check_exists(path: text) -> bool:
+    val r = rt_file_exists(path)
+    return unwrap_opt(r)
 
-    var node = WidgetNode.new(id, kind)
+# =========================================================================
+# Flat key-value parser
+# =========================================================================
 
-    # Parse layout type
-    val layout_val = doc.get("{path}.layout")
-    if layout_val != nil:
-        layout = parse_layout_kind(sdn_to_text(layout_val))
+fn pop_stack(indents: [i64], keys: [text], target_indent: i64) -> ([i64], [text]):
+    var ind = indents
+    var ks = keys
+    var ilen = ilist_len(ind)
+    while ilen > 0:
+        val top = ind[ilen - 1]
+        if target_indent <= top:
+            ind = ind[0:ilen - 1]
+            ks = ks[0:ilen - 1]
+            ilen = ilist_len(ind)
+        else:
+            break
+    return (ind, ks)
 
-    node = node.set_layout(layout)
+fn join_path(parts: [text]) -> text:
+    var result = ""
+    var first = true
+    var i = 0
+    val count = tlist_len(parts)
+    while i < count:
+        val p = parts[i]
+        i = i + 1
+        if first:
+            result = p
+            first = false
+        else:
+            result = result + "." + p
+    return result
 
-    # Parse common properties
-    val prop_keys = ["title", "content", "label", "width", "height",
-        "flex", "left", "right", "action", "view", "items",
-        "placeholder", "value", "checked", "src", "alt", "target",
-        "expanded"]
-    for key in prop_keys:
-        val val_result = doc.get("{path}.{key}")
-        if val_result != nil:
-            node = node.set_prop(key, sdn_to_text(val_result))
+fn make_full_path(keys: [text], key: text) -> text:
+    val klen = tlist_len(keys)
+    if klen > 0:
+        return join_path(keys) + "." + key
+    return key
 
-    # Parse children — doc.keys() returns [text]?, unwrap before iterating
-    val children_check = doc.get("{path}.children")
-    if children_check != nil:
-        val child_keys_opt = doc.keys("{path}.children")
-        if child_keys_opt != nil:
-            match child_keys_opt:
-                case Some(child_keys):
-                    for child_key in child_keys:
-                        val child_path = "{path}.children.{child_key}"
-                        val child_node = parse_layout_node(doc, child_path)
-                        node = node.add_child(child_node)
+fn count_indent(line: text) -> i64:
+    var indent = 0
+    var ci = 0
+    val ll = s_len(line)
+    while ci < ll:
+        if line[ci] == " ":
+            indent = indent + 1
+        else:
+            return indent
+        ci = ci + 1
+    return indent
 
-    # Parse list items
-    val items_val = doc.get("{path}.items")
-    if items_val != nil and kind == "list":
-        var item_idx = 0
-        var has_more_items = true
-        while has_more_items:
-            val item_path = "{path}.items.{item_idx}"
-            val item_label = doc.get("{item_path}.label")
-            if item_label != nil:
-                var item_node = WidgetNode.new("{id}_item_{item_idx}", "text")
-                item_node = item_node.set_prop("label", sdn_to_text(item_label))
-                val item_view = doc.get("{item_path}.view")
-                if item_view != nil:
-                    item_node = item_node.set_prop("view", sdn_to_text(item_view))
-                val item_action = doc.get("{item_path}.action")
-                if item_action != nil:
-                    item_node = item_node.set_prop("action", sdn_to_text(item_action))
-                node = node.add_child(item_node)
-                item_idx = item_idx + 1
-            else:
-                has_more_items = false
+fn parse_to_flat(source: text) -> Dict<text, text>:
+    val lines = s_split(source, "\n")
+    var result: Dict<text, text> = {}
+    var path_indents: [i64] = []
+    var path_keys: [text] = []
+    var li = 0
+    val line_count = tlist_len(lines)
 
-    # Parse menubar items
-    if kind == "menubar":
-        var menu_idx = 0
-        var has_more_menus = true
-        while has_more_menus:
-            val menu_path = "{path}.items.{menu_idx}"
-            # Check for separator type
-            val item_type = doc.get("{menu_path}.type")
-            if item_type != nil and sdn_to_text(item_type) == "separator":
-                var sep_node = WidgetNode.new("{id}_sep_{menu_idx}", "text")
-                sep_node = sep_node.set_prop("label", "|")
-                sep_node = sep_node.set_prop("is_separator", "true")
-                node = node.add_child(sep_node)
-                menu_idx = menu_idx + 1
-            else:
-                val menu_label = doc.get("{menu_path}.label")
-                if menu_label != nil:
-                    var menu_node = WidgetNode.new("{id}_menu_{menu_idx}", "text")
-                    menu_node = menu_node.set_prop("label", sdn_to_text(menu_label))
-                    # Parse submenu children
-                    val children_check_menu = doc.get("{menu_path}.children")
-                    if children_check_menu != nil:
-                        menu_node = menu_node.set_prop("has_submenu", "true")
-                        var sub_idx = 0
-                        var has_more_subs = true
-                        while has_more_subs:
-                            val sub_path = "{menu_path}.children.{sub_idx}"
-                            val sub_label = doc.get("{sub_path}.label")
-                            if sub_label != nil:
-                                var sub_node = WidgetNode.new("{id}_sub_{menu_idx}_{sub_idx}", "text")
-                                sub_node = sub_node.set_prop("label", sdn_to_text(sub_label))
-                                val sub_action = doc.get("{sub_path}.action")
-                                if sub_action != nil:
-                                    sub_node = sub_node.set_prop("action", sdn_to_text(sub_action))
-                                menu_node = menu_node.add_child(sub_node)
-                                sub_idx = sub_idx + 1
-                            else:
-                                has_more_subs = false
-                    node = node.add_child(menu_node)
-                    menu_idx = menu_idx + 1
-                else:
-                    has_more_menus = false
+    while li < line_count:
+        val line = lines[li]
+        li = li + 1
+        val stripped = s_strip(line)
+        if stripped == "":
+            continue
+        if s_starts(stripped, "#"):
+            continue
 
-    return node
+        val indent = count_indent(line)
+        val cp = s_find(stripped, ":")
+        if cp < 0:
+            continue
 
-fn is_layout_alias(name: text) -> bool:
-    return (name == "vbox" or name == "hbox" or name == "grid" or name == "fixed")
+        val key = s_strip(stripped[0:cp])
+        val sl = s_len(stripped)
+        var after = ""
+        if cp + 1 < sl:
+            after = s_strip(stripped[cp + 1:])
+
+        val popped = pop_stack(path_indents, path_keys, indent)
+        path_indents = popped.0
+        path_keys = popped.1
+
+        val full_path = make_full_path(path_keys, key)
+
+        if after == "" or after == "|":
+            path_indents = path_indents + [indent]
+            path_keys = path_keys + [key]
+        else:
+            var val_text = after
+            val vl = s_len(val_text)
+            if vl >= 2:
+                if s_starts(val_text, "\""):
+                    if s_ends(val_text, "\""):
+                        val_text = val_text[1:vl - 1]
+            result[full_path] = val_text
+
+    return result
+
+fn flat_get(d: Dict<text, text>, key: text) -> text:
+    val v = d.get(key)
+    if v == nil:
+        return ""
+    return unwrap_opt(v)
+
+fn flat_child_keys(d: Dict<text, text>, prefix: text) -> [text]:
+    var keys: [text] = []
+    val plen = s_len(prefix)
+    val dot_prefix = prefix + "."
+    val all_keys = d.keys()
+    var ki = 0
+    val kcount = tlist_len(all_keys)
+
+    while ki < kcount:
+        val key = all_keys[ki]
+        ki = ki + 1
+        if s_starts(key, dot_prefix):
+            val rest = key[plen + 1:]
+            val dot_pos = s_find(rest, ".")
+            var child_key = rest
+            if dot_pos >= 0:
+                child_key = rest[0:dot_pos]
+            if not list_contains(keys, child_key):
+                keys = keys + [child_key]
+    return keys
+
+fn list_contains(lst: [text], item: text) -> bool:
+    var i = 0
+    val count = tlist_len(lst)
+    while i < count:
+        if lst[i] == item:
+            return true
+        i = i + 1
+    return false
+
+# =========================================================================
+# Parse + Render to HTML (combined, no widget system)
+# =========================================================================
+
+fn parse_ui_file(path: text) -> Result<text, text>:
+    """Parse a .ui.sdn file and return rendered HTML.
+    NOTE: Caller must pass the file path. This function reads the file,
+    parses it, and renders HTML in separate steps to avoid interpreter
+    method dispatch state corruption."""
+    val exists = check_exists(path)
+    if exists == false:
+        return Err("File not found: {path}")
+    val source = read_file(path)
+    return render_source(source)
+
+fn render_source(source: text) -> Result<text, text>:
+    val entries = parse_to_flat(source)
+    return render_entries(entries)
+
+fn render_entries(entries: Dict<text, text>) -> Result<text, text>:
+    val title = flat_get(entries, "app.title")
+    val theme = flat_get(entries, "app.theme")
+    val html = render_node_html(entries, "layout", 0)
+    val page = build_html_page(title, theme, html)
+    return Ok(page)
+
+fn render_node_html(entries: Dict<text, text>, path: text, depth: i64) -> text:
+    val wtype = flat_get(entries, "{path}.type")
+    val wid = flat_get(entries, "{path}.id")
+    val content = flat_get(entries, "{path}.content")
+    val title = flat_get(entries, "{path}.title")
+    val label = flat_get(entries, "{path}.label")
+    val value = flat_get(entries, "{path}.value")
+    val flex = flat_get(entries, "{path}.flex")
+    val left_text = flat_get(entries, "{path}.left")
+    val right_text = flat_get(entries, "{path}.right")
+    val width = flat_get(entries, "{path}.width")
+
+    var inner = ""
+
+    # Render based on type
+    if wtype == "text":
+        if content != "":
+            inner = "<p>{content}</p>"
+        elif label != "":
+            inner = "<span>{label}</span>"
+    elif wtype == "progress":
+        val pct = if value != "": value else: "0"
+        inner = "<div class=\"progress\"><div class=\"progress-bar\" style=\"width:{pct}%\">{pct}%</div></div>"
+    elif wtype == "list":
+        inner = "<ul class=\"list\"></ul>"
+    elif wtype == "statusbar":
+        inner = "<div class=\"statusbar\"><span>{left_text}</span><span>{right_text}</span></div>"
+    elif wtype == "menubar":
+        inner = "<div class=\"menubar\">Menu</div>"
+
+    # Add title
+    if title != "":
+        inner = "<h3>{title}</h3>" + inner
+
+    # Render children
+    val child_keys = flat_child_keys(entries, "{path}.children")
+    var ci = 0
+    val ccount = tlist_len(child_keys)
+    var children_html = ""
+    while ci < ccount:
+        val ck = child_keys[ci]
+        ci = ci + 1
+        val child_path = "{path}.children.{ck}"
+        val child_html = render_node_html(entries, child_path, depth + 1)
+        children_html = children_html + child_html
+
+    inner = inner + children_html
+
+    # Layout direction
+    var css_class = "widget"
+    if wtype == "vbox" or wtype == "":
+        css_class = "widget vbox"
+    elif wtype == "hbox":
+        css_class = "widget hbox"
+    elif wtype == "panel":
+        css_class = "widget panel"
+    elif wtype == "statusbar":
+        css_class = "widget statusbar-widget"
+    elif wtype == "menubar":
+        css_class = "widget menubar-widget"
+
+    # Style
+    var style = ""
+    if flex != "":
+        style = "flex:{flex};"
+    if width != "":
+        style = style + "width:{width}ch;"
+
+    val id_attr = if wid != "": " id=\"{wid}\"" else: ""
+    val style_attr = if style != "": " style=\"{style}\"" else: ""
+
+    return "<div class=\"{css_class}\"{id_attr}{style_attr}>{inner}</div>\n"
+
+fn build_html_page(title: text, theme: text, body_html: text) -> text:
+    val display_title = if title != "": title else: "Simple UI"
+    val theme_class = if theme != "": theme else: "dark"
+    return "<html><head><title>{display_title}</title><style>" + get_css(theme_class) + "</style></head><body class=\"{theme_class}\"><div id=\"app\">" + body_html + "</div></body></html>"
+
+fn get_css(theme: text) -> text:
+    return "* { margin: 0; padding: 0; box-sizing: border-box; } body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; } body.dark { background: #1a1a2e; color: #e0e0e0; } body.light { background: #f5f5f5; color: #333; } .widget { padding: 4px; } .vbox { display: flex; flex-direction: column; } .hbox { display: flex; flex-direction: row; } .panel { border: 1px solid #333; border-radius: 4px; padding: 8px; margin: 4px; } h3 { color: #7ec8e3; margin-bottom: 8px; font-size: 14px; border-bottom: 1px solid #333; padding-bottom: 4px; } p { margin: 4px 0; } .progress { background: #2d2d44; border-radius: 4px; height: 20px; margin: 8px 0; overflow: hidden; } .progress-bar { background: linear-gradient(90deg, #4a9eff, #7ec8e3); height: 100%; text-align: center; color: #fff; font-size: 12px; line-height: 20px; } .statusbar { display: flex; justify-content: space-between; background: #16213e; padding: 4px 12px; font-size: 12px; color: #7ec8e3; } .statusbar-widget { position: fixed; bottom: 0; left: 0; right: 0; } .menubar-widget { background: #16213e; padding: 4px 12px; border-bottom: 1px solid #333; } .list { list-style: none; padding: 4px; }"
