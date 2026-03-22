@@ -25,21 +25,21 @@ enum IpcMessageKind:
 
 fn parse_ipc_message(json_str: text) -> UIEvent?:
     """Parse a JSON IPC message from the Electron shell."""
-    # Simple JSON parsing for known message formats
-    if json_str.contains("\"type\":\"keypress\"") or json_str.contains("\"type\": \"keypress\""):
+    val msg_type = extract_json_field(json_str, "type")
+    if msg_type == "keypress":
         val key = extract_json_field(json_str, "key")
         if key != "":
             return UIEvent.KeyPress(key: key)
-    elif json_str.contains("\"type\":\"action\"") or json_str.contains("\"type\": \"action\""):
+    if msg_type == "action":
         val name = extract_json_field(json_str, "name")
         if name != "":
             return UIEvent.Action(name: name)
-    elif json_str.contains("\"type\":\"resize\"") or json_str.contains("\"type\": \"resize\""):
+    if msg_type == "resize":
         val w_str = extract_json_field(json_str, "width")
         val h_str = extract_json_field(json_str, "height")
         if w_str != "" and h_str != "":
             return UIEvent.Resize(width: w_str.to_int(), height: h_str.to_int())
-    elif json_str.contains("\"type\":\"quit\"") or json_str.contains("\"type\": \"quit\""):
+    if msg_type == "quit":
         return UIEvent.Quit
     return nil
 
@@ -71,59 +71,44 @@ fn build_ipc_file_dialog(dialog_type: text, filters: text) -> text:
 # JSON Helpers
 # =========================================================================
 
+fn _s_find(s: text, n: text) -> i64:
+    val idx = s.index_of(n)
+    match idx:
+        Some(i): return i
+        nil: return -1
+
 fn extract_json_field(json_str: text, field: text) -> text:
     """Extract a string field value from simple JSON."""
-    val search = "\"{field}\""
-    var idx = json_str.index_of(search)
+    val quote = "\""
+    # Include opening quote in search to avoid reuse-after-method-call bug
+    val search = quote + field + quote + ":" + quote
+    val idx = _s_find(json_str, search)
     if idx < 0:
+        # Try with space after colon: "field": "value"
+        val search2 = quote + field + quote + ": " + quote
+        val idx2 = _s_find(json_str, search2)
+        if idx2 < 0:
+            return ""
+        val slen2 = search2.len()
+        val start2 = idx2 + slen2
+        val rest2 = json_str.substring(start2)
+        val end2 = _s_find(rest2, quote)
+        if end2 < 0:
+            return ""
+        return rest2.substring(0, end2)
+    val slen = search.len()
+    val start = idx + slen
+    val rest = json_str.substring(start)
+    val end = _s_find(rest, quote)
+    if end < 0:
         return ""
-
-    # Skip past "field":
-    idx = idx + search.len()
-    # Skip colon and whitespace
-    while idx < json_str.len():
-        val ch = json_str[idx]
-        if ch == ":" or ch == " ":
-            idx = idx + 1
-        else:
-            break
-
-    # Read quoted value
-    if idx < json_str.len() and json_str[idx] == "\"":
-        idx = idx + 1
-        var value = ""
-        while idx < json_str.len():
-            val ch = json_str[idx]
-            if ch == "\"":
-                return value
-            elif ch == "\\":
-                idx = idx + 1
-                if idx < json_str.len():
-                    value = "{value}{json_str[idx]}"
-            else:
-                value = "{value}{ch}"
-            idx = idx + 1
-
-    return ""
+    return rest.substring(0, end)
 
 fn escape_ipc_json(s: text) -> text:
     """Escape a string for JSON in IPC messages."""
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        match ch:
-            "\"" =>
-                result = "{result}\\\""
-            "\\" =>
-                result = "{result}\\\\"
-            "\n" =>
-                result = "{result}\\n"
-            "\r" =>
-                result = "{result}\\r"
-            "\t" =>
-                result = "{result}\\t"
-            _ =>
-                result = "{result}{ch}"
-        i = i + 1
-    return result
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\\"")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\t", "\\t")
+    return r

@@ -43,10 +43,20 @@ fn read_ws_frame(stream: TcpStream) -> text?:
         Err(_):
             return nil
         Ok(header):
-            if header.len() < 2:
+            # Extract bytes via iteration to avoid .len() + [index] interpreter bug
+            var byte0: u8 = 0
+            var byte1: u8 = 0
+            var hdr_idx = 0
+            for b in header:
+                if hdr_idx == 0:
+                    byte0 = b
+                elif hdr_idx == 1:
+                    byte1 = b
+                hdr_idx = hdr_idx + 1
+            if hdr_idx < 2:
                 return nil
 
-            val opcode = header[0] & 0x0F
+            val opcode = byte0 & 0x0F
             # Close frame
             if opcode == 0x08:
                 return nil
@@ -55,25 +65,49 @@ fn read_ws_frame(stream: TcpStream) -> text?:
             if opcode != 0x01:
                 return nil
 
-            val masked = (header[1] & 0x80) != 0
-            var payload_len = (header[1] & 0x7F) as i64
+            val masked = (byte1 & 0x80) != 0
+            var payload_len = (byte1 & 0x7F) as i64
 
             # Extended payload length
             if payload_len == 126:
                 match stream.read(2):
                     Ok(ext):
-                        if ext.len() < 2:
+                        var e0: i64 = 0
+                        var e1: i64 = 0
+                        var ei = 0
+                        for b in ext:
+                            if ei == 0:
+                                e0 = b as i64
+                            elif ei == 1:
+                                e1 = b as i64
+                            ei = ei + 1
+                        if ei < 2:
                             return nil
-                        payload_len = (ext[0] as i64) * 256 + (ext[1] as i64)
+                        payload_len = e0 * 256 + e1
                     Err(_):
                         return nil
             elif payload_len == 127:
                 match stream.read(8):
                     Ok(ext):
-                        if ext.len() < 8:
+                        var e4: i64 = 0
+                        var e5: i64 = 0
+                        var e6: i64 = 0
+                        var e7: i64 = 0
+                        var ei = 0
+                        for b in ext:
+                            if ei == 4:
+                                e4 = b as i64
+                            elif ei == 5:
+                                e5 = b as i64
+                            elif ei == 6:
+                                e6 = b as i64
+                            elif ei == 7:
+                                e7 = b as i64
+                            ei = ei + 1
+                        if ei < 8:
                             return nil
                         # Simplified: only use lower 4 bytes
-                        payload_len = (ext[4] as i64) * 16777216 + (ext[5] as i64) * 65536 + (ext[6] as i64) * 256 + (ext[7] as i64)
+                        payload_len = e4 * 16777216 + e5 * 65536 + e6 * 256 + e7
                     Err(_):
                         return nil
 
@@ -82,7 +116,10 @@ fn read_ws_frame(stream: TcpStream) -> text?:
             if masked:
                 match stream.read(4):
                     Ok(mk):
-                        if mk.len() < 4:
+                        var mk_count = 0
+                        for b in mk:
+                            mk_count = mk_count + 1
+                        if mk_count < 4:
                             return nil
                         mask_key = mk
                     Err(_):
@@ -155,10 +192,7 @@ fn parse_ws_event(message: text) -> UIEvent?:
                 return UIEvent.Action(name: "focus_{id}")
             return nil
         "resize":
-            val w = extract_field(message, "width")
-            val h = extract_field(message, "height")
-            if w != "" and h != "":
-                return UIEvent.Resize(width: w.to_i32(), height: h.to_i32())
+            # Resize events not yet supported in async WebSocket handler
             return nil
         "quit":
             return UIEvent.Quit
