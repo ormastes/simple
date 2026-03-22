@@ -484,11 +484,36 @@ bin/simple gen-lean write --force     # Regenerate Lean files
 - **Don't:** Write specs without running tests -- May have syntax errors
 - **Do:** Test -> Document -> Generate workflow
 
+## UI System Testing with SSpec
+
+For testing TUI and Web UI backends in headless environments, use `UITestClient` with SSpec. Both backends expose a shared Test API on localhost via web ports.
+
+```simple
+# tag: slow, system
+use std.nogc_sync_mut.ui_test.client.{UITestClient}
+
+describe "UI Interaction":
+    it "clicks button and checks focus":
+        # (start server via helpers or rt_process_spawn_async)
+        val client = UITestClient.connect("127.0.0.1", port)?
+        client.wait_ready(5000)?
+        client.click("action_btn")?
+        val focused = client.check_focused("action_btn")?
+        expect(focused).to_equal(true)
+```
+
+Key modules:
+- `src/lib/nogc_sync_mut/ui_test/client.spl` — UITestClient (click, type, drag, check, wait)
+- `src/app/ui.test_api/handler.spl` — Shared test API handler
+- `test/system/ui/helpers/ui_test_helpers.spl` — Server start/stop helpers
+
+See `/test` skill for full UI system testing reference.
+
 ## See Also
 
 - **[Template](../../.claude/templates/sspec_template.spl)** - Spec file template
 - `doc/spec/sspec_format.md` - Format details
-- `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
+- `doc/guide/testing/testing.md` - Testing guide (includes SSpec + UI testing)
 - `doc/spec/sspec_manual.md` - User manual
 - `doc/test.md` - Test policy
 - `doc/FILE.md` - Document relationship model (PLAN → REQ → FEATURE → TESTS)

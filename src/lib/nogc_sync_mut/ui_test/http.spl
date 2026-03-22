@@ -1,0 +1,205 @@
+# UI Test HTTP Helpers
+#
+# Raw TCP-based HTTP helpers for the UI test client.
+# Sends HTTP/1.1 requests over TcpStream and extracts response bodies.
+#
+# Components:
+#   - test_get: Send HTTP GET and return response body
+#   - test_post: Send HTTP POST with JSON body and return response body
+#
+# Usage:
+#   use std.ui_test.http.{test_get, test_post}
+#
+#   val body = test_get("127.0.0.1", 8080, "/api/state")?
+#   val result = test_post("127.0.0.1", 8080, "/api/click", "{\"id\":\"btn1\"}")?
+
+use std.net.tcp.{TcpStream}
+use std.error.*
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn build_addr(host: text, port: i32) -> text:
+    """Build address string for TcpStream.connect.
+
+    Args:
+        host: Hostname or IP
+        port: Port number
+
+    Returns:
+        Address in "host:port" format
+    """
+    "{host}:{port}"
+
+fn extract_body(response: text) -> text:
+    """Extract HTTP response body after the header separator.
+
+    Searches for the \\r\\n\\r\\n separator between headers and body.
+
+    Args:
+        response: Full HTTP response text
+
+    Returns:
+        Body text after headers, or empty string if separator not found
+    """
+    var separator = "\r\n\r\n"
+    var idx = response.index_of(separator)
+    if idx == nil:
+        return ""
+    var body_start = idx + 4
+    var body = response.substring(body_start)
+    body
+
+fn read_response(stream: TcpStream) -> Result<text, text>:
+    """Read full HTTP response from stream.
+
+    Reads up to 65536 bytes from the stream. Sets a read timeout
+    of 5 seconds to avoid hanging on slow/dead connections.
+
+    Args:
+        stream: Connected TcpStream
+
+    Returns:
+        Result with response text or error message
+    """
+    stream.set_read_timeout(5000)
+    var all_data: [u8] = []
+    var done = false
+    while not done:
+        var read_result = stream.read(8192)
+        match read_result:
+            Ok(data):
+                if data.length() == 0:
+                    done = true
+                else:
+                    var i = 0
+                    while i < data.length():
+                        all_data.append(data[i])
+                        i = i + 1
+                    if all_data.length() >= 65536:
+                        done = true
+            Err(e):
+                # Timeout or connection closed - treat as end of response
+                done = true
+    if all_data.length() == 0:
+        return Err("Empty response from server")
+    var response_text = rt_bytes_to_text(all_data)
+    Ok(response_text)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn test_get(host: text, port: i32, path: text) -> Result<text, text>:
+    """Send HTTP GET request and return response body.
+
+    Connects via raw TcpStream, sends an HTTP/1.1 GET request,
+    reads the full response, and extracts the body after headers.
+
+    Args:
+        host: Server hostname or IP address
+        port: Server port number
+        path: Request path (e.g., "/api/state")
+
+    Returns:
+        Result with response body text or error message
+
+    Example:
+        val body = test_get("127.0.0.1", 8080, "/api/elements")?
+    """
+    var addr = build_addr(host, port)
+    var connect_result = TcpStream.connect(addr)
+    var stream = match connect_result:
+        Ok(s): s
+        Err(e):
+            return Err("Connection failed: {e.message}")
+
+    var request = "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    var req_bytes = rt_text_to_bytes(request)
+    var write_result = stream.write_all(req_bytes)
+    match write_result:
+        Ok(()): pass_dn
+        Err(e):
+            stream.close()
+            return Err("Write failed: {e.message}")
+
+    var flush_result = stream.flush()
+    match flush_result:
+        Ok(()): pass_dn
+        Err(e):
+            stream.close()
+            return Err("Flush failed: {e.message}")
+
+    var response_result = read_response(stream)
+    stream.close()
+
+    match response_result:
+        Ok(response):
+            var body = extract_body(response)
+            Ok(body)
+        Err(e):
+            Err(e)
+
+fn test_post(host: text, port: i32, path: text, body: text) -> Result<text, text>:
+    """Send HTTP POST request with JSON body and return response body.
+
+    Connects via raw TcpStream, sends an HTTP/1.1 POST request
+    with Content-Type: application/json and Content-Length headers,
+    reads the full response, and extracts the body after headers.
+
+    Args:
+        host: Server hostname or IP address
+        port: Server port number
+        path: Request path (e.g., "/api/click")
+        body: JSON request body
+
+    Returns:
+        Result with response body text or error message
+
+    Example:
+        val result = test_post("127.0.0.1", 8080, "/api/click", "{\"id\":\"btn1\"}")?
+    """
+    var addr = build_addr(host, port)
+    var connect_result = TcpStream.connect(addr)
+    var stream = match connect_result:
+        Ok(s): s
+        Err(e):
+            return Err("Connection failed: {e.message}")
+
+    var body_bytes = rt_text_to_bytes(body)
+    var content_length = body_bytes.length()
+    var request = "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body}"
+    var req_bytes = rt_text_to_bytes(request)
+    var write_result = stream.write_all(req_bytes)
+    match write_result:
+        Ok(()): pass_dn
+        Err(e):
+            stream.close()
+            return Err("Write failed: {e.message}")
+
+    var flush_result = stream.flush()
+    match flush_result:
+        Ok(()): pass_dn
+        Err(e):
+            stream.close()
+            return Err("Flush failed: {e.message}")
+
+    var response_result = read_response(stream)
+    stream.close()
+
+    match response_result:
+        Ok(response):
+            var resp_body = extract_body(response)
+            Ok(resp_body)
+        Err(e):
+            Err(e)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export test_get, test_post

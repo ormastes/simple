@@ -312,9 +312,107 @@ testing.assert_fast(\: operation(), 1000000, "1 second limit")
 
 ---
 
+## UI Test Client Helpers
+
+### Import
+
+```simple
+use std.nogc_sync_mut.ui_test.client.{UITestClient}
+use std.nogc_sync_mut.ui_test.types.{ElementInfo, UIStateInfo}
+```
+
+### Connection
+
+| Function | Usage | Returns |
+|----------|-------|---------|
+| `UITestClient.connect(host, port)` | Connect to UI server | `Result<UITestClient, text>` |
+| `client.wait_ready(timeout_ms)` | Wait for server ready | `Result<bool, text>` |
+
+```simple
+val client = UITestClient.connect("127.0.0.1", 9001)?
+client.wait_ready(5000)?
+```
+
+### Actions
+
+| Function | Usage | Returns |
+|----------|-------|---------|
+| `client.click(id)` | Click widget by ID | `Result<bool, text>` |
+| `client.type_text(id, text)` | Type text into widget | `Result<bool, text>` |
+| `client.drag(from_id, to_id)` | Drag between widgets | `Result<bool, text>` |
+| `client.send_key(key)` | Send keyboard event | `Result<bool, text>` |
+
+```simple
+client.click("action_btn")?
+client.type_text("search_input", "hello")?
+client.drag("item_1", "target_panel")?
+client.send_key("enter")?
+```
+
+### Queries
+
+| Function | Usage | Returns |
+|----------|-------|---------|
+| `client.get_element(id)` | Get widget state | `Result<ElementInfo, text>` |
+| `client.get_elements()` | Get all widgets | `Result<[ElementInfo], text>` |
+| `client.get_state()` | Get UI state | `Result<UIStateInfo, text>` |
+| `client.screenshot_html()` | Get HTML snapshot | `Result<text, text>` |
+
+```simple
+val elem = client.get_element("btn_ok")?
+# elem.id, elem.kind, elem.visible, elem.focused, elem.props
+```
+
+### Assertions
+
+| Function | Usage | Returns |
+|----------|-------|---------|
+| `client.check_text(id, expected)` | Check text content | `Result<bool, text>` |
+| `client.check_visible(id)` | Check visibility | `Result<bool, text>` |
+| `client.check_focused(id)` | Check focus state | `Result<bool, text>` |
+| `client.check_exists(id)` | Check element exists | `Result<bool, text>` |
+
+```simple
+client.check_text("status", "Saved")?
+client.check_visible("sidebar")?
+```
+
+### Waiting
+
+| Function | Usage | Returns |
+|----------|-------|---------|
+| `client.wait_for(id, timeout_ms)` | Wait for element | `Result<bool, text>` |
+| `client.wait_ready(timeout_ms)` | Wait for server | `Result<bool, text>` |
+
+```simple
+client.wait_for("modal_dialog", 3000)?
+```
+
+### Pattern: UI System Test
+
+```simple
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_thread_sleep(ms: i64)
+
+describe "My UI":
+    it "clicks and checks":
+        val pid = rt_process_spawn_async("bin/simple",
+            ["ui", "web", "app.ui.sdn", "--port", "19042"])
+        rt_thread_sleep(1000)
+        val client = UITestClient.connect("127.0.0.1", 19042)?
+        client.wait_ready(5000)?
+        client.click("btn")?
+        client.check_focused("btn")?
+        rt_process_kill(pid)
+```
+
+---
+
 ## See Also
 
 - **Full Guide:** `doc/guide/test/comprehensive.md`
+- **Testing Guide:** `doc/guide/testing/testing.md`
 - **Benchmarking:** `doc/guide/benchmarking.md`
 - **Mocking:** `doc/guide/mocking.md`
 - **Examples:** `simple/std_lib/examples/testing/`

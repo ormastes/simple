@@ -1,0 +1,322 @@
+# UI Test Client
+#
+# Main test client for UI testing. Connects to UI backends via HTTP
+# and provides click/type/drag/check/wait operations.
+#
+# Components:
+#   - UITestClient: Test client class with actions, queries, assertions, waiting
+#
+# Usage:
+#   use std.ui_test.client.{UITestClient}
+#
+#   val client = UITestClient.connect("127.0.0.1", 8080)?
+#   client.click("btn_ok")?
+#   val elem = client.get_element("btn_ok")?
+#   val visible = client.check_visible("btn_ok")?
+
+use std.ui_test.types.{ElementInfo, UIStateInfo}
+use std.ui_test.http.{test_get, test_post}
+use std.ui_test.parse.{parse_element_info, parse_elements_list, parse_state_info, extract_field, extract_bool_field}
+
+extern fn rt_thread_sleep(ms: i64)
+
+# ============================================================================
+# UITestClient
+# ============================================================================
+
+class UITestClient:
+    """Test client that connects to a UI backend via HTTP.
+
+    Provides actions (click, type, drag, key events), queries (get elements,
+    state, screenshots), assertions (check text, visibility, focus), and
+    waiting (poll until element appears or server is ready).
+
+    Args:
+        host: Server hostname or IP address
+        port: Server port number
+    """
+    host: text
+    port: i32
+
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    static fn new(host: text, port: i32) -> UITestClient:
+        """Create a new UITestClient without connecting.
+
+        Args:
+            host: Server hostname or IP address
+            port: Server port number
+
+        Returns:
+            New UITestClient instance
+        """
+        UITestClient(host: host, port: port)
+
+    static fn connect(host: text, port: i32) -> Result<UITestClient, text>:
+        """Create a client and wait for the server to be ready.
+
+        Creates the client, then calls wait_ready with a 3-second timeout.
+        Returns the client if the server responds, or an error if timeout.
+
+        Args:
+            host: Server hostname or IP address
+            port: Server port number
+
+        Returns:
+            Result with connected UITestClient or error message
+        """
+        var client = UITestClient(host: host, port: port)
+        var ready_result = client.wait_ready(3000)
+        match ready_result:
+            Ok(ready):
+                if ready:
+                    Ok(client)
+                else:
+                    Err("Server not ready within timeout")
+            Err(e):
+                Err("Failed to connect: {e}")
+
+    # ========================================================================
+    # Actions (POST to test API)
+    # ========================================================================
+
+    fn click(id: text) -> Result<bool, text>:
+        """Click a UI element by ID.
+
+        Args:
+            id: Element identifier to click
+
+        Returns:
+            Result with true on success or error message
+        """
+        var body = "{\"id\":\"{id}\"}"
+        var result = test_post(self.host, self.port, "/api/test/click", body)?
+        Ok(true)
+
+    fn type_text(id: text, content: text) -> Result<bool, text>:
+        """Type text into a UI element.
+
+        Args:
+            id: Element identifier to type into
+            content: Text content to type
+
+        Returns:
+            Result with true on success or error message
+        """
+        var body = "{\"id\":\"{id}\",\"text\":\"{content}\"}"
+        var result = test_post(self.host, self.port, "/api/test/type", body)?
+        Ok(true)
+
+    fn drag(from_id: text, to_id: text) -> Result<bool, text>:
+        """Drag from one element to another.
+
+        Args:
+            from_id: Source element identifier
+            to_id: Target element identifier
+
+        Returns:
+            Result with true on success or error message
+        """
+        var body = "{\"from_id\":\"{from_id}\",\"to_id\":\"{to_id}\"}"
+        var result = test_post(self.host, self.port, "/api/test/drag", body)?
+        Ok(true)
+
+    fn send_key(key: text) -> Result<bool, text>:
+        """Send a key event.
+
+        Args:
+            key: Key name (e.g., "Enter", "Escape", "Tab")
+
+        Returns:
+            Result with true on success or error message
+        """
+        var body = "{\"event_type\":\"key\",\"key\":\"{key}\"}"
+        var result = test_post(self.host, self.port, "/api/test/event", body)?
+        Ok(true)
+
+    fn send_event(event_json: text) -> Result<bool, text>:
+        """Send a raw event as JSON.
+
+        Args:
+            event_json: Raw JSON string for the event
+
+        Returns:
+            Result with true on success or error message
+        """
+        var result = test_post(self.host, self.port, "/api/test/event", event_json)?
+        Ok(true)
+
+    # ========================================================================
+    # Queries (GET from test API)
+    # ========================================================================
+
+    fn get_element(id: text) -> Result<ElementInfo, text>:
+        """Get element information by ID.
+
+        Args:
+            id: Element identifier
+
+        Returns:
+            Result with ElementInfo or error message
+        """
+        var body = test_get(self.host, self.port, "/api/test/element?id={id}")?
+        var elem = parse_element_info(body)?
+        Ok(elem)
+
+    fn get_elements() -> Result<[ElementInfo], text>:
+        """Get all elements in the UI.
+
+        Returns:
+            Result with list of ElementInfo or error message
+        """
+        var body = test_get(self.host, self.port, "/api/test/elements")?
+        var elems = parse_elements_list(body)?
+        Ok(elems)
+
+    fn get_state() -> Result<UIStateInfo, text>:
+        """Get the current UI application state.
+
+        Returns:
+            Result with UIStateInfo or error message
+        """
+        var body = test_get(self.host, self.port, "/api/state")?
+        var state = parse_state_info(body)?
+        Ok(state)
+
+    fn screenshot_html() -> Result<text, text>:
+        """Get an HTML screenshot of the current UI.
+
+        Returns:
+            Result with raw HTML text or error message
+        """
+        var body = test_get(self.host, self.port, "/api/test/screenshot")?
+        Ok(body)
+
+    # ========================================================================
+    # Assertions (convenience wrappers)
+    # ========================================================================
+
+    fn check_text(id: text, expected: text) -> Result<bool, text>:
+        """Check if an element contains expected text in any property value.
+
+        Args:
+            id: Element identifier
+            expected: Text to search for in property values
+
+        Returns:
+            Result with true if any prop value contains expected text, false otherwise
+        """
+        var elem = self.get_element(id)?
+        var props = elem.get_props()
+        var i = 0
+        while i < props.length():
+            var pair = props[i]
+            var value = pair.1
+            var contains_idx = value.index_of(expected)
+            if contains_idx != nil:
+                return Ok(true)
+            i = i + 1
+        Ok(false)
+
+    fn check_visible(id: text) -> Result<bool, text>:
+        """Check if an element is visible.
+
+        Args:
+            id: Element identifier
+
+        Returns:
+            Result with visibility status
+        """
+        var elem = self.get_element(id)?
+        Ok(elem.is_visible())
+
+    fn check_focused(id: text) -> Result<bool, text>:
+        """Check if an element has focus.
+
+        Args:
+            id: Element identifier
+
+        Returns:
+            Result with focus status
+        """
+        var elem = self.get_element(id)?
+        Ok(elem.is_focused())
+
+    fn check_exists(id: text) -> Result<bool, text>:
+        """Check if an element exists.
+
+        Returns Ok(true) if the element is found, Ok(false) if the
+        server returns an error (e.g., 404), and Err only on
+        connection-level failures.
+
+        Args:
+            id: Element identifier
+
+        Returns:
+            Result with true if element exists, false if not found
+        """
+        var elem_result = self.get_element(id)
+        match elem_result:
+            Ok(elem):
+                Ok(true)
+            Err(e):
+                Ok(false)
+
+    # ========================================================================
+    # Waiting (poll with sleep)
+    # ========================================================================
+
+    fn wait_for(id: text, timeout_ms: i32) -> Result<bool, text>:
+        """Wait for an element to appear, polling every 100ms.
+
+        Args:
+            id: Element identifier to wait for
+            timeout_ms: Maximum time to wait in milliseconds
+
+        Returns:
+            Result with true if element found, false if timeout
+        """
+        var elapsed = 0
+        while elapsed < timeout_ms:
+            var elem_result = self.get_element(id)
+            match elem_result:
+                Ok(elem):
+                    return Ok(true)
+                Err(e):
+                    pass_dn
+            rt_thread_sleep(100)
+            elapsed = elapsed + 100
+        Ok(false)
+
+    fn wait_ready(timeout_ms: i32) -> Result<bool, text>:
+        """Wait for the server to be ready, polling every 100ms.
+
+        Sends GET /api/test/ready and checks for {"ready":true} in response.
+
+        Args:
+            timeout_ms: Maximum time to wait in milliseconds
+
+        Returns:
+            Result with true if server is ready, false if timeout
+        """
+        var elapsed = 0
+        while elapsed < timeout_ms:
+            var get_result = test_get(self.host, self.port, "/api/test/ready")
+            match get_result:
+                Ok(body):
+                    var ready = extract_bool_field(body, "ready")
+                    if ready:
+                        return Ok(true)
+                Err(e):
+                    pass_dn
+            rt_thread_sleep(100)
+            elapsed = elapsed + 100
+        Ok(false)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export UITestClient

@@ -15,6 +15,7 @@ use app.ui.web.html.{generate_html_page}
 use app.ui.web.async_ws.{start_ws_reader, ws_send_render}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, escape_json_string}
 use app.ui.render.widgets.{render_html_tree}
+use app.ui.test_api.handler.{handle_test_request}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -145,6 +146,20 @@ class AsyncWebServer:
 
                 if is_ws:
                     self.handle_ws_upgrade(stream, headers)
+                    return
+
+                # Route test API requests (before normal routing)
+                if path.starts_with("/api/test/"):
+                    val method = parts[0]
+                    var body = ""
+                    if method == "POST":
+                        body = _read_request_body(stream, headers)
+                    val event_ch = self.event_channel
+                    val inject_event_fn = \event:
+                        event_ch.send(event)
+                    val result = handle_test_request(path, method, body, self.state, inject_event_fn)
+                    val test_response = http_response(result.0, result.1, result.2)
+                    stream.write_all(test_response)
                     return
 
                 # Route HTTP requests
@@ -291,6 +306,28 @@ fn file_watcher_loop(file_path: Any, event_channel: Any):
             last_content = current
             val ch = event_channel as Channel
             ch.send(UIEvent.FileChanged)
+
+# =========================================================================
+# Request Body Helper
+# =========================================================================
+
+fn _read_request_body(stream: TcpStream, headers: text) -> text:
+    """Read the request body based on Content-Length header."""
+    var content_length = 0
+    val header_lines = headers.split("\n")
+    for line in header_lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("Content-Length:"):
+            val len_str = trimmed.slice(15, trimmed.len())
+            val len_trimmed = len_str.trim()
+            content_length = len_trimmed.to_int()
+    if content_length <= 0:
+        return ""
+    match stream.read_exact(content_length):
+        Ok(body_data):
+            return body_data
+        Err(_):
+            return ""
 
 # =========================================================================
 # HTTP Response Helper

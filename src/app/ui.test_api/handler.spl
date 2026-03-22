@@ -1,0 +1,227 @@
+# UI Test API - Request Handler
+#
+# Shared HTTP request handler for UI test endpoints.
+# Used by both web and tui_web backends to expose a test API
+# for automated UI testing (click, type, drag, screenshot, etc.).
+
+use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
+use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json}
+
+# =========================================================================
+# Main Handler
+# =========================================================================
+
+fn handle_test_request(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle an incoming test API request.
+
+    Returns (status_code, content_type, response_body).
+    """
+    # Strip query string for route matching
+    val route = _strip_query(path)
+
+    if method == "POST":
+        if route == "/api/test/click":
+            return _handle_click(body, inject_event)
+        elif route == "/api/test/type":
+            return _handle_type(body, inject_event)
+        elif route == "/api/test/drag":
+            return _handle_drag(body, inject_event)
+        elif route == "/api/test/event":
+            return _handle_event(body, inject_event)
+        else:
+            return (404, "application/json", "{\"error\":\"not found\"}")
+
+    elif method == "GET":
+        if route == "/api/test/screenshot":
+            return _handle_screenshot(state)
+        elif route == "/api/test/element":
+            val id = _extract_query_param(path, "id")
+            return _handle_element(id, state)
+        elif route == "/api/test/elements":
+            return _handle_elements(state)
+        elif route == "/api/test/ready":
+            return (200, "application/json", "{\"ready\":true}")
+        else:
+            return (404, "application/json", "{\"error\":\"not found\"}")
+
+    else:
+        return (405, "application/json", "{\"error\":\"method not allowed\"}")
+
+# =========================================================================
+# POST Handlers
+# =========================================================================
+
+fn _handle_click(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle POST /api/test/click — inject a click action for a widget."""
+    val id = extract_json_field(body, "id")
+    if id == "":
+        return (400, "application/json", "{\"error\":\"missing id\"}")
+    inject_event(UIEvent.Action(name: "click_{id}"))
+    return (200, "application/json", "{\"ok\":true}")
+
+fn _handle_type(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle POST /api/test/type — focus a widget and inject key presses."""
+    val id = extract_json_field(body, "id")
+    val typed_text = extract_json_field(body, "text")
+    if id == "":
+        return (400, "application/json", "{\"error\":\"missing id\"}")
+
+    # Focus the target widget first
+    inject_event(UIEvent.Action(name: "focus_{id}"))
+
+    # Inject a KeyPress for each character
+    var idx = 0
+    while idx < typed_text.len():
+        val ch = typed_text[idx]
+        var ch_str = ""
+        ch_str = "{ch_str}{ch}"
+        inject_event(UIEvent.KeyPress(key: ch_str))
+        idx = idx + 1
+
+    return (200, "application/json", "{\"ok\":true}")
+
+fn _handle_drag(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle POST /api/test/drag — focus source, then action to target."""
+    val from_id = extract_json_field(body, "from_id")
+    val to_id = extract_json_field(body, "to_id")
+    if from_id == "" or to_id == "":
+        return (400, "application/json", "{\"error\":\"missing from_id or to_id\"}")
+
+    inject_event(UIEvent.Action(name: "focus_{from_id}"))
+    inject_event(UIEvent.Action(name: "drag_{from_id}_to_{to_id}"))
+    return (200, "application/json", "{\"ok\":true}")
+
+fn _handle_event(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
+    """Handle POST /api/test/event — inject a raw UIEvent."""
+    val event_type = extract_json_field(body, "event_type")
+
+    match event_type:
+        "key":
+            val key = extract_json_field(body, "key")
+            if key == "":
+                return (400, "application/json", "{\"error\":\"missing key\"}")
+            inject_event(UIEvent.KeyPress(key: key))
+            return (200, "application/json", "{\"ok\":true}")
+        "action":
+            val name = extract_json_field(body, "name")
+            if name == "":
+                return (400, "application/json", "{\"error\":\"missing name\"}")
+            inject_event(UIEvent.Action(name: name))
+            return (200, "application/json", "{\"ok\":true}")
+        "quit":
+            inject_event(UIEvent.Quit)
+            return (200, "application/json", "{\"ok\":true}")
+        "focus_next":
+            inject_event(UIEvent.FocusNext)
+            return (200, "application/json", "{\"ok\":true}")
+        "focus_prev":
+            inject_event(UIEvent.FocusPrev)
+            return (200, "application/json", "{\"ok\":true}")
+        "resize":
+            val w = extract_json_field(body, "width")
+            val h = extract_json_field(body, "height")
+            if w == "" or h == "":
+                return (400, "application/json", "{\"error\":\"missing width or height\"}")
+            inject_event(UIEvent.Resize(width: w.to_i32(), height: h.to_i32()))
+            return (200, "application/json", "{\"ok\":true}")
+        _:
+            return (400, "application/json", "{\"error\":\"unknown event_type\"}")
+
+# =========================================================================
+# GET Handlers
+# =========================================================================
+
+fn _handle_screenshot(state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/screenshot — return full widget tree as HTML snapshot."""
+    val root = state.tree.root_node()
+    val html = _render_node_html(root, 0)
+    val title = state.tree.title_text()
+    val page = "<html><head><title>{escape_json(title)}</title></head><body>{html}</body></html>"
+    return (200, "text/html", page)
+
+fn _handle_element(id: text, state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/element?id=X — return a single element as JSON."""
+    if id == "":
+        return (400, "application/json", "{\"error\":\"missing id parameter\"}")
+
+    val found = state.tree.find_widget(id)
+    if found == nil:
+        return (404, "application/json", "{\"error\":\"element not found\"}")
+
+    val json = element_to_json(found)
+    return (200, "application/json", json)
+
+fn _handle_elements(state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/elements — return all widgets as JSON array."""
+    val json = elements_to_json(state)
+    return (200, "application/json", json)
+
+# =========================================================================
+# Query String Helpers
+# =========================================================================
+
+fn _strip_query(path: text) -> text:
+    """Strip the query string from a path, returning just the route."""
+    val qidx = path.find("?")
+    if qidx < 0:
+        return path
+    return path.slice(0, qidx)
+
+fn _extract_query_param(path: text, param: text) -> text:
+    """Extract a query parameter value from a path like /route?key=value&k2=v2."""
+    val qidx = path.find("?")
+    if qidx < 0:
+        return ""
+
+    val query = path.slice(qidx + 1, path.len())
+    val search = "{param}="
+    val pidx = query.find(search)
+    if pidx < 0:
+        return ""
+
+    val start = pidx + search.len()
+    # Find the end of the value (next & or end of string)
+    var end_pos = start
+    while end_pos < query.len() and query[end_pos] != "&":
+        end_pos = end_pos + 1
+
+    return query.slice(start, end_pos)
+
+# =========================================================================
+# HTML Snapshot Rendering
+# =========================================================================
+
+fn _render_node_html(node: WidgetNode, depth: i32) -> text:
+    """Render a widget node and its children as an HTML snippet for screenshots."""
+    val record = get_widget_record(node.id)
+    var kind = "panel"
+    var visible = true
+    if record != nil:
+        kind = record.kind
+        visible = record.visible
+
+    if not visible:
+        return ""
+
+    var indent = ""
+    var d = 0
+    while d < depth:
+        indent = "{indent}  "
+        d = d + 1
+
+    # Render children
+    var children_html = ""
+    val child_nodes = node.children()
+    for child in child_nodes:
+        val child_html = _render_node_html(child, depth + 1)
+        children_html = "{children_html}{child_html}"
+
+    # Get text content prop if present
+    val text_content = node.get_prop("text")
+
+    var inner = ""
+    if text_content != "":
+        inner = "{escape_json(text_content)}"
+    inner = "{inner}{children_html}"
+
+    return "{indent}<div data-id=\"{escape_json(node.id)}\" data-kind=\"{escape_json(kind)}\">{inner}</div>\n"

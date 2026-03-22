@@ -196,9 +196,133 @@ bin/simple test --prune-runs=50          # Keep 50 most recent
 
 Reports are generated at `doc/test/test_result.md` after every test run.
 
+## UI System Testing (Headless Web-Port)
+
+Test TUI and Web UI backends in headless environments via web ports. Both backends expose a shared Test API on localhost, and a `UITestClient` library provides click/type/drag/check operations.
+
+### Architecture
+
+```
+System Test (SSpec) → UITestClient → HTTP → Web Backend (port 8080)
+                                          → TUI Web Proxy (port 8081)
+```
+
+- **Web backend** (`ui.web`): Renders widget HTML, serves on port
+- **TUI web proxy** (`ui.tui_web`): Renders TUI Screen buffer as `<pre>` with ANSI→CSS color mapping, serves on port
+- **Test API** (`ui.test_api`): Shared module, localhost-only by default, `--test-api-external` for `0.0.0.0`
+
+### Starting UI Servers for Testing
+
+```bash
+# Web backend with test API (localhost only)
+bin/simple ui web examples/ui/demo_kitchen_sink.ui.sdn --port 9001
+
+# TUI over web (headless-friendly, terminal emulator style)
+bin/simple ui tui_web examples/ui/demo_kitchen_sink.ui.sdn --port 9000
+
+# Allow external access to test API
+bin/simple ui web app.ui.sdn --port 9001 --test-api-external
+```
+
+### UITestClient Library
+
+```simple
+use std.nogc_sync_mut.ui_test.client.{UITestClient}
+use std.nogc_sync_mut.ui_test.types.{ElementInfo, UIStateInfo}
+
+val client = UITestClient.connect("127.0.0.1", 9001)?
+
+# Wait for server readiness
+client.wait_ready(5000)?
+
+# Actions
+client.click("action_btn")?
+client.type_text("search_input", "hello")?
+client.drag("item_1", "target_panel")?
+client.send_key("enter")?
+
+# Queries
+val elem = client.get_element("action_btn")?
+val elems = client.get_elements()?
+val state = client.get_state()?
+val html = client.screenshot_html()?
+
+# Assertions (convenience)
+client.check_text("status_label", "Saved")?
+client.check_visible("sidebar")?
+client.check_focused("search_input")?
+client.check_exists("nav_tabs")?
+
+# Waiting
+client.wait_for("modal_dialog", 3000)?
+```
+
+### Test API Endpoints
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| POST | `/api/test/click` | `{"id":"X"}` | Focus + enter events |
+| POST | `/api/test/type` | `{"id":"X","text":"hello"}` | Focus + keypress events |
+| POST | `/api/test/drag` | `{"from_id":"X","to_id":"Y"}` | Synthetic drag events |
+| POST | `/api/test/event` | `{"event_type":"key","key":"q"}` | Raw UIEvent injection |
+| GET | `/api/test/screenshot` | — | Full HTML snapshot |
+| GET | `/api/test/element?id=X` | — | `{"id","kind","visible","focused","props"}` |
+| GET | `/api/test/elements` | — | All widgets JSON array |
+| GET | `/api/test/ready` | — | `{"ready":true}` |
+
+### Writing UI System Tests
+
+```simple
+# test/system/ui/my_app_spec.spl
+# tag: slow, system
+
+use std.nogc_sync_mut.ui_test.client.{UITestClient}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_thread_sleep(ms: i64)
+
+val port = 19042
+
+describe "My App UI":
+    it "clicks button and checks status":
+        val pid = rt_process_spawn_async("bin/simple",
+            ["ui", "web", "test/fixtures/ui/test_app.ui.sdn", "--port", "{port}"])
+        rt_thread_sleep(1000)
+
+        val client = UITestClient.connect("127.0.0.1", port)
+        match client:
+            Ok(c):
+                c.wait_ready(5000)
+                c.click("action_btn")
+                val focused = c.check_focused("action_btn")
+                expect(focused.is_ok()).to_equal(true)
+                rt_process_kill(pid)
+            Err(e):
+                rt_process_kill(pid)
+                expect(e).to_equal("")
+```
+
+### Test Helpers
+
+Use `test/system/ui/helpers/ui_test_helpers.spl`:
+- `start_ui_server(mode, sdn_file, port) -> i64` — spawns server, returns PID
+- `stop_ui_server(pid)` — kills server
+- `free_port() -> i32` — PID-based port to avoid conflicts
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/app/ui.test_api/handler.spl` | Shared test API handler |
+| `src/app/ui.tui_web/` | TUI web proxy backend |
+| `src/lib/nogc_sync_mut/ui_test/client.spl` | UITestClient library |
+| `src/lib/nogc_sync_mut/ui_test/types.spl` | ElementInfo, UIStateInfo |
+| `test/system/ui/helpers/ui_test_helpers.spl` | Test setup helpers |
+
 ## See Also
 
 - `/sspec` skill - Full SSpec BDD framework details
 - `.claude/templates/sspec_template.spl` - Template for new specs
-- `doc/guide/testing/testing.md` - Testing guide (includes SSpec)
+- `doc/guide/testing/testing.md` - Testing guide (includes SSpec + UI testing)
 - `doc/spec/testing/` - Testing framework specs
