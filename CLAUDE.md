@@ -10,17 +10,17 @@ Impl in simple unless it has big performance differences.
 
 | Binary | Path | Role | Source |
 |--------|------|------|--------|
-| **Real binary** | `bin/release/simple` | Full interpreter/compiler (production) — **fully self-sufficient** | Compiled from Simple source by Simple compiler |
-| **C bootstrap** (temporal) | `build/simple` | Fast CLI dispatcher (~3ms startup) | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
-| **C bootstrap copy** | `build/bootstrap/c_simple/simple` | Same as `build/simple`, canonical bootstrap location | Same generated C source |
-| **Codegen tool** | `build/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
+| **Real binary** | `bin/release/simple` (`.exe` on Windows) | Full interpreter/compiler (production) — **fully self-sufficient** | Compiled from Simple source by Simple compiler |
+| **Platform binaries** | `bin/release/<triple>/simple` | Per-platform release binaries (x86_64-pc-windows-msvc, etc.) | Same as above, organized by target triple |
+| **C++ bootstrap** | `bin/bootstrap/cpp/simple` | Fast CLI dispatcher (~3ms startup) | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
+| **C++ codegen** | `bin/bootstrap/cpp/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
 
-- **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple`. Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
+- **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple` (`.exe` on Windows). Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
 - **NEVER copy the Rust bootstrap binary to `bin/release/simple`** — `bin/release/simple` is the **self-hosted** binary compiled by Simple itself. The Rust bootstrap is only a seed for bootstrapping; it goes to `src/compiler_rust/target/bootstrap/simple`, not to `bin/release/`.
+- **Bootstrap entry points**: `src/app/cli/main.spl` (full CLI), `src/app/cli/bootstrap_main.spl` (minimal entry for staged bootstrap — used by `bootstrap-windows.sh` and CI)
 
 - **`bin/release/simple` is fully self-sufficient** — all compilation, interpretation, file execution, and test running happens **in-process** via direct function calls (`aot_c_file()`, `compile_native()`, `interpret_file()`, `aot_vhdl_file()`). No subprocess calls to `bin/simple` or `bin/release/simple`.
-- The only external tool calls are system tools: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`, `uname`, `which`
-- The C bootstrap preprocesses newer syntax (bitfield, pass_do_nothing, pass_dn) for compatibility with older interpreter versions
+- The only external tool calls are system tools: `clang`/`clang++`/`cl.exe`/`clang-cl`, `gcc`, `mold`/`lld`/`lld-link`/`link.exe`/`ld`, `llc`, `uname`/`cmd`, `which`/`where`
 
 ---
 
@@ -176,14 +176,24 @@ bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 
-# C Backend Bootstrap (temporal — CMake + Ninja)
-# Regenerate C from Simple source:
-build/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
-# Build temporal bootstrap binary:
+# Bootstrap (Rust seed → Simple → Self-host)
+# Stage 1: Build Rust seed
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver
+# Stage 2: Compile Simple compiler with Rust seed
+src/compiler_rust/target/bootstrap/simple native-build \
+  --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/simple_stage2
+# Stage 3: Self-host recompile
+build/bootstrap/simple_stage2 native-build \
+  --entry src/app/cli/main.spl -o bin/release/simple
+# Windows: use bootstrap-windows.sh (handles .exe, MSVC/MinGW detection)
+scripts/bootstrap/bootstrap-windows.sh
+# Linux/FreeBSD: use bootstrap-from-scratch.sh
+scripts/bootstrap/bootstrap-from-scratch.sh
+
+# C++ Bootstrap (legacy fallback — CMake + Ninja)
+bin/bootstrap/cpp/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
 cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
 ninja -C build -j7
-# Copy to canonical bootstrap location:
-cp build/simple build/bootstrap/c_simple/simple
 
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
 CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
