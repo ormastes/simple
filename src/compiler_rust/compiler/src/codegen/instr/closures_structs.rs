@@ -183,12 +183,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
     let func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
         // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
+        // On macOS, dots are sanitized to "_dot_", so also try that variant.
         // When multiple matches exist, pick the shortest name (most specific) for
         // deterministic output regardless of HashMap iteration order.
-        let suffix = format!(".{}", func_name);
+        let dot_suffix = format!(".{}", func_name);
+        let underscore_suffix = format!("_dot_{}", func_name);
         ctx.func_ids
             .iter()
-            .filter(|(k, _)| k.ends_with(&suffix))
+            .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
             .min_by_key(|(k, _)| k.len())
             .map(|(_, &v)| v)
     });
