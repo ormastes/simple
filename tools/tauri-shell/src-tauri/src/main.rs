@@ -1,8 +1,10 @@
-// Desktop entry point — delegates to the shared app module.
+// Simple Language UI — Tauri v2 Shell (desktop entry point)
+//
+// Delegates to the shared run() in lib.rs, which handles both desktop and
+// mobile entry points.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-
 fn main() {
-    app::run();
+    simple_tauri_shell_lib::run();
 }

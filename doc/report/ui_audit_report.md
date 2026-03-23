@@ -157,6 +157,53 @@
 | 18 | LOW | UIEvent | Action has no `value` field — uses name encoding instead | Known limitation |
 | 19 | LOW | Tooltip HTML | Shows `[?]` trigger, content only on hover | By design |
 | 20 | LOW | TUI Image | Placeholder only, no actual image rendering | By design |
+| 21 | MEDIUM | CSS body | `overflow: hidden` prevented page scrolling; `height: 100vh` on #app clipped tall content | **FIXED** |
+| 22 | MEDIUM | CSS panel-content | No flex layout or gap — form elements stacked without spacing | **FIXED** |
+| 23 | MEDIUM | CSS Textfield | Missing `:disabled` style (had readonly but not disabled) | **FIXED** |
+| 24 | LOW | CSS Tooltip | Content clipped when trigger near left panel edge (`translateX(-50%)` overflow) | Known limitation |
+
+## 3.1 Visual Verification Results (Manual Browser Testing)
+
+All 23 widget types were rendered in a real browser and visually inspected:
+
+| Widget | Rendering | Hover | States | Notes |
+|--------|-----------|-------|--------|-------|
+| menubar | ✅ | ✅ highlight | — | File/Edit/View proper layout |
+| tabs | ✅ | ✅ highlight | ✅ active underline | Blue accent on active tab |
+| panel | ✅ | — | ✅ focused border | Title bar + content area |
+| list | ✅ | ✅ highlight | ✅ selected (blue) | ▸ marker on selected |
+| tree | ✅ | ✅ toggle+label | ✅ expanded/collapsed | Unicode ▼/▶ correct |
+| button | ✅ | ✅ lift effect | ✅ disabled (dimmed) | Blue accent styling |
+| checkbox | ✅ | ✅ box border | ✅ checked/disabled | Green ✓ on checked |
+| dropdown | ✅ | — | ✅ disabled | Native select styled |
+| input | ✅ | — | ✅ error/disabled/readonly | Pink border on error |
+| textfield | ✅ | — | ✅ error/disabled/readonly | Focus glow effect |
+| textarea | ✅ | — | ✅ readonly | Resizable, multi-line |
+| progress | ✅ | — | — | Green bar + % label |
+| image | ✅ | — | — | Placeholder styling |
+| divider | ✅ | — | — | Subtle border line |
+| table | ✅ | ✅ row highlight | — | Headers + data rows |
+| tooltip | ✅ | ✅ popup | — | Content appears above trigger |
+| dialog | ✅ | — | — | Centered modal with overlay |
+| scroll | ✅ | — | — | Constrained height area |
+| statusbar | ✅ | — | — | Blue bar, left/right text |
+| text | ✅ | — | ✅ focused | Basic text display |
+| heading | ✅ | — | — | Bold + underline |
+| label | ✅ | — | — | Error label in red |
+| treenode | ✅ | ✅ label hover | — | Leaf vs expandable |
+
+### Layout Verification
+
+| Layout | Result | Notes |
+|--------|--------|-------|
+| VBox | ✅ | Vertical stacking with gap |
+| HBox | ✅ | Horizontal with flex ratios (1:fixed:2) |
+| Grid | ✅ | Auto-fit responsive columns |
+| Sidebar + Main | ✅ | Fixed width sidebar, flex main |
+
+### TUI vs GUI Consistency
+
+Both TUI and GUI versions of the Kitchen Sink demo show identical layout structure: menubar → tabs → sidebar|main → statusbar. Same widgets, same data, same hierarchy. TUI uses Unicode box-drawing characters that correspond to CSS borders in GUI.
 
 ## 4. Code Duplication
 
@@ -173,7 +220,7 @@
 | File | Changes |
 |------|---------|
 | `src/app/ui.render/widgets.spl` | 17 fixes across TUI and HTML renderers |
-| `src/app/ui.web/html.spl` | Added 9 CSS classes, fixed JS checkbox handler, added input change handlers |
+| `src/app/ui.web/html.spl` | Added 9 CSS classes, fixed JS checkbox handler, added input change handlers, fixed body overflow, panel-content flex gap, textfield disabled style |
 | `src/app/ui.web/async_ws.spl` | Added focus event parsing |
 | `src/app/ui.electron/backend.spl` | Added CSS wrapping to HTML output |
 | `src/app/ui.electron/app.spl` | Added CSS wrapping to HTML output |
