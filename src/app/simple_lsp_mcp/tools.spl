@@ -1,0 +1,135 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Simple LSP MCP — tool implementations
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_get_cwd() -> text
+
+fn lsp_find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("bin/release/simple.exe"):
+            return "bin/release/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    "bin/simple"
+
+fn lsp_query_path() -> text:
+    "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
+
+fn clean_command_output(stdout: text) -> text:
+    val lines = stdout.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        if not lines[i].starts_with("[DEBUG] "):
+            kept.push(lines[i])
+        i = i + 1
+    var joined = kept.join("\n")
+    while joined.ends_with("\n"):
+        joined = joined.substring(0, joined.len() - 1)
+    joined
+
+fn run_command_text(args: [text]) -> text:
+    val simple_bin = lsp_find_simple_binary()
+    val (stdout, stderr, code) = rt_process_run(simple_bin, args)
+    val clean = clean_command_output(stdout)
+    if code == 0:
+        return clean
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
+
+fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
+    run_command_text([lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+
+fn run_lsp_symbols(file: text) -> text:
+    run_command_text([lsp_query_path(), "symbols", file])
+
+fn run_lsp_diagnostics(file: text) -> text:
+    run_command_text(["lint", file])
+
+fn make_empty_list_result(id: text, key: text) -> text:
+    lsp_result_ok(id, lsp_jo1(lsp_jp(key, "[]")))
+
+fn handle_resources_list(id: text) -> text:
+    make_empty_list_result(id, "resources")
+
+fn handle_resource_templates_list(id: text) -> text:
+    make_empty_list_result(id, "resourceTemplates")
+
+fn handle_prompts_list(id: text) -> text:
+    make_empty_list_result(id, "prompts")
+
+fn handle_roots_list(id: text) -> text:
+    val cwd = rt_get_cwd()
+    val root = lsp_jo2(
+        lsp_jp("uri", lsp_js("file://" + cwd)),
+        lsp_jp("name", lsp_js("workspace"))
+    )
+    lsp_result_ok(id, lsp_jo1(lsp_jp("roots", "[" + root + "]")))
+
+fn handle_logging_set_level(id: text, body: text) -> text:
+    val params = lsp_extract_field_raw(body, "params")
+    var level = "info"
+    if params != "null":
+        val requested = lsp_extract_field(params, "level")
+        if requested != "":
+            level = requested
+    lsp_result_ok(id, lsp_jo1(lsp_jp("level", lsp_js(level))))
+
+fn require_arg(id: text, args: text, name: text) -> text:
+    val value = lsp_extract_field(args, name)
+    if value == "":
+        return lsp_make_tool_error(id, -32602, "Missing required argument: " + name)
+    ""
+
+fn handle_tool_call(id: text, body: text) -> text:
+    val params = lsp_extract_field_raw(body, "params")
+    if params == "null":
+        return lsp_make_tool_error(id, -32602, "Missing params")
+
+    val tool_name = lsp_extract_field(params, "name")
+    val args = lsp_extract_field_raw(params, "arguments")
+    if tool_name == "":
+        return lsp_make_tool_error(id, -32602, "Missing tool name")
+
+    if tool_name == "lsp_definition" or tool_name == "lsp_references" or tool_name == "lsp_hover":
+        val missing_file = require_arg(id, args, "file")
+        if missing_file != "":
+            return missing_file
+        val missing_line = require_arg(id, args, "line")
+        if missing_line != "":
+            return missing_line
+        val missing_char = require_arg(id, args, "character")
+        if missing_char != "":
+            return missing_char
+
+        val file = lsp_extract_field(args, "file")
+        val line0 = lsp_extract_field(args, "line").to_int()
+        val char0 = lsp_extract_field(args, "character").to_int()
+
+        if tool_name == "lsp_definition":
+            return lsp_make_tool_result(id, run_lsp_query("definition", file, line0, char0))
+        if tool_name == "lsp_references":
+            return lsp_make_tool_result(id, run_lsp_query("references", file, line0, char0))
+        return lsp_make_tool_result(id, run_lsp_query("hover", file, line0, char0))
+
+    if tool_name == "lsp_symbols" or tool_name == "lsp_diagnostics":
+        val missing = require_arg(id, args, "file")
+        if missing != "":
+            return missing
+        val file = lsp_extract_field(args, "file")
+        if tool_name == "lsp_symbols":
+            return lsp_make_tool_result(id, run_lsp_symbols(file))
+        return lsp_make_tool_result(id, run_lsp_diagnostics(file))
+
+    lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
