@@ -22,7 +22,10 @@ end entity regfile;
 
 architecture rtl of regfile is
     type reg_array_t is array (0 to 31) of std_logic_vector(31 downto 0);
-    signal regs : reg_array_t := (others => (others => '0'));
+    signal regs : reg_array_t := (
+        2      => x"00000FFC",  -- SP (x2) = top of 4KB DMEM
+        others => (others => '0')
+    );
 begin
     -- Async read (combinational)
     rs1_data <= (others => '0') when unsigned(rs1_addr) = 0

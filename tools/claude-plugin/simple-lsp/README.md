@@ -15,7 +15,7 @@ claude plugin install simple-lsp@simple-local
 This plugin is intended for use from a Simple repo checkout. It launches:
 
 ```bash
-bin/release/simple run src/app/lsp/main.spl
+bin/simple_lsp_server
 ```
 
 from the workspace root.

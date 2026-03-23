@@ -11,14 +11,17 @@
 # - RISC-V 64 (Linux ELF)
 
 use compiler.mir.mir_data.{MirModule}
+use compiler.backend.native.mach_inst.{EncodedFunction}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompiledModule}
 use compiler.backend.native.isel_x86_64.{isel_module}
 use compiler.backend.native.isel_aarch64.{isel_module_aarch64}
 use compiler.backend.native.isel_riscv64.{isel_module_riscv64}
+use compiler.backend.native.isel_riscv32.{isel_module_riscv32}
 use compiler.backend.native.regalloc.{regalloc_module}
 use compiler.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.native.encode_aarch64.{encode_module_aarch64}
 use compiler.backend.native.encode_riscv64.{encode_module_riscv64}
+use compiler.backend.native.encode_riscv32.{encode_module_rv32, rv32_elf32_header, rv32_elf32_phdr_load}
 use compiler.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_text_section, write_elf64}
 use compiler.backend.native.native_layout.{reorder_by_layout}
 use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64}
@@ -36,6 +39,8 @@ fn compile_native(module: MirModule, target: CodegenTarget) -> [i64]:
             compile_native_aarch64(module)
         case Riscv64:
             compile_native_riscv64(module)
+        case Riscv32:
+            compile_native_riscv32(module)
         case AArch64_MacOS:
             compile_native_macho_aarch64(module)
         case X86_64_MacOS:
@@ -81,6 +86,47 @@ fn compile_native_riscv64(module: MirModule) -> [i64]:
 
     # Phase 4: Layout Optimization & ELF Emission
     emit_elf_riscv64(encoded_funcs, allocated, module)
+
+fn compile_native_riscv32(module: MirModule) -> [i64]:
+    # Phase 1: Instruction Selection (MIR -> MachInst)
+    val mach_module = isel_module_riscv32(module)
+
+    # Phase 2: Register Allocation (virtual -> physical regs)
+    val allocated = regalloc_module(mach_module)
+
+    # Phase 3: Instruction Encoding (MachInst -> bytes)
+    val encoded_funcs = encode_module_rv32(allocated)
+
+    # Phase 4: ELF32 Emission (minimal: header + single PT_LOAD segment)
+    emit_elf32_riscv32(encoded_funcs)
+
+fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
+    # Concatenate all function code
+    var all_code: [i64] = []
+    for func in encoded_funcs:
+        for byte in func.code:
+            all_code = all_code.push(byte)
+
+    # ELF32 layout: header(52) + phdr(32) + code
+    val header_size = 52
+    val phdr_size = 32
+    val code_offset = header_size + phdr_size
+    val code_size = all_code.len()
+    val entry_point = 0  # Code starts at address 0 for baremetal
+
+    # Generate ELF32 header (1 program header, no section headers)
+    var elf = rv32_elf32_header(entry_point, 1, 0, 0)
+
+    # Generate program header (PT_LOAD: RX)
+    val phdr = rv32_elf32_phdr_load(code_offset, 0, code_size, code_size, 5)
+    for byte in phdr:
+        elf = elf.push(byte)
+
+    # Append code
+    for byte in all_code:
+        elf = elf.push(byte)
+
+    elf
 
 fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
     # Stub for unsupported architectures - returns empty ELF
@@ -279,6 +325,7 @@ fn target_to_arch_byte(target: CodegenTarget) -> i64:
         case X86_64: 1
         case AArch64: 2
         case Riscv64: 5
+        case Riscv32: 4
         case AArch64_MacOS: 2
         case X86_64_MacOS: 1
         case _: 1  # Default x86_64

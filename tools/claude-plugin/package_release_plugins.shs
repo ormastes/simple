@@ -1,0 +1,95 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="$PROJECT_ROOT/build/release/plugins"
+PLUGIN="all"
+VERSION=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --plugin)
+            PLUGIN="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$VERSION" ]; then
+    echo "--version is required" >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+package_simple_lsp() {
+    BUNDLE_DIR="$TMP_DIR/simple-lsp"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-lsp/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-lsp/README.md" "$BUNDLE_DIR/README.md"
+    cat > "$BUNDLE_DIR/.lsp.json" <<'EOF'
+{
+  "languages": [
+    {
+      "fileExtensions": [".spl", ".shs"],
+      "languageId": "simple",
+      "command": ["simple-lsp"],
+      "initializationOptions": {}
+    }
+  ]
+}
+EOF
+    tar -czf "$OUTPUT_DIR/simple-lsp-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" simple-lsp
+}
+
+package_cmm_lsp() {
+    BUNDLE_DIR="$TMP_DIR/cmm-lsp"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md" "$BUNDLE_DIR/README.md"
+    cat > "$BUNDLE_DIR/.lsp.json" <<'EOF'
+{
+  "languages": [
+    {
+      "fileExtensions": [".cmm"],
+      "languageId": "cmm",
+      "command": ["cmm-lsp"],
+      "initializationOptions": {}
+    }
+  ]
+}
+EOF
+    tar -czf "$OUTPUT_DIR/cmm-lsp-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" cmm-lsp
+}
+
+case "$PLUGIN" in
+    simple-lsp)
+        package_simple_lsp
+        ;;
+    cmm-lsp)
+        package_cmm_lsp
+        ;;
+    all)
+        package_simple_lsp
+        package_cmm_lsp
+        ;;
+    *)
+        echo "Unsupported plugin: $PLUGIN" >&2
+        exit 1
+        ;;
+esac
