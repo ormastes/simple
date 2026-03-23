@@ -411,8 +411,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 
     // Build command - run through test runner, not as direct script execution
     let mut cmd = Command::new(&simple_binary);
-    cmd.arg("test") // Run through test runner
-        .arg(path)
+    cmd.args(build_safe_mode_child_args(path, options))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -498,6 +497,43 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
             individual_results: vec![],
         },
     }
+}
+
+fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) -> Vec<String> {
+    let mut args = vec!["test".to_string(), path.display().to_string()];
+
+    if let Some(mode) = options.execution_mode.cli_value() {
+        args.push(format!("--mode={}", mode));
+    }
+
+    if options.gc_log {
+        args.push("--gc-log".to_string());
+    }
+    if options.gc_off {
+        args.push("--gc=off".to_string());
+    }
+    if options.only_slow {
+        args.push("--only-slow".to_string());
+    }
+    if options.only_skipped {
+        args.push("--only-skipped".to_string());
+    }
+    if options.show_tags {
+        args.push("--show-tags".to_string());
+    }
+    if options.fail_fast {
+        args.push("--fail-fast".to_string());
+    }
+    if let Some(tag) = &options.tag {
+        args.push("--tag".to_string());
+        args.push(tag.clone());
+    }
+    if let Some(seed) = options.seed {
+        args.push("--seed".to_string());
+        args.push(seed.to_string());
+    }
+
+    args
 }
 
 /// Find the simple binary path.
@@ -691,5 +727,19 @@ mod tests {
         assert_eq!(strip_ansi_codes("\x1b[32mhello\x1b[0m"), "hello");
         assert_eq!(strip_ansi_codes("no codes"), "no codes");
         assert_eq!(strip_ansi_codes("\x1b[1;31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn test_build_safe_mode_child_args_forwards_composite_mode() {
+        let options = super::super::types::TestOptions {
+            execution_mode: TestExecutionMode::Composite(
+                "interpreter(remote(baremetal(riscv32)))".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
+
+        assert!(args.iter().any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
     }
 }

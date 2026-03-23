@@ -13,6 +13,25 @@ bin/simple test ...
 This document also covers the remote baremetal lanes exercised through that
 command.
 
+## Current Baremetal Status
+
+Observed on this host on 2026-03-23:
+
+- `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` passes end to end with `ghdl`
+- `test/integration/debug/hardware/stm32wb_openocd_spec.spl` passes as a repo-readiness spec
+- `test/integration/debug/hardware/stm32h7_openocd_spec.spl` passes as a repo-readiness spec
+- `test/integration/debug/hardware/stm32wb_stlink_spec.spl` passes as a checked-config spec
+- `test/integration/debug/hardware/stm32h7_stlink_spec.spl` passes as a checked-config spec
+- `test/integration/debug/hardware/hardware_check_spec.spl` passes and confirms local tool presence
+- `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` still has failures and stale assumptions
+- composite remote `--mode=interpreter(remote(baremetal(...)))` is currently not preserved by the Rust CLI entrypoint and falls back to plain interpreter mode
+
+In practice this means:
+
+- the STM lanes are currently useful for readiness/config validation and for the live helper smokes inside the remote-baremetal feature spec
+- the RTL RISC-V32 emulator lane is the only checked-in baremetal lane that currently runs fully end to end in normal local use
+- TRACE32 remains blocked by a mix of host startup issues and one repo-side spec/runtime issue
+
 ## Usage
 
 ```bash
@@ -46,17 +65,62 @@ Recommended forms:
 
 ```bash
 # QEMU RV32 compatibility path
+# Note: the Rust CLI currently warns that this mode is unknown and falls back
+# to interpreter mode. Keep this command documented because it is still the
+# intended mode shape, but do not treat it as a verified CLI path yet.
 bin/simple test test/integration/baremetal/qemu_baremetal_lib_smoke_spec.spl \
   '--mode=interpreter(remote(baremetal(riscv32)))'
+
+# RTL RV32I emulator path that works on this host today
+bin/simple test test/feature/baremetal/ghdl_riscv32_semihost_spec.spl
 
 # OpenOCD STM readiness lanes
 bin/simple test test/integration/debug/hardware/stm32wb_openocd_spec.spl
 bin/simple test test/integration/debug/hardware/stm32h7_openocd_spec.spl
 
+# ST-Link metadata/config lanes
+bin/simple test test/integration/debug/hardware/stm32wb_stlink_spec.spl
+bin/simple test test/integration/debug/hardware/stm32h7_stlink_spec.spl
+
 # TRACE32 STM readiness lanes
 bin/simple test test/integration/debug/hardware/t32_native_spec.spl
 bin/simple test test/integration/debug/hardware/t32_gdb_bridge_spec.spl
 ```
+
+### Current Meaning Of The STM Specs
+
+Today the STM-related specs split into two classes:
+
+- repo-readiness/config specs:
+  - `stm32wb_openocd_spec.spl`
+  - `stm32h7_openocd_spec.spl`
+  - `stm32wb_stlink_spec.spl`
+  - `stm32h7_stlink_spec.spl`
+- host-aware live smoke helpers:
+  - `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`
+
+The first class verifies checked-in board metadata, helper fixture presence,
+and launch command construction. They do not by themselves prove full on-device
+test execution.
+
+The second class attempts live debugger/transport checks and is closer to a
+system smoke, but it is currently not cleanly green because:
+
+- the TRACE32 branch still fails before it can classify the host state cleanly
+- one expectation in that spec drifted after an ELF fixture was added
+
+### Current Meaning Of The RTL RISC-V32 Emulator Spec
+
+`test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` is currently the most
+representative working baremetal lane in-tree. It exercises:
+
+- checked-in RV32 ELF fixtures
+- ELF-to-VHDL memory package conversion through `ghdl_runner.shs`
+- GHDL simulation of the repo's RV32I RTL
+- semihosted output collection
+- pass/fail parsing through the normal test command
+
+This is a real execution lane, not just a wiring/readiness check.
 
 ### Current Meaning Of The TRACE32 Specs
 
@@ -70,6 +134,9 @@ They validate:
 
 They do not yet prove real on-device execution because that still depends on a
 working local TRACE32 PowerView session.
+
+On this host on 2026-03-23, direct `t32rem ... PING` still times out, so these
+lanes should still be treated as blocked for full execution.
 
 ### TRACE32 Bring-Up Helpers
 
@@ -184,12 +251,19 @@ describe "JSON.stringify":
 5. Calculate summary statistics
 6. Return exit code (0 = pass, 1 = fail)
 
-### Important Current Caveat
+### Important Current Caveats
 
 Interpreter-mode test execution still has limitations in this repo. Some remote
 hardware specs are therefore used primarily to verify loading, helper wiring,
 and command construction until the relevant backend session is actually
 available.
+
+The current Rust `bin/simple test` entrypoint also only accepts
+`interpreter|smf|native` as explicit execution modes. Composite remote forms
+like `interpreter(remote(baremetal(riscv32)))` are currently rejected with a
+warning and then executed as plain interpreter mode. Until that is fixed, the
+documented composite mode string should be treated as the intended interface,
+not a verified current behavior.
 
 ## Watch Mode
 

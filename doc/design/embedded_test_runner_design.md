@@ -4,6 +4,26 @@
 **Date:** 2026-02-05
 **Author:** Claude
 
+## Current Reality Check
+
+As of 2026-03-23, the repo does not yet implement this full architecture end to
+end through the main Rust CLI.
+
+What is true now:
+
+- the checked-in GHDL RV32I semihost lane works as a real simulator-backed
+  baremetal execution path via `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl`
+- STM OpenOCD and ST-Link specs are currently strongest as readiness/config
+  checks rather than full embedded runner execution
+- TRACE32 remains a readiness-only lane and is still host-blocked here
+- the old Simple-side composite runner model still exists, but the current Rust
+  `bin/simple test` CLI no longer preserves composite remote mode strings
+- the Rust test runner executes tests through interpreted mode rather than a
+  general JIT-backed path because JIT stability is still not sufficient
+
+So this document should be read as target architecture, not current shipped
+behavior.
+
 ---
 
 ## 1. Overview
@@ -17,7 +37,7 @@ Design for a modular embedded test runner system with:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Test Runner Driver                         │
-│  (simple test --embedded --target=qemu-x86)                     │
+│  (target design; not the current CLI contract)                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
          ┌────────────────────┴────────────────────┐
@@ -123,6 +143,29 @@ src/app/test_runner/
    │ Exit with code  │ ──► 0 = pass, 1 = fail
    └─────────────────┘
 ```
+
+## What Maps To This Design Today
+
+Partial mappings that exist in the current repo:
+
+- simulator-backed target execution:
+  - `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl`
+  - `src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs`
+  - `examples/09_embedded/fpga_riscv/rtl/`
+- remote-debug plumbing and host-aware smoke coverage:
+  - `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`
+  - `src/lib/nogc_sync_mut/debug/remote/protocol/gdb_mi.spl`
+  - `src/app/debug/remote/protocol/trace32.spl`
+- STM readiness/config coverage:
+  - `test/integration/debug/hardware/stm32wb_openocd_spec.spl`
+  - `test/integration/debug/hardware/stm32h7_openocd_spec.spl`
+  - `test/integration/debug/hardware/stm32wb_stlink_spec.spl`
+  - `test/integration/debug/hardware/stm32h7_stlink_spec.spl`
+
+Important non-mapping:
+
+- the current Rust CLI does not yet route `--mode=interpreter(remote(baremetal(...)))`
+  into a real composite embedded execution path
 
 ---
 

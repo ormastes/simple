@@ -195,13 +195,13 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     };
 
     // Create build cache for SMF/native modes
-    let build_cache = if options.execution_mode != TestExecutionMode::Interpreter {
+    let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native) {
         Some(BuildCache::new(options.force_rebuild))
     } else {
         None
     };
 
-    if options.execution_mode != TestExecutionMode::Interpreter && !quiet {
+    if !matches!(options.execution_mode, TestExecutionMode::Interpreter) && !quiet {
         println!("Execution mode: {}", options.execution_mode.name());
     }
 
@@ -665,6 +665,11 @@ fn execute_test_files(
                 // run_test_file_with_options handles both safe and normal mode.
                 // In normal mode, a fresh Runner is created per test to prevent memory leaks.
                 super::execution::run_test_file_with_options(path, options)
+            }
+            TestExecutionMode::Composite(_) => {
+                // Composite remote/baremetal modes are currently exercised through
+                // the subprocess test entrypoint, which preserves the CLI mode string.
+                super::execution::run_test_file_safe_mode(path, options)
             }
         };
         total_passed += result.passed;

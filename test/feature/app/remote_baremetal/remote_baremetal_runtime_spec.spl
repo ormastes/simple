@@ -68,6 +68,25 @@ fn command_available(cmd: text) -> bool:
 fn has_target_aware_riscv_gdb() -> bool:
     command_available("riscv32-unknown-elf-gdb") or command_available("riscv64-unknown-elf-gdb") or command_available("gdb-multiarch")
 
+fn find_t32rem_cmd() -> text:
+    val env_check = shell("echo $T32_PATH")
+    val t32_path = env_check.stdout.trim()
+    if t32_path.len() > 0:
+        val candidate = "{t32_path}/bin/pc_linux64/t32rem"
+        val exists = shell("test -x '{candidate}' && echo yes")
+        if exists.stdout.trim() == "yes":
+            return candidate
+
+    val path_check = shell("which t32rem 2>/dev/null")
+    if path_check.exit_code == 0:
+        return path_check.stdout.trim()
+
+    val bundled = "/opt/t32/bin/pc_linux64/t32rem"
+    if file_exists(bundled):
+        return bundled
+
+    ""
+
 fn status_is_acceptable(status: text) -> bool:
     status == "ok" or status.starts_with("ready") or status.starts_with("blocked:") or status.starts_with("skip:")
 
@@ -322,16 +341,18 @@ fn trace32_remote_status() -> text:
     if not file_exists("config/t32/t32_stm_headless.t32"):
         return "error: missing config/t32/t32_stm_headless.t32"
 
-    val t32rem = Trace32Client.find_t32rem()
+    val t32rem = find_t32rem_cmd()
     if t32rem == "":
         return "skip: t32rem unavailable"
 
-    val ping = shell("{t32rem} localhost port=20000 PING 2>&1")
+    val ping = shell("timeout 5 '{t32rem}' localhost port=20000 PING 2>&1")
     val combined = ping.stdout + ping.stderr
     val trimmed = combined.trim()
 
     if ping.exit_code == 0:
         return "ready"
+    if ping.exit_code == 124:
+        return "blocked: trace32 ping timed out"
     if trimmed.contains("error initializing TRACE32"):
         return "blocked: trace32 session not initialized"
     if trimmed.contains("Can't open display"):
@@ -440,9 +461,9 @@ describe "Remote baremetal composite parsing":
         expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
         expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
 
-    it "documents that no checked-in rv32 baremetal elf is currently discoverable":
+    it "finds the checked-in rv32 baremetal elf fixture":
         val elf = find_baremetal_elf("test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl", "riscv32")
-        expect(elf).to_equal("")
+        expect(elf).to_equal("examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf")
 
 describe "QEMU RISC-V32 remote smoke":
 

@@ -50,7 +50,7 @@ macro_rules! debug_log {
 pub(crate) use debug_log;
 
 /// Test execution mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TestExecutionMode {
     /// Interpreter mode (current default)
     #[default]
@@ -59,6 +59,8 @@ pub enum TestExecutionMode {
     Smf,
     /// Native binary mode (compile to ELF, run as subprocess)
     Native,
+    /// Composite platform mode, e.g. interpreter(remote(baremetal(riscv32)))
+    Composite(String),
 }
 
 impl TestExecutionMode {
@@ -68,16 +70,34 @@ impl TestExecutionMode {
             "interpreter" | "interp" => Some(Self::Interpreter),
             "smf" | "loader" => Some(Self::Smf),
             "native" | "binary" => Some(Self::Native),
+            mode if mode.contains("baremetal") || mode.contains("remote") || mode.contains("container") => {
+                if mode.starts_with("interpreter(") || mode.starts_with("smf(") || mode.starts_with("native(") {
+                    Some(Self::Composite(mode.to_string()))
+                } else {
+                    Some(Self::Composite(format!("interpreter({})", mode)))
+                }
+            }
             _ => None,
         }
     }
 
     /// Display name
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
-            Self::Interpreter => "interpreter",
-            Self::Smf => "smf",
-            Self::Native => "native",
+            Self::Interpreter => "interpreter".to_string(),
+            Self::Smf => "smf".to_string(),
+            Self::Native => "native".to_string(),
+            Self::Composite(spec) => spec.clone(),
+        }
+    }
+
+    /// CLI argument value for `--mode=...`
+    pub fn cli_value(&self) -> Option<&str> {
+        match self {
+            Self::Interpreter => None,
+            Self::Smf => Some("smf"),
+            Self::Native => Some("native"),
+            Self::Composite(spec) => Some(spec.as_str()),
         }
     }
 }

@@ -142,9 +142,10 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 i += 1;
                 if i < args.len() {
                     if let Some(mode) = TestExecutionMode::parse_str(&args[i]) {
+                        let needs_safe_mode = mode != TestExecutionMode::Interpreter;
                         options.execution_mode = mode;
                         // SMF and native modes require safe mode (subprocess execution)
-                        if mode != TestExecutionMode::Interpreter {
+                        if needs_safe_mode {
                             options.safe_mode = true;
                         }
                     } else {
@@ -155,8 +156,9 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             arg if arg.starts_with("--mode=") => {
                 let mode_str = arg.trim_start_matches("--mode=");
                 if let Some(mode) = TestExecutionMode::parse_str(mode_str) {
+                    let needs_safe_mode = mode != TestExecutionMode::Interpreter;
                     options.execution_mode = mode;
-                    if mode != TestExecutionMode::Interpreter {
+                    if needs_safe_mode {
                         options.safe_mode = true;
                     }
                 } else {
@@ -400,5 +402,27 @@ mod tests {
         let opts = parse_test_args(&args);
         assert!(opts.rust_tests);
         assert!(opts.rust_ignored_only);
+    }
+
+    #[test]
+    fn test_parse_composite_mode_preserves_full_spec() {
+        let args = vec!["--mode=interpreter(remote(baremetal(riscv32)))".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(
+            opts.execution_mode,
+            TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
+        );
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_composite_mode_normalizes_missing_runtime_prefix() {
+        let args = vec!["--mode=remote(baremetal(riscv32))".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(
+            opts.execution_mode,
+            TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
+        );
+        assert!(opts.safe_mode);
     }
 }
