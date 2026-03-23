@@ -49,7 +49,7 @@ pub(crate) fn evaluate_call(
         let is_extern = EXTERN_FUNCTIONS.with(|cell| {
             let externs = cell.borrow();
             let contains = externs.contains(name);
-            if !contains && name.contains("_box_") {
+            if crate::is_debug_mode() && !contains && name.contains("_box_") {
                 eprintln!("[DEBUG] Looking for '{}' in EXTERN_FUNCTIONS: {}", name, contains);
                 eprintln!("[DEBUG] EXTERN_FUNCTIONS contains {} functions", externs.len());
                 if externs.len() < 50 {
