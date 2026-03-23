@@ -276,7 +276,11 @@ fi
 
 # Also create bin/release/simple → <platform>/simple symlink
 release_link_path="${release_dir}/simple${exe}"
-release_link_target="${release_bin}"
+if [ "${os}" = "windows" ]; then
+  release_link_target="${msvc_bin:-${mingw_bin}}"
+else
+  release_link_target="${release_bin}"
+fi
 if [ -L "${release_link_path}" ] || [ -f "${release_link_path}" ]; then
   rm -f "${release_link_path}"
 fi

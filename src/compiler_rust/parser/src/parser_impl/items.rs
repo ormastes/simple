@@ -290,8 +290,7 @@ impl<'a> Parser<'a> {
         }
 
         // Skip docstrings between attributes and declaration (e.g., @allow(...) """doc""" fn ...)
-        while matches!(&self.current.kind, TokenKind::String { .. } | TokenKind::DocComment(_)) {
-            // Consume the docstring — it's a module/item docstring, not a declaration
+        while matches!(&self.current.kind, TokenKind::String(_) | TokenKind::DocComment(_)) {
             self.advance();
             while self.check(&TokenKind::Newline) {
                 self.advance();

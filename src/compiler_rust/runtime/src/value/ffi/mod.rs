@@ -55,6 +55,7 @@
 //! All FFI functions use `#[no_mangle]` and `extern "C"` for C compatibility.
 
 // Phase 1: Core value operations
+#[cfg(unix)]
 pub mod ctype_shims;
 pub mod equality;
 pub mod memory;
@@ -118,6 +119,7 @@ pub mod package;
 
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
+#[cfg(unix)]
 pub use ctype_shims::*;
 pub use equality::*;
 pub use memory::*;
