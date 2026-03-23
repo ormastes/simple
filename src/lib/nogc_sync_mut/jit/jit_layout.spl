@@ -1,15 +1,18 @@
 # Shared JIT Layout Planning
 
 use std.nogc_sync_mut.jit.jit_types.{JitBinary, JitLayoutPlan}
-use std.nogc_sync_mut.debug.remote.exec.types.{
-    MemoryMap, EBREAK_RV32, BKPT_ARM, halt_instruction_size
-}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
 use std.nogc_sync_mut.debug.remote.types.{Architecture}
+
+fn jit_halt_instruction_size(arch: Architecture) -> i64:
+    match arch:
+        Architecture.Arm32: 2
+        _: 4
 
 fn append_halt_trampoline_arm32(bytes_arg: [i32]) -> [i32]:
     # BKPT (Thumb) = 0xBE00, 2 bytes little-endian
     var bytes = bytes_arg
-    val v = BKPT_ARM
+    val v: i64 = 0xBE00
     bytes.push((v & 0xFF) as i32)
     bytes.push(((v >> 8) & 0xFF) as i32)
     bytes
@@ -17,7 +20,7 @@ fn append_halt_trampoline_arm32(bytes_arg: [i32]) -> [i32]:
 fn append_halt_trampoline_rv32(bytes_arg: [i32]) -> [i32]:
     # EBREAK = 0x00100073, 4 bytes little-endian
     var bytes = bytes_arg
-    val v = EBREAK_RV32
+    val v: i64 = 0x00100073
     bytes.push((v & 0xFF) as i32)
     bytes.push(((v >> 8) & 0xFF) as i32)
     bytes.push(((v >> 16) & 0xFF) as i32)
@@ -25,7 +28,20 @@ fn append_halt_trampoline_rv32(bytes_arg: [i32]) -> [i32]:
     bytes
 
 fn plan_binary_layout_arm32(binary: JitBinary, limits: MemoryMap) -> Result<JitLayoutPlan, text>:
-    plan_binary_layout(binary, limits, Architecture.Arm32)
+    val total = binary.size()
+    if not limits.allow_expand and total > limits.code_capacity():
+        return Err("binary too large for target code region: need {total}, capacity {limits.code_capacity()}")
+
+    val code_base = limits.code_start
+    val halt_addr = code_base + total - 2
+    Ok(JitLayoutPlan(
+        code_base: code_base,
+        code_size: total,
+        entry_point: code_base + binary.entry_offset,
+        halt_addr: halt_addr,
+        stack_top: limits.stack_top,
+        can_expand: limits.allow_expand
+    ))
 
 fn plan_binary_layout_rv32(binary: JitBinary, limits: MemoryMap) -> Result<JitLayoutPlan, text>:
     plan_binary_layout(binary, limits, Architecture.RiscV32)
@@ -36,7 +52,7 @@ fn plan_binary_layout(binary: JitBinary, limits: MemoryMap, arch: Architecture) 
         return Err("binary too large for target code region: need {total}, capacity {limits.code_capacity()}")
 
     val code_base = limits.code_start
-    val halt_size = halt_instruction_size(arch)
+    val halt_size = jit_halt_instruction_size(arch)
     val halt_addr = code_base + total - halt_size
     Ok(JitLayoutPlan(
         code_base: code_base,

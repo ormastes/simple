@@ -1,15 +1,15 @@
 """
 # STM32H7 Baremetal Composite Runner
-Verifies the shared baremetal library workload on STM32H7 via the unified adapter.
+Verifies the shared baremetal library workload on STM32H7 through the HAL-backed JIT path.
 """
 
 use app.io.file_ops.{file_read}
 use std.io_runtime.{shell}
-use std.nogc_sync_mut.debug.remote.exec.adapter_stm32h7.{Stm32H7Adapter}
-use std.nogc_sync_mut.debug.remote.exec.types.{Architecture}
-use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
-
-val STM32H7_CODE_BASE: i64 = 0x24010000
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary_arm32}
+use std.nogc_sync_mut.jit.jit_types.{JitBinary}
+use std.nogc_sync_mut.jit.jit_layout.{append_halt_trampoline_arm32, plan_binary_layout_arm32, jit_entry_pc_arm32, jit_return_pc_arm32}
+use std.nogc_sync_mut.jit.jit_hal_stm32h7.{stm32h7_connect, stm32h7_disconnect, stm32h7_write_code, stm32h7_write_register, stm32h7_read_register, stm32h7_resume}
 
 fn hardware_ready() -> bool:
     val ocd = shell("command -v openocd >/dev/null 2>&1")
@@ -27,30 +27,92 @@ describe "STM32H7 Baremetal Workload":
         if not hardware_ready():
             print "[skip] STM32H7 hardware not available"
             return
-        var adapter = Stm32H7Adapter.new()
-        val conn = adapter.connect()
-        if conn.is_err():
-            print "[skip] connect failed: {conn.err().unwrap()}"
-            return
-        val mgr = adapter.create_manager()
-        if mgr.is_err():
-            adapter.disconnect()
-            print "[skip] manager failed"
-            return
+
         val source = shared_workload_source()
         if source.trim() == "":
-            adapter.disconnect()
             print "[skip] shared workload fixture unreadable"
             return
-        val compiled = compile_remote_binary(source, Architecture.Arm32, STM32H7_CODE_BASE)
-        if compiled.is_err():
-            adapter.disconnect()
-            print "[skip] compile failed: {compiled.err().unwrap()}"
+
+        val connect_result = stm32h7_connect()
+        if connect_result.is_err():
+            print "[skip] connect failed: {connect_result.err().unwrap()}"
             return
-        var manager = mgr.ok.unwrap()
-        val result = manager.execute_bytes("baremetal_lib_workload_stm32h7", compiled.ok.unwrap(), [])
-        adapter.disconnect()
-        if result.is_err():
-            print "[skip] exec failed: {result.err().unwrap()}"
+
+        var openocd_pid: i64 = 0
+        match connect_result:
+            case Ok(v):
+                openocd_pid = v
+            case Err(_):
+                openocd_pid = 0
+
+        val limits = MemoryMap.stm32h7()
+        val compile_result = compile_remote_binary_arm32(source, limits.code_start)
+        if compile_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] compile failed: {compile_result.err().unwrap()}"
             return
-        expect(result.ok.unwrap().return_value).to_equal(0)
+
+        var compiled_bytes: [i32] = []
+        match compile_result:
+            case Ok(v):
+                compiled_bytes = v
+            case Err(_):
+                compiled_bytes = []
+
+        val bytes = append_halt_trampoline_arm32(compiled_bytes)
+        val binary = JitBinary(name: "baremetal_lib_workload_stm32h7", bytes: bytes, entry_offset: 0, stack_bytes: 0)
+        val layout_result = plan_binary_layout_arm32(binary, limits)
+        if layout_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] layout failed: {layout_result.err().unwrap()}"
+            return
+
+        val layout = layout_result.ok.unwrap()
+        val write_result = stm32h7_write_code(layout.code_base, bytes)
+        if write_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] upload failed: {write_result.err().unwrap()}"
+            return
+
+        val sp_result = stm32h7_write_register(13, layout.stack_top)
+        if sp_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] set SP failed: {sp_result.err().unwrap()}"
+            return
+
+        val lr_result = stm32h7_write_register(14, jit_return_pc_arm32(layout))
+        if lr_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] set LR failed: {lr_result.err().unwrap()}"
+            return
+
+        val pc_result = stm32h7_write_register(15, jit_entry_pc_arm32(layout))
+        if pc_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] set PC failed: {pc_result.err().unwrap()}"
+            return
+
+        val resume_result = stm32h7_resume()
+        if resume_result.is_err():
+            stm32h7_disconnect(openocd_pid)
+            print "[skip] resume failed: {resume_result.err().unwrap()}"
+            return
+
+        shell("sleep 0.5")
+        val r0_result = stm32h7_read_register(0)
+        val pc_after_result = stm32h7_read_register(15)
+        stm32h7_disconnect(openocd_pid)
+
+        if r0_result.is_err():
+            print "[skip] read R0 failed: {r0_result.err().unwrap()}"
+            return
+        if pc_after_result.is_err():
+            print "[skip] read PC failed: {pc_after_result.err().unwrap()}"
+            return
+
+        val r0 = r0_result.ok.unwrap()
+        val pc_after = pc_after_result.ok.unwrap()
+        val expected_halt_pc = layout.halt_addr
+        val expected_pc = layout.halt_addr + 2
+        expect(r0).to_equal(0)
+        expect(pc_after == expected_halt_pc or pc_after == expected_pc).to_equal(true)
