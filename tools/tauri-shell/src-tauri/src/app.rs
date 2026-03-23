@@ -3,7 +3,7 @@
 // Spawns a Simple binary as a subprocess and communicates via JSON IPC
 // over stdin/stdout.  The protocol is defined in src/app/ui.ipc/protocol.spl.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(unused_variables)]
 
 use std::env;
 use std::io::{BufRead, BufReader, Write};
@@ -211,125 +211,17 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
 
                         if (!window._evtBound) {{
                             window._evtBound = true;
-                            var T = window.__TAURI_INTERNALS__;
-
-                            // --- Keyboard events (skip when focused on form elements) ---
-                            document.addEventListener('keydown', function(e) {{
-                                var tag = e.target.tagName.toLowerCase();
-                                if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-                                var key = e.key;
-                                if (T && (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0)) {{
-                                    T.invoke('send_keypress', {{ key: key }});
-                                    if (['j','k','Tab','Escape',':','i'].indexOf(key) >= 0) e.preventDefault();
-                                }}
-                            }});
-
-                            // --- Click event delegation for all widget types ---
                             document.addEventListener('click', function(e) {{
-                                if (!T) return;
-                                var el = e.target;
-
-                                // Button clicks (data-action)
-                                var btn = el.closest('.widget-button, [data-action]');
-                                if (btn) {{
-                                    var action = btn.getAttribute('data-action');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                    return;
-                                }}
-
-                                // Checkbox toggle
-                                var cb = el.closest('.widget-checkbox');
-                                if (cb) {{
-                                    var action = cb.getAttribute('data-action');
-                                    var isChecked = cb.classList.contains('checked');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                    return;
-                                }}
-
-                                // List item selection
-                                var li = el.closest('.list-item');
-                                if (li) {{
-                                    var list = li.closest('.widget-list');
-                                    if (list) {{
-                                        var items = list.querySelectorAll('.list-item');
-                                        for (var i = 0; i < items.length; i++) {{
-                                            if (items[i] === li) {{
-                                                T.invoke('send_action', {{ name: 'select_' + list.id + '_' + i }});
-                                                break;
-                                            }}
-                                        }}
-                                    }}
-                                    return;
-                                }}
-
-                                // Tab switching
-                                var tab = el.closest('.tab-item');
-                                if (tab) {{
-                                    var tabs = tab.parentElement;
-                                    if (tabs) {{
-                                        var items = tabs.querySelectorAll('.tab-item');
-                                        for (var i = 0; i < items.length; i++) {{
-                                            items[i].classList.remove('active');
-                                            if (items[i] === tab) {{
-                                                tab.classList.add('active');
-                                                T.invoke('send_action', {{ name: 'tab_' + tabs.id + '_' + i }});
-                                            }}
-                                        }}
-                                    }}
-                                    return;
-                                }}
-
-                                // Tree node toggle
-                                var toggle = el.closest('.tree-toggle');
-                                if (toggle) {{
-                                    var action = toggle.getAttribute('data-action');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                    return;
-                                }}
-
-                                // Table header sort
-                                var th = el.closest('th[data-action]');
-                                if (th) {{
-                                    var action = th.getAttribute('data-action');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                    return;
-                                }}
-
-                                // Submenu item clicks
-                                var sub = el.closest('.submenu-item');
-                                if (sub) {{
-                                    var action = sub.getAttribute('data-action');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                    return;
+                                var btn = e.target.closest('[data-action]');
+                                if (btn && window.__TAURI_INTERNALS__) {{
+                                    window.__TAURI_INTERNALS__.invoke('send_action', {{ name: btn.getAttribute('data-action') }});
                                 }}
                             }});
-
-                            // --- Dropdown change handler ---
-                            document.addEventListener('change', function(e) {{
-                                if (!T) return;
-                                var dd = e.target.closest('.widget-dropdown');
-                                if (dd) {{
-                                    T.invoke('send_action', {{ name: 'select_' + dd.id + '_' + e.target.selectedIndex }});
-                                    return;
+                            document.addEventListener('keydown', function(e) {{
+                                var key = e.key;
+                                if (window.__TAURI_INTERNALS__ && (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0)) {{
+                                    window.__TAURI_INTERNALS__.invoke('send_keypress', {{ key: key }});
                                 }}
-                                var inp = e.target.closest('.widget-input, .widget-textfield');
-                                if (inp && inp.id) T.invoke('send_action', {{ name: 'change_' + inp.id }});
-                                var ta = e.target.closest('.widget-textarea');
-                                if (ta && ta.id) T.invoke('send_action', {{ name: 'change_' + ta.id }});
-                            }});
-
-                            // --- Table filter input handler ---
-                            document.addEventListener('input', function(e) {{
-                                if (!T) return;
-                                if (e.target.classList.contains('table-filter')) {{
-                                    var action = e.target.getAttribute('data-action');
-                                    if (action) T.invoke('send_action', {{ name: action }});
-                                }}
-                            }});
-
-                            // --- Window resize forwarding ---
-                            window.addEventListener('resize', function() {{
-                                if (T) T.invoke('send_resize', {{ width: window.innerWidth, height: window.innerHeight }});
                             }});
                         }}
                     }})();
@@ -378,8 +270,6 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                     _ => {}
                 }
             }
-            #[cfg(mobile)]
-            { let _ = action; }
         }
     }
 }
@@ -551,8 +441,6 @@ pub fn run() {
                 builder = builder.title("Simple UI").inner_size(1280.0, 720.0);
             }
             let _win = builder.build()?;
-
-            // Uncomment to debug: win.open_devtools();
 
             eprintln!("[tauri-shell] window created");
 
