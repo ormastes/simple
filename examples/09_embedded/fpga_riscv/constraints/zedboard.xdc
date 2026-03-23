@@ -1,24 +1,11 @@
-## ZedBoard Pin Constraints for RV32I CPU
-## Target: Zynq-7020 (XC7Z020-CLG484)
-
-## 100 MHz Clock
+## ZedBoard Pin Constraints for RV32I CPU (XC7Z020-CLG484)
 set_property PACKAGE_PIN Y9 [get_ports GCLK]
 set_property IOSTANDARD LVCMOS33 [get_ports GCLK]
 create_clock -period 10.000 -name sys_clk [get_ports GCLK]
 
-## Buttons
 set_property PACKAGE_PIN P16 [get_ports BTNC]
 set_property IOSTANDARD LVCMOS18 [get_ports BTNC]
-set_property PACKAGE_PIN T18 [get_ports BTNU]
-set_property IOSTANDARD LVCMOS18 [get_ports BTNU]
-set_property PACKAGE_PIN R16 [get_ports BTND]
-set_property IOSTANDARD LVCMOS18 [get_ports BTND]
-set_property PACKAGE_PIN N15 [get_ports BTNL]
-set_property IOSTANDARD LVCMOS18 [get_ports BTNL]
-set_property PACKAGE_PIN R18 [get_ports BTNR]
-set_property IOSTANDARD LVCMOS18 [get_ports BTNR]
 
-## LEDs
 set_property PACKAGE_PIN T22 [get_ports {LD[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {LD[0]}]
 set_property PACKAGE_PIN T21 [get_ports {LD[1]}]
@@ -36,7 +23,6 @@ set_property IOSTANDARD LVCMOS33 [get_ports {LD[6]}]
 set_property PACKAGE_PIN U14 [get_ports {LD[7]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {LD[7]}]
 
-## Switches
 set_property PACKAGE_PIN F22 [get_ports {SW[0]}]
 set_property IOSTANDARD LVCMOS18 [get_ports {SW[0]}]
 set_property PACKAGE_PIN G22 [get_ports {SW[1]}]

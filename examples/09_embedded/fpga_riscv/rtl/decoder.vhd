@@ -1,6 +1,3 @@
--- RV32I Instruction Decoder
--- Decodes instruction fields and generates control signals
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -9,7 +6,6 @@ use work.rv32i_pkg.all;
 entity decoder is
     port (
         instruction : in  std_logic_vector(31 downto 0);
-        -- Decoded fields
         opcode      : out std_logic_vector(6 downto 0);
         rd          : out std_logic_vector(4 downto 0);
         rs1         : out std_logic_vector(4 downto 0);
@@ -17,51 +13,40 @@ entity decoder is
         funct3      : out std_logic_vector(2 downto 0);
         funct7      : out std_logic_vector(6 downto 0);
         imm         : out std_logic_vector(31 downto 0);
-        -- Control signals
         alu_op      : out alu_op_t;
         reg_write   : out std_logic;
         mem_read    : out std_logic;
         mem_write   : out std_logic;
         mem_to_reg  : out std_logic;
-        alu_src     : out std_logic;  -- '0'=rs2, '1'=imm
+        alu_src     : out std_logic;
         branch      : out std_logic;
         jump        : out std_logic
     );
 end entity decoder;
 
 architecture rtl of decoder is
-    signal op  : std_logic_vector(6 downto 0);
-    signal f3  : std_logic_vector(2 downto 0);
-    signal f7  : std_logic_vector(6 downto 0);
+    signal op : std_logic_vector(6 downto 0);
+    signal f3 : std_logic_vector(2 downto 0);
+    signal f7 : std_logic_vector(6 downto 0);
 begin
     op <= instruction(6 downto 0);
     f3 <= instruction(14 downto 12);
     f7 <= instruction(31 downto 25);
+    opcode <= op; rd <= instruction(11 downto 7);
+    rs1 <= instruction(19 downto 15); rs2 <= instruction(24 downto 20);
+    funct3 <= f3; funct7 <= f7;
 
-    opcode <= op;
-    rd     <= instruction(11 downto 7);
-    rs1    <= instruction(19 downto 15);
-    rs2    <= instruction(24 downto 20);
-    funct3 <= f3;
-    funct7 <= f7;
-
-    -- Immediate generation (sign-extended)
     process(instruction, op)
     begin
         case op is
-            -- I-type
             when OP_IMMED | OP_LOAD | OP_JALR =>
                 imm <= (31 downto 12 => instruction(31)) & instruction(31 downto 20);
-            -- S-type
             when OP_STORE =>
                 imm <= (31 downto 12 => instruction(31)) & instruction(31 downto 25) & instruction(11 downto 7);
-            -- B-type
             when OP_BRANCH =>
                 imm <= (31 downto 13 => instruction(31)) & instruction(31) & instruction(7) & instruction(30 downto 25) & instruction(11 downto 8) & '0';
-            -- U-type
             when OP_LUI | OP_AUIPC =>
                 imm <= instruction(31 downto 12) & x"000";
-            -- J-type
             when OP_JAL =>
                 imm <= (31 downto 21 => instruction(31)) & instruction(31) & instruction(19 downto 12) & instruction(20) & instruction(30 downto 21) & '0';
             when others =>
@@ -69,10 +54,9 @@ begin
         end case;
     end process;
 
-    -- ALU operation decode
     process(op, f3, f7)
     begin
-        alu_op <= ALU_ADD;  -- default
+        alu_op <= ALU_ADD;
         case op is
             when OP_REG =>
                 case f3 is
@@ -84,7 +68,7 @@ begin
                     when "101" => if f7(5) = '1' then alu_op <= ALU_SRA; else alu_op <= ALU_SRL; end if;
                     when "110" => alu_op <= ALU_OR;
                     when "111" => alu_op <= ALU_AND;
-                    when others => alu_op <= ALU_ADD;
+                    when others => null;
                 end case;
             when OP_IMMED =>
                 case f3 is
@@ -96,27 +80,20 @@ begin
                     when "101" => if f7(5) = '1' then alu_op <= ALU_SRA; else alu_op <= ALU_SRL; end if;
                     when "110" => alu_op <= ALU_OR;
                     when "111" => alu_op <= ALU_AND;
-                    when others => alu_op <= ALU_ADD;
+                    when others => null;
                 end case;
-            when OP_LUI =>
-                alu_op <= ALU_PASS_B;
-            when OP_BRANCH | OP_STORE | OP_LOAD | OP_AUIPC | OP_JAL | OP_JALR =>
-                alu_op <= ALU_ADD;
-            when others =>
-                alu_op <= ALU_ADD;
+            when OP_LUI => alu_op <= ALU_PASS_B;
+            when others => alu_op <= ALU_ADD;
         end case;
     end process;
 
-    -- Control signals
     reg_write  <= '1' when (op = OP_REG or op = OP_IMMED or op = OP_LOAD or
-                            op = OP_LUI or op = OP_AUIPC or op = OP_JAL or op = OP_JALR)
-                      else '0';
+                            op = OP_LUI or op = OP_AUIPC or op = OP_JAL or op = OP_JALR) else '0';
     mem_read   <= '1' when op = OP_LOAD  else '0';
     mem_write  <= '1' when op = OP_STORE else '0';
     mem_to_reg <= '1' when op = OP_LOAD  else '0';
     alu_src    <= '1' when (op = OP_IMMED or op = OP_LOAD or op = OP_STORE or
-                            op = OP_LUI or op = OP_AUIPC or op = OP_JAL or op = OP_JALR)
-                      else '0';
+                            op = OP_LUI or op = OP_AUIPC or op = OP_JAL or op = OP_JALR) else '0';
     branch     <= '1' when op = OP_BRANCH else '0';
     jump       <= '1' when (op = OP_JAL or op = OP_JALR) else '0';
 end architecture rtl;

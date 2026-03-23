@@ -1,5 +1,3 @@
--- RV32I ALU - Arithmetic Logic Unit
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -36,7 +34,6 @@ begin
             when ALU_PASS_B => res_i <= op_b;
         end case;
     end process;
-
     result <= res_i;
     zero   <= '1' when res_i = x"00000000" else '0';
 end architecture rtl;
