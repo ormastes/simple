@@ -1,0 +1,128 @@
+"""
+RV32 Guest CPU Definition Specification
+
+Tests for build_rv32_cpu_def(): register count, widths, address spaces,
+and GuestState register read/write with masking.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{GuestArch}
+use core.mem_op.{Endian}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.riscv.cpu32.{build_rv32_cpu_def}
+use guest.riscv.common.{RV_REG_PC, RV_CSR_MSTATUS, RV_TOTAL_REGS}
+
+# ============================================================================
+# RV32 CPU Definition -- Structure
+# ============================================================================
+
+describe "RV32 CPU definition structure":
+    it "has correct architecture":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.arch.to_text()).to_equal("riscv32")
+
+    it "has 32-bit word size":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.word_size).to_equal(32)
+
+    it "is little-endian":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.endian.to_text()).to_equal("le")
+
+    it "has name 'riscv32'":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.name).to_equal("riscv32")
+
+    it "has 42 registers total":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.register_count()).to_equal(42)
+
+    it "has no flags register":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.flags_reg).to_be_nil()
+
+    it "has sp_reg pointing to x2":
+        val cpu = build_rv32_cpu_def()
+        if val sp = cpu.sp_reg:
+            expect(sp.name).to_equal("sp")
+
+# ============================================================================
+# RV32 CPU Definition -- Register widths
+# ============================================================================
+
+describe "RV32 register widths":
+    it "has 32-bit GPRs":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.registers[0].width).to_equal(32)
+        expect(cpu.registers[31].width).to_equal(32)
+
+    it "has x0 named zero":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.registers[0].id.name).to_equal("zero")
+
+    it "has correct ABI register names":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.registers[1].id.name).to_equal("ra")
+        expect(cpu.registers[2].id.name).to_equal("sp")
+        expect(cpu.registers[10].id.name).to_equal("a0")
+
+    it "has 32-bit PC":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.registers[RV_REG_PC].width).to_equal(32)
+
+    it "has 32-bit CSRs":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.registers[RV_CSR_MSTATUS].width).to_equal(32)
+
+# ============================================================================
+# RV32 CPU Definition -- Address spaces
+# ============================================================================
+
+describe "RV32 address spaces":
+    it "has flat address space":
+        val cpu = build_rv32_cpu_def()
+        expect(cpu.addr_spaces.len()).to_equal(1)
+        expect(cpu.addr_spaces[0].name).to_equal("memory")
+        expect(cpu.addr_spaces[0].addr_width).to_equal(32)
+
+    it "has CSR registers":
+        val cpu = build_rv32_cpu_def()
+        val mstatus = cpu.find_register("mstatus")
+        expect(mstatus.?).to_equal(true)
+
+    it "finds registers by name":
+        val cpu = build_rv32_cpu_def()
+        val a0 = cpu.find_register("a0")
+        expect(a0.?).to_equal(true)
+        val unknown = cpu.find_register("nonexistent")
+        expect(unknown).to_be_nil()
+
+# ============================================================================
+# GuestState -- Register access with masking
+# ============================================================================
+
+describe "RV32 GuestState":
+    it "initializes all registers to 0":
+        val cpu = build_rv32_cpu_def()
+        val state = GuestState.new(cpu)
+        expect(state.get_reg(0)).to_equal(0)
+        expect(state.get_reg(10)).to_equal(0)
+        expect(state.pc).to_equal(0)
+
+    it "masks values to 32 bits":
+        val cpu = build_rv32_cpu_def()
+        var state = GuestState.new(cpu)
+        state.set_reg(10, 0x1_FFFFFFFF)
+        expect(state.get_reg(10)).to_equal(0xFFFFFFFF)
+
+    it "finds registers by name":
+        val cpu = build_rv32_cpu_def()
+        var state = GuestState.new(cpu)
+        state.set_reg_by_name("a0", 42)
+        expect(state.get_reg_by_name("a0")).to_equal(Some(42))
+
+    it "get_reg_by_name returns nil for invalid name":
+        val cpu = build_rv32_cpu_def()
+        val state = GuestState.new(cpu)
+        val result = state.get_reg_by_name("NONEXISTENT")
+        expect(result).to_be_nil()

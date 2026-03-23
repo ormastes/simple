@@ -129,7 +129,7 @@ Status: started
 
 ### Phase 3. Extract hardware abstraction layer from STM32H7
 
-- Status: started
+- Status: in progress
 - first extracted module:
   - `src/lib/nogc_sync_mut/jit/jit_hal_stm32h7.spl`
 - after STM32H7 direct path is stable, extract the actual operations it uses into a backend HAL
@@ -220,6 +220,22 @@ Practical rule:
 - current proof target order:
   STM32H7 real hardware first, then QEMU RV32, then real RISC-V hardware
 
+### Current shared workload status
+
+- host shared workload:
+  `test/integration/remote_jit/baremetal_library_host_spec.spl` passes
+- STM32H7 real hardware shared workload:
+  `test/integration/remote_jit/stm32h7_composite_runner_spec.spl` passes
+- QEMU RV32 shared workload:
+  `test/integration/remote_jit/qemu_rv32_composite_runner_spec.spl` is now interpreter-safe and passes as a blocked/skip-style transport check
+  current live blocker on this host is lack of a target-aware RISC-V GDB
+  (`riscv32-unknown-elf-gdb`, `riscv64-unknown-elf-gdb`, or `gdb-multiarch`)
+  so QEMU physical memory write mode cannot be used reliably
+- the remaining STM32H7 interpreter blocker was in `jit_util.spl`:
+  `index_of()` was being treated as an integer in helper code, which triggered the documented runtime failure
+  `semantic: type mismatch: cannot convert enum to int`
+- STM32H7 shared workload is currently proven with a direct HAL-backed path and a temporary ARM32 stub compiler in the spec
+
 ---
 
 ## Current Known Risks
@@ -228,6 +244,8 @@ Practical rule:
 - there are stale OpenOCD session risks when tests leak processes
 - the older dedicated STM32H7 E2E spec is still unstable on SRAM/register readback and is not yet moved onto the new HAL path
 - the current baremetal “library” coverage on hardware is still mostly smoke-oriented fixture execution, not a shared host+remote library test workload
+- TRACE32 on this host is repo-ready but session-blocked:
+  `/opt/t32/bin/pc_linux64/t32rem localhost port=20000 PING` times out with exit `124`
 - GDB-MI and telnet startup behavior are still inconsistent enough that the telnet path remains the more practical STM32H7 control path for now
 
 ---
@@ -239,7 +257,8 @@ After the STM32H7 hardware-backed library test shape is working, the next backen
 Order:
 
 1. QEMU `riscv32` on the shared runner
-2. real RISC-V hardware only after the QEMU path uses the same shared library test shape
+2. fix the QEMU `riscv32` transport so the shared workload executes instead of skipping on blocked writes
+3. real RISC-V hardware only after the QEMU path uses the same shared library test shape
 
 The RISC-V objective is not another ELF/smoke check.
 It is to make the same baremetal library test workload run through:

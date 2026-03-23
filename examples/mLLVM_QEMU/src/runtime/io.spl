@@ -51,12 +51,13 @@ struct IoController:
     mapping_count: i64
 
     # Device storage by kind (tagged union approach since no dynamic dispatch)
-    device_kind: [i64]          # 0=avr_port, 1=avr_timer, 2=avr_uart, 3=x86_serial, 4=x86_pic
+    device_kind: [i64]          # 0=avr_port, 1=avr_timer, 2=avr_uart, 3=x86_serial, 4=x86_pic, 5=riscv_uart
     avr_ports: [AvrPortIO]
     avr_timers: [AvrTimerIO]
     avr_uarts: [AvrUartIO]
     x86_serials: [X86SerialIO]
     x86_pics: [X86PicIO]
+    riscv_uarts: [RiscvUartIO]
 
     # Logging
     log_enabled: bool
@@ -73,6 +74,7 @@ impl IoController:
             avr_uarts: [],
             x86_serials: [],
             x86_pics: [],
+            riscv_uarts: [],
             log_enabled: false,
             log_entries: []
         )
@@ -119,6 +121,14 @@ impl IoController:
         self.x86_pics.push(device)
         self.device_kind.push(4)
         self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_riscv_uart(base_addr: i64, uart: RiscvUartIO):
+        """Register a RISC-V UART device at the given MMIO base address."""
+        val idx = self.riscv_uarts.len()
+        self.riscv_uarts.push(uart)
+        self.device_kind.push(5)
+        self.mappings.push(PortMapping.new(base_addr, base_addr + 8, self.mapping_count))
         self.mapping_count = self.mapping_count + 1
 
     # ========================================================================
@@ -173,6 +183,9 @@ impl IoController:
         else if kind == 4:
             if self.x86_pics.len() > 0:
                 return self.x86_pics[0].read(port, width)
+        else if kind == 5:
+            if self.riscv_uarts.len() > 0:
+                return self.riscv_uarts[0].read_byte(port, width)
         0xFF
 
     me _dispatch_write(kind: i64, port: i64, width: i64, value: i64):
@@ -192,6 +205,9 @@ impl IoController:
         else if kind == 4:
             if self.x86_pics.len() > 0:
                 self.x86_pics[0].write(port, width, value)
+        else if kind == 5:
+            if self.riscv_uarts.len() > 0:
+                self.riscv_uarts[0].write_byte(port, width, value)
 
     # ========================================================================
     # Logging
@@ -821,6 +837,84 @@ impl X86PicIO:
             self.master_vector_base + irq
         else:
             self.slave_vector_base + (irq - 8)
+
+# ============================================================================
+# RISC-V UART I/O (QEMU virt machine)
+# ============================================================================
+
+# QEMU virt machine UART base address
+val RISCV_UART_BASE: i64 = 0x10000000
+
+# UART register offsets (16550-compatible)
+val RISCV_UART_RBR: i64 = 0    # Receive Buffer Register (read)
+val RISCV_UART_THR: i64 = 0    # Transmit Holding Register (write)
+val RISCV_UART_LSR: i64 = 5    # Line Status Register
+
+# LSR bits
+val RISCV_UART_LSR_DR: i64 = 0x01      # Data Ready
+val RISCV_UART_LSR_THRE: i64 = 0x20    # TX Holding Register Empty
+val RISCV_UART_LSR_TEMT: i64 = 0x40    # Transmitter Empty
+
+struct RiscvUartIO:
+    """RISC-V UART I/O device (QEMU virt machine UART at 0x10000000)."""
+    tx_buffer: [i64]
+    rx_buffer: [i64]
+    rx_read_pos: i64
+
+impl RiscvUartIO:
+    static fn new() -> RiscvUartIO:
+        RiscvUartIO(tx_buffer: [], rx_buffer: [], rx_read_pos: 0)
+
+    fn read_byte(offset: i64, width: i64) -> i64:
+        """Read from UART register at given offset.
+        offset 0 = RBR (receive buffer), offset 5 = LSR (line status).
+        """
+        if offset == RISCV_UART_RBR:
+            # RBR — return current receive byte
+            if self.rx_read_pos < self.rx_buffer.len():
+                self.rx_buffer[self.rx_read_pos]
+            else:
+                0
+        else if offset == RISCV_UART_LSR:
+            # LSR — always report TX ready, RX available if buffer non-empty
+            val rx_ready = if self.rx_read_pos < self.rx_buffer.len(): RISCV_UART_LSR_DR else: 0
+            RISCV_UART_LSR_THRE | RISCV_UART_LSR_TEMT | rx_ready
+        else:
+            0
+
+    me write_byte(offset: i64, width: i64, value: i64):
+        """Write to UART register at given offset.
+        offset 0 = THR (transmit holding register).
+        """
+        if offset == RISCV_UART_THR:
+            self.tx_buffer.push(value & 0xFF)
+
+    fn name() -> text:
+        "riscv-uart"
+
+    me push_rx_byte(byte: i64):
+        """Push a byte into the receive buffer (simulates incoming data)."""
+        self.rx_buffer.push(byte & 0xFF)
+
+    me consume_rx():
+        """Advance receive buffer (called after guest reads RBR)."""
+        self.rx_read_pos = self.rx_read_pos + 1
+
+    fn get_tx_output() -> [i64]:
+        """Get all transmitted bytes (for test verification)."""
+        self.tx_buffer
+
+    fn get_tx_text() -> text:
+        """Get transmitted bytes as text string."""
+        var s = ""
+        for byte in self.tx_buffer:
+            if (byte >= 32) & (byte < 127):
+                s = s + _char_from_byte(byte)
+            else if byte == 10:
+                s = s + "\n"
+            else if byte == 13:
+                s = s + "\r"
+        s
 
 # ============================================================================
 # Helper: byte to single-character text

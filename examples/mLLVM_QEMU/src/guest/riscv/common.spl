@@ -1,0 +1,192 @@
+# RISC-V Shared Constants and Helpers
+#
+# Register layout, ABI names, CSR mapping, and instruction field extractors
+# shared by both RV32 and RV64 guest implementations.
+#
+# Reference: RISC-V ISA Manual, Volume I (Unprivileged) + Volume II (Privileged)
+
+# ============================================================================
+# Register Indices
+# ============================================================================
+#
+# x0-x31: General purpose registers (indices 0-31)
+# PC:     Program counter (index 32)
+# CSRs:   Machine-mode CSRs (indices 33-41)
+
+val RV_REG_PC: i64 = 32
+val RV_CSR_MSTATUS: i64 = 33
+val RV_CSR_MTVEC: i64 = 34
+val RV_CSR_MEPC: i64 = 35
+val RV_CSR_MCAUSE: i64 = 36
+val RV_CSR_MTVAL: i64 = 37
+val RV_CSR_MIE: i64 = 38
+val RV_CSR_MIP: i64 = 39
+val RV_CSR_MSCRATCH: i64 = 40
+val RV_CSR_MHARTID: i64 = 41
+val RV_TOTAL_REGS: i64 = 42
+
+# ============================================================================
+# ABI Register Names
+# ============================================================================
+
+fn rv_gpr_name(index: i64) -> text:
+    """Return the ABI name for a RISC-V general-purpose register (x0-x31)."""
+    match index:
+        0: "zero"
+        1: "ra"
+        2: "sp"
+        3: "gp"
+        4: "tp"
+        5: "t0"
+        6: "t1"
+        7: "t2"
+        8: "s0"
+        9: "s1"
+        10: "a0"
+        11: "a1"
+        12: "a2"
+        13: "a3"
+        14: "a4"
+        15: "a5"
+        16: "a6"
+        17: "a7"
+        18: "s2"
+        19: "s3"
+        20: "s4"
+        21: "s5"
+        22: "s6"
+        23: "s7"
+        24: "s8"
+        25: "s9"
+        26: "s10"
+        27: "s11"
+        28: "t3"
+        29: "t4"
+        30: "t5"
+        31: "t6"
+        _: "x{index}"
+
+# ============================================================================
+# CSR Address to Register Index Mapping
+# ============================================================================
+
+fn rv_csr_to_reg(csr_addr: i64) -> i64?:
+    """Map a 12-bit CSR address to our internal register index.
+
+    Only machine-mode CSRs are currently supported.
+    Returns nil for unrecognized CSR addresses.
+    """
+    match csr_addr:
+        0x300: Some(RV_CSR_MSTATUS)
+        0x305: Some(RV_CSR_MTVEC)
+        0x341: Some(RV_CSR_MEPC)
+        0x342: Some(RV_CSR_MCAUSE)
+        0x343: Some(RV_CSR_MTVAL)
+        0x304: Some(RV_CSR_MIE)
+        0x344: Some(RV_CSR_MIP)
+        0x340: Some(RV_CSR_MSCRATCH)
+        0xF14: Some(RV_CSR_MHARTID)
+        _: nil
+
+# ============================================================================
+# Instruction Format Field Extractors
+# ============================================================================
+#
+# All RISC-V base instructions are 32-bit. Fields are extracted from the
+# little-endian instruction word.
+
+fn rv_opcode(inst: i64) -> i64:
+    """Extract opcode field — bits [6:0]."""
+    inst & 0x7F
+
+fn rv_rd(inst: i64) -> i64:
+    """Extract rd field — bits [11:7]."""
+    (inst >> 7) & 0x1F
+
+fn rv_funct3(inst: i64) -> i64:
+    """Extract funct3 field — bits [14:12]."""
+    (inst >> 12) & 0x7
+
+fn rv_rs1(inst: i64) -> i64:
+    """Extract rs1 field — bits [19:15]."""
+    (inst >> 15) & 0x1F
+
+fn rv_rs2(inst: i64) -> i64:
+    """Extract rs2 field — bits [24:20]."""
+    (inst >> 20) & 0x1F
+
+fn rv_funct7(inst: i64) -> i64:
+    """Extract funct7 field — bits [31:25]."""
+    (inst >> 25) & 0x7F
+
+# ============================================================================
+# Immediate Extractors (sign-extended to i64)
+# ============================================================================
+
+fn rv_sign_extend(value: i64, bits: i64) -> i64:
+    """Sign-extend a value from 'bits' width to full i64.
+
+    If the sign bit (bit 'bits-1') is set, fill upper bits with 1s.
+    """
+    val sign_bit = 1 << (bits - 1)
+    if (value & sign_bit) != 0:
+        # Set all bits above 'bits' to 1
+        val mask = (1 << bits) - 1
+        value | (0 - (1 << bits))
+    else:
+        value
+
+fn rv_imm_i(inst: i64) -> i64:
+    """Extract I-type immediate — bits [31:20], sign-extended.
+
+    Layout: imm[11:0] = inst[31:20]
+    """
+    val raw = (inst >> 20) & 0xFFF
+    rv_sign_extend(raw, 12)
+
+fn rv_imm_s(inst: i64) -> i64:
+    """Extract S-type immediate — bits [31:25|11:7], sign-extended.
+
+    Layout: imm[11:5] = inst[31:25], imm[4:0] = inst[11:7]
+    """
+    val hi = (inst >> 25) & 0x7F
+    val lo = (inst >> 7) & 0x1F
+    val raw = (hi << 5) | lo
+    rv_sign_extend(raw, 12)
+
+fn rv_imm_b(inst: i64) -> i64:
+    """Extract B-type immediate — sign-extended, always even.
+
+    Layout: imm[12] = inst[31], imm[10:5] = inst[30:25],
+            imm[4:1] = inst[11:8], imm[11] = inst[7]
+    Bit 0 is always 0 (branch targets are 2-byte aligned).
+    """
+    val bit12 = (inst >> 31) & 1
+    val bit11 = (inst >> 7) & 1
+    val bits10_5 = (inst >> 25) & 0x3F
+    val bits4_1 = (inst >> 8) & 0xF
+    val raw = (bit12 << 12) | (bit11 << 11) | (bits10_5 << 5) | (bits4_1 << 1)
+    rv_sign_extend(raw, 13)
+
+fn rv_imm_u(inst: i64) -> i64:
+    """Extract U-type immediate — bits [31:12] << 12.
+
+    Layout: imm[31:12] = inst[31:12], imm[11:0] = 0
+    Result is already shifted; sign-extend the 32-bit value.
+    """
+    val raw = inst & 0xFFFFF000
+    rv_sign_extend(raw, 32)
+
+fn rv_imm_j(inst: i64) -> i64:
+    """Extract J-type immediate — sign-extended, always even.
+
+    Layout: imm[20] = inst[31], imm[10:1] = inst[30:21],
+            imm[11] = inst[20], imm[19:12] = inst[19:12]
+    Bit 0 is always 0 (jump targets are 2-byte aligned).
+    """
+    val bit20 = (inst >> 31) & 1
+    val bits10_1 = (inst >> 21) & 0x3FF
+    val bit11 = (inst >> 20) & 1
+    val bits19_12 = (inst >> 12) & 0xFF
+    val raw = (bit20 << 20) | (bits19_12 << 12) | (bit11 << 11) | (bits10_1 << 1)
+    rv_sign_extend(raw, 21)

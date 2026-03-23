@@ -1,0 +1,306 @@
+"""
+RV64I Emulator End-to-End Integration Specification
+
+Exercises the full RV64I emulation pipeline: create emulator via Width64Lib,
+load machine code programs, step through instructions, verify register
+and memory state. Includes RV64I-specific tests for W-suffix instructions
+and 64-bit memory operations (SD/LD).
+
+**Feature IDs:** #MLLVM-RV64-E2E
+**Category:** Testing
+**Status:** Implemented
+"""
+
+use std.spec.{describe, it, expect}
+use libwidth.lib64.{Width64Lib, Rv64Emulator}
+use test.helpers.riscv_encode.{
+    encode_addi, encode_add, encode_sub, encode_lui,
+    encode_sw, encode_lw, encode_beq, encode_bne,
+    encode_jal, encode_jalr, encode_nop, encode_ebreak, encode_ecall,
+    bytes_to_word, encode_rv_i, encode_rv_r, encode_rv_s, encode_rv_b
+}
+
+# ============================================================================
+# RV64I-specific instruction encoders
+# ============================================================================
+
+fn encode_ld(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LD rd, offset(rs1) — 64-bit load."""
+    encode_rv_i(offset, rs1, 3, rd, 0x03)
+
+fn encode_sd(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode SD rs2, offset(rs1) — 64-bit store."""
+    encode_rv_s(offset, rs2, rs1, 3, 0x23)
+
+fn encode_lwu(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LWU rd, offset(rs1) — 32-bit unsigned load (zero-extends to 64)."""
+    encode_rv_i(offset, rs1, 6, rd, 0x03)
+
+fn encode_addiw(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode ADDIW rd, rs1, imm — 32-bit add immediate, sign-extend result."""
+    encode_rv_i(imm, rs1, 0, rd, 0x1B)
+
+fn encode_addw(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode ADDW rd, rs1, rs2 — 32-bit add, sign-extend result."""
+    encode_rv_r(0x00, rs2, rs1, 0, rd, 0x3B)
+
+fn encode_subw(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SUBW rd, rs1, rs2 — 32-bit sub, sign-extend result."""
+    encode_rv_r(0x20, rs2, rs1, 0, rd, 0x3B)
+
+# ============================================================================
+# Helper: create emulator with program loaded at 0x80000000
+# ============================================================================
+
+fn create_rv64_emu(program: [i64]) -> Rv64Emulator:
+    """Create an RV64 emulator with program loaded and PC reset to 0x80000000."""
+    val lib = Width64Lib.new()
+    var emu = lib.create_rv64_emulator()
+    emu.load_program(program)
+    emu.reset()
+    emu
+
+# ============================================================================
+# RV64I Emulator -- Arithmetic (base instructions shared with RV32)
+# ============================================================================
+
+describe "RV64I emulator — arithmetic":
+    """Verify basic arithmetic instructions work in 64-bit mode."""
+
+    it "executes ADDI x10, x0, 42":
+        var program = encode_addi(10, 0, 42)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.step()
+        expect(emu.get_reg("a0")).to_equal(Some(42))
+
+    it "executes ADD x10, x11, x12":
+        var program = encode_addi(11, 0, 10)
+        program = program + encode_addi(12, 0, 20)
+        program = program + encode_add(10, 11, 12)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(3)
+        expect(emu.get_reg("a0")).to_equal(Some(30))
+
+    it "executes SUB x10, x11, x12":
+        var program = encode_addi(11, 0, 50)
+        program = program + encode_addi(12, 0, 20)
+        program = program + encode_sub(10, 11, 12)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(3)
+        expect(emu.get_reg("a0")).to_equal(Some(30))
+
+    it "executes LUI to load upper immediate":
+        # LUI x10, 0x12345  (loads 0x12345000 into x10)
+        var program = encode_lui(10, 0x12345000)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.step()
+        expect(emu.get_reg("a0")).to_equal(Some(0x12345000))
+
+# ============================================================================
+# RV64I Emulator -- x0 hardwired zero
+# ============================================================================
+
+describe "RV64I emulator — x0 hardwired zero":
+    """Verify x0 always reads as zero and writes are discarded."""
+
+    it "x0 always reads as zero":
+        var emu = create_rv64_emu(encode_ebreak())
+        expect(emu.get_reg("zero")).to_equal(Some(0))
+
+    it "writing to x0 has no effect":
+        var program = encode_addi(0, 0, 42)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.step()
+        expect(emu.get_reg("zero")).to_equal(Some(0))
+
+# ============================================================================
+# RV64I Emulator -- Memory (32-bit operations)
+# ============================================================================
+
+describe "RV64I emulator — memory":
+    """Test store/load roundtrip through emulated memory."""
+
+    it "SW/LW roundtrip":
+        # ADDI x11, x0, 42
+        # LUI x12, 0x80000000
+        # ADDI x12, x12, 0x100
+        # SW x12, x11, 0
+        # LW x10, x12, 0
+        var program = encode_addi(11, 0, 42)
+        program = program + encode_lui(12, 0x80000000)
+        program = program + encode_addi(12, 12, 0x100)
+        program = program + encode_sw(12, 11, 0)
+        program = program + encode_lw(10, 12, 0)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(5)
+        expect(emu.get_reg("a0")).to_equal(Some(42))
+
+    it "SD/LD 64-bit roundtrip":
+        # Build a 64-bit value: LUI + ADDI + shift + OR
+        # Simpler approach: store a known small value via SD, load via LD
+        # ADDI x11, x0, 99        — x11 = 99
+        # LUI x12, 0x80000000     — x12 = base address
+        # ADDI x12, x12, 0x200    — x12 = 0x80000200
+        # SD x12, x11, 0           — mem[0x80000200..+8] = 99
+        # LD x10, x12, 0           — x10 = mem[0x80000200..+8]
+        var program = encode_addi(11, 0, 99)
+        program = program + encode_lui(12, 0x80000000)
+        program = program + encode_addi(12, 12, 0x200)
+        program = program + encode_sd(12, 11, 0)
+        program = program + encode_ld(10, 12, 0)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(5)
+        expect(emu.get_reg("a0")).to_equal(Some(99))
+
+    it "LWU zero-extends 32-bit to 64-bit":
+        # Store a 32-bit value then load with LWU (zero-extend)
+        # ADDI x11, x0, 42
+        # LUI x12, 0x80000000
+        # ADDI x12, x12, 0x300
+        # SW x12, x11, 0
+        # LWU x10, x12, 0
+        var program = encode_addi(11, 0, 42)
+        program = program + encode_lui(12, 0x80000000)
+        program = program + encode_addi(12, 12, 0x300)
+        program = program + encode_sw(12, 11, 0)
+        program = program + encode_lwu(10, 12, 0)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(5)
+        expect(emu.get_reg("a0")).to_equal(Some(42))
+
+# ============================================================================
+# RV64I Emulator -- W-suffix instructions
+# ============================================================================
+
+describe "RV64I emulator — W-suffix instructions":
+    """Test ADDIW, ADDW, SUBW — 32-bit operations with sign-extension to 64."""
+
+    it "ADDIW computes in 32-bit and sign-extends":
+        # ADDIW x10, x0, -1 => x10 should be sign-extended 0xFFFFFFFF -> 0xFFFFFFFFFFFFFFFF
+        var program = encode_addiw(10, 0, -1)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.step()
+        # -1 in 32-bit is 0xFFFFFFFF, sign-extended to 64-bit is -1
+        expect(emu.get_reg("a0")).to_equal(Some(-1))
+
+    it "ADDIW with positive result":
+        # ADDIW x10, x0, 100
+        var program = encode_addiw(10, 0, 100)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.step()
+        expect(emu.get_reg("a0")).to_equal(Some(100))
+
+    it "ADDW wraps at 32 bits and sign-extends":
+        # Set x11 = 0x7FFFFFFF via LUI + ADDI
+        # LUI x11, 0x7FFFF000 (upper bits)
+        # ADDI x11, x11, 0x7FF (lower bits => x11 = 0x7FFFF7FF)
+        # Actually, let's use a simpler approach:
+        # ADDIW x11, x0, -1  => x11 = 0xFFFFFFFFFFFFFFFF
+        # ADDIW x12, x0, 1   => x12 = 1
+        # ADDW x10, x11, x12 => 32-bit: 0xFFFFFFFF + 1 = 0 (wraps), sign-ext => 0
+        var program = encode_addiw(11, 0, -1)
+        program = program + encode_addiw(12, 0, 1)
+        program = program + encode_addw(10, 11, 12)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(3)
+        expect(emu.get_reg("a0")).to_equal(Some(0))
+
+    it "SUBW computes in 32-bit and sign-extends":
+        # ADDIW x11, x0, 10 => x11 = 10
+        # ADDIW x12, x0, 30 => x12 = 30
+        # SUBW x10, x11, x12 => 32-bit: 10 - 30 = -20, sign-ext to 64-bit
+        var program = encode_addiw(11, 0, 10)
+        program = program + encode_addiw(12, 0, 30)
+        program = program + encode_subw(10, 11, 12)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(3)
+        expect(emu.get_reg("a0")).to_equal(Some(-20))
+
+# ============================================================================
+# RV64I Emulator -- Branches
+# ============================================================================
+
+describe "RV64I emulator — branches":
+    """Test conditional branch instructions in 64-bit mode."""
+
+    it "BEQ taken when equal":
+        var program = encode_addi(10, 0, 5)
+        program = program + encode_addi(11, 0, 5)
+        program = program + encode_beq(10, 11, 8)
+        program = program + encode_addi(12, 0, 1)
+        program = program + encode_addi(12, 0, 2)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(10)
+        expect(emu.get_reg("a2")).to_equal(Some(2))
+
+    it "BEQ not taken when not equal":
+        var program = encode_addi(10, 0, 5)
+        program = program + encode_addi(11, 0, 6)
+        program = program + encode_beq(10, 11, 8)
+        program = program + encode_addi(12, 0, 1)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(10)
+        expect(emu.get_reg("a2")).to_equal(Some(1))
+
+# ============================================================================
+# RV64I Emulator -- Jumps
+# ============================================================================
+
+describe "RV64I emulator — jumps":
+    """Test JAL saves return address and jumps correctly in 64-bit mode."""
+
+    it "JAL saves return address and jumps":
+        var program = encode_jal(1, 8)
+        program = program + encode_addi(10, 0, 1)
+        program = program + encode_addi(10, 0, 2)
+        program = program + encode_ebreak()
+        var emu = create_rv64_emu(program)
+        emu.run(10)
+        expect(emu.get_reg("a0")).to_equal(Some(2))
+        expect(emu.get_reg("ra")).to_equal(Some(0x80000004))
+
+# ============================================================================
+# RV64I Emulator -- Control
+# ============================================================================
+
+describe "RV64I emulator — control":
+    """Test reset, halt, statistics, and cycle limiting."""
+
+    it "resets PC to 0x80000000":
+        val lib = Width64Lib.new()
+        var emu = lib.create_rv64_emulator()
+        emu.reset()
+        expect(emu.get_reg("pc")).to_equal(Some(0x80000000))
+
+    it "halts on unknown instruction":
+        var emu = create_rv64_emu([0xFF, 0xFF, 0xFF, 0xFF])
+        val cycles = emu.step()
+        expect(cycles).to_equal(0)
+        expect(emu.halted).to_equal(true)
+
+    it "reports stats":
+        var emu = create_rv64_emu(encode_nop() + encode_ebreak())
+        emu.step()
+        val stats = emu.stats_text()
+        expect(stats).to_contain("RV64I")
+        expect(stats).to_contain("1 cycles")
+
+    it "run respects max_cycles":
+        var program = encode_nop() + encode_nop() + encode_nop() + encode_nop()
+        var emu = create_rv64_emu(program)
+        emu.run(2)
+        expect(emu.cycle_count).to_equal(2)

@@ -1,67 +1,181 @@
-# 32-bit Width Support Library (Stub)
+# 32-bit Width Support Library
 #
-# Placeholder for future ARM Cortex-M / RISC-V RV32 support.
-# All functional methods use pass_todo to indicate unimplemented status.
+# Wires RV32I decoder + runtime (memory, I/O, interrupts) into a
+# complete 32-bit emulation environment. Provides a factory for creating
+# fully configured Rv32Emulator instances.
 
 use core.types.{GuestArch}
+use core.ops.{IrTcOp}
+use core.block.{IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
 use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.riscv.cpu32.{build_rv32_cpu_def}
+use guest.riscv.decoder32.{Rv32Decoder}
+use runtime.memory.{GuestMemory}
+use runtime.io.{IoController, RiscvUartIO}
+use runtime.interrupt.{InterruptController}
 
 # ============================================================================
-# Width32 Library (Stub)
+# Width32 Library
 # ============================================================================
 
 class Width32Lib:
-    """32-bit width support library stub.
+    """32-bit width support library for RISC-V RV32I architecture.
 
-    Future targets: ARM Cortex-M (Thumb-2), RISC-V RV32I.
-    Currently unimplemented -- all factory methods use pass_todo.
+    Provides factory methods and configuration for complete 32-bit
+    emulation environments.
     """
-    _placeholder: i64
+    cpu_def: GuestCpuDef
 
 impl Width32Lib:
     static fn new() -> Width32Lib:
-        Width32Lib(_placeholder: 0)
+        Width32Lib(cpu_def: build_rv32_cpu_def())
 
     fn word_size() -> i64:
         32
 
-    fn arch_name() -> text:
-        "arm32/riscv32 (stub)"
+    fn arch() -> GuestArch:
+        GuestArch.Riscv32
 
-    fn create_emulator() -> Width32Stub:
-        """Factory: create a 32-bit emulator (not yet implemented)."""
-        pass_todo
+    fn create_rv32_emulator() -> Rv32Emulator:
+        """Factory: create a fully wired RV32I emulation environment.
 
-    fn supported_targets() -> [text]:
-        """List of target architectures planned for 32-bit support."""
-        ["arm-cortex-m0", "arm-cortex-m4", "riscv32i"]
+        Includes:
+        - Guest CPU state (32 GPRs + PC + 9 CSRs)
+        - 128MB flat memory (single address space)
+        - I/O controller with QEMU virt UART
+        - Interrupt controller
+        - RV32I instruction decoder
+        """
+        val cpu_def = self.cpu_def
+        val state = GuestState.new(cpu_def)
+        val memory = GuestMemory.new(cpu_def)
+
+        # Wire I/O devices
+        var io = IoController.new()
+        # QEMU virt machine UART at 0x10000000
+        io.register_riscv_uart(0x10000000, RiscvUartIO.new())
+
+        val interrupt = InterruptController.new(GuestArch.Riscv32)
+
+        # Create decoder with a fresh emulation builder
+        var builder = IrTcBuilder.new("rv32_tb", IrTcModuleMode.Emulation)
+        val decoder = Rv32Decoder(builder: builder, cpu_def: cpu_def)
+
+        Rv32Emulator(
+            cpu_def: cpu_def,
+            state: state,
+            memory: memory,
+            decoder: decoder,
+            io: io,
+            interrupt: interrupt,
+            cycle_count: 0,
+            halted: false
+        )
 
 # ============================================================================
-# 32-bit Emulator Stub
+# RV32 Emulator
 # ============================================================================
 
-class Width32Stub:
-    """Placeholder emulator for 32-bit architectures."""
-    _placeholder: i64
+class Rv32Emulator:
+    """Complete RV32I emulation environment.
 
-impl Width32Stub:
-    static fn new() -> Width32Stub:
-        Width32Stub(_placeholder: 0)
+    Combines guest state, memory, decoder, I/O, and interrupts into
+    a single step-able emulation engine.
+    """
+    cpu_def: GuestCpuDef
+    state: GuestState
+    memory: GuestMemory
+    decoder: Rv32Decoder
+    io: IoController
+    interrupt: InterruptController
+    cycle_count: i64
+    halted: bool
 
-    fn word_size() -> i64:
-        32
-
+impl Rv32Emulator:
     me step() -> i64:
-        pass_todo
+        """Execute one RV32I instruction.
+
+        Returns the number of cycles consumed (1 per instruction).
+        Fetches a 32-bit instruction word from memory at the current PC,
+        decodes and applies it to the guest state.
+        """
+        if self.halted:
+            return 0
+
+        # Check and deliver pending interrupts
+        self.state = self.interrupt.deliver_riscv(self.state)
+
+        val pc = self.state.pc
+
+        # Fetch 32-bit instruction from memory (little-endian)
+        val b0 = self.memory.read_byte(pc) & 0xFF
+        val b1 = self.memory.read_byte(pc + 1) & 0xFF
+        val b2 = self.memory.read_byte(pc + 2) & 0xFF
+        val b3 = self.memory.read_byte(pc + 3) & 0xFF
+        val inst_word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+        # Decode and execute
+        val result = self.decoder.decode_instruction(inst_word, pc)
+        match result:
+            Ok(bytes_consumed):
+                self.cycle_count = self.cycle_count + 1
+                # Advance PC by 4 (all base ISA instructions are 32-bit)
+                self.state.pc = pc + bytes_consumed
+                1
+            Err(_):
+                # Unknown instruction: halt
+                self.halted = true
+                0
 
     me run(max_cycles: i64):
-        pass_todo
+        """Run the RV32I emulator until halted or max_cycles reached."""
+        var remaining = max_cycles
+        while not self.halted:
+            if remaining <= 0:
+                return
+            val cycles = self.step()
+            if cycles == 0:
+                return
+            remaining = remaining - cycles
 
-    me load_program(addr: i64, data: [i64]):
-        pass_todo
+    me load_program(data: [i64]):
+        """Load a program into memory at the reset address (0x80000000).
+
+        Data is an array of bytes to be placed starting at 0x80000000.
+        """
+        val base = 0x80000000
+        for i in 0..data.len():
+            self.memory.write_byte(base + i, data[i] & 0xFF)
+
+    me load_program_at(addr: i64, data: [i64]):
+        """Load a program into memory at a specific address."""
+        for i in 0..data.len():
+            self.memory.write_byte(addr + i, data[i] & 0xFF)
 
     me reset():
-        pass_todo
+        """Reset the RV32I to initial state.
+
+        Sets PC to 0x80000000 (QEMU virt machine RAM base).
+        """
+        self.state = GuestState.new(self.cpu_def)
+        self.state.pc = 0x80000000
+        self.cycle_count = 0
+        self.halted = false
+
+    fn get_reg(name: text) -> i64?:
+        """Read a register by name (e.g., "a0", "sp", "pc", "mstatus")."""
+        if name == "pc":
+            return Some(self.state.pc)
+        self.state.get_reg_by_name(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        """Write a register by name."""
+        if name == "pc":
+            self.state.pc = value
+            return true
+        self.state.set_reg_by_name(name, value)
 
     fn stats_text() -> text:
-        "32-bit emulator: not yet implemented"
+        """Return emulation statistics as text."""
+        "RV32I: {self.cycle_count} cycles, PC=0x{self.state.pc}, halted={self.halted}"

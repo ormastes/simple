@@ -140,6 +140,13 @@ impl InterruptController:
                 # FLAGS bit 9 (IF) enables maskable interrupts
                 val flags = guest_state.get_reg(X86_REG_FLAGS)
                 (flags & (1 << X86_FLAG_IF)) != 0
+            GuestArch.Riscv32:
+                # mstatus bit 3 (MIE) enables M-mode interrupts
+                val mstatus = guest_state.get_reg(33)  # CSR_MSTATUS
+                (mstatus >> 3) & 1 == 1
+            GuestArch.Riscv64:
+                val mstatus = guest_state.get_reg(33)  # CSR_MSTATUS
+                (mstatus >> 3) & 1 == 1
             _:
                 # Default: assume enabled
                 true
@@ -309,6 +316,75 @@ impl InterruptController:
         )
 
     # ========================================================================
+    # RISC-V Interrupt Delivery
+    # ========================================================================
+
+    me deliver_riscv(guest_state: GuestState) -> GuestState:
+        """Deliver pending RISC-V interrupts (M-mode only).
+
+        Checks mstatus.MIE, and if enabled + pending interrupt:
+        - Save PC to mepc CSR
+        - Set mcause to interrupt cause
+        - Clear mstatus.MIE, set mstatus.MPIE
+        - Jump to mtvec
+        """
+        # CSR register indices (matching future common.spl constants)
+        val CSR_MSTATUS: i64 = 33
+        val CSR_MTVEC: i64 = 34
+        val CSR_MEPC: i64 = 35
+        val CSR_MCAUSE: i64 = 36
+        val CSR_MIE: i64 = 38
+        val CSR_MIP: i64 = 39
+
+        val mstatus = guest_state.get_reg(CSR_MSTATUS)
+        val mie_bit = (mstatus >> 3) & 1  # MIE is bit 3 of mstatus
+
+        if mie_bit == 0:
+            return guest_state  # Interrupts globally disabled
+
+        val mie = guest_state.get_reg(CSR_MIE)
+        val mip = guest_state.get_reg(CSR_MIP)
+        val pending = mie & mip
+
+        if pending == 0:
+            return guest_state  # No enabled interrupts pending
+
+        # Find highest priority pending interrupt
+        # Priority order: M-ext(11), M-timer(7), M-sw(3), S-ext(9), S-timer(5), S-sw(1)
+        val priority_bits: [i64] = [11, 7, 3, 9, 5, 1, 8, 4, 0]
+        var cause: i64 = 0
+        var found = false
+        for bit in priority_bits:
+            if not found:
+                if (pending >> bit) & 1 == 1:
+                    cause = bit
+                    found = true
+
+        if not found:
+            return guest_state
+
+        # Save state
+        var new_state = guest_state
+        new_state.set_reg(CSR_MEPC, guest_state.pc)
+        new_state.set_reg(CSR_MCAUSE, cause | (1 << 63))  # Set interrupt bit
+
+        # Update mstatus: MPIE = MIE, MIE = 0
+        # Clear MIE (bit 3), set MPIE (bit 7) to old MIE value
+        val cleared = mstatus & (0x88 ^ 0xFFFFFFFF)  # Clear bits 3 and 7
+        val new_mstatus = cleared | (mie_bit << 7)     # Set MPIE to old MIE
+        new_state.set_reg(CSR_MSTATUS, new_mstatus)
+
+        # Jump to mtvec
+        val mtvec = guest_state.get_reg(CSR_MTVEC)
+        val mode = mtvec & 3
+        val base = mtvec & (3 ^ 0xFFFFFFFF)  # Clear bottom 2 bits
+        val target = if mode == 1: base + cause * 4 else: base  # Vectored or direct
+        new_state.pc = target
+
+        self.acknowledge(cause)
+        new_state
+
+    # ========================================================================
     # Utilities
     # ========================================================================
 
@@ -362,6 +438,21 @@ struct I8086InterruptPush:
 impl I8086InterruptPush:
     fn to_text() -> text:
         "I8086Push(flags@0x{self.flags_addr}=0x{self.flags_value}, cs@0x{self.cs_addr}=0x{self.cs_value}, ip@0x{self.ip_addr}=0x{self.ip_value}, new_sp=0x{self.new_sp})"
+
+# ============================================================================
+# RISC-V Interrupt Descriptor
+# ============================================================================
+
+struct RiscvInterruptDesc:
+    """Describes a RISC-V interrupt delivery for external inspection."""
+    cause: i64              # Interrupt cause (bit index in mip/mie)
+    mepc_value: i64         # Saved PC value (stored in mepc)
+    mtvec_target: i64       # Jump target (from mtvec)
+    new_mstatus: i64        # Updated mstatus value
+
+impl RiscvInterruptDesc:
+    fn to_text() -> text:
+        "RiscvInt(cause={self.cause}, mepc=0x{self.mepc_value}, target=0x{self.mtvec_target}, mstatus=0x{self.new_mstatus})"
 
 # ============================================================================
 # Helper: 8086 physical address from segment:offset

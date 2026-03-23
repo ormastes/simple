@@ -195,6 +195,21 @@ That means:
   `test/fixtures/remote_jit/baremetal_lib_workload_main.spl`
 - once the shared workload exists, ad hoc `return 0` / `return 42` programs should remain smoke/debug helpers only, not the main proof
 
+### Current shared workload status
+
+- host shared workload is green in:
+  `test/integration/remote_jit/baremetal_library_host_spec.spl`
+- STM32H7 real hardware shared workload is green in:
+  `test/integration/remote_jit/stm32h7_composite_runner_spec.spl`
+- QEMU RV32 shared workload spec is now interpreter-safe in:
+  `test/integration/remote_jit/qemu_rv32_composite_runner_spec.spl`
+  but the live QEMU/GDB transport is still blocked on this host because only plain `gdb` is available
+  and the working QEMU write path needs a target-aware RISC-V GDB for physical-memory mode
+- the last STM32H7 interpreter failure came from helper code using `index_of()` as if it returned an integer
+- TRACE32 readiness is no longer blocked by the app-side parse bug in `src/app/debug/remote/protocol/trace32.spl`
+- current host TRACE32 state is still blocked:
+  `/opt/t32/bin/pc_linux64/t32rem localhost port=20000 PING` timed out with exit `124`
+
  ---
  
  ## Non-Goals

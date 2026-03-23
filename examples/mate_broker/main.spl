@@ -7,13 +7,22 @@
 # This file is self-contained for interpreter mode.
 
 use std.ui.{column, row, panel, label, text_widget, table_widget,
-             progress, statusbar, divider, build_tree_with_title, UITree}
+             progress, statusbar, divider, build_tree_with_title, UITree,
+             input, button, text_field}
+use common.ui.widget.{UIState, UIEvent}
+use common.ui.state.{init_state, update_state, update_tree}
+use app.ui.tui.backend.{TuiBackend}
+use app.ui.render.widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+use app.ui.tauri.ipc.{parse_ipc_message, build_ipc_render}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_stdin_read_line() -> text?
 
 # ============================================================================
 # Broker state (parallel arrays + manual counters)
@@ -45,6 +54,13 @@ var BK_COMPLETED = 0
 var BK_STRATEGY = "capability"
 
 var MAIN_EXECUTED = false
+
+# Interactive dashboard state
+var INPUT_TASK_CONTENT = ""
+var INPUT_TASK_CAPS = "code"
+var INPUT_AGENT_ID = ""
+var INPUT_AGENT_CAPS = ""
+var STATUS_MSG = ""
 
 # === entity/agent_profile.spl ===
 
@@ -474,6 +490,324 @@ fn dashboard_ui() -> UITree:
 
     build_tree_with_title(root, "Mate Broker Dashboard", "dark")
 
+# === Interactive Dashboard UI ===
+
+fn dashboard_interactive_ui() -> UITree:
+    var agent_count_text = BK_AGENT_COUNT.to_text()
+    var task_count_text = BK_TASK_COUNT.to_text()
+    var completed_text = BK_COMPLETED.to_text()
+
+    val stats = row("stats", [
+        label("stat_agents", "Agents: " + agent_count_text),
+        label("stat_tasks", "Tasks: " + task_count_text),
+        label("stat_done", "Completed: " + completed_text)
+    ])
+
+    var agent_rows: [[text]] = []
+    var ai = 0
+    while ai < BK_AGENT_COUNT:
+        var ld = BK_AGENT_LOADS[ai]
+        var mx = BK_AGENT_MAX_CONCURRENT[ai]
+        agent_rows = agent_rows + [[
+            BK_AGENT_IDS[ai],
+            BK_AGENT_STATUSES[ai],
+            ld.to_text() + "/" + mx.to_text(),
+            BK_AGENT_CAPS[ai]
+        ]]
+        ai = ai + 1
+
+    val agents_table = table_widget("agents_table",
+        ["ID", "Status", "Load", "Capabilities"],
+        agent_rows
+    )
+
+    var task_rows: [[text]] = []
+    var tj = 0
+    while tj < BK_TASK_COUNT:
+        val agent = BK_TASK_AGENTS[tj]
+        var agent_col = if agent != "": agent else: "-"
+        task_rows = task_rows + [[
+            BK_TASK_IDS[tj],
+            BK_TASK_STATUSES[tj],
+            agent_col,
+            BK_TASK_CONTENTS[tj]
+        ]]
+        tj = tj + 1
+
+    val tasks_table = table_widget("tasks_table",
+        ["ID", "Status", "Agent", "Content"],
+        task_rows
+    )
+
+    val task_form = panel("task_form", "Submit Task", [
+        row("task_inputs", [
+            text_field("task_content_input", INPUT_TASK_CONTENT, "Task description"),
+            text_field("task_caps_input", INPUT_TASK_CAPS, "Capabilities"),
+            button("submit_task_btn", "Submit", "submit_task")
+        ])
+    ])
+
+    val agent_form = panel("agent_form", "Register Agent", [
+        row("agent_inputs", [
+            text_field("agent_id_input", INPUT_AGENT_ID, "Agent ID"),
+            text_field("agent_caps_input", INPUT_AGENT_CAPS, "Capabilities"),
+            button("register_btn", "Register", "register_agent")
+        ])
+    ])
+
+    val actions = row("action_buttons", [
+        button("process_btn", "Process Pending", "process_pending"),
+        button("refresh_btn", "Refresh", "refresh")
+    ])
+
+    val status_text = if STATUS_MSG != "": STATUS_MSG else: "Ready"
+
+    val root = column("dashboard", [
+        stats,
+        divider("div1"),
+        task_form,
+        agent_form,
+        actions,
+        divider("div2"),
+        panel("agents_panel", "Agent Pool", [agents_table]),
+        divider("div3"),
+        panel("tasks_panel", "Task Queue", [tasks_table]),
+        statusbar("status_bar", "mate-broker", status_text)
+    ])
+
+    build_tree_with_title(root, "Mate Broker Dashboard", "dark")
+
+fn _read_input_value(state: UIState, widget_id: text) -> text:
+    val widget = state.tree.find_widget(widget_id)
+    if widget != nil:
+        return widget.get_prop("value")
+    ""
+
+fn _handle_ui_action(state: UIState, name: text):
+    if name == "submit_task":
+        val content = _read_input_value(state, "task_content_input")
+        val caps = _read_input_value(state, "task_caps_input")
+        if content != "":
+            STATUS_MSG = broker_submit_task(content, caps)
+            INPUT_TASK_CONTENT = ""
+            INPUT_TASK_CAPS = "code"
+        else:
+            STATUS_MSG = "Error: Task content cannot be empty"
+    elif name == "process_pending":
+        STATUS_MSG = broker_run_pending()
+    elif name == "register_agent":
+        val agent_id = _read_input_value(state, "agent_id_input")
+        val agent_caps = _read_input_value(state, "agent_caps_input")
+        if agent_id != "":
+            STATUS_MSG = broker_register_agent(agent_id, agent_caps)
+            INPUT_AGENT_ID = ""
+            INPUT_AGENT_CAPS = ""
+        else:
+            STATUS_MSG = "Error: Agent ID cannot be empty"
+    elif name == "refresh":
+        STATUS_MSG = "Dashboard refreshed"
+
+# === TUI Backend ===
+
+fn _run_tui_dashboard():
+    broker_init()
+    var state = init_state(dashboard_interactive_ui())
+    var backend = TuiBackend.new()
+    backend.init()
+    backend.render(state)
+
+    var running = true
+    while running:
+        val event = backend.poll_event(100)
+        if event != nil:
+            match event:
+                UIEvent.Quit:
+                    running = false
+                UIEvent.Action(name):
+                    _handle_ui_action(state, name)
+                    val new_tree = dashboard_interactive_ui()
+                    state = update_tree(state, new_tree)
+                    backend.render(state)
+                _:
+                    state = update_state(state, event)
+                    backend.render(state)
+
+    backend.shutdown()
+
+# === Web Backend ===
+
+fn _run_web_dashboard(port: i64):
+    broker_init()
+    var port_str = port.to_text()
+    print("Mate Broker Web Dashboard")
+    print("  URL: http://localhost:" + port_str)
+    print("Press Ctrl+C to stop")
+    print("")
+
+    match TcpListener.bind("0.0.0.0:" + port_str):
+        Err(e):
+            print("Error: Failed to bind to port " + port_str + ": " + e)
+            return
+        Ok(listener):
+            loop:
+                match listener.accept():
+                    Ok(stream):
+                        _handle_web_connection(stream)
+                    Err(e):
+                        print("Accept error: " + e)
+
+fn _handle_web_connection(stream: TcpStream):
+    match stream.read_line():
+        Err(e):
+            return
+        Ok(request_line):
+            val parts = request_line.split(" ")
+            if parts.len() < 2:
+                return
+            val method = parts[0]
+            val path = parts[1]
+
+            var content_length = 0
+            loop:
+                match stream.read_line():
+                    Ok(header_line):
+                        if header_line.trim() == "":
+                            break
+                        if header_line.starts_with("Content-Length:"):
+                            val len_str = header_line[15:]
+                            content_length = len_str.trim().to_int()
+                    Err(_):
+                        break
+
+            var body = ""
+            if method == "POST" and content_length > 0:
+                match stream.read_bytes(content_length):
+                    Ok(data):
+                        body = data
+                    Err(_):
+                        pass_dn
+
+            if method == "GET" and path == "/":
+                val html = _generate_web_page()
+                val response = _web_response(200, "text/html", html)
+                stream.write_all(response)
+            elif method == "POST" and path == "/submit":
+                val content = _form_field(body, "content")
+                val caps = _form_field(body, "caps")
+                if content != "":
+                    STATUS_MSG = broker_submit_task(content, caps)
+                val html = _generate_web_page()
+                val response = _web_response(200, "text/html", html)
+                stream.write_all(response)
+            elif method == "POST" and path == "/process":
+                STATUS_MSG = broker_run_pending()
+                val html = _generate_web_page()
+                val response = _web_response(200, "text/html", html)
+                stream.write_all(response)
+            elif method == "POST" and path == "/register":
+                val id = _form_field(body, "agent_id")
+                val caps = _form_field(body, "agent_caps")
+                if id != "":
+                    STATUS_MSG = broker_register_agent(id, caps)
+                val html = _generate_web_page()
+                val response = _web_response(200, "text/html", html)
+                stream.write_all(response)
+            else:
+                val response = _web_response(404, "text/plain", "Not Found")
+                stream.write_all(response)
+
+fn _generate_web_page() -> text:
+    val tree = dashboard_interactive_ui()
+    val state = init_state(tree)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val css = generate_css("dark")
+
+    var html = "<!DOCTYPE html><html><head>"
+    html = html + "<meta charset=\"utf-8\"><title>Mate Broker</title>"
+    html = html + "<style>" + css + "</style>"
+    html = html + "<style>body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;margin:20px;}"
+    html = html + "form{display:inline-block;margin:5px;}"
+    html = html + "input{background:#16213e;color:#e0e0e0;border:1px solid #0f3460;padding:8px;margin:4px;}"
+    html = html + "button{background:#0f3460;color:#e0e0e0;border:none;padding:8px 16px;cursor:pointer;margin:4px;}"
+    html = html + "button:hover{background:#1a4080;}"
+    html = html + ".status{background:#0f3460;padding:10px;margin-top:15px;border-radius:4px;}</style>"
+    html = html + "</head><body>"
+    html = html + "<h1>Mate Broker Dashboard</h1>"
+    html = html + body_html
+    html = html + "<hr>"
+    html = html + "<h3>Submit Task</h3>"
+    html = html + "<form method=\"POST\" action=\"/submit\">"
+    html = html + "<input name=\"content\" placeholder=\"Task description\" required> "
+    html = html + "<input name=\"caps\" value=\"code\" placeholder=\"Capabilities\"> "
+    html = html + "<button type=\"submit\">Submit Task</button></form>"
+    html = html + "<h3>Register Agent</h3>"
+    html = html + "<form method=\"POST\" action=\"/register\">"
+    html = html + "<input name=\"agent_id\" placeholder=\"Agent ID\" required> "
+    html = html + "<input name=\"agent_caps\" placeholder=\"Capabilities\"> "
+    html = html + "<button type=\"submit\">Register</button></form>"
+    html = html + "<br><form method=\"POST\" action=\"/process\">"
+    html = html + "<button type=\"submit\">Process Pending Tasks</button></form>"
+    if STATUS_MSG != "":
+        html = html + "<div class=\"status\">" + STATUS_MSG + "</div>"
+    html = html + "</body></html>"
+    html
+
+fn _web_response(status: i64, content_type: text, body: text) -> text:
+    val status_text = if status == 200: "OK" else: "Not Found"
+    var st = status
+    var bl = body.len()
+    var response = "HTTP/1.1 " + st.to_text() + " " + status_text + "\r\n"
+    response = response + "Content-Type: " + content_type + "\r\n"
+    response = response + "Content-Length: " + bl.to_text() + "\r\n"
+    response = response + "Connection: close\r\n\r\n"
+    response = response + body
+    response
+
+fn _form_field(body: text, field: text) -> text:
+    val parts = body.split("&")
+    for part in parts:
+        val kv = part.split("=")
+        if kv.len() >= 2 and kv[0] == field:
+            return kv[1].replace("+", " ").replace("%20", " ").replace("%2C", ",")
+    ""
+
+# === Tauri Backend (Desktop + Mobile) ===
+
+fn _run_tauri_dashboard(port: i64):
+    broker_init()
+    var state = init_state(dashboard_interactive_ui())
+
+    _send_tauri_html(state)
+
+    var running = true
+    while running:
+        val line = rt_stdin_read_line()
+        if line == nil:
+            continue
+        if line == "":
+            continue
+        val event = parse_ipc_message(line)
+        if event != nil:
+            match event:
+                UIEvent.Quit:
+                    running = false
+                UIEvent.Action(name):
+                    _handle_ui_action(state, name)
+                    val new_tree = dashboard_interactive_ui()
+                    state = update_tree(state, new_tree)
+                    _send_tauri_html(state)
+                _:
+                    state = update_state(state, event)
+                    _send_tauri_html(state)
+
+fn _send_tauri_html(state: UIState):
+    val theme = state.tree.theme_name()
+    val css = generate_css(theme)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val html = "<html><head><style>" + css + "</style></head><body><div id=\"app\">" + body_html + "</div></body></html>"
+    val ipc_msg = build_ipc_render(html)
+    print(ipc_msg)
+
 # === transform/dispatch/pool_view.spl ===
 
 fn pool_available_agents() -> [text]:
@@ -645,6 +979,18 @@ fn _load_default_agents():
     worker_register("researcher", "research,analysis,docs", 2, 5)
     worker_register("tester", "test,integration,benchmark", 4, 7)
 
+fn broker_init():
+    _load_default_agents()
+
+fn broker_submit_task(content: text, caps: text) -> text:
+    val result = _handle_submit(content, caps)
+    val process = broker_run_pending()
+    result + "\n" + process
+
+fn broker_register_agent(id: text, caps: text) -> text:
+    worker_register(id, caps, 3, 5)
+    "Registered agent: " + id
+
 fn _show_broker_help() -> text:
     var parts: [text] = []
     parts.push("mate-broker — Multi-Agent Task Broker")
@@ -658,6 +1004,9 @@ fn _show_broker_help() -> text:
     parts.push("  agents                   List agent pool")
     parts.push("  register <id> <caps>     Register new agent")
     parts.push("  process                  Process pending tasks")
+    parts.push("  tui                      Interactive TUI dashboard")
+    parts.push("  web [port]               Web dashboard (default: 8080)")
+    parts.push("  tauri [port]             Tauri desktop/mobile UI (default: 3000)")
     parts.push("  help                     Show this help")
     parts.join("\n")
 
@@ -731,6 +1080,18 @@ fn main():
         _load_default_agents()
         val result = broker_run_pending()
         print(result)
+    elif cmd == "tui":
+        _run_tui_dashboard()
+    elif cmd == "web":
+        var web_port = 8080
+        if args.len() > 1:
+            web_port = args[1].to_int()
+        _run_web_dashboard(web_port)
+    elif cmd == "tauri":
+        var tauri_port = 3000
+        if args.len() > 1:
+            tauri_port = args[1].to_int()
+        _run_tauri_dashboard(tauri_port)
     else:
         print("Unknown command: " + cmd)
         print(_show_broker_help())

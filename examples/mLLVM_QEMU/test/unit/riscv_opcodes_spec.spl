@@ -1,0 +1,603 @@
+"""
+RISC-V Opcode Decoding Specification
+
+Tests for instruction field extraction, immediate encoding/decoding,
+opcode decoding, and round-trip encode/decode consistency.
+"""
+
+use std.spec.{describe, it, expect}
+use guest.riscv.common.{
+    rv_opcode, rv_rd, rv_funct3, rv_rs1, rv_rs2, rv_funct7,
+    rv_imm_i, rv_imm_s, rv_imm_b, rv_imm_u, rv_imm_j,
+    rv_sign_extend, rv_gpr_name, rv_csr_to_reg,
+    RV_REG_PC, RV_CSR_MSTATUS, RV_CSR_MTVEC, RV_CSR_MEPC,
+    RV_CSR_MCAUSE, RV_CSR_MHARTID
+}
+use guest.riscv.opcodes.{RvOpcode, decode_rv_opcode}
+use test.helpers.riscv_encode.{
+    encode_addi, encode_add, encode_sub, encode_lui, encode_auipc,
+    encode_beq, encode_bne, encode_blt, encode_jal, encode_jalr,
+    encode_sw, encode_lw, encode_lb, encode_lbu,
+    encode_nop, encode_ebreak, encode_ecall,
+    encode_slli, encode_srli, encode_srai,
+    encode_or, encode_and, encode_xor, encode_slt, encode_sltu,
+    encode_rv_r, encode_rv_i, encode_rv_b, encode_rv_j,
+    bytes_to_word
+}
+
+# ============================================================================
+# Field Extraction Tests
+# ============================================================================
+
+describe "RISC-V instruction field extraction":
+    it "extracts opcode field":
+        # ADDI x10, x0, 10 = 0x00A00513
+        val inst = 0x00A00513
+        expect(rv_opcode(inst)).to_equal(0x13)
+
+    it "extracts rd field":
+        # ADDI x10, x0, 10 — rd = x10 = 10
+        val inst = 0x00A00513
+        expect(rv_rd(inst)).to_equal(10)
+
+    it "extracts funct3 field":
+        # ADDI x10, x0, 10 — funct3 = 0
+        val inst = 0x00A00513
+        expect(rv_funct3(inst)).to_equal(0)
+
+    it "extracts rs1 field":
+        # ADDI x10, x0, 10 — rs1 = x0 = 0
+        val inst = 0x00A00513
+        expect(rv_rs1(inst)).to_equal(0)
+
+    it "extracts rs2 field from R-type":
+        # ADD x5, x10, x11 = 0x00B50233 (funct7=0, rs2=11, rs1=10, funct3=0, rd=5, op=0x33... but let's compute)
+        # Actually encode it properly:
+        val bytes = encode_add(5, 10, 11)
+        val inst = bytes_to_word(bytes)
+        expect(rv_rs2(inst)).to_equal(11)
+
+    it "extracts funct7 from R-type":
+        # SUB x5, x10, x11 — funct7 = 0x20
+        val bytes = encode_sub(5, 10, 11)
+        val inst = bytes_to_word(bytes)
+        expect(rv_funct7(inst)).to_equal(0x20)
+
+# ============================================================================
+# Sign Extension Tests
+# ============================================================================
+
+describe "RISC-V sign extension":
+    it "sign extends positive value":
+        # 0x7FF (2047) in 12 bits — positive, no extension
+        expect(rv_sign_extend(0x7FF, 12)).to_equal(2047)
+
+    it "sign extends negative value":
+        # 0x800 in 12 bits — sign bit set, should become -2048
+        expect(rv_sign_extend(0x800, 12)).to_equal(-2048)
+
+    it "sign extends small positive":
+        expect(rv_sign_extend(42, 12)).to_equal(42)
+
+    it "sign extends all ones in 8 bits":
+        # 0xFF in 8 bits = -1
+        expect(rv_sign_extend(0xFF, 8)).to_equal(-1)
+
+    it "sign extends zero":
+        expect(rv_sign_extend(0, 12)).to_equal(0)
+
+# ============================================================================
+# Immediate Extraction Tests
+# ============================================================================
+
+describe "RISC-V I-type immediate":
+    it "extracts positive immediate":
+        # ADDI x10, x0, 10 = 0x00A00513
+        val inst = 0x00A00513
+        expect(rv_imm_i(inst)).to_equal(10)
+
+    it "extracts negative immediate":
+        # ADDI x10, x0, -1 → imm[11:0] = 0xFFF
+        val bytes = encode_addi(10, 0, -1)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_i(inst)).to_equal(-1)
+
+    it "extracts maximum positive immediate":
+        # imm = 2047 (0x7FF)
+        val bytes = encode_addi(1, 0, 2047)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_i(inst)).to_equal(2047)
+
+describe "RISC-V U-type immediate":
+    it "extracts upper immediate":
+        # LUI x5, 0x12345000
+        val bytes = encode_lui(5, 0x12345000)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_u(inst)).to_equal(0x12345000)
+
+describe "RISC-V B-type immediate":
+    it "extracts positive branch offset":
+        # BEQ x0, x0, +8
+        val bytes = encode_beq(0, 0, 8)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_b(inst)).to_equal(8)
+
+    it "extracts negative branch offset":
+        # BEQ x0, x0, -4
+        val bytes = encode_beq(0, 0, -4)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_b(inst)).to_equal(-4)
+
+describe "RISC-V J-type immediate":
+    it "extracts positive jump offset":
+        # JAL x1, +16
+        val bytes = encode_jal(1, 16)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_j(inst)).to_equal(16)
+
+    it "extracts negative jump offset":
+        # JAL x1, -8
+        val bytes = encode_jal(1, -8)
+        val inst = bytes_to_word(bytes)
+        expect(rv_imm_j(inst)).to_equal(-8)
+
+# ============================================================================
+# Opcode Decoding Tests (RV32I mode)
+# ============================================================================
+
+describe "RISC-V opcode decoding":
+    it "decodes ADDI":
+        val bytes = encode_addi(10, 0, 42)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.ADDI(rd, rs1, imm)):
+                expect(rd).to_equal(10)
+                expect(rs1).to_equal(0)
+                expect(imm).to_equal(42)
+            _: expect(true).to_equal(false)
+
+    it "decodes NOP as ADDI x0, x0, 0":
+        val bytes = encode_nop()
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.ADDI(rd, rs1, imm)):
+                expect(rd).to_equal(0)
+                expect(rs1).to_equal(0)
+                expect(imm).to_equal(0)
+            _: expect(true).to_equal(false)
+
+    it "decodes LUI":
+        val bytes = encode_lui(5, 0x12345000)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.LUI(rd, imm)):
+                expect(rd).to_equal(5)
+                expect(imm).to_equal(0x12345000)
+            _: expect(true).to_equal(false)
+
+    it "decodes AUIPC":
+        val bytes = encode_auipc(3, 0x1000)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.AUIPC(rd, _)):
+                expect(rd).to_equal(3)
+            _: expect(true).to_equal(false)
+
+    it "decodes ADD":
+        val bytes = encode_add(5, 10, 11)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.ADD(rd, rs1, rs2)):
+                expect(rd).to_equal(5)
+                expect(rs1).to_equal(10)
+                expect(rs2).to_equal(11)
+            _: expect(true).to_equal(false)
+
+    it "decodes SUB":
+        val bytes = encode_sub(5, 10, 11)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        expect(op.?).to_equal(true)
+        match op:
+            Some(RvOpcode.SUB(rd, rs1, rs2)):
+                expect(rd).to_equal(5)
+                expect(rs1).to_equal(10)
+                expect(rs2).to_equal(11)
+            _: expect(true).to_equal(false)
+
+    it "decodes AND":
+        val bytes = encode_and(1, 2, 3)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.AND(rd, rs1, rs2)):
+                expect(rd).to_equal(1)
+                expect(rs1).to_equal(2)
+                expect(rs2).to_equal(3)
+            _: expect(true).to_equal(false)
+
+    it "decodes OR":
+        val bytes = encode_or(4, 5, 6)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.OR(rd, rs1, rs2)):
+                expect(rd).to_equal(4)
+            _: expect(true).to_equal(false)
+
+    it "decodes XOR":
+        val bytes = encode_xor(7, 8, 9)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.XOR(rd, _, _)):
+                expect(rd).to_equal(7)
+            _: expect(true).to_equal(false)
+
+    it "decodes SLT":
+        val bytes = encode_slt(1, 2, 3)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SLT(_, _, _)):
+                expect(true).to_equal(true)
+            _: expect(true).to_equal(false)
+
+    it "decodes SLTU":
+        val bytes = encode_sltu(1, 2, 3)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SLTU(_, _, _)):
+                expect(true).to_equal(true)
+            _: expect(true).to_equal(false)
+
+    it "decodes SLLI":
+        val bytes = encode_slli(1, 2, 5)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SLLI(rd, rs1, shamt)):
+                expect(rd).to_equal(1)
+                expect(rs1).to_equal(2)
+                expect(shamt).to_equal(5)
+            _: expect(true).to_equal(false)
+
+    it "decodes SRLI":
+        val bytes = encode_srli(1, 2, 3)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SRLI(_, _, shamt)):
+                expect(shamt).to_equal(3)
+            _: expect(true).to_equal(false)
+
+    it "decodes SRAI":
+        val bytes = encode_srai(1, 2, 4)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SRAI(_, _, shamt)):
+                expect(shamt).to_equal(4)
+            _: expect(true).to_equal(false)
+
+# ============================================================================
+# Load/Store Decoding Tests
+# ============================================================================
+
+describe "RISC-V load/store decoding":
+    it "decodes LW":
+        val bytes = encode_lw(5, 10, 16)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.LW(rd, rs1, offset)):
+                expect(rd).to_equal(5)
+                expect(rs1).to_equal(10)
+                expect(offset).to_equal(16)
+            _: expect(true).to_equal(false)
+
+    it "decodes LB":
+        val bytes = encode_lb(3, 2, -1)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.LB(rd, rs1, offset)):
+                expect(rd).to_equal(3)
+                expect(rs1).to_equal(2)
+                expect(offset).to_equal(-1)
+            _: expect(true).to_equal(false)
+
+    it "decodes LBU":
+        val bytes = encode_lbu(4, 1, 100)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.LBU(rd, _, offset)):
+                expect(rd).to_equal(4)
+                expect(offset).to_equal(100)
+            _: expect(true).to_equal(false)
+
+    it "decodes SW":
+        val bytes = encode_sw(10, 5, 32)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SW(rs1, rs2, offset)):
+                expect(rs1).to_equal(10)
+                expect(rs2).to_equal(5)
+                expect(offset).to_equal(32)
+            _: expect(true).to_equal(false)
+
+    it "decodes SW with negative offset":
+        val bytes = encode_sw(2, 3, -4)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.SW(_, _, offset)):
+                expect(offset).to_equal(-4)
+            _: expect(true).to_equal(false)
+
+# ============================================================================
+# Branch Decoding Tests
+# ============================================================================
+
+describe "RISC-V branch decoding":
+    it "decodes BEQ":
+        val bytes = encode_beq(10, 11, 8)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.BEQ(rs1, rs2, offset)):
+                expect(rs1).to_equal(10)
+                expect(rs2).to_equal(11)
+                expect(offset).to_equal(8)
+            _: expect(true).to_equal(false)
+
+    it "decodes BNE":
+        val bytes = encode_bne(1, 2, -4)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.BNE(rs1, rs2, offset)):
+                expect(rs1).to_equal(1)
+                expect(rs2).to_equal(2)
+                expect(offset).to_equal(-4)
+            _: expect(true).to_equal(false)
+
+    it "decodes BLT":
+        val bytes = encode_blt(3, 4, 16)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.BLT(_, _, offset)):
+                expect(offset).to_equal(16)
+            _: expect(true).to_equal(false)
+
+# ============================================================================
+# Jump Decoding Tests
+# ============================================================================
+
+describe "RISC-V jump decoding":
+    it "decodes JAL":
+        val bytes = encode_jal(1, 100)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.JAL(rd, offset)):
+                expect(rd).to_equal(1)
+                expect(offset).to_equal(100)
+            _: expect(true).to_equal(false)
+
+    it "decodes JAL with negative offset":
+        val bytes = encode_jal(1, -8)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.JAL(_, offset)):
+                expect(offset).to_equal(-8)
+            _: expect(true).to_equal(false)
+
+    it "decodes JALR":
+        val bytes = encode_jalr(1, 5, 16)
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.JALR(rd, rs1, offset)):
+                expect(rd).to_equal(1)
+                expect(rs1).to_equal(5)
+                expect(offset).to_equal(16)
+            _: expect(true).to_equal(false)
+
+# ============================================================================
+# System Instruction Decoding Tests
+# ============================================================================
+
+describe "RISC-V system instruction decoding":
+    it "decodes ECALL":
+        val bytes = encode_ecall()
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.ECALL):
+                expect(true).to_equal(true)
+            _: expect(true).to_equal(false)
+
+    it "decodes EBREAK":
+        val bytes = encode_ebreak()
+        val inst = bytes_to_word(bytes)
+        val op = decode_rv_opcode(inst, false)
+        match op:
+            Some(RvOpcode.EBREAK):
+                expect(true).to_equal(true)
+            _: expect(true).to_equal(false)
+
+# ============================================================================
+# Invalid/Unknown Instruction Tests
+# ============================================================================
+
+describe "RISC-V invalid instruction decoding":
+    it "returns nil for unknown opcode":
+        # All 1s is not a valid RV32I instruction
+        val op = decode_rv_opcode(0xFFFFFFFF, false)
+        expect(op).to_be_nil()
+
+    it "returns nil for all zeros":
+        # Opcode 0x00 is not a valid base opcode
+        val op = decode_rv_opcode(0x00000000, false)
+        expect(op).to_be_nil()
+
+    it "rejects RV64 OP-IMM-32 in RV32 mode":
+        # OP-IMM-32 (opcode 0x1B) should be rejected in RV32 mode
+        val inst = 0x0000001B
+        val op = decode_rv_opcode(inst, false)
+        expect(op).to_be_nil()
+
+    it "rejects RV64 OP-32 in RV32 mode":
+        # OP-32 (opcode 0x3B) should be rejected in RV32 mode
+        val inst = 0x0000003B
+        val op = decode_rv_opcode(inst, false)
+        expect(op).to_be_nil()
+
+# ============================================================================
+# ABI Name and CSR Mapping Tests
+# ============================================================================
+
+describe "RISC-V ABI register names":
+    it "returns zero for x0":
+        expect(rv_gpr_name(0)).to_equal("zero")
+
+    it "returns ra for x1":
+        expect(rv_gpr_name(1)).to_equal("ra")
+
+    it "returns sp for x2":
+        expect(rv_gpr_name(2)).to_equal("sp")
+
+    it "returns a0 for x10":
+        expect(rv_gpr_name(10)).to_equal("a0")
+
+    it "returns t3 for x28":
+        expect(rv_gpr_name(28)).to_equal("t3")
+
+    it "returns s0 for x8":
+        expect(rv_gpr_name(8)).to_equal("s0")
+
+describe "RISC-V CSR address mapping":
+    it "maps mstatus CSR":
+        val reg = rv_csr_to_reg(0x300)
+        expect(reg.?).to_equal(true)
+        match reg:
+            Some(idx): expect(idx).to_equal(RV_CSR_MSTATUS)
+            _: expect(true).to_equal(false)
+
+    it "maps mtvec CSR":
+        val reg = rv_csr_to_reg(0x305)
+        match reg:
+            Some(idx): expect(idx).to_equal(RV_CSR_MTVEC)
+            _: expect(true).to_equal(false)
+
+    it "maps mepc CSR":
+        val reg = rv_csr_to_reg(0x341)
+        match reg:
+            Some(idx): expect(idx).to_equal(RV_CSR_MEPC)
+            _: expect(true).to_equal(false)
+
+    it "maps mcause CSR":
+        val reg = rv_csr_to_reg(0x342)
+        match reg:
+            Some(idx): expect(idx).to_equal(RV_CSR_MCAUSE)
+            _: expect(true).to_equal(false)
+
+    it "maps mhartid CSR":
+        val reg = rv_csr_to_reg(0xF14)
+        match reg:
+            Some(idx): expect(idx).to_equal(RV_CSR_MHARTID)
+            _: expect(true).to_equal(false)
+
+    it "returns nil for unknown CSR":
+        val reg = rv_csr_to_reg(0xDEAD)
+        expect(reg).to_be_nil()
+
+# ============================================================================
+# Opcode Properties Tests
+# ============================================================================
+
+describe "RISC-V opcode properties":
+    it "identifies RV64-only opcodes":
+        val lwu = RvOpcode.LWU(rd: 1, rs1: 2, offset: 0)
+        expect(lwu.is_rv64_only()).to_equal(true)
+
+        val ld = RvOpcode.LD(rd: 1, rs1: 2, offset: 0)
+        expect(ld.is_rv64_only()).to_equal(true)
+
+        val addw = RvOpcode.ADDW(rd: 1, rs1: 2, rs2: 3)
+        expect(addw.is_rv64_only()).to_equal(true)
+
+    it "identifies non-RV64 opcodes":
+        val add = RvOpcode.ADD(rd: 1, rs1: 2, rs2: 3)
+        expect(add.is_rv64_only()).to_equal(false)
+
+        val lw = RvOpcode.LW(rd: 1, rs1: 2, offset: 0)
+        expect(lw.is_rv64_only()).to_equal(false)
+
+    it "identifies branch opcodes":
+        val beq = RvOpcode.BEQ(rs1: 1, rs2: 2, offset: 4)
+        expect(beq.is_branch()).to_equal(true)
+
+        val add = RvOpcode.ADD(rd: 1, rs1: 2, rs2: 3)
+        expect(add.is_branch()).to_equal(false)
+
+    it "identifies jump opcodes":
+        val jal = RvOpcode.JAL(rd: 1, offset: 100)
+        expect(jal.is_jump()).to_equal(true)
+
+        val jalr = RvOpcode.JALR(rd: 1, rs1: 2, offset: 0)
+        expect(jalr.is_jump()).to_equal(true)
+
+        val beq = RvOpcode.BEQ(rs1: 1, rs2: 2, offset: 4)
+        expect(beq.is_jump()).to_equal(false)
+
+# ============================================================================
+# to_text Tests
+# ============================================================================
+
+describe "RISC-V opcode disassembly":
+    it "formats ADD":
+        val op = RvOpcode.ADD(rd: 5, rs1: 10, rs2: 11)
+        expect(op.to_text()).to_equal("add x5, x10, x11")
+
+    it "formats ADDI":
+        val op = RvOpcode.ADDI(rd: 10, rs1: 0, imm: 42)
+        expect(op.to_text()).to_equal("addi x10, x0, 42")
+
+    it "formats LW":
+        val op = RvOpcode.LW(rd: 5, rs1: 2, offset: 8)
+        expect(op.to_text()).to_equal("lw x5, 8(x2)")
+
+    it "formats SW":
+        val op = RvOpcode.SW(rs1: 2, rs2: 5, offset: 8)
+        expect(op.to_text()).to_equal("sw x5, 8(x2)")
+
+    it "formats BEQ":
+        val op = RvOpcode.BEQ(rs1: 1, rs2: 2, offset: 16)
+        expect(op.to_text()).to_equal("beq x1, x2, 16")
+
+    it "formats JAL":
+        val op = RvOpcode.JAL(rd: 1, offset: 100)
+        expect(op.to_text()).to_equal("jal x1, 100")
+
+    it "formats ECALL":
+        expect(RvOpcode.ECALL.to_text()).to_equal("ecall")
+
+    it "formats EBREAK":
+        expect(RvOpcode.EBREAK.to_text()).to_equal("ebreak")

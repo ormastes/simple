@@ -1,0 +1,234 @@
+# RISC-V Instruction Encoding Helpers for Tests
+#
+# Encodes RISC-V instructions into little-endian byte arrays for use in
+# unit and integration tests. Each function returns [i64] of 4 bytes.
+#
+# Reference: RISC-V ISA Manual, Volume I, Chapter 2 (Base Instruction Formats)
+
+# ============================================================================
+# Format Encoders
+# ============================================================================
+
+fn encode_rv_r(funct7: i64, rs2: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> [i64]:
+    """Encode an R-type instruction: funct7 | rs2 | rs1 | funct3 | rd | opcode."""
+    val inst = ((funct7 & 0x7F) << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((funct3 & 0x7) << 12) | ((rd & 0x1F) << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_rv_i(imm: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> [i64]:
+    """Encode an I-type instruction: imm[11:0] | rs1 | funct3 | rd | opcode."""
+    val inst = ((imm & 0xFFF) << 20) | ((rs1 & 0x1F) << 15) | ((funct3 & 0x7) << 12) | ((rd & 0x1F) << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_rv_s(imm: i64, rs2: i64, rs1: i64, funct3: i64, opcode: i64) -> [i64]:
+    """Encode an S-type instruction: imm[11:5] | rs2 | rs1 | funct3 | imm[4:0] | opcode."""
+    val imm_hi = (imm >> 5) & 0x7F
+    val imm_lo = imm & 0x1F
+    val inst = (imm_hi << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((funct3 & 0x7) << 12) | (imm_lo << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_rv_b(imm: i64, rs2: i64, rs1: i64, funct3: i64, opcode: i64) -> [i64]:
+    """Encode a B-type instruction: imm[12|10:5] | rs2 | rs1 | funct3 | imm[4:1|11] | opcode."""
+    val bit12 = (imm >> 12) & 1
+    val bit11 = (imm >> 11) & 1
+    val bits10_5 = (imm >> 5) & 0x3F
+    val bits4_1 = (imm >> 1) & 0xF
+    val imm_hi = (bit12 << 6) | bits10_5
+    val imm_lo = (bits4_1 << 1) | bit11
+    val inst = (imm_hi << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((funct3 & 0x7) << 12) | (imm_lo << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_rv_u(imm: i64, rd: i64, opcode: i64) -> [i64]:
+    """Encode a U-type instruction: imm[31:12] | rd | opcode."""
+    val inst = (imm & 0xFFFFF000) | ((rd & 0x1F) << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_rv_j(imm: i64, rd: i64, opcode: i64) -> [i64]:
+    """Encode a J-type instruction: imm[20|10:1|11|19:12] | rd | opcode."""
+    val bit20 = (imm >> 20) & 1
+    val bits10_1 = (imm >> 1) & 0x3FF
+    val bit11 = (imm >> 11) & 1
+    val bits19_12 = (imm >> 12) & 0xFF
+    val imm_enc = (bit20 << 19) | (bits10_1 << 9) | (bit11 << 8) | bits19_12
+    val inst = (imm_enc << 12) | ((rd & 0x1F) << 7) | (opcode & 0x7F)
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+# ============================================================================
+# Convenience Wrappers
+# ============================================================================
+
+fn encode_addi(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode ADDI rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 0, rd, 0x13)
+
+fn encode_slti(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode SLTI rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 2, rd, 0x13)
+
+fn encode_sltiu(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode SLTIU rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 3, rd, 0x13)
+
+fn encode_xori(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode XORI rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 4, rd, 0x13)
+
+fn encode_ori(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode ORI rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 6, rd, 0x13)
+
+fn encode_andi(rd: i64, rs1: i64, imm: i64) -> [i64]:
+    """Encode ANDI rd, rs1, imm."""
+    encode_rv_i(imm, rs1, 7, rd, 0x13)
+
+fn encode_add(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode ADD rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 0, rd, 0x33)
+
+fn encode_sub(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SUB rd, rs1, rs2."""
+    encode_rv_r(0x20, rs2, rs1, 0, rd, 0x33)
+
+fn encode_sll(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SLL rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 1, rd, 0x33)
+
+fn encode_slt(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SLT rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 2, rd, 0x33)
+
+fn encode_sltu(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SLTU rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 3, rd, 0x33)
+
+fn encode_xor(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode XOR rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 4, rd, 0x33)
+
+fn encode_srl(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SRL rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 5, rd, 0x33)
+
+fn encode_sra(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode SRA rd, rs1, rs2."""
+    encode_rv_r(0x20, rs2, rs1, 5, rd, 0x33)
+
+fn encode_or(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode OR rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 6, rd, 0x33)
+
+fn encode_and(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Encode AND rd, rs1, rs2."""
+    encode_rv_r(0x00, rs2, rs1, 7, rd, 0x33)
+
+fn encode_lui(rd: i64, imm: i64) -> [i64]:
+    """Encode LUI rd, imm. imm is the upper 20 bits (already shifted << 12)."""
+    encode_rv_u(imm, rd, 0x37)
+
+fn encode_auipc(rd: i64, imm: i64) -> [i64]:
+    """Encode AUIPC rd, imm. imm is the upper 20 bits (already shifted << 12)."""
+    encode_rv_u(imm, rd, 0x17)
+
+fn encode_lw(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LW rd, offset(rs1)."""
+    encode_rv_i(offset, rs1, 2, rd, 0x03)
+
+fn encode_lh(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LH rd, offset(rs1)."""
+    encode_rv_i(offset, rs1, 1, rd, 0x03)
+
+fn encode_lb(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LB rd, offset(rs1)."""
+    encode_rv_i(offset, rs1, 0, rd, 0x03)
+
+fn encode_lbu(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LBU rd, offset(rs1)."""
+    encode_rv_i(offset, rs1, 4, rd, 0x03)
+
+fn encode_lhu(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode LHU rd, offset(rs1)."""
+    encode_rv_i(offset, rs1, 5, rd, 0x03)
+
+fn encode_sw(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode SW rs2, offset(rs1)."""
+    encode_rv_s(offset, rs2, rs1, 2, 0x23)
+
+fn encode_sh(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode SH rs2, offset(rs1)."""
+    encode_rv_s(offset, rs2, rs1, 1, 0x23)
+
+fn encode_sb(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode SB rs2, offset(rs1)."""
+    encode_rv_s(offset, rs2, rs1, 0, 0x23)
+
+fn encode_beq(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BEQ rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 0, 0x63)
+
+fn encode_bne(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BNE rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 1, 0x63)
+
+fn encode_blt(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BLT rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 4, 0x63)
+
+fn encode_bge(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BGE rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 5, 0x63)
+
+fn encode_bltu(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BLTU rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 6, 0x63)
+
+fn encode_bgeu(rs1: i64, rs2: i64, offset: i64) -> [i64]:
+    """Encode BGEU rs1, rs2, offset."""
+    encode_rv_b(offset, rs2, rs1, 7, 0x63)
+
+fn encode_jal(rd: i64, offset: i64) -> [i64]:
+    """Encode JAL rd, offset."""
+    encode_rv_j(offset, rd, 0x6F)
+
+fn encode_jalr(rd: i64, rs1: i64, offset: i64) -> [i64]:
+    """Encode JALR rd, rs1, offset."""
+    encode_rv_i(offset, rs1, 0, rd, 0x67)
+
+fn encode_nop() -> [i64]:
+    """Encode NOP (ADDI x0, x0, 0)."""
+    encode_addi(0, 0, 0)
+
+fn encode_ebreak() -> [i64]:
+    """Encode EBREAK."""
+    # EBREAK = 0x00100073
+    val inst = 0x00100073
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_ecall() -> [i64]:
+    """Encode ECALL."""
+    # ECALL = 0x00000073
+    val inst = 0x00000073
+    [inst & 0xFF, (inst >> 8) & 0xFF, (inst >> 16) & 0xFF, (inst >> 24) & 0xFF]
+
+fn encode_slli(rd: i64, rs1: i64, shamt: i64) -> [i64]:
+    """Encode SLLI rd, rs1, shamt (RV32 — 5-bit shamt)."""
+    encode_rv_r(0x00, shamt, rs1, 1, rd, 0x13)
+
+fn encode_srli(rd: i64, rs1: i64, shamt: i64) -> [i64]:
+    """Encode SRLI rd, rs1, shamt (RV32 — 5-bit shamt)."""
+    encode_rv_r(0x00, shamt, rs1, 5, rd, 0x13)
+
+fn encode_srai(rd: i64, rs1: i64, shamt: i64) -> [i64]:
+    """Encode SRAI rd, rs1, shamt (RV32 — 5-bit shamt)."""
+    encode_rv_r(0x20, shamt, rs1, 5, rd, 0x13)
+
+fn encode_fence(pred: i64, succ: i64) -> [i64]:
+    """Encode FENCE pred, succ."""
+    val imm = ((pred & 0xF) << 4) | (succ & 0xF)
+    encode_rv_i(imm, 0, 0, 0, 0x0F)
+
+# ============================================================================
+# Helper: bytes to 32-bit word
+# ============================================================================
+
+fn bytes_to_word(bytes: [i64]) -> i64:
+    """Reassemble 4 little-endian bytes into a 32-bit instruction word."""
+    bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)

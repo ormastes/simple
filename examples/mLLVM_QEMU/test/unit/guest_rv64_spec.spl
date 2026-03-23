@@ -1,0 +1,136 @@
+"""
+RV64 Guest CPU Definition Specification
+
+Tests for build_rv64_cpu_def(): register count, widths, address spaces,
+and GuestState register read/write with 64-bit values.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{GuestArch}
+use core.mem_op.{Endian}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.riscv.cpu64.{build_rv64_cpu_def}
+use guest.riscv.common.{RV_REG_PC, RV_CSR_MSTATUS, RV_TOTAL_REGS}
+
+# ============================================================================
+# RV64 CPU Definition -- Structure
+# ============================================================================
+
+describe "RV64 CPU definition structure":
+    it "has correct architecture":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.arch.to_text()).to_equal("riscv64")
+
+    it "has 64-bit word size":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.word_size).to_equal(64)
+
+    it "is little-endian":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.endian.to_text()).to_equal("le")
+
+    it "has name 'riscv64'":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.name).to_equal("riscv64")
+
+    it "has 42 registers total (32 GPR + PC + 9 CSR)":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.registers.len()).to_equal(RV_TOTAL_REGS)
+
+    it "has no flags register":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.flags_reg).to_be_nil()
+
+# ============================================================================
+# RV64 CPU Definition -- Register widths
+# ============================================================================
+
+describe "RV64 register widths":
+    it "has 64-bit GPRs":
+        val cpu = build_rv64_cpu_def()
+        # x0 (index 0)
+        expect(cpu.registers[0].width).to_equal(64)
+        # x31 (index 31)
+        expect(cpu.registers[31].width).to_equal(64)
+
+    it "has x0 named zero":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.registers[0].id.name).to_equal("zero")
+
+    it "has correct ABI register names":
+        val cpu = build_rv64_cpu_def()
+        # ra = x1
+        expect(cpu.registers[1].id.name).to_equal("ra")
+        # sp = x2
+        expect(cpu.registers[2].id.name).to_equal("sp")
+        # a0 = x10
+        expect(cpu.registers[10].id.name).to_equal("a0")
+        # t0 = x5
+        expect(cpu.registers[5].id.name).to_equal("t0")
+        # s0 = x8
+        expect(cpu.registers[8].id.name).to_equal("s0")
+
+    it "has 64-bit PC register":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.registers[RV_REG_PC].width).to_equal(64)
+
+    it "has 64-bit CSR registers":
+        val cpu = build_rv64_cpu_def()
+        val mstatus = cpu.find_register("mstatus")
+        expect(mstatus.?).to_equal(true)
+        if val reg = mstatus:
+            expect(reg.width).to_equal(64)
+
+# ============================================================================
+# RV64 CPU Definition -- Address spaces
+# ============================================================================
+
+describe "RV64 address spaces":
+    it "has single flat address space":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.addr_spaces.len()).to_equal(1)
+
+    it "has 64-bit addressing":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.addr_spaces[0].addr_width).to_equal(64)
+
+    it "has 256MB memory size":
+        val cpu = build_rv64_cpu_def()
+        expect(cpu.addr_spaces[0].size).to_equal(268435456)
+
+# ============================================================================
+# GuestState -- Register access with 64-bit values
+# ============================================================================
+
+describe "RV64 GuestState":
+    it "initializes all registers to zero":
+        val cpu = build_rv64_cpu_def()
+        val state = GuestState.new(cpu)
+        expect(state.get_reg(0)).to_equal(0)
+        expect(state.get_reg(10)).to_equal(0)
+        expect(state.get_reg(RV_REG_PC)).to_equal(0)
+
+    it "handles full 64-bit values":
+        val cpu = build_rv64_cpu_def()
+        var state = GuestState.new(cpu)
+        state.set_reg(10, 0x7FFFFFFFFFFFFFFF)
+        expect(state.get_reg(10)).to_equal(0x7FFFFFFFFFFFFFFF)
+
+    it "finds registers by ABI name":
+        val cpu = build_rv64_cpu_def()
+        var state = GuestState.new(cpu)
+        state.set_reg(10, 42)
+        val result = state.get_reg_by_name("a0")
+        expect(result.?).to_equal(true)
+
+    it "get_reg_by_name returns nil for invalid name":
+        val cpu = build_rv64_cpu_def()
+        val state = GuestState.new(cpu)
+        val result = state.get_reg_by_name("NONEXISTENT")
+        expect(result).to_be_nil()
+
+    it "CSR register read/write works":
+        val cpu = build_rv64_cpu_def()
+        var state = GuestState.new(cpu)
+        state.set_reg(RV_CSR_MSTATUS, 0x8000000A00001800)
+        expect(state.get_reg(RV_CSR_MSTATUS)).to_equal(0x8000000A00001800)
