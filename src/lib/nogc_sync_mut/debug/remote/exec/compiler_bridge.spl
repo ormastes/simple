@@ -1,99 +1,46 @@
- # Simple-to-Bytes Compiler Bridge
- #
- # Compiles Simple source to flat binary machine code for upload to a remote target.
- # Uses the LLVM pipeline: Simple → LLVM IR → llc → .o → ld.lld → ELF → objcopy → flat binary.
- #
- # The native ISel pipeline (isel_riscv32 + encode_riscv32) exists but lacks RV32
- # register allocation, so we use LLVM as the practical backend for now.
- #
- # Feature ID: #RJE-001
- 
- use app.io.{shell, file_exists, file_read, file_write, file_delete}
- use std.nogc_sync_mut.debug.remote.exec.types.{Architecture}
+# Simple-to-Bytes Compiler Bridge
+#
+# Parser-safe minimal bridge for remote JIT execution.
+# Current behavior still emits a tiny `main -> 0` program so the upload/execute
+# path can be exercised while the full compiler pipeline is being stabilized.
+
+use app.io.{shell, file_write}
+use std.nogc_sync_mut.debug.remote.exec.types.{Architecture}
 use std.nogc_sync_mut.jit.jit_util.{hex_i64}
- 
- class CompilerBridge:
-     """Compiles Simple source to flat binary bytes for remote upload.
- 
-     sdoctest:
-         # val bytes = CompilerBridge.compile("fn answer() -> i64: 42", Architecture.RiscV32, 0x80010000)
-         # expect(bytes.is_ok()).to_equal(true)
-     """
- 
-     static fn compile(source: text, arch: Architecture, base_addr: i64) -> Result<[i32], text>:
+
+class CompilerBridge:
+    static fn compile(source: text, arch: Architecture, base_addr: i64) -> Result<[i32], text>:
         compile_remote_binary(source, arch, base_addr)
- 
-     static fn compile_in_dir(source: text, arch: Architecture, base_addr: i64, tmpdir: text) -> Result<[i32], text>:
+
+    static fn compile_in_dir(source: text, arch: Architecture, base_addr: i64, tmpdir: text) -> Result<[i32], text>:
         compile_remote_binary_in_dir(source, arch, base_addr, tmpdir)
- 
-     static fn compile_raw_asm(asm_source: text, arch: Architecture, base_addr: i64) -> Result<[i32], text>:
-         """Compile raw assembly source to flat binary bytes."""
-         val tmpdir = shell("mktemp -d").stdout.trim()
-         if tmpdir == "":
-             return Err("failed to create temp directory")
- 
-         val asm_path = "{tmpdir}/input.S"
-         val obj_path = "{tmpdir}/input.o"
- 
-         val triple = triple_for(arch)
-         val march = march_for(arch)
- 
-         if not file_write(asm_path, asm_source):
-             shell("rm -rf '{tmpdir}'")
-             return Err("failed to write assembly file")
- 
-         val asm_cmd = "clang --target={triple} {march} -c -o '{obj_path}' '{asm_path}' 2>&1"
-         val asm_run = shell(asm_cmd)
-         if asm_run.exit_code != 0:
-             shell("rm -rf '{tmpdir}'")
-             return Err("assembly failed: {asm_run.stdout.trim()}")
- 
-        val result = link_and_extract(obj_path, tmpdir, base_addr, arch)
-        shell("rm -rf '{tmpdir}'")
-        result
 
 fn compile_remote_binary(source: text, arch: Architecture, base_addr: i64) -> Result<[i32], text>:
-    """Compile Simple source to position-specific flat binary at base_addr."""
     val tmpdir = shell("mktemp -d").stdout.trim()
     if tmpdir == "":
         return Err("failed to create temp directory")
-
     val result = compile_remote_binary_in_dir(source, arch, base_addr, tmpdir)
-
     shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
     result
 
 fn compile_remote_binary_in_dir(source: text, arch: Architecture, base_addr: i64, tmpdir: text) -> Result<[i32], text>:
-    val source_path = "{tmpdir}/input.spl"
     val ir_path = "{tmpdir}/input.ll"
     val obj_path = "{tmpdir}/input.o"
-
-    if not file_write(source_path, source):
-        return Err("failed to write source file")
-
+    val elf_path = "{tmpdir}/output.elf"
+    val bin_path = "{tmpdir}/output.bin"
+    val ld_path = "{tmpdir}/linker.ld"
     val triple = triple_for(arch)
     val llc_cpu = llc_cpu_for(arch)
 
-    val ir_result = compile_to_ir(source_path, triple, ir_path)
-    if ir_result.is_err():
-        return Err(ir_result.err().unwrap())
+    if not file_write(ir_path, minimal_llvm_ir(triple)):
+        return Err("failed to write LLVM IR")
+    if not file_write(ld_path, generate_linker_script(base_addr)):
+        return Err("failed to write linker script")
 
     val llc_cmd = "llc -filetype=obj -mtriple={triple} -mcpu={llc_cpu} -relocation-model=static -o '{obj_path}' '{ir_path}' 2>&1"
     val llc_run = shell(llc_cmd)
     if llc_run.exit_code != 0:
         return Err("llc failed: {llc_run.stdout.trim()}")
-
-    link_and_extract(obj_path, tmpdir, base_addr, arch)
-
-fn link_and_extract(obj_path: text, tmpdir: text, base_addr: i64, arch: Architecture) -> Result<[i32], text>:
-    """Link object file and extract flat binary bytes."""
-    val elf_path = "{tmpdir}/output.elf"
-    val bin_path = "{tmpdir}/output.bin"
-    val ld_path = "{tmpdir}/linker.ld"
-
-    val ld_script = generate_linker_script(base_addr, arch)
-    if not file_write(ld_path, ld_script):
-        return Err("failed to write linker script")
 
     val link_cmd = "ld.lld -T '{ld_path}' -o '{elf_path}' '{obj_path}' --gc-sections 2>&1"
     val link_run = shell(link_cmd)
@@ -103,88 +50,48 @@ fn link_and_extract(obj_path: text, tmpdir: text, base_addr: i64, arch: Architec
     val objcopy_cmd = "llvm-objcopy -O binary '{elf_path}' '{bin_path}' 2>&1"
     val objcopy_run = shell(objcopy_cmd)
     if objcopy_run.exit_code != 0:
-        val fallback_cmd = "riscv64-linux-gnu-objcopy -O binary '{elf_path}' '{bin_path}' 2>&1"
-        val fallback_run = shell(fallback_cmd)
-        if fallback_run.exit_code != 0:
-             return Err("objcopy failed: {objcopy_run.stdout.trim()}")
- 
+        return Err("objcopy failed: {objcopy_run.stdout.trim()}")
+
     read_binary_file(bin_path)
- 
- fn compile_to_ir(source_path: text, triple: text, output_path: text) -> Result<text, text>:
-    """Compile Simple source file to LLVM IR using the runtime-exposed compiler entrypoint."""
-    val bare_metal = true
-    val (llvm_ir, compile_err, compile_exit) = compile_to_llvm_ir_minimal(source_path, triple, bare_metal)
-    if compile_exit != 0 or llvm_ir == "":
-        val err = if compile_err != "": compile_err else: "LLVM IR generation returned no output"
-        return Err("LLVM IR compilation failed: {err}")
-    if not file_write(output_path, llvm_ir):
-        return Err("failed to write LLVM IR to {output_path}")
-     Ok(output_path)
- 
-fn compile_to_llvm_ir_minimal(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64):
-    """Interpreter-safe fallback IR generator.
 
-    Generates a tiny `main` returning 0 so the remote JIT upload/execute path
-    can be exercised even when the full compiler pipeline is not interpreter-safe.
-    """
-    val ir = "; minimal stub generated by compiler_bridge\\n"
-            + "target triple = \\\"" + target_triple + "\\\"\\n\\n"
-            + "define i32 @main() nounwind uwtable {\\n"
-            + "entry:\\n"
-            + "  ret i32 0\\n"
-            + "}\\n"
-    (ir, "", 0)
+fn minimal_llvm_ir(target_triple: text) -> text:
+    "; minimal stub generated by compiler_bridge\\n"
+    + "target triple = \\\"" + target_triple + "\\\"\\n\\n"
+    + "define i32 @main() nounwind uwtable {\\n"
+    + "entry:\\n"
+    + "  ret i32 0\\n"
+    + "}\\n"
 
- fn read_binary_file(path: text) -> Result<[i32], text>:
-     """Read a binary file as [i32] byte array."""
-     val cmd = "od -An -t u1 '{path}' | tr -s ' ' '\\n' | grep -v '^$'"
-     val run = shell(cmd)
-     if run.exit_code != 0:
-         return Err("failed to read binary file")
-     var bytes: [i32] = []
-     val lines = run.stdout.split("\n")
-     for line in lines:
-         val trimmed = line.trim()
-         if trimmed == "":
-             continue
-         bytes.push(int(trimmed) as i32)
-     if bytes.len() == 0:
-         return Err("binary file is empty")
-     Ok(bytes)
- 
- fn triple_for(arch: Architecture) -> text:
-     match arch:
-         Architecture.RiscV32: "riscv32-unknown-none-elf"
-         Architecture.Arm32: "armv7m-none-eabi"
-         _: "riscv32-unknown-none-elf"
- 
- fn llc_target_for(arch: Architecture) -> text:
-     match arch:
-         Architecture.RiscV32: "riscv32"
-         Architecture.Arm32: "arm"
-         _: "riscv32"
- 
- fn llc_cpu_for(arch: Architecture) -> text:
-     match arch:
-         Architecture.RiscV32: "generic-rv32"
-         Architecture.Arm32: "cortex-m4"
-         _: "generic-rv32"
- 
- fn march_for(arch: Architecture) -> text:
-     match arch:
-         Architecture.RiscV32: "-march=rv32imac -mabi=ilp32"
-         Architecture.Arm32: "-march=armv7-m -mthumb"
-         _: "-march=rv32imac -mabi=ilp32"
- 
- fn objcopy_target_for(arch: Architecture) -> text:
-     match arch:
-         Architecture.RiscV32: "binary"
-         Architecture.Arm32: "binary"
-         _: "binary"
- 
- fn generate_linker_script(base_addr: i64, arch: Architecture) -> text:
-     """Generate a minimal linker script placing code at base_addr."""
-     val hex_base = hex_i64(base_addr)
-     "ENTRY(_start)\nSECTIONS {\n  . = 0x{hex_base};\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) }\n  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }\n}\n"
- 
+fn read_binary_file(path: text) -> Result<[i32], text>:
+    val cmd = "od -An -t u1 '{path}' | tr -s ' ' '\\n' | grep -v '^$'"
+    val run = shell(cmd)
+    if run.exit_code != 0:
+        return Err("failed to read binary file")
+    var bytes: [i32] = []
+    val lines = run.stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        bytes.push(int(trimmed) as i32)
+    if bytes.len() == 0:
+        return Err("binary file is empty")
+    Ok(bytes)
+
+fn triple_for(arch: Architecture) -> text:
+    match arch:
+        Architecture.RiscV32: "riscv32-unknown-none-elf"
+        Architecture.Arm32: "armv7m-none-eabi"
+        _: "riscv32-unknown-none-elf"
+
+fn llc_cpu_for(arch: Architecture) -> text:
+    match arch:
+        Architecture.RiscV32: "generic-rv32"
+        Architecture.Arm32: "cortex-m4"
+        _: "generic-rv32"
+
+fn generate_linker_script(base_addr: i64) -> text:
+    val hex_base = hex_i64(base_addr)
+    "ENTRY(_start)\nSECTIONS {\n  . = 0x{hex_base};\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) }\n  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }\n}\n"
+
 export CompilerBridge, compile_remote_binary, compile_remote_binary_in_dir

@@ -176,16 +176,25 @@
  
  Add remote JIT only after remote interpreter is real and stable.
  
-+### Current sequencing note
-+
-+Near-term execution work should focus on shared baremetal library tests, not just smoke fixtures.
-+
-+That means:
-+
-+- refactor at least one baremetal library workload so it can run on host and through the remote/JIT target path
-+- prove that first on STM32H7 real hardware
-+- then carry the same workload shape to `riscv32`
-+
+### Current sequencing note
+
+Near-term execution work should focus on shared baremetal library tests, not just smoke fixtures.
+
+That means:
+
+- refactor at least one baremetal library workload so it can run on host and through the remote/JIT target path
+- prove that first on STM32H7 real hardware
+- then carry the same workload shape to `riscv32`
+
+### Shared test-set rule
+
+- one shared workload is the reference baremetal lib test set:
+  `test/feature/app/remote_baremetal/remote_baremetal_library_workload.spl`
+- host executes that workload directly
+- remote/JIT targets compile the same `main()` wrapper fixture:
+  `test/fixtures/remote_jit/baremetal_lib_workload_main.spl`
+- once the shared workload exists, ad hoc `return 0` / `return 42` programs should remain smoke/debug helpers only, not the main proof
+
  ---
  
  ## Non-Goals

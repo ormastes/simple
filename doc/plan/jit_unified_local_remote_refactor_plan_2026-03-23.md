@@ -208,6 +208,18 @@ Practical rule:
 2. run that workload through the STM32H7 HAL-backed remote/JIT path on real hardware
 3. only after STM32H7 is real and repeatable, move the same shared test shape to RISC-V
 
+### Shared library test-set rule
+
+- shared workload logic lives in:
+  `test/feature/app/remote_baremetal/remote_baremetal_library_workload.spl`
+- remote/JIT targets compile the same target fixture:
+  `test/fixtures/remote_jit/baremetal_lib_workload_main.spl`
+- host validation stays separate in:
+  `test/integration/remote_jit/baremetal_library_host_spec.spl`
+- hardware/emulator composite specs should use that same fixture instead of ad hoc `return 0` / `return 42` programs
+- current proof target order:
+  STM32H7 real hardware first, then QEMU RV32, then real RISC-V hardware
+
 ---
 
 ## Current Known Risks

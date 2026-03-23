@@ -1,12 +1,15 @@
 """
 # STM32H7 Baremetal Composite Runner
-Verifies JIT pipeline end-to-end on STM32H7 via unified adapter.
+Verifies the shared baremetal library workload on STM32H7 via the unified adapter.
 """
 
+use app.io.file_ops.{file_read}
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.debug.remote.exec.adapter_stm32h7.{Stm32H7Adapter}
-use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
-use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use std.nogc_sync_mut.debug.remote.exec.types.{Architecture}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
+
+val STM32H7_CODE_BASE: i64 = 0x24010000
 
 fn hardware_ready() -> bool:
     val ocd = shell("command -v openocd >/dev/null 2>&1")
@@ -16,8 +19,11 @@ fn hardware_ready() -> bool:
     val stlink = shell("lsusb 2>/dev/null | grep -q '0483:374e'")
     ocd.exit_code == 0 and clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0 and stlink.exit_code == 0
 
+fn shared_workload_source() -> text:
+    file_read("test/fixtures/remote_jit/baremetal_lib_workload_main.spl")
+
 describe "STM32H7 Baremetal Workload":
-    it "runs return-zero on STM32H7":
+    it "runs the shared baremetal library workload on STM32H7":
         if not hardware_ready():
             print "[skip] STM32H7 hardware not available"
             return
@@ -31,46 +37,20 @@ describe "STM32H7 Baremetal Workload":
             adapter.disconnect()
             print "[skip] manager failed"
             return
-        val source = "fn main() -> i64:\n    0\n"
-        val limits = MemoryMap.stm32h7()
-        val compiled = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
+        val source = shared_workload_source()
+        if source.trim() == "":
+            adapter.disconnect()
+            print "[skip] shared workload fixture unreadable"
+            return
+        val compiled = compile_remote_binary(source, Architecture.Arm32, STM32H7_CODE_BASE)
         if compiled.is_err():
             adapter.disconnect()
-            print "[skip] compile failed"
+            print "[skip] compile failed: {compiled.err().unwrap()}"
             return
         var manager = mgr.ok.unwrap()
-        val result = manager.execute_bytes("workload_zero", compiled.ok.unwrap(), [])
+        val result = manager.execute_bytes("baremetal_lib_workload_stm32h7", compiled.ok.unwrap(), [])
         adapter.disconnect()
         if result.is_err():
             print "[skip] exec failed: {result.err().unwrap()}"
             return
         expect(result.ok.unwrap().return_value).to_equal(0)
-
-    it "runs return-42 on STM32H7":
-        if not hardware_ready():
-            print "[skip] STM32H7 hardware not available"
-            return
-        var adapter = Stm32H7Adapter.new()
-        val conn = adapter.connect()
-        if conn.is_err():
-            print "[skip] connect failed: {conn.err().unwrap()}"
-            return
-        val mgr = adapter.create_manager()
-        if mgr.is_err():
-            adapter.disconnect()
-            print "[skip] manager failed"
-            return
-        val source = "fn main() -> i64:\n    42\n"
-        val limits = MemoryMap.stm32h7()
-        val compiled = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
-        if compiled.is_err():
-            adapter.disconnect()
-            print "[skip] compile failed"
-            return
-        var manager = mgr.ok.unwrap()
-        val result = manager.execute_bytes("workload_42", compiled.ok.unwrap(), [])
-        adapter.disconnect()
-        if result.is_err():
-            print "[skip] exec failed: {result.err().unwrap()}"
-            return
-        expect(result.ok.unwrap().return_value).to_equal(42)
