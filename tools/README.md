@@ -27,9 +27,14 @@ MCP configuration that enables the Simple language MCP server:
 
 Claude Code LSP plugin bundle for `.spl` / `.shs` files.
 
+### `claude-plugin/simple-mcp/`
+
+Claude Code MCP plugin bundle for the main `simple-mcp` server.
+
 ### `claude-plugin/marketplace/`
 
 Checked-in local Claude marketplace exposing:
+- `simple-mcp`
 - `simple-lsp`
 - `cmm-lsp`
 
