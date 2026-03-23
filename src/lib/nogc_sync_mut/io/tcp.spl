@@ -48,6 +48,13 @@ val both_shutdown = Shutdown.Both
 
 use std.common.io.traits.{Read, Write, Close}
 use std.common.io.types.{IoError, IoErrorKind, Shutdown}
+fn tcp_sub_bytes(data: [u8], start: i64, end: i64) -> [u8]:
+    var result: [u8] = []
+    var i = start
+    while i < end and i < data.len():
+        result = result + [data[i]]
+        i = i + 1
+    return result
 
 # ============================================================================
 # TcpListener - TCP Server Socket
@@ -293,7 +300,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
         var offset = 0
         while offset < data.len():
-            val remaining = data.slice(offset, data.len())
+            val remaining = tcp_sub_bytes(data, offset, data.len())
             val written = rt_io_tcp_write(self.fd, remaining)
             if written <= 0:
                 return Err(IoError.new(IoErrorKind.BrokenPipe, "write_all failed"))
@@ -309,8 +316,12 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result or error
         """
-        val bytes = rt_text_to_bytes(s)
-        self.write_all(bytes)
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        val written = rt_io_tcp_write_text(self.fd, s)
+        if written <= 0:
+            return Err(IoError.new(IoErrorKind.BrokenPipe, "write_text failed"))
+        Ok(())
 
     fn flush() -> Result<(), IoError>:
         """Flush write buffer.
@@ -440,6 +451,7 @@ extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_read_line(fd: i64) -> text?
 extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_flush(fd: i64) -> bool
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
@@ -458,4 +470,3 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 # ============================================================================
 # Exports
 # ============================================================================
-

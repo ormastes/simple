@@ -14,6 +14,19 @@ use app.ui.web.ws_handler.{handle_ws_upgrade, is_ws_upgrade_request}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 
+fn parse_request_line(request_line: text) -> (text, text):
+    var method = ""
+    var path = ""
+    var idx = 0
+    for part in request_line.split(" "):
+        if idx == 0:
+            method = part
+        elif idx == 1:
+            path = part
+            break
+        idx = idx + 1
+    return (method, path)
+
 # =========================================================================
 # Web Server
 # =========================================================================
@@ -74,12 +87,11 @@ class WebServer:
                 # Check for file changes before each response
                 self.check_file_changes()
 
-                val parts = request_line.split(" ")
-                if parts.len() < 2:
+                val request = parse_request_line(request_line)
+                val method = request.0
+                val path = request.1
+                if method == "" or path == "":
                     return
-
-                val method = parts[0]
-                val path = parts[1]
 
                 # Read remaining headers
                 var headers = ""
@@ -99,21 +111,69 @@ class WebServer:
                     handle_ws_upgrade(stream, headers, self.state)
                     return
 
-                # Route HTTP requests
-                val response = match path:
+                match path:
                     "/":
-                        val html = generate_html_page(self.state, self.port)
-                        http_response(200, "text/html", html)
+                        val payload = generate_html_page(self.state, self.port)
+                        val payload_text = "{payload}"
+                        var headers = "HTTP/1.1 200 OK\r\n"
+                        headers = "{headers}Content-Type: text/html\r\n"
+                        headers = "{headers}Content-Length: {payload_text.len()}\r\n"
+                        headers = "{headers}Connection: close\r\n"
+                        headers = "{headers}\r\n"
+                        val response = "{headers}{payload_text}"
+                        match stream.write_text(response):
+                            Err(e):
+                                print "HTTP write error: {e}"
+                            Ok(()):
+                                pass_dn
                     "/api/state":
-                        val state_json = state_to_json(self.state)
-                        http_response(200, "application/json", state_json)
+                        val payload = state_to_json(self.state)
+                        val payload_text = "{payload}"
+                        var headers = "HTTP/1.1 200 OK\r\n"
+                        headers = "{headers}Content-Type: application/json\r\n"
+                        headers = "{headers}Content-Length: {payload_text.len()}\r\n"
+                        headers = "{headers}Connection: close\r\n"
+                        headers = "{headers}\r\n"
+                        val response = "{headers}{payload_text}"
+                        match stream.write_text(response):
+                            Err(e):
+                                print "HTTP write error: {e}"
+                            Ok(()):
+                                pass_dn
                     "/api/widgets":
-                        val widgets_json = widgets_to_json(self.state)
-                        http_response(200, "application/json", widgets_json)
+                        val payload = widgets_to_json(self.state)
+                        val payload_text = "{payload}"
+                        var headers = "HTTP/1.1 200 OK\r\n"
+                        headers = "{headers}Content-Type: application/json\r\n"
+                        headers = "{headers}Content-Length: {payload_text.len()}\r\n"
+                        headers = "{headers}Connection: close\r\n"
+                        headers = "{headers}\r\n"
+                        val response = "{headers}{payload_text}"
+                        match stream.write_text(response):
+                            Err(e):
+                                print "HTTP write error: {e}"
+                            Ok(()):
+                                pass_dn
                     _:
-                        http_response(404, "text/plain", "Not Found")
+                        val payload = "Not Found"
+                        val payload_text = "{payload}"
+                        var headers = "HTTP/1.1 404 Not Found\r\n"
+                        headers = "{headers}Content-Type: text/plain\r\n"
+                        headers = "{headers}Content-Length: {payload_text.len()}\r\n"
+                        headers = "{headers}Connection: close\r\n"
+                        headers = "{headers}\r\n"
+                        val response = "{headers}{payload_text}"
+                        match stream.write_text(response):
+                            Err(e):
+                                print "HTTP write error: {e}"
+                            Ok(()):
+                                pass_dn
 
-                stream.write_all(response)
+                match stream.close():
+                    Err(e):
+                        print "Close error: {e}"
+                    Ok(()):
+                        pass_dn
 
     fn check_file_changes():
         """Check if the .ui.sdn file has changed."""
@@ -130,25 +190,6 @@ class WebServer:
                 Err(e):
                     # Keep old state on parse error
                     print "Warning: UI parse error: {e}"
-
-# =========================================================================
-# HTTP Response Helpers
-# =========================================================================
-
-fn http_response(status: i32, content_type: text, body: text) -> text:
-    val status_text = match status:
-        200: "OK"
-        404: "Not Found"
-        405: "Method Not Allowed"
-        500: "Internal Server Error"
-        _: "OK"
-    var response = "HTTP/1.1 {status} {status_text}\r\n"
-    response = "{response}Content-Type: {content_type}\r\n"
-    response = "{response}Content-Length: {body.len()}\r\n"
-    response = "{response}Connection: close\r\n"
-    response = "{response}\r\n"
-    response = "{response}{body}"
-    return response
 
 # =========================================================================
 # JSON Serialization

@@ -1,0 +1,119 @@
+#!/bin/bash
+# Local container test runner for Simple Language
+# Usage: scripts/local-container-test.sh <mode> [path]
+#   unit          - Fast unit tests in isolation container
+#   quick <path>  - Single test file in isolation container
+#   system        - System tests in isolation container
+#   gui           - Tauri GUI container with VNC (port 5900)
+#   shell         - Interactive shell in test container
+
+set -euo pipefail
+
+IMAGE="simple-test-isolation"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Check Docker availability
+if ! command -v docker &>/dev/null; then
+    echo "Error: Docker is not installed or not in PATH."
+    echo ""
+    echo "Install OrbStack (recommended for macOS):"
+    echo "  brew install --cask orbstack"
+    echo ""
+    echo "Or Colima (open source):"
+    echo "  brew install colima docker docker-compose"
+    echo "  colima start"
+    exit 1
+fi
+
+if ! docker info &>/dev/null 2>&1; then
+    echo "Error: Docker daemon is not running."
+    echo "Start OrbStack or run: colima start"
+    exit 1
+fi
+
+# Auto-build image if missing
+ensure_image() {
+    local img="$1"
+    if ! docker image inspect "$img" &>/dev/null 2>&1; then
+        echo "Building $img image..."
+        docker build --platform linux/amd64 \
+            -t "$img" \
+            -f "$PROJECT_ROOT/tools/docker/Dockerfile.test-isolation" \
+            "$PROJECT_ROOT"
+    fi
+}
+
+run_test() {
+    local test_args=("$@")
+    ensure_image "$IMAGE"
+    docker run --rm --platform linux/amd64 \
+        -v "$PROJECT_ROOT/src:/workspace/src:ro" \
+        -v "$PROJECT_ROOT/test:/workspace/test:ro" \
+        -v "$PROJECT_ROOT/examples:/workspace/examples:ro" \
+        -e SIMPLE_LIB=/workspace/src \
+        "$IMAGE" test "${test_args[@]}"
+}
+
+MODE="${1:-help}"
+shift || true
+
+case "$MODE" in
+    unit)
+        echo "Running unit tests in container..."
+        run_test --unit "$@"
+        ;;
+    quick)
+        if [ -z "${1:-}" ]; then
+            echo "Usage: $0 quick <path/to/spec.spl>"
+            exit 1
+        fi
+        echo "Running: $1"
+        run_test "$@"
+        ;;
+    system)
+        echo "Running system tests in container..."
+        run_test --system "$@"
+        ;;
+    gui)
+        echo "Building Tauri GUI image..."
+        docker build --platform linux/amd64 \
+            -t simple-tauri-gui \
+            -f "$PROJECT_ROOT/tools/docker/Dockerfile.tauri-gui" \
+            "$PROJECT_ROOT"
+        echo "Starting Tauri GUI container (VNC on port 5900)..."
+        docker run --rm -p 5900:5900 simple-tauri-gui
+        ;;
+    shell)
+        ensure_image "$IMAGE"
+        echo "Starting interactive shell in test container..."
+        docker run --rm -it --platform linux/amd64 \
+            -v "$PROJECT_ROOT/src:/workspace/src:ro" \
+            -v "$PROJECT_ROOT/test:/workspace/test:ro" \
+            -v "$PROJECT_ROOT/examples:/workspace/examples:ro" \
+            -e SIMPLE_LIB=/workspace/src \
+            --entrypoint /bin/bash \
+            "$IMAGE"
+        ;;
+    help|--help|-h)
+        echo "Simple Language Container Test Runner"
+        echo ""
+        echo "Usage: $0 <mode> [options]"
+        echo ""
+        echo "Modes:"
+        echo "  unit              Run unit tests"
+        echo "  quick <path>      Run a single test file"
+        echo "  system            Run system tests"
+        echo "  gui               Launch Tauri GUI with VNC (port 5900)"
+        echo "  shell             Interactive shell in test container"
+        echo ""
+        echo "Examples:"
+        echo "  $0 unit"
+        echo "  $0 quick test/system/ui/demo_render_spec.spl"
+        echo "  $0 shell"
+        ;;
+    *)
+        echo "Unknown mode: $MODE"
+        echo "Run '$0 help' for usage."
+        exit 1
+        ;;
+esac

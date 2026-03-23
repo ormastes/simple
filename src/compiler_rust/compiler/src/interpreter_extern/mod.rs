@@ -92,6 +92,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 // Import shared functions from parent module
 use super::{evaluate_expr, is_debug_mode};
+use crate::interpreter::interpreter_native_net;
 
 // Import diagram tracing
 use simple_runtime::value::diagram_ffi;
@@ -464,6 +465,25 @@ pub(crate) fn call_extern_function(
         "native_tcp_get_nodelay" => network::native_tcp_get_nodelay(&evaluated),
         "native_tcp_peek" => network::native_tcp_peek(&evaluated),
         "native_tcp_set_backlog" => network::native_tcp_set_backlog(&evaluated),
+        "rt_io_tcp_bind" => interpreter_native_net::rt_io_tcp_bind_interp(&evaluated),
+        "rt_io_tcp_accept" => interpreter_native_net::rt_io_tcp_accept_interp(&evaluated),
+        "rt_io_tcp_accept_timeout" => interpreter_native_net::rt_io_tcp_accept_timeout_interp(&evaluated),
+        "rt_io_tcp_connect" => interpreter_native_net::rt_io_tcp_connect_interp(&evaluated),
+        "rt_io_tcp_connect_timeout" => interpreter_native_net::rt_io_tcp_connect_timeout_interp(&evaluated),
+        "rt_io_tcp_read" => interpreter_native_net::rt_io_tcp_read_interp(&evaluated),
+        "rt_io_tcp_read_line" => interpreter_native_net::rt_io_tcp_read_line_interp(&evaluated),
+        "rt_io_tcp_write" => interpreter_native_net::rt_io_tcp_write_interp(&evaluated),
+        "rt_io_tcp_write_all" => interpreter_native_net::rt_io_tcp_write_all_interp(&evaluated),
+        "rt_io_tcp_write_text" => interpreter_native_net::rt_io_tcp_write_text_interp(&evaluated),
+        "rt_io_tcp_write_http" => interpreter_native_net::rt_io_tcp_write_http_interp(&evaluated),
+        "rt_io_tcp_flush" => interpreter_native_net::rt_io_tcp_flush_interp(&evaluated),
+        "rt_io_tcp_close" => interpreter_native_net::rt_io_tcp_close_interp(&evaluated),
+        "rt_io_tcp_local_addr" => interpreter_native_net::rt_io_tcp_local_addr_interp(&evaluated),
+        "rt_io_tcp_peer_addr" => interpreter_native_net::rt_io_tcp_peer_addr_interp(&evaluated),
+        "rt_io_tcp_set_nodelay" => interpreter_native_net::rt_io_tcp_set_nodelay_interp(&evaluated),
+        "rt_io_tcp_set_read_timeout" => interpreter_native_net::rt_io_tcp_set_read_timeout_interp(&evaluated),
+        "rt_io_tcp_set_write_timeout" => interpreter_native_net::rt_io_tcp_set_write_timeout_interp(&evaluated),
+        "rt_io_tcp_shutdown" => interpreter_native_net::rt_io_tcp_shutdown_interp(&evaluated),
 
         // ====================================================================
         // UDP Operations (18 functions)

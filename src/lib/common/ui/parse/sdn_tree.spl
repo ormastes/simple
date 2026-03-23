@@ -9,6 +9,10 @@ use common.ui.widget.{WidgetNode, UITree}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 
+struct STFlatEntry:
+    key: text
+    value: text
+
 # =========================================================================
 # String / List Helpers
 # =========================================================================
@@ -61,11 +65,7 @@ fn st_check_exists(path: text) -> bool:
 # Flat key-value SDN parser (same algorithm as sdn.spl)
 # =========================================================================
 
-# Module-level state used by st_pop_stack to avoid tuple returns
-var _st_popped_indents: [i64] = []
-var _st_popped_keys: [text] = []
-
-fn st_pop_stack(indents: [i64], keys: [text], target_indent: i64):
+fn st_pop_stack(indents: [i64], keys: [text], target_indent: i64) -> ([i64], [text]):
     var ind = indents
     var ks = keys
     var ilen = st_ilist_len(ind)
@@ -77,8 +77,7 @@ fn st_pop_stack(indents: [i64], keys: [text], target_indent: i64):
             ilen = st_ilist_len(ind)
         else:
             break
-    _st_popped_indents = ind
-    _st_popped_keys = ks
+    return (ind, ks)
 
 fn st_join_path(parts: [text]) -> text:
     var result = ""
@@ -113,11 +112,12 @@ fn st_count_indent(line: text) -> i64:
         ci = ci + 1
     return indent
 
-fn st_parse_to_flat(source: text) -> Dict<text, text>:
+fn st_parse_to_flat(source: text) -> [STFlatEntry]:
     # Normalize Windows CRLF and old Mac CR line endings to Unix LF
-    val normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    var normalized = source.replace("\r\n", "\n")
+    normalized = normalized.replace("\r", "\n")
     val lines = st_split(normalized, "\n")
-    var result: Dict<text, text> = {}
+    var result: [STFlatEntry] = []
     var path_indents: [i64] = []
     var path_keys: [text] = []
     var li = 0
@@ -143,9 +143,9 @@ fn st_parse_to_flat(source: text) -> Dict<text, text>:
         if cp + 1 < sl:
             after = st_strip(stripped[cp + 1:])
 
-        st_pop_stack(path_indents, path_keys, indent)
-        path_indents = _st_popped_indents
-        path_keys = _st_popped_keys
+        val popped = st_pop_stack(path_indents, path_keys, indent)
+        path_indents = popped.0
+        path_keys = popped.1
 
         val full_path = st_make_full_path(path_keys, key)
 
@@ -159,36 +159,29 @@ fn st_parse_to_flat(source: text) -> Dict<text, text>:
                 if st_starts(val_text, "\""):
                     if st_ends(val_text, "\""):
                         val_text = val_text[1:vl - 1]
-            result[full_path] = val_text
+            result = result.push(STFlatEntry(key: full_path, value: val_text))
 
     return result
 
-fn st_flat_get(d: Dict<text, text>, key: text) -> text:
-    val v = d.get(key)
-    if v == nil:
-        return ""
-    return st_unwrap_opt(v)
+fn st_flat_get(entries: [STFlatEntry], key: text) -> text:
+    for entry in entries:
+        if entry.key == key:
+            return entry.value
+    return ""
 
-fn st_flat_child_keys(d: Dict<text, text>, prefix: text) -> [text]:
+fn st_flat_child_keys(entries: [STFlatEntry], prefix: text) -> [text]:
     var keys: [text] = []
-    var seen: Dict<text, text> = {}
     val plen = st_len(prefix)
     val dot_prefix = prefix + "."
-    val all_keys = d.keys()
-    var ki = 0
-    val kcount = st_tlist_len(all_keys)
-
-    while ki < kcount:
-        val key = all_keys[ki]
-        ki = ki + 1
+    for entry in entries:
+        val key = entry.key
         if st_starts(key, dot_prefix):
             val rest = key[plen + 1:]
             val dot_pos = st_find(rest, ".")
             var child_key = rest
             if dot_pos >= 0:
                 child_key = rest[0:dot_pos]
-            if seen.get(child_key) == nil:
-                seen[child_key] = "1"
+            if not st_list_contains(keys, child_key):
                 keys = keys + [child_key]
     return keys
 
@@ -232,7 +225,7 @@ fn build_tree_from_source(source: text) -> Result<UITree, text>:
 # Internal: Recursive Widget Builder
 # =========================================================================
 
-fn build_widget_node(entries: Dict<text, text>, path: text, depth: i64) -> WidgetNode:
+fn build_widget_node(entries: [STFlatEntry], path: text, depth: i64) -> WidgetNode:
     """Recursively build a WidgetNode from flat SDN entries."""
     val wtype = st_flat_get(entries, "{path}.type")
     val wid = st_flat_get(entries, "{path}.id")

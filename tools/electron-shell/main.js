@@ -10,10 +10,22 @@
 const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
+const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
+const projectRoot = path.resolve(__dirname, '..', '..');
+
+function debugLog(message) {
+    const line = `[${new Date().toISOString()}] ${message}\n`;
+    try {
+        fs.appendFileSync(debugLogPath, line);
+    } catch (err) {
+        // Best-effort logging only.
+    }
+}
 
 // Resolve Simple binary path: CLI arg --bin, env SIMPLE_BIN, or default
 function resolveSimpleBin() {
@@ -60,6 +72,7 @@ function handleSimpleMessage(line) {
     if (!line.trim()) return;
     try {
         const msg = JSON.parse(line);
+        debugLog(`ipc message type=${msg.type || 'unknown'}`);
         switch (msg.type) {
             case 'render':
                 if (mainWindow) {
@@ -113,6 +126,7 @@ function handleSimpleMessage(line) {
         }
     } catch (e) {
         // Non-JSON output from the subprocess; ignore
+        debugLog(`non-json stdout: ${line}`);
     }
 }
 
@@ -122,19 +136,27 @@ function spawnSimpleProcess() {
     const entryArgs = resolveEntryArgs();
 
     if (entryArgs.length === 0) {
+        debugLog('no entry args provided');
         console.error('Usage: electron . <entry.spl> [args...]');
         console.error('  --bin <path>   Path to Simple binary (or set SIMPLE_BIN)');
         app.quit();
         return;
     }
 
-    simpleProcess = spawn(bin, ['run', ...entryArgs], {
+    const commandArgs = entryArgs.length > 0 && entryArgs[0].endsWith('.ui.sdn')
+        ? ['ui', 'electron', ...entryArgs]
+        : ['run', ...entryArgs];
+
+    simpleProcess = spawn(bin, commandArgs, {
         stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: projectRoot,
         env: {
             ...process.env,
-            SIMPLE_UI_BACKEND: 'electron'
+            SIMPLE_UI_BACKEND: 'electron',
+            SIMPLE_HOME: projectRoot
         }
     });
+    debugLog(`spawned simple pid=${simpleProcess.pid || 'unknown'} bin=${bin} args=${commandArgs.join(' ')}`);
 
     // Read stdout line by line
     simpleProcess.stdout.on('data', (data) => {
@@ -148,20 +170,26 @@ function spawnSimpleProcess() {
     });
 
     simpleProcess.stderr.on('data', (data) => {
+        debugLog(`stderr: ${data.toString().trim()}`);
         process.stderr.write(data);
     });
 
     simpleProcess.on('close', (code) => {
+        debugLog(`simple process closed code=${code}`);
         simpleProcess = null;
         if (code !== 0 && code !== null) {
             console.error(`Simple process exited with code ${code}`);
         }
-        if (mainWindow) {
-            mainWindow.close();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(
+                'render',
+                '<div style="padding:24px;color:#ff6b6b"><h2>Simple process exited</h2><p>The Electron shell is still open so logs remain visible.</p></div>'
+            );
         }
     });
 
     simpleProcess.on('error', (err) => {
+        debugLog(`simple process start error: ${err.message}`);
         console.error(`Failed to start Simple process: ${err.message}`);
         dialog.showErrorBox(
             'Simple Process Error',
@@ -173,6 +201,7 @@ function spawnSimpleProcess() {
 
 // Create the main window and start the subprocess
 app.whenReady().then(() => {
+    debugLog('app.whenReady');
     mainWindow = new BrowserWindow({
         width: 1280,
         height: 720,
@@ -183,16 +212,30 @@ app.whenReady().then(() => {
         },
         title: 'Simple UI'
     });
+    debugLog('browser window created');
 
-    mainWindow.loadFile('index.html');
+    mainWindow.loadFile(path.join(__dirname, 'index.html'));
+    debugLog('loadFile(index.html) requested');
+
+    mainWindow.webContents.on('did-finish-load', () => {
+        debugLog('window did-finish-load');
+    });
+    mainWindow.webContents.on('render-process-gone', (event, details) => {
+        debugLog(`render-process-gone reason=${details.reason}`);
+    });
+    mainWindow.webContents.on('did-fail-load', (event, code, desc) => {
+        debugLog(`did-fail-load code=${code} desc=${desc}`);
+    });
 
     // Forward resize events to the Simple process
     mainWindow.on('resize', () => {
         const [width, height] = mainWindow.getContentSize();
+        debugLog(`window resize ${width}x${height}`);
         sendToSimple({ type: 'resize', width, height });
     });
 
     mainWindow.on('closed', () => {
+        debugLog('window closed');
         mainWindow = null;
     });
 
@@ -220,10 +263,19 @@ ipcMain.on('quit', () => {
 });
 
 app.on('window-all-closed', () => {
+    debugLog('window-all-closed');
     sendToSimple({ type: 'quit' });
     if (simpleProcess) {
         simpleProcess.kill();
         simpleProcess = null;
     }
     app.quit();
+});
+
+app.on('before-quit', () => {
+    debugLog('before-quit');
+});
+
+app.on('quit', () => {
+    debugLog('quit');
 });

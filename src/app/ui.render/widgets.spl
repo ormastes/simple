@@ -215,63 +215,46 @@ fn render_tui_table(screen: Screen, node: WidgetNode, rect: WidgetRect, focused:
             val cells = split_by_pipe(label)
             # Apply filter if set
             if filter_text != "":
-                if label.contains(filter_text):
+                if text_contains(label, filter_text):
                     all_rows = all_rows.push(cells)
             else:
                 all_rows = all_rows.push(cells)
 
-    # Calculate column widths (max of header and all cell widths)
+    # Determine column count without indexed array access. The current
+    # bootstrap compiler/runtime still miscompiles some indexed table paths.
     var col_count = headers.len()
-    var col_widths: [i32] = []
-    var ci = 0
-    while ci < col_count:
-        var w = 0
-        if ci < headers.len():
-            w = headers[ci].len() + 2
-        col_widths = col_widths.push(w)
-        ci = ci + 1
     for data_row in all_rows:
-        ci = 0
-        while ci < col_count:
-            if ci < data_row.len():
-                val cell_w = data_row[ci].len() + 2
-                if cell_w > col_widths[ci]:
-                    col_widths[ci] = cell_w
-            ci = ci + 1
+        if data_row.len() > col_count:
+            col_count = data_row.len()
 
     val header_style = get_theme_color(theme, "title")
+    val column_width = 14
 
     # Render header row with sort indicator
-    if headers.len() > 0 and row < rect.y + rect.h:
+    if col_count > 0 and row < rect.y + rect.h:
         var header_line = "| "
         var hi = 0
-        while hi < headers.len():
-            val hdr = headers[hi]
-            val cw = if hi < col_widths.len(): col_widths[hi] else: hdr.len() + 2
+        for hdr in headers:
             val indicator = if sort_col == "{hi}":
                 if sort_dir == "desc": " \u{25bc}" else: " \u{25b2}"
             else:
                 ""
             val hdr_text = "{hdr}{indicator}"
-            val padded = pad_right(hdr_text, cw)
+            val padded = pad_right(hdr_text, column_width)
             header_line = "{header_line}{padded} | "
+            hi = hi + 1
+        while hi < col_count:
+            header_line = "{header_line}{pad_right(\"\", column_width)} | "
             hi = hi + 1
         s = s.put_styled(row, rect.x, header_line, header_style)
         row = row + 1
 
     # Render separator line: +----+----+
-    if headers.len() > 0 and row < rect.y + rect.h:
+    if col_count > 0 and row < rect.y + rect.h:
         var sep_line = "+"
         var si = 0
-        while si < col_widths.len():
-            val cw = col_widths[si]
-            var dash_chars: [text] = []
-            var di = 0
-            while di < cw + 2:
-                dash_chars = dash_chars.push("-")
-                di = di + 1
-            val dashes = dash_chars.join("")
-            sep_line = "{sep_line}{dashes}+"
+        while si < col_count:
+            sep_line = "{sep_line}{\"-\".repeat(column_width + 2)}+"
             si = si + 1
         s = s.put_text(row, rect.x, sep_line)
         row = row + 1
@@ -283,11 +266,12 @@ fn render_tui_table(screen: Screen, node: WidgetNode, rect: WidgetRect, focused:
             break
         var data_line = "| "
         var di = 0
-        while di < col_count:
-            val cell = if di < data_row.len(): data_row[di] else: ""
-            val cw = if di < col_widths.len(): col_widths[di] else: cell.len() + 2
-            val padded = pad_right(cell, cw)
+        for cell in data_row:
+            val padded = pad_right(cell, column_width)
             data_line = "{data_line}{padded} | "
+            di = di + 1
+        while di < col_count:
+            data_line = "{data_line}{pad_right(\"\", column_width)} | "
             di = di + 1
         s = s.put_styled(row, rect.x, data_line, text_style)
         row = row + 1
@@ -697,16 +681,29 @@ fn expand_template(template: text, state: UIState) -> text:
     var result = template
     val ph_mode = "{" + "app.mode" + "}"
     val ph_title = "{" + "app.title" + "}"
-    if result.contains(ph_mode):
+    if text_contains(result, ph_mode):
         val mode_name = state.mode_name()
         result = replace_placeholder(result, ph_mode, mode_name)
-    if result.contains(ph_title):
+    if text_contains(result, ph_title):
         result = replace_placeholder(result, ph_title, state.tree.title_text())
     return result
 
 fn replace_placeholder(text_val: text, placeholder: text, replacement: text) -> text:
-    """Simple string replacement."""
-    return text_val.replace(placeholder, replacement)
+    """Simple string replacement without relying on text.replace() or slicing."""
+    if placeholder == "":
+        return text_val
+    val parts = text_val.split(placeholder)
+    return parts.join(replacement)
+
+fn text_contains(haystack: text, needle: text) -> bool:
+    if needle == "":
+        return true
+    val idx = haystack.index_of(needle)
+    match idx:
+        case Some(_):
+            return true
+        case _:
+            return false
 
 # =========================================================================
 # Full TUI Tree Render
@@ -879,8 +876,7 @@ fn render_html_table(node: WidgetNode, state: UIState, focus_class: text) -> tex
         var headers = split_by_pipe(header_str)
         var th_html = ""
         var hi = 0
-        while hi < headers.len():
-            val hdr = headers[hi]
+        for hdr in headers:
             val indicator = if sort_col == "{hi}":
                 if sort_dir == "desc": " \u{25bc}" else: " \u{25b2}"
             else:
@@ -895,7 +891,7 @@ fn render_html_table(node: WidgetNode, state: UIState, focus_class: text) -> tex
         val label = child.get_prop("label")
         if label != "":
             # Apply filter
-            if filter_text != "" and not label.contains(filter_text):
+            if filter_text != "" and not text_contains(label, filter_text):
                 pass_dn
             else:
                 val cells = split_by_pipe(label)

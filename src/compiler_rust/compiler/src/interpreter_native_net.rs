@@ -461,20 +461,229 @@ pub fn native_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_io_tcp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = extract_socket_addr(args, 0)?;
+    match TcpListener::bind(addr) {
+        Ok(listener) => Ok(Value::Int(allocate_socket(SocketHandle::TcpListener(listener)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    match with_tcp_listener(handle, |listener| listener.accept()) {
+        Ok((stream, _)) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let _timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
+    match with_tcp_listener(handle, |listener| listener.accept()) {
+        Ok((stream, _)) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = extract_socket_addr(args, 0)?;
+    match TcpStream::connect(addr) {
+        Ok(stream) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = extract_socket_addr(args, 0)?;
+    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
+    let timeout = if timeout_ms <= 0 {
+        Duration::from_millis(0)
+    } else {
+        Duration::from_millis(timeout_ms as u64)
+    };
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(stream) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096).max(0) as usize;
+    let mut buf = vec![0u8; size];
+    match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
+        Ok(n) => {
+            buf.truncate(n);
+            Ok(Value::Array(Arc::new(buf.into_iter().map(|b| Value::Int(b as i64)).collect())))
+        }
+        Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
+    }
+}
+
+pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let mut out: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    let result = with_tcp_stream_mut(handle, |stream| {
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {
+                    out.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        return Ok(());
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    });
+    match result {
+        Ok(()) => {
+            if out.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::Str(String::from_utf8_lossy(&out).into_owned()))
+            }
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_tcp_write_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let data = extract_bytes(args, 1)?;
+    match with_tcp_stream_mut(handle, |stream| stream.write(&data)) {
+        Ok(n) => Ok(Value::Int(n as i64)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_write_text_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let text = match args.get(1) {
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        None => Vec::new(),
+        _ => Vec::new(),
+    };
+    let text_len = text.len() as i64;
+    match with_tcp_stream_mut(handle, |stream| stream.write_all(&text)) {
+        Ok(()) => Ok(Value::Int(text_len)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_write_http_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let parts = match args.get(1) {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => Arc::new(Vec::new()),
+    };
+    match with_tcp_stream_mut(handle, |stream| {
+        for part in parts.iter() {
+            if let Value::Str(s) = part {
+                stream.write_all(s.as_bytes())?;
+            }
+        }
+        Ok(())
+    }) {
+        Ok(()) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn rt_io_tcp_write_all_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let data = extract_bytes(args, 1)?;
+    eprintln!("[rt_io_tcp_write_all] len={}", data.len());
+    match with_tcp_stream_mut(handle, |stream| stream.write_all(&data)) {
+        Ok(()) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn rt_io_tcp_flush_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(Value::Bool(with_tcp_stream_mut(handle, |stream| stream.flush()).is_ok()))
+}
+
+pub fn rt_io_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(Value::Bool(release_socket(handle)))
+}
+
+pub fn rt_io_tcp_local_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    match with_tcp_listener(handle, |listener| listener.local_addr()) {
+        Ok(addr) => Ok(Value::Str(addr.to_string())),
+        Err(_) => match with_tcp_stream(handle, |stream| stream.local_addr()) {
+            Ok(addr) => Ok(Value::Str(addr.to_string())),
+            Err(_) => Ok(Value::Nil),
+        },
+    }
+}
+
+pub fn rt_io_tcp_peer_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    match with_tcp_stream(handle, |stream| stream.peer_addr()) {
+        Ok(addr) => Ok(Value::Str(addr.to_string())),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
 pub fn native_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
     set_bool_op!(args, with_tcp_stream, set_nodelay, true)
+}
+
+pub fn rt_io_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
+    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_nodelay(enabled)).is_ok()))
 }
 
 pub fn native_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     set_timeout_op!(args, with_tcp_stream, set_read_timeout)
 }
 
+pub fn rt_io_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
+    let timeout = timeout_ms.and_then(|ms| {
+        if ms < 0 {
+            None
+        } else {
+            Some(Duration::from_millis(ms as u64))
+        }
+    });
+    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)).is_ok()))
+}
+
 pub fn native_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     set_timeout_op!(args, with_tcp_stream, set_write_timeout)
 }
 
+pub fn rt_io_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
+    let timeout = timeout_ms.and_then(|ms| {
+        if ms < 0 {
+            None
+        } else {
+            Some(Duration::from_millis(ms as u64))
+        }
+    });
+    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)).is_ok()))
+}
+
 pub fn native_tcp_get_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
     with_tcp_stream_op!(args, 0, |stream| stream.nodelay().map(Value::Bool))
+}
+
+pub fn rt_io_tcp_shutdown_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let how = extract_shutdown_how(args, 1);
+    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.shutdown(how)).is_ok()))
 }
 
 pub fn native_tcp_peek_interp(args: &[Value]) -> Result<Value, CompileError> {

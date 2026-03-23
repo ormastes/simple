@@ -8,6 +8,10 @@
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 
+struct FlatEntry:
+    key: text
+    value: text
+
 # =========================================================================
 # String helpers
 # =========================================================================
@@ -107,11 +111,12 @@ fn count_indent(line: text) -> i64:
         ci = ci + 1
     return indent
 
-fn parse_to_flat(source: text) -> Dict<text, text>:
+fn parse_to_flat(source: text) -> [FlatEntry]:
     # Normalize Windows CRLF and old Mac CR line endings to Unix LF
-    val normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    var normalized = source.replace("\r\n", "\n")
+    normalized = normalized.replace("\r", "\n")
     val lines = s_split(normalized, "\n")
-    var result: Dict<text, text> = {}
+    var result: [FlatEntry] = []
     var path_indents: [i64] = []
     var path_keys: [text] = []
     var li = 0
@@ -153,36 +158,29 @@ fn parse_to_flat(source: text) -> Dict<text, text>:
                 if s_starts(val_text, "\""):
                     if s_ends(val_text, "\""):
                         val_text = val_text[1:vl - 1]
-            result[full_path] = val_text
+            result = result.push(FlatEntry(key: full_path, value: val_text))
 
     return result
 
-fn flat_get(d: Dict<text, text>, key: text) -> text:
-    val v = d.get(key)
-    if v == nil:
-        return ""
-    return unwrap_opt(v)
+fn flat_get(entries: [FlatEntry], key: text) -> text:
+    for entry in entries:
+        if entry.key == key:
+            return entry.value
+    return ""
 
-fn flat_child_keys(d: Dict<text, text>, prefix: text) -> [text]:
+fn flat_child_keys(entries: [FlatEntry], prefix: text) -> [text]:
     var keys: [text] = []
-    var seen: Dict<text, text> = {}
     val plen = s_len(prefix)
     val dot_prefix = prefix + "."
-    val all_keys = d.keys()
-    var ki = 0
-    val kcount = tlist_len(all_keys)
-
-    while ki < kcount:
-        val key = all_keys[ki]
-        ki = ki + 1
+    for entry in entries:
+        val key = entry.key
         if s_starts(key, dot_prefix):
             val rest = key[plen + 1:]
             val dot_pos = s_find(rest, ".")
             var child_key = rest
             if dot_pos >= 0:
                 child_key = rest[0:dot_pos]
-            if seen.get(child_key) == nil:
-                seen[child_key] = "1"
+            if not list_contains(keys, child_key):
                 keys = keys + [child_key]
     return keys
 
@@ -214,14 +212,30 @@ fn render_source(source: text) -> Result<text, text>:
     val entries = parse_to_flat(source)
     return render_entries(entries)
 
-fn render_entries(entries: Dict<text, text>) -> Result<text, text>:
+fn render_entries(entries: [FlatEntry]) -> Result<text, text>:
     val title = flat_get(entries, "app.title")
     val theme = flat_get(entries, "app.theme")
     val html = render_node_html(entries, "layout", 0)
     val page = build_html_page(title, theme, html)
     return Ok(page)
 
-fn render_node_html(entries: Dict<text, text>, path: text, depth: i64) -> text:
+fn replace_template_value(text_val: text, placeholder: text, replacement: text) -> text:
+    if placeholder == "":
+        return text_val
+    val parts = text_val.split(placeholder)
+    return parts.join(replacement)
+
+fn expand_template_value(entries: [FlatEntry], tpl: text) -> text:
+    if tpl == "":
+        return ""
+    var result = tpl
+    val ph_mode = "{" + "app.mode" + "}"
+    val ph_title = "{" + "app.title" + "}"
+    result = replace_template_value(result, ph_mode, "app")
+    result = replace_template_value(result, ph_title, flat_get(entries, "app.title"))
+    return result
+
+fn render_node_html(entries: [FlatEntry], path: text, depth: i64) -> text:
     val wtype = flat_get(entries, "{path}.type")
     val wid = flat_get(entries, "{path}.id")
     val content = flat_get(entries, "{path}.content")
@@ -229,8 +243,8 @@ fn render_node_html(entries: Dict<text, text>, path: text, depth: i64) -> text:
     val label = flat_get(entries, "{path}.label")
     val value = flat_get(entries, "{path}.value")
     val flex = flat_get(entries, "{path}.flex")
-    val left_text = flat_get(entries, "{path}.left")
-    val right_text = flat_get(entries, "{path}.right")
+    val left_text = expand_template_value(entries, flat_get(entries, "{path}.left"))
+    val right_text = expand_template_value(entries, flat_get(entries, "{path}.right"))
     val width = flat_get(entries, "{path}.width")
 
     val placeholder = flat_get(entries, "{path}.placeholder")
