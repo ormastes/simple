@@ -6,10 +6,18 @@
 # Split from test_runner_execute.spl for maintainability.
 
 use test_runner_types.*
-use test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output}
-use app.io.file_ops.{file_exists}
+use test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, parse_test_output}
+use app.io.file_ops.{file_exists, file_read}
 use app.io.time_ops.{time_now_unix_micros}
 use app.io.process_ops.{process_run_timeout}
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.jit.jit_types.{JitBinary}
+use std.nogc_sync_mut.jit.jit_util.{hex_i64}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
+use std.nogc_sync_mut.jit.jit_layout.{append_halt_trampoline_arm32, plan_binary_layout_arm32, jit_entry_pc_arm32, jit_return_pc_arm32}
+use std.nogc_sync_mut.jit.jit_hal_stm32h7.{stm32h7_connect, stm32h7_disconnect, stm32h7_write_code, stm32h7_write_register, stm32h7_read_register, stm32h7_resume}
+use test_executor_composite_jit_generic.{run_test_file_jit_qemu_rv32, run_test_file_jit_qemu_arm, run_test_file_jit_stm32wb, run_test_file_jit_stm32h7_adapter, run_test_file_jit_ch32v307, run_test_file_jit_ghdl_rv32, run_test_file_jit_trace32_stm32h7, run_test_file_jit_trace32_stm32wb}
 
 # =========================================================================
 # Composite Platform Execution
@@ -21,14 +29,21 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
     val base = extract_base_runtime(spec)
     val platform = extract_platform_layer(spec)
     val arch = extract_arch_from_spec(spec)
+    val target = extract_target_from_spec(spec)
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
 
-    # Dispatch to platform-specific runner
+    # Dispatch to platform-specific runner.
+    # Base runtime takes precedence so nested specs like
+    # jit(remote(baremetal(stm32h7))) still reach the JIT lane.
+    if base == "jit":
+        return run_test_file_jit(file_path, options, arch, target)
     if platform == "baremetal":
         return run_test_file_baremetal(file_path, options, base, arch)
     if platform == "remote":
         return run_test_file_remote(file_path, options, base, arch)
+    if platform == "jit":
+        return run_test_file_jit(file_path, options, arch, target)
 
     TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
         duration_ms: 0, setup_ms: setup_ms, error: "Unknown platform: {platform}", timed_out: false)
@@ -53,6 +68,25 @@ fn extract_platform_layer(spec: text) -> text:
 
 fn extract_arch_from_spec(spec: text) -> text:
     """Extract target architecture from composite spec."""
+    if spec.contains("riscv32"): return "riscv32"
+    if spec.contains("stm32h7"): return "arm32"
+    if spec.contains("stm32wb"): return "arm32"
+    if spec.contains("arm32"): return "arm32"
+    if spec.contains("aarch64"): return "aarch64"
+    if spec.contains("x86_64"): return "x86_64"
+    if spec.contains("x86"): return "x86"
+    "host"
+
+fn extract_target_from_spec(spec: text) -> text:
+    """Extract board/target identifier from composite spec."""
+    if spec.contains("trace32") or spec.contains("t32"):
+        if spec.contains("stm32h7"): return "trace32_stm32h7"
+        if spec.contains("stm32wb"): return "trace32_stm32wb"
+        return "trace32_stm32h7"
+    if spec.contains("ch32v307"): return "ch32v307"
+    if spec.contains("ghdl") or spec.contains("rtl_rv32"): return "ghdl_rv32"
+    if spec.contains("stm32h7"): return "stm32h7"
+    if spec.contains("stm32wb"): return "stm32wb"
     if spec.contains("riscv32"): return "riscv32"
     if spec.contains("arm32"): return "arm32"
     if spec.contains("aarch64"): return "aarch64"
@@ -196,7 +230,183 @@ fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch:
     # Fallback: run via host interpreter
     run_test_file_baremetal_via_interpreter(file_path, options, arch)
 
+fn run_test_file_jit(file_path: text, options: TestOptions, arch: text, target: text) -> TestFileResult:
+    """Execute test via JIT upload to remote target.
+
+    Compiles .spl source to native code, uploads to target RAM via debug protocol,
+    executes, and collects results.
+    """
+    val start = time_now_unix_micros()
+
+    if not file_path.ends_with(".spl"):
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (end - start) / 1000, setup_ms: 0,
+            error: "JIT mode only supports .spl files, got: {file_path}", timed_out: false)
+
+    val source = file_read(file_path)
+    if source.trim() == "":
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (end - start) / 1000, setup_ms: 0,
+            error: "JIT source file is empty or unreadable: {file_path}", timed_out: false)
+
+    if target == "riscv32":
+        return run_test_file_jit_qemu_rv32(file_path, source, options)
+    if target == "stm32h7":
+        return run_test_file_jit_stm32h7(file_path, source, options)
+    if target == "stm32wb":
+        return run_test_file_jit_stm32wb(file_path, source, options)
+    if target == "ch32v307":
+        return run_test_file_jit_ch32v307(file_path, source, options)
+    if target == "ghdl_rv32":
+        return run_test_file_jit_ghdl_rv32(file_path, source, options)
+    if target == "trace32_stm32h7" or target == "t32_stm32h7":
+        return run_test_file_jit_trace32_stm32h7(file_path, source, options)
+    if target == "trace32_stm32wb" or target == "t32_stm32wb":
+        return run_test_file_jit_trace32_stm32wb(file_path, source, options)
+    if arch == "arm32":
+        return run_test_file_jit_qemu_arm(file_path, source, options)
+
+    val end = time_now_unix_micros()
+    TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+        duration_ms: (end - start) / 1000, setup_ms: 0,
+        error: "JIT mode is not wired for target: {target}", timed_out: false)
+
+fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions) -> TestFileResult:
+    val setup_start = time_now_unix_micros()
+    val connect_result = stm32h7_connect()
+    if connect_result.is_err():
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT target connect failed: {connect_result.err().unwrap()}", timed_out: false)
+
+    var openocd_pid: i64 = 0
+    match connect_result:
+        case Ok(v):
+            openocd_pid = v
+        case Err(_):
+            openocd_pid = 0
+
+    val limits = MemoryMap.stm32h7()
+    val compile_result = compile_remote_binary(source, Architecture.Arm32, limits.code_start)
+    if compile_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT compile failed: {compile_result.err().unwrap()}", timed_out: false)
+
+    var compiled_bytes: [i32] = []
+    match compile_result:
+        case Ok(v):
+            compiled_bytes = v
+        case Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT compile failed: {msg}", timed_out: false)
+    val bytes = append_halt_trampoline_arm32(compiled_bytes)
+    val binary = JitBinary(
+        name: file_path,
+        bytes: bytes,
+        entry_offset: 0,
+        stack_bytes: 0
+    )
+    val layout_result = plan_binary_layout_arm32(binary, limits)
+    if layout_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT layout failed: {layout_result.err().unwrap()}", timed_out: false)
+    var layout = layout_result.ok.unwrap()
+    val write_result = stm32h7_write_code(layout.code_base, bytes)
+    if write_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT upload failed: {write_result.err().unwrap()}", timed_out: false)
+
+    # TODO: restore SRAM readback verify once stm32h7_read_code() is interpreter-safe.
+
+    val sp_result = stm32h7_write_register(13, layout.stack_top)
+    if sp_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set SP failed: {sp_result.err().unwrap()}", timed_out: false)
+
+    val lr_result = stm32h7_write_register(14, jit_return_pc_arm32(layout))
+    if lr_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set LR failed: {lr_result.err().unwrap()}", timed_out: false)
+
+    val pc_result = stm32h7_write_register(15, jit_entry_pc_arm32(layout))
+    if pc_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set PC failed: {pc_result.err().unwrap()}", timed_out: false)
+
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    val exec_start = time_now_unix_micros()
+    val resume_result = stm32h7_resume()
+    if resume_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "JIT resume failed: {resume_result.err().unwrap()}", timed_out: false)
+
+    shell("sleep 0.5")
+    val r0_result = stm32h7_read_register(0)
+    val pc_after_result = stm32h7_read_register(15)
+    val exec_end = time_now_unix_micros()
+    stm32h7_disconnect(openocd_pid)
+
+    if r0_result.is_err():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+            error: "JIT read R0 failed: {r0_result.err().unwrap()}", timed_out: false)
+
+    if pc_after_result.is_err():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+            error: "JIT read PC failed: {pc_after_result.err().unwrap()}", timed_out: false)
+
+    var r0 = 0
+    match r0_result:
+        case Ok(v):
+            r0 = v
+        case Err(_):
+            r0 = 0
+
+    var pc_after = 0
+    match pc_after_result:
+        case Ok(v):
+            pc_after = v
+        case Err(_):
+            pc_after = 0
+    val expected_halt_pc = layout.halt_addr
+    val expected_pc = layout.halt_addr + 2
+    val pc_ok = pc_after == expected_halt_pc or pc_after == expected_pc
+    val passed = if r0 == 0 and pc_ok: 1 else: 0
+    val failed = if passed == 1: 0 else: 1
+    val error = if passed == 1: "" else: "JIT execution mismatch: r0={r0} pc=0x{hex_i64(pc_after)} expected_pc=0x{hex_i64(expected_pc)} halt_pc=0x{hex_i64(expected_halt_pc)}"
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: 0, pending: 0,
+        duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms, error: error, timed_out: false)
+
 # =========================================================================
 # Exports
 # =========================================================================
-

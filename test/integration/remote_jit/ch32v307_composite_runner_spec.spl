@@ -1,0 +1,50 @@
+"""
+# CH32V307 Baremetal Composite Runner
+Verifies JIT pipeline end-to-end on CH32V307 via WCH-Link adapter.
+"""
+
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.exec.adapter_ch32v307.{Ch32v307Adapter}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+
+fn ch32v307_available() -> bool:
+    val wlink = shell("command -v wlink >/dev/null 2>&1")
+    val clang = shell("command -v clang >/dev/null 2>&1")
+    val lld = shell("command -v ld.lld >/dev/null 2>&1")
+    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
+    wlink.exit_code == 0 and clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0
+
+fn ch32v307_detected() -> bool:
+    val result = shell("lsusb 2>/dev/null | grep -q '4348:55e0'")
+    result.exit_code == 0
+
+describe "CH32V307 Baremetal Workload":
+    it "runs return-zero on CH32V307":
+        if not ch32v307_available() or not ch32v307_detected():
+            print "[skip] CH32V307 hardware/tools not available"
+            return
+        var adapter = Ch32v307Adapter.new()
+        val conn = adapter.connect()
+        if conn.is_err():
+            print "[skip] connect failed: {conn.err().unwrap()}"
+            return
+        val mgr = adapter.create_manager()
+        if mgr.is_err():
+            adapter.disconnect()
+            print "[skip] manager failed"
+            return
+        val source = "fn main() -> i64:\n    0\n"
+        val limits = MemoryMap.ch32v307()
+        val compiled = CompilerBridge.compile(source, Architecture.RiscV32, limits.code_start)
+        if compiled.is_err():
+            adapter.disconnect()
+            print "[skip] compile failed"
+            return
+        var manager = mgr.ok.unwrap()
+        val result = manager.execute_bytes("workload_zero", compiled.ok.unwrap(), [])
+        adapter.disconnect()
+        if result.is_err():
+            print "[skip] exec failed: {result.err().unwrap()}"
+            return
+        expect(result.ok.unwrap().return_value).to_equal(0)

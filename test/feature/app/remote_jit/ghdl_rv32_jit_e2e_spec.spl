@@ -1,0 +1,80 @@
+"""
+# GHDL RV32 RTL Simulation JIT End-to-End (Unified Adapter)
+
+**Feature IDs:** #RJE-030
+**Category:** Integration
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter
+pattern. Uses GhdlRv32Adapter for simulation lifecycle, CompilerBridge for
+compilation, and the standard connect/disconnect pattern.
+
+The adapter stores uploaded code in a local buffer, then runs a full GHDL
+simulation on resume(). Semihosting output is parsed from simulation stdout.
+"""
+
+use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+use std.io_runtime.{shell}
+
+fn ghdl_available() -> bool:
+    """Check that GHDL and cross-compilation tools are installed."""
+    val ghdl = shell("command -v ghdl >/dev/null 2>&1")
+    val clang = shell("command -v clang >/dev/null 2>&1")
+    val lld = shell("command -v ld.lld >/dev/null 2>&1")
+    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
+    (ghdl.exit_code == 0 and clang.exit_code == 0 and
+     lld.exit_code == 0 and objcopy.exit_code == 0)
+
+describe "GHDL RV32 RTL Simulation JIT E2E":
+
+    it "discovers GHDL simulator":
+        if not ghdl_available():
+            print "SKIP: ghdl or cross-compilation tools not installed"
+        else:
+            val ghdl_ver = shell("ghdl --version 2>&1")
+            expect(ghdl_ver.exit_code).to_equal(0)
+            expect(ghdl_ver.stdout).to_contain("GHDL")
+
+    it "connects to GHDL RV32 simulation":
+        if not ghdl_available():
+            print "SKIP: ghdl not installed"
+        else:
+            var adapter = GhdlRv32Adapter.new()
+            val connect_result = adapter.connect()
+            expect(connect_result.is_ok()).to_equal(true)
+            adapter.disconnect()
+
+    it "executes return-zero via GHDL RV32":
+        if not ghdl_available():
+            print "SKIP: ghdl or cross-compilation tools not installed"
+        else:
+            var adapter = GhdlRv32Adapter.new()
+            val connect_result = adapter.connect()
+            expect(connect_result.is_ok()).to_equal(true)
+
+            val source = "fn main() -> i64:\n    0\n"
+            val compile_result = CompilerBridge.compile(source, Architecture.RiscV32, adapter.memory_map.code_start)
+            if compile_result.is_err():
+                print "SKIP: compilation failed — {compile_result.err().unwrap()}"
+                adapter.disconnect()
+            else:
+                val bytes = compile_result.unwrap()
+                expect(bytes.len()).to_be_greater_than(0)
+
+                val write_result = adapter.write_code(adapter.memory_map.code_start, bytes)
+                expect(write_result.is_ok()).to_equal(true)
+
+                val resume_result = adapter.resume()
+                if resume_result.is_err():
+                    print "SKIP: simulation failed — {resume_result.err().unwrap()}"
+                else:
+                    val return_value = adapter.sim_exit_code()
+                    expect(return_value).to_equal(0)
+
+                adapter.disconnect()

@@ -1,0 +1,142 @@
+ # STM32WB Adapter
+ #
+ # ExecTarget implementation for STM32WB real hardware via OpenOCD + GDB MI.
+ # No QEMU — connects to physical hardware through OpenOCD on port 3334.
+ #
+ # Feature ID: #RJE-012
+ 
+ use app.io.{shell}
+ use std.nogc_sync_mut.debug.remote.exec.types.{
+     MemoryMap, CodeInfo, ExecResult, Architecture
+ }
+ use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
+ use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+ use std.nogc_sync_mut.debug.remote.target.stm32wb.{Stm32WbTarget}
+ use std.nogc_sync_mut.debug.remote.types.{DebugConfig}
+ 
+fn default_stm32wb_gdb_port() -> i32:
+    3334
+ 
+ class Stm32WbAdapter:
+     """STM32WB adapter using OpenOCD + GDB MI for code upload and execution."""
+     gdb: Option<GdbMiClient>
+     openocd_pid: i64
+     port: i32
+     memory_map: MemoryMap
+ 
+     static fn new() -> Stm32WbAdapter:
+         Stm32WbAdapter(
+             gdb: nil,
+             openocd_pid: 0,
+            port: default_stm32wb_gdb_port(),
+             memory_map: MemoryMap.stm32wb()
+         )
+ 
+     static fn with_port(port: i32) -> Stm32WbAdapter:
+         Stm32WbAdapter(
+             gdb: nil,
+             openocd_pid: 0,
+             port: port,
+             memory_map: MemoryMap.stm32wb()
+         )
+ 
+     fn is_available() -> bool:
+         val result = shell("command -v openocd >/dev/null 2>&1")
+         result.exit_code == 0
+ 
+     me connect() -> Result<text, text>:
+         """Start OpenOCD with STM32WB Nucleo config, connect GDB MI client."""
+         if not self.is_available():
+             return Err("openocd not available")
+ 
+         # Launch OpenOCD with STM32WB Nucleo board config, halted
+         val openocd_start = shell("sh -c 'openocd -f board/st_nucleo_wb55.cfg -c \"gdb_port {self.port}\" >/dev/null 2>&1 & echo $!'")
+         val pid_text = openocd_start.stdout.trim()
+         self.openocd_pid = if pid_text.len() > 0: int(pid_text) else: -1
+ 
+         if self.openocd_pid <= 0:
+             return Err("failed to launch OpenOCD")
+ 
+         # Wait for GDB port to become available
+         val port_ready = shell("timeout 10 bash -c 'while ! ss -tln | grep -q :{self.port}; do sleep 0.1; done' 2>/dev/null")
+         if port_ready.exit_code != 0:
+             self.stop_openocd()
+             return Err("OpenOCD GDB port did not become ready")
+ 
+         # Connect GDB MI
+         val config = DebugConfig(
+             host: "localhost",
+             port: self.port as i64,
+             target: Architecture.Arm32,
+             program: "",
+             options: {}
+         )
+         val gdb_result = GdbMiClient.connect(config)
+         if gdb_result.is_err():
+             self.stop_openocd()
+             return Err("GDB MI connect failed: {gdb_result.err().unwrap()}")
+ 
+         self.gdb = Some(gdb_result.ok.unwrap())
+         Ok("connected to STM32WB via OpenOCD on port {self.port}")
+ 
+     me disconnect():
+         """Disconnect GDB and stop OpenOCD."""
+        if self.gdb.?:
+            match self.gdb:
+                Some(g): g.disconnect()
+                nil: return
+         self.gdb = nil
+         self.stop_openocd()
+ 
+     me stop_openocd():
+         if self.openocd_pid > 0:
+             shell("kill {self.openocd_pid} >/dev/null 2>&1 || true")
+             shell("sleep 0.1")
+             shell("kill -9 {self.openocd_pid} >/dev/null 2>&1 || true")
+             self.openocd_pid = 0
+ 
+     fn write_code(addr: i64, bytes: [i32]) -> Result<text, text>:
+        match self.gdb:
+            Some(g): g.write_memory(addr, bytes)
+            nil: Err("not connected")
+ 
+     fn read_code(addr: i64, size: i64) -> Result<[i32], text>:
+        match self.gdb:
+            Some(g): g.read_memory(addr, size)
+            nil: Err("not connected")
+ 
+     fn write_register(reg: i64, value: i64) -> Result<text, text>:
+        match self.gdb:
+            Some(g): g.write_register(reg as i32, value)
+            nil: Err("not connected")
+ 
+     fn read_register(reg: i64) -> Result<i64, text>:
+        match self.gdb:
+            Some(g): g.read_register(reg as i32)
+            nil: Err("not connected")
+ 
+     fn resume() -> Result<text, text>:
+        match self.gdb:
+            Some(g): g.resume()
+            nil: Err("not connected")
+ 
+     fn wait_halt(timeout_ms: i64) -> Result<text, text>:
+        match self.gdb:
+            Some(g): g.wait_for_stop(timeout_ms as i32)
+            nil: Err("not connected")
+ 
+     fn create_manager() -> Result<RemoteExecutionManager, text>:
+         """Create a RemoteExecutionManager wired to this adapter."""
+        if not self.gdb.?:
+             return Err("not connected — call connect() first")
+ 
+         Ok(RemoteExecutionManager.new(
+             arch: Architecture.Arm32,
+             memory_map: self.memory_map,
+             write_code_fn: \addr, bytes: self.write_code(addr, bytes),
+             read_code_fn: \addr, size: self.read_code(addr, size),
+             write_register_fn: \reg, val_: self.write_register(reg, val_),
+             read_register_fn: \reg: self.read_register(reg),
+             resume_fn: \: self.resume(),
+             wait_halt_fn: \timeout: self.wait_halt(timeout)
+         ))
