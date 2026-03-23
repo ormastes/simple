@@ -85,18 +85,12 @@ fn show_error(app: &AppHandle, title: &str, detail: &str) {
     if let Some(win) = app.get_webview_window("main") {
         let escaped_title = js_escape(title);
         let escaped_detail = js_escape(detail);
+        // Trigger the demo UI fallback, then show error as a toast overlay
         let js = format!(
             r#"
             (function() {{
-                var app = document.getElementById('app');
-                if (!app) {{
-                    document.body.innerHTML = '<div id="app"></div>';
-                    app = document.getElementById('app');
-                }}
-                app.innerHTML = '<div style="padding:24px;font-family:monospace">'
-                    + '<h2 style="color:#e53e3e;margin-bottom:12px">' + `{}` + '</h2>'
-                    + '<pre style="white-space:pre-wrap;background:#2d1b1b;color:#feb2b2;padding:16px;border-radius:8px;overflow:auto;max-height:80vh">'
-                    + `{}` + '</pre></div>';
+                if (typeof showDemoUI === 'function') {{ showDemoUI(); }}
+                console.warn(`{}` + ': ' + `{}`);
             }})();
             "#,
             escaped_title, escaped_detail
