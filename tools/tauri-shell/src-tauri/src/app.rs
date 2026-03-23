@@ -369,6 +369,7 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                 .show();
         }
         SubprocessMessage::WindowControl { action } => {
+            #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
                 match action.as_str() {
                     "minimize" => { let _ = win.minimize(); }
@@ -377,6 +378,8 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                     _ => {}
                 }
             }
+            #[cfg(mobile)]
+            { let _ = action; }
         }
     }
 }
@@ -537,14 +540,17 @@ pub fn run() {
         .setup(move |app| {
             eprintln!("[tauri-shell] creating window from app://index.html");
 
-            let _win = WebviewWindowBuilder::new(
+            #[allow(unused_mut)]
+            let mut builder = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::App("index.html".into()),
-            )
-            .title("Simple UI")
-            .inner_size(1280.0, 720.0)
-            .build()?;
+            );
+            #[cfg(desktop)]
+            {
+                builder = builder.title("Simple UI").inner_size(1280.0, 720.0);
+            }
+            let _win = builder.build()?;
 
             // Uncomment to debug: win.open_devtools();
 
@@ -615,7 +621,7 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(move |window, event| {
+        .on_window_event(move |_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 process.send(&ShellMessage::Quit);
                 if let Ok(mut guard) = process.stdin.lock() {
@@ -627,7 +633,8 @@ pub fn run() {
                         let _ = child.wait();
                     }
                 }
-                let _ = window.close();
+                #[cfg(desktop)]
+                { let _ = _window.close(); }
             }
         })
         .run(tauri::generate_context!())
