@@ -1125,11 +1125,15 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
     let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
 
-    // Always propagate potential mutations for FieldAccess receivers.
-    // Custom `me` methods (e.g., push_scope, add_symbol) mutate the receiver
-    // but were previously missed because they weren't in a hardcoded list.
-    // For non-mutating methods (e.g., .len()), the result type differs from the
-    // receiver type, so reassigning back is harmless — it's a no-op in practice
-    // because the FieldAccess handler only updates if updated_field.is_some().
-    Ok((result.clone(), Some(result)))
+    // Only propagate self-update when the result type matches the receiver type.
+    // Mutating `me` methods (e.g., push, pop) return the same type (Array → Array).
+    // Non-mutating methods (e.g., len, contains) return a different type (Array → Int).
+    // Returning Some(result) for non-mutating methods corrupts the variable's type
+    // when the Identifier handler in calls.rs reassigns it back to env.
+    let updated_self = if std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
+        Some(result.clone())
+    } else {
+        None
+    };
+    Ok((result, updated_self))
 }

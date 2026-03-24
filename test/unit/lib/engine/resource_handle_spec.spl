@@ -1,0 +1,80 @@
+"""
+Engine HandleArena — Generational Index Arena Tests
+
+Tests insert/get, remove invalidation, slot reuse with bumped generation.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.resource.handle.{HandleArena}
+
+describe "HandleArena":
+    it "inserts and retrieves a value":
+        var arena = HandleArena.new()
+        val handle = arena.insert("hello")
+        val idx = handle.0
+        val gen = handle.1
+        val result = arena.get(idx, gen)
+        expect(result).to_equal("hello")
+
+    it "returns nil for invalid index":
+        var arena = HandleArena.new()
+        val result = arena.get(-1, 1)
+        expect(result).to_be_nil
+
+    it "returns nil for out-of-range index":
+        var arena = HandleArena.new()
+        val result = arena.get(999, 1)
+        expect(result).to_be_nil
+
+    it "removes a value and makes handle stale":
+        var arena = HandleArena.new()
+        val handle = arena.insert("world")
+        val idx = handle.0
+        val gen = handle.1
+        val removed = arena.remove(idx, gen)
+        expect(removed).to_equal(true)
+        val stale = arena.get(idx, gen)
+        expect(stale).to_be_nil
+
+    it "reuses slots with bumped generation":
+        var arena = HandleArena.new()
+        val h1 = arena.insert("first")
+        val idx1 = h1.0
+        val gen1 = h1.1
+        arena.remove(idx1, gen1)
+        val h2 = arena.insert("second")
+        val idx2 = h2.0
+        val gen2 = h2.1
+        # Should reuse the same index
+        expect(idx2).to_equal(idx1)
+        # Generation should be bumped
+        expect(gen2).to_be_greater_than(gen1)
+
+    it "old handle returns nil after slot reuse":
+        var arena = HandleArena.new()
+        val h1 = arena.insert("original")
+        val idx1 = h1.0
+        val gen1 = h1.1
+        arena.remove(idx1, gen1)
+        val h2 = arena.insert("replacement")
+        # Old handle should be stale
+        val old_val = arena.get(idx1, gen1)
+        expect(old_val).to_be_nil
+        # New handle should work
+        val new_val = arena.get(h2.0, h2.1)
+        expect(new_val).to_equal("replacement")
+
+    it "tracks count correctly":
+        var arena = HandleArena.new()
+        expect(arena.len()).to_equal(0)
+        val h1 = arena.insert("a")
+        val h2 = arena.insert("b")
+        expect(arena.len()).to_equal(2)
+        arena.remove(h1.0, h1.1)
+        expect(arena.len()).to_equal(1)
+
+    it "checks emptiness":
+        var arena = HandleArena.new()
+        expect(arena.is_empty()).to_equal(true)
+        val h = arena.insert("x")
+        expect(arena.is_empty()).to_equal(false)
