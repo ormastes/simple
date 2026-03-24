@@ -31,8 +31,12 @@ class GdbMiClient:
             shell("rm -f {fifo_in}")
             return Err("failed to create output FIFO: {mk2.stderr}")
 
-        # Determine GDB binary (prefer riscv-specific, fall back to gdb-multiarch)
-        val gdb_bin = GdbMiClient.find_gdb_binary()
+        # Determine GDB binary. RISC-V targets require a target-aware GDB.
+        val gdb_bin_result = GdbMiClient.find_gdb_binary(config)
+        if gdb_bin_result.is_err():
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err(gdb_bin_result.err().unwrap())
+        val gdb_bin = gdb_bin_result.ok.unwrap()
 
         # Start GDB with MI interface, reading from/writing to FIFOs.
         # Capture the PID in the same shell that launches the background job.
@@ -79,23 +83,36 @@ class GdbMiClient:
         Ok(client)
 
     # Find the best GDB binary available
-    static fn find_gdb_binary() -> text:
+    static fn find_gdb_binary(config: DebugConfig) -> Result<text, text>:
         # Try riscv-specific first
         val rv32 = shell("which riscv32-unknown-elf-gdb 2>/dev/null")
         if rv32.exit_code == 0:
-            return rv32.stdout.trim()
+            return Ok(rv32.stdout.trim())
 
         val rvelf = shell("which riscv64-unknown-elf-gdb 2>/dev/null")
         if rvelf.exit_code == 0:
-            return rvelf.stdout.trim()
+            return Ok(rvelf.stdout.trim())
 
         # Fall back to gdb-multiarch
         val multi = shell("which gdb-multiarch 2>/dev/null")
         if multi.exit_code == 0:
-            return multi.stdout.trim()
+            return Ok(multi.stdout.trim())
+
+        # Also check user-local installs that may not be on PATH
+        val home = shell("echo $HOME").stdout.trim()
+        if home.len() > 0:
+            val local_multi = "{home}/.local/bin/gdb-multiarch"
+            val local_probe = shell("test -x '{local_multi}'")
+            if local_probe.exit_code == 0:
+                return Ok(local_multi)
+
+        match config.target:
+            Architecture.RiscV32: return Err("target-aware GDB unavailable for riscv32 (need riscv32-unknown-elf-gdb, riscv64-unknown-elf-gdb, or gdb-multiarch)")
+            Architecture.RiscV64: return Err("target-aware GDB unavailable for riscv64 (need riscv64-unknown-elf-gdb or gdb-multiarch)")
+            _: pass
 
         # Last resort
-        "gdb"
+        Ok("gdb")
 
     # Send a GDB MI command and wait for result
     me send_command(cmd: text) -> Result<Dict<text, text>, text>:
@@ -387,7 +404,8 @@ class GdbMiClient:
         val inner_len = inner.len()
         val inner2 = if inner.ends_with("]"): inner[0:inner_len - 1] else: inner
         for part in inner2.split(","):
-            val n = part.trim().replace("\"", "")
+            val trimmed = part.trim()
+            val n = trimmed.replace("\"", "")
             if n == name:
                 reg_num = idx
                 break

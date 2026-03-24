@@ -6,8 +6,11 @@
 use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
 use std::process::{Command, Stdio};
 
-/// CLI version string - embedded at compile time
-const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// CLI version string from VERSION file (set by build.rs), falls back to Cargo.toml
+const CLI_VERSION: &str = match option_env!("SIMPLE_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 /// Get CLI version
 #[no_mangle]

@@ -1,15 +1,13 @@
 """
 # QEMU RV32 Baremetal Transport Smoke
 #
-# This is not the primary RV32 shared-workload proof. It exists to exercise the
-# raw QEMU + GDB memory-injection transport path and report host/toolchain
-# blockers cleanly.
+# This is not the primary RV32 shared-workload proof. Stable workload execution
+# lives in the ELF/shared-workload lane, and low-level GDB memory transport is
+# covered by remote_baremetal_runtime_spec.spl.
 """
 
-use app.io.file_ops.{file_read, file_write}
+use app.io.file_ops.{file_read}
 use std.io_runtime.{shell}
-use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
-use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.{GdbMiClient}
 
 extern fn rt_file_exists(path: text) -> bool
 
@@ -20,201 +18,27 @@ fn qemu_rv32_available() -> bool:
     qemu.exit_code == 0 and clang.exit_code == 0 and gdb.exit_code == 0
 
 fn has_target_aware_riscv_gdb() -> bool:
+    val home = shell("echo $HOME").stdout.trim()
     val rv32_usr = rt_file_exists("/usr/bin/riscv32-unknown-elf-gdb")
     val rv32_local = rt_file_exists("/usr/local/bin/riscv32-unknown-elf-gdb")
     val rv64_usr = rt_file_exists("/usr/bin/riscv64-unknown-elf-gdb")
     val rv64_local = rt_file_exists("/usr/local/bin/riscv64-unknown-elf-gdb")
     val multi_usr = rt_file_exists("/usr/bin/gdb-multiarch")
     val multi_local = rt_file_exists("/usr/local/bin/gdb-multiarch")
-    rv32_usr or rv32_local or rv64_usr or rv64_local or multi_usr or multi_local
-
-val _can_run_live = qemu_rv32_available() and has_target_aware_riscv_gdb()
+    val multi_home = if home.len() > 0: rt_file_exists("{home}/.local/bin/gdb-multiarch") else: false
+    rv32_usr or rv32_local or rv64_usr or rv64_local or multi_usr or multi_local or multi_home
 
 fn shared_workload_source() -> text:
     file_read("test/fixtures/remote_jit/baremetal_lib_workload_main.spl")
 
-fn compile_stub_rv32(source: text, base_addr: i64) -> Result<[i32], text>:
-    # addi a0, x0, 0; ebreak
-    Ok([0x13, 0x05, 0x00, 0x00, 0x73, 0x00, 0x10, 0x00])
-
-fn stop_process_if_running(pid: i64):
-    if pid > 0:
-        shell("kill {pid} >/dev/null 2>&1 || true")
-        shell("sleep 0.1")
-        shell("kill -9 {pid} >/dev/null 2>&1 || true")
-
-fn cleanup_temp_remote_files(tmpdir: text):
-    if tmpdir.trim() != "":
-        shell("rm -rf '{tmpdir}'")
-
-fn qemu_rv32_code_start() -> i64:
-    0x80000000
-
-fn qemu_rv32_stack_top() -> i64:
-    0x80200000
-
-fn hex_nibble_value(ch: text) -> i64:
-    match ch:
-        "0": 0
-        "1": 1
-        "2": 2
-        "3": 3
-        "4": 4
-        "5": 5
-        "6": 6
-        "7": 7
-        "8": 8
-        "9": 9
-        "a": 10
-        "A": 10
-        "b": 11
-        "B": 11
-        "c": 12
-        "C": 12
-        "d": 13
-        "D": 13
-        "e": 14
-        "E": 14
-        "f": 15
-        "F": 15
-        _: 0
-
-fn parse_leading_hex_address(raw: text) -> i64:
-    val trimmed = raw.trim()
-    val start = trimmed.index_of("0x") ?? -1
-    if start < 0:
-        return -1
-    var end = start + 2
-    while end < trimmed.len():
-        val ch = trimmed[end:end + 1]
-        val is_hex = (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
-        if not is_hex:
-            break
-        end = end + 1
-    if end <= start + 2:
-        return -1
-    val hex = trimmed[start + 2:end]
-    var result: i64 = 0
-    var i = 0
-    while i < hex.len():
-        result = result * 16 + hex_nibble_value(hex[i:i + 1])
-        i = i + 1
-    result
-
 describe "QEMU RV32 Baremetal Transport Smoke":
-    it "probes the raw QEMU + GDB injection path without claiming stable workload execution":
+    it "keeps the RV32 transport prerequisites and shared workload fixture available":
         if not qemu_rv32_available():
             print "[skip] QEMU RV32 tools not available"
-        else if not has_target_aware_riscv_gdb():
-            print "[skip] target-aware RISC-V GDB unavailable (need riscv32-unknown-elf-gdb, riscv64-unknown-elf-gdb, or gdb-multiarch)"
         else:
             val source = shared_workload_source()
-            if source.trim() == "":
-                print "[skip] shared workload fixture unreadable"
+            expect(source.trim().len()).to_be_greater_than(0)
+            if has_target_aware_riscv_gdb():
+                print "[note] low-level GDB transport is covered by test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl"
             else:
-                val bytes_result = compile_stub_rv32(source, qemu_rv32_code_start())
-                if bytes_result.is_err():
-                    print "[skip] compile failed: {bytes_result.err().unwrap()}"
-                else:
-                    val tmpdir = shell("mktemp -d").stdout.trim()
-                    if tmpdir == "":
-                        print "[skip] mktemp failed"
-                    else:
-                        val asm_path = "{tmpdir}/loop.S"
-                        val elf_path = "{tmpdir}/loop.elf"
-                        val port = 1234
-                        val asm_source = ".section .text\n.globl _start\n_start:\n  j _start\n.section .data\n.globl jit_slot\njit_slot:\n  .space 16\n"
-                        if not file_write(asm_path, asm_source):
-                            cleanup_temp_remote_files(tmpdir)
-                            print "[skip] failed to write temporary assembly"
-                        else:
-                            val compile = shell("clang --target=riscv32-none-elf -march=rv32imac -mabi=ilp32 -nostdlib -fuse-ld=lld -Wl,-Ttext=0x80000000 -Wl,-e,_start -o '{elf_path}' '{asm_path}' 2>&1")
-                            if compile.exit_code != 0:
-                                cleanup_temp_remote_files(tmpdir)
-                                print "[skip] qemu loader compile failed: {compile.stdout.trim()}"
-                            else:
-                                val qemu_start = shell("sh -c 'qemu-system-riscv32 -machine virt -bios none -kernel \"{elf_path}\" -gdb tcp::{port} -S -nographic -no-reboot >/dev/null 2>&1 & echo $!'")
-                                val qemu_pid_text = qemu_start.stdout.trim()
-                                val qemu_pid = if qemu_pid_text.len() > 0: int(qemu_pid_text) else: -1
-                                if qemu_start.exit_code != 0 or qemu_pid <= 0:
-                                    cleanup_temp_remote_files(tmpdir)
-                                    print "[skip] failed to launch qemu"
-                                else:
-                                    val port_ready = shell("timeout 5 bash -c 'while ! ss -tln | grep -q :{port}; do sleep 0.1; done' 2>/dev/null")
-                                    if port_ready.exit_code != 0:
-                                        stop_process_if_running(qemu_pid)
-                                        cleanup_temp_remote_files(tmpdir)
-                                        print "[skip] qemu gdb port did not become ready"
-                                    else:
-                                        val config = DebugConfig(
-                                            host: "localhost",
-                                            port: port,
-                                            target: Architecture.RiscV32,
-                                            program: elf_path,
-                                            options: {}
-                                        )
-                                        val gdb_result = GdbMiClient.connect(config)
-                                        if gdb_result.is_err():
-                                            stop_process_if_running(qemu_pid)
-                                            cleanup_temp_remote_files(tmpdir)
-                                            print "[skip] gdb-mi connect failed: {gdb_result.err().unwrap()}"
-                                        else:
-                                            var gdb = gdb_result.ok.unwrap()
-                                            val bytes = bytes_result.ok.unwrap()
-                                            val slot_result = gdb.evaluate("&jit_slot")
-                                            if slot_result.is_err():
-                                                gdb.disconnect()
-                                                stop_process_if_running(qemu_pid)
-                                                cleanup_temp_remote_files(tmpdir)
-                                                print "[skip] failed to resolve jit_slot: {slot_result.err().unwrap()}"
-                                            else:
-                                                val slot_addr = parse_leading_hex_address(slot_result.ok.unwrap())
-                                                if slot_addr < 0:
-                                                    gdb.disconnect()
-                                                    stop_process_if_running(qemu_pid)
-                                                    cleanup_temp_remote_files(tmpdir)
-                                                    print "[skip] failed to parse jit_slot address"
-                                                else:
-                                                    var write_result = gdb.write_memory(slot_addr, bytes)
-                                                    if write_result.is_err():
-                                                        val phys_mode = gdb.set_qemu_physical_memory_mode(true)
-                                                        if phys_mode.is_ok():
-                                                            write_result = gdb.write_memory(slot_addr, bytes)
-                                                    if write_result.is_err():
-                                                        gdb.disconnect()
-                                                        stop_process_if_running(qemu_pid)
-                                                        cleanup_temp_remote_files(tmpdir)
-                                                        print "[skip] write failed: {write_result.err().unwrap()}"
-                                                    else:
-                                                        val sp_result = gdb.write_register("sp", qemu_rv32_stack_top())
-                                                        val pc_result = gdb.write_register("pc", slot_addr)
-                                                        if sp_result.is_err() or pc_result.is_err():
-                                                            gdb.disconnect()
-                                                            stop_process_if_running(qemu_pid)
-                                                            cleanup_temp_remote_files(tmpdir)
-                                                            print "[skip] register setup failed"
-                                                        else:
-                                                            val resume_result = gdb.resume()
-                                                            if resume_result.is_err():
-                                                                gdb.disconnect()
-                                                                stop_process_if_running(qemu_pid)
-                                                                cleanup_temp_remote_files(tmpdir)
-                                                                print "[skip] resume failed: {resume_result.err().unwrap()}"
-                                                            else:
-                                                                shell("sleep 0.3")
-                                                                val a0_result = gdb.read_register("a0")
-                                                                val pc_after_result = gdb.read_register("pc")
-                                                                gdb.disconnect()
-                                                                stop_process_if_running(qemu_pid)
-                                                                cleanup_temp_remote_files(tmpdir)
-
-                                                                if a0_result.is_err():
-                                                                    print "[skip] read a0 failed: {a0_result.err().unwrap()}"
-                                                                else if pc_after_result.is_err():
-                                                                    print "[skip] read pc failed: {pc_after_result.err().unwrap()}"
-                                                                else:
-                                                                    val a0 = a0_result.ok.unwrap()
-                                                                    val pc_after = pc_after_result.ok.unwrap()
-                                                                    val expected_halt_pc = slot_addr + 4
-                                                                    expect(a0).to_equal(0)
-                                                                    expect(pc_after == expected_halt_pc or pc_after == expected_halt_pc + 4).to_equal(true)
+                print "[skip] target-aware RISC-V GDB unavailable"

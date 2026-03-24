@@ -17,12 +17,32 @@ use walkdir::WalkDir;
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    // CARGO_MANIFEST_DIR = .../simple/rust/driver
-    // We need to go up 2 levels to get to project root (.../simple)
+    // CARGO_MANIFEST_DIR = .../simple/src/compiler_rust/driver
+    // We need to go up 3 levels to get to project root (.../simple)
     let project_root = Path::new(&manifest_dir)
-        .parent() // rust
+        .parent() // compiler_rust
+        .and_then(|p| p.parent()) // src
         .and_then(|p| p.parent()) // project root
         .unwrap();
+
+    // Read VERSION file and validate against Cargo.toml version
+    let version_file = project_root.join("VERSION");
+    println!("cargo:rerun-if-changed={}", version_file.display());
+    if version_file.exists() {
+        let file_version = fs::read_to_string(&version_file)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
+        if !file_version.is_empty() && file_version != cargo_version {
+            println!(
+                "cargo:warning=VERSION file ({}) does not match Cargo.toml ({}). Update both to keep in sync.",
+                file_version, cargo_version
+            );
+        }
+        // Export VERSION for runtime use
+        println!("cargo:rustc-env=SIMPLE_VERSION={}", file_version);
+    }
 
     // Generate tests for stdlib
     let stdlib_test_root = project_root.join("test/lib/std");
