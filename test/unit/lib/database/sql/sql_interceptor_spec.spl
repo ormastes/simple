@@ -1,0 +1,176 @@
+# SQL Interceptor Specification
+#
+# Tests TimingInterceptor, LoggingInterceptor, and RetryInterceptor.
+
+use std.database.sql.interceptor.{TimingInterceptor, LoggingInterceptor, RetryInterceptor}
+
+describe "TimingInterceptor":
+    context "after_execute":
+        it "records slow queries above threshold":
+            var ti = TimingInterceptor.new(100)
+            ti.after_execute("SELECT * FROM users", 150, true)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(1)
+            expect(slow[0]).to_contain("SELECT * FROM users")
+            expect(slow[0]).to_contain("150ms")
+
+        it "does not record queries below threshold":
+            var ti = TimingInterceptor.new(100)
+            ti.after_execute("SELECT 1", 50, true)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(0)
+
+        it "records query at exact threshold":
+            var ti = TimingInterceptor.new(100)
+            ti.after_execute("SELECT 1", 100, true)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(1)
+
+        it "records multiple slow queries":
+            var ti = TimingInterceptor.new(50)
+            ti.after_execute("query1", 60, true)
+            ti.after_execute("query2", 70, true)
+            ti.after_execute("fast_query", 10, true)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(2)
+
+    context "after_query":
+        it "records slow SELECT queries":
+            var ti = TimingInterceptor.new(100)
+            ti.after_query("SELECT * FROM users", 200, 50)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(1)
+            expect(slow[0]).to_contain("QUERY")
+            expect(slow[0]).to_contain("200ms")
+            expect(slow[0]).to_contain("50 rows")
+
+        it "does not record fast SELECT queries":
+            var ti = TimingInterceptor.new(100)
+            ti.after_query("SELECT 1", 10, 1)
+            val slow = ti.get_slow_queries()
+            expect(slow.len()).to_equal(0)
+
+    context "before_execute":
+        it "is a no-op":
+            val ti = TimingInterceptor.new(100)
+            ti.before_execute("SELECT 1")
+            # No exception, no state change
+            expect(ti.get_slow_queries().len()).to_equal(0)
+
+    context "before_query":
+        it "is a no-op":
+            val ti = TimingInterceptor.new(100)
+            ti.before_query("SELECT 1")
+            expect(ti.get_slow_queries().len()).to_equal(0)
+
+describe "LoggingInterceptor":
+    context "before_execute":
+        it "logs before execute":
+            var li = LoggingInterceptor.new()
+            li.before_execute("INSERT INTO users VALUES (1, 'Alice')")
+            val log = li.get_log()
+            expect(log.len()).to_equal(1)
+            expect(log[0]).to_start_with("[EXEC]")
+            expect(log[0]).to_contain("INSERT INTO")
+
+    context "after_execute":
+        it "logs after execute with duration and success":
+            var li = LoggingInterceptor.new()
+            li.after_execute("UPDATE users SET name='Bob'", 5, true)
+            val log = li.get_log()
+            expect(log.len()).to_equal(1)
+            expect(log[0]).to_start_with("[EXEC DONE]")
+            expect(log[0]).to_contain("5ms")
+            expect(log[0]).to_contain("success=true")
+
+        it "logs failed execution":
+            var li = LoggingInterceptor.new()
+            li.after_execute("BAD SQL", 2, false)
+            val log = li.get_log()
+            expect(log[0]).to_contain("success=false")
+
+    context "before_query":
+        it "logs before query":
+            var li = LoggingInterceptor.new()
+            li.before_query("SELECT * FROM users")
+            val log = li.get_log()
+            expect(log.len()).to_equal(1)
+            expect(log[0]).to_start_with("[QUERY]")
+
+    context "after_query":
+        it "logs after query with duration and row count":
+            var li = LoggingInterceptor.new()
+            li.after_query("SELECT * FROM users", 10, 25)
+            val log = li.get_log()
+            expect(log.len()).to_equal(1)
+            expect(log[0]).to_start_with("[QUERY DONE]")
+            expect(log[0]).to_contain("10ms")
+            expect(log[0]).to_contain("25 rows")
+
+    context "full lifecycle":
+        it "logs before and after execute in sequence":
+            var li = LoggingInterceptor.new()
+            li.before_execute("INSERT INTO t VALUES (1)")
+            li.after_execute("INSERT INTO t VALUES (1)", 3, true)
+            val log = li.get_log()
+            expect(log.len()).to_equal(2)
+            expect(log[0]).to_start_with("[EXEC]")
+            expect(log[1]).to_start_with("[EXEC DONE]")
+
+        it "logs before and after query in sequence":
+            var li = LoggingInterceptor.new()
+            li.before_query("SELECT 1")
+            li.after_query("SELECT 1", 1, 1)
+            val log = li.get_log()
+            expect(log.len()).to_equal(2)
+            expect(log[0]).to_start_with("[QUERY]")
+            expect(log[1]).to_start_with("[QUERY DONE]")
+
+    context "clear_log":
+        it "clears all log entries":
+            var li = LoggingInterceptor.new()
+            li.before_execute("sql1")
+            li.before_execute("sql2")
+            expect(li.get_log().len()).to_equal(2)
+            li.clear_log()
+            expect(li.get_log().len()).to_equal(0)
+
+describe "RetryInterceptor":
+    context "retry counting":
+        it "starts with zero retry count":
+            val ri = RetryInterceptor.new(3, 100)
+            expect(ri.get_retry_count()).to_equal(0)
+
+        it "increments retry count on failure":
+            var ri = RetryInterceptor.new(3, 100)
+            ri.after_execute("SELECT 1", 10, false)
+            expect(ri.get_retry_count()).to_equal(1)
+
+        it "does not increment on success":
+            var ri = RetryInterceptor.new(3, 100)
+            ri.after_execute("SELECT 1", 10, true)
+            expect(ri.get_retry_count()).to_equal(0)
+
+        it "counts multiple failures":
+            var ri = RetryInterceptor.new(5, 100)
+            ri.after_execute("sql1", 1, false)
+            ri.after_execute("sql2", 1, false)
+            ri.after_execute("sql3", 1, false)
+            expect(ri.get_retry_count()).to_equal(3)
+
+        it "counts mixed success and failure":
+            var ri = RetryInterceptor.new(5, 100)
+            ri.after_execute("ok", 1, true)
+            ri.after_execute("fail", 1, false)
+            ri.after_execute("ok2", 1, true)
+            ri.after_execute("fail2", 1, false)
+            expect(ri.get_retry_count()).to_equal(2)
+
+    context "configuration":
+        it "stores max_retries":
+            val ri = RetryInterceptor.new(3, 200)
+            expect(ri.max_retries).to_equal(3)
+
+        it "stores delay_ms":
+            val ri = RetryInterceptor.new(3, 200)
+            expect(ri.delay_ms).to_equal(200)
