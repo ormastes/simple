@@ -128,7 +128,7 @@ impl NodeStore:
         val node = Node2D.create(node_id, name)
         self.nodes[index] = node
         self.count = self.count + 1
-        self.root_nodes.push(node_id)
+        self._add_root_node(node_id)
         node_id
 
     fn get_node(id: NodeId) -> Node2D?:
@@ -200,7 +200,7 @@ impl NodeStore:
                         self._add_child_to_parent(parent_id, child_id)
                     else:
                         # Child becomes root
-                        self.root_nodes.push(child_id)
+                        self._add_root_node(child_id)
                 ci = ci + 1
 
             # Remove from parent's children list
@@ -227,9 +227,21 @@ impl NodeStore:
         val maybe_child = self.get_node(child_id)
         if maybe_child == nil:
             return false
+        if parent_id.is_valid() and self.get_node(parent_id) == nil:
+            return false
 
         if val Some(child) = maybe_child:
             val old_parent = child.parent
+            if child_id.eq(parent_id):
+                return false
+            if old_parent.eq(parent_id):
+                if parent_id.is_valid():
+                    self._add_child_to_parent(parent_id, child_id)
+                else:
+                    self._add_root_node(child_id)
+                return true
+            if parent_id.is_valid() and self._would_create_cycle(child_id, parent_id):
+                return false
 
             # Detach from old parent
             if old_parent.is_valid():
@@ -257,7 +269,7 @@ impl NodeStore:
             if parent_id.is_valid():
                 self._add_child_to_parent(parent_id, child_id)
             else:
-                self.root_nodes.push(child_id)
+                self._add_root_node(child_id)
             return true
         false
 
@@ -467,7 +479,8 @@ impl NodeStore:
         val maybe_parent = self.get_node(parent_id)
         if val Some(parent) = maybe_parent:
             var new_children = parent.children
-            new_children.push(child_id)
+            if not self._node_list_contains(new_children, child_id):
+                new_children.push(child_id)
             val updated = Node2D(
                 id: parent.id,
                 name: parent.name,
@@ -482,6 +495,32 @@ impl NodeStore:
                 tags: parent.tags
             )
             self.set_node(parent_id, updated)
+
+    fn _node_list_contains(nodes: [NodeId], id: NodeId) -> bool:
+        var i = 0
+        while i < nodes.len():
+            if nodes[i].eq(id):
+                return true
+            i = i + 1
+        false
+
+    me _add_root_node(id: NodeId):
+        if not self._node_list_contains(self.root_nodes, id):
+            self.root_nodes.push(id)
+
+    fn _would_create_cycle(child_id: NodeId, parent_id: NodeId) -> bool:
+        var current = parent_id
+        var depth = 0
+        while current.is_valid() and depth <= self.nodes.len():
+            if current.eq(child_id):
+                return true
+            val maybe_node = self.get_node(current)
+            if val Some(node) = maybe_node:
+                current = node.parent
+            else:
+                current = NodeId.invalid()
+            depth = depth + 1
+        false
 
     me _remove_child_from_parent(parent_id: NodeId, child_id: NodeId):
         """Remove child_id from the parent's children list."""

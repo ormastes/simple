@@ -1,0 +1,287 @@
+# SimpleOS Compiled Logic Test
+#
+# Tests all OS logic in a single compilation unit to avoid
+# cross-module struct field access bug in Cranelift.
+#
+# Build: src/compiler_rust/target/bootstrap/simple native-build --entry test/unit/os/compiled_logic_test.spl -o build/os_logic_test
+# Run:   build/os_logic_test
+
+var pass_count: i32 = 0
+var fail_count: i32 = 0
+
+fn ok(name: text):
+    pass_count = pass_count + 1
+    print "OK: {name}"
+
+fn fail(name: text):
+    fail_count = fail_count + 1
+    print "FAIL: {name}"
+
+fn check(name: text, value: bool):
+    if value:
+        ok(name)
+    else:
+        fail(name)
+
+# ============================================================================
+# Memory Types (inline)
+# ============================================================================
+
+struct PhysAddr:
+    addr: u64
+
+struct PageFrame:
+    pfn: u64
+
+fn pfn_to_phys(pfn: u64) -> u64:
+    pfn * 4096
+
+fn phys_to_pfn(addr: u64) -> u64:
+    addr / 4096
+
+# VmFlags as bitfield
+struct VmFlags:
+    bits: u32
+
+val VM_PRESENT: u32 = 1
+val VM_WRITABLE: u32 = 2
+val VM_USER: u32 = 4
+val VM_WRITE_THROUGH: u32 = 8
+val VM_CACHE_DISABLE: u32 = 16
+val VM_NO_EXECUTE: u32 = 32
+
+fn vm_present(f: VmFlags) -> bool: (f.bits & VM_PRESENT) != 0
+fn vm_writable(f: VmFlags) -> bool: (f.bits & VM_WRITABLE) != 0
+fn vm_user(f: VmFlags) -> bool: (f.bits & VM_USER) != 0
+fn vm_write_through(f: VmFlags) -> bool: (f.bits & VM_WRITE_THROUGH) != 0
+fn vm_cache_disable(f: VmFlags) -> bool: (f.bits & VM_CACHE_DISABLE) != 0
+fn vm_no_execute(f: VmFlags) -> bool: (f.bits & VM_NO_EXECUTE) != 0
+
+fn kernel_rw() -> VmFlags: VmFlags(bits: VM_PRESENT | VM_WRITABLE)
+fn kernel_ro() -> VmFlags: VmFlags(bits: VM_PRESENT)
+fn user_rw() -> VmFlags: VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+fn user_rx() -> VmFlags: VmFlags(bits: VM_PRESENT | VM_USER)
+fn mmio_flags() -> VmFlags: VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_WRITE_THROUGH | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+
+# ============================================================================
+# Capability Types (inline)
+# ============================================================================
+
+enum CapKind:
+    FileRead(prefix: text)
+    FileWrite(prefix: text)
+    NetConnect(port: u16)
+    ProcessSpawn
+    SystemReboot
+
+struct CapToken:
+    kind: CapKind
+    generation: u64
+    owner: u64
+
+struct CapSet:
+    caps: [CapToken]
+    pledged: i32    # 0=false, 1=true (avoid bool cross-module bug)
+
+fn cap_set_new() -> CapSet:
+    CapSet(caps: [], pledged: 0)
+
+fn cap_set_is_pledged(s: CapSet) -> bool:
+    s.pledged == 1
+
+# ============================================================================
+# PS/2 Scancode Mapping (inline)
+# ============================================================================
+
+fn scancode_to_key(code: u8) -> i32:
+    """Returns key ID. A=1, Space=2, Enter=3, Escape=4, Backspace=5, Unknown=0."""
+    if code == 0x1E: return 1   # A
+    if code == 0x39: return 2   # Space
+    if code == 0x1C: return 3   # Enter
+    if code == 0x01: return 4   # Escape
+    if code == 0x0E: return 5   # Backspace
+    if code == 0x10: return 6   # Q
+    if code == 0x11: return 7   # W
+    if code == 0x12: return 8   # E
+    0  # Unknown
+
+# ============================================================================
+# PCI Config Address (inline)
+# ============================================================================
+
+fn pci_config_addr(bus: u32, device: u32, func: u32, offset: u32) -> u32:
+    (1 << 31) | (bus << 16) | (device << 11) | (func << 8) | (offset & 0xFC)
+
+# ============================================================================
+# Init Service Dependency Sort (inline)
+# ============================================================================
+
+struct ServiceDef:
+    name: text
+    deps: [text]
+
+fn topo_sort(services: [ServiceDef]) -> [text]:
+    """Topological sort — deps before dependents."""
+    var order: [text] = []
+    var visited: [text] = []
+    for svc in services:
+        topo_visit(svc.name, services, visited, order)
+    order
+
+fn topo_visit(name: text, services: [ServiceDef], visited: [text], order: [text]):
+    if visited.contains(name):
+        return
+    visited.push(name)
+    for svc in services:
+        if svc.name == name:
+            for dep in svc.deps:
+                topo_visit(dep, services, visited, order)
+    order.push(name)
+
+# ============================================================================
+# FAT32 Cluster Math (inline)
+# ============================================================================
+
+fn cluster_to_sector(cluster: u32, data_start: u32, spc: u32) -> u64:
+    """Convert cluster number to LBA sector."""
+    val offset = (cluster - 2) * spc
+    (data_start + offset).to_u64()
+
+fn is_eoc(entry: u32) -> bool:
+    """Check if FAT entry is end-of-chain."""
+    entry >= 0x0FFFFFF8
+
+# ============================================================================
+# Color ARGB Packing (inline)
+# ============================================================================
+
+fn color_to_u32(r: u8, g: u8, b: u8, a: u8) -> u32:
+    val ar = a.to_u32() << 24
+    val rr = r.to_u32() << 16
+    val gr = g.to_u32() << 8
+    val br = b.to_u32()
+    ar | rr | gr | br
+
+# ============================================================================
+# Main Test
+# ============================================================================
+
+fn main():
+    print "=== SimpleOS Compiled Logic Test ==="
+
+    # --- PageFrame arithmetic ---
+    check("pfn 42 → phys 172032", pfn_to_phys(42) == 172032)
+    check("pfn 0 → phys 0", pfn_to_phys(0) == 0)
+    check("pfn 1 → phys 4096", pfn_to_phys(1) == 4096)
+    check("phys 172032 → pfn 42", phys_to_pfn(172032) == 42)
+    check("phys 0 → pfn 0", phys_to_pfn(0) == 0)
+    check("round trip pfn 100", phys_to_pfn(pfn_to_phys(100)) == 100)
+    check("round trip pfn 1000000", phys_to_pfn(pfn_to_phys(1000000)) == 1000000)
+
+    # --- VmFlags ---
+    val rw = kernel_rw()
+    check("kernel_rw present", vm_present(rw))
+    check("kernel_rw writable", vm_writable(rw))
+    check("kernel_rw not user", not vm_user(rw))
+    check("kernel_rw not no_execute", not vm_no_execute(rw))
+
+    val ro = kernel_ro()
+    check("kernel_ro present", vm_present(ro))
+    check("kernel_ro not writable", not vm_writable(ro))
+
+    val urw = user_rw()
+    check("user_rw present", vm_present(urw))
+    check("user_rw writable", vm_writable(urw))
+    check("user_rw user", vm_user(urw))
+    check("user_rw W^X: no_execute", vm_no_execute(urw))
+
+    val urx = user_rx()
+    check("user_rx not writable", not vm_writable(urx))
+    check("user_rx not no_execute", not vm_no_execute(urx))
+
+    val mmio = mmio_flags()
+    check("mmio write_through", vm_write_through(mmio))
+    check("mmio cache_disable", vm_cache_disable(mmio))
+    check("mmio no_execute", vm_no_execute(mmio))
+
+    # --- Capabilities ---
+    var caps = cap_set_new()
+    check("cap set not pledged", not cap_set_is_pledged(caps))
+
+    val tok = CapToken(kind: CapKind.FileRead(prefix: "/home"), generation: 1, owner: 42)
+    check("token owner 42", tok.owner == 42)
+    check("token generation 1", tok.generation == 1)
+
+    # --- PS/2 scancodes ---
+    check("0x1E → A", scancode_to_key(0x1E) == 1)
+    check("0x39 → Space", scancode_to_key(0x39) == 2)
+    check("0x1C → Enter", scancode_to_key(0x1C) == 3)
+    check("0x01 → Escape", scancode_to_key(0x01) == 4)
+    check("0x0E → Backspace", scancode_to_key(0x0E) == 5)
+    check("0xFF → Unknown", scancode_to_key(0xFF) == 0)
+    check("0x10 → Q", scancode_to_key(0x10) == 6)
+
+    # --- PCI config address ---
+    val addr0 = pci_config_addr(0, 0, 0, 0)
+    check("PCI enable bit", (addr0 >> 31) == 1)
+
+    val addr1 = pci_config_addr(1, 2, 3, 0x10)
+    check("PCI bus=1", ((addr1 >> 16) & 0xFF) == 1)
+    check("PCI dev=2", ((addr1 >> 11) & 0x1F) == 2)
+    check("PCI func=3", ((addr1 >> 8) & 0x07) == 3)
+    check("PCI offset=0x10", (addr1 & 0xFC) == 0x10)
+
+    # --- Init service dependency sort ---
+    val services = [
+        ServiceDef(name: "vfs", deps: []),
+        ServiceDef(name: "net", deps: []),
+        ServiceDef(name: "compositor", deps: ["vfs"]),
+        ServiceDef(name: "desktop", deps: ["compositor", "vfs"]),
+        ServiceDef(name: "llm", deps: ["compositor", "vfs", "net"])
+    ]
+    val order = topo_sort(services)
+    check("topo sort has 5", order.len() == 5)
+
+    # vfs must come before compositor
+    var vfs_idx = -1
+    var comp_idx = -1
+    var i = 0
+    while i < order.len():
+        if order[i] == "vfs":
+            vfs_idx = i
+        if order[i] == "compositor":
+            comp_idx = i
+        i = i + 1
+    check("vfs before compositor", vfs_idx >= 0 and comp_idx >= 0 and vfs_idx < comp_idx)
+
+    # --- FAT32 cluster math ---
+    check("cluster 2 → sector", cluster_to_sector(2, 100, 8) == 100)
+    check("cluster 3 → sector", cluster_to_sector(3, 100, 8) == 108)
+    check("cluster 10 → sector", cluster_to_sector(10, 100, 8) == 164)
+    check("EOC boundary", is_eoc(0x0FFFFFF8))
+    check("EOC above", is_eoc(0x0FFFFFFF))
+    check("not EOC", not is_eoc(0x00000002))
+    check("not EOC max", not is_eoc(0x0FFFFFF7))
+
+    # --- Color ARGB ---
+    val black = color_to_u32(0, 0, 0, 255)
+    check("black = 0xFF000000", black == 0xFF000000)
+
+    val white = color_to_u32(255, 255, 255, 255)
+    check("white = 0xFFFFFFFF", white == 0xFFFFFFFF)
+
+    val red = color_to_u32(255, 0, 0, 255)
+    check("red R channel", ((red >> 16) & 0xFF) == 255)
+    check("red G channel", ((red >> 8) & 0xFF) == 0)
+
+    # --- Bitwise operations ---
+    check("1 << 31 != 0", (1 << 31) != 0)
+    check("0xFF & 0x0F == 0x0F", (0xFF & 0x0F) == 0x0F)
+    check("0x80 >> 3 == 0x10", (0x80 >> 3) == 0x10)
+    check("0x55 | 0xAA == 0xFF", (0x55 | 0xAA) == 0xFF)
+
+    # --- Results ---
+    print ""
+    print "=== Results: {pass_count} passed, {fail_count} failed ==="
+    if fail_count == 0:
+        print "ALL TESTS PASSED"

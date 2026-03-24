@@ -110,6 +110,10 @@ impl PhysicsWorld2D:
         val pb = self.bodies[idx]
         val rb = self._make_rigid_body(pb)
         val ok = physics_destroy_body(rb)
+        var collider_ok = true
+        for c in self.colliders:
+            if c.node_id.eq(node_id):
+                collider_ok = self._destroy_collider(c) and collider_ok
         # Remove from list
         var new_bodies: [PhysicsBody2D] = []
         var i = 0
@@ -124,7 +128,7 @@ impl PhysicsWorld2D:
             if not c.node_id.eq(node_id):
                 new_colliders.push(c)
         self.colliders = new_colliders
-        ok
+        ok and collider_ok
 
     # ------------------------------------------------------------------
     # Collider Management
@@ -142,6 +146,7 @@ impl PhysicsWorld2D:
         val pc = PhysicsCollider2D(
             node_id: node_id,
             collider_handle: col.handle,
+            shape_code: 1,
             is_sensor: false
         )
         self.colliders.push(pc)
@@ -159,6 +164,7 @@ impl PhysicsWorld2D:
         val pc = PhysicsCollider2D(
             node_id: node_id,
             collider_handle: col.handle,
+            shape_code: 0,
             is_sensor: false
         )
         self.colliders.push(pc)
@@ -166,16 +172,21 @@ impl PhysicsWorld2D:
 
     me set_sensor(node_id: NodeId, is_sensor: bool) -> bool:
         var found = false
+        var updated_colliders: [PhysicsCollider2D] = []
         for c in self.colliders:
+            var next = c
             if c.node_id.eq(node_id):
-                val col = Collider(
-                    handle: c.collider_handle,
-                    world: self.world,
-                    shape: ColliderShape.Box,
-                    is_valid: true
-                )
+                val col = self._make_collider(c)
                 physics_collider_set_sensor(col, is_sensor)
+                next = PhysicsCollider2D(
+                    node_id: c.node_id,
+                    collider_handle: c.collider_handle,
+                    shape_code: c.shape_code,
+                    is_sensor: is_sensor
+                )
                 found = true
+            updated_colliders.push(next)
+        self.colliders = updated_colliders
         found
 
     # ------------------------------------------------------------------
@@ -367,3 +378,22 @@ impl PhysicsWorld2D:
             body_type: bt,
             is_valid: true
         )
+
+    fn _make_collider(pc: PhysicsCollider2D) -> Collider:
+        val shape = if pc.shape_code == 0:
+            ColliderShape.Circle
+        elif pc.shape_code == 1:
+            ColliderShape.Box
+        elif pc.shape_code == 2:
+            ColliderShape.Capsule
+        else:
+            ColliderShape.Polygon
+        Collider(
+            handle: pc.collider_handle,
+            world: self.world,
+            shape: shape,
+            is_valid: true
+        )
+
+    fn _destroy_collider(pc: PhysicsCollider2D) -> bool:
+        physics_destroy_collider(self._make_collider(pc))
