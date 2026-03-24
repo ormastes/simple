@@ -85,6 +85,8 @@ pub mod span_ffi;
 pub mod rc;
 pub mod wffi;
 pub mod dynamic_ffi;
+pub mod winit_ffi;
+pub mod rapier2d_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -1197,6 +1199,9 @@ pub(crate) fn call_extern_function(
         "rt_i18n_context_free" => i18n::rt_i18n_context_free(&evaluated, env),
         "rt_i18n_get_message" => i18n::rt_i18n_get_message(&evaluated, env),
         "rt_i18n_severity_name" => i18n::rt_i18n_severity_name(&evaluated, env),
+
+        _ if name.starts_with("rt_winit_") => winit_ffi::dispatch(name, &evaluated),
+        _ if name.starts_with("rt_rapier2d_") => rapier2d_ffi::dispatch(name, &evaluated),
 
         // Unknown extern function
         // ====================================================================
