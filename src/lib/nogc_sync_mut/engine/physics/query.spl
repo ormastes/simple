@@ -1,0 +1,64 @@
+# Physics System — Raycast Queries
+#
+# Spatial queries against the physics world. Wraps Rapier2D raycast FFI
+# with engine-friendly types (NodeId, Vec2).
+#
+# Usage:
+#   val hit = physics_raycast(world, origin, direction, 100.0)
+#   if hit.node_id.is_valid():
+#       print "Hit node at distance {hit.distance}"
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.io.rapier2d_ffi.*
+use std.nogc_sync_mut.engine.physics.types.{RaycastHit2D}
+use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
+
+# ============================================================================
+# Raycast — Single hit (nearest)
+# ============================================================================
+
+fn physics_raycast(world: PhysicsWorld2D, origin: Vec2, direction: Vec2, max_distance: f64) -> RaycastHit2D:
+    """Cast a ray and return the nearest hit, or an invalid result if nothing hit."""
+    val ffi_origin = Vector2(x: origin.x, y: origin.y)
+    val ffi_dir = Vector2(x: direction.x, y: direction.y)
+    val result = physics_cast_ray(world.world, ffi_origin, ffi_dir, max_distance)
+
+    if not result.hit:
+        return RaycastHit2D(
+            node_id: NodeId.invalid(),
+            point: Vec2.zero(),
+            normal: Vec2.zero(),
+            distance: 0.0
+        )
+
+    # Map collider handle back to a node
+    val node = world._find_node_by_collider(result.collider)
+
+    # Compute hit point from ray origin + direction * distance
+    val norm_dir = direction.normalize()
+    val hit_point = Vec2(
+        x: origin.x + norm_dir.x * result.distance,
+        y: origin.y + norm_dir.y * result.distance
+    )
+
+    RaycastHit2D(
+        node_id: node,
+        point: hit_point,
+        normal: Vec2.zero(),
+        distance: result.distance
+    )
+
+# ============================================================================
+# Raycast All — Multiple hits along the ray
+# ============================================================================
+
+fn physics_raycast_all(world: PhysicsWorld2D, origin: Vec2, direction: Vec2, max_distance: f64) -> [RaycastHit2D]:
+    """Cast a ray and return all hits. Currently delegates to single raycast
+    since Rapier2D FFI exposes only nearest-hit. Returns a single-element
+    list if something was hit, empty list otherwise."""
+    var results: [RaycastHit2D] = []
+    val hit = physics_raycast(world, origin, direction, max_distance)
+    if hit.node_id.is_valid():
+        results.push(hit)
+    results

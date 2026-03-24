@@ -7,14 +7,23 @@
 
 ## Overview
 
-End-to-end JIT test on STM32H7 via TRACE32 PowerView + GDB bridge.
-Compiles ARM Thumb-2 on host, uploads to SRAM through T32 GDB channel,
-executes, reads R0 result register.
+Runs the real composite JIT lane for STM32H7 through the TRACE32 adapter path:
 
-Requires running TRACE32 PowerView instance with STM32H7 target connected.
+- `run_test_file_composite`
+- `Trace32Adapter`
+- `T32GdbBridgeClient`
+- `RemoteExecutionManager`
+
+Requires a live TRACE32 PowerView session with the repo GDB bridge on `2331`.
 """
 
-use std.io_runtime.{shell}
+use app.io.{shell, file_exists}
+use app.test_runner_new.test_executor_composite.{run_test_file_composite}
+use app.test_runner_new.test_runner_args.parse_test_args
+
+val TRACE32_STM32H7_SPEC = "jit(remote(baremetal(trace32(stm32h7))))"
+val TRACE32_GDB_PORT = 2331
+val RETURN_ZERO_FIXTURE = "test/fixtures/remote_jit/stm32h7_return_zero.spl"
 
 fn find_t32rem() -> text:
     val from_env = shell("test -n \"$T32_PATH\" && echo \"$T32_PATH/bin/pc_linux64/t32rem\"")
@@ -31,15 +40,20 @@ fn find_t32rem() -> text:
         return bundled
     ""
 
-fn t32rem_available() -> bool:
-    find_t32rem() != ""
-
 fn t32_reachable() -> bool:
     val t32rem = find_t32rem()
     if t32rem == "":
         return false
-    val result = shell("timeout 5 '{t32rem}' localhost port=20000 PING 2>/dev/null")
+    val result = shell("timeout 5 '{t32rem}' localhost port=20000 PING >/dev/null 2>&1")
     result.exit_code == 0
+
+fn t32_gdb_bridge_ready() -> bool:
+    val nc = shell("command -v nc >/dev/null 2>&1")
+    if nc.exit_code == 0:
+        val result = shell("nc -z -w 2 localhost {TRACE32_GDB_PORT} >/dev/null 2>&1")
+        return result.exit_code == 0
+    val fallback = shell("bash -lc 'echo >/dev/tcp/localhost/{TRACE32_GDB_PORT}' >/dev/null 2>&1")
+    fallback.exit_code == 0
 
 fn toolchain_available() -> bool:
     val clang = shell("command -v clang >/dev/null 2>&1")
@@ -47,31 +61,40 @@ fn toolchain_available() -> bool:
     val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
     clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0
 
+fn trace32_h7_options(path: text):
+    parse_test_args([path, "--quick", "--timeout", "20"])
+
+fn live_trace32_ready() -> bool:
+    file_exists(RETURN_ZERO_FIXTURE) and t32_reachable() and t32_gdb_bridge_ready() and toolchain_available()
+
 describe "TRACE32 STM32H7 JIT E2E":
-    it "discovers t32rem on system":
-        val path = find_t32rem()
-        if path == "":
-            print "[skip] t32rem not found"
-        else:
-            expect(path.len()).to_be_greater_than(0)
-            print "[ok] t32rem found at: {path}"
+    it "discovers the repo return-zero fixture":
+        expect(file_exists(RETURN_ZERO_FIXTURE)).to_equal(true)
 
-    it "pings TRACE32 PowerView":
-        if not t32rem_available():
-            print "[skip] t32rem not available"
-        else:
-            val reachable = t32_reachable()
-            if not reachable:
-                print "[skip] TRACE32 PowerView not reachable on port 20000"
-            else:
-                expect(reachable).to_equal(true)
-                print "[ok] TRACE32 PowerView responds to PING"
+    it "checks for a live TRACE32 Remote API session":
+        if not t32_reachable():
+            print "[skip] TRACE32 PowerView not reachable on port 20000"
+            return
+        expect(t32_reachable()).to_equal(true)
+        print "[ok] TRACE32 PowerView responds to PING"
 
-    it "connects and runs return-zero via T32 GDB bridge":
-        if not t32_reachable() or not toolchain_available():
-            print "[skip] T32 or toolchain not available"
-        else:
-            # Full adapter test requires compiled mode due to T32GdbBridgeClient imports.
-            # In interpreter mode, this verifies the availability checks pass.
-            print "[ok] T32 reachable and toolchain available — full test requires compiled mode"
-            expect(t32_reachable()).to_equal(true)
+    it "checks for a live TRACE32 GDB bridge on the repo default port":
+        if not t32_reachable():
+            print "[skip] TRACE32 PowerView not reachable on port 20000"
+            return
+        if not t32_gdb_bridge_ready():
+            print "[skip] TRACE32 GDB bridge not reachable on port 2331"
+            return
+        expect(t32_gdb_bridge_ready()).to_equal(true)
+        print "[ok] TRACE32 GDB bridge responds on port 2331"
+
+    it "runs the real composite TRACE32 STM32H7 JIT lane":
+        if not live_trace32_ready():
+            print "[skip] TRACE32 session, GDB bridge, toolchain, or fixture not available"
+            return
+        val options = trace32_h7_options(RETURN_ZERO_FIXTURE)
+        val result = run_test_file_composite(RETURN_ZERO_FIXTURE, options, TRACE32_STM32H7_SPEC)
+        expect(result.failed).to_equal(0)
+        expect(result.error).to_equal("")
+        expect(result.passed).to_equal(1)
+        print "[ok] TRACE32 STM32H7 composite JIT returned 0"

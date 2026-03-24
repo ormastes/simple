@@ -122,12 +122,10 @@ config/t32_stm_linux_hidden.t32
 
 It enables:
 
-- `PBI=` / `CORE=1` / `USB`
+- `PBI=` / `USB`
 - `RCL=NETASSIST`
 - `PORT=20000`
-- `IC=NETASSIST`
-- `PORT=20001`
-- `SCREEN=OFF`
+- `SCREEN=INVISIBLE`
 
 This is the config the repo startup helpers use by default.
 

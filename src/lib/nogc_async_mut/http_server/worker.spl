@@ -1,0 +1,402 @@
+"""
+# Worker Thread
+
+Each worker owns its own EventLoop + IoDriver and handles
+thousands of connections via non-blocking I/O. Workers are
+spawned by the master HttpServer.
+
+## Architecture
+
+```
+Worker Thread
+  ├── EventLoop (epoll/kqueue)
+  ├── IoDriver (submit/poll completions)
+  ├── TcpListener (SO_REUSEPORT, own bind)
+  ├── connections: Dict<fd, Connection>
+  ├── AsyncRouter
+  └── MiddlewarePipeline
+```
+
+## Main Loop
+
+```
+while not shutdown:
+  1. Check control channel for shutdown/reload
+  2. driver.flush()
+  3. completions = driver.poll(max_events, timeout_ms)
+  4. For each completion: advance connection state machine
+  5. Reap expired keepalive connections
+```
+"""
+
+use std.io.driver.{IoDriver}
+use std.io.event_loop.{EventLoop, Waker}
+use std.net.ffi.{
+    rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_local_addr,
+    rt_io_tcp_set_nodelay, rt_socket_set_nonblocking
+}
+use std.concurrent.channel.{Channel}
+use std.thread_sffi.{spl_thread_sleep}
+
+use std.http_server.types.{
+    ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
+    ServerConfig, LocationConfig
+}
+use std.http_server.connection.{Connection}
+use std.http_server.parser.{HttpRequestParser}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.middleware.{MiddlewarePipeline, body_limit_handler}
+use std.http_server.response.{
+    serialize_response, build_error, build_not_found, build_internal_error,
+    build_too_large, build_request_timeout
+}
+use std.http_server.error.{HttpServerError}
+
+# FFI for SO_REUSEPORT and SO_REUSEADDR
+extern fn rt_socket_set_reuseport(fd: i64, enabled: bool) -> bool
+extern fn rt_socket_set_reuseaddr(fd: i64, enabled: bool) -> bool
+
+# Time FFI
+extern fn rt_time_now_ms() -> i64
+
+# ============================================================================
+# Worker
+# ============================================================================
+
+class Worker:
+    """Event-driven worker thread for the async HTTP server.
+
+    Each worker binds its own listener (SO_REUSEPORT), owns an IoDriver,
+    and manages a pool of non-blocking connections. The kernel distributes
+    incoming connections across workers.
+    """
+    worker_id: i64
+    driver: IoDriver
+    listener_fd: i64
+    connections: Dict<i64, Connection>
+    router: AsyncRouter
+    pipeline: MiddlewarePipeline
+    config: ServerConfig
+    control: Channel
+    active_count: i64
+    shutdown_requested: bool
+    accept_op_id: i64
+
+    static fn create(worker_id: i64, config: ServerConfig,
+                     router: AsyncRouter, pipeline: MiddlewarePipeline,
+                     control: Channel) -> Result<Worker, HttpServerError>:
+        """Create a new worker and bind its listener.
+
+        Args:
+            worker_id: Worker index (0-based)
+            config: Server configuration
+            router: Router (read-only after init)
+            pipeline: Middleware pipeline (read-only after init)
+            control: Channel for shutdown signals from master
+
+        Returns:
+            Initialized Worker or BindFailed error
+        """
+        # Create IoDriver
+        val driver = IoDriver.new()
+
+        # Bind TCP listener with SO_REUSEPORT
+        val listen_fd = rt_io_tcp_bind(config.listen_addr)
+        if listen_fd < 0:
+            return Err(HttpServerError.BindFailed(
+                "Worker {worker_id}: failed to bind {config.listen_addr}"
+            ))
+
+        rt_socket_set_reuseport(listen_fd, true)
+        rt_socket_set_reuseaddr(listen_fd, true)
+        rt_socket_set_nonblocking(listen_fd, true)
+
+        Ok(Worker(
+            worker_id: worker_id,
+            driver: driver,
+            listener_fd: listen_fd,
+            connections: {},
+            router: router,
+            pipeline: pipeline,
+            config: config,
+            control: control,
+            active_count: 0,
+            shutdown_requested: false,
+            accept_op_id: 0
+        ))
+
+    me run():
+        """Main worker loop. Runs until shutdown is requested.
+
+        This method is called in a dedicated OS thread. It submits
+        an initial accept, then loops polling for completions.
+        """
+        # Submit first accept
+        self.accept_op_id = self.driver.submit_accept(self.listener_fd)
+        self.driver.flush()
+
+        while not self.shutdown_requested:
+            # Check control channel (non-blocking)
+            val msg = self.control.try_recv()
+            if msg.?:
+                val cmd = msg as text
+                if cmd == "shutdown":
+                    self.shutdown_requested = true
+                    break
+
+            # Poll for I/O completions
+            self.driver.flush()
+            val completions = self.driver.poll(64, 10)
+
+            val now = rt_time_now_ms()
+
+            for completion in completions:
+                val op_id = completion.id
+                val result = completion.result
+                val flags = completion.flags
+
+                if op_id == self.accept_op_id:
+                    self.handle_accept(result, now)
+                else:
+                    self.handle_completion(op_id, result, flags, now)
+
+            # Reap expired connections
+            self.reap_expired(now)
+
+        # Cleanup
+        self.close_all_connections()
+        rt_io_tcp_close(self.listener_fd)
+        self.driver.close()
+
+    # ========================================================================
+    # Accept
+    # ========================================================================
+
+    me handle_accept(client_fd: i64, now: i64):
+        """Handle a new connection accept completion."""
+        # Always submit next accept immediately
+        self.accept_op_id = self.driver.submit_accept(self.listener_fd)
+
+        if client_fd < 0:
+            return
+
+        # Check connection limit
+        if self.active_count >= self.config.max_connections:
+            rt_io_tcp_close(client_fd)
+            return
+
+        # Configure new connection
+        rt_socket_set_nonblocking(client_fd, true)
+        rt_io_tcp_set_nodelay(client_fd, true)
+
+        val peer = rt_io_tcp_local_addr(client_fd) ?? "unknown"
+        val conn = Connection.new(client_fd, peer, now)
+
+        self.connections[client_fd] = conn
+        self.active_count = self.active_count + 1
+
+        # Submit recv for the new connection
+        self.driver.submit_recv(client_fd, 8192)
+
+    # ========================================================================
+    # I/O Completions
+    # ========================================================================
+
+    me handle_completion(op_id: i64, result: i64, flags: i64, now: i64):
+        """Handle a non-accept I/O completion.
+
+        Dispatches to the appropriate connection based on fd.
+        """
+        # Find which connection this completion belongs to
+        # The IoDriver returns the fd as the result for recv/send ops
+        # We need to map op_id → fd. For simplicity, we use result as fd
+        # when it represents data, and track separately for sends.
+        pass_todo("Map op_id to connection fd via completion tracking")
+
+    me handle_recv(fd: i64, data: text, now: i64):
+        """Handle data received on a connection."""
+        val conn = self.connections.get(fd)
+        if not conn.?:
+            return
+
+        var c = conn
+        val action = c.on_data_received(data, now)
+        self.connections[fd] = c
+
+        match action:
+            ConnectionAction.ContinueReading:
+                self.driver.submit_recv(fd, 8192)
+
+            ConnectionAction.RequestReady:
+                self.process_request(fd, now)
+
+            ConnectionAction.Close:
+                self.close_connection(fd)
+
+            ConnectionAction.Error(status, msg):
+                self.send_error(fd, status, msg, now)
+
+            _:
+                pass_do_nothing
+
+    me handle_send_complete(fd: i64, now: i64):
+        """Handle write completion on a connection."""
+        val conn = self.connections.get(fd)
+        if not conn.?:
+            return
+
+        var c = conn
+        val action = c.on_write_complete(now)
+        self.connections[fd] = c
+
+        match action:
+            ConnectionAction.ContinueReading:
+                # Keep-alive: wait for next request
+                self.driver.submit_recv(fd, 8192)
+
+            ConnectionAction.Close:
+                self.close_connection(fd)
+
+            _:
+                pass_do_nothing
+
+    # ========================================================================
+    # Request Processing
+    # ========================================================================
+
+    me process_request(fd: i64, now: i64):
+        """Process a complete HTTP request through the pipeline.
+
+        Runs middleware phases, routes to handler, generates response.
+        """
+        val conn = self.connections.get(fd)
+        if not conn.?:
+            return
+
+        var c = conn
+        val request = c.request
+        if not request.?:
+            self.send_error(fd, 500, "No request data", now)
+            return
+
+        # Run pre-content middleware phases
+        val phase_result = self.pipeline.run_all_phases(request, self.config)
+        match phase_result:
+            PhaseResult.Respond(status, reason, body):
+                val resp = build_error(status, body)
+                self.send_response(fd, resp, now)
+                return
+            PhaseResult.Error(status, msg):
+                self.send_error(fd, status, msg, now)
+                return
+            _:
+                pass_do_nothing
+
+        # Route request
+        val route_result = self.router.route(request)
+        match route_result:
+            Ok((location, params)):
+                # Update request with route params
+                var req = request
+                req = HttpRequestData(
+                    method: req.method,
+                    path: req.path,
+                    query: req.query,
+                    version: req.version,
+                    headers: req.headers,
+                    body: req.body,
+                    params: params,
+                    peer_addr: req.peer_addr
+                )
+                val resp = self.execute_handler(location, req)
+                self.send_response(fd, resp, now)
+
+            Err(e):
+                self.send_response(fd, build_not_found(), now)
+
+        # Run log phase
+        self.pipeline.run_log_phase(request, self.config)
+
+    me execute_handler(location: LocationConfig,
+                       request: HttpRequestData) -> HttpResponseData:
+        """Execute the content handler for a matched location.
+
+        Args:
+            location: Matched location config
+            request: Request with route params populated
+
+        Returns:
+            Response from handler
+        """
+        match location.handler_type:
+            "static":
+                # Delegate to static file handler (registered externally)
+                # For now, return a placeholder
+                pass_todo("Delegate to registered static file handler")
+                build_error(501, "Static file handler not yet connected")
+            "proxy":
+                pass_todo("Delegate to proxy handler")
+                build_error(502, "Proxy not implemented")
+            _:
+                build_error(501, "Unknown handler type: {location.handler_type}")
+
+    # ========================================================================
+    # Response Sending
+    # ========================================================================
+
+    me send_response(fd: i64, resp: HttpResponseData, now: i64):
+        """Send a response on a connection."""
+        val conn = self.connections.get(fd)
+        if not conn.?:
+            return
+
+        var c = conn
+        val keepalive_s = self.config.keepalive_timeout_ms / 1000
+        c.set_response(resp, keepalive_s)
+        self.connections[fd] = c
+
+        val bytes = c.get_response_bytes()
+
+        if resp.body_file.len() > 0:
+            # Send headers first, then sendfile
+            pass_todo("Submit header send then sendfile for zero-copy")
+            self.driver.submit_send(fd, bytes)
+        else:
+            self.driver.submit_send(fd, bytes)
+
+    me send_error(fd: i64, status: i64, msg: text, now: i64):
+        """Send an error response and close."""
+        val resp = build_error(status, msg)
+        self.send_response(fd, resp, now)
+
+    # ========================================================================
+    # Connection Lifecycle
+    # ========================================================================
+
+    me close_connection(fd: i64):
+        """Close a connection and remove from tracking."""
+        rt_io_tcp_close(fd)
+        self.connections.remove(fd)
+        self.active_count = self.active_count - 1
+
+    me close_all_connections():
+        """Close all active connections during shutdown."""
+        val fds = self.connections.keys()
+        for fd in fds:
+            rt_io_tcp_close(fd)
+        self.connections = {}
+        self.active_count = 0
+
+    me reap_expired(now: i64):
+        """Close connections that have exceeded their timeout."""
+        var to_close: [i64] = []
+
+        for fd in self.connections.keys():
+            val conn = self.connections[fd]
+            if conn.is_keepalive_expired(now, self.config.keepalive_timeout_ms):
+                to_close = to_close + [fd]
+            elif conn.is_read_timeout(now, self.config.read_timeout_ms):
+                to_close = to_close + [fd]
+
+        for fd in to_close:
+            self.close_connection(fd)

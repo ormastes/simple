@@ -1,0 +1,182 @@
+# TileMap Helpers — tile grid operations and spatial queries
+#
+# Provides tile lookup, world/tile coordinate conversion, source rect computation,
+# and visibility culling for efficient tile rendering.
+#
+# Usage:
+#   val tm = TileMapData.create(tex_id, 16, 16, 100, 100)
+#   val tm2 = tm.set_tile(5, 3, 42)
+#   val rect = tm2.tile_src_rect(42)
+#   val visible = tm2.tiles_in_rect(camera_bounds)
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.rect.{Rect2}
+use std.common.math.{math_max, math_min}
+use std.nogc_sync_mut.engine.component.registry.{TileMapData}
+
+# ============================================================================
+# TileMapData helpers
+# ============================================================================
+
+impl TileMapData:
+    static fn create(texture_id: TextureId, tile_w: i64, tile_h: i64, map_w: i64, map_h: i64) -> TileMapData:
+        """Create a tile map filled with empty tiles (-1).
+
+        Args:
+            texture_id: Texture atlas containing all tiles
+            tile_w: Width of each tile in pixels
+            tile_h: Height of each tile in pixels
+            map_w: Number of tile columns
+            map_h: Number of tile rows
+        """
+        val total = map_w * map_h
+        var tiles: [i64] = []
+        var i = 0
+        while i < total:
+            tiles.push(-1)
+            i = i + 1
+        TileMapData(
+            tile_texture_id: texture_id,
+            tile_width: tile_w,
+            tile_height: tile_h,
+            map_width: map_w,
+            map_height: map_h,
+            tiles: tiles
+        )
+
+    fn get_tile(col: i64, row: i64) -> i64:
+        """Get the tile index at (col, row). Returns -1 if out of bounds."""
+        if col < 0 or col >= self.map_width:
+            return -1
+        if row < 0 or row >= self.map_height:
+            return -1
+        val idx = row * self.map_width + col
+        self.tiles[idx]
+
+    fn set_tile(col: i64, row: i64, tile_index: i64) -> TileMapData:
+        """Return a copy with the tile at (col, row) set to tile_index.
+
+        If (col, row) is out of bounds, returns unchanged copy.
+        """
+        if col < 0 or col >= self.map_width:
+            return self
+        if row < 0 or row >= self.map_height:
+            return self
+        val idx = row * self.map_width + col
+        var new_tiles = self.tiles
+        new_tiles[idx] = tile_index
+        TileMapData(
+            tile_texture_id: self.tile_texture_id,
+            tile_width: self.tile_width,
+            tile_height: self.tile_height,
+            map_width: self.map_width,
+            map_height: self.map_height,
+            tiles: new_tiles
+        )
+
+    fn world_to_tile(world_pos: Vec2) -> (i64, i64):
+        """Convert a world position to tile coordinates.
+
+        Tiles start at world origin (0, 0). Returns (col, row).
+        May return negative or out-of-bounds values for positions outside the map.
+        """
+        var col = 0
+        var row = 0
+        if self.tile_width > 0:
+            col = world_pos.x / (self.tile_width * 1.0)
+            if world_pos.x < 0.0:
+                col = col - 1
+        if self.tile_height > 0:
+            row = world_pos.y / (self.tile_height * 1.0)
+            if world_pos.y < 0.0:
+                row = row - 1
+        (col, row)
+
+    fn tile_to_world(col: i64, row: i64) -> Vec2:
+        """Convert tile coordinates to world position (center of tile).
+
+        Args:
+            col: Tile column
+            row: Tile row
+
+        Returns:
+            World-space position at the center of the tile
+        """
+        val half_w = self.tile_width * 1.0 / 2.0
+        val half_h = self.tile_height * 1.0 / 2.0
+        val wx = col * self.tile_width * 1.0 + half_w
+        val wy = row * self.tile_height * 1.0 + half_h
+        Vec2(x: wx, y: wy)
+
+    fn tile_src_rect(tile_index: i64) -> Rect2:
+        """Compute the source rectangle in the tileset texture for a given tile index.
+
+        Tiles are arranged left-to-right, top-to-bottom in the texture.
+        The number of columns in the texture is derived from texture layout:
+        tile_index maps to (col, row) in the tileset grid.
+        """
+        if tile_index < 0:
+            return Rect2.new(0.0, 0.0, 0.0, 0.0)
+        # Assume tileset columns = map_width as default layout
+        # In practice, the tileset texture has its own column count.
+        # We use tile_index directly: col = index % columns_in_tileset
+        # For a standard tileset, assume tiles are laid out in a row
+        # with wrap determined by the tile map width as a heuristic.
+        val cols_in_tileset = self.map_width
+        val tcol = tile_index % cols_in_tileset
+        val trow = tile_index / cols_in_tileset
+        val tx = tcol * self.tile_width * 1.0
+        val ty = trow * self.tile_height * 1.0
+        Rect2.new(tx, ty, self.tile_width * 1.0, self.tile_height * 1.0)
+
+    fn map_bounds() -> Rect2:
+        """World-space bounding rectangle of the entire tile map.
+
+        Map starts at world origin (0, 0).
+        """
+        val w = self.map_width * self.tile_width * 1.0
+        val h = self.map_height * self.tile_height * 1.0
+        Rect2.new(0.0, 0.0, w, h)
+
+    fn tiles_in_rect(rect: Rect2) -> [(i64, i64)]:
+        """Return tile coordinates visible within a world-space rectangle (for culling).
+
+        Clamps to map bounds. Returns a list of (col, row) tuples.
+
+        Args:
+            rect: World-space rectangle (e.g., from camera visible_bounds)
+
+        Returns:
+            List of (col, row) pairs for tiles that overlap the rect
+        """
+        val tw = self.tile_width * 1.0
+        val th = self.tile_height * 1.0
+
+        # Compute tile range from rect bounds
+        var min_col = rect.x / tw
+        var min_row = rect.y / th
+        var max_col = (rect.x + rect.width) / tw
+        var max_row = (rect.y + rect.height) / th
+
+        # Handle negative positions
+        if rect.x < 0.0:
+            min_col = min_col - 1
+        if rect.y < 0.0:
+            min_row = min_row - 1
+
+        # Clamp to map bounds
+        val clamped_min_col = math_max(min_col, 0)
+        val clamped_min_row = math_max(min_row, 0)
+        val clamped_max_col = math_min(max_col, self.map_width - 1)
+        val clamped_max_row = math_min(max_row, self.map_height - 1)
+
+        var result: [(i64, i64)] = []
+        var r = clamped_min_row
+        while r <= clamped_max_row:
+            var c = clamped_min_col
+            while c <= clamped_max_col:
+                result.push((c, r))
+                c = c + 1
+            r = r + 1
+        result

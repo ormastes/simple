@@ -1,0 +1,71 @@
+#!/bin/sh
+# Start a repo-managed TRACE32 STM session for native or GDB-backed flows.
+
+set -eu
+
+BOARD="${1:-}"
+MODE="${2:-}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+T32_BIN="/opt/t32/bin/pc_linux64/t32marm"
+CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
+
+usage() {
+    echo "Usage: $0 <stm32wb|stm32h7> <native|gdb>" >&2
+    exit 2
+}
+
+if [ "$BOARD" = "" ] || [ "$MODE" = "" ]; then
+    usage
+fi
+
+case "$BOARD" in
+    stm32wb|stm32h7) ;;
+    *) echo "ERROR: unsupported board '$BOARD'" >&2; usage ;;
+esac
+
+case "$MODE" in
+    native|gdb) ;;
+    *) echo "ERROR: unsupported mode '$MODE'" >&2; usage ;;
+esac
+
+case "$MODE" in
+    native) CMM_PATH="$REPO_ROOT/config/t32/${BOARD}_native_start.cmm" ;;
+    gdb) CMM_PATH="$REPO_ROOT/config/t32/${BOARD}_gdb_start.cmm" ;;
+esac
+
+if [ ! -x "$T32_BIN" ]; then
+    echo "ERROR: TRACE32 binary not found at $T32_BIN" >&2
+    exit 1
+fi
+
+if [ ! -f "$CFG_PATH" ]; then
+    echo "ERROR: config not found: $CFG_PATH" >&2
+    exit 1
+fi
+
+if [ ! -f "$CMM_PATH" ]; then
+    echo "ERROR: startup script not found: $CMM_PATH" >&2
+    exit 1
+fi
+
+if ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "ERROR: xvfb-run is required to launch TRACE32 headlessly" >&2
+    exit 1
+fi
+
+echo "Starting TRACE32 for $BOARD ($MODE)"
+echo "  config: $CFG_PATH"
+echo "  script: $CMM_PATH"
+
+cd "$REPO_ROOT"
+nohup xvfb-run -a "$T32_BIN" -c "$CFG_PATH" "$CMM_PATH" >/tmp/t32_"$BOARD"_"$MODE".log 2>&1 &
+PID=$!
+sleep 2
+
+echo "TRACE32 launch pid: $PID"
+echo "TRACE32 log: /tmp/t32_${BOARD}_${MODE}.log"
+
+if [ "$MODE" = "gdb" ]; then
+    echo "Expected GDB bridge port: 2331"
+fi

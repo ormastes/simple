@@ -1,0 +1,36 @@
+#!/bin/sh
+# Verify TRACE32 probe visibility and Remote API responsiveness.
+
+set -eu
+
+T32USBCHECKER="/opt/t32/bin/pc_linux64/t32usbchecker"
+T32REM="/opt/t32/bin/pc_linux64/t32rem"
+HOST="${1:-localhost}"
+PORT="${2:-20000}"
+
+if [ ! -x "$T32USBCHECKER" ]; then
+    echo "ERROR: t32usbchecker not found at $T32USBCHECKER" >&2
+    exit 1
+fi
+
+if [ ! -x "$T32REM" ]; then
+    echo "ERROR: t32rem not found at $T32REM" >&2
+    exit 1
+fi
+
+echo "[1/2] Checking TRACE32 USB probe access..."
+USB_OUTPUT="$("$T32USBCHECKER" 2>&1 || true)"
+printf '%s\n' "$USB_OUTPUT"
+if printf '%s\n' "$USB_OUTPUT" | grep -qi "no useable TRACE32 devices found"; then
+    echo "TRACE32 readiness failed: probe is not usable on this host." >&2
+    exit 1
+fi
+
+echo "[2/2] Checking TRACE32 Remote API..."
+if ! timeout 5 "$T32REM" "$HOST" port="$PORT" PING >/tmp/t32_check_ready_ping.log 2>&1; then
+    cat /tmp/t32_check_ready_ping.log >&2
+    echo "TRACE32 readiness failed: t32rem PING did not succeed." >&2
+    exit 1
+fi
+
+echo "TRACE32 readiness OK: probe visible and Remote API answered on ${HOST}:${PORT}"

@@ -1,0 +1,521 @@
+# Scene Graph Node — Node2D + NodeStore
+#
+# Node2D is a single scene graph node with transform, visibility, z-order,
+# and parent/child relationships. NodeStore is a flat generational-index
+# arena that owns all nodes and manages the parent-child hierarchy.
+#
+# Usage:
+#   var store = NodeStore.new()
+#   val root_id = store.create_node("root")
+#   val child_id = store.create_node("child")
+#   store.set_parent(child_id, root_id)
+#   store.set_position(child_id, Vec2(x: 10.0, y: 20.0))
+
+use std.common.engine.ids.{NodeId, RawHandle, Generation}
+use std.common.engine.math2d.{Vec2, Transform2D}
+
+# ============================================================================
+# Node2D — a single scene graph node
+# ============================================================================
+
+struct Node2D:
+    """A 2D scene graph node.
+
+    Holds local transform (position, rotation, scale), visibility,
+    z-index for draw order, parent/child links, and arbitrary tags.
+    Parent is NodeId.invalid() for root nodes.
+    """
+    id: NodeId
+    name: text
+    parent: NodeId
+    children: [NodeId]
+    position: Vec2
+    rotation: f64
+    scale: Vec2
+    z_index: i64
+    visible: bool
+    active: bool
+    tags: [text]
+
+impl Node2D:
+    static fn create(id: NodeId, name: text) -> Node2D:
+        """Create a node with default transform (identity), visible, active."""
+        Node2D(
+            id: id,
+            name: name,
+            parent: NodeId.invalid(),
+            children: [],
+            position: Vec2.zero(),
+            rotation: 0.0,
+            scale: Vec2.one(),
+            z_index: 0,
+            visible: true,
+            active: true,
+            tags: []
+        )
+
+    fn get_local_transform() -> Transform2D:
+        """Build a Transform2D from this node's position, rotation, scale."""
+        Transform2D(
+            position: self.position,
+            rotation: self.rotation,
+            scale: self.scale
+        )
+
+    fn has_tag(tag: text) -> bool:
+        """Check whether this node has the given tag."""
+        var i = 0
+        while i < self.tags.len():
+            if self.tags[i] == tag:
+                return true
+            i = i + 1
+        false
+
+# ============================================================================
+# NodeStore — flat generational-index arena for all nodes
+# ============================================================================
+
+class NodeStore:
+    """Owns all Node2D instances in a flat array with generational indices.
+
+    Free slots are recycled via a free list. Stale NodeIds are detected
+    by generation mismatch, preventing use-after-free without GC.
+
+    Root nodes (those with no parent) are tracked in a separate list
+    for efficient scene traversal.
+    """
+    nodes: [Node2D?]
+    generations: [i64]
+    free_indices: [i64]
+    count: i64
+    root_nodes: [NodeId]
+
+impl NodeStore:
+    static fn new() -> NodeStore:
+        """Create an empty node store."""
+        NodeStore(
+            nodes: [],
+            generations: [],
+            free_indices: [],
+            count: 0,
+            root_nodes: []
+        )
+
+    me create_node(name: text) -> NodeId:
+        """Allocate a new node, reusing a free slot if available.
+
+        Returns a NodeId with the correct generation for this slot.
+        The new node is automatically added to root_nodes (no parent).
+        """
+        var index = -1
+        var gen = 1
+
+        if self.free_indices.len() > 0:
+            # Reuse a free slot
+            index = self.free_indices[self.free_indices.len() - 1]
+            self.free_indices.pop()
+            gen = self.generations[index] + 1
+            self.generations[index] = gen
+        else:
+            # Append new slot
+            index = self.nodes.len()
+            self.nodes.push(nil)
+            self.generations.push(1)
+            gen = 1
+
+        val raw = RawHandle.new(index, gen)
+        val node_id = NodeId(raw: raw)
+        val node = Node2D.create(node_id, name)
+        self.nodes[index] = node
+        self.count = self.count + 1
+        self.root_nodes.push(node_id)
+        node_id
+
+    fn get_node(id: NodeId) -> Node2D?:
+        """Look up a node by its NodeId.
+
+        Returns nil if the id is invalid, out of range, or the generation
+        does not match (stale handle).
+        """
+        if not id.is_valid():
+            return nil
+        val index = id.to_index()
+        if index < 0 or index >= self.nodes.len():
+            return nil
+        if self.generations[index] != id.raw.generation.value:
+            return nil
+        self.nodes[index]
+
+    me set_node(id: NodeId, node: Node2D) -> bool:
+        """Replace the node at the given id. Returns false if id is invalid."""
+        if not id.is_valid():
+            return false
+        val index = id.to_index()
+        if index < 0 or index >= self.nodes.len():
+            return false
+        if self.generations[index] != id.raw.generation.value:
+            return false
+        self.nodes[index] = node
+        true
+
+    me destroy_node(id: NodeId) -> bool:
+        """Remove a node from the store.
+
+        - Reparents children to the destroyed node's parent (or makes them root).
+        - Removes this node from its parent's children list.
+        - Removes this node from root_nodes if applicable.
+        - Adds the slot to the free list for reuse.
+        """
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+
+        if val Some(node) = maybe_node:
+            val parent_id = node.parent
+            val children = node.children
+
+            # Reparent children to this node's parent
+            var ci = 0
+            while ci < children.len():
+                val child_id = children[ci]
+                val maybe_child = self.get_node(child_id)
+                if val Some(child) = maybe_child:
+                    val updated_child = Node2D(
+                        id: child.id,
+                        name: child.name,
+                        parent: parent_id,
+                        children: child.children,
+                        position: child.position,
+                        rotation: child.rotation,
+                        scale: child.scale,
+                        z_index: child.z_index,
+                        visible: child.visible,
+                        active: child.active,
+                        tags: child.tags
+                    )
+                    self.set_node(child_id, updated_child)
+
+                    if parent_id.is_valid():
+                        # Add child to new parent's children list
+                        self._add_child_to_parent(parent_id, child_id)
+                    else:
+                        # Child becomes root
+                        self.root_nodes.push(child_id)
+                ci = ci + 1
+
+            # Remove from parent's children list
+            if parent_id.is_valid():
+                self._remove_child_from_parent(parent_id, id)
+            else:
+                # Remove from root_nodes
+                self._remove_from_root_nodes(id)
+
+            # Free the slot
+            val index = id.to_index()
+            self.nodes[index] = nil
+            self.free_indices.push(index)
+            self.count = self.count - 1
+            return true
+        false
+
+    me set_parent(child_id: NodeId, parent_id: NodeId) -> bool:
+        """Set the parent of a node.
+
+        Detaches from old parent (or root list), attaches to new parent.
+        If parent_id is invalid, makes the child a root node.
+        """
+        val maybe_child = self.get_node(child_id)
+        if maybe_child == nil:
+            return false
+
+        if val Some(child) = maybe_child:
+            val old_parent = child.parent
+
+            # Detach from old parent
+            if old_parent.is_valid():
+                self._remove_child_from_parent(old_parent, child_id)
+            else:
+                self._remove_from_root_nodes(child_id)
+
+            # Update child's parent field
+            val updated_child = Node2D(
+                id: child.id,
+                name: child.name,
+                parent: parent_id,
+                children: child.children,
+                position: child.position,
+                rotation: child.rotation,
+                scale: child.scale,
+                z_index: child.z_index,
+                visible: child.visible,
+                active: child.active,
+                tags: child.tags
+            )
+            self.set_node(child_id, updated_child)
+
+            # Attach to new parent
+            if parent_id.is_valid():
+                self._add_child_to_parent(parent_id, child_id)
+            else:
+                self.root_nodes.push(child_id)
+            return true
+        false
+
+    me add_tag(id: NodeId, tag: text) -> bool:
+        """Add a tag to the node. Returns false if id is invalid."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            # Check if tag already exists
+            if node.has_tag(tag):
+                return true
+            var new_tags = node.tags
+            new_tags.push(tag)
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: node.active,
+                tags: new_tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me remove_tag(id: NodeId, tag: text) -> bool:
+        """Remove a tag from the node. Returns false if id is invalid."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            var new_tags: [text] = []
+            var i = 0
+            while i < node.tags.len():
+                if node.tags[i] != tag:
+                    new_tags.push(node.tags[i])
+                i = i + 1
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: node.active,
+                tags: new_tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_position(id: NodeId, pos: Vec2) -> bool:
+        """Set the local position of a node."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: pos,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: node.active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_rotation(id: NodeId, rotation: f64) -> bool:
+        """Set the local rotation (radians) of a node."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: node.active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_scale(id: NodeId, s: Vec2) -> bool:
+        """Set the local scale of a node."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: s,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: node.active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_z_index(id: NodeId, z: i64) -> bool:
+        """Set the z-index (draw order) of a node."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: z,
+                visible: node.visible,
+                active: node.active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_visible(id: NodeId, visible: bool) -> bool:
+        """Set whether a node is visible."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: visible,
+                active: node.active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    me set_active(id: NodeId, active: bool) -> bool:
+        """Set whether a node is active."""
+        val maybe_node = self.get_node(id)
+        if maybe_node == nil:
+            return false
+        if val Some(node) = maybe_node:
+            val updated = Node2D(
+                id: node.id,
+                name: node.name,
+                parent: node.parent,
+                children: node.children,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                z_index: node.z_index,
+                visible: node.visible,
+                active: active,
+                tags: node.tags
+            )
+            self.set_node(id, updated)
+            return true
+        false
+
+    fn node_count() -> i64:
+        """Number of live nodes in the store."""
+        self.count
+
+    # --- Private helpers ---
+
+    me _add_child_to_parent(parent_id: NodeId, child_id: NodeId):
+        """Add child_id to the parent's children list."""
+        val maybe_parent = self.get_node(parent_id)
+        if val Some(parent) = maybe_parent:
+            var new_children = parent.children
+            new_children.push(child_id)
+            val updated = Node2D(
+                id: parent.id,
+                name: parent.name,
+                parent: parent.parent,
+                children: new_children,
+                position: parent.position,
+                rotation: parent.rotation,
+                scale: parent.scale,
+                z_index: parent.z_index,
+                visible: parent.visible,
+                active: parent.active,
+                tags: parent.tags
+            )
+            self.set_node(parent_id, updated)
+
+    me _remove_child_from_parent(parent_id: NodeId, child_id: NodeId):
+        """Remove child_id from the parent's children list."""
+        val maybe_parent = self.get_node(parent_id)
+        if val Some(parent) = maybe_parent:
+            var new_children: [NodeId] = []
+            var i = 0
+            while i < parent.children.len():
+                val existing = parent.children[i]
+                if not existing.eq(child_id):
+                    new_children.push(existing)
+                i = i + 1
+            val updated = Node2D(
+                id: parent.id,
+                name: parent.name,
+                parent: parent.parent,
+                children: new_children,
+                position: parent.position,
+                rotation: parent.rotation,
+                scale: parent.scale,
+                z_index: parent.z_index,
+                visible: parent.visible,
+                active: parent.active,
+                tags: parent.tags
+            )
+            self.set_node(parent_id, updated)
+
+    me _remove_from_root_nodes(id: NodeId):
+        """Remove a node from the root_nodes list."""
+        var new_roots: [NodeId] = []
+        var i = 0
+        while i < self.root_nodes.len():
+            val existing = self.root_nodes[i]
+            if not existing.eq(id):
+                new_roots.push(existing)
+            i = i + 1
+        self.root_nodes = new_roots

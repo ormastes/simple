@@ -1,0 +1,119 @@
+# Signal/Event System - Signal
+#
+# A Signal represents a named event that can have multiple listeners (callbacks).
+# Listeners connect via callbacks and are invoked when the signal is emitted.
+# Supports one-shot connections that auto-disconnect after first emit.
+#
+# Example:
+#     var sig = Signal.create("on_damage")
+#     val conn = sig.connect(\data: print "Damage: {data}")
+#     sig.emit("50")       # prints "Damage: 50"
+#     sig.disconnect(conn)  # removes the listener
+
+use std.common.engine.signal.types.*
+
+# ============================================================================
+# Signal Class
+# ============================================================================
+
+class Signal:
+    name: text
+    connections: [SignalConnection]
+    next_id: i64
+    enabled: bool
+
+impl Signal:
+    static fn create(name: text) -> Signal:
+        Signal(name: name, connections: [], next_id: 0, enabled: true)
+
+    # ------------------------------------------------------------------
+    # Connect a callback to this signal. Returns a connection ID for
+    # later disconnection.
+    # ------------------------------------------------------------------
+    me connect(callback: fn(text)) -> SignalConnectionId:
+        val conn_id = SignalConnectionId(id: self.next_id)
+        val conn = SignalConnection(id: conn_id, callback: callback, once: false)
+        self.connections.push(conn)
+        self.next_id = self.next_id + 1
+        conn_id
+
+    # ------------------------------------------------------------------
+    # Connect a callback that fires only once, then auto-disconnects.
+    # ------------------------------------------------------------------
+    me connect_once(callback: fn(text)) -> SignalConnectionId:
+        val conn_id = SignalConnectionId(id: self.next_id)
+        val conn = SignalConnection(id: conn_id, callback: callback, once: true)
+        self.connections.push(conn)
+        self.next_id = self.next_id + 1
+        conn_id
+
+    # ------------------------------------------------------------------
+    # Disconnect a specific callback by its connection ID.
+    # Returns true if the connection was found and removed.
+    # ------------------------------------------------------------------
+    me disconnect(conn_id: SignalConnectionId) -> bool:
+        var found = false
+        var remaining: [SignalConnection] = []
+        for conn in self.connections:
+            if conn.id.id == conn_id.id:
+                found = true
+            else:
+                remaining.push(conn)
+        self.connections = remaining
+        found
+
+    # ------------------------------------------------------------------
+    # Disconnect all callbacks from this signal.
+    # ------------------------------------------------------------------
+    me disconnect_all():
+        self.connections = []
+
+    # ------------------------------------------------------------------
+    # Emit the signal, calling all connected callbacks with the given data.
+    # Once-connections are removed after invocation.
+    # Does nothing if the signal is disabled.
+    # ------------------------------------------------------------------
+    me emit(data: text):
+        if not self.enabled:
+            return
+
+        # Collect IDs of once-connections to remove after iteration
+        var once_ids: [i64] = []
+
+        for conn in self.connections:
+            conn.callback(data)
+            if conn.once:
+                once_ids.push(conn.id.id)
+
+        # Remove once-connections (avoid modifying during iteration)
+        if once_ids.len() > 0:
+            var remaining: [SignalConnection] = []
+            for conn in self.connections:
+                var is_once = false
+                for once_id in once_ids:
+                    if conn.id.id == once_id:
+                        is_once = true
+                if not is_once:
+                    remaining.push(conn)
+            self.connections = remaining
+
+    # ------------------------------------------------------------------
+    # Check if a specific connection ID is currently connected.
+    # ------------------------------------------------------------------
+    fn is_connected(conn_id: SignalConnectionId) -> bool:
+        for conn in self.connections:
+            if conn.id.id == conn_id.id:
+                return true
+        false
+
+    # ------------------------------------------------------------------
+    # Temporarily enable or disable the signal without removing connections.
+    # ------------------------------------------------------------------
+    me set_enabled(enabled: bool):
+        self.enabled = enabled
+
+    # ------------------------------------------------------------------
+    # Return the number of active connections.
+    # ------------------------------------------------------------------
+    fn connection_count() -> i64:
+        self.connections.len()

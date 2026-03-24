@@ -1,0 +1,225 @@
+"""
+# Connection State Machine
+
+Manages the lifecycle of a single HTTP connection through
+non-blocking state transitions driven by I/O completions.
+
+## State Flow
+
+```
+Accepting → ReadingRequest → ProcessingHeaders → Routing
+  → ExecutingHandler → SendingResponse → KeepAlive/Closing
+```
+
+Each state transition is triggered by Worker calling `on_data_received()`,
+`on_write_complete()`, or `on_timeout()` based on IoDriver completions.
+
+## Keep-Alive
+
+After a response is fully sent, if HTTP/1.1 and Connection != close,
+the connection resets for the next request without closing the fd.
+"""
+
+use std.http_server.types.{
+    ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
+    ServerConfig
+}
+use std.http_server.parser.{HttpRequestParser}
+use std.http_server.response.{serialize_response, add_keepalive_headers}
+use std.http_server.error.{HttpServerError}
+use std.http.headers.{get_header}
+use std.thread_sffi.{spl_thread_current_id}
+
+# ============================================================================
+# Connection
+# ============================================================================
+
+class Connection:
+    """A single HTTP connection managed by a Worker.
+
+    Tracks connection state, buffered I/O, and parsed request/response.
+    The Worker calls event methods (`on_data_received`, `on_write_complete`,
+    `on_timeout`) and acts on the returned ConnectionAction.
+    """
+    fd: i64
+    peer_addr: text
+    state: ConnectionState
+    parser: HttpRequestParser
+    request: HttpRequestData?
+    response_bytes: text
+    write_offset: i64
+    keepalive: bool
+    requests_count: i64
+    created_at: i64
+    last_activity: i64
+
+    static fn new(fd: i64, peer_addr: text, now: i64) -> Connection:
+        """Create a new connection after accept.
+
+        Args:
+            fd: Socket file descriptor
+            peer_addr: Remote address string
+            now: Current timestamp in milliseconds
+        """
+        Connection(
+            fd: fd,
+            peer_addr: peer_addr,
+            state: ConnectionState.ReadingRequest,
+            parser: HttpRequestParser.new(),
+            request: nil,
+            response_bytes: "",
+            write_offset: 0,
+            keepalive: true,
+            requests_count: 0,
+            created_at: now,
+            last_activity: now
+        )
+
+    me on_data_received(data: text, now: i64) -> ConnectionAction:
+        """Process data received from socket.
+
+        Feeds data to the incremental parser. When the request is
+        complete, transitions to RequestReady.
+
+        Args:
+            data: Raw data from recv completion
+            now: Current timestamp
+
+        Returns:
+            Action for the worker to take
+        """
+        self.last_activity = now
+
+        match self.state:
+            ConnectionState.ReadingRequest:
+                val result = self.parser.feed(data)
+                match result:
+                    Ok(_):
+                        if self.parser.is_complete():
+                            self.request = self.parser.to_request(self.peer_addr)
+                            self.state = ConnectionState.Routing
+                            return ConnectionAction.RequestReady
+                        else:
+                            return ConnectionAction.ContinueReading
+                    Err(e):
+                        return ConnectionAction.Error(400, "Bad Request")
+
+            ConnectionState.KeepAlive:
+                # Data arrived on keep-alive connection = new request
+                self.state = ConnectionState.ReadingRequest
+                val result = self.parser.feed(data)
+                match result:
+                    Ok(_):
+                        if self.parser.is_complete():
+                            self.request = self.parser.to_request(self.peer_addr)
+                            self.state = ConnectionState.Routing
+                            return ConnectionAction.RequestReady
+                        else:
+                            return ConnectionAction.ContinueReading
+                    Err(e):
+                        return ConnectionAction.Error(400, "Bad Request")
+
+            _:
+                # Data received in unexpected state
+                ConnectionAction.Close
+
+    me set_response(resp: HttpResponseData, keepalive_timeout_s: i64):
+        """Prepare a response for sending.
+
+        Serializes the response and updates connection state.
+
+        Args:
+            resp: Response to send
+            keepalive_timeout_s: Keep-alive timeout in seconds for header
+        """
+        # Determine keepalive from request
+        self.keepalive = self.should_keepalive()
+
+        val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
+        self.response_bytes = serialize_response(final_resp)
+        self.write_offset = 0
+        self.state = ConnectionState.SendingResponse
+
+    fn get_response_bytes() -> text:
+        """Get the serialized response bytes to send."""
+        self.response_bytes
+
+    me on_write_complete(now: i64) -> ConnectionAction:
+        """Handle write completion.
+
+        Args:
+            now: Current timestamp
+
+        Returns:
+            KeepAlive or Close action
+        """
+        self.last_activity = now
+        self.requests_count = self.requests_count + 1
+
+        if self.keepalive:
+            self.reset_for_keepalive()
+            ConnectionAction.ContinueReading
+        else:
+            self.state = ConnectionState.Closing
+            ConnectionAction.Close
+
+    me on_timeout(now: i64) -> ConnectionAction:
+        """Handle timeout event.
+
+        Args:
+            now: Current timestamp
+
+        Returns:
+            Close action (timeout always closes)
+        """
+        self.state = ConnectionState.Closing
+        ConnectionAction.Close
+
+    fn is_keepalive_expired(now: i64, timeout_ms: i64) -> bool:
+        """Check if this connection's keepalive has expired.
+
+        Args:
+            now: Current timestamp in ms
+            timeout_ms: Keepalive timeout in ms
+
+        Returns:
+            true if connection should be closed
+        """
+        match self.state:
+            ConnectionState.KeepAlive:
+                (now - self.last_activity) > timeout_ms
+            _:
+                false
+
+    fn is_read_timeout(now: i64, timeout_ms: i64) -> bool:
+        """Check if request read has timed out."""
+        match self.state:
+            ConnectionState.ReadingRequest:
+                (now - self.last_activity) > timeout_ms
+            _:
+                false
+
+    # ========================================================================
+    # Internal
+    # ========================================================================
+
+    me reset_for_keepalive():
+        """Reset connection state for next request on keep-alive."""
+        self.parser.reset()
+        self.request = nil
+        self.response_bytes = ""
+        self.write_offset = 0
+        self.state = ConnectionState.KeepAlive
+
+    fn should_keepalive() -> bool:
+        """Determine if connection should be kept alive."""
+        match self.request:
+            Some(req):
+                # HTTP/1.1 defaults to keep-alive
+                val conn_header = get_header(req.headers, "Connection")
+                if conn_header.?:
+                    conn_header.to_lower() != "close"
+                else:
+                    req.version == "HTTP/1.1"
+            nil:
+                false

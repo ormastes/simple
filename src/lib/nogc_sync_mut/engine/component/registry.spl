@@ -1,0 +1,225 @@
+# Component System — Component2D enum and ComponentRegistry
+#
+# Composition-based component system using tagged enums.
+# Each Node2D can have multiple components attached via the registry.
+# No inheritance — enum matching for type dispatch.
+#
+# Usage:
+#   var reg = ComponentRegistry.create()
+#   val sprite = SpriteData.create(tex_id, src_rect)
+#   reg.attach(node_id, Component2D.Sprite(data: sprite))
+#   val s = reg.get_sprite(node_id)
+
+use std.common.engine.ids.{NodeId, TextureId, AudioClipId}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+
+# ============================================================================
+# Component Data Structs
+# ============================================================================
+
+class SpriteData:
+    texture_id: TextureId
+    src_rect: Rect2
+    pivot: Vec2
+    flip_x: bool
+    flip_y: bool
+    tint: EngineColor
+
+class AnimatedSpriteData:
+    texture_id: TextureId
+    frame_width: i64
+    frame_height: i64
+    columns: i64
+    rows: i64
+    frames: [i64]
+    speed: f64
+    current_time: f64
+    is_looping: bool
+    is_playing: bool
+
+class CameraData:
+    zoom: f64
+    viewport_width: f64
+    viewport_height: f64
+    is_active: bool
+
+class TileMapData:
+    tile_texture_id: TextureId
+    tile_width: i64
+    tile_height: i64
+    map_width: i64
+    map_height: i64
+    tiles: [i64]
+
+# ============================================================================
+# Component2D — Tagged Union
+# ============================================================================
+
+enum Component2D:
+    Sprite(data: SpriteData)
+    AnimatedSprite(data: AnimatedSpriteData)
+    Camera(data: CameraData)
+    TileMap(data: TileMapData)
+
+impl Component2D:
+    fn type_name() -> text:
+        """Return the variant name as a string."""
+        match self:
+            Sprite(_): "Sprite"
+            AnimatedSprite(_): "AnimatedSprite"
+            Camera(_): "Camera"
+            TileMap(_): "TileMap"
+
+    fn is_sprite() -> bool:
+        match self:
+            Sprite(_): true
+            _: false
+
+    fn is_animated_sprite() -> bool:
+        match self:
+            AnimatedSprite(_): true
+            _: false
+
+    fn is_camera() -> bool:
+        match self:
+            Camera(_): true
+            _: false
+
+    fn is_tilemap() -> bool:
+        match self:
+            TileMap(_): true
+            _: false
+
+# ============================================================================
+# ComponentRegistry — maps nodes to their components
+# ============================================================================
+
+class ComponentRegistry:
+    """Registry mapping node indices to lists of components.
+
+    Uses Dict<i64, [Component2D]> internally keyed by node index.
+    A node can have multiple components of different types.
+    """
+    entries: Dict<i64, [Component2D]>
+
+impl ComponentRegistry:
+    static fn create() -> ComponentRegistry:
+        """Create an empty registry."""
+        ComponentRegistry(entries: {})
+
+    me attach(node_id: NodeId, component: Component2D):
+        """Add a component to a node.
+
+        If the node already has components, the new one is appended.
+        """
+        val idx = node_id.to_index()
+        if val Some(existing) = self.entries.get(idx):
+            var list = existing
+            list.push(component)
+            self.entries[idx] = list
+        else:
+            self.entries[idx] = [component]
+
+    me detach_all(node_id: NodeId):
+        """Remove all components from a node."""
+        val idx = node_id.to_index()
+        self.entries.remove(idx)
+
+    fn get_components(node_id: NodeId) -> [Component2D]:
+        """Get all components for a node. Returns empty list if none."""
+        val idx = node_id.to_index()
+        if val Some(list) = self.entries.get(idx):
+            return list
+        []
+
+    fn get_sprite(node_id: NodeId) -> SpriteData?:
+        """Find the first Sprite component on a node."""
+        val components = self.get_components(node_id)
+        var i = 0
+        while i < components.len():
+            val c = components[i]
+            match c:
+                Component2D.Sprite(data):
+                    return data
+                _:
+                    pass
+            i = i + 1
+        nil
+
+    fn get_animated_sprite(node_id: NodeId) -> AnimatedSpriteData?:
+        """Find the first AnimatedSprite component on a node."""
+        val components = self.get_components(node_id)
+        var i = 0
+        while i < components.len():
+            val c = components[i]
+            match c:
+                Component2D.AnimatedSprite(data):
+                    return data
+                _:
+                    pass
+            i = i + 1
+        nil
+
+    fn get_camera(node_id: NodeId) -> CameraData?:
+        """Find the first Camera component on a node."""
+        val components = self.get_components(node_id)
+        var i = 0
+        while i < components.len():
+            val c = components[i]
+            match c:
+                Component2D.Camera(data):
+                    return data
+                _:
+                    pass
+            i = i + 1
+        nil
+
+    fn get_tilemap(node_id: NodeId) -> TileMapData?:
+        """Find the first TileMap component on a node."""
+        val components = self.get_components(node_id)
+        var i = 0
+        while i < components.len():
+            val c = components[i]
+            match c:
+                Component2D.TileMap(data):
+                    return data
+                _:
+                    pass
+            i = i + 1
+        nil
+
+    fn has_component_type(node_id: NodeId, type_name: text) -> bool:
+        """Check whether a node has a component of the given type name."""
+        val components = self.get_components(node_id)
+        var i = 0
+        while i < components.len():
+            val c = components[i]
+            if c.type_name() == type_name:
+                return true
+            i = i + 1
+        false
+
+    fn find_nodes_with_type(type_name: text) -> [i64]:
+        """Find all node indices that have a component of the given type.
+
+        Iterates over all registry entries and checks each component list.
+        """
+        var result: [i64] = []
+        val keys = self.entries.keys()
+        var k = 0
+        while k < keys.len():
+            val idx = keys[k]
+            val components = self.entries[idx]
+            var found = false
+            var i = 0
+            while i < components.len():
+                val c = components[i]
+                if c.type_name() == type_name:
+                    found = true
+                i = i + 1
+            if found:
+                result.push(idx)
+            k = k + 1
+        result

@@ -1,0 +1,143 @@
+# Vector Renderer — Lyon tessellation to DrawTriangles commands
+#
+# Uses Lyon 2D FFI to tessellate vector shapes (rects, circles, lines)
+# into triangle meshes, then pushes DrawTriangles commands into the
+# render command buffer.
+#
+# Usage:
+#   val vec_renderer = VectorRenderer.create()
+#   vec_renderer.fill_rect(cmds, rect, EngineColor.red(), 0)
+#   vec_renderer.fill_circle(cmds, 100.0, 100.0, 50.0, EngineColor.blue(), 1)
+
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.nogc_sync_mut.engine.render.types.{Vertex2D}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.io.graphics2d_ffi.{
+    Rect, Point2D, Path,
+    FillTessellation, StrokeTessellation,
+    VertexBuffer, IndexBuffer,
+    PathBuilder,
+    graphics_rectangle, graphics_circle,
+    graphics_path_builder_new, graphics_path_begin, graphics_path_line_to,
+    graphics_path_close, graphics_path_build,
+    graphics_fill_tessellate, graphics_fill_get_vertices, graphics_fill_get_indices,
+    graphics_fill_vertex_count, graphics_fill_index_count, graphics_fill_free,
+    graphics_stroke_tessellate, graphics_stroke_get_vertices, graphics_stroke_get_indices,
+    graphics_stroke_vertex_count, graphics_stroke_index_count,
+    graphics_vertex_buffer_get_position, graphics_vertex_buffer_size, graphics_vertex_buffer_free,
+    graphics_index_buffer_get, graphics_index_buffer_size, graphics_index_buffer_free,
+    graphics_path_free, graphics_stroke_free
+}
+
+# ============================================================================
+# VectorRenderer
+# ============================================================================
+
+class VectorRenderer:
+    tolerance: f64
+
+impl VectorRenderer:
+    static fn create() -> VectorRenderer:
+        """Create a vector renderer with default tessellation tolerance."""
+        VectorRenderer(tolerance: 0.1)
+
+    fn fill_rect(cmds: RenderCommandBuffer, rect: Rect2, color: EngineColor, z_order: i64):
+        """Tessellate a filled rectangle and push DrawTriangles command."""
+        val lyon_rect = Rect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)
+        val path = graphics_rectangle(lyon_rect)
+        val result = _tessellate_fill(path, self.tolerance)
+        val verts = result.0
+        val idxs = result.1
+        if verts.len() > 0:
+            cmds.push(RenderCommand.DrawTriangles(vertices: verts, indices: idxs, color: color, z_order: z_order))
+        graphics_path_free(path)
+
+    fn fill_circle(cmds: RenderCommandBuffer, cx: f64, cy: f64, radius: f64, color: EngineColor, z_order: i64):
+        """Tessellate a filled circle and push DrawTriangles command."""
+        val center = Point2D(x: cx, y: cy)
+        val path = graphics_circle(center, radius)
+        val result = _tessellate_fill(path, self.tolerance)
+        val verts = result.0
+        val idxs = result.1
+        if verts.len() > 0:
+            cmds.push(RenderCommand.DrawTriangles(vertices: verts, indices: idxs, color: color, z_order: z_order))
+        graphics_path_free(path)
+
+    fn stroke_rect(cmds: RenderCommandBuffer, rect: Rect2, width: f64, color: EngineColor, z_order: i64):
+        """Tessellate a stroked rectangle and push DrawTriangles command."""
+        val lyon_rect = Rect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)
+        val path = graphics_rectangle(lyon_rect)
+        val result = _tessellate_stroke(path, width, self.tolerance)
+        val verts = result.0
+        val idxs = result.1
+        if verts.len() > 0:
+            cmds.push(RenderCommand.DrawTriangles(vertices: verts, indices: idxs, color: color, z_order: z_order))
+        graphics_path_free(path)
+
+    fn stroke_line(cmds: RenderCommandBuffer, x1: f64, y1: f64, x2: f64, y2: f64, width: f64, color: EngineColor, z_order: i64):
+        """Tessellate a stroked line segment and push DrawTriangles command."""
+        val builder = graphics_path_builder_new()
+        val start = Point2D(x: x1, y: y1)
+        val end_pt = Point2D(x: x2, y: y2)
+        graphics_path_begin(builder, start)
+        graphics_path_line_to(builder, end_pt)
+        val path = graphics_path_build(builder)
+        val result = _tessellate_stroke(path, width, self.tolerance)
+        val verts = result.0
+        val idxs = result.1
+        if verts.len() > 0:
+            cmds.push(RenderCommand.DrawTriangles(vertices: verts, indices: idxs, color: color, z_order: z_order))
+        graphics_path_free(path)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _tessellate_fill(path: Path, tolerance: f64) -> ([Vertex2D], [i64]):
+    """Extract vertices and indices from Lyon fill tessellation."""
+    val tess = graphics_fill_tessellate(path, tolerance)
+    val vert_count = graphics_fill_vertex_count(tess)
+    val idx_count = graphics_fill_index_count(tess)
+    var verts: [Vertex2D] = []
+    var idxs: [i64] = []
+    if vert_count > 0:
+        val vbuf = graphics_fill_get_vertices(tess)
+        val ibuf = graphics_fill_get_indices(tess)
+        var i = 0
+        while i < vert_count:
+            val pos = graphics_vertex_buffer_get_position(vbuf, i)
+            verts.push(Vertex2D(x: pos.x, y: pos.y, u: 0.0, v: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+            i = i + 1
+        var j = 0
+        while j < idx_count:
+            idxs.push(graphics_index_buffer_get(ibuf, j))
+            j = j + 1
+        graphics_vertex_buffer_free(vbuf)
+        graphics_index_buffer_free(ibuf)
+    graphics_fill_free(tess)
+    (verts, idxs)
+
+fn _tessellate_stroke(path: Path, width: f64, tolerance: f64) -> ([Vertex2D], [i64]):
+    """Extract vertices and indices from Lyon stroke tessellation."""
+    val tess = graphics_stroke_tessellate(path, width, tolerance)
+    val vert_count = graphics_stroke_vertex_count(tess)
+    val idx_count = graphics_stroke_index_count(tess)
+    var verts: [Vertex2D] = []
+    var idxs: [i64] = []
+    if vert_count > 0:
+        val vbuf = graphics_stroke_get_vertices(tess)
+        val ibuf = graphics_stroke_get_indices(tess)
+        var i = 0
+        while i < vert_count:
+            val pos = graphics_vertex_buffer_get_position(vbuf, i)
+            verts.push(Vertex2D(x: pos.x, y: pos.y, u: 0.0, v: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+            i = i + 1
+        var j = 0
+        while j < idx_count:
+            idxs.push(graphics_index_buffer_get(ibuf, j))
+            j = j + 1
+        graphics_vertex_buffer_free(vbuf)
+        graphics_index_buffer_free(ibuf)
+    graphics_stroke_free(tess)
+    (verts, idxs)

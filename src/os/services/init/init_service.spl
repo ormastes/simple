@@ -65,9 +65,10 @@ impl InitService:
 
     me register(def_: ServiceDef):
         """Register a service definition."""
+        val stopped = ServiceState.Stopped
         val instance = ServiceInstance(
             def_: def_,
-            state: ServiceState.Stopped,
+            state: stopped,
             restart_count: 0,
             max_restarts: 10
         )
@@ -88,7 +89,8 @@ impl InitService:
             if self.services[i].def_.name == name:
                 if self.services[i].state == ServiceState.Stopped:
                     # Check dependencies are running
-                    val deps_ready = me check_deps(self.services[i].def_.dependencies)
+                    val svc_deps = self.services[i].def_.dependencies
+                    val deps_ready = me check_deps(svc_deps)
                     if deps_ready:
                         self.services[i].state = ServiceState.Starting
                         # Spawn process via syscall
@@ -96,7 +98,8 @@ impl InitService:
                         # The kernel loads the ELF, creates a new task with the specified
                         # capabilities, and returns the PID.
                         # For now, assign a synthetic PID based on service index.
-                        val pid = (1000 + i).to_u64()
+                        val pid_raw = 1000 + i
+                        val pid = pid_raw.to_u64()
                         self.services[i].state = ServiceState.Running(pid: pid)
                 return
             i = i + 1
@@ -120,7 +123,8 @@ impl InitService:
         var visited: [text] = []
 
         for svc in self.services:
-            me topo_visit(svc.def_.name, visited, order)
+            val svc_name = svc.def_.name
+            me topo_visit(svc_name, visited, order)
         order
 
     me topo_visit(name: text, visited: [text], order: [text]):
@@ -158,7 +162,8 @@ impl InitService:
                         if should_restart and self.services[i].restart_count < self.services[i].max_restarts:
                             self.services[i].restart_count = self.services[i].restart_count + 1
                             self.services[i].state = ServiceState.Restarting
-                            me start_service(self.services[i].def_.name)
+                            val svc_name = self.services[i].def_.name
+                            me start_service(svc_name)
                         return
                 case _: pass_dn
             i = i + 1
@@ -169,13 +174,15 @@ impl InitService:
 
 fn default_services() -> [ServiceDef]:
     """Built-in service definitions for minimal OS boot."""
+    val always = RestartPolicy.Always
+    val on_failure = RestartPolicy.OnFailure
     [
         ServiceDef(
             name: "vfs",
             binary: "/sys/services/vfs",
             dependencies: [],
             capabilities: ["FileRead(/)", "FileWrite(/)"],
-            restart: RestartPolicy.Always,
+            restart: always,
             priority: "high"
         ),
         ServiceDef(
@@ -183,7 +190,7 @@ fn default_services() -> [ServiceDef]:
             binary: "/sys/services/net",
             dependencies: [],
             capabilities: ["NetRaw"],
-            restart: RestartPolicy.Always,
+            restart: always,
             priority: "high"
         ),
         ServiceDef(
@@ -191,7 +198,7 @@ fn default_services() -> [ServiceDef]:
             binary: "/sys/services/compositor",
             dependencies: ["vfs"],
             capabilities: ["FileRead(/sys/fonts)"],
-            restart: RestartPolicy.Always,
+            restart: always,
             priority: "high"
         ),
         ServiceDef(
@@ -199,7 +206,7 @@ fn default_services() -> [ServiceDef]:
             binary: "/sys/apps/desktop",
             dependencies: ["compositor", "vfs"],
             capabilities: ["FileRead(/)", "FileWrite(/home)"],
-            restart: RestartPolicy.OnFailure,
+            restart: on_failure,
             priority: "normal"
         ),
         ServiceDef(
@@ -207,7 +214,7 @@ fn default_services() -> [ServiceDef]:
             binary: "/sys/services/llm_mcp",
             dependencies: ["compositor", "vfs", "net"],
             capabilities: ["FileRead(/)", "FileWrite(/home)", "NetConnect(443)"],
-            restart: RestartPolicy.OnFailure,
+            restart: on_failure,
             priority: "normal"
         )
     ]

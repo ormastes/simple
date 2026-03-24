@@ -1083,7 +1083,13 @@ fn generate_stub_object(
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let [_addr, sym_type, name] = parts.as_slice() {
                         if *sym_type != "U" {
-                            defined.insert(name.to_string());
+                            // Strip glibc version suffix: pipe2@@GLIBC_2.9 → pipe2
+                            let base = name.split("@@").next().unwrap_or(name);
+                            defined.insert(base.to_string());
+                            // Also insert the full versioned name in case someone refs it
+                            if base != *name {
+                                defined.insert(name.to_string());
+                            }
                         }
                     }
                 }
@@ -1176,8 +1182,14 @@ fn generate_stub_object(
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
 #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
 fn is_system_symbol(sym: &str) -> bool {
-    // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't)
+    // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't).
+    // Check both original and stripped form so __errno_location matches
+    // whether or not the leading _ is stripped.
     let name = sym.strip_prefix('_').unwrap_or(sym);
+    is_known_system_name(sym) || is_known_system_name(name)
+}
+
+fn is_known_system_name(name: &str) -> bool {
     matches!(
         name,
         // Memory

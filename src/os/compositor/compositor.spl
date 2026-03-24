@@ -15,13 +15,8 @@ use common.ui.layout.{compute_layout}
 use common.ui.builder.{column, text_widget}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard, KeyEvent, Key}
-use os.compositor.decorations.{
-    draw_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH,
-    client_area_x, client_area_y, client_area_width, client_area_height
-}
-use os.compositor.fb_backend.{
-    _render_tree, resolve_theme, CHAR_W, CHAR_H
-}
+use os.compositor.decorations.{draw_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height}
+use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
 
 # ============================================================================
 # Window Surface
@@ -68,6 +63,8 @@ impl Compositor:
 
     static fn new(fb: FramebufferDriver, keyboard: Ps2Keyboard) -> Compositor:
         """Create a new compositor with the given framebuffer and keyboard."""
+        val sw = fb.width.to_i32()
+        val sh = fb.height.to_i32()
         Compositor(
             surfaces: [],
             focused_idx: -1,
@@ -75,8 +72,8 @@ impl Compositor:
             keyboard: keyboard,
             desktop_bg: Color.rgb(0, 48, 96),
             next_id: 1,
-            screen_width: fb.width.to_i32(),
-            screen_height: fb.height.to_i32(),
+            screen_width: sw,
+            screen_height: sh,
             running: false
         )
 
@@ -324,7 +321,8 @@ impl Compositor:
             next = 0
         # Re-order: bring the new focused window to front
         val target = self.surfaces[next]
-        me focus_window(target.id)
+        val target_id = target.id
+        me focus_window(target_id)
 
     me close_focused_window():
         """Close the currently focused window."""
@@ -375,22 +373,35 @@ fn _render_window(fb: FramebufferDriver, surface: WindowSurface, focused: bool):
     draw_window_frame(fb, surface.x, surface.y, surface.width, surface.height, surface.title, focused)
 
     # Calculate client area
-    val cx = client_area_x(surface.x.to_u32()).to_i32()
-    val cy = client_area_y(surface.y.to_u32()).to_i32()
-    val cw = client_area_width(surface.width.to_u32()).to_i32()
-    val ch = client_area_height(surface.height.to_u32()).to_i32()
+    val sx_u = surface.x.to_u32()
+    val cx_raw = client_area_x(sx_u)
+    val cx = cx_raw.to_i32()
+    val sy_u = surface.y.to_u32()
+    val cy_raw = client_area_y(sy_u)
+    val cy = cy_raw.to_i32()
+    val sw_u = surface.width.to_u32()
+    val cw_raw = client_area_width(sw_u)
+    val cw = cw_raw.to_i32()
+    val sh_u = surface.height.to_u32()
+    val ch_raw = client_area_height(sh_u)
+    val ch = ch_raw.to_i32()
 
     if cw <= 0 or ch <= 0:
         return
 
     # Render the window's widget tree into the client area
     val state = surface.session.current_state()
-    val theme = resolve_theme(state.tree.theme())
+    val tree_theme = state.tree.theme()
+    val theme = resolve_theme(tree_theme)
     val root = state.tree.root_node()
     val rects = compute_layout(root, cx, cy, cw, ch)
 
     # Clear client area background
-    fb.fill_rect(cx.to_u32(), cy.to_u32(), cw.to_u32(), ch.to_u32(), theme.bg)
+    val cx_u32 = cx.to_u32()
+    val cy_u32 = cy.to_u32()
+    val cw_u32 = cw.to_u32()
+    val ch_u32 = ch.to_u32()
+    fb.fill_rect(cx_u32, cy_u32, cw_u32, ch_u32, theme.bg)
 
     # Render widget tree into client area
     _render_tree(fb, root, rects, state.focused_id, theme)

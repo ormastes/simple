@@ -59,7 +59,7 @@ Two remote interfaces:
 | Interface | Protocol | Default Port | Use Case |
 |-----------|----------|-------------|----------|
 | `t32_native` (RCL) | UDP NETASSIST | 20000 | Control PowerView directly |
-| `t32_gdb` (RSP) | TCP | 30000 | GDB debugging through TRACE32 |
+| `t32_gdb` (RSP) | TCP | 2331 | GDB debugging through TRACE32 |
 
 ---
 

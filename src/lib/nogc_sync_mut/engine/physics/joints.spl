@@ -1,0 +1,100 @@
+# Physics System — Joint Constraints
+#
+# Joints connect two physics bodies with constraints (revolute, fixed, spring).
+# All joint functions take NodeIds and look up the underlying FFI handles.
+#
+# Usage:
+#   val jid = physics_add_revolute(world, body_a, body_b, Vec2(x: 0.0, y: 0.0))
+#   physics_remove_joint(world, jid)
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.io.rapier2d_ffi.*
+use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
+
+# ============================================================================
+# JointId — Opaque handle to a physics joint
+# ============================================================================
+
+struct JointId:
+    handle: i64
+
+impl JointId:
+    fn is_valid() -> bool:
+        self.handle != 0
+
+    static fn invalid() -> JointId:
+        JointId(handle: 0)
+
+# ============================================================================
+# Joint Creation
+# ============================================================================
+
+fn physics_add_revolute(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId, anchor: Vec2) -> JointId:
+    """Add a revolute (hinge) joint between two bodies at the given anchor point."""
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId.invalid()
+    val pb_a = world.bodies[idx_a]
+    val pb_b = world.bodies[idx_b]
+    val rb_a = world._make_rigid_body(pb_a)
+    val rb_b = world._make_rigid_body(pb_b)
+    val ffi_anchor = Vector2(x: anchor.x, y: anchor.y)
+    val joint = physics_create_revolute_joint(world.world, rb_a, rb_b, ffi_anchor)
+    if not joint.is_valid:
+        return JointId.invalid()
+    JointId(handle: joint.handle)
+
+fn physics_add_fixed(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId) -> JointId:
+    """Add a fixed (weld) joint between two bodies — locks relative position and rotation."""
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId.invalid()
+    val pb_a = world.bodies[idx_a]
+    val pb_b = world.bodies[idx_b]
+    val rb_a = world._make_rigid_body(pb_a)
+    val rb_b = world._make_rigid_body(pb_b)
+    val joint = physics_create_fixed_joint(world.world, rb_a, rb_b)
+    if not joint.is_valid:
+        return JointId.invalid()
+    JointId(handle: joint.handle)
+
+fn physics_add_spring(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId, rest_length: f64, stiffness: f64, damping: f64) -> JointId:
+    """Add a spring (distance) joint between two bodies.
+
+    rest_length — natural length of the spring
+    stiffness   — spring constant (higher = stiffer)
+    damping     — damping coefficient (higher = less oscillation)
+    """
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId.invalid()
+    val pb_a = world.bodies[idx_a]
+    val pb_b = world.bodies[idx_b]
+    val rb_a = world._make_rigid_body(pb_a)
+    val rb_b = world._make_rigid_body(pb_b)
+    val anchor1 = Vector2(x: 0.0, y: 0.0)
+    val anchor2 = Vector2(x: 0.0, y: 0.0)
+    val joint = physics_create_distance_joint(world.world, rb_a, rb_b, anchor1, anchor2, rest_length)
+    if not joint.is_valid:
+        return JointId.invalid()
+    JointId(handle: joint.handle)
+
+# ============================================================================
+# Joint Removal
+# ============================================================================
+
+fn physics_remove_joint(world: PhysicsWorld2D, joint_id: JointId) -> bool:
+    """Remove a joint from the physics world."""
+    if not joint_id.is_valid():
+        return false
+    val joint = Joint(
+        handle: joint_id.handle,
+        world: world.world,
+        joint_type: JointType.Fixed,
+        is_valid: true
+    )
+    physics_destroy_joint(joint)

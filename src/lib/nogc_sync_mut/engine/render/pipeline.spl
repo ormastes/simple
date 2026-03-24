@@ -1,0 +1,357 @@
+# Software Render Pipeline — CPU rasterizer with pixel buffer
+#
+# Maintains a pixel buffer and rasterizes sorted render commands into it.
+# Supports filled rects, triangle rasterization (from Lyon tessellation),
+# and sprite placeholders (colored rects until texture system is ready).
+#
+# Usage:
+#   var renderer = SoftwareRenderer.create(800, 600)
+#   renderer.clear()
+#   val stats = renderer.render_frame(command_buffer)
+#   val pixels = renderer.get_pixels()   # blit to window surface
+
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.engine.render.batch.{sort_commands_by_z}
+
+# ============================================================================
+# SoftwareRenderer
+# ============================================================================
+
+class SoftwareRenderer:
+    width: i64
+    height: i64
+    pixels: [i64]           # RGBA packed as i64: (r << 24) | (g << 16) | (b << 8) | a
+    clear_color: EngineColor
+    stats: DrawStats
+
+impl SoftwareRenderer:
+    static fn create(width: i64, height: i64) -> SoftwareRenderer:
+        """Create a software renderer with given dimensions."""
+        val size = width * height
+        var px: [i64] = []
+        var i = 0
+        while i < size:
+            px.push(0)
+            i = i + 1
+        SoftwareRenderer(
+            width: width,
+            height: height,
+            pixels: px,
+            clear_color: EngineColor.black(),
+            stats: DrawStats.zero()
+        )
+
+    me resize(width: i64, height: i64):
+        """Reallocate the pixel buffer for new dimensions."""
+        self.width = width
+        self.height = height
+        val size = width * height
+        var px: [i64] = []
+        var i = 0
+        while i < size:
+            px.push(0)
+            i = i + 1
+        self.pixels = px
+
+    me clear():
+        """Fill the entire pixel buffer with the clear color."""
+        val rgba = self.clear_color.to_rgba8()
+        val packed = _pack_rgba(rgba.0, rgba.1, rgba.2, rgba.3)
+        val size = self.width * self.height
+        var i = 0
+        while i < size:
+            self.pixels[i] = packed
+            i = i + 1
+
+    me render_frame(commands: RenderCommandBuffer) -> DrawStats:
+        """Sort commands by z_order and rasterize each into the pixel buffer."""
+        self.stats = DrawStats.zero()
+        val sorted = sort_commands_by_z(commands.commands)
+        for cmd in sorted:
+            self._process_command(cmd)
+        self.stats
+
+    me set_pixel(x: i64, y: i64, color: EngineColor):
+        """Set a single pixel with bounds checking and alpha blending."""
+        val in_x = x >= 0 and x < self.width
+        val in_y = y >= 0 and y < self.height
+        if in_x and in_y:
+            val idx = y * self.width + x
+            if color.a >= 0.999:
+                # Fully opaque — skip blend
+                val rgba = color.to_rgba8()
+                self.pixels[idx] = _pack_rgba(rgba.0, rgba.1, rgba.2, rgba.3)
+            else:
+                val dst = self._unpack_pixel(idx)
+                val blended = self._alpha_blend(dst, color)
+                val rgba = blended.to_rgba8()
+                self.pixels[idx] = _pack_rgba(rgba.0, rgba.1, rgba.2, rgba.3)
+
+    me fill_rect_pixels(x: i64, y: i64, w: i64, h: i64, color: EngineColor):
+        """Fast axis-aligned rectangle fill with alpha blending."""
+        # Clip to screen bounds
+        var x0 = x
+        var y0 = y
+        var x1 = x + w
+        var y1 = y + h
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.width:
+            x1 = self.width
+        if y1 > self.height:
+            y1 = self.height
+        if x0 >= x1 or y0 >= y1:
+            return
+        val is_opaque = color.a >= 0.999
+        val rgba = color.to_rgba8()
+        val packed = _pack_rgba(rgba.0, rgba.1, rgba.2, rgba.3)
+        var py = y0
+        while py < y1:
+            var px = x0
+            val row_start = py * self.width
+            while px < x1:
+                val idx = row_start + px
+                if is_opaque:
+                    self.pixels[idx] = packed
+                else:
+                    val dst = self._unpack_pixel(idx)
+                    val blended = self._alpha_blend(dst, color)
+                    val br = blended.to_rgba8()
+                    self.pixels[idx] = _pack_rgba(br.0, br.1, br.2, br.3)
+                px = px + 1
+            py = py + 1
+
+    fn get_pixel(x: i64, y: i64) -> EngineColor:
+        """Read a single pixel as EngineColor."""
+        val in_x = x >= 0 and x < self.width
+        val in_y = y >= 0 and y < self.height
+        if in_x and in_y:
+            val idx = y * self.width + x
+            self._unpack_pixel(idx)
+        else:
+            EngineColor.transparent()
+
+    fn get_pixels() -> [i64]:
+        """Return the raw pixel data for blitting to a window surface."""
+        self.pixels
+
+    # ========================================================================
+    # Internal: command dispatch
+    # ========================================================================
+
+    me _process_command(cmd: RenderCommand):
+        """Dispatch a single render command."""
+        match cmd:
+            case Clear(color):
+                self.clear_color = color
+                self.clear()
+            case DrawRect(rect, color, z_order):
+                val xi = _f64_to_i64(rect.x)
+                val yi = _f64_to_i64(rect.y)
+                val wi = _f64_to_i64(rect.width)
+                val hi = _f64_to_i64(rect.height)
+                self.fill_rect_pixels(xi, yi, wi, hi, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawCircle(cx, cy, radius, color, z_order):
+                # Circle arrives pre-tessellated as DrawTriangles from VectorRenderer
+                # If it reaches here directly, rasterize as a bounding-box approximation
+                val xi = _f64_to_i64(cx - radius)
+                val yi = _f64_to_i64(cy - radius)
+                val di = _f64_to_i64(radius * 2.0)
+                self.fill_rect_pixels(xi, yi, di, di, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawLine(x1, y1, x2, y2, width, color, z_order):
+                # Line arrives pre-tessellated as DrawTriangles from VectorRenderer
+                # Fallback: draw a thin rect between the two points
+                self._rasterize_line(x1, y1, x2, y2, width, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawSprite(texture_id, src_rect, dst_rect, tint, z_order):
+                # Placeholder: draw tinted rectangle until texture system is ready
+                val xi = _f64_to_i64(dst_rect.x)
+                val yi = _f64_to_i64(dst_rect.y)
+                val wi = _f64_to_i64(dst_rect.width)
+                val hi = _f64_to_i64(dst_rect.height)
+                self.fill_rect_pixels(xi, yi, wi, hi, tint)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawTriangles(vertices, indices, color, z_order):
+                val tri_count = indices.len() / 3
+                var t = 0
+                while t < tri_count:
+                    val i0 = indices[t * 3]
+                    val i1 = indices[t * 3 + 1]
+                    val i2 = indices[t * 3 + 2]
+                    val v0 = vertices[i0]
+                    val v1 = vertices[i1]
+                    val v2 = vertices[i2]
+                    self._rasterize_triangle(v0, v1, v2, color)
+                    t = t + 1
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + tri_count,
+                    vertices: self.stats.vertices + vertices.len()
+                )
+
+    # ========================================================================
+    # Internal: triangle rasterizer (scanline with bounding box)
+    # ========================================================================
+
+    me _rasterize_triangle(v0: Vertex2D, v1: Vertex2D, v2: Vertex2D, color: EngineColor):
+        """Rasterize a single triangle using edge function (cross product) test."""
+        # Compute bounding box
+        var min_x = v0.x
+        if v1.x < min_x:
+            min_x = v1.x
+        if v2.x < min_x:
+            min_x = v2.x
+        var max_x = v0.x
+        if v1.x > max_x:
+            max_x = v1.x
+        if v2.x > max_x:
+            max_x = v2.x
+        var min_y = v0.y
+        if v1.y < min_y:
+            min_y = v1.y
+        if v2.y < min_y:
+            min_y = v2.y
+        var max_y = v0.y
+        if v1.y > max_y:
+            max_y = v1.y
+        if v2.y > max_y:
+            max_y = v2.y
+
+        # Clip to screen
+        var ix0 = _f64_to_i64(min_x)
+        var iy0 = _f64_to_i64(min_y)
+        var ix1 = _f64_to_i64(max_x) + 1
+        var iy1 = _f64_to_i64(max_y) + 1
+        if ix0 < 0:
+            ix0 = 0
+        if iy0 < 0:
+            iy0 = 0
+        if ix1 > self.width:
+            ix1 = self.width
+        if iy1 > self.height:
+            iy1 = self.height
+
+        # For each pixel in bounding box, test if inside triangle
+        var py = iy0
+        while py < iy1:
+            val pyf = py * 1.0 + 0.5
+            var px = ix0
+            while px < ix1:
+                val pxf = px * 1.0 + 0.5
+                # Edge function test (cross products)
+                val e0 = _edge_fn(v0.x, v0.y, v1.x, v1.y, pxf, pyf)
+                val e1 = _edge_fn(v1.x, v1.y, v2.x, v2.y, pxf, pyf)
+                val e2 = _edge_fn(v2.x, v2.y, v0.x, v0.y, pxf, pyf)
+                # Inside if all edge functions have the same sign
+                val all_pos = e0 >= 0.0 and e1 >= 0.0 and e2 >= 0.0
+                val all_neg = e0 <= 0.0 and e1 <= 0.0 and e2 <= 0.0
+                if all_pos or all_neg:
+                    self.set_pixel(px, py, color)
+                px = px + 1
+            py = py + 1
+
+    # ========================================================================
+    # Internal: line rasterizer (Bresenham-style via rect approximation)
+    # ========================================================================
+
+    me _rasterize_line(x1: f64, y1: f64, x2: f64, y2: f64, width: f64, color: EngineColor):
+        """Rasterize a line as a series of pixels using DDA algorithm."""
+        val dx = x2 - x1
+        val dy = y2 - y1
+        val half_w = width / 2.0
+        # Use the longer axis for stepping
+        var adx = dx
+        if adx < 0.0:
+            adx = -adx
+        var ady = dy
+        if ady < 0.0:
+            ady = -ady
+        var steps = adx
+        if ady > steps:
+            steps = ady
+        val step_count = _f64_to_i64(steps) + 1
+        if step_count <= 0:
+            return
+        val x_inc = dx / steps
+        val y_inc = dy / steps
+        var cx = x1
+        var cy = y1
+        var s = 0
+        while s < step_count:
+            val hw_i = _f64_to_i64(half_w)
+            val px = _f64_to_i64(cx) - hw_i
+            val py = _f64_to_i64(cy) - hw_i
+            val sz = hw_i * 2 + 1
+            self.fill_rect_pixels(px, py, sz, sz, color)
+            cx = cx + x_inc
+            cy = cy + y_inc
+            s = s + 1
+
+    # ========================================================================
+    # Internal: alpha blending
+    # ========================================================================
+
+    fn _alpha_blend(dst: EngineColor, src: EngineColor) -> EngineColor:
+        """Standard source-over alpha blending."""
+        val sa = src.a
+        val inv_sa = 1.0 - sa
+        val out_a = sa + dst.a * inv_sa
+        if out_a < 0.001:
+            return EngineColor.transparent()
+        val out_r = (src.r * sa + dst.r * dst.a * inv_sa) / out_a
+        val out_g = (src.g * sa + dst.g * dst.a * inv_sa) / out_a
+        val out_b = (src.b * sa + dst.b * dst.a * inv_sa) / out_a
+        EngineColor(r: out_r, g: out_g, b: out_b, a: out_a)
+
+    # ========================================================================
+    # Internal: pixel packing helpers
+    # ========================================================================
+
+    fn _unpack_pixel(idx: i64) -> EngineColor:
+        """Unpack a packed i64 pixel to EngineColor."""
+        val packed = self.pixels[idx]
+        val ri = (packed / 16777216) % 256   # >> 24
+        val gi = (packed / 65536) % 256      # >> 16
+        val bi = (packed / 256) % 256        # >> 8
+        val ai = packed % 256
+        EngineColor(r: ri / 255.0, g: gi / 255.0, b: bi / 255.0, a: ai / 255.0)
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn _pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
+    """Pack RGBA bytes into a single i64."""
+    r * 16777216 + g * 65536 + b * 256 + a
+
+fn _edge_fn(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64:
+    """Edge function: (B-A) x (C-A). Positive if C is to the left of AB."""
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+fn _f64_to_i64(v: f64) -> i64:
+    """Convert f64 to i64 by truncation toward zero."""
+    val r: i64 = v
+    r

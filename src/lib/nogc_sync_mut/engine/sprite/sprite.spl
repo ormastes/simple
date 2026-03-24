@@ -1,0 +1,243 @@
+# Sprite System — High-level sprite, sprite sheet, and animation types
+#
+# Provides Sprite (single frame), SpriteSheet (grid of frames),
+# AnimationClip (named sequence), and SpriteAnimator (stateful playback).
+#
+# Usage:
+#   val sprite = Sprite.create(tex_id, src_rect)
+#   val sheet = SpriteSheet.create(tex_id, 32, 32, 8, 4)
+#   val frame_sprite = sheet.sprite_at(0)
+#
+#   var animator = SpriteAnimator.create(sheet)
+#   animator.add_clip(AnimationClip(name: "walk", frames: [0, 1, 2, 3], speed: 10.0, is_looping: true))
+#   animator.play_clip("walk")
+#   animator.update(0.016)
+#   val current = animator.current_sprite()
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+
+# ============================================================================
+# Sprite — Single texture region with transform properties
+# ============================================================================
+
+class Sprite:
+    """A single sprite referencing a region in a texture.
+
+    Combines a texture handle, source rectangle, pivot point,
+    flip flags, and tint color.
+    """
+    texture_id: TextureId
+    src_rect: Rect2
+    pivot: Vec2
+    flip_x: bool
+    flip_y: bool
+    tint: EngineColor
+
+impl Sprite:
+    static fn create(texture_id: TextureId, src_rect: Rect2) -> Sprite:
+        """Create a sprite with default settings.
+
+        Defaults: pivot at center (0.5, 0.5), no flip, white tint.
+        """
+        Sprite(
+            texture_id: texture_id,
+            src_rect: src_rect,
+            pivot: Vec2(x: 0.5, y: 0.5),
+            flip_x: false,
+            flip_y: false,
+            tint: EngineColor.white()
+        )
+
+    fn with_pivot(p: Vec2) -> Sprite:
+        """Return a copy with the given pivot point."""
+        Sprite(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: p,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            tint: self.tint
+        )
+
+    fn with_flip(fx: bool, fy: bool) -> Sprite:
+        """Return a copy with the given flip flags."""
+        Sprite(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: self.pivot,
+            flip_x: fx,
+            flip_y: fy,
+            tint: self.tint
+        )
+
+    fn with_tint(c: EngineColor) -> Sprite:
+        """Return a copy with the given tint color."""
+        Sprite(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: self.pivot,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            tint: c
+        )
+
+# ============================================================================
+# SpriteSheet — Grid-based sprite sheet
+# ============================================================================
+
+class SpriteSheet:
+    """A uniform grid of frames within a single texture.
+
+    All frames have the same width and height. Frame index maps to
+    (col, row) in the grid: col = index % columns, row = index / columns.
+    """
+    texture_id: TextureId
+    frame_width: i64
+    frame_height: i64
+    columns: i64
+    rows: i64
+
+impl SpriteSheet:
+    static fn create(texture_id: TextureId, frame_w: i64, frame_h: i64, cols: i64, rows: i64) -> SpriteSheet:
+        """Create a sprite sheet with the given frame grid dimensions."""
+        SpriteSheet(
+            texture_id: texture_id,
+            frame_width: frame_w,
+            frame_height: frame_h,
+            columns: cols,
+            rows: rows
+        )
+
+    fn frame_rect(index: i64) -> Rect2:
+        """Compute the source rectangle for a frame by index.
+
+        Maps frame index to (col, row) then to pixel coordinates.
+        """
+        val col = index % self.columns
+        val row = index / self.columns
+        val fx = col * self.frame_width
+        val fy = row * self.frame_height
+        Rect2.new(fx * 1.0, fy * 1.0, self.frame_width * 1.0, self.frame_height * 1.0)
+
+    fn frame_count() -> i64:
+        """Total number of frames in the sheet."""
+        self.columns * self.rows
+
+    fn sprite_at(index: i64) -> Sprite:
+        """Create a Sprite for a specific frame index."""
+        val rect = self.frame_rect(index)
+        Sprite.create(self.texture_id, rect)
+
+# ============================================================================
+# AnimationClip — Named frame sequence
+# ============================================================================
+
+class AnimationClip:
+    """A named animation sequence referencing frame indices in a sprite sheet.
+
+    Frames are indices into a SpriteSheet. Speed is in frames per second.
+    """
+    name: text
+    frames: [i64]
+    speed: f64
+    is_looping: bool
+
+# ============================================================================
+# SpriteAnimator — Stateful animation playback
+# ============================================================================
+
+class SpriteAnimator:
+    """Plays AnimationClips on a SpriteSheet.
+
+    Manages multiple named clips, tracks the current clip,
+    elapsed time, and playing state.
+    """
+    sheet: SpriteSheet
+    clips: Dict<text, AnimationClip>
+    current_clip: text
+    current_time: f64
+    is_playing: bool
+
+impl SpriteAnimator:
+    static fn create(sheet: SpriteSheet) -> SpriteAnimator:
+        """Create a new animator with no clips loaded."""
+        SpriteAnimator(
+            sheet: sheet,
+            clips: {},
+            current_clip: "",
+            current_time: 0.0,
+            is_playing: false
+        )
+
+    me add_clip(clip: AnimationClip):
+        """Register a named animation clip."""
+        self.clips[clip.name] = clip
+
+    me play_clip(name: text):
+        """Switch to a named clip and start playing from the beginning."""
+        self.current_clip = name
+        self.current_time = 0.0
+        self.is_playing = true
+
+    me update(dt: f64):
+        """Advance animation time by dt seconds.
+
+        Handles looping (wraps time) and non-looping (clamps at end).
+        No-op if not playing or no current clip.
+        """
+        if not self.is_playing:
+            return
+        if val Some(clip) = self.clips.get(self.current_clip):
+            val total_frames = clip.frames.len()
+            if total_frames == 0:
+                return
+            if clip.speed <= 0.0:
+                return
+            self.current_time = self.current_time + dt
+            val duration = total_frames * 1.0 / clip.speed
+            if clip.is_looping:
+                if duration > 0.0:
+                    while self.current_time >= duration:
+                        self.current_time = self.current_time - duration
+                    while self.current_time < 0.0:
+                        self.current_time = self.current_time + duration
+            else:
+                if self.current_time >= duration:
+                    self.current_time = duration - 0.0001
+                    self.is_playing = false
+
+    fn current_frame() -> i64:
+        """Get the current frame index from the active clip.
+
+        Returns 0 if no clip is active or clip has no frames.
+        """
+        if val Some(clip) = self.clips.get(self.current_clip):
+            val total = clip.frames.len()
+            if total == 0:
+                return 0
+            if clip.speed <= 0.0:
+                return clip.frames[0]
+            val frame_num = self.current_time * clip.speed
+            var idx: i64 = frame_num
+            if idx < 0:
+                idx = 0
+            if idx >= total:
+                idx = total - 1
+            return clip.frames[idx]
+        0
+
+    fn current_sprite() -> Sprite:
+        """Get the Sprite for the current animation frame."""
+        val frame = self.current_frame()
+        self.sheet.sprite_at(frame)
+
+    me pause():
+        """Pause playback at the current time."""
+        self.is_playing = false
+
+    me resume():
+        """Resume playback from the current time."""
+        self.is_playing = true

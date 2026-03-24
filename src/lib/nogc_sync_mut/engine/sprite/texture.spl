@@ -1,0 +1,255 @@
+# CPU-Side Texture — Pixel arrays stored in system memory
+#
+# Software renderer texture representation. Pixels are RGBA packed as i64.
+# No GPU upload — textures live on the CPU for Phase 1-7.
+# Phase 8 adds GPU textures via image_ffi.spl and Vulkan.
+#
+# Usage:
+#   val tex = Texture.create(64, 64)
+#   tex.set_pixel(10, 20, EngineColor.red())
+#   val c = tex.get_pixel(10, 20)
+#   val sampled = tex.sample(0.5, 0.5)
+#
+#   var store = TextureStore.new()
+#   val id = store.add(tex)
+#   val fetched = store.get(id)
+
+use std.common.engine.ids.{TextureId, RawHandle, Generation}
+use std.common.engine.color.{EngineColor}
+
+# ============================================================================
+# Color Packing Helpers
+# ============================================================================
+
+fn pack_color(color: EngineColor) -> i64:
+    """Convert EngineColor (f64 0.0-1.0) to packed RGBA i64.
+
+    Format: (r << 24) | (g << 16) | (b << 8) | a
+    Each channel is clamped to 0-255.
+    """
+    val ri = _color_to_byte(color.r)
+    val gi = _color_to_byte(color.g)
+    val bi = _color_to_byte(color.b)
+    val ai = _color_to_byte(color.a)
+    ri * 16777216 + gi * 65536 + bi * 256 + ai
+
+fn unpack_color(packed: i64) -> EngineColor:
+    """Convert packed RGBA i64 back to EngineColor.
+
+    Extracts each 8-bit channel and normalizes to 0.0-1.0.
+    """
+    val ri = (packed / 16777216) % 256
+    val gi = (packed / 65536) % 256
+    val bi = (packed / 256) % 256
+    val ai = packed % 256
+    EngineColor(r: ri / 255.0, g: gi / 255.0, b: bi / 255.0, a: ai / 255.0)
+
+fn _color_to_byte(v: f64) -> i64:
+    """Clamp f64 [0.0, 1.0] to i64 [0, 255]."""
+    var clamped = v
+    if clamped < 0.0:
+        clamped = 0.0
+    if clamped > 1.0:
+        clamped = 1.0
+    val scaled = clamped * 255.0 + 0.5
+    if scaled >= 255.0:
+        return 255
+    scaled
+
+# ============================================================================
+# Texture
+# ============================================================================
+
+class Texture:
+    """CPU-side texture stored as a flat pixel array.
+
+    Pixels are RGBA packed into i64 values. Row-major order:
+    pixel at (x, y) is stored at index (y * width + x).
+    """
+    width: i64
+    height: i64
+    pixels: [i64]
+
+impl Texture:
+    static fn create(width: i64, height: i64) -> Texture:
+        """Create a texture filled with transparent black (all zeros)."""
+        val total = width * height
+        var pixels: [i64] = []
+        var i = 0
+        while i < total:
+            pixels.push(0)
+            i = i + 1
+        Texture(width: width, height: height, pixels: pixels)
+
+    static fn create_solid(width: i64, height: i64, color: EngineColor) -> Texture:
+        """Create a texture filled with a single color."""
+        val packed = pack_color(color)
+        val total = width * height
+        var pixels: [i64] = []
+        var i = 0
+        while i < total:
+            pixels.push(packed)
+            i = i + 1
+        Texture(width: width, height: height, pixels: pixels)
+
+    static fn create_checkerboard(width: i64, height: i64, size: i64, color_a: EngineColor, color_b: EngineColor) -> Texture:
+        """Create a checkerboard pattern texture.
+
+        Useful as a placeholder/test pattern. Each square is `size` pixels.
+
+        Args:
+            width: Texture width in pixels
+            height: Texture height in pixels
+            size: Size of each checker square in pixels
+            color_a: Color for even squares
+            color_b: Color for odd squares
+        """
+        val packed_a = pack_color(color_a)
+        val packed_b = pack_color(color_b)
+        val total = width * height
+        var pixels: [i64] = []
+        var i = 0
+        while i < total:
+            val x = i % width
+            val y = i / width
+            val check_x = x / size
+            val check_y = y / size
+            val is_even = (check_x + check_y) % 2 == 0
+            if is_even:
+                pixels.push(packed_a)
+            else:
+                pixels.push(packed_b)
+            i = i + 1
+        Texture(width: width, height: height, pixels: pixels)
+
+    fn get_pixel(x: i64, y: i64) -> EngineColor:
+        """Get the color at (x, y). Returns transparent black if out of bounds."""
+        if x < 0 or x >= self.width:
+            return EngineColor.transparent()
+        if y < 0 or y >= self.height:
+            return EngineColor.transparent()
+        val idx = y * self.width + x
+        unpack_color(self.pixels[idx])
+
+    me set_pixel(x: i64, y: i64, color: EngineColor):
+        """Set the color at (x, y). No-op if out of bounds."""
+        if x < 0 or x >= self.width:
+            return
+        if y < 0 or y >= self.height:
+            return
+        val idx = y * self.width + x
+        self.pixels[idx] = pack_color(color)
+
+    fn sample(u: f64, v: f64) -> EngineColor:
+        """Sample at normalized UV coordinates (0.0-1.0), nearest-neighbor.
+
+        UV (0,0) is top-left, (1,1) is bottom-right.
+        Clamps to texture bounds.
+        """
+        var su = u
+        var sv = v
+        if su < 0.0:
+            su = 0.0
+        if su > 1.0:
+            su = 1.0
+        if sv < 0.0:
+            sv = 0.0
+        if sv > 1.0:
+            sv = 1.0
+        val fx = su * (self.width - 1) + 0.5
+        val fy = sv * (self.height - 1) + 0.5
+        var ix: i64 = fx
+        var iy: i64 = fy
+        if ix >= self.width:
+            ix = self.width - 1
+        if iy >= self.height:
+            iy = self.height - 1
+        self.get_pixel(ix, iy)
+
+    fn size() -> (i64, i64):
+        """Return (width, height) tuple."""
+        (self.width, self.height)
+
+    fn is_valid() -> bool:
+        """Check that the texture has positive dimensions."""
+        val w_ok = self.width > 0
+        val h_ok = self.height > 0
+        w_ok and h_ok
+
+# ============================================================================
+# TextureStore — Manages textures with generational handles
+# ============================================================================
+
+class TextureStore:
+    """Generational handle store for CPU textures.
+
+    Maps TextureId handles to Texture objects. Supports insertion,
+    lookup, and removal with generation-based stale handle detection.
+    """
+    textures: [Texture?]
+    generations: [i64]
+    free_indices: [i64]
+    count: i64
+
+impl TextureStore:
+    static fn new() -> TextureStore:
+        """Create an empty texture store."""
+        TextureStore(
+            textures: [],
+            generations: [],
+            free_indices: [],
+            count: 0
+        )
+
+    me add(texture: Texture) -> TextureId:
+        """Store a texture and return its TextureId handle.
+
+        Reuses free slots with bumped generation when available.
+        """
+        if self.free_indices.len() > 0:
+            val idx = self.free_indices[self.free_indices.len() - 1]
+            self.free_indices.pop()
+            val new_gen = self.generations[idx] + 1
+            self.textures[idx] = texture
+            self.generations[idx] = new_gen
+            self.count = self.count + 1
+            val raw = RawHandle.new(idx, new_gen)
+            return TextureId(raw: raw)
+        val idx = self.textures.len()
+        val gen = 1
+        self.textures.push(texture)
+        self.generations.push(gen)
+        self.count = self.count + 1
+        val raw = RawHandle.new(idx, gen)
+        TextureId(raw: raw)
+
+    fn get(id: TextureId) -> Texture?:
+        """Look up a texture by its handle. Returns nil if invalid or stale."""
+        if not id.is_valid():
+            return nil
+        val idx = id.raw.index
+        val gen = id.raw.generation.value
+        if idx < 0 or idx >= self.textures.len():
+            return nil
+        if self.generations[idx] != gen:
+            return nil
+        self.textures[idx]
+
+    me remove(id: TextureId) -> bool:
+        """Remove a texture by its handle. Returns false if handle was invalid."""
+        if not id.is_valid():
+            return false
+        val idx = id.raw.index
+        val gen = id.raw.generation.value
+        if idx < 0 or idx >= self.textures.len():
+            return false
+        if self.generations[idx] != gen:
+            return false
+        self.textures[idx] = nil
+        self.free_indices.push(idx)
+        self.count = self.count - 1
+        true
+
+    fn texture_count() -> i64:
+        """Number of live textures in the store."""
+        self.count

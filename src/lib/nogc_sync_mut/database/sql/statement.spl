@@ -1,0 +1,208 @@
+# Typed SQL Database Library - Prepared Statement
+#
+# Typed prepared statement wrapper over SqliteStatement.
+# Returns typed DbRow with DbValue entries using rt_sqlite_column_type
+# to determine types, unlike raw FFI which returns everything as text.
+
+use std.io.sqlite_ffi.{SqliteStatement, SqliteConnection, sqlite_prepare,
+    sqlite_bind_text, sqlite_bind_int, sqlite_bind_float, sqlite_bind_null,
+    sqlite_reset, sqlite_finalize, sqlite_error_message}
+use std.io.sqlite_ffi.{rt_sqlite_query_next, rt_sqlite_column_count,
+    rt_sqlite_column_name, rt_sqlite_column_type, rt_sqlite_column_int,
+    rt_sqlite_column_float, rt_sqlite_column_text, rt_sqlite_query_done,
+    rt_sqlite_changes, rt_sqlite_bind_text, rt_sqlite_bind_int,
+    rt_sqlite_bind_float, rt_sqlite_bind_null, rt_sqlite_reset}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.io.sffi_common.{is_valid_handle, is_invalid_handle}
+
+# ============================================================================
+# PreparedStatement — typed wrapper over SqliteStatement
+# ============================================================================
+
+class PreparedStatement:
+    raw: SqliteStatement
+    conn: SqliteConnection
+    sql_text: text
+
+impl PreparedStatement:
+    # Create a prepared statement from a connection and SQL string
+    static fn prepare(conn: SqliteConnection, sql: text) -> Result<PreparedStatement, DbError>:
+        val stmt = sqlite_prepare(conn, sql)
+        if not stmt.is_valid:
+            val msg = sqlite_error_message(conn)
+            return Err(DbError.QueryFailed(sql: sql, message: msg))
+        Ok(PreparedStatement(raw: stmt, conn: conn, sql_text: sql))
+
+    # --- Typed Binding ---
+
+    me bind_int(idx: i64, value: i64) -> Result<(), DbError>:
+        """Bind integer value at 1-based index"""
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
+        val result = rt_sqlite_bind_int(self.raw.handle, idx, value)
+        if result == 1:
+            Ok(())
+        else:
+            val msg = sqlite_error_message(self.conn)
+            Err(DbError.BindFailed(index: idx, message: msg))
+
+    me bind_real(idx: i64, value: f64) -> Result<(), DbError>:
+        """Bind float value at 1-based index"""
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
+        val result = rt_sqlite_bind_float(self.raw.handle, idx, value)
+        if result == 1:
+            Ok(())
+        else:
+            val msg = sqlite_error_message(self.conn)
+            Err(DbError.BindFailed(index: idx, message: msg))
+
+    me bind_text(idx: i64, value: text) -> Result<(), DbError>:
+        """Bind text value at 1-based index"""
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
+        val result = rt_sqlite_bind_text(self.raw.handle, idx, value)
+        if result == 1:
+            Ok(())
+        else:
+            val msg = sqlite_error_message(self.conn)
+            Err(DbError.BindFailed(index: idx, message: msg))
+
+    me bind_null(idx: i64) -> Result<(), DbError>:
+        """Bind NULL at 1-based index"""
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
+        val result = rt_sqlite_bind_null(self.raw.handle, idx)
+        if result == 1:
+            Ok(())
+        else:
+            val msg = sqlite_error_message(self.conn)
+            Err(DbError.BindFailed(index: idx, message: msg))
+
+    me bind_value(idx: i64, value: DbValue) -> Result<(), DbError>:
+        """Bind a DbValue, dispatching to the appropriate typed bind"""
+        match value:
+            DbValue.Integer(v): self.bind_int(idx, v)
+            DbValue.Real(v): self.bind_real(idx, v)
+            DbValue.Text(v): self.bind_text(idx, v)
+            DbValue.Null: self.bind_null(idx)
+            DbValue.Bool(v):
+                if v:
+                    self.bind_int(idx, 1)
+                else:
+                    self.bind_int(idx, 0)
+            DbValue.Blob(_):
+                # Blob binding not yet supported at FFI level; bind as null
+                self.bind_null(idx)
+
+    me bind_all(values: [DbValue]) -> Result<(), DbError>:
+        """Bind all values at positions 1..N"""
+        for i in 0..values.len():
+            self.bind_value(i + 1, values[i])?
+        Ok(())
+
+    # --- Execution ---
+
+    me execute() -> Result<i64, DbError>:
+        """Step the statement and return the number of changes from parent connection.
+
+        Used for INSERT/UPDATE/DELETE statements that don't return rows.
+        """
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
+        val result = rt_sqlite_query_next(self.raw.handle)
+        # For non-SELECT statements, step returns 0 (done) or 1 (row)
+        # Either way, we get the changes count from the connection
+        val changes = rt_sqlite_changes(self.conn.handle)
+        rt_sqlite_query_done(self.raw.handle)
+        Ok(changes)
+
+    fn query_rows() -> Result<[DbRow], DbError>:
+        """Step through all results, building typed DbRow for each row.
+
+        Uses rt_sqlite_column_type to determine the column type per-row,
+        then calls the appropriate rt_sqlite_column_int/float/text to get
+        the correctly typed value. This is the key advantage over raw FFI.
+        """
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
+
+        val col_count = rt_sqlite_column_count(self.raw.handle)
+
+        # Collect column names once
+        var column_names: [text] = []
+        for i in 0..col_count:
+            val name = rt_sqlite_column_name(self.raw.handle, i)
+            column_names = column_names + [name]
+
+        # Fetch all rows with typed values
+        var rows: [DbRow] = []
+        var has_row = rt_sqlite_query_next(self.raw.handle)
+        while has_row == 1:
+            var values: [DbValue] = []
+            for i in 0..col_count:
+                val col_type = rt_sqlite_column_type(self.raw.handle, i)
+                val typed_value = _read_column_value(self.raw.handle, i, col_type)
+                values = values + [typed_value]
+
+            val row = DbRow(columns: column_names, values: values)
+            rows = rows + [row]
+            has_row = rt_sqlite_query_next(self.raw.handle)
+
+        rt_sqlite_query_done(self.raw.handle)
+        Ok(rows)
+
+    fn query_one() -> Result<DbRow?, DbError>:
+        """Return the first row or nil if no results"""
+        val rows = self.query_rows()?
+        if rows.len() > 0:
+            Ok(Some(rows[0]))
+        else:
+            Ok(nil)
+
+    me reset_stmt() -> Result<(), DbError>:
+        """Reset the statement for reuse and clear bindings"""
+        if is_invalid_handle(self.raw.handle):
+            return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
+        val result = rt_sqlite_reset(self.raw.handle)
+        if result == 1:
+            Ok(())
+        else:
+            val msg = sqlite_error_message(self.conn)
+            Err(DbError.QueryFailed(sql: self.sql_text, message: "Reset failed: {msg}"))
+
+    me finalize_stmt():
+        """Finalize the statement and free resources"""
+        if self.raw.is_valid:
+            sqlite_finalize(self.raw)
+            self.raw = SqliteStatement(handle: 0, sql: self.sql_text, is_valid: false)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _read_column_value(stmt_handle: i64, idx: i64, col_type: text) -> DbValue:
+    """Read a single column value using the appropriate typed accessor.
+
+    col_type is the string returned by rt_sqlite_column_type:
+    "integer", "real", "text", "blob", or "null".
+    """
+    if col_type == "integer":
+        val v = rt_sqlite_column_int(stmt_handle, idx)
+        DbValue.Integer(value: v)
+    elif col_type == "real":
+        val v = rt_sqlite_column_float(stmt_handle, idx)
+        DbValue.Real(value: v)
+    elif col_type == "text":
+        val v = rt_sqlite_column_text(stmt_handle, idx)
+        DbValue.Text(value: v)
+    elif col_type == "blob":
+        # Blob read not yet supported at FFI level; return text representation
+        val v = rt_sqlite_column_text(stmt_handle, idx)
+        DbValue.Text(value: v)
+    elif col_type == "null":
+        DbValue.Null
+    else:
+        # Unknown type — fall back to text
+        val v = rt_sqlite_column_text(stmt_handle, idx)
+        DbValue.Text(value: v)
