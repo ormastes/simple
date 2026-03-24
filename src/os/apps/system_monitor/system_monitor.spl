@@ -10,6 +10,9 @@ use common.ui.builder.{column, row, menubar, statusbar, table_widget, text_widge
 use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.session.{UISession}
 use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority}
+use os.userlib.process.{ProcessEntry, list_tasks, signal}
+use os.userlib.system.{sysinfo, mem_info, uptime}
+use os.kernel.types.syscall_types.{SignalKind}
 
 # =========================================================================
 # Process Info (display model)
@@ -95,27 +98,52 @@ impl SystemMonitor:
     # -- Data Refresh --------------------------------------------------------
 
     me refresh():
-        """Query kernel for current process and resource data.
+        """Query kernel for current process and resource data via userlib."""
+        # Fetch real process list
+        val task_result = list_tasks()
+        if task_result.is_ok():
+            self.processes = []
+            val tasks = task_result.unwrap()
+            for task in tasks:
+                val state_str = match task.state:
+                    case 0: "Ready"
+                    case 1: "Running"
+                    case 2: "Blocked"
+                    case 3: "Zombie"
+                    case _: "Unknown"
+                val prio_str = match task.priority:
+                    case 0: "RT"
+                    case 1: "High"
+                    case 2: "Normal"
+                    case 3: "Low"
+                    case 4: "Idle"
+                    case _: "?"
+                val mem_kb = task.memory_pages * 4  # 4KB pages
+                val cpu_pct = task.cpu_ticks.to_f64() * 0.1  # Approximate
+                self.processes = self.processes.push(ProcessInfo(
+                    pid: task.pid,
+                    name: task.name,
+                    state: state_str,
+                    priority: prio_str,
+                    memory_kb: mem_kb,
+                    cpu_percent: cpu_pct
+                ))
 
-        In a real OS this would use syscalls to the scheduler.
-        For now, populates with representative data.
-        """
-        # Placeholder data representing typical OS processes
-        self.processes = [
-            ProcessInfo(pid: 0, name: "idle", state: "Idle", priority: "Idle", memory_kb: 0, cpu_percent: 0.0),
-            ProcessInfo(pid: 1, name: "init", state: "Running", priority: "High", memory_kb: 512, cpu_percent: 0.5),
-            ProcessInfo(pid: 2, name: "vfs", state: "Ready", priority: "High", memory_kb: 1024, cpu_percent: 1.2),
-            ProcessInfo(pid: 3, name: "compositor", state: "Running", priority: "High", memory_kb: 4096, cpu_percent: 5.3),
-            ProcessInfo(pid: 4, name: "shell", state: "Running", priority: "Normal", memory_kb: 2048, cpu_percent: 0.8),
-            ProcessInfo(pid: 5, name: "editor", state: "Ready", priority: "Normal", memory_kb: 1536, cpu_percent: 0.1),
-            ProcessInfo(pid: 6, name: "file_manager", state: "Ready", priority: "Normal", memory_kb: 1280, cpu_percent: 0.3),
-            ProcessInfo(pid: 7, name: "sysmon", state: "Running", priority: "Low", memory_kb: 768, cpu_percent: 2.0)
-        ]
-        self.total_memory_kb = 65536
-        self.used_memory_kb = 11264
-        self.cpu_count = 1
-        self.overall_cpu_percent = 10.2
-        self.uptime_seconds = 3600
+        # Fetch system info
+        val info_result = sysinfo()
+        if info_result.is_ok():
+            val info = info_result.unwrap()
+            self.total_memory_kb = info.total_memory * 4
+            self.used_memory_kb = (info.total_memory - info.free_memory) * 4
+            self.cpu_count = info.cpu_count.to_i32()
+            self.uptime_seconds = info.uptime_ns / 1000000000
+
+        # Calculate overall CPU
+        var total_cpu = 0.0
+        for proc in self.processes:
+            total_cpu = total_cpu + proc.cpu_percent
+        self.overall_cpu_percent = total_cpu
+
         self._sort_processes()
 
     me refresh_from_scheduler(task_data: [(u64, text, text, text, u64, f64)]):
@@ -208,22 +236,13 @@ impl SystemMonitor:
         return nil
 
     me kill_selected():
-        """Kill the selected process (send signal via kernel IPC).
-
-        In a real OS this would invoke a syscall. For now, removes
-        from the local process list.
-        """
+        """Kill the selected process via userlib signal."""
         if self.selected_index < 0 or self.selected_index >= self.processes.len():
             return
-        var new_procs: [ProcessInfo] = []
-        var i = 0
-        for proc in self.processes:
-            if i != self.selected_index:
-                new_procs = new_procs.push(proc)
-            i = i + 1
-        self.processes = new_procs
-        if self.selected_index >= self.processes.len() and self.processes.len() > 0:
-            self.selected_index = self.processes.len() - 1
+        val proc = self.processes[self.selected_index]
+        val _ = signal(proc.pid, SignalKind.Term)
+        # Refresh to reflect the change
+        self.refresh()
 
     # -- UI Construction -----------------------------------------------------
 

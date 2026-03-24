@@ -1,0 +1,57 @@
+# System information queries via raw syscalls.
+
+use os.userlib.syscall_raw
+use os.kernel.types.syscall_types(MemInfoBuf, SysInfoKind)
+
+class SystemInfo:
+    hostname: text
+    cpu_count: u64
+    uptime_ns: u64
+    total_memory: u64
+    free_memory: u64
+
+fn mem_info() -> Result<MemInfoBuf, text>:
+    var buf = MemInfoBuf()
+    val result = syscall(95, SysInfoKind.Memory as u64, &buf as u64, 0, 0, 0)
+    if result < 0:
+        return Err("mem_info failed with code {result}")
+    Ok(buf)
+
+fn uptime() -> Result<u64, text>:
+    var ns: u64 = 0
+    val result = syscall(95, SysInfoKind.Uptime as u64, &ns as u64, 0, 0, 0)
+    if result < 0:
+        return Err("uptime failed with code {result}")
+    Ok(ns)
+
+fn hostname() -> Result<text, text>:
+    var buf: [u8] = [0; 256]
+    val result = syscall(96, &buf as u64, 256, 0, 0, 0)
+    if result < 0:
+        return Err("hostname failed with code {result}")
+    Ok(text.from_bytes(buf, result as u64))
+
+fn set_hostname(name: text) -> Result<bool, text>:
+    val result = syscall(97, &name as u64, name.len() as u64, 0, 0, 0)
+    if result < 0:
+        return Err("set_hostname failed with code {result}")
+    Ok(true)
+
+fn sysinfo() -> Result<SystemInfo, text>:
+    val mem = mem_info()?
+    val up = uptime()?
+    val host = hostname()?
+
+    # CPU count via SysInfo syscall kind=1
+    var cpu: u64 = 0
+    val cpu_result = syscall(95, SysInfoKind.CpuCount as u64, &cpu as u64, 0, 0, 0)
+    if cpu_result < 0:
+        return Err("sysinfo cpu_count failed with code {cpu_result}")
+
+    Ok(SystemInfo(
+        hostname: host,
+        cpu_count: cpu,
+        uptime_ns: up,
+        total_memory: mem.total,
+        free_memory: mem.free
+    ))

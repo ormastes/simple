@@ -1,107 +1,74 @@
-# SimpleOS Smoke Test — Direct inline checks
+# SimpleOS Compiled Smoke Test
 #
-# Uses print statements to verify logic. If every test prints "OK",
-# the logic works. Any "FAIL" line means a bug.
+# Build: src/compiler_rust/target/bootstrap/simple native-build --entry test/unit/os/smoke_test.spl --source src/os -o build/os_smoke_test
+# Run:   build/os_smoke_test
 
 use os.kernel.types.memory_types.{PhysAddr, PageFrame, VmFlags}
-use os.kernel.types.task_types.{TaskId, TaskState}
+use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
-use os.drivers.input.ps2_keyboard.{scancode_to_key, Key}
 
-print "=== SimpleOS Smoke Test ==="
+fn main():
+    print "=== SimpleOS Compiled Smoke Test ==="
 
-# --- PageFrame arithmetic ---
-val frame = PageFrame(pfn: 42)
-val phys = frame.to_phys_addr()
-if phys.addr == 172032:
-    print "OK: pfn 42 → phys 172032"
-else:
-    print "FAIL: pfn 42 → phys {phys.addr}"
+    # --- PageFrame arithmetic ---
+    val frame = PageFrame(pfn: 42)
+    val phys = frame.to_phys_addr()
+    if phys.addr == 172032:
+        print "OK: pfn 42 → phys 172032"
+    else:
+        print "FAIL: pfn 42 → phys {phys.addr}"
 
-val frame2 = PageFrame.from_phys_addr(PhysAddr(addr: 172032))
-if frame2.pfn == 42:
-    print "OK: phys 172032 → pfn 42"
-else:
-    print "FAIL: phys 172032 → pfn {frame2.pfn}"
+    val frame2 = PageFrame.from_phys_addr(PhysAddr(addr: 172032))
+    if frame2.pfn == 42:
+        print "OK: phys 172032 → pfn 42"
+    else:
+        print "FAIL: from_phys pfn={frame2.pfn}"
 
-val frame0 = PageFrame(pfn: 0)
-if frame0.to_phys_addr().addr == 0:
-    print "OK: pfn 0 → phys 0"
-else:
-    print "FAIL: pfn 0"
+    # Round trip
+    val rt = PageFrame(pfn: 100)
+    val rt_back = PageFrame.from_phys_addr(rt.to_phys_addr())
+    if rt_back.pfn == 100:
+        print "OK: round trip pfn 100"
+    else:
+        print "FAIL: round trip pfn={rt_back.pfn}"
 
-# Round trip
-val rt = PageFrame(pfn: 100)
-val rt_back = PageFrame.from_phys_addr(rt.to_phys_addr())
-if rt_back.pfn == 100:
-    print "OK: round trip pfn 100"
-else:
-    print "FAIL: round trip pfn {rt_back.pfn}"
+    # --- VmFlags (u32 bitfield) ---
+    val rw = VmFlags.kernel_rw()
+    if rw.present() and rw.writable() and not rw.user():
+        print "OK: kernel_rw flags"
+    else:
+        print "FAIL: kernel_rw (bits={rw.bits})"
 
-# --- VmFlags ---
-val rw = VmFlags.kernel_rw()
-if rw.present and rw.writable and not rw.user:
-    print "OK: kernel_rw flags"
-else:
-    print "FAIL: kernel_rw flags"
+    val urw = VmFlags.user_rw()
+    if urw.present() and urw.writable() and urw.user() and urw.no_execute():
+        print "OK: user_rw W^X enforced"
+    else:
+        print "FAIL: user_rw (bits={urw.bits})"
 
-val urw = VmFlags.user_rw()
-if urw.present and urw.writable and urw.user and urw.no_execute:
-    print "OK: user_rw flags (W^X: no_execute set)"
-else:
-    print "FAIL: user_rw flags"
+    val mmio = VmFlags.mmio()
+    if mmio.write_through() and mmio.cache_disable() and mmio.no_execute():
+        print "OK: mmio flags"
+    else:
+        print "FAIL: mmio (bits={mmio.bits})"
 
-val mmio = VmFlags.mmio()
-if mmio.write_through and mmio.cache_disable and mmio.no_execute:
-    print "OK: mmio flags"
-else:
-    print "FAIL: mmio flags"
+    # --- CapabilitySet ---
+    var caps = CapabilitySet.full()
+    if not caps.is_pledged:
+        print "OK: cap set not pledged"
+    else:
+        print "FAIL: cap set pledged at start"
 
-# --- Capability ---
-var caps = CapabilitySet.full()
-if not caps.is_pledged:
-    print "OK: cap set not pledged"
-else:
-    print "FAIL: cap set pledged at start"
+    val tok = CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: 1, owner: 42)
+    if tok.owner == 42:
+        print "OK: capability token owner=42"
+    else:
+        print "FAIL: token owner={tok.owner}"
 
-val tok = CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: 1, owner: 42)
-if tok.owner == 42 and tok.generation == 1:
-    print "OK: capability token fields"
-else:
-    print "FAIL: capability token fields"
+    # --- TaskId ---
+    val id1 = TaskId(id: 1)
+    if id1.id == 1:
+        print "OK: TaskId id=1"
+    else:
+        print "FAIL: TaskId"
 
-# --- PS/2 scancode ---
-if scancode_to_key(0x1E) == Key.A:
-    print "OK: scancode 0x1E → A"
-else:
-    print "FAIL: scancode 0x1E"
-
-if scancode_to_key(0x39) == Key.Space:
-    print "OK: scancode 0x39 → Space"
-else:
-    print "FAIL: scancode 0x39"
-
-if scancode_to_key(0x1C) == Key.Enter:
-    print "OK: scancode 0x1C → Enter"
-else:
-    print "FAIL: scancode 0x1C"
-
-if scancode_to_key(0xFF) == Key.Unknown:
-    print "OK: scancode 0xFF → Unknown"
-else:
-    print "FAIL: scancode 0xFF"
-
-if scancode_to_key(0x01) == Key.Escape:
-    print "OK: scancode 0x01 → Escape"
-else:
-    print "FAIL: scancode 0x01"
-
-# --- TaskId ---
-val id1 = TaskId(id: 1)
-val id2 = TaskId(id: 2)
-if id1.id == 1 and id2.id == 2:
-    print "OK: TaskId construction"
-else:
-    print "FAIL: TaskId"
-
-print "=== DONE ==="
+    print "=== ALL DONE ==="

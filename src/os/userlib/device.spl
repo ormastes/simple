@@ -1,0 +1,86 @@
+# Device enumeration via raw syscalls.
+
+use os.userlib.syscall_raw
+use os.kernel.types.syscall_types(DeviceInfoBuf)
+
+class DeviceEntry:
+    bus: u8
+    device: u8
+    func: u8
+    vendor_id: u16
+    device_id: u16
+    class_code: u8
+    subclass: u8
+    class_name: text
+
+fn enumerate_devices() -> Result<[DeviceEntry], text>:
+    val count_result = syscall(80, 0, 0, 0, 0, 0)
+    if count_result < 0:
+        return Err("enumerate_devices failed with code {count_result}")
+    val count = count_result as u64
+    var devices: [DeviceEntry] = []
+    var i: u64 = 0
+    while i < count:
+        var buf = DeviceInfoBuf()
+        val info_result = syscall(80, 1, i, &buf as u64, 0, 0)
+        if info_result >= 0:
+            devices.push(DeviceEntry(
+                bus: buf.bus,
+                device: buf.device,
+                func: buf.func,
+                vendor_id: buf.vendor_id,
+                device_id: buf.device_id,
+                class_code: buf.class_code,
+                subclass: buf.subclass,
+                class_name: device_class_name(buf.class_code, buf.subclass)
+            ))
+        i = i + 1
+    Ok(devices)
+
+fn get_device_info(bus: u8, dev: u8, func: u8) -> Result<DeviceEntry, text>:
+    var buf = DeviceInfoBuf()
+    val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
+    val result = syscall(81, bdf, &buf as u64, 0, 0, 0)
+    if result < 0:
+        return Err("get_device_info failed with code {result}")
+    Ok(DeviceEntry(
+        bus: buf.bus,
+        device: buf.device,
+        func: buf.func,
+        vendor_id: buf.vendor_id,
+        device_id: buf.device_id,
+        class_code: buf.class_code,
+        subclass: buf.subclass,
+        class_name: device_class_name(buf.class_code, buf.subclass)
+    ))
+
+fn device_class_name(class_code: u8, subclass: u8) -> text:
+    match class_code:
+        0x00: "Unclassified"
+        0x01: match subclass:
+            0x00: "SCSI Bus Controller"
+            0x01: "IDE Controller"
+            0x06: "SATA Controller"
+            0x08: "NVMe Controller"
+            _: "Mass Storage Controller"
+        0x02: match subclass:
+            0x00: "Ethernet Controller"
+            0x80: "Other Network Controller"
+            _: "Network Controller"
+        0x03: match subclass:
+            0x00: "VGA Compatible Controller"
+            _: "Display Controller"
+        0x04: "Multimedia Controller"
+        0x05: "Memory Controller"
+        0x06: match subclass:
+            0x00: "Host Bridge"
+            0x01: "ISA Bridge"
+            0x04: "PCI-to-PCI Bridge"
+            _: "Bridge Device"
+        0x07: "Simple Communication Controller"
+        0x08: "Base System Peripheral"
+        0x09: "Input Device Controller"
+        0x0C: match subclass:
+            0x03: "USB Controller"
+            _: "Serial Bus Controller"
+        _: "Unknown ({class_code:#x})"

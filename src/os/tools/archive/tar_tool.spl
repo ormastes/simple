@@ -1,0 +1,208 @@
+# Tar Tool — Archive Management
+# MDSOC: feature dimension, apps layer
+
+use os.userlib.fs.{read_text, write_text, stat, readdir}
+
+val BLOCK_SIZE = 512
+val TYPE_FILE: u8 = 0
+val TYPE_DIR: u8 = 5
+
+struct TarHeader:
+    name: text
+    size: u64
+    mode: u32
+    mtime: u64
+    type_flag: u8       # 0=file, 5=directory
+
+struct TarEntry:
+    header: TarHeader
+    data: text          # file content (text mode for now)
+
+fn run_tar(args: [text]) -> i32:
+    """TAR archive tool.
+
+    Usage: tar -c|-x|-t [-f ARCHIVE] [FILES...]
+    -c: create archive
+    -x: extract archive
+    -t: list contents
+    -f: archive file path
+    """
+    var mode = ""
+    var archive_path = ""
+    var files: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-c":
+            mode = "create"
+        else if arg == "-x":
+            mode = "extract"
+        else if arg == "-t":
+            mode = "list"
+        else if arg == "-f":
+            i = i + 1
+            if i < args.len():
+                archive_path = args[i]
+            else:
+                print "Error: -f requires an argument"
+                return 1
+        else:
+            files.push(arg)
+        i = i + 1
+
+    if mode == "create":
+        val result = tar_create(files)
+        if val Ok(data) = result:
+            if archive_path != "":
+                write_text(archive_path, data)
+                print "Created archive: {archive_path}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+    else if mode == "extract":
+        if archive_path == "":
+            print "Error: -f ARCHIVE required for extract"
+            return 1
+        val data = read_text(archive_path)
+        val result = tar_extract(data, ".")
+        if val Ok(count) = result:
+            print "Extracted {count} files"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+    else if mode == "list":
+        if archive_path == "":
+            print "Error: -f ARCHIVE required for list"
+            return 1
+        val data = read_text(archive_path)
+        val result = tar_list(data)
+        if val Ok(headers) = result:
+            for h in headers:
+                print "{h.name}\t{h.size}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+    else:
+        print "Usage: tar -c|-x|-t [-f ARCHIVE] [FILES...]"
+        return 1
+
+    return 0
+
+fn tar_create(files: [text]) -> Result<text, text>:
+    """Create a tar archive from files. Returns serialized archive."""
+    var archive = ""
+    for path in files:
+        val file_stat = stat(path)
+        if file_stat.? == false:
+            return Result.Err("File not found: {path}")
+        val content = read_text(path)
+        val header = TarHeader(
+            name: path,
+            size: content.len().to_u64(),
+            mode: 0o644,
+            mtime: 0,
+            type_flag: TYPE_FILE
+        )
+        archive = archive + _serialize_header(header)
+        archive = archive + _pad_to_block(content)
+
+    # Two empty blocks mark end of archive
+    val empty_block = " " * BLOCK_SIZE
+    archive = archive + empty_block + empty_block
+    return Result.Ok(archive)
+
+fn tar_extract(archive_data: text, dest: text) -> Result<i32, text>:
+    """Extract tar archive to destination directory. Returns file count."""
+    var offset = 0
+    var count = 0
+    while offset + BLOCK_SIZE <= archive_data.len():
+        val header_result = _parse_header(archive_data, offset)
+        if val Err(e) = header_result:
+            return Result.Err(e)
+        val header = header_result.unwrap()
+
+        # Empty name means end of archive
+        if header.name == "":
+            break
+
+        offset = offset + BLOCK_SIZE
+        val data_size = header.size.to_i32()
+
+        if header.type_flag == TYPE_FILE:
+            val data = archive_data.slice(offset, offset + data_size)
+            val out_path = "{dest}/{header.name}"
+            write_text(out_path, data)
+            count = count + 1
+
+        # Advance past data blocks
+        val padded_size = _round_up_block(data_size)
+        offset = offset + padded_size
+
+    return Result.Ok(count)
+
+fn tar_list(archive_data: text) -> Result<[TarHeader], text>:
+    """List contents of tar archive."""
+    var headers: [TarHeader] = []
+    var offset = 0
+    while offset + BLOCK_SIZE <= archive_data.len():
+        val header_result = _parse_header(archive_data, offset)
+        if val Err(e) = header_result:
+            return Result.Err(e)
+        val header = header_result.unwrap()
+
+        if header.name == "":
+            break
+
+        headers.push(header)
+        offset = offset + BLOCK_SIZE
+        val padded_size = _round_up_block(header.size.to_i32())
+        offset = offset + padded_size
+
+    return Result.Ok(headers)
+
+fn _serialize_header(header: TarHeader) -> text:
+    """Serialize a TarHeader into a 512-byte block."""
+    # Simplified text-based serialization
+    val line = "{header.name}\t{header.size}\t{header.mode}\t{header.mtime}\t{header.type_flag}"
+    val padding_len = BLOCK_SIZE - line.len()
+    if padding_len > 0:
+        return line + (" " * padding_len)
+    return line.slice(0, BLOCK_SIZE)
+
+fn _parse_header(data: text, offset: i32) -> Result<TarHeader, text>:
+    """Parse a TarHeader from a 512-byte block at offset."""
+    if offset + BLOCK_SIZE > data.len():
+        return Result.Err("Unexpected end of archive")
+    val block = data.slice(offset, offset + BLOCK_SIZE).trim()
+    if block == "":
+        return Result.Ok(TarHeader(name: "", size: 0, mode: 0, mtime: 0, type_flag: 0))
+
+    val parts = block.split("\t")
+    if parts.len() < 5:
+        return Result.Err("Invalid tar header at offset {offset}")
+
+    return Result.Ok(TarHeader(
+        name: parts[0],
+        size: parts[1].to_u64(),
+        mode: parts[2].to_u32(),
+        mtime: parts[3].to_u64(),
+        type_flag: parts[4].to_u8()
+    ))
+
+fn _pad_to_block(data: text) -> text:
+    """Pad data to 512-byte block boundary."""
+    val remainder = data.len() % BLOCK_SIZE
+    if remainder == 0:
+        return data
+    val padding_len = BLOCK_SIZE - remainder
+    return data + (" " * padding_len)
+
+fn _round_up_block(size: i32) -> i32:
+    """Round size up to next 512-byte block boundary."""
+    val remainder = size % BLOCK_SIZE
+    if remainder == 0:
+        return size
+    return size + (BLOCK_SIZE - remainder)

@@ -1,0 +1,110 @@
+# Package Repository — Index Management
+# MDSOC: feature dimension, apps layer
+
+use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
+use os.userlib.fs.{read_text, write_text}
+
+struct Repository:
+    name: text
+    url: text
+
+struct PackageIndex:
+    packages: [PackageManifest]
+
+fn load_repositories() -> Result<[Repository], text>:
+    """Load repository list from /etc/pkg/repos.sdn."""
+    val content = read_text("/etc/pkg/repos.sdn")
+    if content == "":
+        return Result.Ok([Repository(name: "local", url: "/pkg/repo/local")])
+
+    var repos: [Repository] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("["):
+            pass_dn
+        else:
+            # Format: name = "url"
+            val eq_idx = trimmed.index_of("=")
+            if eq_idx > 0:
+                val name = trimmed.slice(0, eq_idx).trim()
+                var url = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                if url.starts_with("\""):
+                    url = url.slice(1, url.len())
+                if url.ends_with("\""):
+                    url = url.slice(0, url.len() - 1)
+                repos.push(Repository(name: name, url: url))
+
+    return Result.Ok(repos)
+
+fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
+    """Fetch package index from a repository.
+
+    For local repos: reads /pkg/repo/<name>/index.sdn
+    For remote repos: HTTP GET <url>/index.sdn
+    """
+    if repo.url.starts_with("http://") or repo.url.starts_with("https://"):
+        pass_todo("HTTP fetch for remote package repositories")
+        return Result.Err("Remote repositories not yet supported")
+
+    # Local repository
+    val index_path = "{repo.url}/index.sdn"
+    val content = read_text(index_path)
+    if content == "":
+        return Result.Ok(PackageIndex(packages: []))
+
+    return _parse_index(content)
+
+fn search(index: PackageIndex, query: text) -> [PackageManifest]:
+    """Search packages by name or description."""
+    var results: [PackageManifest] = []
+    val lower_query = query.to_lower()
+    for pkg in index.packages:
+        val name_match = pkg.name.to_lower().contains(lower_query)
+        val desc_match = pkg.description.to_lower().contains(lower_query)
+        if name_match or desc_match:
+            results.push(pkg)
+    return results
+
+fn load_local_index() -> Result<PackageIndex, text>:
+    """Load the local (bundled) package index from /pkg/repo/local/index.sdn."""
+    val content = read_text("/pkg/repo/local/index.sdn")
+    if content == "":
+        return Result.Ok(PackageIndex(packages: []))
+    return _parse_index(content)
+
+fn save_index_cache(repo_name: text, index: PackageIndex) -> Result<bool, text>:
+    """Cache a fetched index to /var/cache/pkg/<name>/index.sdn."""
+    var content = ""
+    for pkg in index.packages:
+        content = content + "[package]\n"
+        content = content + "name = \"{pkg.name}\"\n"
+        content = content + "version = \"{pkg.version.to_text()}\"\n"
+        content = content + "description = \"{pkg.description}\"\n"
+        content = content + "\n"
+
+    val cache_path = "/var/cache/pkg/{repo_name}/index.sdn"
+    write_text(cache_path, content)
+    return Result.Ok(true)
+
+fn _parse_index(content: text) -> Result<PackageIndex, text>:
+    """Parse a multi-package index file.
+
+    Each package separated by [package] headers.
+    """
+    var packages: [PackageManifest] = []
+    val sections = content.split("[package]")
+
+    for section in sections:
+        val trimmed = section.trim()
+        if trimmed == "":
+            pass_dn
+        else:
+            # Re-add the header for the parser
+            val manifest_text = "[package]\n{trimmed}"
+            val result = parse_manifest(manifest_text)
+            if val Ok(manifest) = result:
+                packages.push(manifest)
+            # Skip malformed entries silently
+
+    return Result.Ok(PackageIndex(packages: packages))

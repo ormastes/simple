@@ -9,6 +9,8 @@
 use common.ui.builder.{column, row, menubar, statusbar, text_widget, scroll, build_tree, with_flex, with_height}
 use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.session.{UISession}
+use os.userlib.process.{signal}
+use os.kernel.types.syscall_types.{SignalKind}
 
 # =========================================================================
 # Terminal Character
@@ -110,6 +112,8 @@ class Terminal:
     ansi_current_param: text
     # Scrollback
     max_scrollback: i32
+    # Foreground process for signal forwarding
+    foreground_pid: u64
 
 impl Terminal:
 
@@ -135,7 +139,8 @@ impl Terminal:
             ansi_state: AnsiState.Normal,
             ansi_params: [],
             ansi_current_param: "",
-            max_scrollback: 1000
+            max_scrollback: 1000,
+            foreground_pid: 0
         )
 
     # -- Character Output ----------------------------------------------------
@@ -399,6 +404,17 @@ impl Terminal:
     me handle_key(key: text):
         """Handle keyboard input, adding to input buffer."""
         match key:
+            "ctrl_c":
+                # Send interrupt signal to foreground process
+                if self.foreground_pid > 0:
+                    val _ = signal(self.foreground_pid, SignalKind.Int)
+                self.write_string("^C\n")
+                self.input_buffer = ""
+            "ctrl_z":
+                # Suspend foreground process
+                if self.foreground_pid > 0:
+                    val _ = signal(self.foreground_pid, SignalKind.Stop)
+                self.write_string("^Z\n")
             "enter":
                 self.input_buffer = "{self.input_buffer}\n"
             "backspace":

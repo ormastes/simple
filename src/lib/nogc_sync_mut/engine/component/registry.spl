@@ -97,14 +97,19 @@ impl Component2D:
 # ============================================================================
 
 class ComponentRegistry:
-    """Registry mapping node indices to lists of components.
+    """Registry mapping full NodeId identities to lists of components.
 
-    Uses Dict<i64, [Component2D]> internally keyed by node index.
+    Uses Dict<i64, [Component2D]> internally keyed by a packed
+    generational handle, so recycled node slots do not inherit stale
+    components from older generations.
     A node can have multiple components of different types.
     """
     entries: Dict<i64, [Component2D]>
 
 impl ComponentRegistry:
+    fn _entry_key(node_id: NodeId) -> i64:
+        node_id.to_index() + node_id.raw.generation.value * 4294967296
+
     static fn create() -> ComponentRegistry:
         """Create an empty registry."""
         ComponentRegistry(entries: {})
@@ -114,23 +119,23 @@ impl ComponentRegistry:
 
         If the node already has components, the new one is appended.
         """
-        val idx = node_id.to_index()
-        if val Some(existing) = self.entries.get(idx):
+        val key = self._entry_key(node_id)
+        if val Some(existing) = self.entries.get(key):
             var list = existing
             list.push(component)
-            self.entries[idx] = list
+            self.entries[key] = list
         else:
-            self.entries[idx] = [component]
+            self.entries[key] = [component]
 
     me detach_all(node_id: NodeId):
         """Remove all components from a node."""
-        val idx = node_id.to_index()
-        self.entries.remove(idx)
+        val key = self._entry_key(node_id)
+        self.entries.remove(key)
 
     fn get_components(node_id: NodeId) -> [Component2D]:
         """Get all components for a node. Returns empty list if none."""
-        val idx = node_id.to_index()
-        if val Some(list) = self.entries.get(idx):
+        val key = self._entry_key(node_id)
+        if val Some(list) = self.entries.get(key):
             return list
         []
 
@@ -210,8 +215,8 @@ impl ComponentRegistry:
         val keys = self.entries.keys()
         var k = 0
         while k < keys.len():
-            val idx = keys[k]
-            val components = self.entries[idx]
+            val key = keys[k]
+            val components = self.entries[key]
             var found = false
             var i = 0
             while i < components.len():
@@ -220,6 +225,6 @@ impl ComponentRegistry:
                     found = true
                 i = i + 1
             if found:
-                result.push(idx)
+                result.push(key % 4294967296)
             k = k + 1
         result

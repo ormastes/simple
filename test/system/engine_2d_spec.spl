@@ -1,0 +1,788 @@
+"""
+# Simple-Native 2D Game Engine — System Specification
+
+**Feature IDs:** #ENG-001 through #ENG-010
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** doc/requirement/engine_2d.md
+**Design:** doc/design/engine_2d.md
+
+## Overview
+
+Comprehensive system test exercising the 2D game engine end-to-end
+WITHOUT opening a window or calling FFI (Winit/Rapier/Rodio).
+Tests only the pure Simple logic layers: IDs, math, scene graph,
+components, resources, render commands, signals, sprites, and input types.
+
+## Test Sections
+
+1. Engine ID System — generational handles, validity, type distinction
+2. Engine Math — Vec2 arithmetic, Transform2D compose, Camera projection, Color lerp
+3. Scene Graph — nodes, parent/child, world transform, z-sorted traversal, find_by_name
+4. Component System — attach/retrieve, camera viewport, animated sprite, tilemap, find_nodes
+5. Resource Management — HandleArena lifecycle, TextureStore, Texture create_solid, TextureAtlas
+6. Software Renderer — RenderCommandBuffer, DrawStats
+7. Signal System — connect/emit, disconnect, connect_once, EventBus
+8. Sprite Animation — SpriteSheet frame_rect, SpriteAnimator update/looping
+9. Input Types — ButtonState transitions, ActionBinding creation
+10. Integration: Scene + Components + Render — combined scene queries
+"""
+
+use std.spec
+
+# --- Engine: IDs ---
+use std.common.engine.ids.{RawHandle, Generation, NodeId, TextureId, ComponentId}
+
+# --- Engine: Math ---
+use std.common.engine.math2d.{Vec2, Transform2D}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+
+# --- Engine: Scene ---
+use std.nogc_sync_mut.engine.scene.node.{Node2D, NodeStore}
+use std.nogc_sync_mut.engine.scene.tree.{
+    get_world_transform, find_by_name, traverse_z_sorted, traverse_depth_first
+}
+
+# --- Engine: Components ---
+use std.nogc_sync_mut.engine.component.registry.{
+    SpriteData, AnimatedSpriteData, CameraData, TileMapData,
+    Component2D, ComponentRegistry
+}
+use std.nogc_sync_mut.engine.component.camera
+use std.nogc_sync_mut.engine.component.tilemap
+
+# --- Engine: Resources ---
+use std.nogc_sync_mut.engine.resource.handle.{HandleArena, HandleEntry}
+use std.nogc_sync_mut.engine.sprite.texture.{Texture, TextureStore, pack_color}
+use std.nogc_sync_mut.engine.sprite.atlas.{TextureAtlas, AtlasRegion}
+
+# --- Engine: Render ---
+use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+
+# --- Engine: Signals ---
+use std.common.engine.signal.types.{SignalConnectionId, SignalConnection}
+use std.common.engine.signal.signal.{Signal}
+use std.common.engine.signal.event_bus.{EventBus}
+
+# --- Engine: Sprites ---
+use std.nogc_sync_mut.engine.sprite.sprite.{
+    Sprite, SpriteSheet, AnimationClip, SpriteAnimator
+}
+
+# --- Engine: Input ---
+use std.nogc_sync_mut.engine.input.types.{ButtonState, ActionBinding}
+
+
+# ============================================================================
+# 1. Engine ID System
+# ============================================================================
+
+describe "Engine ID System":
+    """
+    ## Generational Handles
+
+    Verifies that generational index handles correctly track validity,
+    detect stale references after removal, and maintain type distinction
+    between different handle types (NodeId vs TextureId).
+    """
+
+    it "creates valid handles with positive generation":
+        val raw = RawHandle.new(0, 1)
+        expect(raw.is_valid()).to_equal(true)
+        expect(raw.to_index()).to_equal(0)
+
+    it "marks invalid handles as not valid":
+        val raw = RawHandle.invalid()
+        expect(raw.is_valid()).to_equal(false)
+        expect(raw.index).to_equal(-1)
+
+    it "detects stale handles via generation mismatch":
+        val raw_gen1 = RawHandle.new(0, 1)
+        val raw_gen2 = RawHandle.new(0, 2)
+        val eq = raw_gen1.eq(raw_gen2)
+        expect(eq).to_equal(false)
+
+    it "distinguishes NodeId from TextureId":
+        val node_raw = RawHandle.new(0, 1)
+        val tex_raw = RawHandle.new(0, 1)
+        val node_id = NodeId(raw: node_raw)
+        val tex_id = TextureId(raw: tex_raw)
+        # Both valid but are different types
+        expect(node_id.is_valid()).to_equal(true)
+        expect(tex_id.is_valid()).to_equal(true)
+
+
+# ============================================================================
+# 2. Engine Math
+# ============================================================================
+
+describe "Engine Math":
+    """
+    ## Vec2, Transform2D, Camera Projection, Color Interpolation
+
+    Exercises core math primitives used throughout the engine:
+    vector arithmetic, transform composition, camera coordinate mapping,
+    and color interpolation.
+    """
+
+    it "computes Vec2 addition correctly":
+        val a = Vec2(x: 3.0, y: 4.0)
+        val b = Vec2(x: 1.0, y: 2.0)
+        val result = a.add(b)
+        # Compare as i64 via truncation: 4.0 * 1000 = 4000
+        val rx = (result.x * 1000.0) as i64
+        val ry = (result.y * 1000.0) as i64
+        expect(rx).to_equal(4000)
+        expect(ry).to_equal(6000)
+
+    it "computes Vec2 subtraction and dot product":
+        val a = Vec2(x: 5.0, y: 3.0)
+        val b = Vec2(x: 2.0, y: 1.0)
+        val diff = a.sub(b)
+        val dx = (diff.x * 1000.0) as i64
+        val dy = (diff.y * 1000.0) as i64
+        expect(dx).to_equal(3000)
+        expect(dy).to_equal(2000)
+        # dot product: 5*2 + 3*1 = 13
+        val dot = (a.dot(b) * 1000.0) as i64
+        expect(dot).to_equal(13000)
+
+    it "computes Vec2 scalar multiplication and length":
+        val v = Vec2(x: 3.0, y: 4.0)
+        val scaled = v.mul_scalar(2.0)
+        val sx = (scaled.x * 1000.0) as i64
+        expect(sx).to_equal(6000)
+        # length of (3, 4) = 5.0
+        val len = (v.length() * 1000.0) as i64
+        expect(len).to_equal(5000)
+
+    it "composes Transform2D to produce correct world positions":
+        val parent = Transform2D(
+            position: Vec2(x: 10.0, y: 20.0),
+            rotation: 0.0,
+            scale: Vec2.one()
+        )
+        val child = Transform2D(
+            position: Vec2(x: 5.0, y: 3.0),
+            rotation: 0.0,
+            scale: Vec2.one()
+        )
+        val world = parent.compose(child)
+        # With no rotation and unit scale, composed position = parent + child
+        val wx = (world.position.x * 1000.0) as i64
+        val wy = (world.position.y * 1000.0) as i64
+        expect(wx).to_equal(15000)
+        expect(wy).to_equal(23000)
+
+    it "verifies Camera world_to_screen and screen_to_world are inverses":
+        val cam = CameraData.create(800.0, 600.0)
+        val cam_pos = Vec2(x: 100.0, y: 200.0)
+        val world_pt = Vec2(x: 150.0, y: 250.0)
+        # world -> screen -> world should round-trip
+        val screen = cam.world_to_screen(world_pt, cam_pos)
+        val back = cam.screen_to_world(screen, cam_pos)
+        val bx = (back.x * 1000.0) as i64
+        val by = (back.y * 1000.0) as i64
+        expect(bx).to_equal(150000)
+        expect(by).to_equal(250000)
+
+    it "interpolates Color at midpoint":
+        val black = EngineColor.black()
+        val white = EngineColor.white()
+        val mid = black.lerp(white, 0.5)
+        # midpoint should be approximately 0.5 for each channel
+        val mr = (mid.r * 1000.0) as i64
+        val mg = (mid.g * 1000.0) as i64
+        val mb = (mid.b * 1000.0) as i64
+        expect(mr).to_equal(500)
+        expect(mg).to_equal(500)
+        expect(mb).to_equal(500)
+
+
+# ============================================================================
+# 3. Scene Graph
+# ============================================================================
+
+describe "Scene Graph":
+    """
+    ## Node Creation, Parent/Child, World Transform, Z-Sort, Search
+
+    Validates the core scene graph operations: node lifecycle,
+    parent-child hierarchy, world transform computation via parent chain,
+    z-sorted traversal for render ordering, and name-based search.
+    """
+
+    it "creates nodes and retrieves them by id":
+        var store = NodeStore.new()
+        val id = store.create_node("player")
+        val maybe_node = store.get_node(id)
+        val found = maybe_node != nil
+        expect(found).to_equal(true)
+        expect(store.node_count()).to_equal(1)
+
+    it "sets parent-child relationships":
+        var store = NodeStore.new()
+        val parent_id = store.create_node("parent")
+        val child_id = store.create_node("child")
+        val ok = store.set_parent(child_id, parent_id)
+        expect(ok).to_equal(true)
+        # Verify parent has child in children list
+        val maybe_parent = store.get_node(parent_id)
+        if val Some(parent) = maybe_parent:
+            expect(parent.children.len()).to_equal(1)
+
+    it "computes world transform walking parent chain":
+        var store = NodeStore.new()
+        val root_id = store.create_node("root")
+        val child_id = store.create_node("child")
+        store.set_parent(child_id, root_id)
+        store.set_position(root_id, Vec2(x: 10.0, y: 0.0))
+        store.set_position(child_id, Vec2(x: 5.0, y: 3.0))
+        val world_t = get_world_transform(store, child_id)
+        # World position should be root(10,0) + child(5,3) = (15,3)
+        val wx = (world_t.position.x * 1000.0) as i64
+        val wy = (world_t.position.y * 1000.0) as i64
+        expect(wx).to_equal(15000)
+        expect(wy).to_equal(3000)
+
+    it "returns z-sorted traversal in ascending z_index order":
+        var store = NodeStore.new()
+        val bg_id = store.create_node("background")
+        val mid_id = store.create_node("midground")
+        val fg_id = store.create_node("foreground")
+        store.set_z_index(bg_id, 0)
+        store.set_z_index(mid_id, 5)
+        store.set_z_index(fg_id, 10)
+        val sorted = traverse_z_sorted(store)
+        # All 3 nodes should appear in z-ascending order
+        expect(sorted.len()).to_equal(3)
+        # First node should be bg (z=0)
+        val first_node = store.get_node(sorted[0])
+        if val Some(n) = first_node:
+            expect(n.name).to_equal("background")
+        # Last node should be fg (z=10)
+        val last_node = store.get_node(sorted[2])
+        if val Some(n) = last_node:
+            expect(n.name).to_equal("foreground")
+
+    it "finds node by name":
+        var store = NodeStore.new()
+        val id = store.create_node("hero")
+        val found = find_by_name(store, "hero")
+        val is_found = found != nil
+        expect(is_found).to_equal(true)
+        # Search for non-existent returns nil
+        val missing = find_by_name(store, "villain")
+        val is_missing = missing == nil
+        expect(is_missing).to_equal(true)
+
+    it "reparents children when destroying a node":
+        var store = NodeStore.new()
+        val root_id = store.create_node("root")
+        val mid_id = store.create_node("middle")
+        val leaf_id = store.create_node("leaf")
+        store.set_parent(mid_id, root_id)
+        store.set_parent(leaf_id, mid_id)
+        # Destroy middle — leaf should become child of root
+        store.destroy_node(mid_id)
+        expect(store.node_count()).to_equal(2)
+        val maybe_leaf = store.get_node(leaf_id)
+        if val Some(leaf) = maybe_leaf:
+            val leaf_parent_eq = leaf.parent.eq(root_id)
+            expect(leaf_parent_eq).to_equal(true)
+
+    it "filters invisible nodes from z-sorted traversal":
+        var store = NodeStore.new()
+        val vis_id = store.create_node("visible_node")
+        val invis_id = store.create_node("invisible_node")
+        store.set_z_index(vis_id, 0)
+        store.set_z_index(invis_id, 1)
+        store.set_visible(invis_id, false)
+        val sorted = traverse_z_sorted(store)
+        # Only the visible node should appear
+        expect(sorted.len()).to_equal(1)
+        val first = store.get_node(sorted[0])
+        if val Some(n) = first:
+            expect(n.name).to_equal("visible_node")
+
+
+# ============================================================================
+# 4. Component System
+# ============================================================================
+
+describe "Component System":
+    """
+    ## Component Attach/Retrieve, Camera, AnimatedSprite, TileMap
+
+    Tests the composition-based component system: attaching components
+    to nodes via the registry, type-safe retrieval, camera viewport
+    calculations, animated sprite frame regions, and tilemap operations.
+    """
+
+    it "attaches and retrieves a sprite component":
+        var reg = ComponentRegistry.create()
+        val raw = RawHandle.new(0, 1)
+        val node_id = NodeId(raw: raw)
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val src = Rect2.new(0.0, 0.0, 32.0, 32.0)
+        val sprite = SpriteData(
+            texture_id: tex_id,
+            src_rect: src,
+            pivot: Vec2(x: 0.5, y: 0.5),
+            flip_x: false,
+            flip_y: false,
+            tint: EngineColor.white()
+        )
+        reg.attach(node_id, Component2D.Sprite(data: sprite))
+        val got = reg.get_sprite(node_id)
+        val found = got != nil
+        expect(found).to_equal(true)
+
+    it "attaches camera and verifies viewport calculations":
+        val cam = CameraData.create(800.0, 600.0)
+        val cam_pos = Vec2(x: 0.0, y: 0.0)
+        val bounds = cam.visible_bounds(cam_pos)
+        # At zoom=1, viewport 800x600: bounds should be (-400, -300, 800, 600)
+        val bx = (bounds.x * 1000.0) as i64
+        val by = (bounds.y * 1000.0) as i64
+        val bw = (bounds.width * 1000.0) as i64
+        val bh = (bounds.height * 1000.0) as i64
+        expect(bx).to_equal(-400000)
+        expect(by).to_equal(-300000)
+        expect(bw).to_equal(800000)
+        expect(bh).to_equal(600000)
+
+    it "verifies camera zoom scales visible bounds":
+        val cam = CameraData.create(800.0, 600.0)
+        val zoomed = cam.with_zoom(2.0)
+        val bounds = zoomed.visible_bounds(Vec2.zero())
+        # At zoom=2, world visible = viewport / zoom = 400x300
+        val bw = (bounds.width * 1000.0) as i64
+        val bh = (bounds.height * 1000.0) as i64
+        expect(bw).to_equal(400000)
+        expect(bh).to_equal(300000)
+
+    it "round-trips TileMap get_tile and set_tile":
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val tm = TileMapData.create(tex_id, 16, 16, 10, 10)
+        # Initially all tiles are -1
+        val empty = tm.get_tile(5, 3)
+        expect(empty).to_equal(-1)
+        # Set tile and verify
+        val tm2 = tm.set_tile(5, 3, 42)
+        val tile = tm2.get_tile(5, 3)
+        expect(tile).to_equal(42)
+        # Out of bounds returns -1
+        val oob = tm2.get_tile(99, 99)
+        expect(oob).to_equal(-1)
+
+    it "finds nodes with specific component type":
+        var reg = ComponentRegistry.create()
+        val raw1 = RawHandle.new(0, 1)
+        val raw2 = RawHandle.new(1, 1)
+        val node1 = NodeId(raw: raw1)
+        val node2 = NodeId(raw: raw2)
+        val cam = CameraData.create(800.0, 600.0)
+        reg.attach(node1, Component2D.Camera(data: cam))
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val sprite = SpriteData(
+            texture_id: tex_id,
+            src_rect: Rect2.new(0.0, 0.0, 32.0, 32.0),
+            pivot: Vec2(x: 0.5, y: 0.5),
+            flip_x: false,
+            flip_y: false,
+            tint: EngineColor.white()
+        )
+        reg.attach(node2, Component2D.Sprite(data: sprite))
+        val cameras = reg.find_nodes_with_type("Camera")
+        expect(cameras.len()).to_equal(1)
+        expect(cameras[0]).to_equal(0)
+
+
+# ============================================================================
+# 5. Resource Management
+# ============================================================================
+
+describe "Resource Management":
+    """
+    ## HandleArena, TextureStore, Texture, TextureAtlas
+
+    Validates generational arena insert/get/remove lifecycle,
+    texture store add/get with TextureId handles, solid color texture
+    pixel verification, and atlas packing with UV computation.
+    """
+
+    it "HandleArena insert, get, and remove lifecycle":
+        var arena = HandleArena<text>.new()
+        val handle = arena.insert("hello")
+        val idx = handle.0
+        val gen = handle.1
+        val got = arena.get(idx, gen)
+        val found = got != nil
+        expect(found).to_equal(true)
+        # Remove and verify stale handle returns nil
+        arena.remove(idx, gen)
+        val stale = arena.get(idx, gen)
+        val is_nil = stale == nil
+        expect(is_nil).to_equal(true)
+
+    it "TextureStore add and get with TextureId":
+        var store = TextureStore.new()
+        val tex = Texture.create(4, 4)
+        val id = store.add(tex)
+        expect(id.is_valid()).to_equal(true)
+        val got = store.get(id)
+        val found = got != nil
+        expect(found).to_equal(true)
+
+    it "Texture create_solid fills all pixels with correct color":
+        val red = EngineColor.red()
+        val tex = Texture.create_solid(2, 2, red)
+        expect(tex.width).to_equal(2)
+        expect(tex.height).to_equal(2)
+        # All 4 pixels should be the same packed value
+        val packed = pack_color(red)
+        expect(tex.pixels[0]).to_equal(packed)
+        expect(tex.pixels[1]).to_equal(packed)
+        expect(tex.pixels[2]).to_equal(packed)
+        expect(tex.pixels[3]).to_equal(packed)
+
+    it "TextureAtlas packs multiple regions and computes UVs":
+        var atlas = TextureAtlas.create(64, 64)
+        # Pack a 16x16 sub-image
+        var pixels16: [i64] = []
+        var i = 0
+        while i < 256:
+            pixels16.push(1)
+            i = i + 1
+        val r1 = atlas.pack(16, 16, pixels16)
+        val r1_found = r1 != nil
+        expect(r1_found).to_equal(true)
+        # Pack a second 16x16 sub-image
+        val r2 = atlas.pack(16, 16, pixels16)
+        val r2_found = r2 != nil
+        expect(r2_found).to_equal(true)
+        expect(atlas.region_count()).to_equal(2)
+        # First region should start at (0, 0)
+        val region0 = atlas.get_region(0)
+        if val Some(r) = region0:
+            expect(r.x).to_equal(0)
+            expect(r.y).to_equal(0)
+            expect(r.width).to_equal(16)
+            expect(r.height).to_equal(16)
+            # UV check: u0 = 0/64 = 0.0, u1 = 16/64 = 0.25
+            val u1_i = (r.u1 * 1000.0) as i64
+            expect(u1_i).to_equal(250)
+
+
+# ============================================================================
+# 6. Software Renderer
+# ============================================================================
+
+describe "Software Renderer":
+    """
+    ## RenderCommandBuffer, DrawStats
+
+    Tests the render command infrastructure used by the software renderer:
+    command buffer push/clear/len, and DrawStats initialization.
+    No actual pixel rasterization (that requires the FFI-backed renderer).
+    """
+
+    it "RenderCommandBuffer push, clear, and len":
+        var buf = RenderCommandBuffer.create()
+        expect(buf.len()).to_equal(0)
+        buf.push(RenderCommand.Clear(color: EngineColor.black()))
+        buf.push(RenderCommand.DrawRect(
+            rect: Rect2.new(10.0, 10.0, 100.0, 50.0),
+            color: EngineColor.red(),
+            z_order: 0
+        ))
+        expect(buf.len()).to_equal(2)
+        buf.clear()
+        expect(buf.len()).to_equal(0)
+
+    it "DrawStats initializes to zero":
+        val stats = DrawStats.zero()
+        expect(stats.draw_calls).to_equal(0)
+        expect(stats.triangles).to_equal(0)
+        expect(stats.vertices).to_equal(0)
+
+    it "RenderCommandBuffer accumulates multiple command types":
+        var buf = RenderCommandBuffer.create()
+        buf.push(RenderCommand.Clear(color: EngineColor.black()))
+        buf.push(RenderCommand.DrawRect(
+            rect: Rect2.new(0.0, 0.0, 50.0, 50.0),
+            color: EngineColor.blue(),
+            z_order: 0
+        ))
+        buf.push(RenderCommand.DrawLine(
+            x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0,
+            width: 2.0, color: EngineColor.green(), z_order: 1
+        ))
+        buf.push(RenderCommand.DrawCircle(
+            cx: 50.0, cy: 50.0, radius: 25.0,
+            color: EngineColor.white(), z_order: 2
+        ))
+        expect(buf.len()).to_equal(4)
+
+
+# ============================================================================
+# 7. Signal System
+# ============================================================================
+
+describe "Signal System":
+    """
+    ## Signal Connect/Emit, Disconnect, Connect Once, EventBus
+
+    Validates the observer pattern implementation: signal callback
+    dispatch, connection removal, one-shot connections, and the
+    named-signal EventBus dispatcher.
+    """
+
+    it "Signal connect and emit calls callback":
+        var sig = Signal.create("test_signal")
+        var received = ""
+        val conn = sig.connect(\data: received = data)
+        sig.emit("hello")
+        expect(received).to_equal("hello")
+
+    it "Signal disconnect stops callbacks":
+        var sig = Signal.create("test_signal")
+        var count = 0
+        val conn = sig.connect(\data: count = count + 1)
+        sig.emit("first")
+        expect(count).to_equal(1)
+        sig.disconnect(conn)
+        sig.emit("second")
+        # count should still be 1 after disconnect
+        expect(count).to_equal(1)
+
+    it "Signal connect_once fires once then auto-removes":
+        var sig = Signal.create("once_signal")
+        var count = 0
+        val conn = sig.connect_once(\data: count = count + 1)
+        sig.emit("first")
+        sig.emit("second")
+        # Should have fired only once
+        expect(count).to_equal(1)
+
+    it "EventBus register and emit dispatches correctly":
+        var bus = EventBus.create()
+        bus.register("player_hit")
+        var damage = ""
+        val conn = bus.connect("player_hit", \data: damage = data)
+        bus.emit("player_hit", "50")
+        expect(damage).to_equal("50")
+
+
+# ============================================================================
+# 8. Sprite Animation
+# ============================================================================
+
+describe "Sprite Animation":
+    """
+    ## SpriteSheet Frame Rect, SpriteAnimator Update/Looping
+
+    Tests sprite sheet grid math and the stateful animation playback
+    system, including frame advancement and loop wrap-around.
+    """
+
+    it "SpriteSheet frame_rect computes grid positions":
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val sheet = SpriteSheet.create(tex_id, 32, 32, 4, 2)
+        # Frame 0: (0, 0, 32, 32)
+        val r0 = sheet.frame_rect(0)
+        val r0x = (r0.x * 1000.0) as i64
+        val r0y = (r0.y * 1000.0) as i64
+        expect(r0x).to_equal(0)
+        expect(r0y).to_equal(0)
+        # Frame 5: col=5%4=1, row=5/4=1 -> (32, 32, 32, 32)
+        val r5 = sheet.frame_rect(5)
+        val r5x = (r5.x * 1000.0) as i64
+        val r5y = (r5.y * 1000.0) as i64
+        expect(r5x).to_equal(32000)
+        expect(r5y).to_equal(32000)
+        # frame_count = columns * rows = 8
+        expect(sheet.frame_count()).to_equal(8)
+
+    it "SpriteAnimator update advances frames correctly":
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val sheet = SpriteSheet.create(tex_id, 32, 32, 4, 1)
+        var animator = SpriteAnimator.create(sheet)
+        val clip = AnimationClip(
+            name: "walk",
+            frames: [0, 1, 2, 3],
+            speed: 10.0,
+            is_looping: false
+        )
+        animator.add_clip(clip)
+        animator.play_clip("walk")
+        # At time=0, frame should be 0
+        expect(animator.current_frame()).to_equal(0)
+        # Advance 0.15s at 10fps -> time=0.15, frame_num=1.5, idx=1
+        animator.update(0.15)
+        expect(animator.current_frame()).to_equal(1)
+
+    it "SpriteAnimator looping wraps around":
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val sheet = SpriteSheet.create(tex_id, 32, 32, 4, 1)
+        var animator = SpriteAnimator.create(sheet)
+        val clip = AnimationClip(
+            name: "idle",
+            frames: [0, 1],
+            speed: 10.0,
+            is_looping: true
+        )
+        animator.add_clip(clip)
+        animator.play_clip("idle")
+        # duration = 2 frames / 10fps = 0.2s
+        # Advance 0.25s -> should wrap around: 0.25 - 0.2 = 0.05s
+        # frame_num = 0.05 * 10 = 0.5 -> idx = 0
+        animator.update(0.25)
+        val frame = animator.current_frame()
+        expect(frame).to_equal(0)
+        # Should still be playing (looping)
+        expect(animator.is_playing).to_equal(true)
+
+
+# ============================================================================
+# 9. Input Types
+# ============================================================================
+
+describe "Input Types":
+    """
+    ## ButtonState Transitions, ActionBinding Creation
+
+    Tests input type constructors and state query methods without
+    requiring an actual event loop or window handle.
+    """
+
+    it "ButtonState transitions report correct pressed/released state":
+        val released = ButtonState.Released
+        val just_pressed = ButtonState.JustPressed
+        val held = ButtonState.Held
+        val just_released = ButtonState.JustReleased
+        # is_pressed: JustPressed and Held are "pressed"
+        expect(released.is_pressed()).to_equal(false)
+        expect(just_pressed.is_pressed()).to_equal(true)
+        expect(held.is_pressed()).to_equal(true)
+        expect(just_released.is_pressed()).to_equal(false)
+        # is_just_pressed: only JustPressed
+        expect(just_pressed.is_just_pressed()).to_equal(true)
+        expect(held.is_just_pressed()).to_equal(false)
+        # is_just_released: only JustReleased
+        expect(just_released.is_just_released()).to_equal(true)
+        expect(released.is_just_released()).to_equal(false)
+
+    it "ActionBinding creation and query":
+        val binding = ActionBinding.key_only("jump", 32)
+        expect(binding.action_name).to_equal("jump")
+        expect(binding.key_codes.len()).to_equal(1)
+        expect(binding.key_codes[0]).to_equal(32)
+        expect(binding.mouse_buttons.len()).to_equal(0)
+        # Multi-key binding
+        val multi = ActionBinding.keys("move_left", [65, 263])
+        expect(multi.key_codes.len()).to_equal(2)
+
+
+# ============================================================================
+# 10. Integration: Scene + Components + Render
+# ============================================================================
+
+describe "Integration: Scene + Components + Render":
+    """
+    ## Combined Scene Graph + Components + Render Order
+
+    End-to-end integration tests exercising multiple engine subsystems
+    together: building a scene with nodes and components, querying
+    render order via z-sort, and camera bounds clipping with zoom.
+    """
+
+    it "creates scene with nodes and sprite components, verifies z-order":
+        var store = NodeStore.new()
+        var reg = ComponentRegistry.create()
+
+        val bg_id = store.create_node("bg_sprite")
+        val player_id = store.create_node("player_sprite")
+        val fg_id = store.create_node("fg_sprite")
+
+        store.set_z_index(bg_id, 0)
+        store.set_z_index(player_id, 5)
+        store.set_z_index(fg_id, 10)
+
+        val tex_raw = RawHandle.new(0, 1)
+        val tex_id = TextureId(raw: tex_raw)
+        val sprite = SpriteData(
+            texture_id: tex_id,
+            src_rect: Rect2.new(0.0, 0.0, 32.0, 32.0),
+            pivot: Vec2(x: 0.5, y: 0.5),
+            flip_x: false,
+            flip_y: false,
+            tint: EngineColor.white()
+        )
+        reg.attach(bg_id, Component2D.Sprite(data: sprite))
+        reg.attach(player_id, Component2D.Sprite(data: sprite))
+        reg.attach(fg_id, Component2D.Sprite(data: sprite))
+
+        # Z-sorted traversal should return bg, player, fg in order
+        val sorted = traverse_z_sorted(store)
+        expect(sorted.len()).to_equal(3)
+        val first = store.get_node(sorted[0])
+        if val Some(n) = first:
+            expect(n.name).to_equal("bg_sprite")
+        val last = store.get_node(sorted[2])
+        if val Some(n) = last:
+            expect(n.name).to_equal("fg_sprite")
+        # All 3 nodes should have Sprite components
+        val sprite_nodes = reg.find_nodes_with_type("Sprite")
+        expect(sprite_nodes.len()).to_equal(3)
+
+    it "camera visible_bounds clips based on zoom level":
+        val cam_1x = CameraData.create(800.0, 600.0)
+        val cam_2x = cam_1x.with_zoom(2.0)
+        val cam_pos = Vec2(x: 0.0, y: 0.0)
+        val bounds_1x = cam_1x.visible_bounds(cam_pos)
+        val bounds_2x = cam_2x.visible_bounds(cam_pos)
+        # At 2x zoom, visible world area should be half
+        val w1 = (bounds_1x.width * 1000.0) as i64
+        val w2 = (bounds_2x.width * 1000.0) as i64
+        val h1 = (bounds_1x.height * 1000.0) as i64
+        val h2 = (bounds_2x.height * 1000.0) as i64
+        expect(w1).to_equal(800000)
+        expect(w2).to_equal(400000)
+        expect(h1).to_equal(600000)
+        expect(h2).to_equal(300000)
+
+    it "scene world transform + component lookup integration":
+        var store = NodeStore.new()
+        var reg = ComponentRegistry.create()
+        # Build a 3-level hierarchy: world -> camera_node -> player
+        val world_id = store.create_node("world")
+        val cam_node_id = store.create_node("camera_node")
+        val player_id = store.create_node("player")
+        store.set_parent(cam_node_id, world_id)
+        store.set_parent(player_id, cam_node_id)
+        store.set_position(world_id, Vec2(x: 0.0, y: 0.0))
+        store.set_position(cam_node_id, Vec2(x: 100.0, y: 50.0))
+        store.set_position(player_id, Vec2(x: 20.0, y: 10.0))
+        # Attach camera to cam_node
+        val cam = CameraData.create(800.0, 600.0)
+        reg.attach(cam_node_id, Component2D.Camera(data: cam))
+        # World position of player = 0 + 100 + 20 = 120, 0 + 50 + 10 = 60
+        val player_world = get_world_transform(store, player_id)
+        val pwx = (player_world.position.x * 1000.0) as i64
+        val pwy = (player_world.position.y * 1000.0) as i64
+        expect(pwx).to_equal(120000)
+        expect(pwy).to_equal(60000)
+        # Verify camera component attached
+        val has_cam = reg.has_component_type(cam_node_id, "Camera")
+        expect(has_cam).to_equal(true)

@@ -8,8 +8,17 @@ and vector shape rendering -- all in ~140 lines of Simple.
 ## Run
 
 ```bash
-bin/simple run examples/engine_2d_demo/main.spl
+./examples/engine_2d_demo/run.sh
 ```
+
+Direct command:
+
+```bash
+bin/simple_native run examples/engine_2d_demo/main.spl
+```
+
+`bin/simple` in this checkout is a bootstrap-only binary and does not support
+`run`.
 
 ## Controls
 

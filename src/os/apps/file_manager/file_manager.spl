@@ -6,11 +6,12 @@
 #
 # MDSOC: feature dimension, file_manager layer
 
-use common.ui.builder.{column, row, menubar, statusbar, tree_widget, tree_node, tree_leaf, table_widget, panel, button, checkbox, build_tree, build_tree_with_title, with_flex, with_width}
+use common.ui.builder.{column, row, menubar, statusbar, tree_widget, tree_node, tree_leaf, table_widget, panel, button, checkbox, dialog, text_widget, build_tree, build_tree_with_title, with_flex, with_width}
 use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.session.{UISession}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
+use os.userlib.fs.{stat}
 
 # =========================================================================
 # Sort Configuration
@@ -237,6 +238,72 @@ impl FileManager:
         val _ = self.vfs.remove(path)
         self.refresh()
 
+    fn get_selected_properties() -> text?:
+        """Get properties of the selected file as formatted text."""
+        if self.selected_index < 0 or self.selected_index >= self.entries.len():
+            return nil
+        val entry = self.entries[self.selected_index]
+        val path = _join_path(self.current_path, entry.name)
+        val kind_str = format_kind(entry.kind)
+        val size_str = format_size(entry.size)
+        val result = "Name: {entry.name}\nType: {kind_str}\nSize: {size_str}\nPath: {path}\nPermissions: {entry.permissions}"
+        return result
+
+    me compress_selected():
+        """Compress selected file to .tar.gz (via archive tools)."""
+        if self.selected_index < 0 or self.selected_index >= self.entries.len():
+            return
+        if self.vfs == nil:
+            return
+        val entry = self.entries[self.selected_index]
+        val src_path = _join_path(self.current_path, entry.name)
+        # Read source, create simple tar, write to .tar file
+        val read_result = self.vfs.read(src_path)
+        if read_result.is_ok():
+            val content = read_result.unwrap()
+            # Simple tar: header line + content
+            val tar_data = "TAR:{entry.name}:{entry.size}\n{content}"
+            val tar_path = _join_path(self.current_path, "{entry.name}.tar")
+            val _ = self.vfs.write(tar_path, tar_data)
+            self.refresh()
+
+    me extract_selected():
+        """Extract selected archive to current directory."""
+        if self.selected_index < 0 or self.selected_index >= self.entries.len():
+            return
+        if self.vfs == nil:
+            return
+        val entry = self.entries[self.selected_index]
+        if not entry.name.ends_with(".tar"):
+            return
+        val src_path = _join_path(self.current_path, entry.name)
+        val read_result = self.vfs.read(src_path)
+        if read_result.is_ok():
+            val content = read_result.unwrap()
+            # Simple tar extraction: parse header, write content
+            if content.starts_with("TAR:"):
+                val header_end = content.index_of("\n")
+                if header_end > 0:
+                    val header = content.slice(4, header_end)
+                    val colon_pos = header.index_of(":")
+                    val filename = header.slice(0, colon_pos)
+                    val file_content = content.slice(header_end + 1, content.len())
+                    val dest_path = _join_path(self.current_path, filename)
+                    val _ = self.vfs.write(dest_path, file_content)
+                    self.refresh()
+
+    me search_files(pattern: text):
+        """Filter entries by name pattern."""
+        if pattern == "":
+            self.refresh()
+            return
+        var filtered: [FileEntry] = []
+        for entry in self.entries:
+            if entry.name.contains(pattern):
+                filtered = filtered.push(entry)
+        self.entries = filtered
+        self.selected_index = 0
+
     # -- Refresh / Load Data -------------------------------------------------
 
     me refresh():
@@ -310,7 +377,10 @@ impl FileManager:
             row("fm_toolbar", [
                 button("fm_btn_up", "Up", "navigate_up"),
                 button("fm_btn_refresh", "Refresh", "refresh"),
-                button("fm_btn_hidden", if self.show_hidden: "[x] Hidden" else: "[ ] Hidden", "toggle_hidden")
+                button("fm_btn_hidden", if self.show_hidden: "[x] Hidden" else: "[ ] Hidden", "toggle_hidden"),
+                button("fm_btn_compress", "Compress", "compress_selected"),
+                button("fm_btn_extract", "Extract", "extract_selected"),
+                button("fm_btn_props", "Properties", "show_properties")
             ]),
             row("fm_content", [
                 with_width(panel("fm_tree_panel", "Directories", [dir_tree]), 30),

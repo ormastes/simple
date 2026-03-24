@@ -1,0 +1,158 @@
+# Package Resolver — Dependency Resolution
+# MDSOC: feature dimension, apps layer
+
+use os.tools.pkg.pkg_manifest.{PackageManifest, PackageVersion}
+
+struct ResolvedSet:
+    packages: [PackageManifest]
+    install_order: [text]           # topologically sorted names
+
+fn resolve(target: text, available: [PackageManifest], installed: [PackageManifest]) -> Result<ResolvedSet, text>:
+    """Resolve dependencies for a target package.
+
+    Returns the set of packages to install in dependency order.
+    Detects cycles and missing dependencies.
+    """
+    val pkg = _find_package(target, available)
+    if pkg.? == false:
+        return Result.Err("Package not found: {target}")
+
+    # Collect all needed packages recursively
+    var needed: [PackageManifest] = []
+    val collect_result = _collect_deps(target, available, installed, needed)
+    if val Err(e) = collect_result:
+        return Result.Err(e)
+    needed = collect_result.unwrap()
+
+    # Topological sort
+    val sort_result = _topo_sort(needed)
+    if val Err(e) = sort_result:
+        return Result.Err(e)
+    val order = sort_result.unwrap()
+
+    return Result.Ok(ResolvedSet(packages: needed, install_order: order))
+
+fn _collect_deps(name: text, available: [PackageManifest], installed: [PackageManifest], collected: [PackageManifest]) -> Result<[PackageManifest], text>:
+    """Recursively collect all dependencies."""
+    # Check if already collected
+    for c in collected:
+        if c.name == name:
+            return Result.Ok(collected)
+
+    # Check if already installed
+    for inst in installed:
+        if inst.name == name:
+            return Result.Ok(collected)
+
+    val pkg = _find_package(name, available)
+    if pkg.? == false:
+        return Result.Err("Dependency not found: {name}")
+    val manifest = pkg.unwrap()
+
+    var result = collected
+    result.push(manifest)
+
+    # Recurse into dependencies
+    for dep_str in manifest.dependencies:
+        val parsed = _parse_dep(dep_str)
+        val dep_name = parsed.0
+        val recurse_result = _collect_deps(dep_name, available, installed, result)
+        if val Err(e) = recurse_result:
+            return Result.Err(e)
+        result = recurse_result.unwrap()
+
+    return Result.Ok(result)
+
+fn _topo_sort(packages: [PackageManifest]) -> Result<[text], text>:
+    """Topological sort of packages by dependencies."""
+    # States: 0=unvisited, 1=visiting, 2=visited
+    var states: [i32] = []
+    var order: [text] = []
+
+    for _p in packages:
+        states.push(0)
+
+    var i = 0
+    while i < packages.len():
+        if states[i] == 0:
+            val result = _topo_visit(i, packages, states, order)
+            if val Err(e) = result:
+                return Result.Err(e)
+            val updated = result.unwrap()
+            states = updated.0
+            order = updated.1
+        i = i + 1
+
+    return Result.Ok(order)
+
+fn _topo_visit(idx: i32, packages: [PackageManifest], states: [i32], order: [text]) -> Result<([i32], [text]), text>:
+    """DFS visit for topological sort. Detects cycles via 'visiting' state."""
+    var s = states
+    var o = order
+
+    if s[idx] == 1:
+        return Result.Err("Dependency cycle detected involving: {packages[idx].name}")
+    if s[idx] == 2:
+        return Result.Ok((s, o))
+
+    s[idx] = 1  # Mark as visiting
+
+    val pkg = packages[idx]
+    for dep_str in pkg.dependencies:
+        val parsed = _parse_dep(dep_str)
+        val dep_name = parsed.0
+
+        # Find index of dependency in packages list
+        var dep_idx = -1
+        var j = 0
+        while j < packages.len():
+            if packages[j].name == dep_name:
+                dep_idx = j
+                break
+            j = j + 1
+
+        if dep_idx >= 0:
+            val result = _topo_visit(dep_idx, packages, s, o)
+            if val Err(e) = result:
+                return Result.Err(e)
+            val updated = result.unwrap()
+            s = updated.0
+            o = updated.1
+
+    s[idx] = 2  # Mark as visited
+    o.push(pkg.name)
+    return Result.Ok((s, o))
+
+fn _find_package(name: text, packages: [PackageManifest]) -> PackageManifest?:
+    """Find a package by name in a list."""
+    for pkg in packages:
+        if pkg.name == name:
+            return pkg
+    return nil
+
+fn _satisfies_dep(dep_str: text, available: [PackageManifest]) -> bool:
+    """Check if a dependency string like 'foo>=1.0.0' is satisfied."""
+    val parsed = _parse_dep(dep_str)
+    val name = parsed.0
+    val min_version = parsed.1
+
+    val pkg = _find_package(name, available)
+    if pkg.? == false:
+        return false
+
+    if val Some(min_ver) = min_version:
+        val cmp = pkg.unwrap().version.compare(min_ver)
+        return cmp >= 0
+    return true
+
+fn _parse_dep(dep: text) -> (text, PackageVersion?):
+    """Parse 'name>=version' into (name, min_version?)."""
+    val gte_idx = dep.index_of(">=")
+    if gte_idx >= 0:
+        val name = dep.slice(0, gte_idx)
+        val ver_str = dep.slice(gte_idx + 2, dep.len())
+        val ver_result = PackageVersion.parse(ver_str)
+        if val Ok(ver) = ver_result:
+            return (name, ver)
+        return (name, nil)
+    return (dep, nil)

@@ -1,0 +1,97 @@
+# Log Viewer — CLI Log Display
+# MDSOC: feature dimension, apps layer
+
+use os.tools.log.journal.{JournalReader, JournalFilter, facility_name, level_name}
+use os.userlib.log.{LogLevel}
+
+fn run_log(args: [text]) -> i32:
+    """Entry point for log command.
+
+    Usage: log [-f] [--level=LEVEL] [--source=SOURCE] [-n COUNT]
+    -f: follow mode (continuously print new entries)
+    --level=error: minimum level filter
+    --source=vfs: facility filter
+    -n 50: show last N entries (default 50)
+    """
+    var follow = false
+    var min_level: LogLevel? = nil
+    var source_filter: text? = nil
+    var count: i32 = 50
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-f":
+            follow = true
+        else if arg.starts_with("--level="):
+            val level_str = arg.slice(8, arg.len())
+            min_level = _parse_level(level_str)
+            if min_level.? == false:
+                print "warning: unknown level '{level_str}', ignoring"
+        else if arg.starts_with("--source="):
+            val src = arg.slice(9, arg.len())
+            source_filter = Some(src)
+        else if arg == "-n":
+            i = i + 1
+            if i < args.len():
+                val parsed = args[i].parse_i32()
+                if val Some(v) = parsed:
+                    count = v
+        i = i + 1
+
+    var reader = JournalReader.new()
+
+    val filter = JournalFilter(
+        min_level: min_level,
+        source: source_filter,
+        since_ns: nil
+    )
+    reader.set_filter(filter)
+
+    # Initial fetch
+    val refresh_result = reader.refresh()
+    if val Err(e) = refresh_result:
+        print "error: {e}"
+        return 1
+
+    _print_entries(reader, count)
+
+    if follow:
+        _follow_mode(reader)
+
+    0
+
+fn _parse_level(s: text) -> LogLevel?:
+    val lower = s.to_lower()
+    match lower:
+        "emerg": Some(LogLevel.Emerg)
+        "alert": Some(LogLevel.Alert)
+        "crit": Some(LogLevel.Crit)
+        "error": Some(LogLevel.Error)
+        "warn": Some(LogLevel.Warn)
+        "notice": Some(LogLevel.Notice)
+        "info": Some(LogLevel.Info)
+        "debug": Some(LogLevel.Debug)
+        _: nil
+
+fn _print_entries(reader: JournalReader, max_count: i32):
+    val entries = reader.filtered_entries()
+
+    # Show only the last max_count entries
+    val start_idx = if entries.len() > max_count:
+        entries.len() - max_count
+    else:
+        0
+
+    var i = start_idx
+    while i < entries.len():
+        val formatted = reader.format_entry(entries[i])
+        print formatted
+        i = i + 1
+
+    if entries.len() == 0:
+        print "(no log entries matching filter)"
+
+fn _follow_mode(reader: JournalReader):
+    """Continuously poll and print new log entries."""
+    pass_todo("follow mode requires async/timer integration")

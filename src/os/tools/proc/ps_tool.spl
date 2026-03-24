@@ -1,0 +1,99 @@
+# PS Tool — Process Listing
+# MDSOC: feature dimension, apps layer
+
+use os.userlib.process.{ProcessEntry, list_tasks}
+
+fn run_ps(args: [text]) -> i32:
+    """Entry point for ps command.
+
+    Flags: -a (all), -l (long format), -p PID (specific)
+    """
+    var show_all = false
+    var long_format = false
+    var filter_pid: u64? = nil
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-a":
+            show_all = true
+        else if arg == "-l":
+            long_format = true
+        else if arg == "-p":
+            i = i + 1
+            if i >= args.len():
+                print "error: -p requires a PID argument"
+                return 1
+            val pid_result = _parse_pid(args[i])
+            if val Ok(pid) = pid_result:
+                filter_pid = Some(pid)
+            else:
+                print "error: invalid PID '{args[i]}'"
+                return 1
+        i = i + 1
+
+    val tasks_result = list_tasks()
+    if val Err(e) = tasks_result:
+        print "error: failed to list tasks: {e}"
+        return 1
+
+    val tasks = tasks_result.unwrap()
+
+    if long_format:
+        print "{_pad_right("PID", 6)}{_pad_right("PPID", 6)}{_pad_right("STATE", 10)}{_pad_right("PRIORITY", 10)}{_pad_right("MEM(pg)", 10)}{_pad_right("CPU(tick)", 10)}NAME"
+    else:
+        print "{_pad_right("PID", 6)}{_pad_right("STATE", 10)}{_pad_right("PRIORITY", 10)}NAME"
+
+    var count = 0
+    for entry in tasks:
+        if val Some(pid) = filter_pid:
+            if entry.pid != pid:
+                continue
+
+        val state_str = _format_state(entry.state)
+        val prio_str = _format_priority(entry.priority)
+
+        if long_format:
+            print "{_pad_left("{entry.pid}", 6)}{_pad_left("{entry.ppid}", 6)}{_pad_right(state_str, 10)}{_pad_right(prio_str, 10)}{_pad_left("{entry.mem_pages}", 10)}{_pad_left("{entry.cpu_ticks}", 10)}{entry.name}"
+        else:
+            print "{_pad_left("{entry.pid}", 6)}{_pad_right(state_str, 10)}{_pad_right(prio_str, 10)}{entry.name}"
+        count = count + 1
+
+    print "\nTotal: {count} processes"
+    0
+
+fn _format_state(state: u8) -> text:
+    match state:
+        0: "Ready"
+        1: "Running"
+        2: "Blocked"
+        3: "Zombie"
+        _: "Unknown"
+
+fn _format_priority(priority: u8) -> text:
+    match priority:
+        0: "Realtime"
+        1: "High"
+        2: "Normal"
+        3: "Low"
+        4: "Idle"
+        _: "?"
+
+fn _pad_right(s: text, width: i32) -> text:
+    var result = s
+    while result.len() < width:
+        result = result + " "
+    result
+
+fn _pad_left(s: text, width: i32) -> text:
+    var result = s
+    while result.len() < width:
+        result = " " + result
+    result
+
+fn _parse_pid(s: text) -> Result<u64, text>:
+    val n = s.parse_u64()
+    if val Some(pid) = n:
+        Ok(pid)
+    else:
+        Err("invalid PID: {s}")

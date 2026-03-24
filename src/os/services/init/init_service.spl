@@ -22,6 +22,10 @@
 #   restart = "always"
 #   priority = "high"
 
+use os.userlib.process.{spawn, signal}
+use os.userlib.security.{cap_grant}
+use os.kernel.types.syscall_types.{SignalKind}
+
 enum ServiceState:
     Stopped
     Starting
@@ -93,14 +97,22 @@ impl InitService:
                     val deps_ready = me check_deps(svc_deps)
                     if deps_ready:
                         self.services[i].state = ServiceState.Starting
-                        # Spawn process via syscall
-                        # In the real kernel, this calls SyscallId.Spawn with the binary path.
-                        # The kernel loads the ELF, creates a new task with the specified
-                        # capabilities, and returns the PID.
-                        # For now, assign a synthetic PID based on service index.
-                        val pid_raw = 1000 + i
-                        val pid = pid_raw.to_u64()
-                        self.services[i].state = ServiceState.Running(pid: pid)
+                        # Spawn process via userlib syscall
+                        val priority_val: u8 = match self.services[i].def_.priority:
+                            "realtime": 0
+                            "high": 1
+                            "normal": 2
+                            "low": 3
+                            _: 2
+                        val spawn_result = spawn(0, priority_val)  # entry=0 placeholder until ELF loading
+                        if spawn_result.is_ok():
+                            val pid = spawn_result.unwrap()
+                            # Grant capabilities to the spawned process
+                            for cap in self.services[i].def_.capabilities:
+                                val _ = cap_grant(pid, cap)
+                            self.services[i].state = ServiceState.Running(pid: pid)
+                        else:
+                            self.services[i].state = ServiceState.Failed(reason: "spawn failed")
                 return
             i = i + 1
 
@@ -140,6 +152,13 @@ impl InitService:
                     me topo_visit(dep, visited, order)
 
         order.push(name)
+
+    fn query_services() -> [(text, ServiceState)]:
+        """Query all service states for IPC responses."""
+        var result: [(text, ServiceState)] = []
+        for svc in self.services:
+            result = result.push((svc.def_.name, svc.state))
+        result
 
     me handle_exit(pid: u64, exit_code: i32):
         """Handle service exit. Restart if policy allows."""
