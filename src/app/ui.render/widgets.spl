@@ -77,6 +77,19 @@ fn render_tui_widget(screen: Screen, node: WidgetNode, rect: WidgetRect, state: 
             return render_tui_heading(screen, node, rect, theme)
         "label" =>
             return render_tui_text(screen, node, rect, is_focused, theme)
+        # iOS widgets
+        "navigation_bar" =>
+            return render_tui_navigation_bar(screen, node, rect, theme)
+        "tab_bar" =>
+            return render_tui_tab_bar(screen, node, rect, is_focused, theme)
+        "card" =>
+            return render_tui_card(screen, node, rect, is_focused, theme)
+        "switch" =>
+            return render_tui_switch(screen, node, rect, is_focused, theme)
+        "segmented_control" =>
+            return render_tui_segmented_control(screen, node, rect, is_focused, theme)
+        "search_bar" =>
+            return render_tui_search_bar(screen, node, rect, is_focused, theme)
 
 fn render_tui_tree_widget(screen: Screen, node: WidgetNode, rect: WidgetRect, state: UIState) -> Screen:
     """Render a tree container by rendering each child treenode at depth 0."""
@@ -784,6 +797,19 @@ fn render_html_widget(node: WidgetNode, state: UIState) -> text:
             return render_html_heading(node, focus_class)
         "label" =>
             return render_html_text(node, focus_class)
+        # iOS widgets
+        "navigation_bar" =>
+            return render_html_navigation_bar(node, state, focus_class)
+        "tab_bar" =>
+            return render_html_tab_bar(node, state, focus_class)
+        "card" =>
+            return render_html_card(node, state, focus_class)
+        "switch" =>
+            return render_html_switch(node, focus_class)
+        "segmented_control" =>
+            return render_html_segmented_control(node, focus_class)
+        "search_bar" =>
+            return render_html_search_bar(node, focus_class)
 
 fn render_html_tree_widget(node: WidgetNode, state: UIState, focus_class: text) -> text:
     """Render a tree widget to HTML."""
@@ -1056,6 +1082,222 @@ fn render_html_heading(node: WidgetNode, focus_class: text) -> text:
     val level = node.get_prop("level")
     val tag = if level == "1": "h1" elif level == "2": "h2" elif level == "3": "h3" else: "h2"
     return "<{tag} class=\"widget-heading{focus_class}\" id=\"{node.id}\">{display}</{tag}>"
+
+# =========================================================================
+# iOS Widget HTML Renderers
+# =========================================================================
+
+fn render_html_navigation_bar(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    """Render an iOS-style navigation bar."""
+    val title = node.get_prop("title")
+    val large_title = node.get_prop("large_title")
+    val title_class = if large_title == "true": "nav-title nav-title-large" else: "nav-title"
+
+    var left_html = ""
+    var right_html = ""
+    val children = node.children()
+    # First child = left items container, second = title (skip), third = right items container
+    if children.len() >= 1:
+        val left_container = children[0]
+        for child in left_container.children():
+            left_html = "{left_html}{render_html_widget(child, state)}"
+    if children.len() >= 3:
+        val right_container = children[2]
+        for child in right_container.children():
+            right_html = "{right_html}{render_html_widget(child, state)}"
+
+    var html = "<nav class=\"widget-navigation-bar{focus_class}\" id=\"{node.id}\">"
+    html = "{html}<div class=\"nav-left\">{left_html}</div>"
+    html = "{html}<div class=\"{title_class}\">{title}</div>"
+    html = "{html}<div class=\"nav-right\">{right_html}</div>"
+    html = "{html}</nav>"
+    return html
+
+fn render_html_tab_bar(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    """Render an iOS-style bottom tab bar."""
+    val active_str = node.get_prop("active_index")
+    var active_idx = 0
+    if active_str != "":
+        active_idx = active_str.to_int()
+
+    var items_html = ""
+    var idx = 0
+    for child in node.children():
+        val icon = child.get_prop("icon")
+        val label = child.get_prop("label")
+        val badge = child.get_prop("badge")
+        val active_class = if idx == active_idx: " tab-bar-item-active" else: ""
+        var badge_html = ""
+        if badge != "" and badge != "0":
+            badge_html = "<span class=\"tab-bar-badge\">{badge}</span>"
+        items_html = "{items_html}<div class=\"tab-bar-item{active_class}\" data-action=\"tab_{node.id}_{idx}\">"
+        items_html = "{items_html}<span class=\"tab-bar-icon\">{icon}{badge_html}</span>"
+        items_html = "{items_html}<span class=\"tab-bar-label\">{label}</span>"
+        items_html = "{items_html}</div>"
+        idx = idx + 1
+
+    return "<div class=\"widget-tab-bar{focus_class}\" id=\"{node.id}\">{items_html}</div>"
+
+fn render_html_card(node: WidgetNode, state: UIState, focus_class: text) -> text:
+    """Render an iOS-style card."""
+    val title = node.get_prop("title")
+    val subtitle = node.get_prop("subtitle")
+
+    var header_html = ""
+    if title != "":
+        header_html = "<div class=\"card-header\"><div class=\"card-title\">{title}</div>"
+        if subtitle != "":
+            header_html = "{header_html}<div class=\"card-subtitle\">{subtitle}</div>"
+        header_html = "{header_html}</div>"
+
+    var content_html = ""
+    for child in node.children():
+        content_html = "{content_html}{render_html_widget(child, state)}"
+
+    val flex_prop = node.get_prop("flex")
+    var style = ""
+    if flex_prop != "":
+        style = " style=\"flex: {flex_prop};\""
+
+    return "<div class=\"widget-card{focus_class}\" id=\"{node.id}\"{style}>{header_html}<div class=\"card-content\">{content_html}</div></div>"
+
+fn render_html_switch(node: WidgetNode, focus_class: text) -> text:
+    """Render an iOS-style toggle switch."""
+    val label = node.get_prop("label")
+    val on = node.get_prop("on")
+    val disabled = node.get_prop("disabled")
+    val action = node.get_prop("action")
+    val on_class = if on == "true": " switch-on" else: ""
+    val dis_class = if disabled == "true": " disabled" else: ""
+
+    var html = "<div class=\"widget-switch{on_class}{dis_class}{focus_class}\" id=\"{node.id}\" data-action=\"{action}\">"
+    html = "{html}<span class=\"switch-label\">{label}</span>"
+    html = "{html}<div class=\"switch-track\"><div class=\"switch-thumb\"></div></div>"
+    html = "{html}</div>"
+    return html
+
+fn render_html_segmented_control(node: WidgetNode, focus_class: text) -> text:
+    """Render an iOS-style segmented control."""
+    val active_str = node.get_prop("active_index")
+    var active_idx = 0
+    if active_str != "":
+        active_idx = active_str.to_int()
+
+    var items_html = ""
+    var idx = 0
+    for child in node.children():
+        val label = child.get_prop("label")
+        val active_class = if idx == active_idx: " segment-active" else: ""
+        items_html = "{items_html}<div class=\"segment-item{active_class}\" data-action=\"segment_{node.id}_{idx}\">{label}</div>"
+        idx = idx + 1
+
+    return "<div class=\"widget-segmented-control{focus_class}\" id=\"{node.id}\">{items_html}</div>"
+
+fn render_html_search_bar(node: WidgetNode, focus_class: text) -> text:
+    """Render an iOS-style search bar."""
+    val placeholder = node.get_prop("placeholder")
+    val value = node.get_prop("value")
+    val show_cancel = node.get_prop("show_cancel")
+
+    var html = "<div class=\"widget-search-bar{focus_class}\" id=\"{node.id}\">"
+    html = "{html}<span class=\"search-icon\">\u{1F50D}</span>"
+    html = "{html}<input class=\"search-input\" type=\"text\" placeholder=\"{placeholder}\" value=\"{value}\" data-action=\"change_{node.id}\" />"
+    if show_cancel == "true":
+        html = "{html}<button class=\"search-cancel\" data-action=\"cancel_{node.id}\">Cancel</button>"
+    html = "{html}</div>"
+    return html
+
+# =========================================================================
+# iOS Widget TUI Renderers
+# =========================================================================
+
+fn render_tui_navigation_bar(screen: Screen, node: WidgetNode, rect: WidgetRect, theme: text) -> Screen:
+    """Render a navigation bar as a bold centered title row in TUI."""
+    var s = screen
+    val title = node.get_prop("title")
+    val color = get_theme_color(theme, "accent")
+    # Center the title in the available width
+    val padded = center(title, rect.w)
+    s = s.write(rect.x, rect.y, "{BOLD}{color}{padded}{RESET}")
+    return s
+
+fn render_tui_tab_bar(screen: Screen, node: WidgetNode, rect: WidgetRect, is_focused: bool, theme: text) -> Screen:
+    """Render a bottom tab bar as a row of icon+label pairs."""
+    var s = screen
+    val accent = get_theme_color(theme, "accent")
+    val active_str = node.get_prop("active_index")
+    var active_idx = 0
+    if active_str != "":
+        active_idx = active_str.to_int()
+
+    var bar_text = ""
+    var idx = 0
+    for child in node.children():
+        val icon = child.get_prop("icon")
+        val label = child.get_prop("label")
+        if idx > 0:
+            bar_text = "{bar_text} | "
+        if idx == active_idx:
+            bar_text = "{bar_text}{accent}{BOLD}{icon} {label}{RESET}"
+        else:
+            bar_text = "{bar_text}{DIM}{icon} {label}{RESET}"
+        idx = idx + 1
+
+    val padded = center(bar_text, rect.w)
+    s = s.write(rect.x, rect.y, padded)
+    return s
+
+fn render_tui_card(screen: Screen, node: WidgetNode, rect: WidgetRect, is_focused: bool, theme: text) -> Screen:
+    """Render a card as a bordered panel in TUI."""
+    # Delegate to panel renderer (card is a styled panel)
+    return render_tui_panel(screen, node, rect, is_focused, theme)
+
+fn render_tui_switch(screen: Screen, node: WidgetNode, rect: WidgetRect, is_focused: bool, theme: text) -> Screen:
+    """Render a toggle switch in TUI."""
+    var s = screen
+    val label = node.get_prop("label")
+    val on = node.get_prop("on")
+    val accent = get_theme_color(theme, "accent")
+    val indicator = if on == "true": "{GREEN}[ON ]{RESET}" else: "{DIM}[ OFF]{RESET}"
+    val focus_marker = if is_focused: "{accent}>{RESET} " else: "  "
+    s = s.write(rect.x, rect.y, "{focus_marker}{label}  {indicator}")
+    return s
+
+fn render_tui_segmented_control(screen: Screen, node: WidgetNode, rect: WidgetRect, is_focused: bool, theme: text) -> Screen:
+    """Render a segmented control in TUI."""
+    var s = screen
+    val accent = get_theme_color(theme, "accent")
+    val active_str = node.get_prop("active_index")
+    var active_idx = 0
+    if active_str != "":
+        active_idx = active_str.to_int()
+
+    var seg_text = "["
+    var idx = 0
+    for child in node.children():
+        val label = child.get_prop("label")
+        if idx > 0:
+            seg_text = "{seg_text} | "
+        if idx == active_idx:
+            seg_text = "{seg_text}{accent}{BOLD}*{label}*{RESET}"
+        else:
+            seg_text = "{seg_text}{label}"
+        idx = idx + 1
+    seg_text = "{seg_text}]"
+
+    s = s.write(rect.x, rect.y, seg_text)
+    return s
+
+fn render_tui_search_bar(screen: Screen, node: WidgetNode, rect: WidgetRect, is_focused: bool, theme: text) -> Screen:
+    """Render a search bar in TUI."""
+    var s = screen
+    val placeholder = node.get_prop("placeholder")
+    val value = node.get_prop("value")
+    val accent = get_theme_color(theme, "accent")
+    val display = if value != "": value else: "{DIM}{placeholder}{RESET}"
+    val focus_indicator = if is_focused: accent else: ""
+    s = s.write(rect.x, rect.y, "{focus_indicator}\u{1F50D} {display}{RESET}")
+    return s
 
 # =========================================================================
 # Full HTML Tree Render

@@ -1,0 +1,180 @@
+# Rich Text Model
+#
+# Shared attributed text model for Word, Mail compose, and Slides text boxes.
+# Supports styled text spans, paragraph blocks, and document structure.
+
+# =========================================================================
+# Inline Styles
+# =========================================================================
+
+enum InlineStyle:
+    Bold
+    Italic
+    Underline
+    Code
+    Strikethrough
+    Link(url: text)
+
+# =========================================================================
+# Text Span
+# =========================================================================
+
+struct TextSpan:
+    content: text
+    styles: [InlineStyle]
+
+# =========================================================================
+# Document Blocks
+# =========================================================================
+
+enum DocBlock:
+    Paragraph(spans: [TextSpan])
+    Heading(level: i32, spans: [TextSpan])
+    BulletList(items: [[TextSpan]])
+    NumberedList(items: [[TextSpan]], start: i32)
+    CodeBlock(language: text, code: text)
+    Quote(blocks: [DocBlock])
+    HorizontalRule
+    Image(src: text, alt: text)
+
+# =========================================================================
+# Rich Document
+# =========================================================================
+
+struct RichDocument:
+    title: text
+    blocks: [DocBlock]
+    metadata: Dict<text, text>
+
+# =========================================================================
+# Span Helpers
+# =========================================================================
+
+fn plain_span(content: text) -> TextSpan:
+    """Create a span with no styles."""
+    return TextSpan(content: content, styles: [])
+
+fn bold_span(content: text) -> TextSpan:
+    """Create a span with Bold style."""
+    return TextSpan(content: content, styles: [InlineStyle.Bold])
+
+fn italic_span(content: text) -> TextSpan:
+    """Create a span with Italic style."""
+    return TextSpan(content: content, styles: [InlineStyle.Italic])
+
+fn link_span(content: text, url: text) -> TextSpan:
+    """Create a span with Link style."""
+    return TextSpan(content: content, styles: [InlineStyle.Link(url: url)])
+
+# =========================================================================
+# Block Helpers
+# =========================================================================
+
+fn paragraph(spans: [TextSpan]) -> DocBlock:
+    """Create a Paragraph block."""
+    return DocBlock.Paragraph(spans: spans)
+
+fn heading(level: i32, content: text) -> DocBlock:
+    """Create a Heading block with a single plain span."""
+    return DocBlock.Heading(level: level, spans: [plain_span(content)])
+
+fn bullet_list(items: [text]) -> DocBlock:
+    """Create a BulletList from plain text items."""
+    var span_items: [[TextSpan]] = []
+    for item in items:
+        span_items = span_items.push([plain_span(item)])
+    return DocBlock.BulletList(items: span_items)
+
+fn code_block(language: text, code: text) -> DocBlock:
+    """Create a CodeBlock."""
+    return DocBlock.CodeBlock(language: language, code: code)
+
+fn horizontal_rule() -> DocBlock:
+    """Create a HorizontalRule block."""
+    return DocBlock.HorizontalRule
+
+# =========================================================================
+# Document Helpers
+# =========================================================================
+
+fn empty_document(title: text) -> RichDocument:
+    """Create a document with a single empty paragraph."""
+    val empty_para = DocBlock.Paragraph(spans: [plain_span("")])
+    return RichDocument(title: title, blocks: [empty_para], metadata: {})
+
+# =========================================================================
+# Plain Text Extraction
+# =========================================================================
+
+fn spans_to_plain_text(spans: [TextSpan]) -> text:
+    """Join all span contents into plain text."""
+    var result = ""
+    for span in spans:
+        result = "{result}{span.content}"
+    return result
+
+fn block_to_plain_text(block: DocBlock) -> text:
+    """Extract plain text from a block."""
+    match block:
+        case DocBlock.Paragraph(spans):
+            return spans_to_plain_text(spans)
+        case DocBlock.Heading(level, spans):
+            return spans_to_plain_text(spans)
+        case DocBlock.BulletList(items):
+            var lines: [text] = []
+            for item in items:
+                lines = lines.push(spans_to_plain_text(item))
+            return lines.join("\n")
+        case DocBlock.NumberedList(items, start):
+            var lines: [text] = []
+            var num = start
+            for item in items:
+                lines = lines.push("{num}. {spans_to_plain_text(item)}")
+                num = num + 1
+            return lines.join("\n")
+        case DocBlock.CodeBlock(language, code):
+            return code
+        case DocBlock.Quote(blocks):
+            var lines: [text] = []
+            for b in blocks:
+                lines = lines.push(block_to_plain_text(b))
+            return lines.join("\n")
+        case DocBlock.HorizontalRule:
+            return "---"
+        case DocBlock.Image(src, alt):
+            return alt
+    return ""
+
+# =========================================================================
+# Document Analysis
+# =========================================================================
+
+fn _count_words(s: text) -> i32:
+    """Count words in a string by splitting on whitespace."""
+    if s.trim() == "":
+        return 0
+    val parts = s.trim().split(" ")
+    var count = 0
+    for part in parts:
+        if part.trim() != "":
+            count = count + 1
+    return count
+
+fn document_word_count(doc: RichDocument) -> i32:
+    """Count total words across all blocks in the document."""
+    var total = 0
+    for block in doc.blocks:
+        val plain = block_to_plain_text(block)
+        total = total + _count_words(plain)
+    return total
+
+fn document_headings(doc: RichDocument) -> [DocBlock]:
+    """Extract all heading blocks from the document."""
+    var headings: [DocBlock] = []
+    for block in doc.blocks:
+        match block:
+            case DocBlock.Heading(level, spans):
+                headings = headings.push(block)
+            _:
+                pass_do_nothing
+    return headings

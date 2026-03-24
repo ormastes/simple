@@ -1,0 +1,181 @@
+# Find and Replace Engine
+#
+# Generic text search for office apps.
+
+# =========================================================================
+# Search Types
+# =========================================================================
+
+struct SearchMatch:
+    start: i32
+    end_pos: i32
+    line: i32
+    text: text
+
+struct SearchOptions:
+    case_sensitive: bool
+    whole_word: bool
+
+# =========================================================================
+# Search Options Factory
+# =========================================================================
+
+fn default_search_options() -> SearchOptions:
+    """Return default search options (case-insensitive, no whole-word)."""
+    return SearchOptions(case_sensitive: false, whole_word: false)
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _normalize(content: text, case_sensitive: bool) -> text:
+    """Normalize text for comparison based on case sensitivity."""
+    if case_sensitive:
+        return content
+    return content.to_lower()
+
+fn _is_word_boundary(ch: text) -> bool:
+    """Check if a character is a word boundary (not alphanumeric or underscore)."""
+    if ch == "":
+        return true
+    if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+        return true
+    if ch == "." or ch == "," or ch == ";" or ch == ":" or ch == "!":
+        return true
+    if ch == "?" or ch == "(" or ch == ")" or ch == "[" or ch == "]":
+        return true
+    if ch == "{" or ch == "}" or ch == "<" or ch == ">" or ch == "/":
+        return true
+    if ch == "\\" or ch == "'" or ch == "\"" or ch == "-" or ch == "+":
+        return true
+    if ch == "=" or ch == "*" or ch == "&" or ch == "^" or ch == "%":
+        return true
+    if ch == "$" or ch == "#" or ch == "@" or ch == "`" or ch == "~":
+        return true
+    return false
+
+fn _char_at(s: text, pos: i32) -> text:
+    """Get character at position, or empty string if out of bounds."""
+    if pos < 0 or pos >= s.len():
+        return ""
+    return s.slice(pos, pos + 1)
+
+fn _count_lines_before(content: text, pos: i32) -> i32:
+    """Count newlines before the given position to determine the line number."""
+    var line = 0
+    var idx = 0
+    while idx < pos and idx < content.len():
+        if _char_at(content, idx) == "\n":
+            line = line + 1
+        idx = idx + 1
+    return line
+
+fn _check_whole_word(content: text, start: i32, query_len: i32) -> bool:
+    """Check if a match at the given position is a whole-word match."""
+    val before = _char_at(content, start - 1)
+    val after = _char_at(content, start + query_len)
+    return _is_word_boundary(before) and _is_word_boundary(after)
+
+# =========================================================================
+# Search Functions
+# =========================================================================
+
+fn find_all(content: text, query: text, options: SearchOptions) -> [SearchMatch]:
+    """Find all occurrences of query in content."""
+    var matches: [SearchMatch] = []
+    if query == "":
+        return matches
+    val norm_content = _normalize(content, options.case_sensitive)
+    val norm_query = _normalize(query, options.case_sensitive)
+    val q_len = norm_query.len()
+    var pos = 0
+    while pos <= norm_content.len() - q_len:
+        val candidate = norm_content.slice(pos, pos + q_len)
+        if candidate == norm_query:
+            var is_match = true
+            if options.whole_word:
+                is_match = _check_whole_word(norm_content, pos, q_len)
+            if is_match:
+                val line = _count_lines_before(content, pos)
+                val matched_text = content.slice(pos, pos + q_len)
+                matches = matches.push(SearchMatch(
+                    start: pos,
+                    end_pos: pos + q_len,
+                    line: line,
+                    text: matched_text
+                ))
+                pos = pos + q_len
+            else:
+                pos = pos + 1
+        else:
+            pos = pos + 1
+    return matches
+
+fn find_next(content: text, query: text, from_pos: i32, options: SearchOptions) -> SearchMatch?:
+    """Find the next occurrence of query starting from from_pos."""
+    if query == "":
+        return nil
+    val norm_content = _normalize(content, options.case_sensitive)
+    val norm_query = _normalize(query, options.case_sensitive)
+    val q_len = norm_query.len()
+    var pos = from_pos
+    while pos <= norm_content.len() - q_len:
+        val candidate = norm_content.slice(pos, pos + q_len)
+        if candidate == norm_query:
+            var is_match = true
+            if options.whole_word:
+                is_match = _check_whole_word(norm_content, pos, q_len)
+            if is_match:
+                val line = _count_lines_before(content, pos)
+                val matched_text = content.slice(pos, pos + q_len)
+                return SearchMatch(
+                    start: pos,
+                    end_pos: pos + q_len,
+                    line: line,
+                    text: matched_text
+                )
+            else:
+                pos = pos + 1
+        else:
+            pos = pos + 1
+    return nil
+
+fn replace_first(content: text, query: text, replacement: text, from_pos: i32, options: SearchOptions) -> text:
+    """Replace the first occurrence of query starting from from_pos."""
+    val match_result = find_next(content, query, from_pos, options)
+    if match_result == nil:
+        return content
+    val m = match_result!
+    val before = content.slice(0, m.start)
+    val after = content.slice(m.end_pos, content.len())
+    return "{before}{replacement}{after}"
+
+fn replace_all(content: text, query: text, replacement: text, options: SearchOptions) -> text:
+    """Replace all occurrences of query in content."""
+    if query == "":
+        return content
+    var result = ""
+    val norm_content = _normalize(content, options.case_sensitive)
+    val norm_query = _normalize(query, options.case_sensitive)
+    val q_len = norm_query.len()
+    var pos = 0
+    while pos < content.len():
+        if pos <= content.len() - q_len:
+            val candidate = norm_content.slice(pos, pos + q_len)
+            if candidate == norm_query:
+                var is_match = true
+                if options.whole_word:
+                    is_match = _check_whole_word(norm_content, pos, q_len)
+                if is_match:
+                    result = "{result}{replacement}"
+                    pos = pos + q_len
+                else:
+                    result = "{result}{_char_at(content, pos)}"
+                    pos = pos + 1
+            else:
+                result = "{result}{_char_at(content, pos)}"
+                pos = pos + 1
+        else:
+            result = "{result}{_char_at(content, pos)}"
+            pos = pos + 1
+    return result
