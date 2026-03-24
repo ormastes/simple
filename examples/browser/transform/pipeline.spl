@@ -10,35 +10,57 @@
 #
 # Each stage is a separate pass. This module wires them together.
 
-use sbp.shared.logging.{Logger}
-use sbp.shared.error.{BrowserResult, parse_error}
-
-# Placeholder types for pipeline intermediate results.
-# Real types will come from entity/dom/, entity/style/, entity/layout/, entity/paint/.
+use examples.browser.entity.dom.node_types.{DomNode, Element, NodeKind}
+use examples.browser.entity.dom.css_types.{CSSValue, SelectorPart, Specificity}
+use examples.browser.entity.dom.box_types.{LayoutBox, BoxKind}
+use examples.browser.entity.dom.paint_types.{PaintOp}
+use examples.browser.feature.parser.html_tokenizer.{HtmlTokenizer}
+use examples.browser.feature.parser.html_tree_builder.{TreeBuilder}
+use examples.browser.feature.style.cascade.{Cascade, CascadeEntry, CssOrigin, ua_stylesheet}
+use examples.browser.feature.style.computed.{ComputedStyle, StyleResolver, set_property_on_style}
+use examples.browser.feature.paint.display_list.{DisplayListBuilder}
+use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.error.{BrowserResult}
 
 class DomTree:
     root_id: i64
+    nodes: List<DomNode>
+    elements: List<Element>
 
     static fn empty() -> DomTree:
-        DomTree(root_id: 0)
+        DomTree(root_id: 0, nodes: List<DomNode>(), elements: List<Element>())
 
 class StyledTree:
     root_id: i64
+    nodes: List<DomNode>
+    elements: List<Element>
+    styles: List<ComputedStyle>
 
     static fn empty() -> StyledTree:
-        StyledTree(root_id: 0)
+        StyledTree(root_id: 0, nodes: List<DomNode>(), elements: List<Element>(), styles: List<ComputedStyle>())
 
 class LayoutTree:
     root_id: i64
+    nodes: List<DomNode>
+    elements: List<Element>
+    styles: List<ComputedStyle>
+    root_box: LayoutBox
 
     static fn empty() -> LayoutTree:
-        LayoutTree(root_id: 0)
+        LayoutTree(
+            root_id: 0,
+            nodes: List<DomNode>(),
+            elements: List<Element>(),
+            styles: List<ComputedStyle>(),
+            root_box: LayoutBox.create(0, BoxKind.Block)
+        )
 
 class DisplayList:
+    ops: List<PaintOp>
     commands: List<text>
 
     static fn empty() -> DisplayList:
-        DisplayList(commands: List<text>())
+        DisplayList(ops: List<PaintOp>(), commands: List<text>())
 
 class RenderPipeline:
     logger: Logger
@@ -67,21 +89,172 @@ class RenderPipeline:
         Ok(display_list)
 
     me parse(html: text) -> BrowserResult<DomTree>:
-        # TODO: invoke HTML5 tokenizer + tree builder
-        pass_todo
-        Ok(DomTree.empty())
+        val tokenizer = HtmlTokenizer.new(html, self.logger)
+        var builder = TreeBuilder.new(tokenizer, self.logger)
+        val parsed = builder.parse()
+        match parsed:
+            Ok(doc_id):
+                Ok(DomTree(root_id: doc_id, nodes: builder.nodes, elements: builder.elements))
+            Err(err):
+                Err(err)
 
     me resolve_styles(dom: DomTree) -> BrowserResult<StyledTree>:
-        # TODO: CSS cascade, computed values, inheritance
-        pass_todo
-        Ok(StyledTree.empty())
+        val max_id = self.max_node_id(dom.nodes)
+        var styles = List<ComputedStyle>()
+        var i = 0
+        while i <= max_id:
+            styles.push(ComputedStyle.default_style())
+            i = i + 1
+
+        val cascade = Cascade.new(self.logger)
+        val resolver = StyleResolver.new(cascade, self.logger)
+        self.resolve_styles_for_node(dom.root_id, ComputedStyle.default_style(), dom.nodes, dom.elements, resolver, styles)
+
+        Ok(StyledTree(root_id: dom.root_id, nodes: dom.nodes, elements: dom.elements, styles: styles))
 
     me compute_layout(styled: StyledTree) -> BrowserResult<LayoutTree>:
-        # TODO: block, inline, flex, grid layout algorithms
-        pass_todo
-        Ok(LayoutTree.empty())
+        val root_box = self.layout_node(styled.root_id, styled.nodes, styled.styles, 0.0, 0.0, 1024.0)
+        Ok(LayoutTree(
+            root_id: styled.root_id,
+            nodes: styled.nodes,
+            elements: styled.elements,
+            styles: styled.styles,
+            root_box: root_box
+        ))
 
     me paint(layout: LayoutTree) -> BrowserResult<DisplayList>:
-        # TODO: walk layout tree, emit draw commands
-        pass_todo
-        Ok(DisplayList.empty())
+        val builder = DisplayListBuilder.new(self.logger)
+        val real_display_list = builder.build(layout.root_box, layout.styles)
+        var commands = List<text>()
+        for op in real_display_list.ops:
+            commands.push("{op}")
+        Ok(DisplayList(ops: real_display_list.ops, commands: commands))
+
+    fn resolve_styles_for_node(node_id: i64, parent_style: ComputedStyle, nodes: List<DomNode>, elements: List<Element>, resolver: StyleResolver, styles: List<ComputedStyle>):
+        val node = self.find_node(node_id, nodes)
+        if not node.?:
+            return
+        val resolved_node = node.unwrap()
+        var style = parent_style
+
+        match resolved_node.kind:
+            NodeKind.Document:
+                style = set_property_on_style(ComputedStyle.default_style(), "display", CSSValue.Keyword(v: "block"))
+            NodeKind.Element:
+                val element = self.find_element(node_id, elements)
+                if val Some(el) = element:
+                    val matched = self.match_rules(el)
+                    style = resolver.compute(node_id, matched, parent_style)
+            NodeKind.Text:
+                style = set_property_on_style(parent_style, "display", CSSValue.Keyword(v: "inline"))
+            _:
+                style = parent_style
+
+        if node_id >= 0 and node_id < styles.len():
+            styles.set(node_id, style)
+
+        for child_id in resolved_node.children:
+            self.resolve_styles_for_node(child_id, style, nodes, elements, resolver, styles)
+
+    fn match_rules(element: Element) -> List<CascadeEntry>:
+        var entries = List<CascadeEntry>()
+        val rules = ua_stylesheet()
+        var source_order = 0
+        for rule in rules:
+            if self.matches_type_selector(rule.selector.parts, element.tag_name):
+                entries.push(CascadeEntry.create(
+                    rule: rule,
+                    origin: CssOrigin.UserAgent,
+                    specificity: Specificity.create(ids: 0, classes: 0, elements: 1),
+                    source_order: source_order
+                ))
+            source_order = source_order + 1
+        entries
+
+    fn matches_type_selector(parts: List<SelectorPart>, tag_name: text) -> bool:
+        if parts.len() != 1:
+            return false
+        match parts.get(0):
+            SelectorPart.Type(name):
+                name == tag_name
+            _:
+                false
+
+    fn layout_node(node_id: i64, nodes: List<DomNode>, styles: List<ComputedStyle>, x: f64, y: f64, available_width: f64) -> LayoutBox:
+        val style = self.style_for_node(node_id, styles)
+        val node = self.find_node(node_id, nodes)
+        var box_node = LayoutBox.create(node_id, self.box_kind_for(style.display))
+        box_node.x = x
+        box_node.y = y
+
+        if not node.?:
+            box_node.width = available_width
+            box_node.height = 0.0
+            return box_node
+
+        val resolved = node.unwrap()
+        if resolved.kind == NodeKind.Text:
+            val text_width = self.estimate_text_width(resolved.data)
+            box_node.width = text_width
+            box_node.height = 18.0
+            return box_node
+
+        var cursor_y = y + 8.0
+        var max_width = 0.0
+        for child_id in resolved.children:
+            val child_style = self.style_for_node(child_id, styles)
+            if child_style.display == "none":
+                pass_dn
+            else:
+                val child_box = self.layout_node(child_id, nodes, styles, x + 8.0, cursor_y, available_width - 16.0)
+                box_node.children.push(child_box)
+                cursor_y = cursor_y + child_box.height + 8.0
+                if child_box.width > max_width:
+                    max_width = child_box.width
+
+        if box_node.children.len() == 0:
+            box_node.width = available_width
+            box_node.height = 24.0
+        else:
+            box_node.width = if max_width > 0.0: max_width else: available_width
+            box_node.height = (cursor_y - y) + 8.0
+        box_node
+
+    fn estimate_text_width(value: text) -> f64:
+        val len = value.trim().len()
+        if len == 0:
+            return 0.0
+        len.to_f64() * 8.0
+
+    fn box_kind_for(display: text) -> BoxKind:
+        match display:
+            "inline": BoxKind.Inline
+            "inline-block": BoxKind.InlineBlock
+            "flex": BoxKind.Flex
+            "grid": BoxKind.Grid
+            "table": BoxKind.Table
+            _: BoxKind.Block
+
+    fn style_for_node(node_id: i64, styles: List<ComputedStyle>) -> ComputedStyle:
+        if node_id >= 0 and node_id < styles.len():
+            return styles.get(node_id)
+        ComputedStyle.default_style()
+
+    fn max_node_id(nodes: List<DomNode>) -> i64:
+        var max_id = 0
+        for node in nodes:
+            if node.id > max_id:
+                max_id = node.id
+        max_id
+
+    fn find_node(node_id: i64, nodes: List<DomNode>) -> DomNode?:
+        for node in nodes:
+            if node.id == node_id:
+                return Some(node)
+        nil
+
+    fn find_element(node_id: i64, elements: List<Element>) -> Element?:
+        for element in elements:
+            if element.node_id == node_id:
+                return Some(element)
+        nil

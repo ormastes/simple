@@ -3,9 +3,11 @@
 # loaded from sandbox.sdn profiles. The broker controls granting and revoking
 # capabilities at runtime.
 
-use sbp.entity.ipc.process_types.{ProcessId}
-use sbp.shared.logging.{Logger}
-use sbp.shared.error.{BrowserResult, sandbox_error}
+use std.io_runtime.{file_read}
+use std.sdn.parser.{parse}
+use examples.browser.entity.ipc.process_types.{ProcessId}
+use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.error.{BrowserResult, sandbox_error}
 
 class SandboxPolicy:
     capabilities: List<text>
@@ -101,7 +103,38 @@ class CapabilityBroker:
         nil
 
     fn load_profile(profile: text) -> BrowserResult<SandboxPolicy>:
-        # TODO: read sandbox.sdn and parse the named profile section
-        # For now, return a restrictive default policy
-        pass_todo
-        Ok(SandboxPolicy.empty())
+        val content = file_read("examples/browser/sandbox.sdn")
+        match parse(content):
+            case Ok(root):
+                val section = root.get(profile)
+                if not section.?:
+                    return Err(sandbox_error("Sandbox profile not found: {profile}"))
+                Ok(SandboxPolicy.create(
+                    capabilities: _get_text_list(section, "capabilities"),
+                    denied: _get_text_list(section, "denied"),
+                    pledge: _get_bool(section, "pledge"),
+                    unveil_paths: _get_text_list(section, "unveil_paths")
+                ))
+            case Err(err):
+                Err(sandbox_error("Failed to parse sandbox policy file: {err}"))
+
+fn _get_text_list(section, key: text) -> List<text>:
+    var result = List<text>()
+    val field = section.get(key)
+    if field.?:
+        match field:
+            case SdnValue.Array(arr):
+                for item in arr:
+                    match item:
+                        case SdnValue.String(s): result.push(s)
+                        case _: pass_dn
+            case _: pass_dn
+    result
+
+fn _get_bool(section, key: text) -> bool:
+    val field = section.get(key)
+    if field.?:
+        match field:
+            case SdnValue.Bool(b): return b
+            case _: pass_dn
+    false

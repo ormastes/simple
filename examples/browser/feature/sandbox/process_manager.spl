@@ -2,18 +2,31 @@
 # Manages spawning, killing, and IPC routing across browser processes.
 # Each process gets a unique PID and runs in a sandbox with restricted capabilities.
 
-use sbp.entity.ipc.process_types.{ProcessId, ProcessKind, ProcessState, ProcessInfo}
-use sbp.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod}
-use sbp.shared.logging.{Logger}
-use sbp.shared.error.{BrowserResult, ipc_error}
+use examples.browser.entity.ipc.process_types.{ProcessId, ProcessKind, ProcessState, ProcessInfo}
+use examples.browser.entity.ipc.message_types.{BrowserIpcMsg}
+use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.error.{BrowserResult, ipc_error}
+
+class ProcessMailbox:
+    pid_id: i64
+    messages: List<BrowserIpcMsg>
+
+    static fn create(pid_id: i64) -> ProcessMailbox:
+        ProcessMailbox(pid_id: pid_id, messages: List<BrowserIpcMsg>())
 
 class ProcessManager:
     logger: Logger
     processes: List<ProcessInfo>
+    mailboxes: List<ProcessMailbox>
     next_pid: i64
 
     static fn new(logger: Logger) -> ProcessManager:
-        ProcessManager(logger: logger, processes: List<ProcessInfo>(), next_pid: 1)
+        ProcessManager(
+            logger: logger,
+            processes: List<ProcessInfo>(),
+            mailboxes: List<ProcessMailbox>(),
+            next_pid: 1
+        )
 
     me spawn(kind: ProcessKind) -> BrowserResult<ProcessId>:
         # Allocate a new PID and create a process entry
@@ -22,6 +35,7 @@ class ProcessManager:
 
         val info = ProcessInfo.create(pid, ProcessState.Starting, 0)
         self.processes.push(info)
+        self.mailboxes.push(ProcessMailbox.create(pid.id))
 
         self.logger.info("Spawned process pid={pid.id} kind={kind}")
 
@@ -45,11 +59,30 @@ class ProcessManager:
         match dst_state:
             ProcessState.Running:
                 self.logger.debug("IPC: pid={msg.src.id} -> pid={msg.dst.id}")
-                # TODO: deliver message to process mailbox
-                pass_todo
+                self.enqueue(msg.dst.id, msg)?
                 Ok(())
             _:
                 Err(ipc_error("Cannot send to process pid={msg.dst.id}: not running"))
+
+    me recv(pid: ProcessId) -> BrowserIpcMsg?:
+        var i = 0
+        while i < self.mailboxes.len():
+            var mailbox = self.mailboxes.get(i)
+            if mailbox.pid_id == pid.id:
+                if mailbox.messages.len() == 0:
+                    return nil
+                val msg = mailbox.messages.get(0)
+                mailbox.messages.remove(0)
+                self.mailboxes.set(i, mailbox)
+                return Some(msg)
+            i = i + 1
+        nil
+
+    fn pending_messages() -> i64:
+        var total = 0
+        for mailbox in self.mailboxes:
+            total = total + mailbox.messages.len()
+        total
 
     fn get_state(pid: ProcessId) -> ProcessState:
         var i = 0
@@ -83,3 +116,14 @@ class ProcessManager:
                 return i
             i = i + 1
         -1
+
+    me enqueue(pid_id: i64, msg: BrowserIpcMsg) -> BrowserResult<()>:
+        var i = 0
+        while i < self.mailboxes.len():
+            var mailbox = self.mailboxes.get(i)
+            if mailbox.pid_id == pid_id:
+                mailbox.messages.push(msg)
+                self.mailboxes.set(i, mailbox)
+                return Ok(())
+            i = i + 1
+        Err(ipc_error("No mailbox for process pid={pid_id}"))

@@ -1225,7 +1225,23 @@ fn is_system_symbol(sym: &str) -> bool {
         // Misc
         "qsort" | "bsearch" | "abs" | "labs" | "rand" | "srand" | "isdigit" | "isalpha" |
         "isspace" | "tolower" | "toupper" | "mmap" | "munmap" | "mprotect" | "sysconf" |
-        "pipe" | "dup" | "dup2" | "fcntl" | "ioctl" | "select" | "poll"
+        "pipe" | "dup" | "dup2" | "fcntl" | "ioctl" | "select" | "poll" |
+        // glibc internals used by Rust std (stubbing these causes segfaults)
+        "gnu_get_libc_version" | "confstr" | "getauxval" | "dl_iterate_phdr" |
+        "__libc_start_main" | "__cxa_atexit" | "__cxa_finalize" | "__cxa_thread_atexit_impl" |
+        "__errno_location" | "__stack_chk_fail" | "__stack_chk_guard" |
+        // POSIX spawn (used by Rust Command)
+        "posix_spawn" | "posix_spawnattr_init" | "posix_spawnattr_setflags" |
+        "posix_spawnattr_setsigdefault" | "posix_spawnattr_setsigmask" |
+        "posix_spawnattr_setpgroup" | "posix_spawnattr_destroy" |
+        "posix_spawn_file_actions_init" | "posix_spawn_file_actions_adddup2" |
+        "posix_spawn_file_actions_addopen" | "posix_spawn_file_actions_addclose" |
+        "posix_spawn_file_actions_destroy" | "posix_spawnp" |
+        // Additional libc functions used by Rust std
+        "setlocale" | "nl_langinfo" | "getpwuid_r" | "getuid" | "geteuid" |
+        "prctl" | "sched_getaffinity" | "getrandom" | "syscall" |
+        "epoll_create1" | "epoll_ctl" | "epoll_wait" | "eventfd" |
+        "futex" | "madvise" | "mremap" | "mincore"
     )
 }
 

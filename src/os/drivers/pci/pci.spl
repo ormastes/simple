@@ -18,7 +18,7 @@ struct PciDevice:
     """Discovered PCI device."""
     bus: u8
     device: u8
-    function: u8
+    func: u8
     vendor_id: u16
     device_id: u16
     class_code: u8
@@ -40,49 +40,45 @@ impl PciDevice:
         self.vendor_id == 0x1AF4  # Red Hat VirtIO vendor
 
     fn description() -> text:
-        "PCI {self.bus}:{self.device}.{self.function} vendor={self.vendor_id} device={self.device_id} class={self.class_code}:{self.subclass}"
+        "PCI {self.bus}:{self.device}.{self.func} vendor={self.vendor_id} device={self.device_id} class={self.class_code}:{self.subclass}"
 
 # ============================================================================
 # PCI Config Space Access
 # ============================================================================
 
-fn pci_config_addr(bus: u8, device: u8, function: u8, offset: u8) -> u32:
+fn pci_config_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32:
     """Build PCI config address for I/O method 1."""
-    (1 << 31) |                             # Enable bit
-    (bus.to_u32() << 16) |
-    (device.to_u32() << 11) |
-    (function.to_u32() << 8) |
-    (offset.to_u32() & 0xFC)               # Align to dword
+    ((1 << 31) | (bus.to_u32() << 16) | (device.to_u32() << 11) | (func.to_u32() << 8) | (offset.to_u32() & 0xFC))
 
-fn pci_read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32:
+fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
     """Read 32-bit value from PCI config space."""
-    val addr = pci_config_addr(bus, device, function, offset)
+    val addr = pci_config_addr(bus, device, func, offset)
     port_outl(PCI_CONFIG_ADDR, addr)
     port_inl(PCI_CONFIG_DATA)
 
-fn pci_write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32):
+fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
     """Write 32-bit value to PCI config space."""
-    val addr = pci_config_addr(bus, device, function, offset)
+    val addr = pci_config_addr(bus, device, func, offset)
     port_outl(PCI_CONFIG_ADDR, addr)
     port_outl(PCI_CONFIG_DATA, value)
 
-fn pci_read_vendor(bus: u8, device: u8, function: u8) -> u16:
-    (pci_read_config(bus, device, function, 0x00) & 0xFFFF).to_u16()
+fn pci_read_vendor(bus: u8, device: u8, func: u8) -> u16:
+    (pci_read_config(bus, device, func, 0x00) & 0xFFFF).to_u16()
 
-fn pci_read_device_id(bus: u8, device: u8, function: u8) -> u16:
-    (pci_read_config(bus, device, function, 0x00) >> 16).to_u16()
+fn pci_read_device_id(bus: u8, device: u8, func: u8) -> u16:
+    (pci_read_config(bus, device, func, 0x00) >> 16).to_u16()
 
-fn pci_read_class(bus: u8, device: u8, function: u8) -> u32:
-    pci_read_config(bus, device, function, 0x08)
+fn pci_read_class(bus: u8, device: u8, func: u8) -> u32:
+    pci_read_config(bus, device, func, 0x08)
 
-fn pci_read_header_type(bus: u8, device: u8, function: u8) -> u8:
-    ((pci_read_config(bus, device, function, 0x0C) >> 16) & 0xFF).to_u8()
+fn pci_read_header_type(bus: u8, device: u8, func: u8) -> u8:
+    ((pci_read_config(bus, device, func, 0x0C) >> 16) & 0xFF).to_u8()
 
-fn pci_read_bar(bus: u8, device: u8, function: u8, bar_num: u8) -> u32:
-    pci_read_config(bus, device, function, 0x10 + bar_num * 4)
+fn pci_read_bar(bus: u8, device: u8, func: u8, bar_num: u8) -> u32:
+    pci_read_config(bus, device, func, 0x10 + bar_num * 4)
 
-fn pci_read_irq(bus: u8, device: u8, function: u8) -> u8:
-    (pci_read_config(bus, device, function, 0x3C) & 0xFF).to_u8()
+fn pci_read_irq(bus: u8, device: u8, func: u8) -> u8:
+    (pci_read_config(bus, device, func, 0x3C) & 0xFF).to_u8()
 
 # ============================================================================
 # PCI Bus Scanner
@@ -124,22 +120,22 @@ impl PciBus:
                     me scan_function(bus, device, func)
                 func = func + 1
 
-    me scan_function(bus: u8, device: u8, function: u8):
+    me scan_function(bus: u8, device: u8, func: u8):
         """Read device info for one PCI function."""
-        val class_info = pci_read_class(bus, device, function)
+        val class_info = pci_read_class(bus, device, func)
         val pci_dev = PciDevice(
             bus: bus,
             device: device,
-            function: function,
-            vendor_id: pci_read_vendor(bus, device, function),
-            device_id: pci_read_device_id(bus, device, function),
+            func: func,
+            vendor_id: pci_read_vendor(bus, device, func),
+            device_id: pci_read_device_id(bus, device, func),
             class_code: ((class_info >> 24) & 0xFF).to_u8(),
             subclass: ((class_info >> 16) & 0xFF).to_u8(),
             prog_if: ((class_info >> 8) & 0xFF).to_u8(),
-            header_type: pci_read_header_type(bus, device, function),
-            bar0: pci_read_bar(bus, device, function, 0),
-            bar1: pci_read_bar(bus, device, function, 1),
-            irq_line: pci_read_irq(bus, device, function)
+            header_type: pci_read_header_type(bus, device, func),
+            bar0: pci_read_bar(bus, device, func, 0),
+            bar1: pci_read_bar(bus, device, func, 1),
+            irq_line: pci_read_irq(bus, device, func)
         )
         self.devices.push(pci_dev)
 

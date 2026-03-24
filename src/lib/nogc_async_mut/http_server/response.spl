@@ -1,0 +1,223 @@
+"""
+# HTTP Response Serialization
+
+Serializes HttpResponseData into HTTP/1.1 wire format.
+Supports plain body, chunked encoding, and sendfile hints.
+
+## Usage
+
+```simple
+val resp = default_response_data(200, "OK", "<h1>Hello</h1>")
+val bytes = serialize_response(resp)
+# bytes = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n..."
+```
+"""
+
+use std.http_server.types.{HttpResponseData, default_response_data}
+use std.http.types.{status_reason}
+
+# ============================================================================
+# Response Serialization
+# ============================================================================
+
+fn serialize_response(resp: HttpResponseData) -> text:
+    """Serialize an HttpResponseData to HTTP/1.1 wire format.
+
+    Args:
+        resp: Response data to serialize
+
+    Returns:
+        Complete HTTP response as text
+    """
+    var result = "HTTP/1.1 {resp.status} {resp.reason}\r\n"
+
+    # Add Content-Length if body present and not chunked
+    var has_content_length = false
+    for header in resp.headers:
+        val name = header.0
+        val value = header.1
+        result = result + "{name}: {value}\r\n"
+        if name.to_lower() == "content-length":
+            has_content_length = true
+
+    if not has_content_length and resp.body.len() > 0 and not resp.chunked:
+        result = result + "Content-Length: {resp.body.len()}\r\n"
+
+    result = result + "\r\n"
+
+    if resp.body.len() > 0:
+        result = result + resp.body
+
+    result
+
+# ============================================================================
+# Response Builders
+# ============================================================================
+
+fn build_ok(body: text, content_type: text) -> HttpResponseData:
+    """200 OK response with body."""
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", content_type),
+            ("Server", "SimpleServer")
+        ],
+        body: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn build_json(body: text) -> HttpResponseData:
+    """200 OK JSON response."""
+    build_ok(body, "application/json")
+
+fn build_html(body: text) -> HttpResponseData:
+    """200 OK HTML response."""
+    build_ok(body, "text/html; charset=utf-8")
+
+fn build_text(body: text) -> HttpResponseData:
+    """200 OK plain text response."""
+    build_ok(body, "text/plain; charset=utf-8")
+
+fn build_redirect(url: text, status: i64) -> HttpResponseData:
+    """Redirect response (301 or 302)."""
+    val reason = match status:
+        301: "Moved Permanently"
+        302: "Found"
+        307: "Temporary Redirect"
+        308: "Permanent Redirect"
+        _: "Found"
+
+    HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: [
+            ("Location", url),
+            ("Server", "SimpleServer"),
+            ("Content-Length", "0")
+        ],
+        body: "",
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn build_error(status: i64, message: text) -> HttpResponseData:
+    """Error response with HTML body."""
+    val reason = status_reason(status)
+    val body = "<html><head><title>{status} {reason}</title></head>" +
+               "<body><h1>{status} {reason}</h1><p>{message}</p>" +
+               "<hr><p>SimpleServer</p></body></html>"
+
+    HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Server", "SimpleServer"),
+            ("Connection", "close")
+        ],
+        body: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn build_not_found() -> HttpResponseData:
+    """404 Not Found response."""
+    build_error(404, "The requested resource was not found.")
+
+fn build_method_not_allowed() -> HttpResponseData:
+    """405 Method Not Allowed response."""
+    build_error(405, "The request method is not allowed for this resource.")
+
+fn build_request_timeout() -> HttpResponseData:
+    """408 Request Timeout response."""
+    build_error(408, "The server timed out waiting for the request.")
+
+fn build_too_large() -> HttpResponseData:
+    """413 Content Too Large response."""
+    build_error(413, "The request body exceeds the maximum allowed size.")
+
+fn build_internal_error() -> HttpResponseData:
+    """500 Internal Server Error response."""
+    build_error(500, "An internal server error occurred.")
+
+fn build_service_unavailable() -> HttpResponseData:
+    """503 Service Unavailable response."""
+    build_error(503, "The server is temporarily unable to handle the request.")
+
+# ============================================================================
+# File Response (for static file handler)
+# ============================================================================
+
+fn build_file_response(path: text, content_type: text, size: i64) -> HttpResponseData:
+    """Response that signals sendfile for zero-copy transfer.
+
+    The body_file field tells the worker to use IoDriver.submit_sendfile()
+    instead of sending body bytes.
+
+    Args:
+        path: Absolute file path
+        content_type: MIME type
+        size: File size in bytes
+
+    Returns:
+        Response with body_file set for sendfile
+    """
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", content_type),
+            ("Content-Length", "{size}"),
+            ("Server", "SimpleServer")
+        ],
+        body: "",
+        body_file: path,
+        body_offset: 0,
+        body_length: size,
+        chunked: false
+    )
+
+fn build_not_modified() -> HttpResponseData:
+    """304 Not Modified response (for conditional requests)."""
+    HttpResponseData(
+        status: 304,
+        reason: "Not Modified",
+        headers: [("Server", "SimpleServer")],
+        body: "",
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+# ============================================================================
+# Keep-Alive Header Helpers
+# ============================================================================
+
+fn add_keepalive_headers(resp: HttpResponseData, keepalive: bool, timeout_s: i64) -> HttpResponseData:
+    """Add Connection and Keep-Alive headers."""
+    var headers = resp.headers
+    if keepalive:
+        headers = headers + [("Connection", "keep-alive")]
+        headers = headers + [("Keep-Alive", "timeout={timeout_s}")]
+    else:
+        headers = headers + [("Connection", "close")]
+
+    HttpResponseData(
+        status: resp.status,
+        reason: resp.reason,
+        headers: headers,
+        body: resp.body,
+        body_file: resp.body_file,
+        body_offset: resp.body_offset,
+        body_length: resp.body_length,
+        chunked: resp.chunked
+    )
