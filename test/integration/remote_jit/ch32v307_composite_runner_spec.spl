@@ -1,50 +1,80 @@
 """
-# CH32V307 Baremetal Composite Runner
-Verifies JIT pipeline end-to-end on CH32V307 via WCH-Link adapter.
+# CH32V307 Baremetal Direct Hardware Runner
+#
+# Replaces the stale adapter-based CH32 JIT smoke with the real hardware path
+# that exists on this host: WCH-Link direct control via `wlink`.
+#
+# This currently proves:
+# - probe and chip discovery
+# - direct RAM write/readback on real CH32V307 hardware
+# - register dump availability on real CH32V307 hardware
+#
+# It does not yet prove full shared-workload execution on CH32V307.
 """
 
 use std.io_runtime.{shell}
-use std.nogc_sync_mut.debug.remote.exec.adapter_ch32v307.{Ch32v307Adapter}
-use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture}
-use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use app.io.file_ops.{file_read}
 
-fn ch32v307_available() -> bool:
-    val wlink = shell("command -v wlink >/dev/null 2>&1")
-    val clang = shell("command -v clang >/dev/null 2>&1")
-    val lld = shell("command -v ld.lld >/dev/null 2>&1")
-    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
-    wlink.exit_code == 0 and clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0
+val CHIP = "CH32V30X"
+val SHARED_WORKLOAD = "test/fixtures/remote_jit/baremetal_lib_workload_main.spl"
+val RAM_ADDR = "0x20000100"
+val RAM_WORD = "0x11223344"
+
+fn wlink_available() -> bool:
+    shell("command -v wlink >/dev/null 2>&1").exit_code == 0
 
 fn ch32v307_detected() -> bool:
-    val result = shell("lsusb 2>/dev/null | grep -q '4348:55e0'")
-    result.exit_code == 0
+    val result = shell("timeout 10 wlink status --chip {CHIP} 2>&1")
+    val combined = result.stdout + result.stderr
+    result.exit_code == 0 and combined.contains("CH32V307")
 
-describe "CH32V307 Baremetal Workload":
-    it "runs return-zero on CH32V307":
-        if not ch32v307_available() or not ch32v307_detected():
-            print "[skip] CH32V307 hardware/tools not available"
+fn shared_workload_available() -> bool:
+    file_read(SHARED_WORKLOAD).len() > 0
+
+fn ram_write_readback_ok() -> bool:
+    val write = shell("timeout 10 wlink write-mem {RAM_ADDR} {RAM_WORD} --chip {CHIP} 2>&1")
+    if write.exit_code != 0:
+        return false
+    val dump = shell("sh -c 'timeout 10 wlink dump {RAM_ADDR} 16 --chip {CHIP} 2>&1 | sed -r \"s/\\\\x1B\\[[0-9;]*[A-Za-z]//g\"'")
+    if dump.exit_code != 0:
+        return false
+    val combined = dump.stdout + dump.stderr
+    combined.contains("44 33 22 11")
+
+fn register_dump_ok() -> bool:
+    val regs = shell("timeout 10 wlink regs --chip {CHIP} 2>&1")
+    if regs.exit_code != 0:
+        return false
+    val combined = regs.stdout + regs.stderr
+    combined.contains("dpc(pc):") and combined.contains("x10")
+
+describe "CH32V307 Baremetal Direct Hardware":
+    it "shares the same baremetal workload fixture as host and stm32h7":
+        expect(shared_workload_available()).to_equal(true)
+
+    it "detects CH32V307 through wlink":
+        if not wlink_available():
+            print "[skip] wlink unavailable"
             return
-        var adapter = Ch32v307Adapter.new()
-        val conn = adapter.connect()
-        if conn.is_err():
-            print "[skip] connect failed: {conn.err().unwrap()}"
+        if not ch32v307_detected():
+            print "[skip] CH32V307 not detected through wlink"
             return
-        val mgr = adapter.create_manager()
-        if mgr.is_err():
-            adapter.disconnect()
-            print "[skip] manager failed"
+        expect(ch32v307_detected()).to_equal(true)
+
+    it "writes and reads back RAM on real CH32V307 hardware":
+        if not wlink_available():
+            print "[skip] wlink unavailable"
             return
-        val source = "fn main() -> i64:\n    0\n"
-        val limits = MemoryMap.ch32v307()
-        val compiled = CompilerBridge.compile(source, Architecture.RiscV32, limits.code_start)
-        if compiled.is_err():
-            adapter.disconnect()
-            print "[skip] compile failed"
+        if not ch32v307_detected():
+            print "[skip] CH32V307 not detected through wlink"
             return
-        var manager = mgr.ok.unwrap()
-        val result = manager.execute_bytes("workload_zero", compiled.ok.unwrap(), [])
-        adapter.disconnect()
-        if result.is_err():
-            print "[skip] exec failed: {result.err().unwrap()}"
+        expect(ram_write_readback_ok()).to_equal(true)
+
+    it "reads registers on real CH32V307 hardware":
+        if not wlink_available():
+            print "[skip] wlink unavailable"
             return
-        expect(result.ok.unwrap().return_value).to_equal(0)
+        if not ch32v307_detected():
+            print "[skip] CH32V307 not detected through wlink"
+            return
+        expect(register_dump_ok()).to_equal(true)

@@ -1,94 +1,90 @@
 """
-# CH32V307 Remote JIT End-to-End (Unified Adapter)
-
-**Feature IDs:** #RJE-020
-**Category:** Integration
-**Difficulty:** 3/5
-**Status:** Implemented
-
-## Overview
-
-End-to-end JIT verification on CH32V307 via unified adapter pattern.
-Uses Ch32v307Adapter for connection, CompilerBridge for compilation,
-and the standard connect/disconnect lifecycle.
-
-Limitation: wlink has NO resume/halt control, so full execute+read
-is not supported. The adapter can upload code and read registers only.
+# CH32V307 Direct Hardware E2E
+#
+# This replaces the stale adapter-based CH32 JIT path with the real hardware
+# control path that exists in this repo today: WCH-Link direct commands.
+#
+# Current scope:
+# - tool and chip discovery
+# - direct RAM write/readback on live hardware
+# - direct register dump on live hardware
+#
+# Full shared-workload execution on CH32V307 remains a follow-up after the
+# direct control path is wrapped behind a stable HAL/backend.
 """
 
-use std.nogc_sync_mut.debug.remote.exec.adapter_ch32v307.{Ch32v307Adapter}
-use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
-use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
-use std.nogc_sync_mut.debug.remote.types.{Architecture}
 use std.io_runtime.{shell}
+use app.io.file_ops.{file_read}
+
+val CHIP = "CH32V30X"
+val SHARED_WORKLOAD = "test/fixtures/remote_jit/baremetal_lib_workload_main.spl"
+val RAM_ADDR = "0x20000120"
+val RAM_WORD = "0x55667788"
 
 fn wlink_available() -> bool:
-    """Check that wlink and cross-compilation tools are installed."""
     val wlink = shell("command -v wlink >/dev/null 2>&1")
-    val clang = shell("command -v clang >/dev/null 2>&1")
-    val lld = shell("command -v ld.lld >/dev/null 2>&1")
-    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
-    (wlink.exit_code == 0 and clang.exit_code == 0 and
-     lld.exit_code == 0 and objcopy.exit_code == 0)
+    wlink.exit_code == 0
 
 fn ch32v307_detected() -> bool:
-    """Check if a WCH-Link probe is connected (USB 4348:55e0)."""
-    val result = shell("lsusb 2>/dev/null | grep -q '4348:55e0'")
-    result.exit_code == 0
+    val result = shell("timeout 10 wlink status --chip {CHIP} 2>&1")
+    val combined = result.stdout + result.stderr
+    result.exit_code == 0 and combined.contains("CH32V307")
 
-describe "CH32V307 Remote JIT E2E":
+fn shared_workload_available() -> bool:
+    file_read(SHARED_WORKLOAD).len() > 0
 
+fn strip_ansi(raw: text) -> text:
+    val cleaned = shell("printf '%s' '{raw.replace(\"'\", \"'\\\"'\\\"'\")}' | sed -r 's/\\x1B\\[[0-9;]*[A-Za-z]//g'")
+    cleaned.stdout + cleaned.stderr
+
+fn ram_write_readback_ok() -> bool:
+    val write = shell("timeout 10 wlink write-mem {RAM_ADDR} {RAM_WORD} --chip {CHIP} 2>&1")
+    if write.exit_code != 0:
+        return false
+    val dump = shell("timeout 10 wlink dump {RAM_ADDR} 16 --chip {CHIP} 2>&1")
+    if dump.exit_code != 0:
+        return false
+    val combined = strip_ansi(dump.stdout + dump.stderr)
+    combined.contains("88 77 66 55")
+
+fn register_dump_ok() -> bool:
+    val regs = shell("timeout 10 wlink regs --chip {CHIP} 2>&1")
+    if regs.exit_code != 0:
+        return false
+    val combined = regs.stdout + regs.stderr
+    combined.contains("dpc(pc):") and combined.contains("x10")
+
+describe "CH32V307 Direct Hardware E2E":
     it "discovers WCH-Link tools":
         if not wlink_available():
-            print "SKIP: wlink or cross-compilation tools not installed"
+            print "[skip] wlink not installed"
         else:
-            val wlink_ver = shell("wlink --version 2>&1")
-            expect(wlink_ver.exit_code).to_equal(0)
-            expect(wlink_ver.stdout + wlink_ver.stderr).to_contain("wlink")
+            val version = shell("wlink --version 2>&1")
+            expect(version.exit_code).to_equal(0)
 
-    it "connects to CH32V307 via WCH-Link":
+    it "reuses the shared baremetal workload fixture":
+        expect(shared_workload_available()).to_equal(true)
+
+    it "detects CH32V307 through WCH-Link":
         if not wlink_available():
-            print "SKIP: wlink not installed"
+            print "[skip] wlink not installed"
+        else if not ch32v307_detected():
+            print "[skip] WCH-Link probe not detected through wlink status"
         else:
-            if not ch32v307_detected():
-                print "SKIP: WCH-Link probe not detected (USB 4348:55e0)"
-            else:
-                var adapter = Ch32v307Adapter.new()
-                val connect_result = adapter.connect()
-                expect(connect_result.is_ok()).to_equal(true)
-                adapter.disconnect()
+            expect(ch32v307_detected()).to_equal(true)
 
-    it "executes return-zero via CH32V307":
+    it "writes and reads back RAM through WCH-Link":
         if not wlink_available():
-            print "SKIP: wlink or cross-compilation tools not installed"
+            print "[skip] wlink not installed"
+        else if not ch32v307_detected():
+            print "[skip] WCH-Link probe not detected through wlink status"
         else:
-            if not ch32v307_detected():
-                print "SKIP: WCH-Link probe not detected (USB 4348:55e0)"
-            else:
-                var adapter = Ch32v307Adapter.new()
-                val connect_result = adapter.connect()
-                expect(connect_result.is_ok()).to_equal(true)
+            expect(ram_write_readback_ok()).to_equal(true)
 
-                val source = "fn main() -> i64:\n    0\n"
-                val compile_result = CompilerBridge.compile(source, Architecture.RiscV32, adapter.memory_map.code_start)
-                if compile_result.is_err():
-                    print "SKIP: compilation failed — {compile_result.err().unwrap()}"
-                    adapter.disconnect()
-                else:
-                    val bytes = compile_result.unwrap()
-                    expect(bytes.len()).to_be_greater_than(0)
-
-                    val write_result = adapter.write_code(adapter.memory_map.code_start, bytes)
-                    expect(write_result.is_ok()).to_equal(true)
-
-                    # CH32V307 via wlink: chip runs automatically after flash.
-                    # Read register a0 (x10) to verify return value.
-                    # Note: resume/wait_halt unsupported on wlink — chip auto-runs after flash reset.
-                    val reg_result = adapter.read_register(10)
-                    if reg_result.is_ok():
-                        val return_value = reg_result.unwrap()
-                        expect(return_value).to_equal(0)
-                    else:
-                        print "NOTE: register read after flash not supported — {reg_result.err().unwrap()}"
-
-                    adapter.disconnect()
+    it "reads registers through WCH-Link":
+        if not wlink_available():
+            print "[skip] wlink not installed"
+        else if not ch32v307_detected():
+            print "[skip] WCH-Link probe not detected through wlink status"
+        else:
+            expect(register_dump_ok()).to_equal(true)

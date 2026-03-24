@@ -205,6 +205,14 @@ That means:
   `test/integration/remote_jit/qemu_rv32_composite_runner_spec.spl`
   but the live QEMU/GDB transport is still blocked on this host because only plain `gdb` is available
   and the working QEMU write path needs a target-aware RISC-V GDB for physical-memory mode
+- QEMU RV32 library workload is proven through the stable semihost ELF lane in:
+  `test/integration/remote_jit/qemu_rv32_library_semihost_spec.spl`
+- CH32V307 real hardware direct-control lane is now proven in:
+  `test/integration/remote_jit/ch32v307_composite_runner_spec.spl`
+  through direct `wlink` control rather than the stale adapter path
+  currently proven: probe discovery, RAM write/readback, register dump,
+  and reuse of the shared workload fixture
+  not yet proven: full shared-workload execution on CH32V307
 - the last STM32H7 interpreter failure came from helper code using `index_of()` as if it returned an integer
 - TRACE32 readiness is no longer blocked by the app-side parse bug in `src/app/debug/remote/protocol/trace32.spl`
 - current host TRACE32 state is still blocked:

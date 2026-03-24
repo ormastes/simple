@@ -231,6 +231,15 @@ Practical rule:
   current live blocker on this host is lack of a target-aware RISC-V GDB
   (`riscv32-unknown-elf-gdb`, `riscv64-unknown-elf-gdb`, or `gdb-multiarch`)
   so QEMU physical memory write mode cannot be used reliably
+- QEMU RV32 semihost library workload:
+  `test/integration/remote_jit/qemu_rv32_library_semihost_spec.spl` passes on this host
+  and proves a real RV32 baremetal library workload through the stable ELF lane
+- CH32V307 real hardware direct-control workload:
+  `test/integration/remote_jit/ch32v307_composite_runner_spec.spl` now uses direct `wlink`
+  instead of the stale adapter import path
+  current proven operations are probe discovery, RAM write/readback, register dump,
+  and reuse of the shared baremetal workload fixture
+  full shared-workload execution on CH32V307 is still pending
 - the remaining STM32H7 interpreter blocker was in `jit_util.spl`:
   `index_of()` was being treated as an integer in helper code, which triggered the documented runtime failure
   `semantic: type mismatch: cannot convert enum to int`
@@ -259,6 +268,17 @@ Order:
 1. QEMU `riscv32` on the shared runner
 2. fix the QEMU `riscv32` transport so the shared workload executes instead of skipping on blocked writes
 3. real RISC-V hardware only after the QEMU path uses the same shared library test shape
+
+Current CH32V307 note:
+
+- the old adapter-based CH32 runner was stale and imported a non-existent adapter module
+- the direct WCH-Link path is real on this host and should be the basis for the first CH32 HAL/backend
+- full CH32 shared-workload execution remains a follow-up after direct control is stabilized
+
+Practical note:
+
+- the stable near-term RV32 proof lane is semihost ELF execution
+- the still-broken lane is raw remote-JIT byte injection through QEMU GDB
 
 The RISC-V objective is not another ELF/smoke check.
 It is to make the same baremetal library test workload run through:

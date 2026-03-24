@@ -6,6 +6,7 @@
 
 use test_runner_types.*
 use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{shell}
 use std.nogc_sync_mut.debug.remote.types.{Architecture}
 use std.nogc_sync_mut.debug.remote.exec.{ExecResult, MemoryMap}
 use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
@@ -14,7 +15,6 @@ use std.nogc_sync_mut.debug.remote.exec.adapter_qemu_arm.{QemuArmAdapter}
 use std.nogc_sync_mut.debug.remote.exec.adapter_stm32wb.{Stm32WbAdapter}
 use std.nogc_sync_mut.debug.remote.exec.adapter_stm32h7.{Stm32H7Adapter}
 use std.nogc_sync_mut.debug.remote.exec.adapter_trace32.{Trace32Adapter}
-use std.nogc_sync_mut.debug.remote.exec.adapter_ch32v307.{Ch32v307Adapter}
 use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
 use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{compile_remote_binary}
 use std.nogc_sync_mut.jit.jit_types.{JitBinary}
@@ -61,14 +61,26 @@ fn run_test_file_jit_stm32h7_adapter(file_path: text, source: text, options: Tes
     )
 
 fn run_test_file_jit_ch32v307(file_path: text, source: text, options: TestOptions) -> TestFileResult:
-    var adapter = Ch32v307Adapter.new()
-    run_test_file_jit_with_adapter(
-        file_path, source, options,
-        Architecture.RiscV32, MemoryMap.ch32v307(),
-        \: adapter.connect(),
-        \: adapter.create_manager(),
-        \: adapter.disconnect()
-    )
+    val setup_start = time_now_unix_micros()
+    val wlink = shell("command -v wlink >/dev/null 2>&1")
+    val detected = shell("timeout 10 wlink status --chip CH32V30X 2>&1")
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    if wlink.exit_code != 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "CH32V307 direct hardware path unavailable: wlink not installed", timed_out: false)
+
+    val combined = detected.stdout + detected.stderr
+    if detected.exit_code != 0 or not combined.contains("CH32V307"):
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "CH32V307 direct hardware path unavailable: probe not detected through wlink", timed_out: false)
+
+    TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+        duration_ms: 0, setup_ms: setup_ms,
+        error: "CH32V307 shared-workload execution is not implemented in the composite runner yet; use the direct wlink hardware specs", timed_out: false)
 
 fn run_test_file_jit_ghdl_rv32(file_path: text, source: text, options: TestOptions) -> TestFileResult:
     var adapter = GhdlRv32Adapter.new()
