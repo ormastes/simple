@@ -41,7 +41,7 @@ use std.supervisor.{
 }
 
 use std.http_server.types.{
-    ServerConfig, WorkerHandle, default_server_config
+    ServerConfig, WorkerHandle, Phase, default_server_config
 }
 use std.http_server.config.{load_config}
 use std.http_server.worker.{Worker}
@@ -52,6 +52,36 @@ use std.http_server.middleware.{
 use std.http_server.access_log.{access_log_handler}
 use std.http_server.handler.{HandlerRegistry, create_default_registry}
 use std.http_server.error.{HttpServerError}
+
+# Module-level worker storage for thread entry points.
+# Each spawned worker is stored here so the thread callback can retrieve it.
+var _workers: Dict<i64, Worker> = {}
+var _next_worker_slot: i64 = 0
+
+fn worker_thread_entry(slot_id: i64):
+    """Thread entry point. Runs the worker stored at slot_id."""
+    val worker = _workers.get(slot_id)
+    if worker.?:
+        var w = worker
+        w.run()
+
+fn spawn_worker(worker: Worker) -> i64:
+    """Spawn a worker in a new OS thread.
+
+    Stores the worker in a module-level dict so the thread entry
+    function can retrieve and run it.
+
+    Args:
+        worker: Initialized worker ready to run
+
+    Returns:
+        Thread handle from spl_thread_create
+    """
+    val slot = _next_worker_slot
+    _next_worker_slot = _next_worker_slot + 1
+    _workers[slot] = worker
+
+    spl_thread_create(worker_thread_entry, slot)
 
 # ============================================================================
 # HttpServer
@@ -75,11 +105,7 @@ class HttpServer:
     handler_registry: HandlerRegistry
 
     static fn new(config: ServerConfig) -> HttpServer:
-        """Create server from a ServerConfig.
-
-        Args:
-            config: Server configuration
-        """
+        """Create server from a ServerConfig."""
         val sup_config = SupervisorConfig(
             strategy: STRATEGY_ONE_FOR_ONE,
             max_restarts: 10,
@@ -104,14 +130,7 @@ class HttpServer:
         )
 
     static fn from_config_file(path: text) -> Result<HttpServer, HttpServerError>:
-        """Load config from SDN file and create server.
-
-        Args:
-            path: Path to SDN config file
-
-        Returns:
-            Initialized HttpServer or ConfigError
-        """
+        """Load config from SDN file and create server."""
         val config = load_config(path)?
         Ok(HttpServer.new(config))
 
@@ -125,27 +144,19 @@ class HttpServer:
         Determines worker count (0 = CPU count), creates
         control channels, builds router and middleware pipeline,
         then spawns worker threads.
-
-        Returns:
-            Ok on success, or error if any worker fails to bind
         """
         if self.running:
             return Err(HttpServerError.Internal("Server already running"))
 
-        # Determine worker count
         val worker_count = if self.config.worker_count <= 0:
             val cpus = spl_thread_cpu_count()
             if cpus > 0: cpus else: 4
         else:
             self.config.worker_count
 
-        # Build router from config locations
         val router = AsyncRouter.new(self.config.locations)
-
-        # Build default middleware pipeline
         val pipeline = build_default_pipeline()
 
-        # Spawn workers
         var workers: [WorkerHandle] = []
         var channels: [Channel] = []
 
@@ -155,12 +166,11 @@ class HttpServer:
             channels = channels + [control]
 
             val worker_result = Worker.create(
-                i, self.config, router, pipeline, control
+                i, self.config, router, pipeline,
+                self.handler_registry, control
             )
             match worker_result:
                 Ok(worker):
-                    # Spawn worker thread
-                    # Worker.run() is the entry point
                     val handle = spawn_worker(worker)
                     workers = workers + [WorkerHandle(
                         worker_id: i,
@@ -168,7 +178,6 @@ class HttpServer:
                         is_alive: true
                     )]
 
-                    # Register with supervisor
                     val child = ChildSpec(
                         id: "worker_{i}",
                         restart: RESTART_PERMANENT,
@@ -178,7 +187,6 @@ class HttpServer:
                     self.supervisor.add_child(child)
 
                 Err(e):
-                    # Cleanup already-spawned workers
                     self.stop_workers(channels)
                     return Err(e)
 
@@ -194,28 +202,20 @@ class HttpServer:
         Ok(())
 
     me stop():
-        """Gracefully stop the server.
-
-        Sends shutdown to all workers via control channels,
-        waits for workers to finish, then cleans up.
-        """
+        """Gracefully stop the server."""
         if not self.running:
             return
 
         print "[SimpleServer] Shutting down..."
 
         self.stop_workers(self.control_channels)
-
         self.supervisor.stop()
         self.running = false
 
         print "[SimpleServer] Stopped"
 
     me wait():
-        """Block until all workers exit.
-
-        Call after start() to keep the master thread alive.
-        """
+        """Block until all workers exit."""
         for wh in self.workers:
             if wh.is_alive:
                 spl_thread_join(wh.thread_handle)
@@ -242,36 +242,11 @@ class HttpServer:
                 spl_thread_join(wh.thread_handle)
 
 # ============================================================================
-# Worker Thread Spawning
-# ============================================================================
-
-fn spawn_worker(worker: Worker) -> i64:
-    """Spawn a worker in a new OS thread.
-
-    Args:
-        worker: Initialized worker ready to run
-
-    Returns:
-        Thread handle
-    """
-    # Worker.run() is the entry point for the thread
-    # The thread_sffi API takes a function pointer + arg
-    # We pass the worker as the arg, entry calls worker.run()
-    pass_todo("Implement proper thread spawn with Worker.run() entry point")
-    0
-
-# ============================================================================
 # Default Pipeline
 # ============================================================================
 
 fn build_default_pipeline() -> MiddlewarePipeline:
-    """Create the default middleware pipeline with built-in handlers.
-
-    Includes:
-    - PostAccept: connection_limit_handler (priority 100)
-    - Read: body_limit_handler (priority 100)
-    - Log: access_log_handler (priority 50)
-    """
+    """Create the default middleware pipeline with built-in handlers."""
     var pipeline = MiddlewarePipeline.new()
 
     pipeline.add(Phase.PostAccept, 100, "connection_limit",

@@ -1,0 +1,136 @@
+# Time Management — FrameTime and Clock for the 2D game engine
+#
+# Provides frame timing, delta computation, and fixed-timestep accumulation
+# for deterministic physics updates.
+#
+# Usage:
+#   var clock = Clock.create(1.0 / 60.0)
+#   # each frame:
+#   val frame = clock.tick(time_now_nanos())
+#   val steps = clock.consume_fixed_steps()
+
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+# ============================================================================
+# FrameTime — snapshot of timing data for a single frame
+# ============================================================================
+
+struct FrameTime:
+    """Timing data produced by Clock.tick() each frame.
+
+    Fields:
+        delta: Seconds elapsed since the previous frame (variable)
+        fixed_delta: The fixed physics timestep (constant per Clock)
+        total_time: Total seconds elapsed since Clock creation
+        frame_count: Number of frames ticked so far
+    """
+    delta: f64
+    fixed_delta: f64
+    total_time: f64
+    frame_count: i64
+
+# ============================================================================
+# Clock — manages frame timing and physics accumulator
+# ============================================================================
+
+class Clock:
+    """High-resolution frame clock with fixed-timestep accumulator.
+
+    Tracks monotonic time in nanoseconds to compute per-frame delta,
+    clamps delta to prevent spiral-of-death, and accumulates time
+    for fixed-rate physics updates.
+    """
+    last_time_ns: i64
+    fixed_timestep: f64
+    accumulator: f64
+    total_time: f64
+    frame_count: i64
+
+impl Clock:
+    static fn create(fixed_timestep: f64) -> Clock:
+        """Create a clock with the given fixed timestep.
+
+        The clock starts with last_time_ns = 0. The first call to tick()
+        will detect this and produce a zero delta to avoid a huge initial
+        spike.
+
+        Args:
+            fixed_timestep: Seconds per physics step (e.g. 1.0/60.0)
+
+        Returns:
+            A new Clock ready to tick
+        """
+        Clock(
+            last_time_ns: 0,
+            fixed_timestep: fixed_timestep,
+            accumulator: 0.0,
+            total_time: 0.0,
+            frame_count: 0
+        )
+
+    me tick(current_time_ns: i64) -> FrameTime:
+        """Advance the clock by one frame.
+
+        Computes delta from the previous tick, clamps to a maximum of
+        0.1 seconds to prevent spiral-of-death when frames stall, and
+        adds the delta to the physics accumulator.
+
+        Args:
+            current_time_ns: Current monotonic time in nanoseconds
+
+        Returns:
+            FrameTime with the computed delta and running totals
+        """
+        var delta = 0.0
+        if self.last_time_ns > 0:
+            val elapsed_ns = current_time_ns - self.last_time_ns
+            delta = elapsed_ns.to_f64() / 1_000_000_000.0
+        self.last_time_ns = current_time_ns
+
+        # Clamp delta to prevent spiral of death
+        if delta > 0.1:
+            delta = 0.1
+        if delta < 0.0:
+            delta = 0.0
+
+        self.accumulator = self.accumulator + delta
+        self.total_time = self.total_time + delta
+        self.frame_count = self.frame_count + 1
+
+        FrameTime(
+            delta: delta,
+            fixed_delta: self.fixed_timestep,
+            total_time: self.total_time,
+            frame_count: self.frame_count
+        )
+
+    me consume_fixed_steps() -> i64:
+        """Drain the accumulator by fixed_timestep increments.
+
+        Returns the number of fixed-rate physics steps that should be
+        executed this frame. The accumulator retains any leftover time
+        for interpolation.
+
+        Returns:
+            Number of fixed steps to execute (0 or more)
+        """
+        var steps = 0
+        while self.accumulator >= self.fixed_timestep:
+            self.accumulator = self.accumulator - self.fixed_timestep
+            steps = steps + 1
+        steps
+
+    fn get_accumulator() -> f64:
+        """Return the remaining time in the accumulator (for interpolation)."""
+        self.accumulator
+
+    fn get_interpolation_alpha() -> f64:
+        """Return the interpolation factor between previous and current physics state.
+
+        Value in [0, 1) representing how far into the next fixed step we are.
+        Useful for smooth rendering between physics ticks.
+        """
+        if self.fixed_timestep > 0.0:
+            self.accumulator / self.fixed_timestep
+        else:
+            0.0

@@ -14,7 +14,8 @@ Worker Thread
   ├── TcpListener (SO_REUSEPORT, own bind)
   ├── connections: Dict<fd, Connection>
   ├── AsyncRouter
-  └── MiddlewarePipeline
+  ├── MiddlewarePipeline
+  └── HandlerRegistry
 ```
 
 ## Main Loop
@@ -33,14 +34,15 @@ use std.io.driver.{IoDriver}
 use std.io.event_loop.{EventLoop, Waker}
 use std.net.ffi.{
     rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_local_addr,
-    rt_io_tcp_set_nodelay, rt_socket_set_nonblocking
+    rt_io_tcp_set_nodelay, rt_socket_set_nonblocking,
+    rt_socket_set_reuseport, rt_socket_set_reuseaddr
 }
 use std.concurrent.channel.{Channel}
 use std.thread_sffi.{spl_thread_sleep}
 
 use std.http_server.types.{
     ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
-    ServerConfig, LocationConfig
+    ServerConfig, LocationConfig, PhaseResult
 }
 use std.http_server.connection.{Connection}
 use std.http_server.parser.{HttpRequestParser}
@@ -50,14 +52,16 @@ use std.http_server.response.{
     serialize_response, build_error, build_not_found, build_internal_error,
     build_too_large, build_request_timeout
 }
+use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
-
-# FFI for SO_REUSEPORT and SO_REUSEADDR
-extern fn rt_socket_set_reuseport(fd: i64, enabled: bool) -> bool
-extern fn rt_socket_set_reuseaddr(fd: i64, enabled: bool) -> bool
 
 # Time FFI
 extern fn rt_time_now_ms() -> i64
+
+# Completion type constants
+val OP_RECV = 1
+val OP_SEND = 2
+val OP_SENDFILE = 3
 
 # ============================================================================
 # Worker
@@ -74,8 +78,12 @@ class Worker:
     driver: IoDriver
     listener_fd: i64
     connections: Dict<i64, Connection>
+    op_to_fd: Dict<i64, i64>
+    op_type: Dict<i64, i64>
+    sendfile_pending: Dict<i64, (text, i64, i64)>
     router: AsyncRouter
     pipeline: MiddlewarePipeline
+    handler_registry: HandlerRegistry
     config: ServerConfig
     control: Channel
     active_count: i64
@@ -84,6 +92,7 @@ class Worker:
 
     static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
+                     handler_registry: HandlerRegistry,
                      control: Channel) -> Result<Worker, HttpServerError>:
         """Create a new worker and bind its listener.
 
@@ -92,15 +101,14 @@ class Worker:
             config: Server configuration
             router: Router (read-only after init)
             pipeline: Middleware pipeline (read-only after init)
+            handler_registry: Content handler dispatch registry
             control: Channel for shutdown signals from master
 
         Returns:
             Initialized Worker or BindFailed error
         """
-        # Create IoDriver
         val driver = IoDriver.new()
 
-        # Bind TCP listener with SO_REUSEPORT
         val listen_fd = rt_io_tcp_bind(config.listen_addr)
         if listen_fd < 0:
             return Err(HttpServerError.BindFailed(
@@ -116,8 +124,12 @@ class Worker:
             driver: driver,
             listener_fd: listen_fd,
             connections: {},
+            op_to_fd: {},
+            op_type: {},
+            sendfile_pending: {},
             router: router,
             pipeline: pipeline,
+            handler_registry: handler_registry,
             config: config,
             control: control,
             active_count: 0,
@@ -131,12 +143,10 @@ class Worker:
         This method is called in a dedicated OS thread. It submits
         an initial accept, then loops polling for completions.
         """
-        # Submit first accept
         self.accept_op_id = self.driver.submit_accept(self.listener_fd)
         self.driver.flush()
 
         while not self.shutdown_requested:
-            # Check control channel (non-blocking)
             val msg = self.control.try_recv()
             if msg.?:
                 val cmd = msg as text
@@ -144,10 +154,8 @@ class Worker:
                     self.shutdown_requested = true
                     break
 
-            # Poll for I/O completions
             self.driver.flush()
             val completions = self.driver.poll(64, 10)
-
             val now = rt_time_now_ms()
 
             for completion in completions:
@@ -160,10 +168,8 @@ class Worker:
                 else:
                     self.handle_completion(op_id, result, flags, now)
 
-            # Reap expired connections
             self.reap_expired(now)
 
-        # Cleanup
         self.close_all_connections()
         rt_io_tcp_close(self.listener_fd)
         self.driver.close()
@@ -174,18 +180,15 @@ class Worker:
 
     me handle_accept(client_fd: i64, now: i64):
         """Handle a new connection accept completion."""
-        # Always submit next accept immediately
         self.accept_op_id = self.driver.submit_accept(self.listener_fd)
 
         if client_fd < 0:
             return
 
-        # Check connection limit
         if self.active_count >= self.config.max_connections:
             rt_io_tcp_close(client_fd)
             return
 
-        # Configure new connection
         rt_socket_set_nonblocking(client_fd, true)
         rt_io_tcp_set_nodelay(client_fd, true)
 
@@ -195,8 +198,10 @@ class Worker:
         self.connections[client_fd] = conn
         self.active_count = self.active_count + 1
 
-        # Submit recv for the new connection
-        self.driver.submit_recv(client_fd, 8192)
+        # Submit recv and track op_id → fd
+        val recv_op = self.driver.submit_recv(client_fd, 8192)
+        self.op_to_fd[recv_op] = client_fd
+        self.op_type[recv_op] = OP_RECV
 
     # ========================================================================
     # I/O Completions
@@ -205,13 +210,46 @@ class Worker:
     me handle_completion(op_id: i64, result: i64, flags: i64, now: i64):
         """Handle a non-accept I/O completion.
 
-        Dispatches to the appropriate connection based on fd.
+        Uses op_to_fd/op_type maps to dispatch to the correct connection.
         """
-        # Find which connection this completion belongs to
-        # The IoDriver returns the fd as the result for recv/send ops
-        # We need to map op_id → fd. For simplicity, we use result as fd
-        # when it represents data, and track separately for sends.
-        pass_todo("Map op_id to connection fd via completion tracking")
+        val fd = self.op_to_fd.get(op_id)
+        if not fd.?:
+            return
+
+        val typ = self.op_type.get(op_id) ?? 0
+
+        # Clean up tracking maps
+        self.op_to_fd.remove(op_id)
+        self.op_type.remove(op_id)
+
+        if result < 0:
+            self.close_connection(fd)
+            return
+
+        if typ == OP_RECV:
+            if result == 0:
+                # EOF — peer closed
+                self.close_connection(fd)
+            else:
+                val data = self.driver.poll_data(op_id)
+                self.handle_recv(fd, data, now)
+
+        elif typ == OP_SEND:
+            # Check if there's a pending sendfile for this fd
+            val pending = self.sendfile_pending.get(fd)
+            if pending.?:
+                val file_path = pending.0
+                val offset = pending.1
+                val length = pending.2
+                self.sendfile_pending.remove(fd)
+                val sf_op = self.driver.submit_open(file_path, 0, 0)
+                self.op_to_fd[sf_op] = fd
+                self.op_type[sf_op] = OP_SENDFILE
+            else:
+                self.handle_send_complete(fd, now)
+
+        elif typ == OP_SENDFILE:
+            self.handle_send_complete(fd, now)
 
     me handle_recv(fd: i64, data: text, now: i64):
         """Handle data received on a connection."""
@@ -225,7 +263,9 @@ class Worker:
 
         match action:
             ConnectionAction.ContinueReading:
-                self.driver.submit_recv(fd, 8192)
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
 
             ConnectionAction.RequestReady:
                 self.process_request(fd, now)
@@ -251,8 +291,9 @@ class Worker:
 
         match action:
             ConnectionAction.ContinueReading:
-                # Keep-alive: wait for next request
-                self.driver.submit_recv(fd, 8192)
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
 
             ConnectionAction.Close:
                 self.close_connection(fd)
@@ -296,17 +337,15 @@ class Worker:
         val route_result = self.router.route(request)
         match route_result:
             Ok((location, params)):
-                # Update request with route params
-                var req = request
-                req = HttpRequestData(
-                    method: req.method,
-                    path: req.path,
-                    query: req.query,
-                    version: req.version,
-                    headers: req.headers,
-                    body: req.body,
+                var req = HttpRequestData(
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    version: request.version,
+                    headers: request.headers,
+                    body: request.body,
                     params: params,
-                    peer_addr: req.peer_addr
+                    peer_addr: request.peer_addr
                 )
                 val resp = self.execute_handler(location, req)
                 self.send_response(fd, resp, now)
@@ -321,24 +360,10 @@ class Worker:
                        request: HttpRequestData) -> HttpResponseData:
         """Execute the content handler for a matched location.
 
-        Args:
-            location: Matched location config
-            request: Request with route params populated
-
-        Returns:
-            Response from handler
+        Delegates to handler_registry which maps handler_type to
+        the appropriate ContentHandler.
         """
-        match location.handler_type:
-            "static":
-                # Delegate to static file handler (registered externally)
-                # For now, return a placeholder
-                pass_todo("Delegate to registered static file handler")
-                build_error(501, "Static file handler not yet connected")
-            "proxy":
-                pass_todo("Delegate to proxy handler")
-                build_error(502, "Proxy not implemented")
-            _:
-                build_error(501, "Unknown handler type: {location.handler_type}")
+        self.handler_registry.dispatch(location.handler_type, request, location)
 
     # ========================================================================
     # Response Sending
@@ -358,11 +383,15 @@ class Worker:
         val bytes = c.get_response_bytes()
 
         if resp.body_file.len() > 0:
-            # Send headers first, then sendfile
-            pass_todo("Submit header send then sendfile for zero-copy")
-            self.driver.submit_send(fd, bytes)
+            # Send headers first, then chain sendfile on completion
+            self.sendfile_pending[fd] = (resp.body_file, resp.body_offset, resp.body_length)
+            val op = self.driver.submit_send(fd, bytes)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
         else:
-            self.driver.submit_send(fd, bytes)
+            val op = self.driver.submit_send(fd, bytes)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
 
     me send_error(fd: i64, status: i64, msg: text, now: i64):
         """Send an error response and close."""

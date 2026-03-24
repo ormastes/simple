@@ -1,0 +1,168 @@
+# Game Loop — Fixed-timestep game loop with input/update/physics/render phases
+#
+# The main loop that ties all engine subsystems together. Uses a
+# GameCallbacks struct to let user code hook into each phase.
+#
+# Usage:
+#   val callbacks = GameCallbacks(
+#       on_init: \e: setup(e),
+#       on_update: \e, dt: move_player(e, dt),
+#       on_physics_update: \e, dt: pass_dn,
+#       on_late_update: \e, dt: pass_dn,
+#       on_render: \e, cmds: draw_scene(e, cmds),
+#       on_destroy: \e: cleanup(e)
+#   )
+#   var loop = GameLoop.create(1.0 / 60.0)
+#   loop.run(engine, callbacks)
+
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+use std.nogc_sync_mut.engine.core.time.{Clock, FrameTime}
+use std.nogc_sync_mut.engine.render.command.{RenderCommandBuffer}
+use std.common.engine.math2d.{Vec2}
+
+# Forward declaration — Engine2D is defined in engine.spl
+# The game loop receives it as a parameter.
+
+# ============================================================================
+# GameCallbacks — user-provided hooks for each loop phase
+# ============================================================================
+
+struct GameCallbacks:
+    """Callback hooks invoked by the game loop at each phase.
+
+    Fields:
+        on_init: Called once before the first frame
+        on_update: Called each frame with variable delta (seconds)
+        on_physics_update: Called 0-N times per frame with fixed delta
+        on_late_update: Called after physics sync with variable delta
+        on_render: Called each frame to build render commands
+        on_destroy: Called once after the loop exits
+    """
+    on_init: fn(Engine2D)
+    on_update: fn(Engine2D, f64)
+    on_physics_update: fn(Engine2D, f64)
+    on_late_update: fn(Engine2D, f64)
+    on_render: fn(Engine2D, RenderCommandBuffer)
+    on_destroy: fn(Engine2D)
+
+# ============================================================================
+# GameLoop
+# ============================================================================
+
+class GameLoop:
+    """Fixed-timestep game loop with five phases per frame.
+
+    Phase 1: INPUT   — poll window and gamepad events
+    Phase 2: UPDATE  — variable-rate game logic
+    Phase 3: PHYSICS — fixed-rate physics steps + scene sync
+    Phase 4: LATE    — post-physics adjustments (camera, etc.)
+    Phase 5: RENDER  — build command buffer and rasterize
+    """
+    running: bool
+    paused: bool
+    clock: Clock
+
+impl GameLoop:
+    static fn create(fixed_timestep: f64) -> GameLoop:
+        """Create a game loop with the given fixed timestep.
+
+        Args:
+            fixed_timestep: Seconds per physics step (e.g. 1.0/60.0)
+
+        Returns:
+            A new GameLoop ready to run
+        """
+        GameLoop(
+            running: false,
+            paused: false,
+            clock: Clock.create(fixed_timestep)
+        )
+
+    me run(engine: Engine2D, callbacks: GameCallbacks):
+        """Execute the main game loop.
+
+        Calls on_init once, then loops through all five phases each frame
+        until stop() is called or the window close is requested. Calls
+        on_destroy after the loop exits.
+
+        Args:
+            engine: The Engine2D instance owning all subsystems
+            callbacks: User-provided hooks for each phase
+        """
+        self.running = true
+        callbacks.on_init(engine)
+
+        while self.running:
+            val current_ns = time_now_nanos()
+            val frame = self.clock.tick(current_ns)
+
+            # Phase 1: INPUT
+            engine.input.poll()
+            if engine.input.window_should_close():
+                self.running = false
+
+            if not self.paused:
+                # Phase 2: UPDATE (variable timestep)
+                callbacks.on_update(engine, frame.delta)
+
+                # Phase 3: PHYSICS (fixed timestep)
+                val steps = self.clock.consume_fixed_steps()
+                var i = 0
+                while i < steps:
+                    callbacks.on_physics_update(engine, frame.fixed_delta)
+                    engine.physics.step(frame.fixed_delta)
+                    i = i + 1
+
+                # Sync physics transforms back to scene
+                sync_physics_to_scene(engine)
+
+                # Phase 4: LATE UPDATE
+                callbacks.on_late_update(engine, frame.delta)
+
+            # Phase 5: RENDER
+            var cmds = RenderCommandBuffer.create()
+            callbacks.on_render(engine, cmds)
+            engine.renderer.render_frame(cmds)
+
+        callbacks.on_destroy(engine)
+
+    me stop():
+        """Signal the game loop to exit after the current frame."""
+        self.running = false
+
+    me pause():
+        """Pause update and physics phases. Rendering continues."""
+        self.paused = true
+
+    me unpause():
+        """Resume update and physics phases."""
+        self.paused = false
+
+    fn is_running() -> bool:
+        """Check whether the loop is currently running."""
+        self.running
+
+    fn is_paused() -> bool:
+        """Check whether update/physics phases are paused."""
+        self.paused
+
+# ============================================================================
+# Physics-to-Scene Synchronization
+# ============================================================================
+
+fn sync_physics_to_scene(engine: Engine2D):
+    """Copy dynamic body transforms from the physics world to the scene graph.
+
+    Reads all dynamic body positions and rotations from PhysicsWorld2D
+    and applies them to the corresponding nodes in NodeStore.
+    """
+    val transforms = engine.physics.get_all_dynamic_transforms()
+    var i = 0
+    while i < transforms.len():
+        val entry = transforms[i]
+        val node_id = entry.0
+        val pos = entry.1
+        val rot = entry.2
+        engine.nodes.set_position(node_id, pos)
+        engine.nodes.set_rotation(node_id, rot)
+        i = i + 1
