@@ -2,8 +2,7 @@
 # Reads config.sdn and produces a typed BrowserConfig.
 
 use std.io_runtime.{file_read}
-use std.sdn.parser.{parse}
-use examples.browser.shared.error.{BrowserResult, config_error}
+use examples.browser.shared.error.{BrowserError, config_error}
 
 class BrowserConfig:
     name: text
@@ -55,108 +54,96 @@ class BrowserConfig:
             mixed_content: "block"
         )
 
-fn load_config(path: text) -> BrowserResult<BrowserConfig>:
+fn load_config(path: text) -> Result<BrowserConfig, BrowserError>:
     val content = file_read(path)
-    match parse(content):
-        case Ok(root):
-            var config = BrowserConfig.default()
+    if content.len() == 0:
+        return Err(config_error("Failed to read browser config '{path}'"))
 
-            val project = root.get("project")
-            if project.?:
-                val name = _get_text(project, "name")
-                if name.len() > 0:
-                    config.name = name
-                val version = _get_text(project, "version")
-                if version.len() > 0:
-                    config.version = version
+    var config = BrowserConfig.default()
+    var section = ""
 
-            val browser = root.get("browser")
-            if browser.?:
-                _apply_browser_section(config, browser)
+    for raw_line in content.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_do_nothing
+        else if trimmed.ends_with(":") and not trimmed.contains(": "):
+            section = trimmed.substring(0, trimmed.len() - 1)
+        else:
+            val parts = trimmed.split(":")
+            if parts.len() < 2:
+                pass_do_nothing
+            else:
+                val key = parts.get(0).trim()
+                val value = _normalize_value(trimmed.substring(key.len() + 1))
+                _assign_value(config, section, key, value)
 
-            val network = root.get("network")
-            if network.?:
-                _apply_network_section(config, network)
+    Ok(config)
 
-            val rendering = root.get("rendering")
-            if rendering.?:
-                _apply_rendering_section(config, rendering)
+fn _assign_value(config: BrowserConfig, section: text, key: text, value: text):
+    if section == "project":
+        if key == "name" and value.len() > 0:
+            config.name = value
+        else if key == "version" and value.len() > 0:
+            config.version = value
+    else if section == "browser":
+        if key == "homepage" and value.len() > 0:
+            config.homepage = value
+        else if key == "user_agent" and value.len() > 0:
+            config.user_agent = value
+        else if key == "tab_limit":
+            config.tab_limit = _parse_int(value, config.tab_limit)
+        else if key == "process_model" and value.len() > 0:
+            config.process_model = value
+        else if key == "default_encoding" and value.len() > 0:
+            config.default_encoding = value
+        else if key == "max_history_entries":
+            config.max_history_entries = _parse_int(value, config.max_history_entries)
+    else if section == "network":
+        if key == "max_connections_per_host":
+            config.max_connections_per_host = _parse_int(value, config.max_connections_per_host)
+        else if key == "max_total_connections":
+            config.max_total_connections = _parse_int(value, config.max_total_connections)
+        else if key == "dns_cache_ttl":
+            config.dns_cache_ttl = _parse_int(value, config.dns_cache_ttl)
+        else if key == "http_cache_size_mb":
+            config.http_cache_size_mb = _parse_int(value, config.http_cache_size_mb)
+        else if key == "cookie_policy" and value.len() > 0:
+            config.cookie_policy = value
+        else if key == "connect_timeout_ms":
+            config.connect_timeout_ms = _parse_int(value, config.connect_timeout_ms)
+        else if key == "read_timeout_ms":
+            config.read_timeout_ms = _parse_int(value, config.read_timeout_ms)
+    else if section == "rendering":
+        if key == "gpu_compositing":
+            config.gpu_compositing = _parse_bool(value, config.gpu_compositing)
+        else if key == "hardware_acceleration":
+            config.hardware_acceleration = _parse_bool(value, config.hardware_acceleration)
+        else if key == "max_texture_size":
+            config.max_texture_size = _parse_int(value, config.max_texture_size)
+        else if key == "tile_size":
+            config.tile_size = _parse_int(value, config.tile_size)
+        else if key == "target_fps":
+            config.target_fps = _parse_int(value, config.target_fps)
+    else if section == "security":
+        if key == "csp_default" and value.len() > 0:
+            config.csp_default = value
+        else if key == "mixed_content" and value.len() > 0:
+            config.mixed_content = value
 
-            val security = root.get("security")
-            if security.?:
-                _apply_security_section(config, security)
+fn _normalize_value(raw: text) -> text:
+    var value = raw.trim()
+    if value.starts_with("\"") and value.ends_with("\"") and value.len() >= 2:
+        value = value.substring(1, value.len() - 1)
+    value
 
-            Ok(config)
-        case Err(err):
-            Err(config_error("Failed to parse browser config '{path}': {err}"))
+fn _parse_int(value: text, fallback: i64) -> i64:
+    if value.len() == 0:
+        return fallback
+    value.to_int()
 
-fn _apply_browser_section(config: BrowserConfig, section):
-    val homepage = _get_text(section, "homepage")
-    if homepage.len() > 0:
-        config.homepage = homepage
-    val user_agent = _get_text(section, "user_agent")
-    if user_agent.len() > 0:
-        config.user_agent = user_agent
-    config.tab_limit = _get_int_or(section, "tab_limit", config.tab_limit)
-    val process_model = _get_text(section, "process_model")
-    if process_model.len() > 0:
-        config.process_model = process_model
-    val default_encoding = _get_text(section, "default_encoding")
-    if default_encoding.len() > 0:
-        config.default_encoding = default_encoding
-    config.max_history_entries = _get_int_or(section, "max_history_entries", config.max_history_entries)
-
-fn _apply_network_section(config: BrowserConfig, section):
-    config.max_connections_per_host = _get_int_or(section, "max_connections_per_host", config.max_connections_per_host)
-    config.max_total_connections = _get_int_or(section, "max_total_connections", config.max_total_connections)
-    config.dns_cache_ttl = _get_int_or(section, "dns_cache_ttl", config.dns_cache_ttl)
-    config.http_cache_size_mb = _get_int_or(section, "http_cache_size_mb", config.http_cache_size_mb)
-    val cookie_policy = _get_text(section, "cookie_policy")
-    if cookie_policy.len() > 0:
-        config.cookie_policy = cookie_policy
-    config.connect_timeout_ms = _get_int_or(section, "connect_timeout_ms", config.connect_timeout_ms)
-    config.read_timeout_ms = _get_int_or(section, "read_timeout_ms", config.read_timeout_ms)
-
-fn _apply_rendering_section(config: BrowserConfig, section):
-    config.gpu_compositing = _get_bool_or(section, "gpu_compositing", config.gpu_compositing)
-    config.hardware_acceleration = _get_bool_or(section, "hardware_acceleration", config.hardware_acceleration)
-    config.max_texture_size = _get_int_or(section, "max_texture_size", config.max_texture_size)
-    config.tile_size = _get_int_or(section, "tile_size", config.tile_size)
-    config.target_fps = _get_int_or(section, "target_fps", config.target_fps)
-
-fn _apply_security_section(config: BrowserConfig, section):
-    val csp_default = _get_text(section, "csp_default")
-    if csp_default.len() > 0:
-        config.csp_default = csp_default
-    val mixed_content = _get_text(section, "mixed_content")
-    if mixed_content.len() > 0:
-        config.mixed_content = mixed_content
-
-fn _get_text(section, key: text) -> text:
-    val field = section.get(key)
-    if field.?:
-        match field:
-            case SdnValue.String(s): return s
-            case SdnValue.Int(n): return "{n}"
-            case SdnValue.Bool(b):
-                if b:
-                    return "true"
-                return "false"
-            case _: pass_dn
-    ""
-
-fn _get_int_or(section, key: text, fallback: i64) -> i64:
-    val field = section.get(key)
-    if field.?:
-        match field:
-            case SdnValue.Int(n): return n
-            case _: pass_dn
-    fallback
-
-fn _get_bool_or(section, key: text, fallback: bool) -> bool:
-    val field = section.get(key)
-    if field.?:
-        match field:
-            case SdnValue.Bool(b): return b
-            case _: pass_dn
+fn _parse_bool(value: text, fallback: bool) -> bool:
+    if value == "true":
+        return true
+    if value == "false":
+        return false
     fallback

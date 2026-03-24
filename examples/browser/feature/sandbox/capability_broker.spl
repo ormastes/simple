@@ -4,10 +4,9 @@
 # capabilities at runtime.
 
 use std.io_runtime.{file_read}
-use std.sdn.parser.{parse}
 use examples.browser.entity.ipc.process_types.{ProcessId}
 use examples.browser.shared.logging.{Logger}
-use examples.browser.shared.error.{BrowserResult, sandbox_error}
+use examples.browser.shared.error.{BrowserError, sandbox_error}
 
 class SandboxPolicy:
     capabilities: List<text>
@@ -15,7 +14,7 @@ class SandboxPolicy:
     pledge: bool
     unveil_paths: List<text>
 
-    static fn create(capabilities: List<text>, denied: List<text>, pledge: bool, unveil_paths: List<text>) -> SandboxPolicy:
+    static fn from_profile(capabilities: List<text>, denied: List<text>, pledge: bool, unveil_paths: List<text>) -> SandboxPolicy:
         SandboxPolicy(capabilities: capabilities, denied: denied, pledge: pledge, unveil_paths: unveil_paths)
 
     static fn empty() -> SandboxPolicy:
@@ -25,23 +24,21 @@ class PolicyEntry:
     pid_id: i64
     policy: SandboxPolicy
 
-    static fn create(pid_id: i64, policy: SandboxPolicy) -> PolicyEntry:
+    static fn bind_policy(pid_id: i64, policy: SandboxPolicy) -> PolicyEntry:
         PolicyEntry(pid_id: pid_id, policy: policy)
 
 class CapabilityBroker:
     logger: Logger
     policies: List<PolicyEntry>
 
-    static fn new(logger: Logger) -> CapabilityBroker:
+    static fn create_broker(logger: Logger) -> CapabilityBroker:
         CapabilityBroker(logger: logger, policies: List<PolicyEntry>())
 
-    me apply_sandbox(pid: ProcessId, profile: text) -> BrowserResult<()>:
-        # Load sandbox policy from sandbox.sdn by profile name.
-        # TODO: parse sandbox.sdn and extract the named profile
+    me apply_sandbox(pid: ProcessId, profile: text) -> Result<(), BrowserError>:
         val policy = self.load_profile(profile)
         match policy:
             Ok(p):
-                val entry = PolicyEntry.create(pid.id, p)
+                val entry = PolicyEntry.bind_policy(pid.id, p)
                 self.policies.push(entry)
                 self.logger.info("Applied sandbox profile '{profile}' to pid={pid.id}")
                 Ok(())
@@ -68,7 +65,7 @@ class CapabilityBroker:
             nil:
                 false
 
-    me grant(pid: ProcessId, cap: text) -> BrowserResult<()>:
+    me grant(pid: ProcessId, cap: text) -> Result<(), BrowserError>:
         var i = 0
         while i < self.policies.len():
             val entry = self.policies.get(i)
@@ -79,7 +76,7 @@ class CapabilityBroker:
             i = i + 1
         Err(sandbox_error("No sandbox policy for pid={pid.id}"))
 
-    me revoke(pid: ProcessId, cap: text) -> BrowserResult<()>:
+    me revoke(pid: ProcessId, cap: text) -> Result<(), BrowserError>:
         var i = 0
         while i < self.policies.len():
             val entry = self.policies.get(i)
@@ -102,39 +99,82 @@ class CapabilityBroker:
             i = i + 1
         nil
 
-    fn load_profile(profile: text) -> BrowserResult<SandboxPolicy>:
+    fn load_profile(profile: text) -> Result<SandboxPolicy, BrowserError>:
         val content = file_read("examples/browser/sandbox.sdn")
-        match parse(content):
-            case Ok(root):
-                val section = root.get(profile)
-                if not section.?:
-                    return Err(sandbox_error("Sandbox profile not found: {profile}"))
-                Ok(SandboxPolicy.create(
-                    capabilities: _get_text_list(section, "capabilities"),
-                    denied: _get_text_list(section, "denied"),
-                    pledge: _get_bool(section, "pledge"),
-                    unveil_paths: _get_text_list(section, "unveil_paths")
-                ))
-            case Err(err):
-                Err(sandbox_error("Failed to parse sandbox policy file: {err}"))
+        if content.len() == 0:
+            return Err(sandbox_error("Failed to read sandbox policy file"))
 
-fn _get_text_list(section, key: text) -> List<text>:
-    var result = List<text>()
-    val field = section.get(key)
-    if field.?:
-        match field:
-            case SdnValue.Array(arr):
-                for item in arr:
-                    match item:
-                        case SdnValue.String(s): result.push(s)
-                        case _: pass_dn
-            case _: pass_dn
-    result
+        var section = ""
+        var collecting_key = ""
+        var capabilities = List<text>()
+        var denied = List<text>()
+        var unveil_paths = List<text>()
+        var pledge = false
+        var saw_profile = false
 
-fn _get_bool(section, key: text) -> bool:
-    val field = section.get(key)
-    if field.?:
-        match field:
-            case SdnValue.Bool(b): return b
-            case _: pass_dn
-    false
+        for raw_line in content.split("\n"):
+            val trimmed = raw_line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                pass_do_nothing
+            else if trimmed.ends_with(":") and not trimmed.contains(": "):
+                if collecting_key.len() > 0 and section == profile:
+                    collecting_key = ""
+                section = trimmed.substring(0, trimmed.len() - 1)
+                if section == profile:
+                    saw_profile = true
+            else if section == profile:
+                if collecting_key.len() > 0:
+                    if trimmed == "]":
+                        collecting_key = ""
+                    else:
+                        val item = _normalize_item(trimmed)
+                        if item.len() > 0:
+                            _push_list_item(collecting_key, item, capabilities, denied, unveil_paths)
+                else:
+                    val colon_index = trimmed.index_of(":")
+                    if colon_index < 0:
+                        pass_do_nothing
+                    else:
+                        val key = trimmed.substring(0, colon_index).trim()
+                        val value = trimmed.substring(colon_index + 1).trim()
+                        if value == "[":
+                            collecting_key = key
+                        else if value.starts_with("[") and value.ends_with("]"):
+                            _assign_inline_list(key, value, capabilities, denied, unveil_paths)
+                        else if key == "pledge":
+                            pledge = value == "true"
+
+        if not saw_profile:
+            return Err(sandbox_error("Sandbox profile not found: {profile}"))
+
+        Ok(SandboxPolicy.from_profile(
+            capabilities: capabilities,
+            denied: denied,
+            pledge: pledge,
+            unveil_paths: unveil_paths
+        ))
+
+fn _assign_inline_list(key: text, value: text, capabilities: List<text>, denied: List<text>, unveil_paths: List<text>):
+    val inner = value.substring(1, value.len() - 1).trim()
+    if inner.len() == 0:
+        return
+    for piece in inner.split(","):
+        val item = _normalize_item(piece)
+        if item.len() > 0:
+            _push_list_item(key, item, capabilities, denied, unveil_paths)
+
+fn _push_list_item(key: text, item: text, capabilities: List<text>, denied: List<text>, unveil_paths: List<text>):
+    if key == "capabilities":
+        capabilities.push(item)
+    else if key == "denied":
+        denied.push(item)
+    else if key == "unveil_paths":
+        unveil_paths.push(item)
+
+fn _normalize_item(raw: text) -> text:
+    var item = raw.trim()
+    if item.ends_with(","):
+        item = item.substring(0, item.len() - 1).trim()
+    if item.starts_with("\"") and item.ends_with("\"") and item.len() >= 2:
+        item = item.substring(1, item.len() - 1)
+    item

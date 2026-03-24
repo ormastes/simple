@@ -5,13 +5,13 @@
 use examples.browser.entity.ipc.process_types.{ProcessId, ProcessKind, ProcessState, ProcessInfo}
 use examples.browser.entity.ipc.message_types.{BrowserIpcMsg}
 use examples.browser.shared.logging.{Logger}
-use examples.browser.shared.error.{BrowserResult, ipc_error}
+use examples.browser.shared.error.{BrowserError, ipc_error}
 
 class ProcessMailbox:
     pid_id: i64
     messages: List<BrowserIpcMsg>
 
-    static fn create(pid_id: i64) -> ProcessMailbox:
+    static fn for_pid(pid_id: i64) -> ProcessMailbox:
         ProcessMailbox(pid_id: pid_id, messages: List<BrowserIpcMsg>())
 
 class ProcessManager:
@@ -20,7 +20,7 @@ class ProcessManager:
     mailboxes: List<ProcessMailbox>
     next_pid: i64
 
-    static fn new(logger: Logger) -> ProcessManager:
+    static fn create_manager(logger: Logger) -> ProcessManager:
         ProcessManager(
             logger: logger,
             processes: List<ProcessInfo>(),
@@ -28,14 +28,14 @@ class ProcessManager:
             next_pid: 1
         )
 
-    me spawn(kind: ProcessKind) -> BrowserResult<ProcessId>:
+    me spawn(kind: ProcessKind) -> Result<ProcessId, BrowserError>:
         # Allocate a new PID and create a process entry
-        val pid = ProcessId.create(self.next_pid, kind)
+        val pid = ProcessId(id: self.next_pid, kind: kind)
         self.next_pid = self.next_pid + 1
 
-        val info = ProcessInfo.create(pid, ProcessState.Starting, 0)
+        val info = ProcessInfo(pid: pid, state: ProcessState.Starting, memory_usage: 0)
         self.processes.push(info)
-        self.mailboxes.push(ProcessMailbox.create(pid.id))
+        self.mailboxes.push(ProcessMailbox.for_pid(pid.id))
 
         self.logger.info("Spawned process pid={pid.id} kind={kind}")
 
@@ -44,7 +44,7 @@ class ProcessManager:
 
         Ok(pid)
 
-    me kill(pid: ProcessId) -> BrowserResult<()>:
+    me kill(pid: ProcessId) -> Result<(), BrowserError>:
         # Find process and transition to Terminated
         val found = self.find_index(pid)
         if found < 0:
@@ -53,7 +53,7 @@ class ProcessManager:
         self.logger.info("Killed process pid={pid.id}")
         Ok(())
 
-    me send(msg: BrowserIpcMsg) -> BrowserResult<()>:
+    me send(msg: BrowserIpcMsg) -> Result<(), BrowserError>:
         # Route IPC message to destination process
         val dst_state = self.get_state(msg.dst)
         match dst_state:
@@ -103,7 +103,7 @@ class ProcessManager:
         while i < self.processes.len():
             val info = self.processes.get(i)
             if info.pid.id == pid.id:
-                val updated = ProcessInfo.create(pid, state, info.memory_usage)
+                val updated = ProcessInfo(pid: pid, state: state, memory_usage: info.memory_usage)
                 self.processes.set(i, updated)
                 return
             i = i + 1
@@ -117,7 +117,7 @@ class ProcessManager:
             i = i + 1
         -1
 
-    me enqueue(pid_id: i64, msg: BrowserIpcMsg) -> BrowserResult<()>:
+    me enqueue(pid_id: i64, msg: BrowserIpcMsg) -> Result<(), BrowserError>:
         var i = 0
         while i < self.mailboxes.len():
             var mailbox = self.mailboxes.get(i)

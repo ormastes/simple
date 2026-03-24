@@ -31,7 +31,7 @@ use examples.browser.feature.sandbox.process_manager.{ProcessManager}
 use examples.browser.feature.sandbox.capability_broker.{CapabilityBroker}
 use examples.browser.shared.config.{BrowserConfig, load_config}
 use examples.browser.shared.logging.{Logger, LogLevel}
-use examples.browser.shared.error.{BrowserResult}
+use examples.browser.shared.error.{BrowserError}
 use examples.browser.transform.pipeline.{RenderPipeline}
 
 class PendingNavigation:
@@ -39,7 +39,7 @@ class PendingNavigation:
     tab_id: i64
     url: text
 
-    static fn create(renderer_pid_id: i64, tab_id: i64, url: text) -> PendingNavigation:
+    static fn for_renderer(renderer_pid_id: i64, tab_id: i64, url: text) -> PendingNavigation:
         PendingNavigation(renderer_pid_id: renderer_pid_id, tab_id: tab_id, url: url)
 
 # Browser process — the privileged coordinator
@@ -53,11 +53,11 @@ class BrowserProcess:
     gpu_pid_id: i64
     pending_navigations: List<PendingNavigation>
 
-    static fn new(config: BrowserConfig) -> BrowserProcess:
-        val logger = Logger.new("browser", LogLevel.Info)
-        val pm = ProcessManager.new(logger)
-        val cb = CapabilityBroker.new(logger)
-        val pipeline = RenderPipeline.new(logger)
+    static fn boot(config: BrowserConfig) -> BrowserProcess:
+        val logger = Logger(name: "browser")
+        val pm = ProcessManager.create_manager(logger)
+        val cb = CapabilityBroker.create_broker(logger)
+        val pipeline = RenderPipeline.create_pipeline(logger)
         BrowserProcess(
             config: config,
             logger: logger,
@@ -69,7 +69,7 @@ class BrowserProcess:
             pending_navigations: List<PendingNavigation>()
         )
 
-    me start() -> BrowserResult<()>:
+    me start() -> Result<(), BrowserError>:
         self.logger.info("Simple Browser Platform v{self.config.version} starting")
 
         # Spawn core service processes
@@ -88,7 +88,7 @@ class BrowserProcess:
         # Enter main event loop
         self.run_event_loop()
 
-    me open_tab(url: text) -> BrowserResult<TabId>:
+    me open_tab(url: text) -> Result<TabId, BrowserError>:
         val tab_id = TabId(id: self.next_tab_id)
         self.next_tab_id = self.next_tab_id + 1
 
@@ -104,13 +104,13 @@ class BrowserProcess:
             flags: [IpcFlag.Async],
             request_id: 0
         )
-        self.pending_navigations.push(PendingNavigation.create(renderer_pid.id, tab_id.id, url))
+        self.pending_navigations.push(PendingNavigation.for_renderer(renderer_pid.id, tab_id.id, url))
         self.process_manager.send(msg)?
 
         self.logger.info("Tab {tab_id.id} opened: {url}")
         Ok(tab_id)
 
-    me run_event_loop() -> BrowserResult<()>:
+    me run_event_loop() -> Result<(), BrowserError>:
         self.logger.info("Entering main event loop")
         var idle_cycles = 0
         while idle_cycles < 2:
@@ -128,7 +128,7 @@ class BrowserProcess:
         self.logger.info("Event loop drained all pending IPC messages")
         Ok(())
 
-    me handle_message(msg: BrowserIpcMsg) -> BrowserResult<()>:
+    me handle_message(msg: BrowserIpcMsg) -> Result<(), BrowserError>:
         match msg.method:
             BrowserIpcMethod.NavigateTo:
                 self.handle_navigation(msg.dst)
@@ -139,7 +139,7 @@ class BrowserProcess:
                 self.logger.debug("Ignoring IPC message {msg.method}")
                 Ok(())
 
-    me handle_navigation(renderer_pid: ProcessId) -> BrowserResult<()>:
+    me handle_navigation(renderer_pid: ProcessId) -> Result<(), BrowserError>:
         val pending = self.take_pending_navigation(renderer_pid.id)
         if not pending.?:
             self.logger.warn("Renderer pid={renderer_pid.id} received navigation without pending URL")
@@ -148,13 +148,16 @@ class BrowserProcess:
         self.logger.info("Renderer pid={renderer_pid.id} navigating tab={nav.tab_id} to {nav.url}")
 
         val html = self.sample_document_for(nav.url)
-        val display_list = self.pipeline.run_full_pipeline(html)?
+        val dom = self.pipeline.parse(html)?
+        val styled = self.pipeline.resolve_styles(dom)?
+        val layout = self.pipeline.compute_layout(styled)?
+        val display_list = self.pipeline.paint(layout)?
         self.logger.info("Navigation complete for tab={nav.tab_id}: {display_list.ops.len()} paint ops")
 
         if self.gpu_pid_id > 0:
-            val gpu_msg = BrowserIpcMsg.create(
+            val gpu_msg = BrowserIpcMsg(
                 src: renderer_pid,
-                dst: ProcessId.create(self.gpu_pid_id, ProcessKind.Gpu),
+                dst: ProcessId(id: self.gpu_pid_id, kind: ProcessKind.Gpu),
                 method: BrowserIpcMethod.SubmitFrame,
                 flags: [IpcFlag.Async],
                 request_id: nav.tab_id
@@ -180,7 +183,7 @@ fn main():
     val config = load_config("examples/browser/config.sdn")
     match config:
         Ok(cfg):
-            var browser = BrowserProcess.new(cfg)
+            var browser = BrowserProcess.boot(cfg)
             match browser.start():
                 Ok(_): pass_do_nothing
                 Err(e): print("Fatal: {e.message}")
