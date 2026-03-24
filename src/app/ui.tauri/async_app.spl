@@ -11,6 +11,7 @@ use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_sleep, ThreadHand
 use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
+use common.ui.session.{UISession}
 use app.ui.tauri.backend.{TauriBackend}
 use app.ui.tauri.ipc.{parse_ipc_message, build_ipc_render}
 use app.ui.ipc.async_handler.{start_ipc_reader, start_ipc_writer}
@@ -25,7 +26,7 @@ extern fn rt_file_exists(path: text) -> bool
 
 class AsyncTauriApp:
     file_path: text
-    state: UIState
+    session: UISession
     event_channel: Channel
     render_channel: Channel
     running: bool
@@ -37,7 +38,8 @@ class AsyncTauriApp:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("tauri")
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -48,7 +50,7 @@ class AsyncTauriApp:
 
                 return Ok(AsyncTauriApp(
                     file_path: file_path,
-                    state: state,
+                    session: session,
                     event_channel: evt_ch,
                     render_channel: rnd_ch,
                     running: true,
@@ -100,7 +102,7 @@ class AsyncTauriApp:
                     self.reload_file()
                     self.send_render()
                 _:
-                    self.state = update_state(self.state, event)
+                    self.session.dispatch(event)
                     self.send_render()
 
         # Shutdown: close channels so worker threads exit
@@ -120,14 +122,15 @@ class AsyncTauriApp:
             val tree_result = parse_ui_to_tree(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
+                    self.session.update_tree(new_tree)
                 Err(e):
                     # Keep old state on parse error
                     pass_dn
 
     fn send_render():
         """Queue a render via the render_channel (non-blocking)."""
-        val html = render_html_tree(self.state.tree.root_node(), self.state)
+        val state = self.session.current_state()
+        val html = render_html_tree(state.tree.root_node(), state)
         self.render_channel.send(html)
 
 # =========================================================================

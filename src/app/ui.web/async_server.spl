@@ -10,6 +10,7 @@ use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_spawn2, thread_sl
 use common.ui.widget.{UIState, UITree, UIEvent}
 use common.ui.parse.sdn.{parse_ui_file}
 use common.ui.state.{init_state, update_state, update_tree}
+use common.ui.session.{UISession}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page}
 use app.ui.web.async_ws.{start_ws_reader, ws_send_render}
@@ -33,7 +34,7 @@ val MSG_TYPE_RENDER: text = "render"
 class AsyncWebServer:
     file_path: text
     port: i32
-    state: UIState
+    session: UISession
     event_channel: Channel
     render_channel: Channel
     ws_clients: [TcpStream]
@@ -47,7 +48,8 @@ class AsyncWebServer:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("web")
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -55,7 +57,7 @@ class AsyncWebServer:
                 return Ok(AsyncWebServer(
                     file_path: file_path,
                     port: port,
-                    state: state,
+                    session: session,
                     event_channel: channel_new(),
                     render_channel: channel_new(),
                     ws_clients: [],
@@ -157,7 +159,7 @@ class AsyncWebServer:
                     val event_ch = self.event_channel
                     val inject_event_fn = \event:
                         event_ch.send(event)
-                    val result = handle_test_request(path, method, body, self.state, inject_event_fn)
+                    val result = handle_test_request(path, method, body, self.session.current_state(), inject_event_fn)
                     val test_response = http_response(result.0, result.1, result.2)
                     stream.write_all(test_response)
                     return
@@ -165,10 +167,10 @@ class AsyncWebServer:
                 # Route HTTP requests
                 val response = match path:
                     "/":
-                        val html = generate_html_page(self.state, self.port)
+                        val html = generate_html_page(self.session.current_state(), self.port)
                         http_response(200, "text/html", html)
                     "/api/state":
-                        val state_json = async_state_to_json(self.state)
+                        val state_json = async_state_to_json(self.session.current_state())
                         http_response(200, "application/json", state_json)
                     "/api/clients":
                         val clients_json = "{\"connected\": {self.ws_clients.len()}}"
@@ -194,7 +196,8 @@ class AsyncWebServer:
         stream.write_all(response)
 
         # Send initial render to this new client
-        val html = render_html_tree(self.state.tree.root_node(), self.state)
+        val ws_state = self.session.current_state()
+        val html = render_html_tree(ws_state.tree.root_node(), ws_state)
         val msg = "{\"type\": \"render\", \"html\": \"{escape_json_string(html)}\"}"
         send_ws_text(stream, msg)
 
@@ -225,7 +228,7 @@ class AsyncWebServer:
                         self.reload_file()
                         changed = true
                     _:
-                        self.state = update_state(self.state, event)
+                        self.session.dispatch(event)
                         changed = true
 
         if changed:
@@ -242,13 +245,14 @@ class AsyncWebServer:
             val tree_result = parse_ui_file(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
+                    self.session.update_tree(new_tree)
                 Err(e):
                     print "Warning: UI parse error: {e}"
 
     me broadcast_render():
         """Send current render HTML to all connected WebSocket clients."""
-        val html = render_html_tree(self.state.tree.root_node(), self.state)
+        val bc_state = self.session.current_state()
+        val html = render_html_tree(bc_state.tree.root_node(), bc_state)
         val msg = "{\"type\": \"render\", \"html\": \"{escape_json_string(html)}\"}"
 
         var alive_clients: [TcpStream] = []

@@ -15,6 +15,7 @@ use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
 use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_spawn2, thread_sleep}
 use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
+use common.ui.session.{UISession}
 use common.ui.event.{process_event}
 use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use app.ui.tui.screen.{Screen, get_terminal_size, ansi_clear_screen, ansi_cursor_home,
@@ -67,7 +68,7 @@ fn start_file_watcher_task(channel: Channel, file_path: text, initial_content: t
 
 class AsyncTuiApp:
     file_path: text
-    state: UIState
+    session: UISession
     event_channel: Channel
     running: bool
     last_file_content: text
@@ -79,7 +80,8 @@ class AsyncTuiApp:
             Err(e):
                 return Err(e)
             Ok(tree):
-                val state = init_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("tui")
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -87,7 +89,7 @@ class AsyncTuiApp:
                 val ch = channel_new()
                 return Ok(AsyncTuiApp(
                     file_path: file_path,
-                    state: state,
+                    session: session,
                     event_channel: ch,
                     running: true,
                     last_file_content: content
@@ -149,13 +151,18 @@ class AsyncTuiApp:
             UIEvent.FileChanged:
                 self.reload_file()
                 return true
+            UIEvent.Resize(width, height):
+                self.session.set_viewport(width, height, "tui")
+                self.session.dispatch(event)
+                return true
             _:
-                val new_state = update_state(self.state, event)
+                val old_state = self.session.current_state()
+                self.session.dispatch(event)
+                val new_state = self.session.current_state()
                 # Detect whether state actually changed
-                val changed = (new_state.focused_id != self.state.focused_id
-                    or new_state.mode_name() != self.state.mode_name()
-                    or new_state.command_buffer != self.state.command_buffer)
-                self.state = new_state
+                val changed = (new_state.focused_id != old_state.focused_id
+                    or new_state.mode_name() != old_state.mode_name()
+                    or new_state.command_buffer != old_state.command_buffer)
                 return changed
 
     fn render_frame():
@@ -165,12 +172,13 @@ class AsyncTuiApp:
         val height = size.1 - 1  # Reserve one line for input
 
         var screen = Screen.new(width, height)
+        val state = self.session.current_state()
 
         # Compute layout
-        val rects = compute_layout(self.state.tree.root_node(), 0, 0, width, height)
+        val rects = compute_layout(state.tree.root_node(), 0, 0, width, height)
 
         # Render widget tree
-        screen = render_tui_tree(screen, self.state.tree.root_node(), rects, self.state)
+        screen = render_tui_tree(screen, state.tree.root_node(), rects, state)
 
         # Output
         print screen.render()
@@ -202,7 +210,7 @@ class AsyncTuiApp:
             val tree_result = parse_ui_to_tree(self.file_path)
             match tree_result:
                 Ok(new_tree):
-                    self.state = update_tree(self.state, new_tree)
+                    self.session.update_tree(new_tree)
                 Err(e):
                     # Keep old state on parse error
                     print "Warning: UI parse error: {e}"
