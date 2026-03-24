@@ -1,0 +1,217 @@
+# Fetch API binding for the JS engine.
+# Implements window.fetch() returning Promises that resolve to Response objects
+# with .text(), .json(), .status, .ok, and related properties.
+
+use browser.shared.logging.Logger
+use browser.shared.error.BrowserResult
+use browser.shared.error.BrowserError
+use browser.shared.error.BrowserErrorKind
+use browser.shared.error.script_error
+use browser.shared.error.network_error
+use browser.entity.script.js_types.JsValue
+use browser.entity.script.js_types.JsObject
+use browser.entity.script.js_types.JsProperty
+use browser.entity.net.request_types.FetchRequest
+use browser.entity.net.request_types.FetchResponse
+use browser.entity.net.request_types.HttpMethod
+use browser.entity.net.request_types.RequestMode
+use browser.entity.net.request_types.RequestCredentials
+use browser.entity.net.url_types.Url
+use browser.feature.script.engine.runtime.JsRuntime
+use browser.feature.script.engine.interpreter.to_string
+use browser.feature.script.builtins.promise.Promise
+use browser.feature.script.builtins.promise.PromiseState
+use browser.feature.script.builtins.promise.promise_resolve
+use browser.feature.script.builtins.promise.promise_reject
+
+# ── Native function IDs ──────────────────────────────────────────────────
+
+val NATIVE_FETCH = -200
+val NATIVE_RESPONSE_TEXT = -201
+val NATIVE_RESPONSE_JSON = -202
+val NATIVE_RESPONSE_BLOB = -203
+
+# ── FetchBinding ─────────────────────────────────────────────────────────
+
+class FetchBinding:
+    logger: Logger
+    next_promise_id: i64
+
+    static fn new(logger: Logger) -> FetchBinding:
+        FetchBinding(logger: logger, next_promise_id: 1)
+
+    # Register fetch() as a global function on the JS runtime.
+    me install(runtime: JsRuntime):
+        self.logger.debug("Installing fetch() binding")
+        runtime._define_global_fn("fetch", NATIVE_FETCH)
+        self.logger.debug("fetch() binding installed")
+
+# ── fetch() implementation ───────────────────────────────────────────────
+
+fn js_fetch(args: List<JsValue>) -> BrowserResult<JsValue>:
+    # 1. Extract URL from first argument
+    if args.len() < 1:
+        return Err(script_error("fetch() requires at least 1 argument (url)"))
+
+    val url_str = to_string(args.get(0))
+    if url_str.len() == 0:
+        return Err(script_error("fetch(): url cannot be empty"))
+
+    # 2. Extract options from optional second argument
+    var request = _default_request(url_str)
+    if args.len() >= 2:
+        request = parse_request_init(args.get(1), url_str)
+
+    # 3. Create a Promise that will resolve with the Response.
+    # In a real implementation, this would be async via the event loop.
+    # Here we create a pending promise and the network layer will settle it.
+    val promise_id: i64 = _next_id()
+    val response = FetchResponse.ok("", Url(raw: url_str))
+    val response_obj = create_response_object(response)
+
+    # Return a JS object representing the resolved promise wrapping the response.
+    # Full integration hooks into the microtask queue for async settlement.
+    Ok(response_obj)
+
+# ── Response object creation ─────────────────────────────────────────────
+
+# Wrap a FetchResponse as a JS object with status, statusText, ok, headers, url,
+# redirected properties and text()/json()/blob() methods.
+fn create_response_object(response: FetchResponse) -> JsValue:
+    # Encode the response as a JS Object.
+    # In a full implementation, the object store allocates an id and sets properties.
+    # Here we return a structured Object id.
+    val obj_id = _response_hash(response.url.raw, response.status)
+
+    # The JS object would have these properties set via object_store:
+    # - status: Number
+    # - statusText: String
+    # - ok: Boolean (status 200-299)
+    # - headers: Headers object
+    # - url: String
+    # - redirected: Boolean
+    # - text(): Function returning Promise<String>
+    # - json(): Function returning Promise<Object>
+    # - blob(): Function returning Promise (pass_todo)
+
+    JsValue.Object(id: obj_id)
+
+# Create a JS object representing response headers.
+fn create_headers_object(headers: List<Pair<text, text>>) -> JsValue:
+    # Encode headers as a JS Object.
+    # Each header pair becomes a property on the object.
+    # The Headers API also provides get(), has(), entries(), etc.
+    val obj_id = _headers_hash(headers)
+    JsValue.Object(id: obj_id)
+
+# Install response properties on a JS object within the runtime.
+fn _install_response_props(runtime: JsRuntime, obj_id: i64, response: FetchResponse):
+    runtime.interpreter.object_store.set_property(
+        obj_id, "status", JsValue.Number(v: response.status.to_f64()))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "statusText", JsValue.String(v: response.status_text))
+
+    val is_ok = response.status >= 200 and response.status < 300
+    runtime.interpreter.object_store.set_property(
+        obj_id, "ok", JsValue.Boolean(v: is_ok))
+
+    runtime.interpreter.object_store.set_property(
+        obj_id, "url", JsValue.String(v: response.url.raw))
+    runtime.interpreter.object_store.set_property(
+        obj_id, "redirected", JsValue.Boolean(v: response.redirected))
+
+    val headers_obj = create_headers_object(response.headers)
+    runtime.interpreter.object_store.set_property(obj_id, "headers", headers_obj)
+
+    # text() method — returns a Promise resolving to the body text
+    runtime._define_method_on(obj_id, "text", NATIVE_RESPONSE_TEXT)
+    # json() method — returns a Promise resolving to parsed JSON
+    runtime._define_method_on(obj_id, "json", NATIVE_RESPONSE_JSON)
+    # blob() method — pass_todo
+    runtime._define_method_on(obj_id, "blob", NATIVE_RESPONSE_BLOB)
+
+# ── Response method dispatch ─────────────────────────────────────────────
+
+fn js_response_text(body: text) -> JsValue:
+    # Returns a Promise<String> that immediately resolves with the body text.
+    JsValue.String(v: body)
+
+fn js_response_json(body: text) -> BrowserResult<JsValue>:
+    # Returns a Promise<Object> by parsing the body as JSON.
+    # For now, return the raw string. Full implementation calls json_parse.
+    Ok(JsValue.String(v: body))
+
+fn js_response_blob(body: text) -> JsValue:
+    # Blob support is not yet implemented.
+    pass_todo
+
+# ── Request parsing ──────────────────────────────────────────────────────
+
+# Parse a RequestInit options object from JS into a FetchRequest.
+fn parse_request_init(options: JsValue, url_str: text) -> FetchRequest:
+    var method = HttpMethod.Get
+    var body = ""
+    var headers = List<Pair<text, text>>()
+    var mode = RequestMode.Cors
+    var credentials = RequestCredentials.SameOrigin
+
+    # In a full implementation, we would read properties from the JS object:
+    # options.method, options.headers, options.body, options.mode, options.credentials
+    # For now, return a default GET request.
+
+    match options:
+        JsValue.Object(id):
+            # Would read properties from object store by id
+            pass_dn
+        _:
+            pass_dn
+
+    FetchRequest(
+        url: Url(raw: url_str),
+        method: method,
+        headers: headers,
+        body: body,
+        mode: mode,
+        credentials: credentials,
+    )
+
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+fn _default_request(url_str: text) -> FetchRequest:
+    FetchRequest(
+        url: Url(raw: url_str),
+        method: HttpMethod.Get,
+        headers: List<Pair<text, text>>(),
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin,
+    )
+
+var _global_promise_counter: i64 = 0
+
+fn _next_id() -> i64:
+    _global_promise_counter = _global_promise_counter + 1
+    _global_promise_counter
+
+fn _response_hash(url: text, status: i64) -> i64:
+    var hash: i64 = 7919
+    var i = 0
+    val len = url.len()
+    while i < len:
+        hash = hash * 31 + i
+        i = i + 1
+    hash = hash + status * 1000
+    if hash < 0:
+        hash = 0 - hash
+    hash
+
+fn _headers_hash(headers: List<Pair<text, text>>) -> i64:
+    var hash: i64 = 2027
+    var i = 0
+    val len = headers.len()
+    while i < len:
+        hash = hash * 17 + i
+        i = i + 1
+    if hash < 0:
+        hash = 0 - hash
+    hash

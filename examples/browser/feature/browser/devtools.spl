@@ -1,0 +1,160 @@
+# Chrome DevTools Protocol (CDP-lite) server for the Simple Browser Platform.
+# Provides a simplified DevTools interface for DOM inspection, JS evaluation,
+# CSS queries, network inspection, and page control.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error}
+use sbp.shared.logging.{Logger, LogLevel}
+
+enum DevToolsMethod:
+    DomGetDocument
+    DomQuerySelector
+    DomGetOuterHTML
+    CssGetComputedStyle
+    RuntimeEvaluate
+    NetworkGetResponseBody
+    PageNavigate
+    PageReload
+    PageScreenshot
+    ConsoleMessageAdded
+
+class DevToolsSession:
+    id: i64
+    tab_id: i64
+
+    static fn create(id: i64, tab_id: i64) -> DevToolsSession:
+        DevToolsSession(id: id, tab_id: tab_id)
+
+class DevToolsServer:
+    is_active: bool
+    port: i64
+    sessions: List<DevToolsSession>
+    next_session_id: i64
+    logger: Logger
+
+    static fn new(port: i64, logger: Logger) -> DevToolsServer:
+        DevToolsServer(
+            is_active: false,
+            port: port,
+            sessions: List<DevToolsSession>(),
+            next_session_id: 1,
+            logger: logger
+        )
+
+    me start() -> BrowserResult<()>:
+        if self.is_active:
+            return Err(config_error("DevTools server already running"))
+        self.is_active = true
+        self.logger.info("DevTools server started on port {self.port}")
+        Ok(())
+
+    me stop():
+        self.is_active = false
+        self.sessions = List<DevToolsSession>()
+        self.logger.info("DevTools server stopped")
+
+    me create_session(tab_id: i64) -> i64:
+        val id = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val session = DevToolsSession.create(id: id, tab_id: tab_id)
+        self.sessions.push(session)
+        self.logger.debug("DevTools session created id={id} for tab={tab_id}")
+        id
+
+    me close_session(session_id: i64):
+        var idx = -1
+        for i in 0..self.sessions.len():
+            if self.sessions[i].id == session_id:
+                idx = i
+        if idx >= 0:
+            self.sessions.remove(idx)
+            self.logger.debug("DevTools session closed id={session_id}")
+
+    fn get_session(session_id: i64) -> DevToolsSession?:
+        for s in self.sessions:
+            if s.id == session_id:
+                return Some(s)
+        nil
+
+    me handle_message(session_id: i64, method: text, params: text) -> BrowserResult<text>:
+        val session = self.get_session(session_id)
+        if session.? == false:
+            return Err(config_error("DevTools session id={session_id} not found"))
+        val s = session!
+        self.logger.debug("DevTools method={method} session={session_id} tab={s.tab_id}")
+        val parsed = self.parse_method(method)
+        match parsed:
+            DevToolsMethod.DomGetDocument:
+                Ok(self.dom_get_document(s.tab_id))
+            DevToolsMethod.DomQuerySelector:
+                Ok(self.dom_query_selector(s.tab_id, params))
+            DevToolsMethod.DomGetOuterHTML:
+                Ok(self.dom_get_outer_html(s.tab_id, params))
+            DevToolsMethod.CssGetComputedStyle:
+                Ok(self.css_get_computed(s.tab_id, 0))
+            DevToolsMethod.RuntimeEvaluate:
+                Ok(self.runtime_evaluate(s.tab_id, params))
+            DevToolsMethod.NetworkGetResponseBody:
+                Ok(self.network_get_response_body(s.tab_id, params))
+            DevToolsMethod.PageNavigate:
+                Ok(self.page_navigate(s.tab_id, params))
+            DevToolsMethod.PageReload:
+                Ok(self.page_reload(s.tab_id))
+            DevToolsMethod.PageScreenshot:
+                Ok(self.page_screenshot(s.tab_id))
+            DevToolsMethod.ConsoleMessageAdded:
+                Ok(self.console_message_added(s.tab_id, params))
+
+    fn parse_method(method: text) -> DevToolsMethod:
+        match method:
+            "DOM.getDocument": DevToolsMethod.DomGetDocument
+            "DOM.querySelector": DevToolsMethod.DomQuerySelector
+            "DOM.getOuterHTML": DevToolsMethod.DomGetOuterHTML
+            "CSS.getComputedStyleForNode": DevToolsMethod.CssGetComputedStyle
+            "Runtime.evaluate": DevToolsMethod.RuntimeEvaluate
+            "Network.getResponseBody": DevToolsMethod.NetworkGetResponseBody
+            "Page.navigate": DevToolsMethod.PageNavigate
+            "Page.reload": DevToolsMethod.PageReload
+            "Page.captureScreenshot": DevToolsMethod.PageScreenshot
+            "Console.messageAdded": DevToolsMethod.ConsoleMessageAdded
+            _: DevToolsMethod.DomGetDocument
+
+    fn dom_get_document(tab_id: i64) -> text:
+        # Returns a JSON representation of the DOM document tree.
+        # In a full implementation, this queries the renderer process.
+        "{\"nodeId\":1,\"nodeType\":9,\"nodeName\":\"#document\",\"children\":[]}"
+
+    fn dom_query_selector(tab_id: i64, selector: text) -> text:
+        "{\"nodeId\":0}"
+
+    fn dom_get_outer_html(tab_id: i64, node_id_str: text) -> text:
+        "{\"outerHTML\":\"<html></html>\"}"
+
+    fn css_get_computed(tab_id: i64, node_id: i64) -> text:
+        "{\"computedStyle\":[]}"
+
+    fn runtime_evaluate(tab_id: i64, expression: text) -> text:
+        # Evaluate JavaScript expression in the tab's context.
+        # Stubbed — returns undefined result.
+        "{\"result\":{\"type\":\"undefined\"}}"
+
+    fn network_get_response_body(tab_id: i64, request_id: text) -> text:
+        "{\"body\":\"\",\"base64Encoded\":false}"
+
+    fn page_navigate(tab_id: i64, url: text) -> text:
+        self.logger.debug("DevTools navigate tab={tab_id} url={url}")
+        "{\"frameId\":\"main\"}"
+
+    fn page_reload(tab_id: i64) -> text:
+        self.logger.debug("DevTools reload tab={tab_id}")
+        "{}"
+
+    fn page_screenshot(tab_id: i64) -> text:
+        pass_todo
+        "{\"data\":\"\"}"
+
+    fn console_message_added(tab_id: i64, message: text) -> text:
+        self.logger.debug("Console message from tab={tab_id}: {message}")
+        "{}"
+
+    fn get_session_count() -> i64:
+        self.sessions.len()

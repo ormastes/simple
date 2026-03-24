@@ -1,0 +1,174 @@
+# Script-to-DOM bridge for the Simple Browser Platform.
+# Translates JavaScript DOM mutations (appendChild, removeChild,
+# setAttribute, innerHTML, classList changes, etc.) into concrete
+# tree updates on the Document model.
+#
+# Each mutation is classified for whether it invalidates layout,
+# paint, or both, so the pipeline can skip unnecessary stages.
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.shared.error.{BrowserResult, dom_error}
+use sbp.feature.dom.document.{Document}
+
+# ---------------------------------------------------------------------------
+# JsMutation — every DOM-mutating JS API call produces one of these.
+# ---------------------------------------------------------------------------
+enum JsMutation:
+    AppendChild(parent_id: i64, child_id: i64)
+    RemoveChild(parent_id: i64, child_id: i64)
+    SetAttribute(node_id: i64, name: text, value: text)
+    RemoveAttribute(node_id: i64, name: text)
+    SetTextContent(node_id: i64, content: text)
+    SetInnerHTML(node_id: i64, html: text)
+    InsertBefore(parent_id: i64, new_child: i64, ref_child: i64)
+    ReplaceChild(parent_id: i64, new_child: i64, old_child: i64)
+    SetStyle(node_id: i64, property: text, value: text)
+    AddClass(node_id: i64, class_name: text)
+    RemoveClass(node_id: i64, class_name: text)
+
+# ---------------------------------------------------------------------------
+# ScriptToDomBridge
+# ---------------------------------------------------------------------------
+class ScriptToDomBridge:
+    logger: Logger
+
+    static fn new(logger: Logger) -> ScriptToDomBridge:
+        ScriptToDomBridge(logger: logger)
+
+    # Apply a single JS mutation to the document tree.
+    fn apply_js_mutation(mutation: JsMutation, doc: Document) -> BrowserResult<()>:
+        self.logger.debug("ScriptToDom: applying mutation")
+        match mutation:
+            JsMutation.AppendChild(parent_id, child_id):
+                self.logger.debug("ScriptToDom: appendChild parent={parent_id} child={child_id}")
+                # TODO: doc.append_child(parent_id, child_id)
+                pass_todo
+                Ok(())
+            JsMutation.RemoveChild(parent_id, child_id):
+                self.logger.debug("ScriptToDom: removeChild parent={parent_id} child={child_id}")
+                # TODO: doc.remove_child(parent_id, child_id)
+                pass_todo
+                Ok(())
+            JsMutation.SetAttribute(node_id, name, value):
+                self.logger.debug("ScriptToDom: setAttribute node={node_id} {name}={value}")
+                # TODO: doc.set_attribute(node_id, name, value)
+                pass_todo
+                Ok(())
+            JsMutation.RemoveAttribute(node_id, name):
+                self.logger.debug("ScriptToDom: removeAttribute node={node_id} {name}")
+                # TODO: doc.remove_attribute(node_id, name)
+                pass_todo
+                Ok(())
+            JsMutation.SetTextContent(node_id, content):
+                self.logger.debug("ScriptToDom: setTextContent node={node_id}")
+                # TODO: doc.set_text_content(node_id, content)
+                pass_todo
+                Ok(())
+            JsMutation.SetInnerHTML(node_id, html):
+                self.logger.debug("ScriptToDom: setInnerHTML node={node_id}")
+                # TODO: parse html fragment, replace children
+                pass_todo
+                Ok(())
+            JsMutation.InsertBefore(parent_id, new_child, ref_child):
+                self.logger.debug("ScriptToDom: insertBefore parent={parent_id}")
+                # TODO: doc.insert_before(parent_id, new_child, ref_child)
+                pass_todo
+                Ok(())
+            JsMutation.ReplaceChild(parent_id, new_child, old_child):
+                self.logger.debug("ScriptToDom: replaceChild parent={parent_id}")
+                # TODO: doc.replace_child(parent_id, new_child, old_child)
+                pass_todo
+                Ok(())
+            JsMutation.SetStyle(node_id, property, value):
+                self.logger.debug("ScriptToDom: setStyle node={node_id} {property}={value}")
+                # TODO: update inline style on node
+                pass_todo
+                Ok(())
+            JsMutation.AddClass(node_id, class_name):
+                self.logger.debug("ScriptToDom: addClass node={node_id} '{class_name}'")
+                # TODO: add to classList
+                pass_todo
+                Ok(())
+            JsMutation.RemoveClass(node_id, class_name):
+                self.logger.debug("ScriptToDom: removeClass node={node_id} '{class_name}'")
+                # TODO: remove from classList
+                pass_todo
+                Ok(())
+
+    # Apply a batch of mutations in order.  Stops at the first error.
+    fn batch_mutations(mutations: List<JsMutation>, doc: Document) -> BrowserResult<()>:
+        self.logger.info("ScriptToDom: applying batch of {mutations.len()} mutations")
+        for m in mutations:
+            self.apply_js_mutation(m, doc)?
+        Ok(())
+
+# ---------------------------------------------------------------------------
+# Invalidation queries — determine which pipeline stages must re-run
+# ---------------------------------------------------------------------------
+
+# Does this mutation change the tree structure or sizing, requiring layout?
+fn needs_layout(mutation: JsMutation) -> bool:
+    match mutation:
+        JsMutation.AppendChild(_, _): true
+        JsMutation.RemoveChild(_, _): true
+        JsMutation.SetTextContent(_, _): true
+        JsMutation.SetInnerHTML(_, _): true
+        JsMutation.InsertBefore(_, _, _): true
+        JsMutation.ReplaceChild(_, _, _): true
+        JsMutation.SetAttribute(_, name, _):
+            # Some attributes affect layout (e.g. width, height on <img>)
+            name == "width" or name == "height" or name == "hidden"
+        JsMutation.RemoveAttribute(_, name):
+            name == "width" or name == "height" or name == "hidden"
+        JsMutation.SetStyle(_, property, _):
+            # Layout-affecting CSS properties
+            is_layout_property(property)
+        _: false
+
+# Does this mutation require a repaint (but not necessarily layout)?
+fn needs_paint(mutation: JsMutation) -> bool:
+    match mutation:
+        # Anything that needs layout also needs paint
+        JsMutation.AppendChild(_, _): true
+        JsMutation.RemoveChild(_, _): true
+        JsMutation.SetTextContent(_, _): true
+        JsMutation.SetInnerHTML(_, _): true
+        JsMutation.InsertBefore(_, _, _): true
+        JsMutation.ReplaceChild(_, _, _): true
+        # Visual-only changes
+        JsMutation.SetStyle(_, _, _): true
+        JsMutation.AddClass(_, _): true
+        JsMutation.RemoveClass(_, _): true
+        JsMutation.SetAttribute(_, name, _):
+            name == "class" or name == "style" or name == "hidden"
+        JsMutation.RemoveAttribute(_, name):
+            name == "class" or name == "style" or name == "hidden"
+
+# Check if a CSS property name affects layout.
+fn is_layout_property(property: text) -> bool:
+    match property:
+        "display": true
+        "position": true
+        "width": true
+        "height": true
+        "min-width": true
+        "max-width": true
+        "min-height": true
+        "max-height": true
+        "margin": true
+        "margin-top": true
+        "margin-right": true
+        "margin-bottom": true
+        "margin-left": true
+        "padding": true
+        "padding-top": true
+        "padding-right": true
+        "padding-bottom": true
+        "padding-left": true
+        "border-width": true
+        "float": true
+        "flex": true
+        "flex-direction": true
+        "grid-template-columns": true
+        "grid-template-rows": true
+        _: false

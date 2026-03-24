@@ -1,0 +1,235 @@
+# ArrayBuffer and TypedArray built-ins for the JS engine.
+# Models typed memory views over byte buffers.
+
+use browser.entity.script.js_types.*
+
+enum TypedArrayKind:
+    Int8
+    Uint8
+    Int16
+    Uint16
+    Int32
+    Uint32
+    Float32
+    Float64
+
+class ArrayBuffer:
+    id: i64
+    byte_length: i64
+    data: List<i64>   # byte-level storage (each element is 0-255)
+
+class TypedArrayView:
+    buffer_id: i64
+    byte_offset: i64
+    length: i64
+    element_size: i64
+    kind: TypedArrayKind
+
+class DataView:
+    buffer_id: i64
+    byte_offset: i64
+    byte_length: i64
+
+# --- Element size ---
+
+fn element_size(kind: TypedArrayKind) -> i64:
+    match kind:
+        TypedArrayKind.Int8: 1
+        TypedArrayKind.Uint8: 1
+        TypedArrayKind.Int16: 2
+        TypedArrayKind.Uint16: 2
+        TypedArrayKind.Int32: 4
+        TypedArrayKind.Uint32: 4
+        TypedArrayKind.Float32: 4
+        TypedArrayKind.Float64: 8
+
+# --- ArrayBuffer ---
+
+fn arraybuffer_new(byte_length: i64) -> ArrayBuffer:
+    var data = List<i64>()
+    var i = 0
+    while i < byte_length:
+        data.push(0)
+        i = i + 1
+    ArrayBuffer(id: -1, byte_length: byte_length, data: data)
+
+fn arraybuffer_byte_length(buffer: ArrayBuffer) -> i64:
+    buffer.byte_length
+
+fn arraybuffer_slice(buffer: ArrayBuffer, start: i64, end_idx: i64) -> ArrayBuffer:
+    var s = start
+    var e = end_idx
+    if s < 0:
+        s = buffer.byte_length + s
+    if s < 0:
+        s = 0
+    if e < 0:
+        e = buffer.byte_length + e
+    if e > buffer.byte_length:
+        e = buffer.byte_length
+    var data = List<i64>()
+    var i = s
+    while i < e:
+        data.push(buffer.data.get(i))
+        i = i + 1
+    ArrayBuffer(id: -1, byte_length: e - s, data: data)
+
+# --- TypedArray ---
+
+fn typed_array_new(buffer: ArrayBuffer, kind: TypedArrayKind) -> TypedArrayView:
+    val es = element_size(kind)
+    val len = buffer.byte_length / es
+    TypedArrayView(
+        buffer_id: buffer.id,
+        byte_offset: 0,
+        length: len,
+        element_size: es,
+        kind: kind
+    )
+
+fn typed_array_new_with_offset(buffer: ArrayBuffer, kind: TypedArrayKind, offset: i64, length: i64) -> TypedArrayView:
+    val es = element_size(kind)
+    TypedArrayView(
+        buffer_id: buffer.id,
+        byte_offset: offset,
+        length: length,
+        element_size: es,
+        kind: kind
+    )
+
+fn typed_array_get(view: TypedArrayView, buffer: ArrayBuffer, index: i64) -> JsValue:
+    if index < 0 or index >= view.length:
+        return JsValue.Undefined
+    val byte_pos = view.byte_offset + index * view.element_size
+    match view.kind:
+        TypedArrayKind.Uint8:
+            val b = buffer.data.get(byte_pos)
+            JsValue.Number(v: b.to_f64())
+        TypedArrayKind.Int8:
+            var b = buffer.data.get(byte_pos)
+            if b > 127:
+                b = b - 256
+            JsValue.Number(v: b.to_f64())
+        TypedArrayKind.Uint16:
+            val lo = buffer.data.get(byte_pos)
+            val hi = buffer.data.get(byte_pos + 1)
+            val value = lo + hi * 256
+            JsValue.Number(v: value.to_f64())
+        TypedArrayKind.Int16:
+            val lo = buffer.data.get(byte_pos)
+            val hi = buffer.data.get(byte_pos + 1)
+            var value = lo + hi * 256
+            if value > 32767:
+                value = value - 65536
+            JsValue.Number(v: value.to_f64())
+        TypedArrayKind.Uint32:
+            val b0 = buffer.data.get(byte_pos)
+            val b1 = buffer.data.get(byte_pos + 1)
+            val b2 = buffer.data.get(byte_pos + 2)
+            val b3 = buffer.data.get(byte_pos + 3)
+            val value = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+            JsValue.Number(v: value.to_f64())
+        TypedArrayKind.Int32:
+            val b0 = buffer.data.get(byte_pos)
+            val b1 = buffer.data.get(byte_pos + 1)
+            val b2 = buffer.data.get(byte_pos + 2)
+            val b3 = buffer.data.get(byte_pos + 3)
+            var value = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+            if value > 2147483647:
+                value = value - 4294967296
+            JsValue.Number(v: value.to_f64())
+        TypedArrayKind.Float32:
+            # Float decoding requires bitwise ops — simplified stub
+            pass_todo
+        TypedArrayKind.Float64:
+            pass_todo
+
+me typed_array_set(view: TypedArrayView, buffer: ArrayBuffer, index: i64, value: JsValue):
+    if index < 0 or index >= view.length:
+        return
+    val byte_pos = view.byte_offset + index * view.element_size
+    val num = _js_to_i64(value)
+    match view.kind:
+        TypedArrayKind.Uint8:
+            buffer.data.set(byte_pos, num % 256)
+        TypedArrayKind.Int8:
+            var b = num % 256
+            if b < 0:
+                b = b + 256
+            buffer.data.set(byte_pos, b)
+        TypedArrayKind.Uint16:
+            buffer.data.set(byte_pos, num % 256)
+            buffer.data.set(byte_pos + 1, (num / 256) % 256)
+        TypedArrayKind.Int16:
+            var v = num
+            if v < 0:
+                v = v + 65536
+            buffer.data.set(byte_pos, v % 256)
+            buffer.data.set(byte_pos + 1, (v / 256) % 256)
+        TypedArrayKind.Uint32:
+            buffer.data.set(byte_pos, num % 256)
+            buffer.data.set(byte_pos + 1, (num / 256) % 256)
+            buffer.data.set(byte_pos + 2, (num / 65536) % 256)
+            buffer.data.set(byte_pos + 3, (num / 16777216) % 256)
+        TypedArrayKind.Int32:
+            var v = num
+            if v < 0:
+                v = v + 4294967296
+            buffer.data.set(byte_pos, v % 256)
+            buffer.data.set(byte_pos + 1, (v / 256) % 256)
+            buffer.data.set(byte_pos + 2, (v / 65536) % 256)
+            buffer.data.set(byte_pos + 3, (v / 16777216) % 256)
+        TypedArrayKind.Float32:
+            pass_todo
+        TypedArrayKind.Float64:
+            pass_todo
+
+fn typed_array_length(view: TypedArrayView) -> i64:
+    view.length
+
+fn typed_array_byte_length(view: TypedArrayView) -> i64:
+    view.length * view.element_size
+
+fn typed_array_byte_offset(view: TypedArrayView) -> i64:
+    view.byte_offset
+
+# --- DataView ---
+
+fn dataview_new(buffer: ArrayBuffer, byte_offset: i64, byte_length: i64) -> DataView:
+    DataView(buffer_id: buffer.id, byte_offset: byte_offset, byte_length: byte_length)
+
+fn dataview_getInt32(dv: DataView, buffer: ArrayBuffer, offset: i64) -> i64:
+    val pos = dv.byte_offset + offset
+    val b0 = buffer.data.get(pos)
+    val b1 = buffer.data.get(pos + 1)
+    val b2 = buffer.data.get(pos + 2)
+    val b3 = buffer.data.get(pos + 3)
+    var value = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    if value > 2147483647:
+        value = value - 4294967296
+    value
+
+me dataview_setInt32(dv: DataView, buffer: ArrayBuffer, offset: i64, value: i64):
+    val pos = dv.byte_offset + offset
+    var v = value
+    if v < 0:
+        v = v + 4294967296
+    buffer.data.set(pos, v % 256)
+    buffer.data.set(pos + 1, (v / 256) % 256)
+    buffer.data.set(pos + 2, (v / 65536) % 256)
+    buffer.data.set(pos + 3, (v / 16777216) % 256)
+
+fn dataview_getUint8(dv: DataView, buffer: ArrayBuffer, offset: i64) -> i64:
+    buffer.data.get(dv.byte_offset + offset)
+
+me dataview_setUint8(dv: DataView, buffer: ArrayBuffer, offset: i64, value: i64):
+    buffer.data.set(dv.byte_offset + offset, value % 256)
+
+# --- Internal helper ---
+
+fn _js_to_i64(value: JsValue) -> i64:
+    match value:
+        JsValue.Number(v): v.to_i64()
+        JsValue.Boolean(v):
+            if v: 1 else: 0
+        _: 0

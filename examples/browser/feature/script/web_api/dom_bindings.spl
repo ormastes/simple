@@ -1,0 +1,362 @@
+# DOM bindings — bridge between JS engine and DOM tree.
+# Exposes document/element methods to JavaScript: getElementById, querySelector,
+# createElement, attribute manipulation, child management, and property accessors.
+
+use browser.shared.logging.Logger
+use browser.shared.error.BrowserResult
+use browser.shared.error.BrowserError
+use browser.shared.error.BrowserErrorKind
+use browser.shared.error.script_error
+use browser.shared.error.dom_error
+use browser.entity.script.js_types.JsValue
+use browser.entity.script.js_types.JsObject
+use browser.entity.script.js_types.JsProperty
+use browser.entity.dom.node_types.DomNode
+use browser.entity.dom.node_types.NodeKind
+use browser.entity.dom.node_types.Element
+use browser.entity.dom.node_types.TextNode
+use browser.feature.script.engine.runtime.JsRuntime
+use browser.feature.script.engine.interpreter.to_string
+
+# ── Native function IDs for DOM bindings ─────────────────────────────────
+
+val NATIVE_GET_ELEMENT_BY_ID = -100
+val NATIVE_GET_ELEMENTS_BY_TAG_NAME = -101
+val NATIVE_GET_ELEMENTS_BY_CLASS_NAME = -102
+val NATIVE_QUERY_SELECTOR = -103
+val NATIVE_QUERY_SELECTOR_ALL = -104
+val NATIVE_CREATE_ELEMENT = -105
+val NATIVE_CREATE_TEXT_NODE = -106
+val NATIVE_GET_ATTRIBUTE = -110
+val NATIVE_SET_ATTRIBUTE = -111
+val NATIVE_REMOVE_ATTRIBUTE = -112
+val NATIVE_APPEND_CHILD = -113
+val NATIVE_REMOVE_CHILD = -114
+val NATIVE_INSERT_BEFORE = -115
+val NATIVE_GET_INNER_HTML = -120
+val NATIVE_SET_INNER_HTML = -121
+val NATIVE_GET_TEXT_CONTENT = -122
+val NATIVE_SET_TEXT_CONTENT = -123
+val NATIVE_CLASS_LIST_ADD = -124
+val NATIVE_CLASS_LIST_REMOVE = -125
+val NATIVE_STYLE_SET = -126
+
+# ── DomBindings ──────────────────────────────────────────────────────────
+
+class DomBindings:
+    document_ref: i64
+    logger: Logger
+
+    static fn new(document_ref: i64, logger: Logger) -> DomBindings:
+        DomBindings(document_ref: document_ref, logger: logger)
+
+    # Install all DOM API bindings on the global JS runtime object.
+    me install(runtime: JsRuntime):
+        self.logger.debug("Installing DOM bindings")
+
+        # Create the document object in the JS object store
+        val doc_id = runtime.interpreter.object_store.create_object()
+
+        # ── Document methods ────────────────────────────────────────
+        runtime._define_method_on(doc_id, "getElementById", NATIVE_GET_ELEMENT_BY_ID)
+        runtime._define_method_on(doc_id, "getElementsByTagName", NATIVE_GET_ELEMENTS_BY_TAG_NAME)
+        runtime._define_method_on(doc_id, "getElementsByClassName", NATIVE_GET_ELEMENTS_BY_CLASS_NAME)
+        runtime._define_method_on(doc_id, "querySelector", NATIVE_QUERY_SELECTOR)
+        runtime._define_method_on(doc_id, "querySelectorAll", NATIVE_QUERY_SELECTOR_ALL)
+        runtime._define_method_on(doc_id, "createElement", NATIVE_CREATE_ELEMENT)
+        runtime._define_method_on(doc_id, "createTextNode", NATIVE_CREATE_TEXT_NODE)
+
+        # Store document ref so DOM methods can resolve against the tree
+        runtime.interpreter.object_store.set_property(
+            doc_id, "__dom_ref__", JsValue.Number(v: self.document_ref.to_f64()))
+
+        # Bind document to global scope
+        runtime.interpreter.env_stack.define_var(
+            runtime.interpreter.global_env, "document", JsValue.Object(id: doc_id))
+
+        self.logger.debug("DOM bindings installed with document ref={self.document_ref}")
+
+# ── Document query methods ───────────────────────────────────────────────
+
+fn js_getElementById(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("getElementById requires 1 argument"))
+    val id_str = to_string(args.get(0))
+    if id_str.len() == 0:
+        return Ok(JsValue.Null)
+    # Return a placeholder wrapped node.
+    # A full implementation looks up the DOM tree by element ID attribute.
+    # For now we hash the id string to generate a stable node reference.
+    val node_id = _hash_id(id_str)
+    Ok(wrap_node(node_id))
+
+fn js_getElementsByTagName(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("getElementsByTagName requires 1 argument"))
+    val tag = to_string(args.get(0))
+    # Returns an empty HTMLCollection as a JS array for now.
+    # Full implementation walks the tree collecting matches.
+    Ok(JsValue.Array(id: -1))
+
+fn js_getElementsByClassName(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("getElementsByClassName requires 1 argument"))
+    val class_name = to_string(args.get(0))
+    Ok(JsValue.Array(id: -1))
+
+fn js_querySelector(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("querySelector requires 1 argument"))
+    val selector = to_string(args.get(0))
+    if selector.len() == 0:
+        return Err(script_error("querySelector: empty selector"))
+    # Simplified: if selector starts with '#', treat as id lookup
+    if selector[0:1] == "#":
+        val id_part = selector[1:selector.len()]
+        val node_id = _hash_id(id_part)
+        return Ok(wrap_node(node_id))
+    # Otherwise return null (no match)
+    Ok(JsValue.Null)
+
+fn js_querySelectorAll(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("querySelectorAll requires 1 argument"))
+    val selector = to_string(args.get(0))
+    if selector.len() == 0:
+        return Err(script_error("querySelectorAll: empty selector"))
+    # Returns an empty NodeList as a JS array for now
+    Ok(JsValue.Array(id: -1))
+
+fn js_createElement(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("createElement requires 1 argument"))
+    val tag_name = to_string(args.get(0))
+    if tag_name.len() == 0:
+        return Err(script_error("createElement: tag name cannot be empty"))
+    # Create a new node with a generated ID based on tag name.
+    # Full implementation allocates in the DOM tree and returns a live reference.
+    val node_id = _hash_id("new_" + tag_name)
+    Ok(wrap_node(node_id))
+
+fn js_createTextNode(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 1:
+        return Err(script_error("createTextNode requires 1 argument"))
+    val content = to_string(args.get(0))
+    val node_id = _hash_id("text_" + content)
+    val node_obj = wrap_node(node_id)
+    # Text nodes carry their content in __text__ property
+    Ok(node_obj)
+
+# ── Element attribute methods ────────────────────────────────────────────
+
+fn js_getAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 2:
+        return Err(script_error("getAttribute requires element and attribute name"))
+    val node_id = unwrap_node(args.get(0))
+    if val Some(nid) = node_id:
+        val attr_name = to_string(args.get(1))
+        # Full implementation looks up the element's attribute list.
+        # Return null to indicate attribute not found.
+        return Ok(JsValue.Null)
+    Err(script_error("getAttribute: invalid node reference"))
+
+fn js_setAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 3:
+        return Err(script_error("setAttribute requires element, name, and value"))
+    val node_id = unwrap_node(args.get(0))
+    if val Some(nid) = node_id:
+        val attr_name = to_string(args.get(1))
+        val attr_value = to_string(args.get(2))
+        # Full implementation sets the attribute on the element in the DOM tree.
+        return Ok(JsValue.Undefined)
+    Err(script_error("setAttribute: invalid node reference"))
+
+fn js_removeAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 2:
+        return Err(script_error("removeAttribute requires element and attribute name"))
+    val node_id = unwrap_node(args.get(0))
+    if val Some(nid) = node_id:
+        val attr_name = to_string(args.get(1))
+        # Full implementation removes the attribute from the element.
+        return Ok(JsValue.Undefined)
+    Err(script_error("removeAttribute: invalid node reference"))
+
+# ── Child node manipulation ──────────────────────────────────────────────
+
+fn js_appendChild(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 2:
+        return Err(script_error("appendChild requires parent and child nodes"))
+    val parent_id = unwrap_node(args.get(0))
+    val child_id = unwrap_node(args.get(1))
+    if val Some(pid) = parent_id:
+        if val Some(cid) = child_id:
+            # Full implementation appends child_id to parent_id in the DOM tree,
+            # removing from old parent if necessary.
+            return Ok(args.get(1))
+        return Err(script_error("appendChild: invalid child node"))
+    Err(script_error("appendChild: invalid parent node"))
+
+fn js_removeChild(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 2:
+        return Err(script_error("removeChild requires parent and child nodes"))
+    val parent_id = unwrap_node(args.get(0))
+    val child_id = unwrap_node(args.get(1))
+    if val Some(pid) = parent_id:
+        if val Some(cid) = child_id:
+            # Full implementation removes child from parent's children list.
+            return Ok(args.get(1))
+        return Err(script_error("removeChild: invalid child node"))
+    Err(script_error("removeChild: invalid parent node"))
+
+fn js_insertBefore(args: List<JsValue>) -> BrowserResult<JsValue>:
+    if args.len() < 3:
+        return Err(script_error("insertBefore requires parent, new child, and reference child"))
+    val parent_id = unwrap_node(args.get(0))
+    val new_child_id = unwrap_node(args.get(1))
+    # Third arg can be null (insert at end)
+    if val Some(pid) = parent_id:
+        if val Some(ncid) = new_child_id:
+            val ref_child = unwrap_node(args.get(2))
+            # Full implementation inserts new_child before ref_child in parent.
+            return Ok(args.get(1))
+        return Err(script_error("insertBefore: invalid new child node"))
+    Err(script_error("insertBefore: invalid parent node"))
+
+# ── Property accessors ───────────────────────────────────────────────────
+
+fn js_innerHTML_get(node_id: i64) -> JsValue:
+    # Full implementation serializes the subtree under node_id to HTML string.
+    JsValue.String(v: "")
+
+fn js_innerHTML_set(node_id: i64, html: text) -> BrowserResult<()>:
+    # Full implementation parses HTML and replaces node's children.
+    if node_id < 0:
+        return Err(dom_error("innerHTML set: invalid node id"))
+    Ok(())
+
+fn js_textContent_get(node_id: i64) -> JsValue:
+    # Full implementation collects all text node descendants.
+    JsValue.String(v: "")
+
+fn js_textContent_set(node_id: i64, content: text):
+    # Full implementation removes all children and creates a single text node.
+    pass_dn
+
+fn js_classList_add(node_id: i64, class_name: text):
+    # Full implementation adds class to element's class attribute DOMTokenList.
+    pass_dn
+
+fn js_classList_remove(node_id: i64, class_name: text):
+    # Full implementation removes class from element's class attribute DOMTokenList.
+    pass_dn
+
+fn js_style_set(node_id: i64, property: text, value: text):
+    # Full implementation updates the inline style map on the element.
+    pass_dn
+
+# ── Node wrapping / unwrapping ───────────────────────────────────────────
+
+# Create a JS object that represents a DOM node.
+# The object carries a __node_id__ property for identification.
+fn wrap_node(node_id: i64) -> JsValue:
+    # We encode the node as a JS Object with a well-known property.
+    # The object_store would normally allocate an id; here we use the node_id
+    # directly as a stand-in since the full runtime manages allocation.
+    JsValue.Object(id: node_id)
+
+# Extract the node_id from a JS value that was created by wrap_node.
+fn unwrap_node(value: JsValue) -> i64?:
+    match value:
+        JsValue.Object(id):
+            Some(id)
+        JsValue.Number(v):
+            # Allow passing numeric node ids directly
+            Some(v.to_i64())
+        _:
+            nil
+
+# ── DOM dispatch ─────────────────────────────────────────────────────────
+
+# Dispatch a DOM native function call by its ID.
+fn dispatch_dom_native(fn_id: i64, args: List<JsValue>) -> BrowserResult<JsValue>:
+    if fn_id == NATIVE_GET_ELEMENT_BY_ID:
+        return js_getElementById(args)
+    if fn_id == NATIVE_GET_ELEMENTS_BY_TAG_NAME:
+        return js_getElementsByTagName(args)
+    if fn_id == NATIVE_GET_ELEMENTS_BY_CLASS_NAME:
+        return js_getElementsByClassName(args)
+    if fn_id == NATIVE_QUERY_SELECTOR:
+        return js_querySelector(args)
+    if fn_id == NATIVE_QUERY_SELECTOR_ALL:
+        return js_querySelectorAll(args)
+    if fn_id == NATIVE_CREATE_ELEMENT:
+        return js_createElement(args)
+    if fn_id == NATIVE_CREATE_TEXT_NODE:
+        return js_createTextNode(args)
+    if fn_id == NATIVE_GET_ATTRIBUTE:
+        return js_getAttribute(args)
+    if fn_id == NATIVE_SET_ATTRIBUTE:
+        return js_setAttribute(args)
+    if fn_id == NATIVE_REMOVE_ATTRIBUTE:
+        return js_removeAttribute(args)
+    if fn_id == NATIVE_APPEND_CHILD:
+        return js_appendChild(args)
+    if fn_id == NATIVE_REMOVE_CHILD:
+        return js_removeChild(args)
+    if fn_id == NATIVE_INSERT_BEFORE:
+        return js_insertBefore(args)
+    Err(script_error("Unknown DOM native function id: {fn_id}"))
+
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+# Simple hash to generate a deterministic node_id from a string identifier.
+fn _hash_id(s: text) -> i64:
+    var hash: i64 = 5381
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val ch = s[i:i + 1]
+        # djb2-style hash: hash * 33 + char_code
+        hash = hash * 33 + _char_code(ch)
+        i = i + 1
+    # Keep positive
+    if hash < 0:
+        hash = 0 - hash
+    hash
+
+fn _char_code(ch: text) -> i64:
+    if ch.len() == 0:
+        return 0
+    # Simplified char code — maps a-z to 97-122, A-Z to 65-90, 0-9 to 48-57
+    if ch >= "a" and ch <= "z":
+        return 97 + _alpha_offset(ch, "a")
+    if ch >= "A" and ch <= "Z":
+        return 65 + _alpha_offset(ch, "A")
+    if ch >= "0" and ch <= "9":
+        return 48 + _digit_value(ch)
+    # Default for other characters
+    95
+
+fn _alpha_offset(ch: text, base: text) -> i64:
+    # Count offset from base character
+    val chars = "abcdefghijklmnopqrstuvwxyz"
+    val lower = ch.to_lower()
+    var i = 0
+    while i < 26:
+        if chars[i:i + 1] == lower:
+            return i
+        i = i + 1
+    0
+
+fn _digit_value(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    0

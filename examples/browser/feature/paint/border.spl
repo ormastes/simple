@@ -1,0 +1,223 @@
+# Border painting — solid, dashed, and dotted border styles for all four sides.
+# Also handles outline painting (drawn outside the border box).
+
+use examples.browser.entity.dom.paint_types.(Color, PaintOp)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.entity.dom.box_types.(LayoutBox, BoxModel)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# BorderSide — identifies which side of the box to paint.
+# ---------------------------------------------------------------------------
+
+enum BorderSide:
+    Top
+    Right
+    Bottom
+    Left
+
+# ---------------------------------------------------------------------------
+# BorderPainter
+# ---------------------------------------------------------------------------
+
+class BorderPainter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> BorderPainter:
+        BorderPainter(logger: logger)
+
+# ---------------------------------------------------------------------------
+# Border painting functions
+# ---------------------------------------------------------------------------
+
+# Paint all four borders for a layout box based on its computed style.
+fn paint_borders(box_node: LayoutBox, style: ComputedStyle) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val bm = box_node.box_model
+
+    val x = box_node.x
+    val y = box_node.y
+    val w = box_node.width
+    val h = box_node.height
+
+    # Top border
+    if bm.border_top > 0.0:
+        val color = get_border_color(style, BorderSide.Top)
+        val bstyle = get_border_style(style, BorderSide.Top)
+        val side_ops = paint_border_side(x, y, w, bm.border_top, color, BorderSide.Top, bstyle)
+        for op in side_ops:
+            ops.push(op)
+
+    # Right border
+    if bm.border_right > 0.0:
+        val color = get_border_color(style, BorderSide.Right)
+        val bstyle = get_border_style(style, BorderSide.Right)
+        val rx = x + w - bm.border_right
+        val side_ops = paint_border_side(rx, y, h, bm.border_right, color, BorderSide.Right, bstyle)
+        for op in side_ops:
+            ops.push(op)
+
+    # Bottom border
+    if bm.border_bottom > 0.0:
+        val color = get_border_color(style, BorderSide.Bottom)
+        val bstyle = get_border_style(style, BorderSide.Bottom)
+        val by = y + h - bm.border_bottom
+        val side_ops = paint_border_side(x, by, w, bm.border_bottom, color, BorderSide.Bottom, bstyle)
+        for op in side_ops:
+            ops.push(op)
+
+    # Left border
+    if bm.border_left > 0.0:
+        val color = get_border_color(style, BorderSide.Left)
+        val bstyle = get_border_style(style, BorderSide.Left)
+        val side_ops = paint_border_side(x, y, h, bm.border_left, color, BorderSide.Left, bstyle)
+        for op in side_ops:
+            ops.push(op)
+
+    ops
+
+# Paint a single border side, dispatching to the appropriate style renderer.
+fn paint_border_side(x: f64, y: f64, length: f64, width: f64, color: Color, side: BorderSide, border_style: text) -> List<PaintOp>:
+    match border_style:
+        "solid":
+            var ops = List<PaintOp>()
+            ops.push(paint_solid_border(x, y, length, width, color, side))
+            ops
+        "dashed":
+            paint_dashed_border(x, y, length, width, color, side)
+        "dotted":
+            paint_dotted_border(x, y, length, width, color, side)
+        "double":
+            # Double border: two lines with a gap between
+            var ops = List<PaintOp>()
+            val third = width / 3.0
+            ops.push(paint_solid_border(x, y, length, third, color, side))
+            match side:
+                BorderSide.Top:
+                    ops.push(paint_solid_border(x, y + width - third, length, third, color, side))
+                BorderSide.Bottom:
+                    ops.push(paint_solid_border(x, y - width + third, length, third, color, side))
+                BorderSide.Left:
+                    ops.push(paint_solid_border(x + width - third, y, length, third, color, side))
+                BorderSide.Right:
+                    ops.push(paint_solid_border(x - width + third, y, length, third, color, side))
+            ops
+        "none":
+            List<PaintOp>()
+        "hidden":
+            List<PaintOp>()
+        _:
+            # Default to solid for unknown styles
+            var ops = List<PaintOp>()
+            ops.push(paint_solid_border(x, y, length, width, color, side))
+            ops
+
+# Paint a solid border as a filled rectangle.
+fn paint_solid_border(x: f64, y: f64, length: f64, width: f64, color: Color, side: BorderSide) -> PaintOp:
+    match side:
+        BorderSide.Top:
+            PaintOp.FillRect(x: x, y: y, w: length, h: width, color: color)
+        BorderSide.Bottom:
+            PaintOp.FillRect(x: x, y: y, w: length, h: width, color: color)
+        BorderSide.Left:
+            PaintOp.FillRect(x: x, y: y, w: width, h: length, color: color)
+        BorderSide.Right:
+            PaintOp.FillRect(x: x, y: y, w: width, h: length, color: color)
+
+# Paint a dashed border as a series of rectangular segments.
+fn paint_dashed_border(x: f64, y: f64, length: f64, width: f64, color: Color, side: BorderSide) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    # Dash length = 3x border width, gap = 2x border width
+    val dash_len = width * 3.0
+    val gap_len = width * 2.0
+    val stride = dash_len + gap_len
+
+    var offset = 0.0
+    while offset < length:
+        val segment = if offset + dash_len > length: length - offset else: dash_len
+        match side:
+            BorderSide.Top:
+                ops.push(PaintOp.FillRect(x: x + offset, y: y, w: segment, h: width, color: color))
+            BorderSide.Bottom:
+                ops.push(PaintOp.FillRect(x: x + offset, y: y, w: segment, h: width, color: color))
+            BorderSide.Left:
+                ops.push(PaintOp.FillRect(x: x, y: y + offset, w: width, h: segment, color: color))
+            BorderSide.Right:
+                ops.push(PaintOp.FillRect(x: x, y: y + offset, w: width, h: segment, color: color))
+        offset = offset + stride
+
+    ops
+
+# Paint a dotted border as a series of small squares.
+fn paint_dotted_border(x: f64, y: f64, length: f64, width: f64, color: Color, side: BorderSide) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    # Dot size = border width, gap = border width
+    val dot_size = width
+    val stride = dot_size * 2.0
+
+    var offset = 0.0
+    while offset < length:
+        match side:
+            BorderSide.Top:
+                ops.push(PaintOp.FillRect(x: x + offset, y: y, w: dot_size, h: dot_size, color: color))
+            BorderSide.Bottom:
+                ops.push(PaintOp.FillRect(x: x + offset, y: y, w: dot_size, h: dot_size, color: color))
+            BorderSide.Left:
+                ops.push(PaintOp.FillRect(x: x, y: y + offset, w: dot_size, h: dot_size, color: color))
+            BorderSide.Right:
+                ops.push(PaintOp.FillRect(x: x, y: y + offset, w: dot_size, h: dot_size, color: color))
+        offset = offset + stride
+
+    ops
+
+# Paint outline around a box (drawn outside the border box).
+fn paint_outline(box_node: LayoutBox, style: ComputedStyle) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    # Outline is not modeled in ComputedStyle yet — simplified implementation
+    # uses border-top-color and a 1px width outside the box.
+    val outline_width = 1.0
+    val color = get_border_color(style, BorderSide.Top)
+
+    val x = box_node.x - outline_width
+    val y = box_node.y - outline_width
+    val w = box_node.width + outline_width * 2.0
+    val h = box_node.height + outline_width * 2.0
+
+    # Top
+    ops.push(PaintOp.FillRect(x: x, y: y, w: w, h: outline_width, color: color))
+    # Bottom
+    ops.push(PaintOp.FillRect(x: x, y: y + h - outline_width, w: w, h: outline_width, color: color))
+    # Left
+    ops.push(PaintOp.FillRect(x: x, y: y, w: outline_width, h: h, color: color))
+    # Right
+    ops.push(PaintOp.FillRect(x: x + w - outline_width, y: y, w: outline_width, h: h, color: color))
+
+    ops
+
+# ---------------------------------------------------------------------------
+# Style accessors — extract border properties per side.
+# ---------------------------------------------------------------------------
+
+# Get border color for a given side.
+# Currently ComputedStyle only stores border-top-color; other sides use the same.
+fn get_border_color(style: ComputedStyle, side: BorderSide) -> Color:
+    # All sides fall back to border-top-color (simplified model)
+    match style.border_top_color:
+        CSSValue.Color(r, g, b, a):
+            Color(r: r, g: g, b: b, a: a)
+        _:
+            Color.black()
+
+# Get border style for a given side.
+fn get_border_style(style: ComputedStyle, side: BorderSide) -> text:
+    # All sides fall back to border-top-style (simplified model)
+    style.border_top_style
+
+# Get border width for a given side.
+fn get_border_width(style: ComputedStyle, side: BorderSide) -> f64:
+    match side:
+        BorderSide.Top: extract_px(style.border_top_width)
+        BorderSide.Right: extract_px(style.border_right_width)
+        BorderSide.Bottom: extract_px(style.border_bottom_width)
+        BorderSide.Left: extract_px(style.border_left_width)

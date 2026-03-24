@@ -1,0 +1,149 @@
+# Compositor-side scrolling — handles scroll input off the main thread.
+# Manages scrollable layers, applies scroll offsets as transform deltas,
+# and detects scroll boundaries for overscroll behavior.
+
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# ScrollableLayer — a layer that can be scrolled independently.
+# ---------------------------------------------------------------------------
+
+class ScrollableLayer:
+    layer_id: i64
+    scroll_x: f64
+    scroll_y: f64
+    max_x: f64
+    max_y: f64
+    bounds_w: f64
+    bounds_h: f64
+
+    static fn create(layer_id: i64, max_x: f64, max_y: f64, bounds_w: f64, bounds_h: f64) -> ScrollableLayer:
+        ScrollableLayer(
+            layer_id: layer_id,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            max_x: max_x,
+            max_y: max_y,
+            bounds_w: bounds_w,
+            bounds_h: bounds_h
+        )
+
+# ---------------------------------------------------------------------------
+# CompositorScroll — manages all scrollable layers and scroll input.
+# ---------------------------------------------------------------------------
+
+class CompositorScroll:
+    layers: List<ScrollableLayer>
+    active_scroll: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> CompositorScroll:
+        CompositorScroll(
+            layers: List<ScrollableLayer>(),
+            active_scroll: -1,
+            logger: logger
+        )
+
+    # Handle a scroll input event on a specific layer.
+    # Clamps the scroll position to valid bounds.
+    # Returns true if the scroll was consumed (not at a boundary).
+    me handle_scroll_input(layer_id: i64, delta_x: f64, delta_y: f64) -> bool:
+        val layer = self.find_layer(layer_id)
+        if val l = layer:
+            # Check if we're at a scroll boundary before applying
+            if is_at_scroll_boundary(l, delta_y) and delta_x == 0.0:
+                self.logger.trace("scroll boundary reached on layer {layer_id}")
+                return false
+
+            # Apply scroll delta with clamping
+            var new_x = l.scroll_x + delta_x
+            var new_y = l.scroll_y + delta_y
+
+            # Clamp X
+            if new_x < 0.0:
+                new_x = 0.0
+            if new_x > l.max_x:
+                new_x = l.max_x
+
+            # Clamp Y
+            if new_y < 0.0:
+                new_y = 0.0
+            if new_y > l.max_y:
+                new_y = l.max_y
+
+            l.scroll_x = new_x
+            l.scroll_y = new_y
+            self.active_scroll = layer_id
+            self.logger.trace("scrolled layer {layer_id} to ({new_x}, {new_y})")
+            return true
+
+        self.logger.warn("scroll target layer {layer_id} not found")
+        false
+
+    # Get the current scroll offset for a layer as a transform delta.
+    me apply_scroll_offset(layer_id: i64) -> Pair<f64, f64>:
+        val layer = self.find_layer(layer_id)
+        if val l = layer:
+            # Scroll offsets are negative translations (content moves up/left)
+            return Pair(first: 0.0 - l.scroll_x, second: 0.0 - l.scroll_y)
+        Pair(first: 0.0, second: 0.0)
+
+    # Hit-test to find which scrollable layer contains the given point.
+    fn find_scrollable_layer(x: f64, y: f64) -> i64?:
+        # Search in reverse order (top-most layer first)
+        var i = self.layers.len() - 1
+        while i >= 0:
+            val layer = self.layers.get(i)
+            if val l = layer:
+                # Simple bounds check — the layer's visible area
+                if x >= 0.0 and x < l.bounds_w and y >= 0.0 and y < l.bounds_h:
+                    return l.layer_id
+            i = i - 1
+        nil
+
+    # Set the scroll position directly (e.g., from JavaScript scrollTo).
+    me set_scroll_position(layer_id: i64, x: f64, y: f64):
+        val layer = self.find_layer(layer_id)
+        if val l = layer:
+            # Clamp to valid range
+            var cx = x
+            var cy = y
+            if cx < 0.0:
+                cx = 0.0
+            if cx > l.max_x:
+                cx = l.max_x
+            if cy < 0.0:
+                cy = 0.0
+            if cy > l.max_y:
+                cy = l.max_y
+            l.scroll_x = cx
+            l.scroll_y = cy
+            self.logger.debug("scroll position set to ({cx}, {cy}) on layer {layer_id}")
+
+    # Register a new scrollable layer.
+    me add_scrollable_layer(layer_id: i64, max_x: f64, max_y: f64, bounds_w: f64, bounds_h: f64):
+        val layer = ScrollableLayer.create(layer_id, max_x, max_y, bounds_w, bounds_h)
+        self.layers.push(layer)
+        self.logger.debug("registered scrollable layer {layer_id}")
+
+    # Find a scrollable layer by ID.
+    fn find_layer(layer_id: i64) -> ScrollableLayer?:
+        for layer in self.layers:
+            if layer.layer_id == layer_id:
+                return layer
+        nil
+
+# ---------------------------------------------------------------------------
+# Scroll boundary detection
+# ---------------------------------------------------------------------------
+
+# Check if the scrollable layer is at a scroll boundary in the Y direction.
+# At the top (scroll_y == 0 and scrolling up) or bottom (scroll_y == max_y and scrolling down).
+fn is_at_scroll_boundary(layer: ScrollableLayer, delta_y: f64) -> bool:
+    # At top boundary, trying to scroll up
+    if layer.scroll_y <= 0.0 and delta_y < 0.0:
+        return true
+    # At bottom boundary, trying to scroll down
+    if layer.scroll_y >= layer.max_y and delta_y > 0.0:
+        return true
+    false

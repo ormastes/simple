@@ -1,0 +1,213 @@
+# Background painting — solid colors, linear gradients, and background images.
+# Handles background-origin (content-box, padding-box, border-box) and
+# background-repeat modes.
+
+use examples.browser.entity.dom.paint_types.(Color, Gradient, GradientStop, PaintOp)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.entity.dom.box_types.(LayoutBox, BoxModel)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# Background repeat and position types
+# ---------------------------------------------------------------------------
+
+enum BackgroundRepeat:
+    RepeatBoth
+    RepeatX
+    RepeatY
+    NoRepeat
+
+class BackgroundPosition:
+    x: f64
+    y: f64
+
+    static fn origin() -> BackgroundPosition:
+        BackgroundPosition(x: 0.0, y: 0.0)
+
+    static fn create(x: f64, y: f64) -> BackgroundPosition:
+        BackgroundPosition(x: x, y: y)
+
+# ---------------------------------------------------------------------------
+# BackgroundPainter
+# ---------------------------------------------------------------------------
+
+class BackgroundPainter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> BackgroundPainter:
+        BackgroundPainter(logger: logger)
+
+# ---------------------------------------------------------------------------
+# Background painting functions
+# ---------------------------------------------------------------------------
+
+# Paint the full background for a layout box — color, gradient, and/or image.
+fn paint_background(box_node: LayoutBox, style: ComputedStyle) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    # Determine painting area (default: padding-box)
+    val area = get_painting_area(box_node, "padding-box")
+    val ax = area.first.first
+    val ay = area.first.second
+    val aw = area.second.first
+    val ah = area.second.second
+
+    # Paint background-color
+    match style.background_color:
+        CSSValue.Color(r, g, b, a):
+            if a > 0:
+                val color = Color(r: r, g: g, b: b, a: a)
+                val op = paint_solid_color(ax, ay, aw, ah, color)
+                ops.push(op)
+        _: pass_dn
+
+    ops
+
+# Paint a solid color rectangle.
+fn paint_solid_color(x: f64, y: f64, w: f64, h: f64, color: Color) -> PaintOp:
+    PaintOp.FillRect(x: x, y: y, w: w, h: h, color: color)
+
+# Approximate a linear gradient by painting color bands.
+# Divides the area into strips along the gradient axis.
+fn paint_linear_gradient(x: f64, y: f64, w: f64, h: f64, gradient: Gradient) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    val num_stops = gradient.stops.len()
+    if num_stops < 2:
+        # Single stop — just fill with that color
+        if num_stops == 1:
+            val stop = gradient.stops.get(0)
+            if val s = stop:
+                ops.push(PaintOp.FillRect(x: x, y: y, w: w, h: h, color: s.color))
+        return ops
+
+    # Number of bands for approximation
+    val band_count = 32
+    val band_height = h / 32.0
+
+    var band_idx = 0
+    while band_idx < band_count:
+        val t = band_idx.to_f64() / 32.0
+        val color = interpolate_gradient_color(gradient, t)
+        val band_y = y + band_idx.to_f64() * band_height
+        val op = PaintOp.FillRect(x: x, y: band_y, w: w, h: band_height, color: color)
+        ops.push(op)
+        band_idx = band_idx + 1
+
+    ops
+
+# Interpolate color along a gradient at position t (0.0 to 1.0).
+fn interpolate_gradient_color(gradient: Gradient, t: f64) -> Color:
+    val stops = gradient.stops
+    val num = stops.len()
+    if num == 0:
+        return Color.transparent()
+    if num == 1:
+        val s = stops.get(0)
+        if val stop = s:
+            return stop.color
+        return Color.transparent()
+
+    # Find the two stops that bracket t
+    var i = 0
+    while i < num - 1:
+        val curr = stops.get(i)
+        val next_stop = stops.get(i + 1)
+        if val c = curr:
+            if val n = next_stop:
+                if t >= c.position and t <= n.position:
+                    val range = n.position - c.position
+                    if range <= 0.0:
+                        return c.color
+                    val local_t = (t - c.position) / range
+                    return lerp_color(c.color, n.color, local_t)
+        i = i + 1
+
+    # Past last stop — use last color
+    val last = stops.get(num - 1)
+    if val l = last:
+        return l.color
+    Color.transparent()
+
+# Linear interpolation between two colors.
+fn lerp_color(a: Color, b: Color, t: f64) -> Color:
+    val r = a.r.to_f64() + (b.r.to_f64() - a.r.to_f64()) * t
+    val g = a.g.to_f64() + (b.g.to_f64() - a.g.to_f64()) * t
+    val bl = a.b.to_f64() + (b.b.to_f64() - a.b.to_f64()) * t
+    val alpha = a.a.to_f64() + (b.a.to_f64() - a.a.to_f64()) * t
+    Color(r: r.to_i64(), g: g.to_i64(), b: bl.to_i64(), a: alpha.to_i64())
+
+# Paint a background image with repeat and position.
+fn paint_background_image(x: f64, y: f64, w: f64, h: f64, image_id: i64, repeat: BackgroundRepeat, position: BackgroundPosition) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    match repeat:
+        BackgroundRepeat.NoRepeat:
+            # Single image at the specified position
+            val op = PaintOp.DrawImage(
+                x: x + position.x,
+                y: y + position.y,
+                w: w,
+                h: h,
+                image_id: image_id
+            )
+            ops.push(op)
+        BackgroundRepeat.RepeatBoth:
+            # Tile the image across the entire area
+            val op = PaintOp.DrawImage(x: x, y: y, w: w, h: h, image_id: image_id)
+            ops.push(op)
+        BackgroundRepeat.RepeatX:
+            val op = PaintOp.DrawImage(x: x, y: y + position.y, w: w, h: h, image_id: image_id)
+            ops.push(op)
+        BackgroundRepeat.RepeatY:
+            val op = PaintOp.DrawImage(x: x + position.x, y: y, w: w, h: h, image_id: image_id)
+            ops.push(op)
+
+    ops
+
+# Resolve background-position from CSS values to pixel offsets.
+fn resolve_background_position(pos_x: CSSValue, pos_y: CSSValue, box_w: f64, box_h: f64, img_w: f64, img_h: f64) -> BackgroundPosition:
+    val x = resolve_position_value(pos_x, box_w, img_w)
+    val y = resolve_position_value(pos_y, box_h, img_h)
+    BackgroundPosition(x: x, y: y)
+
+fn resolve_position_value(value: CSSValue, container_size: f64, image_size: f64) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            v
+        CSSValue.Percentage(v):
+            (v / 100.0) * (container_size - image_size)
+        CSSValue.Keyword(v):
+            match v:
+                "left": 0.0
+                "top": 0.0
+                "center": (container_size - image_size) / 2.0
+                "right": container_size - image_size
+                "bottom": container_size - image_size
+                _: 0.0
+        _:
+            0.0
+
+# Get the painting area for a background given the box and origin keyword.
+# Returns ((x, y), (width, height)).
+fn get_painting_area(box_node: LayoutBox, origin: text) -> Pair<Pair<f64, f64>, Pair<f64, f64>>:
+    val bm = box_node.box_model
+    match origin:
+        "content-box":
+            val cx = box_node.x + bm.border_left + bm.padding_left
+            val cy = box_node.y + bm.border_top + bm.padding_top
+            val cw = box_node.width - bm.border_left - bm.border_right - bm.padding_left - bm.padding_right
+            val ch = box_node.height - bm.border_top - bm.border_bottom - bm.padding_top - bm.padding_bottom
+            Pair(first: Pair(first: cx, second: cy), second: Pair(first: cw, second: ch))
+        "padding-box":
+            val px = box_node.x + bm.border_left
+            val py = box_node.y + bm.border_top
+            val pw = box_node.width - bm.border_left - bm.border_right
+            val ph = box_node.height - bm.border_top - bm.border_bottom
+            Pair(first: Pair(first: px, second: py), second: Pair(first: pw, second: ph))
+        _:  # border-box (default)
+            Pair(
+                first: Pair(first: box_node.x, second: box_node.y),
+                second: Pair(first: box_node.width, second: box_node.height)
+            )

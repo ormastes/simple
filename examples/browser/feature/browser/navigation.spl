@@ -1,0 +1,161 @@
+# Navigation controller for the Simple Browser Platform.
+# Manages URL loading, history traversal, and redirect handling.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error, network_error}
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.entity.browser.navigation_types.{NavigationEntry, NavigationState}
+
+class NavigationController:
+    entries: List<NavigationEntry>
+    current_index: i64
+    is_loading: bool
+    state: NavigationState
+    logger: Logger
+
+    static fn new(logger: Logger) -> NavigationController:
+        NavigationController(
+            entries: List<NavigationEntry>(),
+            current_index: -1,
+            is_loading: false,
+            state: NavigationState.Idle,
+            logger: logger
+        )
+
+    me navigate(url: text) -> BrowserResult<()>:
+        val normalized = normalize_url(url)
+        if not is_valid_url(normalized):
+            return Err(network_error("Invalid URL: {url}"))
+        self.is_loading = true
+        self.state = NavigationState.Loading
+        self.logger.info("Navigating to {normalized}")
+        # Truncate forward history if we are not at the end
+        if self.current_index < self.entries.len() - 1:
+            var i = self.entries.len() - 1
+            while i > self.current_index:
+                self.entries.remove(i)
+                i = i - 1
+        # Add new entry
+        val entry = NavigationEntry.create(url: normalized, title: "", timestamp: 0)
+        self.entries.push(entry)
+        self.current_index = self.entries.len() - 1
+        Ok(())
+
+    me commit_navigation(url: text, title: text):
+        self.is_loading = false
+        self.state = NavigationState.Committed
+        if self.current_index >= 0 and self.current_index < self.entries.len():
+            val entry = NavigationEntry.create(url: url, title: title, timestamp: 0)
+            self.entries[self.current_index] = entry
+        self.logger.info("Navigation committed: {title} ({url})")
+
+    me go_back() -> BrowserResult<()>:
+        if not self.can_go_back():
+            return Err(config_error("Cannot go back — at beginning of history"))
+        self.current_index = self.current_index - 1
+        val entry = self.entries[self.current_index]
+        self.state = NavigationState.Loading
+        self.is_loading = true
+        self.logger.debug("Go back to index={self.current_index} url={entry.url}")
+        Ok(())
+
+    me go_forward() -> BrowserResult<()>:
+        if not self.can_go_forward():
+            return Err(config_error("Cannot go forward — at end of history"))
+        self.current_index = self.current_index + 1
+        val entry = self.entries[self.current_index]
+        self.state = NavigationState.Loading
+        self.is_loading = true
+        self.logger.debug("Go forward to index={self.current_index} url={entry.url}")
+        Ok(())
+
+    me reload() -> BrowserResult<()>:
+        if self.current_index < 0:
+            return Err(config_error("No page to reload"))
+        self.state = NavigationState.Loading
+        self.is_loading = true
+        val entry = self.entries[self.current_index]
+        self.logger.debug("Reloading {entry.url}")
+        Ok(())
+
+    me stop_loading():
+        if self.is_loading:
+            self.is_loading = false
+            self.state = NavigationState.Idle
+            self.logger.debug("Loading stopped")
+
+    fn can_go_back() -> bool:
+        self.current_index > 0
+
+    fn can_go_forward() -> bool:
+        self.current_index < self.entries.len() - 1
+
+    fn current_url() -> text:
+        if self.current_index >= 0 and self.current_index < self.entries.len():
+            self.entries[self.current_index].url
+        else:
+            ""
+
+    fn current_title() -> text:
+        if self.current_index >= 0 and self.current_index < self.entries.len():
+            self.entries[self.current_index].title
+        else:
+            ""
+
+    me update_title(title: text):
+        if self.current_index >= 0 and self.current_index < self.entries.len():
+            val old = self.entries[self.current_index]
+            self.entries[self.current_index] = NavigationEntry.create(
+                url: old.url, title: title, timestamp: old.timestamp
+            )
+            self.logger.debug("Title updated: {title}")
+
+    me update_favicon(url: text):
+        # Favicon is tracked per-tab, not per navigation entry.
+        # This notifies the tab manager to update the favicon.
+        self.logger.debug("Favicon updated: {url}")
+
+    fn get_entry_count() -> i64:
+        self.entries.len()
+
+    fn get_entries() -> List<NavigationEntry>:
+        self.entries
+
+# --- URL utility functions ---
+
+fn normalize_url(input: text) -> text:
+    # Handle empty input
+    if input == "":
+        return "about:blank"
+    # Handle internal URLs
+    if is_internal_url(input):
+        return input
+    # Already has a scheme
+    if input.starts_with("https://") or input.starts_with("http://"):
+        return input
+    if input.starts_with("file://"):
+        return input
+    # Looks like a URL (contains a dot and no spaces)
+    if input.contains(".") and not input.contains(" "):
+        return "https://{input}"
+    # Treat as search query
+    return search_url(input)
+
+fn is_valid_url(url: text) -> bool:
+    if url == "":
+        return false
+    if is_internal_url(url):
+        return true
+    if url.starts_with("https://") or url.starts_with("http://"):
+        return true
+    if url.starts_with("file://"):
+        return true
+    false
+
+fn is_internal_url(url: text) -> bool:
+    (url.starts_with("about:") or
+     url.starts_with("simple://") or
+     url.starts_with("data:") or
+     url.starts_with("blob:"))
+
+fn search_url(query: text) -> text:
+    "https://search.example.com/?q={query}"

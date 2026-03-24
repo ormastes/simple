@@ -1,0 +1,231 @@
+# GPU surface management — abstraction over platform render targets.
+# Manages allocation, resizing, destruction, and swapchain presentation
+# of GPU-backed surfaces used for compositing and rasterization.
+
+use examples.browser.shared.error.(BrowserError, BrowserErrorKind, BrowserResult, paint_error)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# SurfaceFormat — pixel format for GPU surfaces.
+# ---------------------------------------------------------------------------
+
+enum SurfaceFormat:
+    BGRA8
+    RGBA8
+    RGB565
+
+# Return bytes per pixel for a given surface format.
+fn bytes_per_pixel(format: SurfaceFormat) -> i64:
+    match format:
+        SurfaceFormat.BGRA8: 4
+        SurfaceFormat.RGBA8: 4
+        SurfaceFormat.RGB565: 2
+
+# ---------------------------------------------------------------------------
+# GpuSurface — a single GPU-backed render target.
+# ---------------------------------------------------------------------------
+
+class GpuSurface:
+    id: i64
+    width: i64
+    height: i64
+    format: SurfaceFormat
+    texture_id: i64
+    is_valid: bool
+    generation: i64
+
+    static fn create(id: i64, width: i64, height: i64, format: SurfaceFormat) -> GpuSurface:
+        GpuSurface(
+            id: id,
+            width: width,
+            height: height,
+            format: format,
+            texture_id: id,
+            is_valid: true,
+            generation: 0
+        )
+
+# Calculate memory usage of a single surface in bytes.
+fn surface_memory_bytes(surface: GpuSurface) -> i64:
+    val bpp = bytes_per_pixel(surface.format)
+    surface.width * surface.height * bpp
+
+# ---------------------------------------------------------------------------
+# SurfacePool — manages a collection of GPU surfaces.
+# ---------------------------------------------------------------------------
+
+class SurfacePool:
+    surfaces: List<GpuSurface>
+    next_id: i64
+    max_surfaces: i64
+    logger: Logger
+
+    static fn new(max_surfaces: i64, logger: Logger) -> SurfacePool:
+        logger.info("SurfacePool created, max_surfaces={max_surfaces}")
+        SurfacePool(
+            surfaces: List<GpuSurface>(),
+            next_id: 1,
+            max_surfaces: max_surfaces,
+            logger: logger
+        )
+
+    # Create a new GPU surface with the given dimensions and format.
+    me create_surface(width: i64, height: i64, format: SurfaceFormat) -> BrowserResult<GpuSurface>:
+        if self.surfaces.len() >= self.max_surfaces:
+            self.logger.warn("surface pool exhausted: {self.surfaces.len()}/{self.max_surfaces}")
+            return Err(paint_error("surface pool exhausted, max={self.max_surfaces}"))
+
+        if width <= 0 or height <= 0:
+            return Err(paint_error("invalid surface dimensions: {width}x{height}"))
+
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val surface = GpuSurface.create(id, width, height, format)
+        self.surfaces.push(surface)
+
+        val mem = surface_memory_bytes(surface)
+        self.logger.debug("created surface id={id} {width}x{height} ({mem} bytes)")
+        Ok(surface)
+
+    # Resize an existing surface by ID. Invalidates old content.
+    me resize_surface(surface_id: i64, width: i64, height: i64) -> BrowserResult<()>:
+        if width <= 0 or height <= 0:
+            return Err(paint_error("invalid resize dimensions: {width}x{height}"))
+
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                val old_w = surface.width
+                val old_h = surface.height
+                surface.width = width
+                surface.height = height
+                surface.generation = surface.generation + 1
+                self.logger.debug("resized surface {surface_id}: {old_w}x{old_h} -> {width}x{height}")
+                return Ok(())
+
+        Err(paint_error("surface not found: id={surface_id}"))
+
+    # Destroy a surface by ID and remove it from the pool.
+    me destroy_surface(surface_id: i64):
+        var new_surfaces = List<GpuSurface>()
+        var found = false
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                surface.is_valid = false
+                found = true
+                self.logger.debug("destroyed surface id={surface_id}")
+            else:
+                new_surfaces.push(surface)
+        self.surfaces = new_surfaces
+        if not found:
+            self.logger.warn("destroy_surface: id={surface_id} not found")
+
+    # Look up a surface by ID.
+    fn get_surface(surface_id: i64) -> GpuSurface?:
+        for surface in self.surfaces:
+            if surface.id == surface_id:
+                if surface.is_valid:
+                    return surface
+        nil
+
+    # Reclaim surfaces that are no longer valid.
+    me reclaim_unused():
+        var kept = List<GpuSurface>()
+        var reclaimed = 0
+        for surface in self.surfaces:
+            if surface.is_valid:
+                kept.push(surface)
+            else:
+                reclaimed = reclaimed + 1
+        self.surfaces = kept
+        if reclaimed > 0:
+            self.logger.info("reclaimed {reclaimed} unused surfaces, {kept.len()} remaining")
+
+    # Calculate total memory usage of all surfaces in the pool.
+    fn total_memory_usage() -> i64:
+        var total = 0
+        for surface in self.surfaces:
+            if surface.is_valid:
+                total = total + surface_memory_bytes(surface)
+        total
+
+    # Present a swapchain by swapping front and back buffers.
+    me present(swapchain: Swapchain) -> BrowserResult<()>:
+        val front_surface = self.get_surface(swapchain.front)
+        if front_surface.?:
+            pass_do_nothing
+        else:
+            return Err(paint_error("swapchain front surface not found: id={swapchain.front}"))
+
+        val back_surface = self.get_surface(swapchain.back)
+        if back_surface.?:
+            pass_do_nothing
+        else:
+            return Err(paint_error("swapchain back surface not found: id={swapchain.back}"))
+
+        # Swap front and back buffer IDs
+        val old_front = swapchain.front
+        swapchain.front = swapchain.back
+        swapchain.back = old_front
+
+        self.logger.trace("presented swapchain: front={swapchain.front}, back={swapchain.back}")
+        Ok(())
+
+    # Create a new swapchain with front and back surfaces.
+    me create_swapchain(width: i64, height: i64) -> BrowserResult<Swapchain>:
+        val front = self.create_surface(width, height, SurfaceFormat.BGRA8)?
+        val back = self.create_surface(width, height, SurfaceFormat.BGRA8)?
+
+        val sc = Swapchain(
+            front: front.id,
+            back: back.id,
+            width: width,
+            height: height
+        )
+        self.logger.info("created swapchain {width}x{height} front={front.id} back={back.id}")
+        Ok(sc)
+
+# ---------------------------------------------------------------------------
+# Swapchain — double-buffered presentation surface.
+# ---------------------------------------------------------------------------
+
+class Swapchain:
+    front: i64
+    back: i64
+    width: i64
+    height: i64
+
+    static fn create(front: i64, back: i64, width: i64, height: i64) -> Swapchain:
+        Swapchain(front: front, back: back, width: width, height: height)
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+# Calculate total memory for a given dimension and format.
+fn calculate_surface_memory(width: i64, height: i64, format: SurfaceFormat) -> i64:
+    width * height * bytes_per_pixel(format)
+
+# Check if a surface fits within a maximum memory budget (in bytes).
+fn surface_fits_budget(width: i64, height: i64, format: SurfaceFormat, budget_bytes: i64) -> bool:
+    val needed = calculate_surface_memory(width, height, format)
+    needed <= budget_bytes
+
+# Format a surface description as text.
+fn describe_surface(surface: GpuSurface) -> text:
+    val fmt_name = match surface.format:
+        SurfaceFormat.BGRA8: "BGRA8"
+        SurfaceFormat.RGBA8: "RGBA8"
+        SurfaceFormat.RGB565: "RGB565"
+    val mem = surface_memory_bytes(surface)
+    "Surface(id={surface.id}, {surface.width}x{surface.height}, {fmt_name}, {mem} bytes, gen={surface.generation})"
+
+# Format memory size in human-readable form.
+fn format_memory(bytes: i64) -> text:
+    if bytes >= 1048576:
+        val mb = bytes / 1048576
+        return "{mb} MB"
+    if bytes >= 1024:
+        val kb = bytes / 1024
+        return "{kb} KB"
+    "{bytes} B"

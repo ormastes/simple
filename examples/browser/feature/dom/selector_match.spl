@@ -1,0 +1,525 @@
+# CSS selector matching against DOM nodes.
+# Implements matching for type, class, ID, attribute, and pseudo-class selectors,
+# plus combinators (descendant, child, adjacent sibling, general sibling).
+# Provides querySelector and querySelectorAll tree-search methods.
+#
+# Depends on:
+#   entity/dom/node_types.spl   — DomNode, NodeKind, Element
+#   entity/dom/css_types.spl    — Selector, SelectorPart
+#   shared/logging.spl          — Logger, LogLevel
+
+# --- Selector matcher ---
+
+class SelectorMatcher:
+    logger: Logger
+
+    static fn new(logger: Logger) -> SelectorMatcher:
+        SelectorMatcher(logger: logger)
+
+    # Does this selector match the given node?
+    fn matches(selector: Selector, node_id: i64, doc_nodes: List<DomNode>, doc_elements: List<Element>) -> bool:
+        val parts = selector.parts
+
+        # If there are no parts, nothing matches
+        if parts.len() == 0:
+            return false
+
+        # Split parts and combinators for compound selector matching
+        var selector_parts = List<SelectorPart>()
+        var combinators = List<text>()
+
+        var i = 0
+        while i < parts.len():
+            val part = parts.get(i)
+            match part:
+                SelectorPart.Combinator(kind):
+                    combinators.push(kind)
+                _:
+                    selector_parts.push(part)
+            i = i + 1
+
+        # If there are combinators, use combinator matching
+        if combinators.len() > 0:
+            return self.matches_with_combinator(selector_parts, combinators, node_id, doc_nodes, doc_elements)
+
+        # Simple selector: all parts must match the same node
+        var j = 0
+        while j < selector_parts.len():
+            if !self.matches_part(selector_parts.get(j), node_id, doc_nodes, doc_elements):
+                return false
+            j = j + 1
+        true
+
+    # Match a single selector part against a node.
+    fn matches_part(part: SelectorPart, node_id: i64, doc_nodes: List<DomNode>, doc_elements: List<Element>) -> bool:
+        match part:
+            SelectorPart.Type(name):
+                self.matches_type(name, node_id, doc_elements)
+            SelectorPart.Class(name):
+                self.matches_class(name, node_id, doc_elements)
+            SelectorPart.Id(name):
+                self.matches_id(name, node_id, doc_elements)
+            SelectorPart.Universal:
+                # Universal selector matches any element node
+                val elem = get_element_for_node(node_id, doc_elements)
+                match elem:
+                    Some(_): true
+                    nil: false
+            SelectorPart.Attribute(name, op, value):
+                self.matches_attribute(name, op, value, node_id, doc_elements)
+            SelectorPart.PseudoClass(name):
+                self.matches_pseudo_class(name, node_id, doc_nodes, doc_elements)
+            SelectorPart.PseudoElement(_):
+                # Pseudo-elements are handled at style application, not matching
+                false
+            SelectorPart.Combinator(_):
+                # Combinators are handled separately
+                false
+
+    # Find the first node in subtree matching the selector (depth-first).
+    fn querySelector(selector: Selector, root_id: i64, doc_nodes: List<DomNode>, doc_elements: List<Element>) -> i64?:
+        val nodes_in_order = walk_subtree(root_id, doc_nodes)
+        var i = 0
+        while i < nodes_in_order.len():
+            val nid = nodes_in_order.get(i)
+            if self.matches(selector, nid, doc_nodes, doc_elements):
+                self.logger.debug("querySelector: matched node={nid}")
+                return nid
+            i = i + 1
+        self.logger.debug("querySelector: no match found under root={root_id}")
+        nil
+
+    # Find all nodes in subtree matching the selector (depth-first order).
+    fn querySelectorAll(selector: Selector, root_id: i64, doc_nodes: List<DomNode>, doc_elements: List<Element>) -> List<i64>:
+        var result = List<i64>()
+        val nodes_in_order = walk_subtree(root_id, doc_nodes)
+        var i = 0
+        while i < nodes_in_order.len():
+            val nid = nodes_in_order.get(i)
+            if self.matches(selector, nid, doc_nodes, doc_elements):
+                result.push(nid)
+            i = i + 1
+        self.logger.debug("querySelectorAll: found {result.len()} matches under root={root_id}")
+        result
+
+    # --- Part matchers ---
+
+    # Match element tag name (case-insensitive for HTML).
+    fn matches_type(name: text, node_id: i64, elements: List<Element>) -> bool:
+        val elem = get_element_for_node(node_id, elements)
+        match elem:
+            Some(e):
+                e.tag_name == name or e.tag_name == name.to_lower() or e.tag_name == name.to_upper()
+            nil:
+                false
+
+    # Match class: element's "class" attribute contains the given class name.
+    fn matches_class(name: text, node_id: i64, elements: List<Element>) -> bool:
+        val elem = get_element_for_node(node_id, elements)
+        match elem:
+            Some(e):
+                val class_attr = get_attribute_value(e, "class")
+                match class_attr:
+                    Some(class_str):
+                        # Split class string by spaces and check for exact match
+                        val classes = class_str.split(" ")
+                        var i = 0
+                        while i < classes.len():
+                            if classes.get(i) == name:
+                                return true
+                            i = i + 1
+                        false
+                    nil:
+                        false
+            nil:
+                false
+
+    # Match ID: element's "id" attribute equals the given name.
+    fn matches_id(name: text, node_id: i64, elements: List<Element>) -> bool:
+        val elem = get_element_for_node(node_id, elements)
+        match elem:
+            Some(e):
+                val id_attr = get_attribute_value(e, "id")
+                match id_attr:
+                    Some(id_val): id_val == name
+                    nil: false
+            nil:
+                false
+
+    # Match attribute selector with operator.
+    # Operators: = (exact), ~= (space-separated word), |= (hyphen-separated prefix),
+    #            ^= (starts with), $= (ends with), *= (contains)
+    fn matches_attribute(name: text, op: text, value: text, node_id: i64, elements: List<Element>) -> bool:
+        val elem = get_element_for_node(node_id, elements)
+        match elem:
+            Some(e):
+                val attr_val = get_attribute_value(e, name)
+                match attr_val:
+                    Some(av):
+                        if op == "":
+                            # [attr] — attribute exists
+                            true
+                        else if op == "=":
+                            # [attr=value] — exact match
+                            av == value
+                        else if op == "~=":
+                            # [attr~=value] — space-separated word
+                            val words = av.split(" ")
+                            var i = 0
+                            var found = false
+                            while i < words.len():
+                                if words.get(i) == value:
+                                    found = true
+                                i = i + 1
+                            found
+                        else if op == "|=":
+                            # [attr|=value] — exact or starts with value-
+                            av == value or av.starts_with("{value}-")
+                        else if op == "^=":
+                            # [attr^=value] — starts with
+                            av.starts_with(value)
+                        else if op == "$=":
+                            # [attr$=value] — ends with
+                            av.ends_with(value)
+                        else if op == "*=":
+                            # [attr*=value] — contains substring
+                            av.contains(value)
+                        else:
+                            false
+                    nil:
+                        # Attribute not present
+                        if op == "":
+                            # [attr] — existence check, attribute not found
+                            false
+                        else:
+                            false
+            nil:
+                false
+
+    # Match pseudo-class selectors.
+    fn matches_pseudo_class(name: text, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> bool:
+        if name == "root":
+            # :root matches the document element (parent is document or -1)
+            var i = 0
+            while i < doc_nodes.len():
+                val node = doc_nodes.get(i)
+                if node.id == node_id:
+                    return node.parent_id < 0 or node.parent_id == node_id
+                i = i + 1
+            return false
+
+        if name == "first-child":
+            val siblings = get_siblings(node_id, doc_nodes)
+            if siblings.len() > 0:
+                return siblings.get(0) == node_id
+            return false
+
+        if name == "last-child":
+            val siblings = get_siblings(node_id, doc_nodes)
+            if siblings.len() > 0:
+                return siblings.get(siblings.len() - 1) == node_id
+            return false
+
+        if name == "only-child":
+            val siblings = get_siblings(node_id, doc_nodes)
+            return siblings.len() == 1 and siblings.get(0) == node_id
+
+        if name == "empty":
+            # :empty matches elements with no children
+            var i = 0
+            while i < doc_nodes.len():
+                val node = doc_nodes.get(i)
+                if node.id == node_id:
+                    return node.children.len() == 0
+                i = i + 1
+            return false
+
+        if name == "first-of-type":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val siblings = get_siblings(node_id, doc_nodes)
+                    var j = 0
+                    while j < siblings.len():
+                        val sib_id = siblings.get(j)
+                        val sib_elem = get_element_for_node(sib_id, elements)
+                        match sib_elem:
+                            Some(se):
+                                if se.tag_name == e.tag_name:
+                                    return sib_id == node_id
+                            nil: pass_dn
+                        j = j + 1
+                    false
+                nil: false
+
+        if name == "last-of-type":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val siblings = get_siblings(node_id, doc_nodes)
+                    var last_match = -1
+                    var j = 0
+                    while j < siblings.len():
+                        val sib_id = siblings.get(j)
+                        val sib_elem = get_element_for_node(sib_id, elements)
+                        match sib_elem:
+                            Some(se):
+                                if se.tag_name == e.tag_name:
+                                    last_match = sib_id
+                            nil: pass_dn
+                        j = j + 1
+                    last_match == node_id
+                nil: false
+
+        # Unsupported pseudo-class
+        self.logger.warn("matches_pseudo_class: unsupported pseudo-class :{name}")
+        false
+
+    # --- Combinator matching ---
+
+    # Match a compound selector with combinators.
+    # selector_parts: the non-combinator parts, grouped per compound segment.
+    # combinators: the combinators between segments.
+    # We process from right to left: the rightmost segment matches the candidate node,
+    # then each combinator constrains the relationship to the next segment left.
+    fn matches_with_combinator(selector_parts: List<SelectorPart>, combinators: List<text>, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> bool:
+        # Group parts into segments separated by combinators.
+        # For a selector like "div > .foo .bar", parts = [Type("div"), Class("foo"), Class("bar")]
+        # and combinators = [">", " "].
+        # Segments (right-to-left): [Class("bar")], [Class("foo")], [Type("div")]
+        # Combinators (right-to-left): " ", ">"
+
+        # Simple approach: assume 1 part per segment (most common case).
+        # The rightmost part must match the candidate node.
+        if selector_parts.len() == 0:
+            return false
+
+        val rightmost = selector_parts.get(selector_parts.len() - 1)
+        if !self.matches_part(rightmost, node_id, doc_nodes, elements):
+            return false
+
+        # Walk left through combinators
+        var current_node = node_id
+        var seg_idx = selector_parts.len() - 2  # next segment to the left
+        var comb_idx = combinators.len() - 1     # corresponding combinator
+
+        while seg_idx >= 0 and comb_idx >= 0:
+            val part = selector_parts.get(seg_idx)
+            val combinator = combinators.get(comb_idx)
+
+            if combinator == " ":
+                # Descendant combinator: any ancestor must match
+                val matched = self.match_descendant(part, current_node, doc_nodes, elements)
+                match matched:
+                    Some(ancestor_id):
+                        current_node = ancestor_id
+                    nil:
+                        return false
+            else if combinator == ">":
+                # Child combinator: direct parent must match
+                val matched = self.match_child(part, current_node, doc_nodes, elements)
+                match matched:
+                    Some(parent_id):
+                        current_node = parent_id
+                    nil:
+                        return false
+            else if combinator == "+":
+                # Adjacent sibling: immediately preceding sibling must match
+                val matched = self.match_adjacent(part, current_node, doc_nodes, elements)
+                match matched:
+                    Some(sib_id):
+                        current_node = sib_id
+                    nil:
+                        return false
+            else if combinator == "~":
+                # General sibling: any preceding sibling must match
+                val matched = self.match_general_sibling(part, current_node, doc_nodes, elements)
+                match matched:
+                    Some(sib_id):
+                        current_node = sib_id
+                    nil:
+                        return false
+            else:
+                self.logger.warn("matches_with_combinator: unknown combinator '{combinator}'")
+                return false
+
+            seg_idx = seg_idx - 1
+            comb_idx = comb_idx - 1
+
+        true
+
+    # Descendant combinator: find any ancestor of node_id that matches part.
+    fn match_descendant(part: SelectorPart, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> i64?:
+        var parent = get_parent(node_id, doc_nodes)
+        while true:
+            match parent:
+                Some(pid):
+                    if self.matches_part(part, pid, doc_nodes, elements):
+                        return pid
+                    parent = get_parent(pid, doc_nodes)
+                nil:
+                    return nil
+        nil
+
+    # Child combinator: direct parent must match.
+    fn match_child(part: SelectorPart, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> i64?:
+        val parent = get_parent(node_id, doc_nodes)
+        match parent:
+            Some(pid):
+                if self.matches_part(part, pid, doc_nodes, elements):
+                    return pid
+                nil
+            nil:
+                nil
+
+    # Adjacent sibling: the immediately preceding sibling must match.
+    fn match_adjacent(part: SelectorPart, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> i64?:
+        val siblings = get_siblings(node_id, doc_nodes)
+        val idx = get_child_index_in_list(node_id, siblings)
+        if idx > 0:
+            val prev_id = siblings.get(idx - 1)
+            if self.matches_part(part, prev_id, doc_nodes, elements):
+                return prev_id
+        nil
+
+    # General sibling: any preceding sibling must match.
+    fn match_general_sibling(part: SelectorPart, node_id: i64, doc_nodes: List<DomNode>, elements: List<Element>) -> i64?:
+        val siblings = get_siblings(node_id, doc_nodes)
+        val idx = get_child_index_in_list(node_id, siblings)
+        var i = idx - 1
+        while i >= 0:
+            val sib_id = siblings.get(i)
+            if self.matches_part(part, sib_id, doc_nodes, elements):
+                return sib_id
+            i = i - 1
+        nil
+
+# --- Traversal helpers ---
+
+# Depth-first traversal of a subtree rooted at root_id.
+# Returns node IDs in document order (excluding root itself).
+fn walk_subtree(root_id: i64, doc_nodes: List<DomNode>) -> List<i64>:
+    var result = List<i64>()
+    var stack = List<i64>()
+    stack.push(root_id)
+
+    while stack.len() > 0:
+        val current = stack.pop()
+        # Skip root itself — querySelectorAll doesn't match root
+        if current != root_id:
+            result.push(current)
+
+        # Find this node and push children in reverse order for correct traversal
+        var i = 0
+        while i < doc_nodes.len():
+            val node = doc_nodes.get(i)
+            if node.id == current:
+                var ci = node.children.len() - 1
+                while ci >= 0:
+                    stack.push(node.children.get(ci))
+                    ci = ci - 1
+                i = doc_nodes.len()  # break
+            i = i + 1
+
+    result
+
+# Get the parent node ID of a given node.
+fn get_parent(node_id: i64, doc_nodes: List<DomNode>) -> i64?:
+    var i = 0
+    while i < doc_nodes.len():
+        val node = doc_nodes.get(i)
+        if node.id == node_id:
+            if node.parent_id >= 0 and node.parent_id != node_id:
+                return node.parent_id
+            return nil
+        i = i + 1
+    nil
+
+# Get the sibling node IDs (children of the same parent).
+fn get_siblings(node_id: i64, doc_nodes: List<DomNode>) -> List<i64>:
+    val parent = get_parent(node_id, doc_nodes)
+    match parent:
+        Some(pid):
+            var i = 0
+            while i < doc_nodes.len():
+                val node = doc_nodes.get(i)
+                if node.id == pid:
+                    return node.children
+                i = i + 1
+            List<i64>()
+        nil:
+            List<i64>()
+
+# Get the index of a child within its parent's children list.
+fn get_child_index(node_id: i64, doc_nodes: List<DomNode>) -> i64:
+    val siblings = get_siblings(node_id, doc_nodes)
+    get_child_index_in_list(node_id, siblings)
+
+# Get the index of a node ID within a list.
+fn get_child_index_in_list(node_id: i64, siblings: List<i64>) -> i64:
+    var i = 0
+    while i < siblings.len():
+        if siblings.get(i) == node_id:
+            return i
+        i = i + 1
+    -1
+
+# Get the Element record for a given node ID.
+fn get_element_for_node(node_id: i64, elements: List<Element>) -> Element?:
+    var i = 0
+    while i < elements.len():
+        val elem = elements.get(i)
+        if elem.node_id == node_id:
+            return elem
+        i = i + 1
+    nil
+
+# Get an attribute value from an element by name.
+fn get_attribute_value(elem: Element, name: text) -> text?:
+    var i = 0
+    while i < elem.attributes.len():
+        val attr = elem.attributes.get(i)
+        if attr.name == name:
+            return attr.value
+        i = i + 1
+    nil
+
+# --- Specificity calculation ---
+
+# Calculate specificity for a selector (ids, classes, elements).
+fn calculate_specificity(selector: Selector) -> Specificity:
+    var ids = 0
+    var classes = 0
+    var elements = 0
+
+    var i = 0
+    while i < selector.parts.len():
+        val part = selector.parts.get(i)
+        match part:
+            SelectorPart.Id(_):
+                ids = ids + 1
+            SelectorPart.Class(_):
+                classes = classes + 1
+            SelectorPart.Attribute(_, _, _):
+                classes = classes + 1
+            SelectorPart.PseudoClass(_):
+                classes = classes + 1
+            SelectorPart.Type(_):
+                elements = elements + 1
+            SelectorPart.PseudoElement(_):
+                elements = elements + 1
+            SelectorPart.Universal:
+                pass_dn  # Universal selector has no specificity
+            SelectorPart.Combinator(_):
+                pass_dn  # Combinators have no specificity
+        i = i + 1
+
+    Specificity.create(ids, classes, elements)
+
+# Compare two specificities. Returns positive if a > b, negative if a < b, 0 if equal.
+fn compare_specificity(a: Specificity, b: Specificity) -> i64:
+    if a.ids != b.ids:
+        return a.ids - b.ids
+    if a.classes != b.classes:
+        return a.classes - b.classes
+    a.elements - b.elements

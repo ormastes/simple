@@ -1,0 +1,247 @@
+# SVG rendering subset — converts a tree of SVG nodes to PaintOps.
+# Supports a basic subset: rect, circle, line, text, and path (stub).
+
+use examples.browser.entity.dom.paint_types.(Color, PaintOp)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# SvgNode — a node in the SVG DOM tree.
+# ---------------------------------------------------------------------------
+
+class SvgNode:
+    tag: text
+    attrs: List<Pair<text, text>>
+    children: List<SvgNode>
+
+    static fn create(tag: text, attrs: List<Pair<text, text>>) -> SvgNode:
+        SvgNode(tag: tag, attrs: attrs, children: List<SvgNode>())
+
+    static fn with_children(tag: text, attrs: List<Pair<text, text>>, children: List<SvgNode>) -> SvgNode:
+        SvgNode(tag: tag, attrs: attrs, children: children)
+
+# ---------------------------------------------------------------------------
+# SvgRenderer
+# ---------------------------------------------------------------------------
+
+class SvgRenderer:
+    logger: Logger
+
+    static fn new(logger: Logger) -> SvgRenderer:
+        SvgRenderer(logger: logger)
+
+# ---------------------------------------------------------------------------
+# SVG rendering functions
+# ---------------------------------------------------------------------------
+
+# Render an SVG tree into a list of PaintOps.
+fn render(svg_tree: List<SvgNode>) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    for node in svg_tree:
+        val node_ops = render_node(node)
+        for op in node_ops:
+            ops.push(op)
+    ops
+
+# Render a single SVG node, dispatching by tag name.
+fn render_node(node: SvgNode) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    match node.tag:
+        "rect":
+            val rect_ops = render_rect(node.attrs)
+            for op in rect_ops:
+                ops.push(op)
+        "circle":
+            val circle_ops = render_circle(node.attrs)
+            for op in circle_ops:
+                ops.push(op)
+        "line":
+            val line_ops = render_line(node.attrs)
+            for op in line_ops:
+                ops.push(op)
+        "text":
+            # Text content would come from a child text node
+            val text_ops = render_text(node.attrs, "")
+            for op in text_ops:
+                ops.push(op)
+        "path":
+            val d = get_attr(node.attrs, "d")
+            val path_ops = render_path(d)
+            for op in path_ops:
+                ops.push(op)
+        "g":
+            # Group element — render children
+            pass_dn
+        "svg":
+            # Root SVG element — render children
+            pass_dn
+        _:
+            pass_dn  # Unknown tag, skip
+
+    # Recurse into children
+    for child in node.children:
+        val child_ops = render_node(child)
+        for op in child_ops:
+            ops.push(op)
+
+    ops
+
+# Render an SVG <rect> element.
+fn render_rect(attrs: List<Pair<text, text>>) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val x = parse_svg_length(get_attr(attrs, "x"))
+    val y = parse_svg_length(get_attr(attrs, "y"))
+    val w = parse_svg_length(get_attr(attrs, "width"))
+    val h = parse_svg_length(get_attr(attrs, "height"))
+    val fill = parse_svg_color(get_attr(attrs, "fill"))
+
+    if w > 0.0 and h > 0.0:
+        ops.push(PaintOp.FillRect(x: x, y: y, w: w, h: h, color: fill))
+
+    # Stroke if present
+    val stroke_color_str = get_attr(attrs, "stroke")
+    if stroke_color_str != "":
+        val stroke_color = parse_svg_color(stroke_color_str)
+        val stroke_w = parse_svg_length(get_attr(attrs, "stroke-width"))
+        val sw = if stroke_w <= 0.0: 1.0 else: stroke_w
+        # Top
+        ops.push(PaintOp.FillRect(x: x, y: y, w: w, h: sw, color: stroke_color))
+        # Bottom
+        ops.push(PaintOp.FillRect(x: x, y: y + h - sw, w: w, h: sw, color: stroke_color))
+        # Left
+        ops.push(PaintOp.FillRect(x: x, y: y, w: sw, h: h, color: stroke_color))
+        # Right
+        ops.push(PaintOp.FillRect(x: x + w - sw, y: y, w: sw, h: h, color: stroke_color))
+
+    ops
+
+# Render an SVG <circle> element as an axis-aligned bounding box fill.
+# True circle rasterization would require arc PaintOps.
+fn render_circle(attrs: List<Pair<text, text>>) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val cx = parse_svg_length(get_attr(attrs, "cx"))
+    val cy = parse_svg_length(get_attr(attrs, "cy"))
+    val r = parse_svg_length(get_attr(attrs, "r"))
+    val fill = parse_svg_color(get_attr(attrs, "fill"))
+
+    if r > 0.0:
+        # Approximate circle as bounding box
+        ops.push(PaintOp.FillRect(x: cx - r, y: cy - r, w: r * 2.0, h: r * 2.0, color: fill))
+
+    ops
+
+# Render an SVG <line> element as a thin filled rectangle.
+fn render_line(attrs: List<Pair<text, text>>) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val x1 = parse_svg_length(get_attr(attrs, "x1"))
+    val y1 = parse_svg_length(get_attr(attrs, "y1"))
+    val x2 = parse_svg_length(get_attr(attrs, "x2"))
+    val y2 = parse_svg_length(get_attr(attrs, "y2"))
+    val stroke = parse_svg_color(get_attr(attrs, "stroke"))
+    val stroke_w = parse_svg_length(get_attr(attrs, "stroke-width"))
+    val sw = if stroke_w <= 0.0: 1.0 else: stroke_w
+
+    # Simplified — horizontal or vertical lines only as filled rects
+    if y1 == y2:
+        # Horizontal line
+        val min_x = if x1 < x2: x1 else: x2
+        val line_w = if x2 > x1: x2 - x1 else: x1 - x2
+        ops.push(PaintOp.FillRect(x: min_x, y: y1 - sw / 2.0, w: line_w, h: sw, color: stroke))
+    else if x1 == x2:
+        # Vertical line
+        val min_y = if y1 < y2: y1 else: y2
+        val line_h = if y2 > y1: y2 - y1 else: y1 - y2
+        ops.push(PaintOp.FillRect(x: x1 - sw / 2.0, y: min_y, w: sw, h: line_h, color: stroke))
+    else:
+        # Diagonal — approximate as horizontal rect from (x1,y1) to (x2,y2)
+        val min_x = if x1 < x2: x1 else: x2
+        val min_y = if y1 < y2: y1 else: y2
+        val line_w = if x2 > x1: x2 - x1 else: x1 - x2
+        val line_h = if y2 > y1: y2 - y1 else: y1 - y2
+        ops.push(PaintOp.FillRect(x: min_x, y: min_y, w: line_w, h: line_h, color: stroke))
+
+    ops
+
+# Render SVG <text> element.
+fn render_text(attrs: List<Pair<text, text>>, content: text) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val x = parse_svg_length(get_attr(attrs, "x"))
+    val y = parse_svg_length(get_attr(attrs, "y"))
+    val fill = parse_svg_color(get_attr(attrs, "fill"))
+    val font_size = parse_svg_length(get_attr(attrs, "font-size"))
+    val fs = if font_size <= 0.0: 16.0 else: font_size
+
+    if content.len() > 0:
+        ops.push(PaintOp.DrawText(x: x, y: y, text_content: content, font_size: fs, color: fill))
+
+    ops
+
+# Render SVG <path> element — full path parsing is complex, so this is a stub.
+fn render_path(d: text) -> List<PaintOp>:
+    pass_todo  # Full SVG path (M, L, C, Q, A, Z) parsing and tessellation
+    List<PaintOp>()
+
+# ---------------------------------------------------------------------------
+# SVG attribute/value parsing helpers
+# ---------------------------------------------------------------------------
+
+# Get an attribute value by name, returning empty string if not found.
+fn get_attr(attrs: List<Pair<text, text>>, name: text) -> text:
+    for attr in attrs:
+        if attr.first == name:
+            return attr.second
+    ""
+
+# Parse an SVG color string into a Color.
+# Supports: named colors, #RGB, #RRGGBB, rgb(r,g,b), and "none".
+fn parse_svg_color(value: text) -> Color:
+    if value == "" or value == "none":
+        return Color.transparent()
+
+    # Named colors
+    match value:
+        "black": return Color.black()
+        "white": return Color.white()
+        "red": return Color.rgb(255, 0, 0)
+        "green": return Color.rgb(0, 128, 0)
+        "blue": return Color.rgb(0, 0, 255)
+        "yellow": return Color.rgb(255, 255, 0)
+        "orange": return Color.rgb(255, 165, 0)
+        "purple": return Color.rgb(128, 0, 128)
+        "gray": return Color.rgb(128, 128, 128)
+        "grey": return Color.rgb(128, 128, 128)
+        "cyan": return Color.rgb(0, 255, 255)
+        "magenta": return Color.rgb(255, 0, 255)
+        _: pass_dn
+
+    # Hex color (#RGB or #RRGGBB)
+    if value.starts_with("#"):
+        val hex = value.slice(1, value.len())
+        if hex.len() == 3:
+            # Short hex: each digit doubled
+            return Color.rgb(128, 128, 128)  # Simplified — full hex parse is pass_todo
+        if hex.len() == 6:
+            return Color.rgb(128, 128, 128)  # Simplified — full hex parse is pass_todo
+
+    # Default fallback
+    Color.black()
+
+# Parse an SVG length value (e.g., "100", "50.5", "10px") to f64.
+fn parse_svg_length(value: text) -> f64:
+    if value == "":
+        return 0.0
+
+    # Strip known unit suffixes
+    var num_str = value
+    if value.ends_with("px"):
+        num_str = value.slice(0, value.len() - 2)
+    else if value.ends_with("pt"):
+        num_str = value.slice(0, value.len() - 2)
+    else if value.ends_with("em"):
+        num_str = value.slice(0, value.len() - 2)
+
+    # Parse the numeric part
+    val parsed = num_str.to_f64()
+    if val v = parsed:
+        return v
+    0.0

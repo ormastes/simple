@@ -1,0 +1,207 @@
+# Display list builder — converts layout tree to paint operations.
+# Walks the layout tree depth-first, generating PaintOps for each box
+# in correct CSS painting order: background, borders, content.
+
+use examples.browser.entity.dom.paint_types.(Color, Gradient, GradientStop, PaintOp, DisplayList, DisplayItem)
+use examples.browser.entity.dom.css_types.(CSSValue, CSSDeclaration)
+use examples.browser.entity.dom.box_types.(LayoutBox, BoxModel, BoxKind)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.shared.logging.(Logger, LogLevel)
+use examples.browser.shared.error.(BrowserError, BrowserResult, paint_error)
+
+# ---------------------------------------------------------------------------
+# DisplayListBuilder — accumulates PaintOps for an entire layout tree.
+# ---------------------------------------------------------------------------
+
+class DisplayListBuilder:
+    ops: List<PaintOp>
+    logger: Logger
+
+    static fn new(logger: Logger) -> DisplayListBuilder:
+        DisplayListBuilder(ops: List<PaintOp>(), logger: logger)
+
+    # Walk the entire layout tree and produce a flat DisplayList of paint ops.
+    me build(layout_root: LayoutBox, styles: List<ComputedStyle>) -> DisplayList:
+        self.ops = List<PaintOp>()
+        self.logger.debug("building display list from layout tree")
+        self.walk_tree(layout_root, styles)
+        self.logger.info("display list built: {self.ops.len()} ops")
+        DisplayList(ops: self.ops)
+
+    # Recursive tree walk — depth-first, paint parent then children.
+    me walk_tree(box_node: LayoutBox, styles: List<ComputedStyle>):
+        # Look up style for this node
+        val style = self.find_style(box_node.node_id, styles)
+        if val s = style:
+            if should_paint(s):
+                self.paint_box(box_node, s)
+
+        # Recurse into children
+        for child in box_node.children:
+            self.walk_tree(child, styles)
+
+    # Paint a single box following CSS 2.1 painting order:
+    # 1. Push clip if overflow hidden
+    # 2. Paint background
+    # 3. Paint borders
+    # 4. Paint box-shadow
+    # 5. Paint content (text or replaced element)
+    # 6. Pop clip
+    me paint_box(box_node: LayoutBox, style: ComputedStyle):
+        self.logger.trace("painting box node_id={box_node.node_id}")
+
+        val clip_needed = style.overflow_x == "hidden" or style.overflow_y == "hidden"
+
+        # 1. Push clip if overflow hidden
+        if clip_needed:
+            val clip_op = PaintOp.PushClip(
+                x: box_node.x,
+                y: box_node.y,
+                w: box_node.width,
+                h: box_node.height
+            )
+            self.ops.push(clip_op)
+
+        # Push opacity layer if not fully opaque
+        val needs_opacity = style.opacity < 1.0
+        if needs_opacity:
+            self.ops.push(PaintOp.PushOpacity(alpha: style.opacity))
+
+        # 2. Paint background
+        self.paint_background_for(box_node, style)
+
+        # 3. Paint borders
+        self.paint_borders_for(box_node, style)
+
+        # 4. Paint box-shadow
+        pass_todo  # box-shadow painting
+
+        # 5. Paint content (text)
+        self.paint_text_for(box_node, style)
+
+        # Pop opacity layer
+        if needs_opacity:
+            self.ops.push(PaintOp.PopOpacity)
+
+        # 6. Pop clip
+        if clip_needed:
+            self.ops.push(PaintOp.PopClip)
+
+    # Paint the background-color for a box. Background-image is handled separately.
+    me paint_background_for(box_node: LayoutBox, style: ComputedStyle):
+        val bg_color = get_background_color(style)
+        # Only paint if not fully transparent
+        if bg_color.a > 0:
+            val op = PaintOp.FillRect(
+                x: box_node.x,
+                y: box_node.y,
+                w: box_node.width,
+                h: box_node.height,
+                color: bg_color
+            )
+            self.ops.push(op)
+            self.logger.trace("background fill at ({box_node.x}, {box_node.y})")
+
+    # Paint all four borders. Uses DrawBorder with width/color arrays [top, right, bottom, left].
+    me paint_borders_for(box_node: LayoutBox, style: ComputedStyle):
+        val bm = box_node.box_model
+        # Skip if no borders
+        val has_borders = (bm.border_top > 0.0 or bm.border_right > 0.0
+            or bm.border_bottom > 0.0 or bm.border_left > 0.0)
+        if not has_borders:
+            return
+
+        # Only paint if border style is not "none"
+        if style.border_top_style == "none":
+            return
+
+        val border_color = css_color_to_color(style.border_top_color)
+        val widths = [bm.border_top, bm.border_right, bm.border_bottom, bm.border_left]
+        val colors = [border_color, border_color, border_color, border_color]
+
+        val op = PaintOp.DrawBorder(
+            x: box_node.x,
+            y: box_node.y,
+            w: box_node.width,
+            h: box_node.height,
+            widths: widths,
+            colors: colors
+        )
+        self.ops.push(op)
+        self.logger.trace("borders at ({box_node.x}, {box_node.y})")
+
+    # Paint text content for a box. Generates DrawText ops with font size and color.
+    me paint_text_for(box_node: LayoutBox, style: ComputedStyle):
+        # Only inline and inline-block boxes render text directly
+        match box_node.kind:
+            BoxKind.Inline: pass_dn
+            BoxKind.InlineBlock: pass_dn
+            _: return
+
+        val font_size = extract_px(style.font_size)
+        val text_color = get_text_color(style)
+
+        # Calculate text baseline position (top of box + font ascent approximation)
+        val text_x = box_node.x + box_node.box_model.padding_left
+        val text_y = box_node.y + box_node.box_model.padding_top + font_size * 0.8
+
+        val op = PaintOp.DrawText(
+            x: text_x,
+            y: text_y,
+            text_content: "",  # Actual text content resolved by text layout
+            font_size: font_size,
+            color: text_color
+        )
+        self.ops.push(op)
+        self.logger.trace("text at ({text_x}, {text_y}) size={font_size}")
+
+    # Find the ComputedStyle for a given node_id from the style list.
+    fn find_style(node_id: i64, styles: List<ComputedStyle>) -> ComputedStyle?:
+        if node_id >= 0 and node_id < styles.len():
+            return styles.get(node_id)
+        nil
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+# Determine whether a box should be painted based on its computed style.
+fn should_paint(style: ComputedStyle) -> bool:
+    # display: none — do not paint at all
+    if style.display == "none":
+        return false
+    # visibility: hidden — reserve space but do not paint content
+    if style.visibility == "hidden":
+        return false
+    true
+
+# Extract background-color from ComputedStyle as a Color.
+fn get_background_color(style: ComputedStyle) -> Color:
+    css_color_to_color(style.background_color)
+
+# Extract foreground (text) color from ComputedStyle as a Color.
+fn get_text_color(style: ComputedStyle) -> Color:
+    css_color_to_color(style.color)
+
+# Convert a CSSValue that is expected to be a Color variant into a Color.
+# Falls back to transparent for non-color values.
+fn css_color_to_color(value: CSSValue) -> Color:
+    match value:
+        CSSValue.Color(r, g, b, a):
+            Color(r: r, g: g, b: b, a: a)
+        CSSValue.Keyword(v):
+            match v:
+                "transparent": Color.transparent()
+                "black": Color.black()
+                "white": Color.white()
+                "red": Color.rgb(255, 0, 0)
+                "green": Color.rgb(0, 128, 0)
+                "blue": Color.rgb(0, 0, 255)
+                "yellow": Color.rgb(255, 255, 0)
+                "orange": Color.rgb(255, 165, 0)
+                "purple": Color.rgb(128, 0, 128)
+                "gray": Color.rgb(128, 128, 128)
+                "grey": Color.rgb(128, 128, 128)
+                _: Color.transparent()
+        _:
+            Color.transparent()

@@ -1,0 +1,165 @@
+# Text rendering operations.
+# Generates PaintOps for text content, decorations (underline, overline, line-through),
+# and text shadows.
+
+use examples.browser.entity.dom.paint_types.(Color, PaintOp)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# TextShadow — a single text shadow effect.
+# ---------------------------------------------------------------------------
+
+class TextShadow:
+    offset_x: f64
+    offset_y: f64
+    blur: f64
+    color: Color
+
+    static fn create(offset_x: f64, offset_y: f64, blur: f64, color: Color) -> TextShadow:
+        TextShadow(offset_x: offset_x, offset_y: offset_y, blur: blur, color: color)
+
+# ---------------------------------------------------------------------------
+# TextPainter — produces PaintOps for text rendering.
+# ---------------------------------------------------------------------------
+
+class TextPainter:
+    logger: Logger
+
+    static fn new(logger: Logger) -> TextPainter:
+        TextPainter(logger: logger)
+
+# ---------------------------------------------------------------------------
+# Text paint operations
+# ---------------------------------------------------------------------------
+
+# Generate DrawText ops for rendering text content at a given position.
+fn paint_text(text_content: text, x: f64, y: f64, style: ComputedStyle) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val font_size = get_font_size_px(style)
+    val color = get_text_color(style)
+
+    if text_content.len() == 0:
+        return ops
+
+    val op = PaintOp.DrawText(
+        x: x,
+        y: y,
+        text_content: text_content,
+        font_size: font_size,
+        color: color
+    )
+    ops.push(op)
+
+    # Add text decoration if needed
+    if style.text_decoration != "none":
+        # Approximate text width as 0.6 * font_size * character count
+        val approx_width = 0.6 * font_size * text_content.len().to_f64()
+        val decoration_ops = paint_text_decoration(x, y, approx_width, style)
+        for dop in decoration_ops:
+            ops.push(dop)
+
+    ops
+
+# Generate PaintOps for text decoration (underline, overline, line-through).
+fn paint_text_decoration(x: f64, y: f64, width: f64, style: ComputedStyle) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+    val font_size = get_font_size_px(style)
+    val deco_color = get_decoration_color(style)
+    val thickness = get_decoration_thickness(font_size)
+
+    val decoration = style.text_decoration
+
+    # Underline
+    if decoration == "underline":
+        val underline_y = y + underline_position(font_size)
+        val op = PaintOp.FillRect(
+            x: x,
+            y: underline_y,
+            w: width,
+            h: thickness,
+            color: deco_color
+        )
+        ops.push(op)
+
+    # Overline
+    if decoration == "overline":
+        val overline_y = y - font_size * 0.85
+        val op = PaintOp.FillRect(
+            x: x,
+            y: overline_y,
+            w: width,
+            h: thickness,
+            color: deco_color
+        )
+        ops.push(op)
+
+    # Line-through
+    if decoration == "line-through":
+        val strike_y = y - font_size * 0.35
+        val op = PaintOp.FillRect(
+            x: x,
+            y: strike_y,
+            w: width,
+            h: thickness,
+            color: deco_color
+        )
+        ops.push(op)
+
+    ops
+
+# Generate PaintOps for text-shadow effects.
+# Each shadow produces a DrawText op offset by the shadow parameters.
+fn paint_text_shadow(text_content: text, x: f64, y: f64, shadows: List<TextShadow>) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    for shadow in shadows:
+        val shadow_x = x + shadow.offset_x
+        val shadow_y = y + shadow.offset_y
+        # Shadow is painted as text at the offset position with shadow color.
+        # Blur is approximated by slightly expanding (actual GPU blur not modeled here).
+        val op = PaintOp.DrawText(
+            x: shadow_x,
+            y: shadow_y,
+            text_content: text_content,
+            font_size: 16.0,  # Caller should provide actual size
+            color: shadow.color
+        )
+        ops.push(op)
+
+    ops
+
+# ---------------------------------------------------------------------------
+# Metric helpers
+# ---------------------------------------------------------------------------
+
+# Extract font-size in px from ComputedStyle.
+fn get_font_size_px(style: ComputedStyle) -> f64:
+    extract_px(style.font_size)
+
+# Extract the foreground text color.
+fn get_text_color(style: ComputedStyle) -> Color:
+    match style.color:
+        CSSValue.Color(r, g, b, a):
+            Color(r: r, g: g, b: b, a: a)
+        _:
+            Color.black()
+
+# Get the decoration color — defaults to the text color per CSS spec.
+fn get_decoration_color(style: ComputedStyle) -> Color:
+    # CSS spec: text-decoration color defaults to currentColor (text color)
+    get_text_color(style)
+
+# Calculate decoration line thickness from font size.
+# Typical browser heuristic: max(1px, font_size / 16).
+fn get_decoration_thickness(font_size: f64) -> f64:
+    val thickness = font_size / 16.0
+    if thickness < 1.0:
+        return 1.0
+    thickness
+
+# Calculate underline position below the baseline.
+# Typical heuristic: baseline + font_size * 0.15.
+fn underline_position(font_size: f64) -> f64:
+    font_size * 0.15

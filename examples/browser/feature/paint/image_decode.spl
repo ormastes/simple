@@ -1,0 +1,191 @@
+# Image decoding pipeline — detects format, manages decoded image cache,
+# and provides placeholder generation for loading states.
+
+use examples.browser.entity.media.image_types.(ImageData, ImageFormat)
+use examples.browser.shared.logging.(Logger, LogLevel)
+use examples.browser.shared.error.(BrowserError, BrowserResult, paint_error)
+
+# ---------------------------------------------------------------------------
+# Image state tracking
+# ---------------------------------------------------------------------------
+
+enum ImageState:
+    Pending
+    Decoding
+    Ready
+    Error
+
+# ---------------------------------------------------------------------------
+# DecodedImage — cached result of decoding an image.
+# ---------------------------------------------------------------------------
+
+class DecodedImage:
+    id: i64
+    url: text
+    data: ImageData
+    state: ImageState
+
+    static fn pending(id: i64, url: text) -> DecodedImage:
+        DecodedImage(
+            id: id,
+            url: url,
+            data: ImageData.create(0, 0, ImageFormat.Png),
+            state: ImageState.Pending
+        )
+
+    static fn ready(id: i64, url: text, data: ImageData) -> DecodedImage:
+        DecodedImage(id: id, url: url, data: data, state: ImageState.Ready)
+
+    static fn error(id: i64, url: text) -> DecodedImage:
+        DecodedImage(
+            id: id,
+            url: url,
+            data: ImageData.create(0, 0, ImageFormat.Png),
+            state: ImageState.Error
+        )
+
+# ---------------------------------------------------------------------------
+# ImageDecoder — decodes raw image data and maintains a cache.
+# ---------------------------------------------------------------------------
+
+class ImageDecoder:
+    cache: List<DecodedImage>
+    logger: Logger
+
+    static fn new(logger: Logger) -> ImageDecoder:
+        ImageDecoder(cache: List<DecodedImage>(), logger: logger)
+
+    # Decode raw image data into an ImageData structure.
+    # The actual pixel decoding is a pass_todo — this structures the pipeline.
+    me decode(image_id: i64, raw_data: text, format: ImageFormat) -> BrowserResult<ImageData>:
+        self.logger.debug("decoding image id={image_id} format={format_name(format)}")
+
+        # Check cache first
+        val cached = self.get_decoded(image_id)
+        if val c = cached:
+            match c.state:
+                ImageState.Ready:
+                    self.logger.trace("cache hit for image {image_id}")
+                    return Ok(c.data)
+                ImageState.Error:
+                    return Err(paint_error("image {image_id} previously failed to decode"))
+                _: pass_dn
+
+        # Mark as decoding
+        val placeholder = DecodedImage(
+            id: image_id,
+            url: "",
+            data: ImageData.create(0, 0, format),
+            state: ImageState.Decoding
+        )
+        self.cache.push(placeholder)
+
+        # Actual decoding — structure only, real decode is pass_todo
+        pass_todo  # Actual pixel decoding (PNG inflate, JPEG DCT, etc.)
+
+        # For now, create a minimal placeholder as the "decoded" result
+        val decoded_data = create_placeholder(100, 100)
+        val result = DecodedImage.ready(image_id, "", decoded_data)
+
+        # Update cache — replace the decoding entry
+        self.update_cache(image_id, result)
+        self.logger.info("decoded image {image_id}")
+        Ok(decoded_data)
+
+    # Look up a decoded image by ID from the cache.
+    me get_decoded(image_id: i64) -> DecodedImage?:
+        for entry in self.cache:
+            if entry.id == image_id:
+                return entry
+        nil
+
+    # Update an existing cache entry.
+    me update_cache(image_id: i64, updated: DecodedImage):
+        var i = 0
+        while i < self.cache.len():
+            val entry = self.cache.get(i)
+            if val e = entry:
+                if e.id == image_id:
+                    self.cache.set(i, updated)
+                    return
+            i = i + 1
+        # Not found — just append
+        self.cache.push(updated)
+
+# ---------------------------------------------------------------------------
+# Format detection
+# ---------------------------------------------------------------------------
+
+# Detect image format from raw data using magic bytes.
+# PNG:  137 80 78 71 (0x89 P N G)
+# JPEG: 255 216      (0xFF 0xD8)
+# GIF:  71 73 70     (G I F)
+# BMP:  66 77        (B M)
+fn detect_format(data: text) -> ImageFormat:
+    val len = data.len()
+    if len < 2:
+        return ImageFormat.Png  # Default fallback
+
+    # Check PNG signature
+    if len >= 4:
+        val b0 = data.byte_at(0)
+        val b1 = data.byte_at(1)
+        val b2 = data.byte_at(2)
+        val b3 = data.byte_at(3)
+        if b0 == 137 and b1 == 80 and b2 == 78 and b3 == 71:
+            return ImageFormat.Png
+
+    # Check JPEG signature
+    val j0 = data.byte_at(0)
+    val j1 = data.byte_at(1)
+    if j0 == 255 and j1 == 216:
+        return ImageFormat.Jpeg
+
+    # Check GIF signature
+    if len >= 3:
+        val g0 = data.byte_at(0)
+        val g1 = data.byte_at(1)
+        val g2 = data.byte_at(2)
+        if g0 == 71 and g1 == 73 and g2 == 70:
+            return ImageFormat.Gif
+
+    # Check BMP signature
+    if j0 == 66 and j1 == 77:
+        return ImageFormat.Bmp
+
+    # Default
+    ImageFormat.Png
+
+# ---------------------------------------------------------------------------
+# Image operations
+# ---------------------------------------------------------------------------
+
+# Scale an image to the target dimensions.
+fn scale_image(image: ImageData, target_width: i64, target_height: i64) -> ImageData:
+    pass_todo  # Actual bilinear/bicubic scaling
+    ImageData.create(target_width, target_height, image.format)
+
+# Create a gray placeholder image for loading states.
+fn create_placeholder(width: i64, height: i64) -> ImageData:
+    var data = List<i64>()
+    # Fill with mid-gray RGBA (128, 128, 128, 255)
+    var i = 0
+    val total = width * height
+    while i < total:
+        data.push(128)  # R
+        data.push(128)  # G
+        data.push(128)  # B
+        data.push(255)  # A
+        i = i + 1
+    ImageData(width: width, height: height, format: ImageFormat.Png, data: data)
+
+# Helper — format name for logging.
+fn format_name(format: ImageFormat) -> text:
+    match format:
+        ImageFormat.Png: "PNG"
+        ImageFormat.Jpeg: "JPEG"
+        ImageFormat.Gif: "GIF"
+        ImageFormat.Webp: "WebP"
+        ImageFormat.Svg: "SVG"
+        ImageFormat.Bmp: "BMP"
+        ImageFormat.Ico: "ICO"

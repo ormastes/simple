@@ -1,0 +1,165 @@
+# Compositing layer tree — manages GPU-composited layers built from
+# stacking contexts. Each layer can be independently rasterized and
+# composited, enabling efficient scrolling and animation.
+
+use examples.browser.entity.dom.paint_types.(PaintOp, DisplayItem, Color)
+use examples.browser.entity.dom.css_types.(CSSValue)
+use examples.browser.feature.style.computed.(ComputedStyle)
+use examples.browser.feature.paint.stacking.(StackingContext)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# CompositeLayer — a single compositing layer.
+# ---------------------------------------------------------------------------
+
+class CompositeLayer:
+    id: i64
+    node_id: i64
+    bounds_x: f64
+    bounds_y: f64
+    bounds_w: f64
+    bounds_h: f64
+    transform: List<f64>
+    opacity: f64
+    clips_children: bool
+    children: List<i64>
+    display_items: List<DisplayItem>
+    needs_repaint: bool
+
+    static fn create(id: i64, node_id: i64, x: f64, y: f64, w: f64, h: f64) -> CompositeLayer:
+        # Identity transform (4x4 matrix flattened to 16 elements)
+        val identity = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ]
+        CompositeLayer(
+            id: id,
+            node_id: node_id,
+            bounds_x: x,
+            bounds_y: y,
+            bounds_w: w,
+            bounds_h: h,
+            transform: identity,
+            opacity: 1.0,
+            clips_children: false,
+            children: List<i64>(),
+            display_items: List<DisplayItem>(),
+            needs_repaint: true
+        )
+
+# ---------------------------------------------------------------------------
+# LayerTree — the tree of compositing layers.
+# ---------------------------------------------------------------------------
+
+class LayerTree:
+    layers: List<CompositeLayer>
+    root_layer_id: i64
+    next_id: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> LayerTree:
+        LayerTree(
+            layers: List<CompositeLayer>(),
+            root_layer_id: -1,
+            next_id: 0,
+            logger: logger
+        )
+
+    # Build compositing layers from a stacking context tree.
+    # Returns the root layer ID.
+    me build_from_stacking(root: StackingContext) -> i64:
+        self.layers = List<CompositeLayer>()
+        self.next_id = 0
+        self.logger.debug("building layer tree from stacking contexts")
+
+        val root_id = self.create_layer_from_context(root)
+        self.root_layer_id = root_id
+        self.logger.info("layer tree built: {self.layers.len()} layers, root={root_id}")
+        root_id
+
+    # Recursively create layers from stacking contexts.
+    me create_layer_from_context(ctx: StackingContext) -> i64:
+        val layer_id = self.create_layer(ctx.node_id, 0.0, 0.0, 0.0, 0.0)
+
+        # Copy display items from the stacking context
+        val layer = self.get_layer(layer_id)
+        if val l = layer:
+            l.opacity = ctx.opacity
+            for item in ctx.display_items:
+                l.display_items.push(item)
+
+        # Recurse into child stacking contexts
+        for child_ctx in ctx.children:
+            val child_id = self.create_layer_from_context(child_ctx)
+            self.add_child(layer_id, child_id)
+
+        layer_id
+
+    # Create a new layer with the given bounds.
+    me create_layer(node_id: i64, bounds_x: f64, bounds_y: f64, w: f64, h: f64) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val layer = CompositeLayer.create(id, node_id, bounds_x, bounds_y, w, h)
+        self.layers.push(layer)
+        self.logger.trace("created layer id={id} node={node_id}")
+        id
+
+    # Add a child layer to a parent layer.
+    me add_child(parent_id: i64, child_id: i64):
+        val parent = self.get_layer(parent_id)
+        if val p = parent:
+            p.children.push(child_id)
+
+    # Mark a layer as needing repaint.
+    me invalidate_layer(layer_id: i64):
+        val layer = self.get_layer(layer_id)
+        if val l = layer:
+            l.needs_repaint = true
+            self.logger.trace("invalidated layer {layer_id}")
+
+    # Look up a layer by ID.
+    fn get_layer(layer_id: i64) -> CompositeLayer?:
+        for layer in self.layers:
+            if layer.id == layer_id:
+                return layer
+        nil
+
+    # Update the bounds of a layer.
+    me update_bounds(layer_id: i64, x: f64, y: f64, w: f64, h: f64):
+        val layer = self.get_layer(layer_id)
+        if val l = layer:
+            l.bounds_x = x
+            l.bounds_y = y
+            l.bounds_w = w
+            l.bounds_h = h
+            l.needs_repaint = true
+
+# ---------------------------------------------------------------------------
+# Layer promotion criteria
+# ---------------------------------------------------------------------------
+
+# Determine whether a box needs its own compositing layer.
+# Elements with transforms, opacity, will-change, or overflow:scroll
+# are promoted to their own layer for GPU compositing.
+fn needs_own_layer(style: ComputedStyle) -> bool:
+    # opacity < 1 needs its own layer for blending
+    if style.opacity < 1.0:
+        return true
+
+    # Positioned elements with z-index may need their own layer
+    if style.position == "fixed":
+        return true
+
+    # overflow: scroll needs its own layer for smooth scrolling
+    if style.overflow_x == "scroll" or style.overflow_y == "scroll":
+        return true
+    if style.overflow_x == "auto" or style.overflow_y == "auto":
+        return true
+
+    # position: sticky needs own layer for scroll-linked transforms
+    if style.position == "sticky":
+        return true
+
+    false

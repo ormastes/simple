@@ -1,0 +1,106 @@
+# Permission grant/deny manager for the Simple Browser Platform.
+# Manages origin-scoped permission grants for camera, microphone, location, etc.
+
+use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind}
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.entity.browser.permission_types.{PermissionState, PermissionDescriptor, PermissionGrant}
+
+class PermissionManager:
+    grants: List<PermissionGrant>
+    default_profile: text
+    logger: Logger
+
+    static fn new(logger: Logger) -> PermissionManager:
+        PermissionManager(
+            grants: List<PermissionGrant>(),
+            default_profile: "default",
+            logger: logger
+        )
+
+    me request_permission(origin: text, name: text) -> PermissionState:
+        # Check if we already have a grant for this origin+name
+        for g in self.grants:
+            if g.descriptor.origin == origin and g.descriptor.name == name:
+                self.logger.debug("Permission '{name}' for {origin}: existing grant = {self.state_to_text(g.state)}")
+                return g.state
+        # No existing grant — return default state
+        val default_state = self.get_default_state(name)
+        self.logger.debug("Permission '{name}' for {origin}: default = {self.state_to_text(default_state)}")
+        default_state
+
+    me grant_permission(origin: text, name: text):
+        # Remove any existing grant for this pair
+        self.remove_grant(origin, name)
+        val descriptor = PermissionDescriptor.create(name: name, origin: origin)
+        val grant = PermissionGrant.create(
+            descriptor: descriptor,
+            state: PermissionState.Granted,
+            granted_at: 0
+        )
+        self.grants.push(grant)
+        self.logger.info("Permission granted: '{name}' for {origin}")
+
+    me deny_permission(origin: text, name: text):
+        # Remove any existing grant for this pair
+        self.remove_grant(origin, name)
+        val descriptor = PermissionDescriptor.create(name: name, origin: origin)
+        val grant = PermissionGrant.create(
+            descriptor: descriptor,
+            state: PermissionState.Denied,
+            granted_at: 0
+        )
+        self.grants.push(grant)
+        self.logger.info("Permission denied: '{name}' for {origin}")
+
+    me reset_permission(origin: text, name: text):
+        self.remove_grant(origin, name)
+        self.logger.info("Permission reset: '{name}' for {origin}")
+
+    me remove_grant(origin: text, name: text):
+        var idx = -1
+        for i in 0..self.grants.len():
+            if self.grants[i].descriptor.origin == origin and self.grants[i].descriptor.name == name:
+                idx = i
+        if idx >= 0:
+            self.grants.remove(idx)
+
+    fn get_permissions_for_origin(origin: text) -> List<PermissionGrant>:
+        var results = List<PermissionGrant>()
+        for g in self.grants:
+            if g.descriptor.origin == origin:
+                results.push(g)
+        results
+
+    fn get_all_grants() -> List<PermissionGrant>:
+        self.grants
+
+    me clear_grants_for_origin(origin: text):
+        var i = self.grants.len() - 1
+        while i >= 0:
+            if self.grants[i].descriptor.origin == origin:
+                self.grants.remove(i)
+            i = i - 1
+        self.logger.info("All permissions cleared for {origin}")
+
+    fn get_default_state(permission_name: text) -> PermissionState:
+        # Default permission states based on permission type.
+        # Dangerous permissions default to Prompt; benign ones may default to Granted.
+        match permission_name:
+            "camera": PermissionState.Prompt
+            "microphone": PermissionState.Prompt
+            "geolocation": PermissionState.Prompt
+            "notifications": PermissionState.Prompt
+            "push": PermissionState.Prompt
+            "clipboard-read": PermissionState.Prompt
+            "clipboard-write": PermissionState.Granted
+            "storage": PermissionState.Granted
+            _: PermissionState.Prompt
+
+    fn state_to_text(s: PermissionState) -> text:
+        match s:
+            PermissionState.Granted: "granted"
+            PermissionState.Denied: "denied"
+            PermissionState.Prompt: "prompt"
+
+    fn get_grant_count() -> i64:
+        self.grants.len()

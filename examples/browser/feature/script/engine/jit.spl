@@ -1,0 +1,143 @@
+# JIT compiler stub for the JS engine.
+# Provides profiling, hotspot detection, and future compilation tiers.
+# Actual native code generation is not yet implemented (pass_todo).
+
+use browser.entity.script.bytecode_types.(BytecodeChunk)
+use browser.shared.error.(BrowserError, BrowserResult, script_error)
+use browser.shared.logging.(Logger, LogLevel)
+
+# --- JIT tiers ---
+
+enum JitTier:
+    Baseline
+    Optimizing
+
+# --- Profiling data ---
+
+class JitProfile:
+    function_name: text
+    call_count: i64
+    hot_threshold: i64
+    is_compiled: bool
+    tier: JitTier
+
+    static fn create(function_name: text, hot_threshold: i64) -> JitProfile:
+        JitProfile(
+            function_name: function_name,
+            call_count: 0,
+            hot_threshold: hot_threshold,
+            is_compiled: false,
+            tier: JitTier.Baseline
+        )
+
+# --- Compiled function handle ---
+
+class CompiledFunction:
+    name: text
+    tier: JitTier
+    native_code_id: i64
+
+# --- JIT compiler ---
+
+class JitCompiler:
+    profiles: List<JitProfile>
+    compiled_functions: List<CompiledFunction>
+    hot_threshold: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> JitCompiler:
+        JitCompiler(
+            profiles: List<JitProfile>(),
+            compiled_functions: List<CompiledFunction>(),
+            hot_threshold: 100,
+            logger: logger
+        )
+
+    # --- Profiling ---
+
+    me profile_call(function_name: text):
+        val idx = self._find_profile(function_name)
+        if idx >= 0:
+            var profile = self.profiles.get(idx)
+            profile.call_count = profile.call_count + 1
+            if not profile.is_compiled and self._is_hot(profile):
+                self.logger.info("Function '{function_name}' is hot (call_count={profile.call_count})")
+        else:
+            val profile = JitProfile.create(function_name, self.hot_threshold)
+            self.profiles.push(profile)
+            # Increment the first call
+            var new_profile = self.profiles.get(self.profiles.len() - 1)
+            new_profile.call_count = 1
+
+    fn should_compile(function_name: text) -> bool:
+        val idx = self._find_profile(function_name)
+        if idx >= 0:
+            val profile = self.profiles.get(idx)
+            self._is_hot(profile) and not profile.is_compiled
+        else:
+            false
+
+    # --- Compilation stubs ---
+
+    me compile_baseline(chunk: BytecodeChunk, name: text) -> BrowserResult<CompiledFunction>:
+        self.logger.info("Baseline JIT compile requested for '{name}'")
+        # TODO: Implement baseline JIT compilation
+        # This would generate simple native code from bytecode
+        pass_todo
+
+    me compile_optimizing(chunk: BytecodeChunk, name: text) -> BrowserResult<CompiledFunction>:
+        self.logger.info("Optimizing JIT compile requested for '{name}'")
+        # TODO: Implement optimizing JIT compilation
+        # This would apply type specialization, inlining, and register allocation
+        pass_todo
+
+    # --- Deoptimization ---
+
+    me deoptimize(name: text):
+        self.logger.warn("Deoptimizing function '{name}', falling back to interpreter")
+        # Remove from compiled functions
+        var new_compiled = List<CompiledFunction>()
+        var i = 0
+        while i < self.compiled_functions.len():
+            val func = self.compiled_functions.get(i)
+            if func.name != name:
+                new_compiled.push(func)
+            i = i + 1
+        self.compiled_functions = new_compiled
+        # Reset profile
+        val idx = self._find_profile(name)
+        if idx >= 0:
+            var profile = self.profiles.get(idx)
+            profile.is_compiled = false
+            profile.call_count = 0
+            profile.tier = JitTier.Baseline
+
+    # --- Lookup ---
+
+    fn get_compiled(name: text) -> Option<CompiledFunction>:
+        var i = 0
+        while i < self.compiled_functions.len():
+            val func = self.compiled_functions.get(i)
+            if func.name == name:
+                return Some(func)
+            i = i + 1
+        nil
+
+    # --- Private helpers ---
+
+    fn _find_profile(name: text) -> i64:
+        var i = 0
+        while i < self.profiles.len():
+            val profile = self.profiles.get(i)
+            if profile.function_name == name:
+                return i
+            i = i + 1
+        -1
+
+    fn _is_hot(profile: JitProfile) -> bool:
+        profile.call_count >= profile.hot_threshold
+
+# --- Free function ---
+
+fn is_hot(profile: JitProfile) -> bool:
+    profile.call_count >= profile.hot_threshold

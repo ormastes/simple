@@ -1,0 +1,135 @@
+# Composite-to-GPU bridge for the Simple Browser Platform.
+# Translates compositing layers into GpuCommands that can be submitted
+# to the GPU command buffer for rasterization and final presentation.
+#
+# Each layer is rasterized independently, then the layers are composited
+# back-to-front with appropriate transforms and opacity.
+
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.entity.dom.paint_types.{PaintOp, DisplayItem, Color}
+use sbp.feature.composite.layer_tree.{CompositeLayer}
+use sbp.feature.gpu.command_buffer.{GpuCommand}
+
+# ---------------------------------------------------------------------------
+# CompositeToGpuBridge
+# ---------------------------------------------------------------------------
+class CompositeToGpuBridge:
+    logger: Logger
+
+    static fn new(logger: Logger) -> CompositeToGpuBridge:
+        CompositeToGpuBridge(logger: logger)
+
+    # Generate the full set of GPU commands for one frame.
+    # `layers` is the composited layer tree; `frame` is the frame counter
+    # used for fence synchronization.
+    fn generate_gpu_commands(layers: List<CompositeLayer>, frame: i64) -> List<GpuCommand>:
+        self.logger.info("CompositeToGpu: generating GPU commands for frame {frame}")
+        var cmds = List<GpuCommand>()
+
+        # 1. Clear the back buffer
+        cmds.push(GpuCommand.Clear(
+            surface_id: 0,
+            color: Color.white(),
+        ))
+
+        # 2. Rasterize each layer
+        for layer in layers:
+            val layer_cmds = rasterize_layer(layer)
+            for cmd in layer_cmds:
+                cmds.push(cmd)
+
+        # 3. Composite layers back-to-front
+        val comp_cmds = composite_layers(layers)
+        for cmd in comp_cmds:
+            cmds.push(cmd)
+
+        # 4. Present
+        val present = present_frame(0)
+        cmds.push(present)
+
+        # 5. Fence for frame synchronization
+        cmds.push(GpuCommand.Fence(id: frame))
+
+        self.logger.info("CompositeToGpu: {cmds.len()} GPU commands")
+        cmds
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+# Rasterize a single layer into GPU commands.
+# Each DisplayItem's PaintOp is translated to the appropriate GPU draw call.
+fn rasterize_layer(layer: CompositeLayer) -> List<GpuCommand>:
+    var cmds = List<GpuCommand>()
+
+    # Apply layer transform
+    val transform_cmds = apply_layer_transform(layer)
+    for cmd in transform_cmds:
+        cmds.push(cmd)
+
+    # Set scissor rect for layer bounds
+    if layer.clips_children:
+        cmds.push(GpuCommand.SetScissor(
+            x: layer.bounds_x.to_i64(),
+            y: layer.bounds_y.to_i64(),
+            w: layer.bounds_w.to_i64(),
+            h: layer.bounds_h.to_i64(),
+        ))
+
+    # Translate each display item to a GPU draw quad
+    for item in layer.display_items:
+        match item.op:
+            PaintOp.FillRect(x, y, w, h, color):
+                # Use a solid-color quad (texture_id = -1 means untextured)
+                cmds.push(GpuCommand.DrawQuad(
+                    surface_id: 0,
+                    x: x, y: y, w: w, h: h,
+                    texture_id: -1,
+                    opacity: layer.opacity,
+                ))
+            PaintOp.DrawImage(x, y, w, h, image_id):
+                cmds.push(GpuCommand.DrawQuad(
+                    surface_id: 0,
+                    x: x, y: y, w: w, h: h,
+                    texture_id: image_id,
+                    opacity: layer.opacity,
+                ))
+            _: pass_do_nothing
+
+    # Clear scissor if it was set
+    if layer.clips_children:
+        cmds.push(GpuCommand.ClearScissor)
+
+    cmds
+
+# Composite layers in back-to-front order by blitting each layer's
+# rasterized surface onto the final surface.
+fn composite_layers(layers: List<CompositeLayer>) -> List<GpuCommand>:
+    var cmds = List<GpuCommand>()
+    var layer_idx = 0
+    for layer in layers:
+        if layer_idx > 0:
+            # Blit this layer onto surface 0 (the back buffer)
+            cmds.push(GpuCommand.Blit(
+                src_surface: layer.id,
+                dst_surface: 0,
+                src_x: 0, src_y: 0,
+                src_w: layer.bounds_w.to_i64(), src_h: layer.bounds_h.to_i64(),
+                dst_x: layer.bounds_x.to_i64(), dst_y: layer.bounds_y.to_i64(),
+                dst_w: layer.bounds_w.to_i64(), dst_h: layer.bounds_h.to_i64(),
+            ))
+        layer_idx = layer_idx + 1
+    cmds
+
+# Apply the layer's CSS transform (stored as a flattened 4x4 matrix).
+# Currently a placeholder — real implementation would decompose the
+# matrix and issue GPU transform state changes.
+fn apply_layer_transform(layer: CompositeLayer) -> List<GpuCommand>:
+    var cmds = List<GpuCommand>()
+    # TODO: decompose layer.transform into GPU transform commands
+    pass_todo
+    cmds
+
+# Issue a present/swap command for the given swapchain.
+fn present_frame(swapchain_id: i64) -> GpuCommand:
+    GpuCommand.Present(swapchain_id: swapchain_id)

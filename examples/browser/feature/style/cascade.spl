@@ -1,0 +1,408 @@
+# CSS cascade algorithm — specificity, origin, and source-order resolution.
+# Implements the CSS cascade per the specification: determines which CSS value
+# wins when multiple rules declare the same property on the same element.
+# Also provides a user-agent default stylesheet.
+
+use examples.browser.entity.dom.css_types.(CSSValue, CSSDeclaration, CSSRule, Selector, SelectorPart, Specificity)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# Origin enum — the three CSS origins in ascending priority order.
+# ---------------------------------------------------------------------------
+
+enum CssOrigin:
+    UserAgent
+    User
+    Author
+
+# ---------------------------------------------------------------------------
+# CascadeEntry — one matched rule annotated with origin metadata.
+# ---------------------------------------------------------------------------
+
+class CascadeEntry:
+    rule: CSSRule
+    origin: CssOrigin
+    specificity: Specificity
+    source_order: i64
+
+    static fn create(rule: CSSRule, origin: CssOrigin, specificity: Specificity, source_order: i64) -> CascadeEntry:
+        CascadeEntry(rule: rule, origin: origin, specificity: specificity, source_order: source_order)
+
+# ---------------------------------------------------------------------------
+# Cascade — the core cascade resolver.
+# ---------------------------------------------------------------------------
+
+class Cascade:
+    logger: Logger
+
+    static fn new(logger: Logger) -> Cascade:
+        Cascade(logger: logger)
+
+    # Resolve the winning value for a single property across all matched rules.
+    # Steps: filter -> sort by cascade priority -> return winning value.
+    fn resolve(entries: List<CascadeEntry>, property: text) -> CSSValue?:
+        # Step 1: Filter entries that declare this property
+        var relevant = List<CascadeEntry>()
+        for entry in entries:
+            val decl = self.get_declaration(entry.rule, property)
+            if decl.?:
+                relevant.push(entry)
+
+        if relevant.len() == 0:
+            self.logger.trace("cascade: no entries for property '{property}'")
+            return nil
+
+        # Step 2: Sort by cascade priority (bubble sort — small lists)
+        var sorted = relevant
+        var n = sorted.len()
+        var i = 0
+        while i < n - 1:
+            var j = 0
+            while j < n - i - 1:
+                val cmp = self.compare_cascade(sorted.get(j), sorted.get(j + 1), property)
+                if cmp < 0:
+                    val tmp = sorted.get(j)
+                    sorted.set(j, sorted.get(j + 1))
+                    sorted.set(j + 1, tmp)
+                j = j + 1
+            i = i + 1
+
+        # Step 3: Return winning value (first after sort = highest priority)
+        val winner = sorted.get(0)
+        val winning_decl = self.get_declaration(winner.rule, property)
+        if val d = winning_decl:
+            self.logger.trace("cascade: property '{property}' won by source_order={winner.source_order}")
+            return d.value
+        return nil
+
+    # Compare two cascade entries for a given property.
+    # Returns positive if a wins, negative if b wins, 0 if equal.
+    #
+    # Priority order (highest first):
+    #   !important Author > !important User > !important UA
+    #   > Author > User > UA
+    # Within same level: higher specificity wins.
+    # Same specificity: later source order wins.
+    fn compare_cascade(a: CascadeEntry, b: CascadeEntry, prop: text) -> i64:
+        val a_important = self.is_important(a.rule, prop)
+        val b_important = self.is_important(b.rule, prop)
+
+        # !important declarations beat normal declarations
+        if a_important and not b_important:
+            return 1
+        if b_important and not a_important:
+            return -1
+
+        # Both important or both normal — compare origins
+        val a_origin_val = self.origin_weight(a.origin, a_important)
+        val b_origin_val = self.origin_weight(b.origin, b_important)
+
+        if a_origin_val != b_origin_val:
+            return a_origin_val - b_origin_val
+
+        # Same origin level — compare specificity
+        val spec_cmp = self.compare_specificity(a.specificity, b.specificity)
+        if spec_cmp != 0:
+            return spec_cmp
+
+        # Same specificity — later source order wins
+        return a.source_order - b.source_order
+
+    # Origin weight for cascade sorting.
+    # For normal declarations: UA=1, User=2, Author=3
+    # For !important declarations: Author=4, User=5, UA=6
+    fn origin_weight(origin: CssOrigin, important: bool) -> i64:
+        if important:
+            match origin:
+                CssOrigin.Author: 4
+                CssOrigin.User: 5
+                CssOrigin.UserAgent: 6
+        else:
+            match origin:
+                CssOrigin.UserAgent: 1
+                CssOrigin.User: 2
+                CssOrigin.Author: 3
+
+    # Compare specificity tuples: (ids, classes, elements).
+    # Returns positive if a > b, negative if a < b, 0 if equal.
+    fn compare_specificity(a: Specificity, b: Specificity) -> i64:
+        if a.ids != b.ids:
+            return a.ids - b.ids
+        if a.classes != b.classes:
+            return a.classes - b.classes
+        return a.elements - b.elements
+
+    # Find the declaration for a property within a rule.
+    fn get_declaration(rule: CSSRule, property: text) -> CSSDeclaration?:
+        for decl in rule.declarations:
+            if decl.property == property:
+                return decl
+        return nil
+
+    # Check whether a rule declares a property as !important.
+    fn is_important(rule: CSSRule, property: text) -> bool:
+        for decl in rule.declarations:
+            if decl.property == property:
+                return decl.important
+        return false
+
+# ---------------------------------------------------------------------------
+# Helper: create a simple type selector.
+# ---------------------------------------------------------------------------
+
+fn type_selector(name: text) -> Selector:
+    Selector(parts: [SelectorPart.Type(name: name)])
+
+# Helper: create a CSSDeclaration with !important flag.
+fn important_decl(property: text, value: CSSValue) -> CSSDeclaration:
+    CSSDeclaration(property: property, value: value, important: true)
+
+# Helper: create a keyword value.
+fn kw(v: text) -> CSSValue:
+    CSSValue.Keyword(v: v)
+
+# Helper: create a length in px.
+fn px(v: f64) -> CSSValue:
+    CSSValue.Length(v: v, unit: "px")
+
+# Helper: create a length in em.
+fn em(v: f64) -> CSSValue:
+    CSSValue.Length(v: v, unit: "em")
+
+# Helper: create a simple color value.
+fn color_val(r: i64, g: i64, b: i64) -> CSSValue:
+    CSSValue.Color(r: r, g: g, b: b, a: 255)
+
+# ---------------------------------------------------------------------------
+# User-Agent default stylesheet.
+# Returns the built-in default styles per the CSS specification.
+# ---------------------------------------------------------------------------
+
+fn ua_stylesheet() -> List<CSSRule>:
+    var rules = List<CSSRule>()
+
+    # html { display: block }
+    rules.push(CSSRule.create(
+        type_selector("html"),
+        [CSSDeclaration.create("display", kw("block"))]
+    ))
+
+    # body { display: block; margin: 8px }
+    rules.push(CSSRule.create(
+        type_selector("body"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("margin-top", px(8.0)),
+            CSSDeclaration.create("margin-right", px(8.0)),
+            CSSDeclaration.create("margin-bottom", px(8.0)),
+            CSSDeclaration.create("margin-left", px(8.0))
+        ]
+    ))
+
+    # h1 { display: block; font-size: 2em; font-weight: bold; margin-top: 0.67em; margin-bottom: 0.67em }
+    rules.push(CSSRule.create(
+        type_selector("h1"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("font-size", em(2.0)),
+            CSSDeclaration.create("font-weight", kw("bold")),
+            CSSDeclaration.create("margin-top", em(0.67)),
+            CSSDeclaration.create("margin-bottom", em(0.67))
+        ]
+    ))
+
+    # h2 { display: block; font-size: 1.5em; font-weight: bold }
+    rules.push(CSSRule.create(
+        type_selector("h2"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("font-size", em(1.5)),
+            CSSDeclaration.create("font-weight", kw("bold"))
+        ]
+    ))
+
+    # h3 { display: block; font-size: 1.17em; font-weight: bold }
+    rules.push(CSSRule.create(
+        type_selector("h3"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("font-size", em(1.17)),
+            CSSDeclaration.create("font-weight", kw("bold"))
+        ]
+    ))
+
+    # p { display: block; margin-top: 1em; margin-bottom: 1em }
+    rules.push(CSSRule.create(
+        type_selector("p"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("margin-top", em(1.0)),
+            CSSDeclaration.create("margin-bottom", em(1.0))
+        ]
+    ))
+
+    # div { display: block }
+    rules.push(CSSRule.create(
+        type_selector("div"),
+        [CSSDeclaration.create("display", kw("block"))]
+    ))
+
+    # span { display: inline }
+    rules.push(CSSRule.create(
+        type_selector("span"),
+        [CSSDeclaration.create("display", kw("inline"))]
+    ))
+
+    # a { color: blue; text-decoration: underline }
+    rules.push(CSSRule.create(
+        type_selector("a"),
+        [
+            CSSDeclaration.create("color", color_val(0, 0, 255)),
+            CSSDeclaration.create("text-decoration", kw("underline"))
+        ]
+    ))
+
+    # strong { font-weight: bold }
+    rules.push(CSSRule.create(
+        type_selector("strong"),
+        [CSSDeclaration.create("font-weight", kw("bold"))]
+    ))
+
+    # b { font-weight: bold }
+    rules.push(CSSRule.create(
+        type_selector("b"),
+        [CSSDeclaration.create("font-weight", kw("bold"))]
+    ))
+
+    # em { font-style: italic }
+    rules.push(CSSRule.create(
+        type_selector("em"),
+        [CSSDeclaration.create("font-style", kw("italic"))]
+    ))
+
+    # i { font-style: italic }
+    rules.push(CSSRule.create(
+        type_selector("i"),
+        [CSSDeclaration.create("font-style", kw("italic"))]
+    ))
+
+    # ul { display: block; padding-left: 40px }
+    rules.push(CSSRule.create(
+        type_selector("ul"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("padding-left", px(40.0))
+        ]
+    ))
+
+    # ol { display: block; padding-left: 40px }
+    rules.push(CSSRule.create(
+        type_selector("ol"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("padding-left", px(40.0))
+        ]
+    ))
+
+    # li { display: list-item }
+    rules.push(CSSRule.create(
+        type_selector("li"),
+        [CSSDeclaration.create("display", kw("list-item"))]
+    ))
+
+    # table { display: table; border-collapse: separate }
+    rules.push(CSSRule.create(
+        type_selector("table"),
+        [
+            CSSDeclaration.create("display", kw("table")),
+            CSSDeclaration.create("border-collapse", kw("separate"))
+        ]
+    ))
+
+    # tr { display: table-row }
+    rules.push(CSSRule.create(
+        type_selector("tr"),
+        [CSSDeclaration.create("display", kw("table-row"))]
+    ))
+
+    # td { display: table-cell; padding: 1px }
+    rules.push(CSSRule.create(
+        type_selector("td"),
+        [
+            CSSDeclaration.create("display", kw("table-cell")),
+            CSSDeclaration.create("padding-top", px(1.0)),
+            CSSDeclaration.create("padding-right", px(1.0)),
+            CSSDeclaration.create("padding-bottom", px(1.0)),
+            CSSDeclaration.create("padding-left", px(1.0))
+        ]
+    ))
+
+    # th { display: table-cell; padding: 1px }
+    rules.push(CSSRule.create(
+        type_selector("th"),
+        [
+            CSSDeclaration.create("display", kw("table-cell")),
+            CSSDeclaration.create("padding-top", px(1.0)),
+            CSSDeclaration.create("padding-right", px(1.0)),
+            CSSDeclaration.create("padding-bottom", px(1.0)),
+            CSSDeclaration.create("padding-left", px(1.0))
+        ]
+    ))
+
+    # img { display: inline-block }
+    rules.push(CSSRule.create(
+        type_selector("img"),
+        [CSSDeclaration.create("display", kw("inline-block"))]
+    ))
+
+    # input { display: inline-block }
+    rules.push(CSSRule.create(
+        type_selector("input"),
+        [CSSDeclaration.create("display", kw("inline-block"))]
+    ))
+
+    # button { display: inline-block }
+    rules.push(CSSRule.create(
+        type_selector("button"),
+        [CSSDeclaration.create("display", kw("inline-block"))]
+    ))
+
+    # select { display: inline-block }
+    rules.push(CSSRule.create(
+        type_selector("select"),
+        [CSSDeclaration.create("display", kw("inline-block"))]
+    ))
+
+    # textarea { display: inline-block }
+    rules.push(CSSRule.create(
+        type_selector("textarea"),
+        [CSSDeclaration.create("display", kw("inline-block"))]
+    ))
+
+    # pre { font-family: monospace }
+    rules.push(CSSRule.create(
+        type_selector("pre"),
+        [CSSDeclaration.create("font-family", kw("monospace"))]
+    ))
+
+    # code { font-family: monospace }
+    rules.push(CSSRule.create(
+        type_selector("code"),
+        [CSSDeclaration.create("font-family", kw("monospace"))]
+    ))
+
+    # hr { display: block; border-top: 1px solid; margin: 0.5em 0 }
+    rules.push(CSSRule.create(
+        type_selector("hr"),
+        [
+            CSSDeclaration.create("display", kw("block")),
+            CSSDeclaration.create("border-top-width", px(1.0)),
+            CSSDeclaration.create("border-top-style", kw("solid")),
+            CSSDeclaration.create("margin-top", em(0.5)),
+            CSSDeclaration.create("margin-bottom", em(0.5)),
+            CSSDeclaration.create("margin-left", px(0.0)),
+            CSSDeclaration.create("margin-right", px(0.0))
+        ]
+    ))
+
+    rules

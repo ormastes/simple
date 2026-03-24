@@ -1,0 +1,453 @@
+# Computed value resolution — transforms cascaded values to computed values.
+# After the cascade determines which declarations win, this module resolves
+# relative units (em, rem, %), applies inheritance, and produces the final
+# ComputedStyle that the layout engine consumes.
+
+use examples.browser.entity.dom.css_types.(CSSValue, CSSDeclaration, CSSRule, Specificity)
+use examples.browser.feature.style.cascade.(Cascade, CascadeEntry, CssOrigin)
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# ---------------------------------------------------------------------------
+# ComputedStyle — the fully resolved style for a single DOM node.
+# All values are absolute (px, keywords, or numeric).
+# ---------------------------------------------------------------------------
+
+class ComputedStyle:
+    # Display and positioning
+    display: text
+    position: text
+    float_val: text
+
+    # Sizing
+    width: CSSValue
+    height: CSSValue
+    min_width: CSSValue
+    max_width: CSSValue
+
+    # Margins
+    margin_top: CSSValue
+    margin_right: CSSValue
+    margin_bottom: CSSValue
+    margin_left: CSSValue
+
+    # Padding
+    padding_top: CSSValue
+    padding_right: CSSValue
+    padding_bottom: CSSValue
+    padding_left: CSSValue
+
+    # Borders — widths
+    border_top_width: CSSValue
+    border_right_width: CSSValue
+    border_bottom_width: CSSValue
+    border_left_width: CSSValue
+
+    # Borders — color and style (top only for brevity; others follow same pattern)
+    border_top_color: CSSValue
+    border_top_style: text
+
+    # Colors
+    color: CSSValue
+    background_color: CSSValue
+
+    # Typography
+    font_family: text
+    font_size: CSSValue
+    font_weight: CSSValue
+    font_style: text
+    line_height: CSSValue
+    text_align: text
+    text_decoration: text
+
+    # Overflow
+    overflow_x: text
+    overflow_y: text
+
+    # Visual
+    opacity: f64
+    visibility: text
+    z_index: CSSValue
+
+    # Flexbox
+    flex_direction: text
+    flex_wrap: text
+    justify_content: text
+    align_items: text
+
+    # Grid
+    grid_template_columns: text
+    grid_template_rows: text
+
+    static fn default_style() -> ComputedStyle:
+        ComputedStyle(
+            display: "inline",
+            position: "static",
+            float_val: "none",
+            width: CSSValue.Keyword(v: "auto"),
+            height: CSSValue.Keyword(v: "auto"),
+            min_width: CSSValue.Keyword(v: "auto"),
+            max_width: CSSValue.Keyword(v: "none"),
+            margin_top: CSSValue.Length(v: 0.0, unit: "px"),
+            margin_right: CSSValue.Length(v: 0.0, unit: "px"),
+            margin_bottom: CSSValue.Length(v: 0.0, unit: "px"),
+            margin_left: CSSValue.Length(v: 0.0, unit: "px"),
+            padding_top: CSSValue.Length(v: 0.0, unit: "px"),
+            padding_right: CSSValue.Length(v: 0.0, unit: "px"),
+            padding_bottom: CSSValue.Length(v: 0.0, unit: "px"),
+            padding_left: CSSValue.Length(v: 0.0, unit: "px"),
+            border_top_width: CSSValue.Length(v: 0.0, unit: "px"),
+            border_right_width: CSSValue.Length(v: 0.0, unit: "px"),
+            border_bottom_width: CSSValue.Length(v: 0.0, unit: "px"),
+            border_left_width: CSSValue.Length(v: 0.0, unit: "px"),
+            border_top_color: CSSValue.Color(r: 0, g: 0, b: 0, a: 255),
+            border_top_style: "none",
+            color: CSSValue.Color(r: 0, g: 0, b: 0, a: 255),
+            background_color: CSSValue.Color(r: 0, g: 0, b: 0, a: 0),
+            font_family: "serif",
+            font_size: CSSValue.Length(v: 16.0, unit: "px"),
+            font_weight: CSSValue.Number(v: 400.0),
+            font_style: "normal",
+            line_height: CSSValue.Number(v: 1.2),
+            text_align: "start",
+            text_decoration: "none",
+            overflow_x: "visible",
+            overflow_y: "visible",
+            opacity: 1.0,
+            visibility: "visible",
+            z_index: CSSValue.Keyword(v: "auto"),
+            flex_direction: "row",
+            flex_wrap: "nowrap",
+            justify_content: "flex-start",
+            align_items: "stretch",
+            grid_template_columns: "none",
+            grid_template_rows: "none"
+        )
+
+# ---------------------------------------------------------------------------
+# StyleResolver — resolves cascaded + inherited + initial → computed style.
+# ---------------------------------------------------------------------------
+
+class StyleResolver:
+    cascade: Cascade
+    logger: Logger
+
+    static fn new(cascade: Cascade, logger: Logger) -> StyleResolver:
+        StyleResolver(cascade: cascade, logger: logger)
+
+    # Compute the full style for a node given its matched cascade entries and
+    # the parent's computed style.
+    me compute(node_id: i64, matched_rules: List<CascadeEntry>, parent_style: ComputedStyle) -> ComputedStyle:
+        var style = ComputedStyle.default_style()
+
+        # Process all known CSS properties
+        val properties = all_property_names()
+        for prop in properties:
+            val cascaded = self.cascade.resolve(matched_rules, prop)
+            var resolved = CSSValue.Keyword(v: "__unset__")
+
+            if val cv = cascaded:
+                # Explicit 'inherit' keyword
+                match cv:
+                    CSSValue.Inherit:
+                        resolved = get_property_from_style(parent_style, prop)
+                    CSSValue.Initial:
+                        resolved = initial_value(prop)
+                    CSSValue.Unset:
+                        if is_inherited_property(prop):
+                            resolved = get_property_from_style(parent_style, prop)
+                        else:
+                            resolved = initial_value(prop)
+                    _:
+                        resolved = resolve_value(cv, prop, parent_style)
+            else:
+                # No cascaded value — inherit or use initial
+                if is_inherited_property(prop):
+                    resolved = get_property_from_style(parent_style, prop)
+                else:
+                    resolved = initial_value(prop)
+
+            style = set_property_on_style(style, prop, resolved)
+
+        self.logger.trace("computed style for node {node_id}")
+        style
+
+# ---------------------------------------------------------------------------
+# Value resolution — relative units to absolute.
+# ---------------------------------------------------------------------------
+
+fn resolve_value(cascaded: CSSValue, property: text, parent_style: ComputedStyle) -> CSSValue:
+    match cascaded:
+        CSSValue.Length(v, unit):
+            if unit == "em":
+                val parent_px = extract_px(parent_style.font_size)
+                val resolved_px = resolve_em(v, parent_px)
+                CSSValue.Length(v: resolved_px, unit: "px")
+            else if unit == "rem":
+                # Root font size assumed 16px (true root resolution happens at tree level)
+                val resolved_px = resolve_rem(v, 16.0)
+                CSSValue.Length(v: resolved_px, unit: "px")
+            else:
+                cascaded
+        CSSValue.Percentage(v):
+            # Percentage resolution depends on property context
+            val parent_px = extract_px(parent_style.font_size)
+            val resolved_px = resolve_percentage(v, parent_px)
+            CSSValue.Length(v: resolved_px, unit: "px")
+        _:
+            cascaded
+
+fn resolve_em(value: f64, parent_font_size: f64) -> f64:
+    value * parent_font_size
+
+fn resolve_rem(value: f64, root_font_size: f64) -> f64:
+    value * root_font_size
+
+fn resolve_percentage(value: f64, reference: f64) -> f64:
+    (value / 100.0) * reference
+
+# Extract px numeric value from a CSSValue. Falls back to 16.0 (default font-size).
+fn extract_px(value: CSSValue) -> f64:
+    match value:
+        CSSValue.Length(v, unit):
+            v
+        CSSValue.Number(v):
+            v
+        _:
+            16.0
+
+# ---------------------------------------------------------------------------
+# Inherited properties — per CSS specification.
+# ---------------------------------------------------------------------------
+
+fn is_inherited_property(property: text) -> bool:
+    val inherited = [
+        "color", "font-family", "font-size", "font-weight", "font-style",
+        "line-height", "text-align", "text-decoration", "text-indent",
+        "text-transform", "letter-spacing", "word-spacing", "white-space",
+        "visibility", "direction", "cursor", "list-style-type",
+        "list-style-position", "quotes"
+    ]
+    for p in inherited:
+        if p == property:
+            return true
+    return false
+
+# ---------------------------------------------------------------------------
+# Initial values — CSS specification defaults for each property.
+# ---------------------------------------------------------------------------
+
+fn initial_value(property: text) -> CSSValue:
+    match property:
+        "display": CSSValue.Keyword(v: "inline")
+        "position": CSSValue.Keyword(v: "static")
+        "float": CSSValue.Keyword(v: "none")
+        "width": CSSValue.Keyword(v: "auto")
+        "height": CSSValue.Keyword(v: "auto")
+        "min-width": CSSValue.Keyword(v: "auto")
+        "max-width": CSSValue.Keyword(v: "none")
+        "margin-top": CSSValue.Length(v: 0.0, unit: "px")
+        "margin-right": CSSValue.Length(v: 0.0, unit: "px")
+        "margin-bottom": CSSValue.Length(v: 0.0, unit: "px")
+        "margin-left": CSSValue.Length(v: 0.0, unit: "px")
+        "padding-top": CSSValue.Length(v: 0.0, unit: "px")
+        "padding-right": CSSValue.Length(v: 0.0, unit: "px")
+        "padding-bottom": CSSValue.Length(v: 0.0, unit: "px")
+        "padding-left": CSSValue.Length(v: 0.0, unit: "px")
+        "border-top-width": CSSValue.Length(v: 0.0, unit: "px")
+        "border-right-width": CSSValue.Length(v: 0.0, unit: "px")
+        "border-bottom-width": CSSValue.Length(v: 0.0, unit: "px")
+        "border-left-width": CSSValue.Length(v: 0.0, unit: "px")
+        "border-top-color": CSSValue.Color(r: 0, g: 0, b: 0, a: 255)
+        "border-top-style": CSSValue.Keyword(v: "none")
+        "color": CSSValue.Color(r: 0, g: 0, b: 0, a: 255)
+        "background-color": CSSValue.Color(r: 0, g: 0, b: 0, a: 0)
+        "font-family": CSSValue.Keyword(v: "serif")
+        "font-size": CSSValue.Length(v: 16.0, unit: "px")
+        "font-weight": CSSValue.Number(v: 400.0)
+        "font-style": CSSValue.Keyword(v: "normal")
+        "line-height": CSSValue.Number(v: 1.2)
+        "text-align": CSSValue.Keyword(v: "start")
+        "text-decoration": CSSValue.Keyword(v: "none")
+        "overflow-x": CSSValue.Keyword(v: "visible")
+        "overflow-y": CSSValue.Keyword(v: "visible")
+        "opacity": CSSValue.Number(v: 1.0)
+        "visibility": CSSValue.Keyword(v: "visible")
+        "z-index": CSSValue.Keyword(v: "auto")
+        "flex-direction": CSSValue.Keyword(v: "row")
+        "flex-wrap": CSSValue.Keyword(v: "nowrap")
+        "justify-content": CSSValue.Keyword(v: "flex-start")
+        "align-items": CSSValue.Keyword(v: "stretch")
+        "grid-template-columns": CSSValue.Keyword(v: "none")
+        "grid-template-rows": CSSValue.Keyword(v: "none")
+        _: CSSValue.Keyword(v: "initial")
+
+# ---------------------------------------------------------------------------
+# Property accessors — get/set properties on a ComputedStyle by name.
+# ---------------------------------------------------------------------------
+
+fn get_property_from_style(style: ComputedStyle, property: text) -> CSSValue:
+    match property:
+        "display": CSSValue.Keyword(v: style.display)
+        "position": CSSValue.Keyword(v: style.position)
+        "float": CSSValue.Keyword(v: style.float_val)
+        "width": style.width
+        "height": style.height
+        "min-width": style.min_width
+        "max-width": style.max_width
+        "margin-top": style.margin_top
+        "margin-right": style.margin_right
+        "margin-bottom": style.margin_bottom
+        "margin-left": style.margin_left
+        "padding-top": style.padding_top
+        "padding-right": style.padding_right
+        "padding-bottom": style.padding_bottom
+        "padding-left": style.padding_left
+        "border-top-width": style.border_top_width
+        "border-right-width": style.border_right_width
+        "border-bottom-width": style.border_bottom_width
+        "border-left-width": style.border_left_width
+        "border-top-color": style.border_top_color
+        "border-top-style": CSSValue.Keyword(v: style.border_top_style)
+        "color": style.color
+        "background-color": style.background_color
+        "font-family": CSSValue.Keyword(v: style.font_family)
+        "font-size": style.font_size
+        "font-weight": style.font_weight
+        "font-style": CSSValue.Keyword(v: style.font_style)
+        "line-height": style.line_height
+        "text-align": CSSValue.Keyword(v: style.text_align)
+        "text-decoration": CSSValue.Keyword(v: style.text_decoration)
+        "overflow-x": CSSValue.Keyword(v: style.overflow_x)
+        "overflow-y": CSSValue.Keyword(v: style.overflow_y)
+        "opacity": CSSValue.Number(v: style.opacity)
+        "visibility": CSSValue.Keyword(v: style.visibility)
+        "z-index": style.z_index
+        "flex-direction": CSSValue.Keyword(v: style.flex_direction)
+        "flex-wrap": CSSValue.Keyword(v: style.flex_wrap)
+        "justify-content": CSSValue.Keyword(v: style.justify_content)
+        "align-items": CSSValue.Keyword(v: style.align_items)
+        "grid-template-columns": CSSValue.Keyword(v: style.grid_template_columns)
+        "grid-template-rows": CSSValue.Keyword(v: style.grid_template_rows)
+        _: CSSValue.Keyword(v: "initial")
+
+fn set_property_on_style(style: ComputedStyle, property: text, value: CSSValue) -> ComputedStyle:
+    var s = style
+    match property:
+        "display":
+            match value:
+                CSSValue.Keyword(v): s.display = v
+                _: pass_dn
+        "position":
+            match value:
+                CSSValue.Keyword(v): s.position = v
+                _: pass_dn
+        "float":
+            match value:
+                CSSValue.Keyword(v): s.float_val = v
+                _: pass_dn
+        "width": s.width = value
+        "height": s.height = value
+        "min-width": s.min_width = value
+        "max-width": s.max_width = value
+        "margin-top": s.margin_top = value
+        "margin-right": s.margin_right = value
+        "margin-bottom": s.margin_bottom = value
+        "margin-left": s.margin_left = value
+        "padding-top": s.padding_top = value
+        "padding-right": s.padding_right = value
+        "padding-bottom": s.padding_bottom = value
+        "padding-left": s.padding_left = value
+        "border-top-width": s.border_top_width = value
+        "border-right-width": s.border_right_width = value
+        "border-bottom-width": s.border_bottom_width = value
+        "border-left-width": s.border_left_width = value
+        "border-top-color": s.border_top_color = value
+        "border-top-style":
+            match value:
+                CSSValue.Keyword(v): s.border_top_style = v
+                _: pass_dn
+        "color": s.color = value
+        "background-color": s.background_color = value
+        "font-family":
+            match value:
+                CSSValue.Keyword(v): s.font_family = v
+                _: pass_dn
+        "font-size": s.font_size = value
+        "font-weight": s.font_weight = value
+        "font-style":
+            match value:
+                CSSValue.Keyword(v): s.font_style = v
+                _: pass_dn
+        "line-height": s.line_height = value
+        "text-align":
+            match value:
+                CSSValue.Keyword(v): s.text_align = v
+                _: pass_dn
+        "text-decoration":
+            match value:
+                CSSValue.Keyword(v): s.text_decoration = v
+                _: pass_dn
+        "overflow-x":
+            match value:
+                CSSValue.Keyword(v): s.overflow_x = v
+                _: pass_dn
+        "overflow-y":
+            match value:
+                CSSValue.Keyword(v): s.overflow_y = v
+                _: pass_dn
+        "opacity":
+            match value:
+                CSSValue.Number(v): s.opacity = v
+                _: pass_dn
+        "visibility":
+            match value:
+                CSSValue.Keyword(v): s.visibility = v
+                _: pass_dn
+        "z-index": s.z_index = value
+        "flex-direction":
+            match value:
+                CSSValue.Keyword(v): s.flex_direction = v
+                _: pass_dn
+        "flex-wrap":
+            match value:
+                CSSValue.Keyword(v): s.flex_wrap = v
+                _: pass_dn
+        "justify-content":
+            match value:
+                CSSValue.Keyword(v): s.justify_content = v
+                _: pass_dn
+        "align-items":
+            match value:
+                CSSValue.Keyword(v): s.align_items = v
+                _: pass_dn
+        "grid-template-columns":
+            match value:
+                CSSValue.Keyword(v): s.grid_template_columns = v
+                _: pass_dn
+        "grid-template-rows":
+            match value:
+                CSSValue.Keyword(v): s.grid_template_rows = v
+                _: pass_dn
+        _: pass_dn
+    s
+
+# ---------------------------------------------------------------------------
+# Complete list of all tracked property names.
+# ---------------------------------------------------------------------------
+
+fn all_property_names() -> List<text>:
+    [
+        "display", "position", "float",
+        "width", "height", "min-width", "max-width",
+        "margin-top", "margin-right", "margin-bottom", "margin-left",
+        "padding-top", "padding-right", "padding-bottom", "padding-left",
+        "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+        "border-top-color", "border-top-style",
+        "color", "background-color",
+        "font-family", "font-size", "font-weight", "font-style",
+        "line-height", "text-align", "text-decoration",
+        "overflow-x", "overflow-y",
+        "opacity", "visibility", "z-index",
+        "flex-direction", "flex-wrap", "justify-content", "align-items",
+        "grid-template-columns", "grid-template-rows"
+    ]
