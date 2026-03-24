@@ -4,12 +4,9 @@
 # Replaces the stale adapter-based CH32 JIT smoke with the real hardware path
 # that exists on this host: WCH-Link direct control via `wlink`.
 #
-# This currently proves:
-# - probe and chip discovery
-# - direct RAM write/readback on real CH32V307 hardware
-# - register dump availability on real CH32V307 hardware
-#
-# It does not yet prove full shared-workload execution on CH32V307.
+# This proves direct CH32 hardware control and attempts real shared-workload
+# execution via a checked-in RV32 collections ELF. If SDI serial access is not
+# permitted on the host, execution is classified as blocked instead of failing.
 """
 
 use std.io_runtime.{shell}
@@ -17,6 +14,7 @@ use app.io.file_ops.{file_read}
 
 val CHIP = "CH32V30X"
 val SHARED_WORKLOAD = "test/fixtures/remote_jit/baremetal_lib_workload_main.spl"
+val WORKLOAD_ELF = "examples/09_embedded/baremetal/baremetal/hello_riscv32_collections.elf"
 val RAM_ADDR = "0x20000100"
 val RAM_WORD = "0x11223344"
 
@@ -30,6 +28,9 @@ fn ch32v307_detected() -> bool:
 
 fn shared_workload_available() -> bool:
     file_read(SHARED_WORKLOAD).len() > 0
+
+fn workload_elf_available() -> bool:
+    shell("test -f '{WORKLOAD_ELF}'").exit_code == 0
 
 fn ram_write_readback_ok() -> bool:
     val write = shell("timeout 10 wlink write-mem {RAM_ADDR} {RAM_WORD} --chip {CHIP} 2>&1")
@@ -48,9 +49,14 @@ fn register_dump_ok() -> bool:
     val combined = regs.stdout + regs.stderr
     combined.contains("dpc(pc):") and combined.contains("x10")
 
+fn workload_flash_output() -> text:
+    val run = shell("timeout 20 wlink flash '{WORKLOAD_ELF}' --chip {CHIP} --enable-sdi-print --watch-serial 2>&1")
+    run.stdout + run.stderr
+
 describe "CH32V307 Baremetal Direct Hardware":
     it "shares the same baremetal workload fixture as host and stm32h7":
         expect(shared_workload_available()).to_equal(true)
+        expect(workload_elf_available()).to_equal(true)
 
     it "detects CH32V307 through wlink":
         if not wlink_available():
@@ -78,3 +84,21 @@ describe "CH32V307 Baremetal Direct Hardware":
             print "[skip] CH32V307 not detected through wlink"
             return
         expect(register_dump_ok()).to_equal(true)
+
+    it "attempts the shared collections workload through flashed RV32 ELF":
+        if not wlink_available():
+            print "[skip] wlink unavailable"
+            return
+        if not ch32v307_detected():
+            print "[skip] CH32V307 not detected through wlink"
+            return
+        if not workload_elf_available():
+            print "[skip] workload ELF unavailable"
+            return
+        val output = workload_flash_output()
+        if output.contains("Permission denied"):
+            print "[skip] WCH-Link serial permission denied for SDI workload output"
+            return
+        expect(output).to_contain("PASS: FixedArray push/pop order correct")
+        expect(output).to_contain("PASS: FixedMap hash/put/get correct")
+        expect(output).to_contain("PASS: RingBuffer enqueue/dequeue with wrap-around correct")
