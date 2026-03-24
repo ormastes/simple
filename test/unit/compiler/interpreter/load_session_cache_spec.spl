@@ -1,0 +1,119 @@
+"""
+# Load Session Cache Specification
+
+**Feature IDs:** #SMF-001
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Plan:** doc/plan/smf_load_enable_plan.md
+
+## Overview
+
+Tests for InterpreterLoadConfig and LoadSessionCache — pure data types
+for caching SMF module resolution decisions in interpreter mode.
+"""
+
+import std.spec
+
+describe "InterpreterLoadConfig":
+    it "creates default config with correct values":
+        val cfg = interpreter_load_config_default()
+        expect(cfg.prefer_compiled).to_equal(true)
+        expect(cfg.allow_library_smf).to_equal(true)
+        expect(cfg.allow_source_fallback).to_equal(true)
+        expect(cfg.regenerate_stale_smf).to_equal(false)
+        expect(cfg.compiled_imports).to_equal(false)
+
+    it "creates source-only config that disables SMF":
+        val cfg = interpreter_load_config_source_only()
+        expect(cfg.prefer_compiled).to_equal(false)
+        expect(cfg.allow_library_smf).to_equal(false)
+        expect(cfg.allow_source_fallback).to_equal(true)
+        expect(cfg.regenerate_stale_smf).to_equal(false)
+        expect(cfg.compiled_imports).to_equal(false)
+
+describe "LoadSessionCache":
+    it "initializes with empty state":
+        lsc_init()
+        expect(lsc_target_hit_count()).to_equal(0)
+        expect(lsc_target_miss_count()).to_equal(0)
+        expect(lsc_freshness_hit_count()).to_equal(0)
+        expect(lsc_freshness_miss_count()).to_equal(0)
+
+    it "caches and retrieves target kind":
+        lsc_init()
+        lsc_cache_target("std.text", "/src/main.spl", "source", "/src/lib/text.spl")
+        val kind = lsc_get_cached_target_kind("std.text", "/src/main.spl")
+        expect(kind).to_equal("source")
+
+    it "caches and retrieves target path":
+        lsc_init()
+        lsc_cache_target("std.math", "/src/main.spl", "smf", "/cache/math.smf")
+        val path = lsc_get_cached_target_path("std.math", "/src/main.spl")
+        expect(path).to_equal("/cache/math.smf")
+
+    it "returns empty string for uncached target":
+        lsc_init()
+        val kind = lsc_get_cached_target_kind("unknown.mod", "/src/main.spl")
+        expect(kind).to_equal("")
+
+    it "tracks target hits and misses":
+        lsc_init()
+        lsc_cache_target("std.text", "/f.spl", "source", "/lib/text.spl")
+        lsc_get_cached_target_kind("std.text", "/f.spl")
+        lsc_get_cached_target_kind("unknown", "/f.spl")
+        expect(lsc_target_hit_count()).to_equal(1)
+        expect(lsc_target_miss_count()).to_equal(1)
+
+    it "caches freshness as fresh (1)":
+        lsc_init()
+        lsc_cache_freshness("/src/lib/text.spl", true)
+        expect(lsc_get_cached_freshness("/src/lib/text.spl")).to_equal(1)
+
+    it "caches freshness as stale (0)":
+        lsc_init()
+        lsc_cache_freshness("/src/lib/old.spl", false)
+        expect(lsc_get_cached_freshness("/src/lib/old.spl")).to_equal(0)
+
+    it "returns -1 for uncached freshness":
+        lsc_init()
+        expect(lsc_get_cached_freshness("/unknown.spl")).to_equal(-1)
+
+    it "tracks compiled module loading":
+        lsc_init()
+        expect(lsc_is_compiled_loaded("std.text")).to_equal(false)
+        lsc_mark_compiled_loaded("std.text")
+        expect(lsc_is_compiled_loaded("std.text")).to_equal(true)
+
+    it "tracks template metadata":
+        lsc_init()
+        expect(lsc_has_template_metadata("mod_a")).to_equal(false)
+        lsc_mark_template_metadata("mod_a", true)
+        expect(lsc_has_template_metadata("mod_a")).to_equal(true)
+
+    it "records and checks regen failures":
+        lsc_init()
+        expect(lsc_has_regen_failure("std.broken")).to_equal(false)
+        lsc_record_regen_failure("std.broken", "compile error")
+        expect(lsc_has_regen_failure("std.broken")).to_equal(true)
+        expect(lsc_get_regen_failure_reason("std.broken")).to_equal("compile error")
+
+    it "invalidates a single module":
+        lsc_init()
+        lsc_mark_compiled_loaded("std.text")
+        lsc_mark_template_metadata("std.text", true)
+        lsc_record_regen_failure("std.text", "err")
+        lsc_invalidate_module("std.text")
+        expect(lsc_is_compiled_loaded("std.text")).to_equal(false)
+        expect(lsc_has_template_metadata("std.text")).to_equal(false)
+        expect(lsc_has_regen_failure("std.text")).to_equal(false)
+
+    it "invalidates all caches":
+        lsc_init()
+        lsc_cache_target("m1", "/f.spl", "source", "/p.spl")
+        lsc_cache_freshness("/f.spl", true)
+        lsc_mark_compiled_loaded("m1")
+        lsc_invalidate_all()
+        expect(lsc_get_cached_target_kind("m1", "/f.spl")).to_equal("")
+        expect(lsc_get_cached_freshness("/f.spl")).to_equal(-1)
+        expect(lsc_is_compiled_loaded("m1")).to_equal(false)

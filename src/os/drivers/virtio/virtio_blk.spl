@@ -1,0 +1,248 @@
+# VirtIO Block Device Driver
+#
+# MDSOC: feature dimension, drivers layer
+# Implements BlockDevice trait for VirtIO block devices in QEMU.
+#
+# VirtIO-blk uses a single virtqueue for read/write requests.
+# Each request: header (type, sector) → data buffer → status byte.
+
+use os.drivers.virtio.virtio_common.{VirtioDevice, VIRTIO_DEVICE_BLK, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64}
+use os.services.fat32.fat32.{BlockDevice}
+
+# VirtIO block request types
+val VIRTIO_BLK_T_IN: u32 = 0           # Read
+val VIRTIO_BLK_T_OUT: u32 = 1          # Write
+val VIRTIO_BLK_T_FLUSH: u32 = 4        # Flush
+
+# VirtIO block status
+val VIRTIO_BLK_S_OK: u8 = 0
+val VIRTIO_BLK_S_IOERR: u8 = 1
+val VIRTIO_BLK_S_UNSUPP: u8 = 2
+
+# VirtIO block config offsets (from device base + 0x100)
+val VIRTIO_BLK_CFG_CAPACITY: u32 = 0x100  # Total sectors (u64)
+val VIRTIO_BLK_CFG_SEG_MAX: u32 = 0x10C
+val VIRTIO_BLK_CFG_BLK_SIZE: u32 = 0x114  # Sector size
+
+@repr("C")
+struct VirtioBlkReqHeader:
+    """VirtIO block request header (16 bytes)."""
+    type_: u32          # VIRTIO_BLK_T_*
+    reserved: u32
+    sector: u64         # Starting sector (LBA)
+
+# ============================================================================
+# VirtIO Block Driver
+# ============================================================================
+
+class VirtioBlkDriver:
+    """VirtIO block device driver.
+
+    Provides sector-level read/write on a virtual disk.
+    Used by FAT32 and other filesystem drivers.
+    """
+    device: VirtioDevice
+    capacity_sectors: u64
+    sector_size: u32
+    initialized: bool
+
+impl VirtioBlkDriver:
+    static fn new(base_addr: u64) -> VirtioBlkDriver:
+        VirtioBlkDriver(
+            device: VirtioDevice(
+                base_addr: base_addr,
+                device_id: 0,
+                queue: Virtqueue.new(0, 0)  # Placeholder; real queue created in init()
+            ),
+            capacity_sectors: 0,
+            sector_size: 512,
+            initialized: false
+        )
+
+    me init() -> Result<bool, text>:
+        """Initialize VirtIO block device."""
+        val result = self.device.init()
+        if result.is_err():
+            return result
+
+        if self.device.device_id != VIRTIO_DEVICE_BLK:
+            return Result.Err("not a block device (type={self.device.device_id})")
+
+        # Read capacity
+        self.capacity_sectors = mmio_read64(self.device.base_addr + VIRTIO_BLK_CFG_CAPACITY.to_u64())
+
+        # Read sector size (if feature supported, else default 512)
+        val blk_size = mmio_read32(self.device.base_addr + VIRTIO_BLK_CFG_BLK_SIZE.to_u64())
+        if blk_size > 0:
+            self.sector_size = blk_size
+
+        self.initialized = true
+        Result.Ok(true)
+
+    me read_sectors(lba: u64, count: u32, buffer: [u8]) -> Result<bool, text>:
+        """Read sectors from device into buffer."""
+        if not self.initialized:
+            return Result.Err("device not initialized")
+        if lba + count.to_u64() > self.capacity_sectors:
+            return Result.Err("read beyond disk capacity")
+
+        # Build 3-descriptor chain: header → data (device-writable) → status
+        val desc0 = self.device.queue.alloc_desc()
+        val desc1 = self.device.queue.alloc_desc()
+        val desc2 = self.device.queue.alloc_desc()
+        if desc0 < 0 or desc1 < 0 or desc2 < 0:
+            return Result.Err("no free descriptors")
+
+        # Descriptor 0: request header (driver-readable)
+        # Write header to a known memory location
+        val header_addr: u64 = 0x210000  # TODO: proper allocation
+        mmio_write32(header_addr, VIRTIO_BLK_T_IN)          # type = read
+        mmio_write32(header_addr + 4, 0)                      # reserved
+        mmio_write32(header_addr + 8, (lba & 0xFFFFFFFF).to_u32())  # sector low
+        mmio_write32(header_addr + 12, (lba >> 32).to_u32())        # sector high
+
+        # Set descriptor 0
+        val d0_addr = self.device.queue.desc_addr + (desc0 * 16).to_u64()
+        mmio_write32(d0_addr, (header_addr & 0xFFFFFFFF).to_u32())      # addr low
+        mmio_write32(d0_addr + 4, (header_addr >> 32).to_u32())         # addr high
+        mmio_write32(d0_addr + 8, 16)                                     # len = 16 bytes
+        mmio_write32(d0_addr + 12, (VIRTQ_DESC_F_NEXT.to_u32() << 16) | desc1.to_u32())  # flags + next
+
+        # Descriptor 1: data buffer (device-writable)
+        val data_addr: u64 = 0x220000  # TODO: proper allocation
+        val data_len = count * self.sector_size
+        val d1_addr = self.device.queue.desc_addr + (desc1 * 16).to_u64()
+        mmio_write32(d1_addr, (data_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d1_addr + 4, (data_addr >> 32).to_u32())
+        mmio_write32(d1_addr + 8, data_len)
+        val d1_flags = VIRTQ_DESC_F_WRITE.to_u32() | VIRTQ_DESC_F_NEXT.to_u32()
+        mmio_write32(d1_addr + 12, (d1_flags << 16) | desc2.to_u32())
+
+        # Descriptor 2: status byte (device-writable)
+        val status_addr: u64 = 0x230000  # TODO: proper allocation
+        val d2_addr = self.device.queue.desc_addr + (desc2 * 16).to_u64()
+        mmio_write32(d2_addr, (status_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d2_addr + 4, (status_addr >> 32).to_u32())
+        mmio_write32(d2_addr + 8, 1)  # 1 byte status
+        mmio_write32(d2_addr + 12, VIRTQ_DESC_F_WRITE.to_u32() << 16)  # write flag, no next
+
+        # Submit to available ring
+        self.device.queue.push_avail(desc0.to_u16())
+        self.device.notify_queue(0)
+
+        # Wait for completion (poll used ring)
+        # TODO: interrupt-driven instead of polling
+        var timeout = 1000000
+        while timeout > 0:
+            val used_idx_addr = self.device.queue.used_addr + 2
+            val used_idx = mmio_read32(used_idx_addr).to_u16()
+            if used_idx != self.device.queue.last_used_idx:
+                self.device.queue.last_used_idx = used_idx
+                break
+            timeout = timeout - 1
+
+        if timeout == 0:
+            return Result.Err("virtio-blk read timeout")
+
+        # Check status
+        val status = mmio_read32(status_addr).to_u8()
+        if status != VIRTIO_BLK_S_OK:
+            return Result.Err("virtio-blk read error (status={status})")
+
+        # Copy data from data_addr to buffer
+        # TODO: zero-copy with proper buffer management
+        var i: u32 = 0
+        while i < data_len:
+            buffer[i.to_i32()] = mmio_read32(data_addr + i.to_u64()).to_u8()
+            i = i + 1
+
+        # Free descriptors
+        self.device.queue.free_desc(desc0.to_u16())
+        self.device.queue.free_desc(desc1.to_u16())
+        self.device.queue.free_desc(desc2.to_u16())
+
+        Result.Ok(true)
+
+    fn capacity_bytes() -> u64:
+        self.capacity_sectors * self.sector_size.to_u64()
+
+# Implement BlockDevice trait for FAT32 integration
+impl BlockDevice for VirtioBlkDriver:
+    me read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        me read_sectors(lba, 1, buffer)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write a single sector to device."""
+        if not self.initialized:
+            return Result.Err("device not initialized")
+        if lba >= self.capacity_sectors:
+            return Result.Err("write beyond disk capacity")
+
+        # Build 3-descriptor chain: header → data (driver-readable) → status
+        val desc0 = self.device.queue.alloc_desc()
+        val desc1 = self.device.queue.alloc_desc()
+        val desc2 = self.device.queue.alloc_desc()
+        if desc0 < 0 or desc1 < 0 or desc2 < 0:
+            return Result.Err("no free descriptors")
+
+        # Header: VIRTIO_BLK_T_OUT (write)
+        val header_addr: u64 = 0x210000
+        mmio_write32(header_addr, VIRTIO_BLK_T_OUT)
+        mmio_write32(header_addr + 4, 0)
+        mmio_write32(header_addr + 8, (lba & 0xFFFFFFFF).to_u32())
+        mmio_write32(header_addr + 12, (lba >> 32).to_u32())
+
+        val d0_addr = self.device.queue.desc_addr + (desc0 * 16).to_u64()
+        mmio_write32(d0_addr, (header_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d0_addr + 4, (header_addr >> 32).to_u32())
+        mmio_write32(d0_addr + 8, 16)
+        mmio_write32(d0_addr + 12, (VIRTQ_DESC_F_NEXT.to_u32() << 16) | desc1.to_u32())
+
+        # Data buffer: driver-readable (no WRITE flag)
+        val data_addr: u64 = 0x220000
+        var i: u32 = 0
+        while i < self.sector_size and i.to_i32() < data.len():
+            mmio_write32(data_addr + i.to_u64(), data[i.to_i32()].to_u32())
+            i = i + 1
+
+        val d1_addr = self.device.queue.desc_addr + (desc1 * 16).to_u64()
+        mmio_write32(d1_addr, (data_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d1_addr + 4, (data_addr >> 32).to_u32())
+        mmio_write32(d1_addr + 8, self.sector_size)
+        mmio_write32(d1_addr + 12, (VIRTQ_DESC_F_NEXT.to_u32() << 16) | desc2.to_u32())
+
+        # Status byte: device-writable
+        val status_addr: u64 = 0x230000
+        val d2_addr = self.device.queue.desc_addr + (desc2 * 16).to_u64()
+        mmio_write32(d2_addr, (status_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d2_addr + 4, (status_addr >> 32).to_u32())
+        mmio_write32(d2_addr + 8, 1)
+        mmio_write32(d2_addr + 12, VIRTQ_DESC_F_WRITE.to_u32() << 16)
+
+        self.device.queue.push_avail(desc0.to_u16())
+        self.device.notify_queue(0)
+
+        # Poll for completion
+        var timeout = 1000000
+        while timeout > 0:
+            val used_idx = mmio_read32(self.device.queue.used_addr + 2).to_u16()
+            if used_idx != self.device.queue.last_used_idx:
+                self.device.queue.last_used_idx = used_idx
+                break
+            timeout = timeout - 1
+
+        if timeout == 0:
+            return Result.Err("virtio-blk write timeout")
+
+        val status = mmio_read32(status_addr).to_u8()
+        if status != VIRTIO_BLK_S_OK:
+            return Result.Err("virtio-blk write error (status={status})")
+
+        self.device.queue.free_desc(desc0.to_u16())
+        self.device.queue.free_desc(desc1.to_u16())
+        self.device.queue.free_desc(desc2.to_u16())
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        self.sector_size

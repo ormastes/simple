@@ -1,0 +1,219 @@
+"""
+# VFS Manager Specification
+
+**Feature IDs:** #OS-VFS
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Tests the Virtual Filesystem manager: mount table management,
+longest-prefix mount resolution, prefix stripping, and operation routing.
+"""
+
+use std.spec
+use os.services.vfs.vfs.{VfsManager, Filesystem, MountEntry, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+
+
+# ============================================================================
+# Mock Filesystem for testing
+# ============================================================================
+
+class MockFs:
+    """Mock filesystem that records calls for verification."""
+    name: text
+    mounted: bool
+    last_stat_path: text
+    last_readdir_path: text
+
+impl MockFs:
+    static fn new(name: text) -> MockFs:
+        MockFs(name: name, mounted: false, last_stat_path: "", last_readdir_path: "")
+
+impl Filesystem for MockFs:
+    fn fs_name() -> text: self.name
+
+    me mount(device: text, options: text) -> Result<bool, text>:
+        self.mounted = true
+        Result.Ok(true)
+
+    me unmount() -> Result<bool, text>:
+        self.mounted = false
+        Result.Ok(true)
+
+    me open(path: text, flags: FileFlags) -> Result<u64, text>:
+        Result.Ok(1)
+
+    me read(handle: u64, size: u64) -> Result<[u8], text>:
+        Result.Ok([])
+
+    me write(handle: u64, data: [u8]) -> Result<u64, text>:
+        Result.Ok(0)
+
+    me close(handle: u64) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        Result.Ok(0)
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        self.last_stat_path = path
+        val node = FsNode(
+            id: 1,
+            kind: FsNodeKind.File,
+            size: 100,
+            permissions: 0o644,
+            owner: 0,
+            group: 0,
+            created_ns: 0,
+            modified_ns: 0
+        )
+        Result.Ok(node)
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me mkdir(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me rmdir(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        self.last_readdir_path = path
+        Result.Ok([])
+
+    me unlink(path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+    me rename(old_path: text, new_path: text) -> Result<bool, text>:
+        Result.Ok(true)
+
+
+# ============================================================================
+# Test Group 1: VfsManager Initialization
+# ============================================================================
+
+describe "VfsManager":
+    describe "new":
+        it "starts with no mounts":
+            val vfs = VfsManager.new()
+            expect(vfs.mounts.len()).to_equal(0)
+
+        it "starts with next_fd set to 3":
+            val vfs = VfsManager.new()
+            expect(vfs.next_fd).to_equal(3)
+
+    # ========================================================================
+    # Test Group 2: Mounting
+    # ========================================================================
+
+    describe "mount":
+        it "adds a filesystem at root":
+            var vfs = VfsManager.new()
+            val fs = MockFs.new("rootfs")
+            val result = vfs.mount("/", "ext4", "/dev/sda1", false, fs)
+            expect(result.is_ok()).to_equal(true)
+            expect(vfs.mounts.len()).to_equal(1)
+
+        it "supports multiple mount points":
+            var vfs = VfsManager.new()
+            val root_fs = MockFs.new("rootfs")
+            val usb_fs = MockFs.new("usbfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+            vfs.mount("/mnt/usb", "fat32", "/dev/sdb1", false, usb_fs)
+            expect(vfs.mounts.len()).to_equal(2)
+
+    # ========================================================================
+    # Test Group 3: Mount Resolution (longest prefix match)
+    # ========================================================================
+
+    describe "resolve_mount":
+        it "resolves to USB mount for USB path (longest prefix)":
+            var vfs = VfsManager.new()
+            val root_fs = MockFs.new("rootfs")
+            val usb_fs = MockFs.new("usbfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+            vfs.mount("/mnt/usb", "fat32", "/dev/sdb1", false, usb_fs)
+
+            val entry = vfs.resolve_mount("/mnt/usb/file.txt")
+            expect(entry.?).to_equal(true)
+            val resolved = entry.unwrap()
+            expect(resolved.point.path).to_equal("/mnt/usb")
+
+        it "resolves to root mount for non-USB path":
+            var vfs = VfsManager.new()
+            val root_fs = MockFs.new("rootfs")
+            val usb_fs = MockFs.new("usbfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+            vfs.mount("/mnt/usb", "fat32", "/dev/sdb1", false, usb_fs)
+
+            val entry = vfs.resolve_mount("/etc/config")
+            expect(entry.?).to_equal(true)
+            val resolved = entry.unwrap()
+            expect(resolved.point.path).to_equal("/")
+
+        it "returns nil when no mount matches":
+            val vfs = VfsManager.new()
+            val entry = vfs.resolve_mount("/some/path")
+            expect(entry.?).to_equal(false)
+
+    # ========================================================================
+    # Test Group 4: Mount Prefix Stripping
+    # ========================================================================
+
+    describe "strip_mount_prefix":
+        it "preserves path for root mount":
+            val vfs = VfsManager.new()
+            val result = vfs.strip_mount_prefix("/etc/config", "/")
+            expect(result).to_equal("/etc/config")
+
+        it "removes mount path prefix":
+            val vfs = VfsManager.new()
+            val result = vfs.strip_mount_prefix("/mnt/usb/file.txt", "/mnt/usb")
+            expect(result).to_equal("/file.txt")
+
+        it "returns slash for exact mount path":
+            val vfs = VfsManager.new()
+            val result = vfs.strip_mount_prefix("/mnt/usb", "/mnt/usb")
+            expect(result).to_equal("/")
+
+    # ========================================================================
+    # Test Group 5: Stat Routing
+    # ========================================================================
+
+    describe "stat":
+        it "routes stat to correct filesystem":
+            var vfs = VfsManager.new()
+            val root_fs = MockFs.new("rootfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+
+            val result = vfs.stat("/etc/config")
+            expect(result.is_ok()).to_equal(true)
+            val node = result.unwrap()
+            expect(node.size).to_equal(100)
+
+        it "returns error when no mount found":
+            val vfs = VfsManager.new()
+            val result = vfs.stat("/no/mount")
+            expect(result.is_err()).to_equal(true)
+
+    # ========================================================================
+    # Test Group 6: Readdir Routing
+    # ========================================================================
+
+    describe "readdir":
+        it "routes readdir to correct filesystem":
+            var vfs = VfsManager.new()
+            val root_fs = MockFs.new("rootfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+
+            val result = vfs.readdir("/home")
+            expect(result.is_ok()).to_equal(true)
+
+        it "returns error when no mount found":
+            val vfs = VfsManager.new()
+            val result = vfs.readdir("/missing")
+            expect(result.is_err()).to_equal(true)

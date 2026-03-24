@@ -1042,6 +1042,18 @@ claude mcp add simple-mcp -- \
 sh config/mcp/install.shs
 ```
 
+### Install Simple MCP Plugin
+
+The `simple-mcp` Claude plugin is a repo-checkout plugin. Install it from a
+Simple repository checkout; it is not a standalone portable runtime bundle.
+
+```bash
+claude plugin marketplace add tools/claude-plugin/marketplace
+claude plugin install simple-mcp@simple-local
+```
+
+The plugin launches `bin/simple_mcp_server` from the repository root.
+
 ### Install Simple LSP Plugin
 
 The Simple language server provides completions, hover, go-to-definition, diagnostics, and semantic tokens for `.spl` / `.shs` files.

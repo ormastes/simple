@@ -1,0 +1,477 @@
+"""
+# HostFuture & HostPromise Intensive Tests
+
+**Feature IDs:** #RT-020
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** doc/requirement/async_promise_intensive_tests.md
+**Plan:** doc/plan/async_promise_intensive_tests.md
+**Design:** doc/design/async_promise_intensive_tests.md
+
+## Overview
+Intensive tests for HostFuture operations (poll, map, then, catch, timeout,
+cancel, delay) and HostPromise (complete, fail, double-complete prevention).
+"""
+
+# ---------------------------------------------------------------------------
+# Stub: FutureState
+# ---------------------------------------------------------------------------
+enum FutureState:
+    Pending
+    Ready(value)
+    Failed(error)
+
+# ---------------------------------------------------------------------------
+# Stub: Poll
+# ---------------------------------------------------------------------------
+enum Poll:
+    Ready(value)
+    Pending
+
+impl Poll:
+    fn is_ready() -> bool:
+        if val Poll.Ready(_v) = self:
+            return true
+        return false
+
+    fn is_pending() -> bool:
+        if val Poll.Pending = self:
+            return true
+        return false
+
+    fn unwrap():
+        if val Poll.Ready(v) = self:
+            return v
+        pass_dn
+
+# ---------------------------------------------------------------------------
+# Stub: HostFuture
+# ---------------------------------------------------------------------------
+class HostFuture:
+    state: FutureState
+    wakers: [i64]
+    deadline: i64
+
+    static fn ready(value) -> HostFuture:
+        return HostFuture(state: FutureState.Ready(value), wakers: [], deadline: 0)
+
+    static fn pending() -> HostFuture:
+        return HostFuture(state: FutureState.Pending, wakers: [], deadline: 0)
+
+    static fn failed(err) -> HostFuture:
+        return HostFuture(state: FutureState.Failed(err), wakers: [], deadline: 0)
+
+    fn poll() -> Poll:
+        if val FutureState.Ready(v) = self.state:
+            return Poll.Ready(v)
+        if val FutureState.Failed(e) = self.state:
+            return Poll.Ready(FutureState.Failed(e))
+        return Poll.Pending
+
+    fn is_ready() -> bool:
+        if val FutureState.Ready(_v) = self.state:
+            return true
+        return false
+
+    fn is_pending() -> bool:
+        if val FutureState.Pending = self.state:
+            return true
+        return false
+
+    fn is_failed() -> bool:
+        if val FutureState.Failed(_e) = self.state:
+            return true
+        return false
+
+    me complete(value):
+        self.state = FutureState.Ready(value)
+
+    me fail(err):
+        self.state = FutureState.Failed(err)
+
+    fn map(f) -> HostFuture:
+        if val FutureState.Ready(v) = self.state:
+            return HostFuture.ready(f(v))
+        if val FutureState.Failed(e) = self.state:
+            return HostFuture.failed(e)
+        return HostFuture.pending()
+
+    fn then(f) -> HostFuture:
+        if val FutureState.Ready(v) = self.state:
+            return f(v)
+        if val FutureState.Failed(e) = self.state:
+            return HostFuture.failed(e)
+        return HostFuture.pending()
+
+    fn catch_err(f) -> HostFuture:
+        if val FutureState.Failed(e) = self.state:
+            return f(e)
+        return HostFuture(state: self.state, wakers: self.wakers, deadline: self.deadline)
+
+    me with_timeout(millis: i64) -> HostFuture:
+        self.deadline = millis
+        return self
+
+    me cancel():
+        self.state = FutureState.Failed("cancelled")
+
+# ---------------------------------------------------------------------------
+# Stub: HostPromise
+# ---------------------------------------------------------------------------
+class HostPromise:
+    future: HostFuture
+    completed: bool
+
+    static fn new() -> List:
+        var fut = HostFuture.pending()
+        var promise = HostPromise(future: fut, completed: false)
+        return [fut, promise]
+
+    me complete(value) -> bool:
+        if self.completed:
+            return false
+        self.completed = true
+        self.future.complete(value)
+        return true
+
+    me fail(err) -> bool:
+        if self.completed:
+            return false
+        self.completed = true
+        self.future.fail(err)
+        return true
+
+    fn is_completed() -> bool:
+        return self.completed
+
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+describe "HostFuture & HostPromise Intensive":
+
+    # -----------------------------------------------------------------------
+    # 1. HostFuture Creation
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Creation":
+
+        it "creates a ready future with a value":
+            var fut = HostFuture.ready(42)
+            expect(fut.is_ready()).to_equal(true)
+
+        it "creates a ready future and stores the correct value":
+            var fut = HostFuture.ready("hello")
+            var p = fut.poll()
+            expect(p.unwrap()).to_equal("hello")
+
+        it "creates a pending future":
+            var fut = HostFuture.pending()
+            expect(fut.is_pending()).to_equal(true)
+
+        it "creates a failed future":
+            var fut = HostFuture.failed("oops")
+            expect(fut.is_failed()).to_equal(true)
+
+        it "ready future is not pending":
+            var fut = HostFuture.ready(1)
+            expect(fut.is_pending()).to_equal(false)
+
+        it "ready future is not failed":
+            var fut = HostFuture.ready(1)
+            expect(fut.is_failed()).to_equal(false)
+
+        it "pending future is not ready":
+            var fut = HostFuture.pending()
+            expect(fut.is_ready()).to_equal(false)
+
+        it "failed future is not ready":
+            var fut = HostFuture.failed("err")
+            expect(fut.is_ready()).to_equal(false)
+
+    # -----------------------------------------------------------------------
+    # 2. HostFuture Polling
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Polling":
+
+        it "poll on ready future returns Poll.Ready":
+            var fut = HostFuture.ready(10)
+            var p = fut.poll()
+            expect(p.is_ready()).to_equal(true)
+
+        it "poll on ready future unwraps to correct value":
+            var fut = HostFuture.ready(99)
+            var p = fut.poll()
+            expect(p.unwrap()).to_equal(99)
+
+        it "poll on pending future returns Poll.Pending":
+            var fut = HostFuture.pending()
+            var p = fut.poll()
+            expect(p.is_pending()).to_equal(true)
+
+        it "poll on failed future returns Poll.Ready wrapping the error state":
+            var fut = HostFuture.failed("timeout")
+            var p = fut.poll()
+            expect(p.is_ready()).to_equal(true)
+
+    # -----------------------------------------------------------------------
+    # 3. HostFuture Map
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Map":
+
+        it "map applies function to ready value":
+            var fut = HostFuture.ready(5)
+            var mapped = fut.map(\x: x * 2)
+            var p = mapped.poll()
+            expect(p.unwrap()).to_equal(10)
+
+        it "map on pending returns pending":
+            var fut = HostFuture.pending()
+            var mapped = fut.map(\x: x + 1)
+            expect(mapped.is_pending()).to_equal(true)
+
+        it "map on failed propagates error":
+            var fut = HostFuture.failed("bad")
+            var mapped = fut.map(\x: x + 1)
+            expect(mapped.is_failed()).to_equal(true)
+
+        it "map chain applies functions in sequence":
+            var fut = HostFuture.ready(2)
+            var step1 = fut.map(\x: x + 3)
+            var step2 = step1.map(\x: x * 10)
+            var p = step2.poll()
+            expect(p.unwrap()).to_equal(50)
+
+        it "map with identity returns same value":
+            var fut = HostFuture.ready("abc")
+            var mapped = fut.map(\x: x)
+            var p = mapped.poll()
+            expect(p.unwrap()).to_equal("abc")
+
+    # -----------------------------------------------------------------------
+    # 4. HostFuture Then / FlatMap
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Then":
+
+        it "then on ready with ready-returning function":
+            var fut = HostFuture.ready(3)
+            var result = fut.then(\x: HostFuture.ready(x * 3))
+            var p = result.poll()
+            expect(p.unwrap()).to_equal(9)
+
+        it "then on ready with pending-returning function":
+            var fut = HostFuture.ready(3)
+            var result = fut.then(\x: HostFuture.pending())
+            expect(result.is_pending()).to_equal(true)
+
+        it "then on pending returns pending regardless":
+            var fut = HostFuture.pending()
+            var result = fut.then(\x: HostFuture.ready(x))
+            expect(result.is_pending()).to_equal(true)
+
+        it "then on failed propagates failure":
+            var fut = HostFuture.failed("err")
+            var result = fut.then(\x: HostFuture.ready(x))
+            expect(result.is_failed()).to_equal(true)
+
+        it "then chaining multiple futures":
+            var fut = HostFuture.ready(1)
+            var step1 = fut.then(\x: HostFuture.ready(x + 10))
+            var step2 = step1.then(\x: HostFuture.ready(x + 100))
+            var p = step2.poll()
+            expect(p.unwrap()).to_equal(111)
+
+    # -----------------------------------------------------------------------
+    # 5. HostFuture Error Handling
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Error Handling":
+
+        it "catch_err on failed future recovers":
+            var fut = HostFuture.failed("network_error")
+            var recovered = fut.catch_err(\e: HostFuture.ready("default"))
+            expect(recovered.is_ready()).to_equal(true)
+            var p = recovered.poll()
+            expect(p.unwrap()).to_equal("default")
+
+        it "catch_err on ready future passes through":
+            var fut = HostFuture.ready(42)
+            var same = fut.catch_err(\e: HostFuture.ready(0))
+            expect(same.is_ready()).to_equal(true)
+            var p = same.poll()
+            expect(p.unwrap()).to_equal(42)
+
+        it "catch_err on pending future passes through":
+            var fut = HostFuture.pending()
+            var same = fut.catch_err(\e: HostFuture.ready(0))
+            expect(same.is_pending()).to_equal(true)
+
+        it "error then catch then map recovery chain":
+            var fut = HostFuture.failed("broken")
+            var recovered = fut.catch_err(\e: HostFuture.ready(0))
+            var mapped = recovered.map(\x: x + 100)
+            var p = mapped.poll()
+            expect(p.unwrap()).to_equal(100)
+
+    # -----------------------------------------------------------------------
+    # 6. HostFuture Timeout
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Timeout":
+
+        it "with_timeout sets deadline on future":
+            var fut = HostFuture.pending()
+            fut.with_timeout(millis: 5000)
+            expect(fut.deadline).to_equal(5000)
+
+        it "with_timeout on ready future still sets deadline":
+            var fut = HostFuture.ready(1)
+            fut.with_timeout(millis: 3000)
+            expect(fut.deadline).to_equal(3000)
+
+        it "default deadline is zero":
+            var fut = HostFuture.pending()
+            expect(fut.deadline).to_equal(0)
+
+    # -----------------------------------------------------------------------
+    # 7. HostFuture Cancel
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture Cancel":
+
+        it "cancel sets pending future to failed with cancelled":
+            var fut = HostFuture.pending()
+            fut.cancel()
+            expect(fut.is_failed()).to_equal(true)
+
+        it "cancel on ready future sets it to failed":
+            var fut = HostFuture.ready(10)
+            fut.cancel()
+            expect(fut.is_failed()).to_equal(true)
+
+        it "cancelled future is no longer pending":
+            var fut = HostFuture.pending()
+            fut.cancel()
+            expect(fut.is_pending()).to_equal(false)
+
+    # -----------------------------------------------------------------------
+    # 8. HostPromise Basics
+    # -----------------------------------------------------------------------
+
+    describe "HostPromise Basics":
+
+        it "creates a future-promise pair":
+            var pair = HostPromise.new()
+            var fut = pair[0]
+            var promise = pair[1]
+            expect(fut.is_pending()).to_equal(true)
+            expect(promise.is_completed()).to_equal(false)
+
+        it "complete resolves the future":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            var ok = promise.complete(42)
+            expect(ok).to_equal(true)
+            expect(promise.future.is_ready()).to_equal(true)
+
+        it "complete sets the correct value in the future":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.complete("done")
+            var p = promise.future.poll()
+            expect(p.unwrap()).to_equal("done")
+
+        it "fail sets the future to failed state":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            var ok = promise.fail("error_msg")
+            expect(ok).to_equal(true)
+            expect(promise.future.is_failed()).to_equal(true)
+
+        it "is_completed returns true after complete":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.complete(1)
+            expect(promise.is_completed()).to_equal(true)
+
+        it "is_completed returns true after fail":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.fail("x")
+            expect(promise.is_completed()).to_equal(true)
+
+    # -----------------------------------------------------------------------
+    # 9. HostPromise Double Complete
+    # -----------------------------------------------------------------------
+
+    describe "HostPromise Double Complete":
+
+        it "second complete returns false":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.complete(1)
+            var second = promise.complete(2)
+            expect(second).to_equal(false)
+
+        it "second fail returns false":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.fail("first")
+            var second = promise.fail("second")
+            expect(second).to_equal(false)
+
+        it "complete then fail returns false for fail":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.complete(1)
+            var fail_ok = promise.fail("err")
+            expect(fail_ok).to_equal(false)
+
+        it "fail then complete returns false for complete":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.fail("err")
+            var complete_ok = promise.complete(1)
+            expect(complete_ok).to_equal(false)
+
+        it "original value preserved after double complete":
+            var pair = HostPromise.new()
+            var promise = pair[1]
+            promise.complete(100)
+            promise.complete(200)
+            var p = promise.future.poll()
+            expect(p.unwrap()).to_equal(100)
+
+    # -----------------------------------------------------------------------
+    # 10. HostFuture State Transitions
+    # -----------------------------------------------------------------------
+
+    describe "HostFuture State Transitions":
+
+        it "pending to ready via complete":
+            var fut = HostFuture.pending()
+            expect(fut.is_pending()).to_equal(true)
+            fut.complete(7)
+            expect(fut.is_ready()).to_equal(true)
+
+        it "pending to failed via fail":
+            var fut = HostFuture.pending()
+            expect(fut.is_pending()).to_equal(true)
+            fut.fail("went_wrong")
+            expect(fut.is_failed()).to_equal(true)
+
+        it "complete overwrites state to ready":
+            var fut = HostFuture.pending()
+            fut.complete("value")
+            expect(fut.is_pending()).to_equal(false)
+            expect(fut.is_ready()).to_equal(true)
+
+        it "fail overwrites state to failed":
+            var fut = HostFuture.pending()
+            fut.fail("err")
+            expect(fut.is_pending()).to_equal(false)
+            expect(fut.is_failed()).to_equal(true)

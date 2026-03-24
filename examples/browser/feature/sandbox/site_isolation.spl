@@ -1,0 +1,61 @@
+# Site isolation policy for the Simple Browser Platform.
+# Ensures different origins run in separate renderer processes,
+# preventing Spectre-class cross-origin data leaks.
+
+use sbp.entity.ipc.process_types.{ProcessId, ProcessKind}
+use sbp.shared.error.{BrowserResult}
+
+class Origin:
+    scheme: text
+    host: text
+    port: i64
+
+    static fn create(scheme: text, host: text, port: i64) -> Origin:
+        Origin(scheme: scheme, host: host, port: port)
+
+    fn to_site() -> text:
+        # Extract registrable domain (eTLD+1).
+        # Simplified: just returns host for now.
+        self.host
+
+class OriginMapping:
+    origin_site: text
+    pid_id: i64
+
+    static fn create(origin_site: text, pid_id: i64) -> OriginMapping:
+        OriginMapping(origin_site: origin_site, pid_id: pid_id)
+
+class SiteIsolationPolicy:
+    process_map: List<OriginMapping>
+    next_pid_hint: i64
+
+    static fn new() -> SiteIsolationPolicy:
+        SiteIsolationPolicy(process_map: List<OriginMapping>(), next_pid_hint: 100)
+
+    fn get_process_for_origin(origin: Origin) -> ProcessId:
+        # Returns existing process for this site, or assigns a new PID hint.
+        val site = origin.to_site()
+        var i = 0
+        while i < self.process_map.len():
+            val mapping = self.process_map.get(i)
+            if mapping.origin_site == site:
+                return ProcessId.create(mapping.pid_id, ProcessKind.Renderer)
+            i = i + 1
+        # No existing mapping — assign new PID
+        val pid_id = self.next_pid_hint
+        self.next_pid_hint = self.next_pid_hint + 1
+        self.process_map.push(OriginMapping.create(site, pid_id))
+        ProcessId.create(pid_id, ProcessKind.Renderer)
+
+    fn is_same_site(a: Origin, b: Origin) -> bool:
+        a.to_site() == b.to_site()
+
+    fn should_isolate(origin: Origin) -> bool:
+        # All origins should be isolated in site-per-process model.
+        # Could be relaxed for data: or about: URLs.
+        val scheme = origin.scheme
+        if scheme == "data":
+            return false
+        if scheme == "about":
+            return false
+        true

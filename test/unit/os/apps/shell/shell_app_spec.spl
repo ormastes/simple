@@ -1,0 +1,208 @@
+# Shell Application Unit Tests
+#
+# Tests for ShellApp: construction, command parsing, environment variables,
+# history tracking, and built-in commands.
+
+# ============================================================================
+# ShellApp Construction
+# ============================================================================
+
+describe "ShellApp":
+    context "when newly created":
+        it "starts with cwd at root":
+            val shell = ShellApp.new()
+            expect(shell.cwd).to_equal("/")
+
+        it "starts with empty history":
+            val shell = ShellApp.new()
+            expect(shell.history.len()).to_equal(0)
+
+        it "starts with history_pos at -1":
+            val shell = ShellApp.new()
+            expect(shell.history_pos).to_equal(-1)
+
+        it "starts in running state":
+            val shell = ShellApp.new()
+            expect(shell.running).to_equal(true)
+
+        it "starts with exit code 0":
+            val shell = ShellApp.new()
+            expect(shell.last_exit_code).to_equal(0)
+
+        it "has a default prompt":
+            val shell = ShellApp.new()
+            expect(shell.prompt).to_equal("$ ")
+
+        it "has empty output_lines":
+            val shell = ShellApp.new()
+            expect(shell.output_lines.len()).to_equal(0)
+
+        it "has nil vfs by default":
+            val shell = ShellApp.new()
+            expect(shell.vfs).to_be_nil
+
+    context "environment variables":
+        it "has HOME set to /":
+            val shell = ShellApp.new()
+            val env = shell.env
+            # env is a list of (text, text) tuples
+            expect(env.len()).to_be_greater_than(0)
+
+        it "has at least 3 default environment variables":
+            val shell = ShellApp.new()
+            # HOME, PATH, SHELL
+            expect(shell.env.len()).to_equal(3)
+
+    context "terminal":
+        it "has a terminal attached":
+            val shell = ShellApp.new()
+            expect(shell.terminal.cols).to_equal(80)
+            expect(shell.terminal.rows).to_equal(24)
+
+# ============================================================================
+# Command Parsing — _tokenize
+# ============================================================================
+
+describe "ShellApp command parsing":
+    context "simple commands":
+        it "splits simple command into tokens":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("ls -la /home")
+            expect(tokens.len()).to_equal(3)
+            expect(tokens[0]).to_equal("ls")
+            expect(tokens[1]).to_equal("-la")
+            expect(tokens[2]).to_equal("/home")
+
+        it "handles single word command":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("pwd")
+            expect(tokens.len()).to_equal(1)
+            expect(tokens[0]).to_equal("pwd")
+
+        it "handles empty input":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("")
+            expect(tokens.len()).to_equal(0)
+
+        it "handles extra whitespace":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("  ls   -la   ")
+            expect(tokens.len()).to_equal(2)
+            expect(tokens[0]).to_equal("ls")
+            expect(tokens[1]).to_equal("-la")
+
+    context "quoted arguments":
+        it "handles double-quoted string":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("echo \"hello world\"")
+            expect(tokens.len()).to_equal(2)
+            expect(tokens[0]).to_equal("echo")
+            expect(tokens[1]).to_equal("hello world")
+
+        it "handles single-quoted string":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("echo 'hello world'")
+            expect(tokens.len()).to_equal(2)
+            expect(tokens[0]).to_equal("echo")
+            expect(tokens[1]).to_equal("hello world")
+
+        it "handles escaped characters":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("echo hello\\ world")
+            expect(tokens.len()).to_equal(2)
+            expect(tokens[0]).to_equal("echo")
+            expect(tokens[1]).to_equal("hello world")
+
+    context "multiple arguments":
+        it "parses command with flag and path":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("cat -n /etc/passwd")
+            expect(tokens.len()).to_equal(3)
+            expect(tokens[0]).to_equal("cat")
+            expect(tokens[1]).to_equal("-n")
+            expect(tokens[2]).to_equal("/etc/passwd")
+
+        it "parses command with many args":
+            var shell = ShellApp.new()
+            val tokens = shell._tokenize("cp -r src/ dst/")
+            expect(tokens.len()).to_equal(3)
+
+# ============================================================================
+# History Tracking
+# ============================================================================
+
+describe "ShellApp history":
+    it "starts empty":
+        val shell = ShellApp.new()
+        expect(shell.history.len()).to_equal(0)
+
+    it "records executed command":
+        var shell = ShellApp.new()
+        shell._execute_line("help")
+        expect(shell.history.len()).to_equal(1)
+        expect(shell.history[0]).to_equal("help")
+
+    it "records multiple commands":
+        var shell = ShellApp.new()
+        shell._execute_line("help")
+        shell._execute_line("pwd")
+        expect(shell.history.len()).to_equal(2)
+
+    it "does not record empty input":
+        var shell = ShellApp.new()
+        shell._execute_line("")
+        expect(shell.history.len()).to_equal(0)
+
+# ============================================================================
+# Built-in Commands
+# ============================================================================
+
+describe "ShellApp built-in commands":
+    context "help command":
+        it "executes without error":
+            var shell = ShellApp.new()
+            shell._execute_line("help")
+            expect(shell.last_exit_code).to_equal(0)
+
+    context "pwd command":
+        it "shows current directory":
+            var shell = ShellApp.new()
+            shell._execute_line("pwd")
+            expect(shell.last_exit_code).to_equal(0)
+
+    context "exit command":
+        it "sets running to false":
+            var shell = ShellApp.new()
+            shell._execute_line("exit")
+            expect(shell.running).to_equal(false)
+
+    context "cd command":
+        it "changes cwd":
+            var shell = ShellApp.new()
+            shell._execute_line("cd /home")
+            expect(shell.cwd).to_equal("/home")
+
+        it "cd / goes to root":
+            var shell = ShellApp.new()
+            shell._execute_line("cd /home")
+            shell._execute_line("cd /")
+            expect(shell.cwd).to_equal("/")
+
+    context "echo command":
+        it "produces output":
+            var shell = ShellApp.new()
+            shell._execute_line("echo hello")
+            expect(shell.last_exit_code).to_equal(0)
+
+    context "env command":
+        it "lists environment variables":
+            var shell = ShellApp.new()
+            shell._execute_line("env")
+            expect(shell.last_exit_code).to_equal(0)
+
+    context "export command":
+        it "sets environment variable":
+            var shell = ShellApp.new()
+            shell._execute_line("export FOO=bar")
+            # Verify env grew
+            expect(shell.env.len()).to_be_greater_than(3)

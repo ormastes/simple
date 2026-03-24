@@ -595,8 +595,35 @@ impl MirTextCodegen for MirToLlvm:
         val arg_list = arg_list_parts.join(", ")
 
         val volatile_flag = if is_volatile: " sideeffect" else: ""
-        val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
-        self.builder.emit(asm_call)
+
+        if outputs.len() == 0:
+            # No outputs: call void
+            val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        elif outputs.len() == 1:
+            # Single output: capture result directly
+            val out_op = outputs[0]
+            val out_val = self.translate_operand(out_op.operand)
+            val out_ty = self.native_int()
+            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        else:
+            # Multiple outputs: use struct return type
+            var out_types: [text] = []
+            for out in outputs:
+                out_types.push(self.native_int())
+            val struct_ty = "{{ " + out_types.join(", ") + " }}"
+            val first_out_val = self.translate_operand(outputs[0].operand)
+            val tmp_name = "{first_out_val}.asm_ret"
+            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+            # Extract each output value
+            var out_idx = 0
+            for out in outputs:
+                val out_val = self.translate_operand(out.operand)
+                val out_ty = self.native_int()
+                self.builder.emit("  {out_val} = extractvalue {struct_ty} {tmp_name}, {out_idx}")
+                out_idx = out_idx + 1
 
     # === Overrides: pipeline operators ===
 

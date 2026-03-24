@@ -64,3 +64,163 @@ void __spl_start_bare(void) {
     zero_bss();
     __spl_exit(main(0, (char **)0));
 }
+
+/* ========================================================================
+ * Volatile MMIO — used by Simple baremetal code for hardware register access.
+ * These MUST NOT be optimized away by the compiler.
+ * ======================================================================== */
+
+#include <stdint.h>
+
+uint32_t rt_mmio_read_u32(uint64_t addr) {
+    return *(volatile uint32_t *)(uintptr_t)addr;
+}
+
+void rt_mmio_write_u32(uint64_t addr, uint32_t value) {
+    *(volatile uint32_t *)(uintptr_t)addr = value;
+}
+
+uint16_t rt_mmio_read_u16(uint64_t addr) {
+    return *(volatile uint16_t *)(uintptr_t)addr;
+}
+
+void rt_mmio_write_u16(uint64_t addr, uint16_t value) {
+    *(volatile uint16_t *)(uintptr_t)addr = value;
+}
+
+uint8_t rt_mmio_read_u8(uint64_t addr) {
+    return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+void rt_mmio_write_u8(uint64_t addr, uint8_t value) {
+    *(volatile uint8_t *)(uintptr_t)addr = value;
+}
+
+uint64_t rt_mmio_read_u64(uint64_t addr) {
+    return *(volatile uint64_t *)(uintptr_t)addr;
+}
+
+void rt_mmio_write_u64(uint64_t addr, uint64_t value) {
+    *(volatile uint64_t *)(uintptr_t)addr = value;
+}
+
+/* ========================================================================
+ * x86 Port I/O — for PS/2 keyboard, PIC, serial, PCI config space.
+ * ======================================================================== */
+
+#if defined(__x86_64__) || defined(__i386__)
+
+uint8_t rt_port_inb(uint16_t port) {
+    uint8_t result;
+    __asm__ volatile ("inb %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+void rt_port_outb(uint16_t port, uint8_t value) {
+    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+uint16_t rt_port_inw(uint16_t port) {
+    uint16_t result;
+    __asm__ volatile ("inw %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+void rt_port_outw(uint16_t port, uint16_t value) {
+    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+uint32_t rt_port_inl(uint16_t port) {
+    uint32_t result;
+    __asm__ volatile ("inl %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+void rt_port_outl(uint16_t port, uint32_t value) {
+    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+/* I/O wait — short delay for slow I/O devices */
+void rt_port_io_wait(void) {
+    __asm__ volatile ("outb %%al, $0x80" : : "a"(0));
+}
+
+#else
+/* Stubs for non-x86 */
+uint8_t rt_port_inb(uint16_t port) { (void)port; return 0; }
+void rt_port_outb(uint16_t port, uint8_t value) { (void)port; (void)value; }
+uint16_t rt_port_inw(uint16_t port) { (void)port; return 0; }
+void rt_port_outw(uint16_t port, uint16_t value) { (void)port; (void)value; }
+uint32_t rt_port_inl(uint16_t port) { (void)port; return 0; }
+void rt_port_outl(uint16_t port, uint32_t value) { (void)port; (void)value; }
+void rt_port_io_wait(void) {}
+#endif
+
+/* ========================================================================
+ * x86 special registers — CR3, MSR access for kernel.
+ * ======================================================================== */
+
+#if defined(__x86_64__)
+
+uint64_t rt_read_cr3(void) {
+    uint64_t val;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(val));
+    return val;
+}
+
+void rt_write_cr3(uint64_t val) {
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(val) : "memory");
+}
+
+uint64_t rt_read_cr2(void) {
+    uint64_t val;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(val));
+    return val;
+}
+
+void rt_invlpg(uint64_t addr) {
+    __asm__ volatile ("invlpg (%0)" : : "r"(addr) : "memory");
+}
+
+uint64_t rt_read_msr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void rt_write_msr(uint32_t msr, uint64_t val) {
+    uint32_t lo = (uint32_t)val;
+    uint32_t hi = (uint32_t)(val >> 32);
+    __asm__ volatile ("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+void rt_cli(void) { __asm__ volatile ("cli"); }
+void rt_sti(void) { __asm__ volatile ("sti"); }
+void rt_hlt(void) { __asm__ volatile ("hlt"); }
+
+void rt_lgdt(uint64_t gdtr_addr) {
+    __asm__ volatile ("lgdt (%0)" : : "r"(gdtr_addr) : "memory");
+}
+
+void rt_lidt(uint64_t idtr_addr) {
+    __asm__ volatile ("lidt (%0)" : : "r"(idtr_addr) : "memory");
+}
+
+void rt_ltr(uint16_t selector) {
+    __asm__ volatile ("ltr %0" : : "r"(selector));
+}
+
+#else
+uint64_t rt_read_cr3(void) { return 0; }
+void rt_write_cr3(uint64_t val) { (void)val; }
+uint64_t rt_read_cr2(void) { return 0; }
+void rt_invlpg(uint64_t addr) { (void)addr; }
+uint64_t rt_read_msr(uint32_t msr) { (void)msr; return 0; }
+void rt_write_msr(uint32_t msr, uint64_t val) { (void)msr; (void)val; }
+void rt_cli(void) {}
+void rt_sti(void) {}
+void rt_hlt(void) {}
+void rt_lgdt(uint64_t a) { (void)a; }
+void rt_lidt(uint64_t a) { (void)a; }
+void rt_ltr(uint16_t s) { (void)s; }
+#endif

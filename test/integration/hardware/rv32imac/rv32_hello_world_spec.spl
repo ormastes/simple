@@ -1,0 +1,127 @@
+"""
+# RV32IMAC Hello World Verification
+
+**Feature IDs:** #RV32-HELLO-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Verifies the SoC boots and produces UART output.
+Tests the full pipeline from instruction fetch to UART character output.
+"""
+
+# @req REQ-RV32IMAC
+# @feature rv32imac
+# tag: only-compiled, vhdl, slow
+
+import std.spec
+
+use hardware.rv32imac.periph.rv32_uart.Rv32UartModel
+use hardware.rv32imac.periph.rv32_timer.Rv32TimerModel
+use hardware.rv32imac.mem.rv32_sram.Rv32Sram
+use hardware.rv32imac.top.rv32_soc_top.{BusTarget, decode_bus_target, ADDR_ROM_BASE, ADDR_SRAM_BASE, ADDR_UART_BASE, ADDR_TIMER_BASE}
+
+# ============================================================================
+# UART Model Tests
+# ============================================================================
+
+describe "RV32 UART Model":
+    """
+    ## UART Peripheral Verification
+
+    Tests the UART transmit and status register behavior.
+    """
+
+    it "starts with TX empty":
+        """
+        **Given:** Fresh UART model
+        **When:** Reading LSR
+        **Then:** TX empty and TX idle bits are set
+        """
+        val uart = Rv32UartModel.create(868)
+        val lsr = uart.read_lsr()
+        expect((lsr and 0x60)).to_equal(0x60)
+
+    it "buffers transmitted bytes":
+        """
+        **Given:** UART model
+        **When:** Writing to THR
+        **Then:** Byte appears in TX output buffer
+        """
+        var uart = Rv32UartModel.create(868)
+        uart.write_thr(0x48)  # 'H'
+        uart.write_thr(0x65)  # 'e'
+        val output = uart.get_tx_output()
+        expect(output.len()).to_equal(2)
+        expect(output[0]).to_equal(0x48)
+        expect(output[1]).to_equal(0x65)
+
+# ============================================================================
+# Timer Model Tests
+# ============================================================================
+
+describe "RV32 Timer Model":
+    """
+    ## Timer Peripheral Verification
+    """
+
+    it "increments mtime on tick":
+        var timer = Rv32TimerModel.create()
+        timer.tick()
+        timer.tick()
+        timer.tick()
+        expect(timer.read_reg(0x00)).to_equal(3)
+
+    it "generates interrupt when mtime >= mtimecmp":
+        var timer = Rv32TimerModel.create()
+        timer.set_mtimecmp(5)
+        timer.tick()
+        timer.tick()
+        expect(timer.interrupt_pending()).to_equal(false)
+        timer.tick()
+        timer.tick()
+        timer.tick()
+        expect(timer.interrupt_pending()).to_equal(true)
+
+# ============================================================================
+# SRAM Model Tests
+# ============================================================================
+
+describe "RV32 SRAM Model":
+    """
+    ## SRAM Verification
+    """
+
+    it "reads back written data":
+        var sram = Rv32Sram.create(4)
+        sram.write_word(0, 0xDEADBEEF, 0xF)
+        expect(sram.read_word(0)).to_equal(0xDEADBEEF)
+
+    it "supports byte-enable writes":
+        var sram = Rv32Sram.create(4)
+        sram.write_word(0, 0x12345678, 0xF)
+        sram.write_word(0, 0x000000AA, 0x1)  # Write only byte 0
+        expect(sram.read_word(0) and 0xFF).to_equal(0xAA)
+
+# ============================================================================
+# Bus Decode Tests
+# ============================================================================
+
+describe "RV32 Bus Address Decode":
+    """
+    ## Memory Map Verification
+    """
+
+    it "routes ROM addresses correctly":
+        expect(decode_bus_target(0x00001000) == BusTarget.Rom).to_equal(true)
+
+    it "routes SRAM addresses correctly":
+        expect(decode_bus_target(0x80000100) == BusTarget.Sram).to_equal(true)
+
+    it "routes UART addresses correctly":
+        expect(decode_bus_target(0x10000000) == BusTarget.Uart).to_equal(true)
+
+    it "routes Timer addresses correctly":
+        expect(decode_bus_target(0x02000000) == BusTarget.Timer).to_equal(true)

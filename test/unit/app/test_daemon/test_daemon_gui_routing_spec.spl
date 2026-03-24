@@ -1,0 +1,67 @@
+# Test Daemon GUI Routing Specification
+#
+# Verifies GUI test path classification and session key mapping.
+
+use app.test_daemon.daemon.{
+    is_gui_test_path, gui_session_key_for_path, normalize_gui_mode,
+    is_qemu_test_path, infer_qemu_arch
+}
+
+describe "TestDaemon GUI routing":
+    describe "GUI path detection":
+        it "treats system gui specs as GUI tests":
+            expect(is_gui_test_path("test/system/gui/widget_rendering_spec.spl")).to_equal(true)
+
+        it "treats unit app ui specs as GUI tests":
+            expect(is_gui_test_path("test/unit/app/ui/unified_app_spec.spl")).to_equal(true)
+
+        it "treats .ui.sdn files as GUI targets":
+            expect(is_gui_test_path("examples/ui/minimal.ui.sdn")).to_equal(true)
+
+        it "does not treat non-gui specs as GUI tests":
+            expect(is_gui_test_path("test/system/test_daemon/test_daemon_flow_system_spec.spl")).to_equal(false)
+
+    describe "session key mapping":
+        it "maps system gui tests to shared system key":
+            val key = gui_session_key_for_path("test/system/gui/unified_app_spec.spl")
+            expect(key).to_equal("system_gui")
+
+        it "maps unit app ui tests to shared unit key":
+            val key = gui_session_key_for_path("test/unit/app/ui/theme_spec.spl")
+            expect(key).to_equal("unit_ui")
+
+        it "falls back to path for unknown gui locations":
+            val path = "tmp/custom/gui_like_spec.spl"
+            val key = gui_session_key_for_path(path)
+            expect(key).to_equal(path)
+
+    describe "mode normalization":
+        it "accepts container mode":
+            expect(normalize_gui_mode("container")).to_equal("container")
+
+        it "maps headed/native to native":
+            expect(normalize_gui_mode("headed")).to_equal("native")
+            expect(normalize_gui_mode("native")).to_equal("native")
+
+        it "maps none/headless/any to headless":
+            expect(normalize_gui_mode("none")).to_equal("headless")
+            expect(normalize_gui_mode("headless")).to_equal("headless")
+            expect(normalize_gui_mode("any")).to_equal("headless")
+
+        it "returns empty for unknown mode":
+            expect(normalize_gui_mode("weird_mode")).to_equal("")
+
+    describe "qemu routing":
+        it "detects baremetal tests as qemu targets":
+            expect(is_qemu_test_path("test/feature/baremetal/arm64_boot_spec.spl")).to_equal(true)
+
+        it "detects qemu-named integration tests":
+            expect(is_qemu_test_path("test/integration/baremetal/qemu_unified_execution_demo.spl")).to_equal(true)
+
+        it "ignores normal non-baremetal tests":
+            expect(is_qemu_test_path("test/system/test_daemon/test_daemon_flow_system_spec.spl")).to_equal(false)
+
+        it "infers qemu arch from path":
+            expect(infer_qemu_arch("test/feature/baremetal/riscv64_boot_spec.spl")).to_equal("riscv64")
+            expect(infer_qemu_arch("test/feature/baremetal/arm64_boot_spec.spl")).to_equal("arm64")
+            expect(infer_qemu_arch("test/unit/compiler/native/x86_64_simd_spec.spl")).to_equal("x86_64")

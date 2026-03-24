@@ -1,0 +1,85 @@
+# Process lifecycle management for the Simple Browser Platform.
+# Manages spawning, killing, and IPC routing across browser processes.
+# Each process gets a unique PID and runs in a sandbox with restricted capabilities.
+
+use sbp.entity.ipc.process_types.{ProcessId, ProcessKind, ProcessState, ProcessInfo}
+use sbp.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod}
+use sbp.shared.logging.{Logger}
+use sbp.shared.error.{BrowserResult, ipc_error}
+
+class ProcessManager:
+    logger: Logger
+    processes: List<ProcessInfo>
+    next_pid: i64
+
+    static fn new(logger: Logger) -> ProcessManager:
+        ProcessManager(logger: logger, processes: List<ProcessInfo>(), next_pid: 1)
+
+    me spawn(kind: ProcessKind) -> BrowserResult<ProcessId>:
+        # Allocate a new PID and create a process entry
+        val pid = ProcessId.create(self.next_pid, kind)
+        self.next_pid = self.next_pid + 1
+
+        val info = ProcessInfo.create(pid, ProcessState.Starting, 0)
+        self.processes.push(info)
+
+        self.logger.info("Spawned process pid={pid.id} kind={kind}")
+
+        # Transition to Running
+        self.set_state(pid, ProcessState.Running)
+
+        Ok(pid)
+
+    me kill(pid: ProcessId) -> BrowserResult<()>:
+        # Find process and transition to Terminated
+        val found = self.find_index(pid)
+        if found < 0:
+            return Err(ipc_error("Process not found: pid={pid.id}"))
+        self.set_state(pid, ProcessState.Terminated)
+        self.logger.info("Killed process pid={pid.id}")
+        Ok(())
+
+    me send(msg: BrowserIpcMsg) -> BrowserResult<()>:
+        # Route IPC message to destination process
+        val dst_state = self.get_state(msg.dst)
+        match dst_state:
+            ProcessState.Running:
+                self.logger.debug("IPC: pid={msg.src.id} -> pid={msg.dst.id}")
+                # TODO: deliver message to process mailbox
+                pass_todo
+                Ok(())
+            _:
+                Err(ipc_error("Cannot send to process pid={msg.dst.id}: not running"))
+
+    fn get_state(pid: ProcessId) -> ProcessState:
+        var i = 0
+        while i < self.processes.len():
+            val info = self.processes.get(i)
+            if info.pid.id == pid.id:
+                return info.state
+            i = i + 1
+        ProcessState.Terminated
+
+    fn list_processes() -> List<ProcessInfo>:
+        self.processes
+
+    # --- internal helpers ---
+
+    me set_state(pid: ProcessId, state: ProcessState):
+        var i = 0
+        while i < self.processes.len():
+            val info = self.processes.get(i)
+            if info.pid.id == pid.id:
+                val updated = ProcessInfo.create(pid, state, info.memory_usage)
+                self.processes.set(i, updated)
+                return
+            i = i + 1
+
+    fn find_index(pid: ProcessId) -> i64:
+        var i = 0
+        while i < self.processes.len():
+            val info = self.processes.get(i)
+            if info.pid.id == pid.id:
+                return i
+            i = i + 1
+        -1

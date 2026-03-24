@@ -1,0 +1,203 @@
+"""
+# CompilerConfig Specification
+
+**Category:** Infrastructure
+**Status:** Implemented
+
+## Overview
+
+Tests for CompilerConfig struct — default construction, CLI arg parsing,
+SDN application, key-value bag, and logger creation.
+Tests that require extern functions (env_get) are noted.
+"""
+
+use compiler.common.config.{CompilerConfig, CompilerProfile, Config, Logger}
+
+
+# ============================================================================
+# Config (key-value bag)
+# ============================================================================
+
+describe "Config":
+    context "default":
+        it "creates empty config":
+            val config = Config.default()
+            val result = config.get("anything")
+            expect(result.?).to_equal(false)
+
+    context "get and set":
+        it "stores and retrieves a value":
+            var config = Config.default()
+            config.set("key1", "value1")
+            val result = config.get("key1")
+            expect(result.?).to_equal(true)
+            expect(result).to_equal("value1")
+
+        it "returns nil for missing key":
+            val config = Config.default()
+            val result = config.get("nonexistent")
+            expect(result.?).to_equal(false)
+
+        it "overwrites existing value":
+            var config = Config.default()
+            config.set("key", "first")
+            config.set("key", "second")
+            val result = config.get("key")
+            expect(result).to_equal("second")
+
+        it "handles multiple keys":
+            var config = Config.default()
+            config.set("a", "1")
+            config.set("b", "2")
+            config.set("c", "3")
+            expect(config.get("a")).to_equal("1")
+            expect(config.get("b")).to_equal("2")
+            expect(config.get("c")).to_equal("3")
+
+
+# ============================================================================
+# CompilerConfig
+# ============================================================================
+
+describe "CompilerConfig":
+    context "default":
+        it "has Dev profile":
+            val config = CompilerConfig.default()
+            expect(config.profile.to_text()).to_equal("dev")
+
+        it "has zero log level":
+            val config = CompilerConfig.default()
+            expect(config.log_level).to_equal(0)
+
+        it "has use_rust_types false":
+            val config = CompilerConfig.default()
+            expect(config.use_rust_types).to_equal(false)
+
+        it "has use_rust_interp false":
+            val config = CompilerConfig.default()
+            expect(config.use_rust_interp).to_equal(false)
+
+        it "has use_rust_lexer false":
+            val config = CompilerConfig.default()
+            expect(config.use_rust_lexer).to_equal(false)
+
+        it "has deterministic false":
+            val config = CompilerConfig.default()
+            expect(config.deterministic).to_equal(false)
+
+        it "has coverage_enabled false":
+            val config = CompilerConfig.default()
+            expect(config.coverage_enabled).to_equal(false)
+
+        it "has default type inference config":
+            val config = CompilerConfig.default()
+            expect(config.type_inference.empty_array_default.to_text()).to_equal("i32")
+            expect(config.type_inference.strict_empty_collections).to_equal(false)
+
+    context "get":
+        it "returns nil for missing key":
+            val config = CompilerConfig.default()
+            val result = config.get("nonexistent")
+            expect(result.?).to_equal(false)
+
+    context "apply_cli_args":
+        it "sets use_rust_types flag":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--use-rust-types"])
+            expect(config.use_rust_types).to_equal(true)
+
+        it "sets fast_interp flag":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--fast-interp"])
+            expect(config.use_rust_interp).to_equal(true)
+
+        it "sets fast_lex flag":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--fast-lex"])
+            expect(config.use_rust_lexer).to_equal(true)
+
+        it "sets deterministic flag":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--deterministic"])
+            expect(config.deterministic).to_equal(true)
+
+        it "sets coverage flag":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--coverage"])
+            expect(config.coverage_enabled).to_equal(true)
+
+        it "sets profile with next arg":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--profile", "prod"])
+            expect(config.profile.to_text()).to_equal("prod")
+
+        it "handles key=value form":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--output-dir=/tmp/build"])
+            val result = config.get("output-dir")
+            expect(result.?).to_equal(true)
+            expect(result).to_equal("/tmp/build")
+
+        it "handles multiple flags":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--deterministic", "--coverage", "--fast-lex"])
+            expect(config.deterministic).to_equal(true)
+            expect(config.coverage_enabled).to_equal(true)
+            expect(config.use_rust_lexer).to_equal(true)
+
+        it "ignores unknown flags":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--unknown-flag"])
+            # Should not crash; config unchanged
+            expect(config.deterministic).to_equal(false)
+
+    context "apply_sdn":
+        it "applies key-value pairs from SDN content":
+            var config = CompilerConfig.default()
+            config.apply_sdn("output: build\noptimize: true")
+            expect(config.get("output")).to_equal("build")
+            expect(config.get("optimize")).to_equal("true")
+
+        it "skips comments":
+            var config = CompilerConfig.default()
+            config.apply_sdn("# comment\nkey: value")
+            expect(config.get("key")).to_equal("value")
+
+        it "skips empty lines":
+            var config = CompilerConfig.default()
+            config.apply_sdn("\n\nkey: value\n\n")
+            expect(config.get("key")).to_equal("value")
+
+        it "does not overwrite existing values":
+            var config = CompilerConfig.default()
+            config.apply_cli_args(["--key=cli_value"])
+            config.apply_sdn("key: sdn_value")
+            # CLI takes precedence (already set before SDN)
+            expect(config.get("key")).to_equal("cli_value")
+
+    context "logger":
+        it "creates logger with configured log level":
+            var config = CompilerConfig.default()
+            config.log_level = 10
+            val log = config.logger()
+            expect(log.level).to_equal(10)
+
+        it "creates silent logger by default":
+            val config = CompilerConfig.default()
+            val log = config.logger()
+            expect(log.level).to_equal(0)
+
+
+# ============================================================================
+# Logger
+# ============================================================================
+
+describe "Logger":
+    context "construction":
+        it "stores configured level":
+            val log = Logger(level: 4)
+            expect(log.level).to_equal(4)
+
+        it "zero level is silent":
+            val log = Logger(level: 0)
+            expect(log.level).to_equal(0)

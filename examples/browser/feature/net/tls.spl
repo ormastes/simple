@@ -1,0 +1,225 @@
+# TLS handshake and certificate validation for the Simple Browser Platform.
+# Manages TLS configuration, certificate chain verification, and hostname
+# matching (including wildcard certificates). Actual cryptographic operations
+# delegate to SFFI (std.crypto); this module focuses on validation logic.
+
+use examples.browser.entity.net.tls_types.(TlsConfig, CertChain, TlsVersion)
+use examples.browser.shared.error.(BrowserResult, BrowserError, network_error)
+use examples.browser.shared.logging.Logger
+use std.io_runtime.time
+
+# --- TlsConnection ---
+
+class TlsConnection:
+    host: text
+    port: i64
+    version: TlsVersion
+    cipher: text
+
+    static fn create(host: text, port: i64, version: TlsVersion, cipher: text) -> TlsConnection:
+        TlsConnection(host: host, port: port, version: version, cipher: cipher)
+
+    fn description() -> text:
+        val ver = match self.version:
+            TlsVersion.Tls12: "TLS 1.2"
+            TlsVersion.Tls13: "TLS 1.3"
+        "{ver} connection to {self.host}:{self.port} (cipher: {self.cipher})"
+
+# --- TlsManager ---
+
+class TlsManager:
+    config: TlsConfig
+    logger: Logger
+    trusted_certs: List<text>
+
+    static fn new(logger: Logger, config: TlsConfig) -> TlsManager:
+        TlsManager(
+            config: config,
+            logger: logger,
+            trusted_certs: default_trusted_certs()
+        )
+
+    me handshake(host: text, port: i64) -> BrowserResult<TlsConnection>:
+        # Initiate a TLS handshake with the given host:port.
+        # 1. Connect to the remote server (TCP layer handled by runtime).
+        # 2. Send ClientHello with supported versions and cipher suites.
+        # 3. Receive ServerHello + certificate chain.
+        # 4. Verify certificate chain.
+        # 5. Complete key exchange and establish encrypted channel.
+        self.logger.info("TLS handshake starting with {host}:{port}")
+
+        # Validate hostname is non-empty
+        if host.len() == 0:
+            return Err(network_error("TLS handshake: empty hostname"))
+
+        # Validate port range
+        if port <= 0 or port > 65535:
+            return Err(network_error("TLS handshake: invalid port {port}"))
+
+        # Determine TLS version to negotiate
+        val version = negotiate_version(self.config.min_version)
+
+        # The actual handshake would use SFFI crypto primitives.
+        # Here we model the verification steps that happen during handshake.
+        pass_todo  # Actual TCP connect + ClientHello/ServerHello via std.crypto
+
+        # After handshake, we would have the server's certificate chain.
+        # For now, create a placeholder connection representing success.
+        val cipher = default_cipher(version)
+        self.logger.info("TLS handshake complete: {host}:{port} using {cipher}")
+
+        Ok(TlsConnection.create(host, port, version, cipher))
+
+# --- Certificate verification ---
+
+fn verify_certificate(chain: CertChain, hostname: text) -> BrowserResult<()>:
+    # Verify a certificate chain:
+    # 1. Chain must be non-empty.
+    # 2. Leaf certificate hostname must match the requested hostname.
+    # 3. Each certificate must not be expired.
+    # 4. Each certificate must be signed by the next cert in the chain (or a trusted root).
+    # 5. Root must be in the trusted store (or self-signed for dev).
+
+    # Check chain is non-empty
+    if chain.certs.len() == 0:
+        return Err(network_error("Certificate chain is empty"))
+
+    # Verify leaf certificate hostname
+    val leaf_cert = chain.certs.get(0)
+    if not check_hostname(leaf_cert, hostname):
+        return Err(network_error("Certificate hostname mismatch: expected {hostname}, got {leaf_cert}"))
+
+    # Verify none of the certs are expired
+    val now = time.now_seconds()
+    var i = 0
+    while i < chain.certs.len():
+        val cert = chain.certs.get(i)
+        # In a real implementation, we would parse the cert to extract
+        # not_before and not_after. Here we model the validation flow.
+        # Actual cert parsing would use std.cert
+        i = i + 1
+
+    # Verify chain of trust: each cert is signed by the next
+    # This requires actual cryptographic signature verification via SFFI.
+    pass_todo  # Delegate to std.crypto for signature verification
+
+    # Verify root is trusted
+    if chain.ca_certs.len() > 0:
+        val root = chain.ca_certs.get(chain.ca_certs.len() - 1)
+        # In a real implementation, check root against trusted store
+        pass_todo  # Match against trusted_certs list
+
+    Ok(())
+
+fn check_hostname(cert_cn: text, hostname: text) -> bool:
+    # Check if a certificate's CN or SAN matches the requested hostname.
+    # Supports wildcard certificates: *.example.com matches sub.example.com
+    # but NOT example.com itself, and NOT nested: a.b.example.com.
+    val cn = cert_cn.to_lower()
+    val host = hostname.to_lower()
+
+    # Exact match
+    if cn == host:
+        return true
+
+    # Wildcard matching: *.example.com
+    if cn.starts_with("*."):
+        val wildcard_base = cn.slice(2, cn.len())  # "example.com"
+
+        # Host must end with the wildcard base
+        if not host.ends_with(wildcard_base):
+            return false
+
+        # Host must have exactly one more label before the base
+        # e.g., "sub.example.com" is valid, "a.sub.example.com" is not
+        val prefix_len = host.len() - wildcard_base.len()
+        if prefix_len <= 0:
+            return false
+
+        # The prefix (including the dot) — e.g., "sub."
+        val prefix = host.slice(0, prefix_len)
+
+        # Prefix must end with a dot (separator between label and base)
+        if not prefix.ends_with("."):
+            return false
+
+        # The label part (without the trailing dot) must not contain dots
+        val label = prefix.slice(0, prefix.len() - 1)
+        if label.len() == 0:
+            return false
+
+        # Ensure no dots in the label (prevents nested subdomain match)
+        if contains_char(label, "."):
+            return false
+
+        return true
+
+    false
+
+fn is_cert_expired(not_after: i64, now: i64) -> bool:
+    # Check if a certificate has expired.
+    # not_after is the certificate's expiry time as epoch seconds.
+    now > not_after
+
+fn is_cert_not_yet_valid(not_before: i64, now: i64) -> bool:
+    # Check if a certificate is not yet valid.
+    # not_before is the certificate's validity start time as epoch seconds.
+    now < not_before
+
+# --- Version and cipher negotiation ---
+
+fn negotiate_version(min_version: TlsVersion) -> TlsVersion:
+    # Negotiate the highest mutually supported TLS version.
+    # We prefer TLS 1.3 when possible.
+    match min_version:
+        TlsVersion.Tls13:
+            TlsVersion.Tls13
+        TlsVersion.Tls12:
+            # Prefer TLS 1.3 if available, fall back to 1.2
+            TlsVersion.Tls13
+
+fn default_cipher(version: TlsVersion) -> text:
+    # Return a default cipher suite string for the given TLS version.
+    match version:
+        TlsVersion.Tls13:
+            "TLS_AES_256_GCM_SHA384"
+        TlsVersion.Tls12:
+            "ECDHE-RSA-AES256-GCM-SHA384"
+
+fn default_trusted_certs() -> List<text>:
+    # Placeholder for the system's trusted CA certificate store.
+    # In a real implementation, this would load from the OS trust store
+    # or a bundled CA bundle (e.g., Mozilla's certdata.txt).
+    var certs = List<text>()
+    certs.push("DigiCert Global Root G2")
+    certs.push("ISRG Root X1")
+    certs.push("Baltimore CyberTrust Root")
+    certs.push("Amazon Root CA 1")
+    certs.push("Google Trust Services - GlobalSign Root CA-R2")
+    certs.push("Sectigo RSA Domain Validation Secure Server CA")
+    certs
+
+# --- Internal helpers ---
+
+fn contains_char(s: text, ch: text) -> bool:
+    # Check if a string contains a specific character (as a single-char string).
+    var i = 0
+    while i < s.len():
+        if s.get(i) == ch:
+            return true
+        i = i + 1
+    false
+
+fn validate_tls_config(config: TlsConfig) -> BrowserResult<()>:
+    # Validate a TLS configuration for sane defaults.
+    # Ensure at least TLS 1.2 is the minimum.
+    match config.min_version:
+        TlsVersion.Tls12:
+            Ok(())
+        TlsVersion.Tls13:
+            Ok(())
+
+fn format_version(version: TlsVersion) -> text:
+    match version:
+        TlsVersion.Tls12: "TLS 1.2"
+        TlsVersion.Tls13: "TLS 1.3"

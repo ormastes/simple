@@ -1,0 +1,107 @@
+# Capability-based sandboxing for the Simple Browser Platform.
+# Follows the OpenBSD pledge/unveil model. Each process gets a SandboxPolicy
+# loaded from sandbox.sdn profiles. The broker controls granting and revoking
+# capabilities at runtime.
+
+use sbp.entity.ipc.process_types.{ProcessId}
+use sbp.shared.logging.{Logger}
+use sbp.shared.error.{BrowserResult, sandbox_error}
+
+class SandboxPolicy:
+    capabilities: List<text>
+    denied: List<text>
+    pledge: bool
+    unveil_paths: List<text>
+
+    static fn create(capabilities: List<text>, denied: List<text>, pledge: bool, unveil_paths: List<text>) -> SandboxPolicy:
+        SandboxPolicy(capabilities: capabilities, denied: denied, pledge: pledge, unveil_paths: unveil_paths)
+
+    static fn empty() -> SandboxPolicy:
+        SandboxPolicy(capabilities: List<text>(), denied: List<text>(), pledge: false, unveil_paths: List<text>())
+
+class PolicyEntry:
+    pid_id: i64
+    policy: SandboxPolicy
+
+    static fn create(pid_id: i64, policy: SandboxPolicy) -> PolicyEntry:
+        PolicyEntry(pid_id: pid_id, policy: policy)
+
+class CapabilityBroker:
+    logger: Logger
+    policies: List<PolicyEntry>
+
+    static fn new(logger: Logger) -> CapabilityBroker:
+        CapabilityBroker(logger: logger, policies: List<PolicyEntry>())
+
+    me apply_sandbox(pid: ProcessId, profile: text) -> BrowserResult<()>:
+        # Load sandbox policy from sandbox.sdn by profile name.
+        # TODO: parse sandbox.sdn and extract the named profile
+        val policy = self.load_profile(profile)
+        match policy:
+            Ok(p):
+                val entry = PolicyEntry.create(pid.id, p)
+                self.policies.push(entry)
+                self.logger.info("Applied sandbox profile '{profile}' to pid={pid.id}")
+                Ok(())
+            Err(e):
+                Err(e)
+
+    fn check_capability(pid: ProcessId, cap: text) -> bool:
+        val policy = self.find_policy(pid)
+        match policy:
+            Some(p):
+                # Check denied list first — denied always wins
+                var i = 0
+                while i < p.denied.len():
+                    if p.denied.get(i) == cap:
+                        return false
+                    i = i + 1
+                # Check capabilities list
+                var j = 0
+                while j < p.capabilities.len():
+                    if p.capabilities.get(j) == cap:
+                        return true
+                    j = j + 1
+                false
+            nil:
+                false
+
+    me grant(pid: ProcessId, cap: text) -> BrowserResult<()>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                entry.policy.capabilities.push(cap)
+                self.logger.info("Granted '{cap}' to pid={pid.id}")
+                return Ok(())
+            i = i + 1
+        Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+
+    me revoke(pid: ProcessId, cap: text) -> BrowserResult<()>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                # Add to denied list to override any existing grant
+                entry.policy.denied.push(cap)
+                self.logger.info("Revoked '{cap}' from pid={pid.id}")
+                return Ok(())
+            i = i + 1
+        Err(sandbox_error("No sandbox policy for pid={pid.id}"))
+
+    # --- internal helpers ---
+
+    fn find_policy(pid: ProcessId) -> Option<SandboxPolicy>:
+        var i = 0
+        while i < self.policies.len():
+            val entry = self.policies.get(i)
+            if entry.pid_id == pid.id:
+                return Some(entry.policy)
+            i = i + 1
+        nil
+
+    fn load_profile(profile: text) -> BrowserResult<SandboxPolicy>:
+        # TODO: read sandbox.sdn and parse the named profile section
+        # For now, return a restrictive default policy
+        pass_todo
+        Ok(SandboxPolicy.empty())

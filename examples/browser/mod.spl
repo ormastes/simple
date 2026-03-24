@@ -1,0 +1,108 @@
+# Simple Browser Platform — Entry Point
+#
+# Chromium-class browser architecture written 100% in Simple.
+# Multi-process model: browser (privileged), renderer (sandboxed),
+# network service, GPU compositor.
+#
+# Architecture:
+#   Layer 0: Network (DNS, TLS, HTTP, fetch, cache, cookies, CORS)
+#   Layer 1: Parser (HTML5 tokenizer+tree builder, CSS parser)
+#   Layer 2: DOM (document tree, events, mutation observers)
+#   Layer 3: Style (cascade, computed values, inheritance, animations)
+#   Layer 4: Layout (block, inline, flex, grid, text shaping)
+#   Layer 5: Paint (display list, stacking, text/image/border paint)
+#   Layer 6: Composite (layer tree, tiling, damage tracking)
+#   Layer 7: GPU (surfaces, raster, textures, command buffers)
+#   Layer 8: Script (JS lexer/parser/VM/GC, builtins, web APIs)
+#   Layer 9: Browser (tabs, navigation, history, permissions, devtools)
+#   Layer 10: Sandbox (process manager, capabilities, site isolation, CSP)
+#
+# Security: Capability-based (Capsicum + OpenBSD inspired)
+# IPC: Typed enum messages, no stringly-typed protocols
+
+use sbp.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod}
+use sbp.entity.ipc.process_types.{ProcessId, ProcessKind, ProcessState}
+use sbp.entity.browser.tab_types.{Tab, TabId, TabState}
+use sbp.feature.sandbox.process_manager.{ProcessManager}
+use sbp.feature.sandbox.capability_broker.{CapabilityBroker}
+use sbp.shared.config.{BrowserConfig, load_config}
+use sbp.shared.logging.{Logger, LogLevel}
+use sbp.shared.error.{BrowserError, BrowserResult}
+
+# Browser process — the privileged coordinator
+class BrowserProcess:
+    config: BrowserConfig
+    logger: Logger
+    process_manager: ProcessManager
+    capability_broker: CapabilityBroker
+    next_tab_id: i64
+
+    static fn new(config: BrowserConfig) -> BrowserProcess:
+        val logger = Logger.new("browser", LogLevel.Info)
+        val pm = ProcessManager.new(logger)
+        val cb = CapabilityBroker.new(logger)
+        BrowserProcess(
+            config: config,
+            logger: logger,
+            process_manager: pm,
+            capability_broker: cb,
+            next_tab_id: 1
+        )
+
+    me start() -> BrowserResult<()>:
+        self.logger.info("Simple Browser Platform v{self.config.version} starting")
+
+        # Spawn core service processes
+        val network_pid = self.process_manager.spawn(ProcessKind.Network)?
+        self.capability_broker.apply_sandbox(network_pid, "network_process")?
+        self.logger.info("Network service started: pid={network_pid.id}")
+
+        val gpu_pid = self.process_manager.spawn(ProcessKind.Gpu)?
+        self.capability_broker.apply_sandbox(gpu_pid, "gpu_process")?
+        self.logger.info("GPU compositor started: pid={gpu_pid.id}")
+
+        # Open initial tab
+        self.open_tab(self.config.homepage)?
+
+        # Enter main event loop
+        self.run_event_loop()
+
+    me open_tab(url: text) -> BrowserResult<TabId>:
+        val tab_id = TabId(id: self.next_tab_id)
+        self.next_tab_id = self.next_tab_id + 1
+
+        # Spawn sandboxed renderer process for this tab
+        val renderer_pid = self.process_manager.spawn(ProcessKind.Renderer)?
+        self.capability_broker.apply_sandbox(renderer_pid, "renderer_process")?
+
+        # Send navigation command to renderer
+        val msg = BrowserIpcMsg(
+            src: ProcessId(id: 0, kind: ProcessKind.Browser),
+            dst: renderer_pid,
+            method: BrowserIpcMethod.LoadUrl(url: url, frame_id: 0),
+            flags: 0,
+            request_id: 0
+        )
+        self.process_manager.send(msg)?
+
+        self.logger.info("Tab {tab_id.id} opened: {url}")
+        Ok(tab_id)
+
+    me run_event_loop() -> BrowserResult<()>:
+        self.logger.info("Entering main event loop")
+        # Main event loop — process IPC messages from child processes
+        # This is a stub; full implementation in SBP-10
+        pass_todo
+        Ok(())
+
+# Application entry point
+fn main():
+    val config = load_config("examples/browser/config.sdn")
+    match config:
+        Ok(cfg):
+            var browser = BrowserProcess.new(cfg)
+            match browser.start():
+                Ok(_): pass_do_nothing
+                Err(e): print("Fatal: {e.message}")
+        Err(e):
+            print("Failed to load config: {e.message}")

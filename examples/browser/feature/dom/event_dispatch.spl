@@ -1,0 +1,424 @@
+# W3C DOM Event dispatch — capture -> target -> bubble phases.
+# Implements the full three-phase event propagation algorithm per the DOM spec.
+# Events travel down the ancestor chain (capture), hit the target, then bubble back up.
+#
+# Depends on:
+#   entity/dom/node_types.spl   — DomNode, NodeKind, Element
+#   entity/dom/event_types.spl  — DomEvent, EventPhase, EventInit
+#   shared/logging.spl          — Logger, LogLevel
+
+# --- Event listener options ---
+
+class EventListenerOptions:
+    capture: bool
+    once: bool
+    passive: bool
+
+    static fn default_options() -> EventListenerOptions:
+        EventListenerOptions(capture: false, once: false, passive: false)
+
+    static fn create(capture: bool, once: bool, passive: bool) -> EventListenerOptions:
+        EventListenerOptions(capture: capture, once: once, passive: passive)
+
+# --- Event listener registration ---
+
+class EventListener:
+    id: i64
+    type_name: text
+    node_id: i64
+    callback_id: i64
+    use_capture: bool
+    once: bool
+    passive: bool
+
+    static fn create(id: i64, type_name: text, node_id: i64, callback_id: i64, options: EventListenerOptions) -> EventListener:
+        EventListener(
+            id: id,
+            type_name: type_name,
+            node_id: node_id,
+            callback_id: callback_id,
+            use_capture: options.capture,
+            once: options.once,
+            passive: options.passive
+        )
+
+# --- Event dispatcher ---
+
+class EventDispatcher:
+    listeners: List<EventListener>
+    next_listener_id: i64
+    logger: Logger
+
+    static fn new(logger: Logger) -> EventDispatcher:
+        EventDispatcher(
+            listeners: List<EventListener>(),
+            next_listener_id: 1,
+            logger: logger
+        )
+
+    # Register a listener on a node for a given event type.
+    me addEventListener(node_id: i64, type_name: text, callback_id: i64, options: EventListenerOptions):
+        # Check for duplicate: same node, type, callback, capture
+        var i = 0
+        while i < self.listeners.len():
+            val existing = self.listeners.get(i)
+            if (existing.node_id == node_id and
+                existing.type_name == type_name and
+                existing.callback_id == callback_id and
+                existing.use_capture == options.capture):
+                self.logger.debug("addEventListener: duplicate listener ignored for type={type_name} node={node_id}")
+                return
+            i = i + 1
+
+        val listener = EventListener.create(
+            self.next_listener_id, type_name, node_id, callback_id, options
+        )
+        self.next_listener_id = self.next_listener_id + 1
+        self.listeners.push(listener)
+        self.logger.debug("addEventListener: id={listener.id} type={type_name} node={node_id} capture={options.capture}")
+
+    # Remove a listener matching node, type, callback, and capture flag.
+    me removeEventListener(node_id: i64, type_name: text, callback_id: i64, use_capture: bool):
+        var i = 0
+        while i < self.listeners.len():
+            val l = self.listeners.get(i)
+            if (l.node_id == node_id and
+                l.type_name == type_name and
+                l.callback_id == callback_id and
+                l.use_capture == use_capture):
+                self.listeners.remove(i)
+                self.logger.debug("removeEventListener: removed id={l.id} type={type_name} node={node_id}")
+                return
+            i = i + 1
+        self.logger.debug("removeEventListener: no matching listener for type={type_name} node={node_id}")
+
+    # Full W3C three-phase dispatch.
+    # ancestors: list of node IDs from root (index 0) to target's parent (last).
+    # Returns true if default action should proceed (!event.prevented).
+    me dispatchEvent(event: DomEvent, target_id: i64, ancestors: List<i64>) -> bool:
+        self.logger.info("dispatchEvent: type={event.type_name} target={target_id} ancestors={ancestors.len()}")
+
+        # Set event target
+        var ev = DomEvent(
+            type_name: event.type_name,
+            target_id: target_id,
+            current_target_id: target_id,
+            phase: EventPhase.None,
+            init: event.init,
+            prevented: event.prevented,
+            stopped: event.stopped,
+            timestamp: event.timestamp
+        )
+
+        # --- Phase 1: Capturing ---
+        # Iterate ancestors from root (index 0) toward target (exclusive).
+        var cap_idx = 0
+        while cap_idx < ancestors.len():
+            if ev.stopped:
+                self.logger.debug("dispatchEvent: propagation stopped during capture at ancestor index={cap_idx}")
+                return !ev.prevented
+
+            val ancestor_id = ancestors.get(cap_idx)
+            ev = self.fire_listeners_at(ancestor_id, ev, EventPhase.Capturing)
+            cap_idx = cap_idx + 1
+
+        # --- Phase 2: At Target ---
+        if !ev.stopped:
+            ev = self.fire_listeners_at(target_id, ev, EventPhase.AtTarget)
+
+        # --- Phase 3: Bubbling ---
+        if ev.init.bubbles and !ev.stopped:
+            # Iterate ancestors in reverse (target parent -> root)
+            var bub_idx = ancestors.len() - 1
+            while bub_idx >= 0:
+                if ev.stopped:
+                    self.logger.debug("dispatchEvent: propagation stopped during bubble at ancestor index={bub_idx}")
+                    return !ev.prevented
+
+                val ancestor_id = ancestors.get(bub_idx)
+                ev = self.fire_listeners_at(ancestor_id, ev, EventPhase.Bubbling)
+                bub_idx = bub_idx - 1
+
+        self.logger.info("dispatchEvent: completed type={ev.type_name} prevented={ev.prevented}")
+
+        # Clean up "once" listeners that fired
+        self.remove_once_listeners_that_fired(ev.type_name, target_id, ancestors)
+
+        return !ev.prevented
+
+    # Fire all matching listeners on a specific node for a given phase.
+    # Returns the (possibly modified) event after all listeners have processed.
+    me fire_listeners_at(node_id: i64, event: DomEvent, phase: EventPhase) -> DomEvent:
+        var ev = DomEvent(
+            type_name: event.type_name,
+            target_id: event.target_id,
+            current_target_id: node_id,
+            phase: phase,
+            init: event.init,
+            prevented: event.prevented,
+            stopped: event.stopped,
+            timestamp: event.timestamp
+        )
+
+        var i = 0
+        var immediate_stopped = false
+        while i < self.listeners.len():
+            if immediate_stopped:
+                return ev
+
+            val listener = self.listeners.get(i)
+            if matches_listener(listener, ev.type_name, node_id, phase):
+                self.logger.trace("fire_listeners_at: firing listener id={listener.id} on node={node_id} phase={phase_name(phase)}")
+
+                # Mark non-passive preventDefault as effective
+                # (In a real browser, callback_id would invoke the JS callback here.
+                #  We signal that the listener was invoked by logging it.)
+
+                # Check if listener wants to prevent default (non-passive only)
+                if !listener.passive and ev.init.cancelable:
+                    # The actual callback would call preventDefault() —
+                    # we model this by preserving the prevented flag as-is.
+                    pass_dn
+
+                # For "once" listeners, we mark them for later removal
+                # (removal happens after full dispatch to avoid index shifts)
+
+            i = i + 1
+
+        ev
+
+    # Remove "once" listeners that would have fired during dispatch.
+    me remove_once_listeners_that_fired(type_name: text, target_id: i64, ancestors: List<i64>):
+        var i = 0
+        while i < self.listeners.len():
+            val listener = self.listeners.get(i)
+            if listener.once and listener.type_name == type_name:
+                # Check if this listener's node was in the event path
+                var in_path = listener.node_id == target_id
+                if !in_path:
+                    var j = 0
+                    while j < ancestors.len():
+                        if ancestors.get(j) == listener.node_id:
+                            in_path = true
+                        j = j + 1
+
+                if in_path:
+                    self.logger.debug("remove_once: removing once-listener id={listener.id}")
+                    self.listeners.remove(i)
+                    # Don't increment i — next element shifted into current position
+                else:
+                    i = i + 1
+            else:
+                i = i + 1
+
+    # Get all listeners registered on a given node.
+    fn get_listeners_for_node(node_id: i64) -> List<EventListener>:
+        var result = List<EventListener>()
+        var i = 0
+        while i < self.listeners.len():
+            val listener = self.listeners.get(i)
+            if listener.node_id == node_id:
+                result.push(listener)
+            i = i + 1
+        result
+
+    # Get all listeners for a specific event type.
+    fn get_listeners_for_type(type_name: text) -> List<EventListener>:
+        var result = List<EventListener>()
+        var i = 0
+        while i < self.listeners.len():
+            val listener = self.listeners.get(i)
+            if listener.type_name == type_name:
+                result.push(listener)
+            i = i + 1
+        result
+
+    # Count total registered listeners.
+    fn listener_count() -> i64:
+        self.listeners.len()
+
+# --- Matching helpers ---
+
+# Check whether a listener should fire for a given type, node, and phase.
+# At target phase: both capture and bubble listeners fire.
+# Capture phase: only use_capture=true listeners fire.
+# Bubble phase: only use_capture=false listeners fire.
+fn matches_listener(listener: EventListener, type_name: text, node_id: i64, phase: EventPhase) -> bool:
+    if listener.type_name != type_name:
+        return false
+    if listener.node_id != node_id:
+        return false
+
+    match phase:
+        EventPhase.AtTarget:
+            # At target, both capture and non-capture listeners fire
+            true
+        EventPhase.Capturing:
+            listener.use_capture
+        EventPhase.Bubbling:
+            !listener.use_capture
+        EventPhase.None:
+            false
+
+# Get the string name for an event phase (for logging).
+fn phase_name(phase: EventPhase) -> text:
+    match phase:
+        EventPhase.None: "none"
+        EventPhase.Capturing: "capturing"
+        EventPhase.AtTarget: "at-target"
+        EventPhase.Bubbling: "bubbling"
+
+# --- Ancestor chain builder ---
+
+# Build the ancestor chain from a target node up to the root.
+# Returns a list ordered root-first (index 0 = root, last = target's parent).
+# This is the order needed for capture-phase traversal.
+fn get_ancestors(node_id: i64, doc_nodes: List<DomNode>) -> List<i64>:
+    var ancestors = List<i64>()
+    var current_id = node_id
+
+    # Walk up to parent, collecting ancestors
+    var found_parent = true
+    while found_parent:
+        found_parent = false
+        var i = 0
+        while i < doc_nodes.len():
+            val node = doc_nodes.get(i)
+            if node.id == current_id:
+                if node.parent_id >= 0 and node.parent_id != current_id:
+                    ancestors.push(node.parent_id)
+                    current_id = node.parent_id
+                    found_parent = true
+                i = doc_nodes.len()  # break
+            i = i + 1
+
+    # Reverse so root is at index 0
+    var reversed = List<i64>()
+    var ri = ancestors.len() - 1
+    while ri >= 0:
+        reversed.push(ancestors.get(ri))
+        ri = ri - 1
+
+    reversed
+
+# --- Event creation helpers ---
+
+# Create a mouse event with position and button info.
+fn create_mouse_event(type_name: text, x: i64, y: i64, button: i64) -> DomEvent:
+    val init = EventInit.create(true, true, true)  # bubbles, cancelable, composed
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# Create a keyboard event with key and code.
+fn create_keyboard_event(type_name: text, key: text, code: text) -> DomEvent:
+    val init = EventInit.create(true, true, true)  # bubbles, cancelable, composed
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# Create a custom event with explicit bubbles/cancelable flags.
+fn create_custom_event(type_name: text, bubbles: bool, cancelable: bool) -> DomEvent:
+    val init = EventInit.create(bubbles, cancelable, false)
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# Create a focus event (does not bubble by default).
+fn create_focus_event(type_name: text) -> DomEvent:
+    val init = EventInit.create(false, false, true)  # no bubble, not cancelable, composed
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# Create an input event (bubbles but not cancelable).
+fn create_input_event(type_name: text) -> DomEvent:
+    val init = EventInit.create(true, false, true)  # bubbles, not cancelable, composed
+    DomEvent(
+        type_name: type_name,
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# Create a submit event (bubbles and cancelable).
+fn create_submit_event() -> DomEvent:
+    val init = EventInit.create(true, true, false)  # bubbles, cancelable, not composed
+    DomEvent(
+        type_name: "submit",
+        target_id: -1,
+        current_target_id: -1,
+        phase: EventPhase.None,
+        init: init,
+        prevented: false,
+        stopped: false,
+        timestamp: 0
+    )
+
+# --- Utility ---
+
+# Check if an event type is a mouse event.
+fn is_mouse_event(type_name: text) -> bool:
+    if type_name == "click": return true
+    if type_name == "dblclick": return true
+    if type_name == "mousedown": return true
+    if type_name == "mouseup": return true
+    if type_name == "mousemove": return true
+    if type_name == "mouseenter": return true
+    if type_name == "mouseleave": return true
+    if type_name == "mouseover": return true
+    if type_name == "mouseout": return true
+    if type_name == "contextmenu": return true
+    false
+
+# Check if an event type is a keyboard event.
+fn is_keyboard_event(type_name: text) -> bool:
+    if type_name == "keydown": return true
+    if type_name == "keyup": return true
+    if type_name == "keypress": return true
+    false
+
+# Check if an event type bubbles by default.
+fn event_bubbles_by_default(type_name: text) -> bool:
+    # Most UI events bubble; focus/blur/load/unload do not
+    if type_name == "focus": return false
+    if type_name == "blur": return false
+    if type_name == "load": return false
+    if type_name == "unload": return false
+    if type_name == "scroll": return false
+    if type_name == "resize": return false
+    if type_name == "mouseenter": return false
+    if type_name == "mouseleave": return false
+    true

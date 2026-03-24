@@ -1,0 +1,307 @@
+"""
+# Capability Enforcement Specification
+
+**Feature IDs:** #OS-007
+**Category:** Runtime
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for the capability enforcement manager. Validates grant/revoke lifecycle,
+pledge() monotonic restriction, unveil() file path restriction, and file access
+checking with prefix matching.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+
+# ============================================================================
+# Test Group 1: CapabilityManager Construction
+# ============================================================================
+
+describe "CapabilityManager":
+    describe "construction":
+        it "creates with empty records":
+            val mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            val result = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect(result).to_equal(false)
+
+    describe "init_task":
+        it "initializes a task with given capabilities":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            val token = CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn,
+                generation: 1,
+                owner: 1
+            )
+            val caps = CapabilitySet(caps: [token], is_pledged: false)
+            mgr.init_task(task, caps)
+            val has = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect(has).to_equal(true)
+
+        it "initializes a task with empty capabilities":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            mgr.init_task(task, CapabilitySet.full())
+            val has = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect(has).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: Check / Grant / Revoke
+# ============================================================================
+
+describe "CapabilityManager check":
+    it "returns false for unregistered task":
+        val mgr = CapabilityManager.new()
+        val result = mgr.check(TaskId(id: 999), CapabilityKind.SystemReboot)
+        expect(result).to_equal(false)
+
+    it "returns true when task has matching capability":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
+
+    it "returns false for non-matching capability kind":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
+
+describe "CapabilityManager grant":
+    it "grants capability from source to target":
+        var mgr = CapabilityManager.new()
+        val src = TaskId(id: 1)
+        val dst = TaskId(id: 2)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(src, CapabilitySet(caps: [token], is_pledged: false))
+        mgr.init_task(dst, CapabilitySet.full())
+
+        val ok = mgr.grant(src, dst, token)
+        expect(ok).to_equal(true)
+        expect(mgr.check(dst, CapabilityKind.ProcessSpawn)).to_equal(true)
+
+    it "fails to grant if source does not hold capability":
+        var mgr = CapabilityManager.new()
+        val src = TaskId(id: 1)
+        val dst = TaskId(id: 2)
+        mgr.init_task(src, CapabilitySet.full())  # Empty caps
+        mgr.init_task(dst, CapabilitySet.full())
+
+        val token = CapabilityToken(
+            kind: CapabilityKind.SystemReboot,
+            generation: 1,
+            owner: 1
+        )
+        val ok = mgr.grant(src, dst, token)
+        expect(ok).to_equal(false)
+
+describe "CapabilityManager revoke":
+    it "revokes a capability token":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        val revoked = mgr.revoke(token)
+        expect(revoked).to_equal(true)
+        # After revoke, the capability should be gone
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
+
+    it "revoke returns false for unknown token":
+        var mgr = CapabilityManager.new()
+        val token = CapabilityToken(
+            kind: CapabilityKind.SystemMount,
+            generation: 99,
+            owner: 999
+        )
+        val result = mgr.revoke(token)
+        expect(result).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: Pledge (Monotonic Restriction)
+# ============================================================================
+
+describe "CapabilityManager pledge":
+    it "restricts capabilities to allowed list":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val spawn_token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        val reboot_token = CapabilityToken(
+            kind: CapabilityKind.SystemReboot,
+            generation: 2,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(
+            caps: [spawn_token, reboot_token],
+            is_pledged: false
+        ))
+
+        # Pledge to only ProcessSpawn
+        mgr.pledge(task, [CapabilityKind.ProcessSpawn])
+
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
+
+    it "pledge with empty list removes all capabilities":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        mgr.pledge(task, [])
+
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
+
+    it "second pledge is no-op (already pledged)":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        # First pledge: keep ProcessSpawn
+        mgr.pledge(task, [CapabilityKind.ProcessSpawn])
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
+
+        # Second pledge: try to remove all - should be no-op
+        mgr.pledge(task, [])
+        # ProcessSpawn should still be present because second pledge was ignored
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: Unveil (File Path Restriction)
+# ============================================================================
+
+describe "CapabilityManager unveil":
+    it "before unveil, all paths are allowed":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+        val allowed = mgr.check_file_access(task, "/any/path", "r")
+        expect(allowed).to_equal(true)
+
+    it "after unveil, only unveiled paths are allowed":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        # Unveil /tmp with read permission
+        mgr.unveil(task, "/tmp", "r")
+
+        val tmp_ok = mgr.check_file_access(task, "/tmp/file.txt", "r")
+        expect(tmp_ok).to_equal(true)
+
+        val etc_denied = mgr.check_file_access(task, "/etc/passwd", "r")
+        expect(etc_denied).to_equal(false)
+
+    it "unveil supports write permission":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/var/log", "rw")
+
+        val write_ok = mgr.check_file_access(task, "/var/log/app.log", "w")
+        expect(write_ok).to_equal(true)
+
+    it "multiple unveil calls add entries":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/tmp", "r")
+        mgr.unveil(task, "/home", "rw")
+
+        val tmp_ok = mgr.check_file_access(task, "/tmp/data", "r")
+        expect(tmp_ok).to_equal(true)
+
+        val home_ok = mgr.check_file_access(task, "/home/user/file", "r")
+        expect(home_ok).to_equal(true)
+
+    it "unveil denies paths not in the list":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/safe", "r")
+
+        val unsafe = mgr.check_file_access(task, "/unsafe/secret", "r")
+        expect(unsafe).to_equal(false)
+
+    it "path prefix matching works correctly":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/home/user", "r")
+
+        # Subpath should match
+        val sub = mgr.check_file_access(task, "/home/user/docs/file.txt", "r")
+        expect(sub).to_equal(true)
+
+        # Parent path should NOT match
+        val parent = mgr.check_file_access(task, "/home", "r")
+        expect(parent).to_equal(false)
+
+
+# ============================================================================
+# Test Group 5: Destroy Task
+# ============================================================================
+
+describe "CapabilityManager destroy_task":
+    it "removes all records for the destroyed task":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
+
+        mgr.destroy_task(task)
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)

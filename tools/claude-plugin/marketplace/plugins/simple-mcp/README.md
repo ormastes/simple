@@ -2,6 +2,9 @@
 
 Simple MCP server plugin for Claude Code.
 
+This bundle is intended for use from a Simple repository checkout. It is not a
+standalone portable runtime bundle.
+
 Runtime:
 
 ```bash

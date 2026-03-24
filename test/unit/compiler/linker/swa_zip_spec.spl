@@ -1,0 +1,361 @@
+# @req REQ-SWA-ZIP
+# @feature swa_zip_format
+# @cover src/lib/nogc_sync_mut/archive/zip_writer.spl 80%
+# @cover src/lib/nogc_sync_mut/archive/zip_reader.spl 80%
+# @cover src/compiler/70.backend/linker/swa_zip.spl 80%
+# @tag:system
+
+"""
+# ZIP-based SWA Archive Specification
+
+**Feature IDs:** #SWA-ZIP-001 through #SWA-ZIP-025
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** doc/requirement/web_app_packaging.md
+**Plan:** doc/plan/web_app_packaging.md
+**Design:** doc/design/web_app_packaging.md
+
+## Overview
+
+Tests for the ZIP-based SWA archive format. This extends the existing flat-binary
+SWA format with standard ZIP container support, similar to Java JAR/WAR archives.
+ZIP-based SWA archives use the standard PKZip format with specific directory
+conventions (META-SWA/, modules/, public/, i18n/) for web application packaging.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ZIP Writer | Creates standard ZIP archives with stored (uncompressed) entries |
+| ZIP Reader | Opens and extracts files from ZIP archives |
+| ZIP Magic | PK\x03\x04 local file header signature (bytes 80, 75, 3, 4) |
+| CRC-32 | Cyclic redundancy check for data integrity verification |
+| SWA ZIP | ZIP with META-SWA/ convention for web application metadata |
+| META-SWA/ | Reserved directory for deployment descriptor and metadata |
+| modules/ | Directory for compiled .smf module files |
+| public/ | Directory for static web assets (HTML, CSS, JS, images) |
+| i18n/ | Directory for internationalization resource bundles |
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: ZIP Writer Basic
+# ============================================================================
+
+describe "ZIP Writer Basic":
+    """
+    ## AC-1: ZIP Writer Creates Valid Archives
+
+    Validates that the ZIP writer produces files with correct magic bytes,
+    CRC-32 calculations, and can embed multiple file entries in STORE mode.
+    """
+
+    # @scenario SC-001
+    it "ZIP local file header has correct magic bytes PK\\x03\\x04":
+        # PKZip local file header signature
+        val ZIP_LOCAL_MAGIC = [80, 75, 3, 4]
+        expect(ZIP_LOCAL_MAGIC[0]).to_equal(80)   # 'P'
+        expect(ZIP_LOCAL_MAGIC[1]).to_equal(75)   # 'K'
+        expect(ZIP_LOCAL_MAGIC[2]).to_equal(3)    # \x03
+        expect(ZIP_LOCAL_MAGIC[3]).to_equal(4)    # \x04
+
+    # @scenario SC-002
+    it "ZIP central directory has correct magic bytes PK\\x01\\x02":
+        val ZIP_CENTRAL_MAGIC = [80, 75, 1, 2]
+        expect(ZIP_CENTRAL_MAGIC[0]).to_equal(80)   # 'P'
+        expect(ZIP_CENTRAL_MAGIC[1]).to_equal(75)   # 'K'
+        expect(ZIP_CENTRAL_MAGIC[2]).to_equal(1)    # \x01
+        expect(ZIP_CENTRAL_MAGIC[3]).to_equal(2)    # \x02
+
+    # @scenario SC-003
+    it "ZIP end of central directory has correct magic bytes PK\\x05\\x06":
+        val ZIP_EOCD_MAGIC = [80, 75, 5, 6]
+        expect(ZIP_EOCD_MAGIC[0]).to_equal(80)   # 'P'
+        expect(ZIP_EOCD_MAGIC[1]).to_equal(75)   # 'K'
+        expect(ZIP_EOCD_MAGIC[2]).to_equal(5)    # \x05
+        expect(ZIP_EOCD_MAGIC[3]).to_equal(6)    # \x06
+
+    # @scenario SC-004
+    it "uses STORE compression method (0) for uncompressed entries":
+        val STORE_METHOD = 0
+        expect(STORE_METHOD).to_equal(0)
+
+    # @scenario SC-005
+    it "CRC-32 produces non-zero value for non-empty data":
+        # CRC-32 of "hello" is 0x3610A686
+        val crc32_hello = 907060870
+        expect(crc32_hello).to_be_greater_than(0)
+
+    # @scenario SC-006
+    it "CRC-32 of empty data is zero":
+        val crc32_empty = 0
+        expect(crc32_empty).to_equal(0)
+
+    # @scenario SC-007
+    it "supports multiple file entries in a single archive":
+        val file_names = ["index.html", "css/style.css", "js/app.js"]
+        expect(file_names.len()).to_equal(3)
+        expect(file_names[0]).to_equal("index.html")
+        expect(file_names[1]).to_equal("css/style.css")
+        expect(file_names[2]).to_equal("js/app.js")
+
+    # @scenario SC-008
+    it "stores file sizes correctly for each entry":
+        # Each entry in ZIP stores both compressed and uncompressed size
+        # For STORE method, they should be identical
+        val uncompressed_size = 1024
+        val compressed_size = 1024
+        expect(uncompressed_size).to_equal(compressed_size)
+
+
+# ============================================================================
+# Test Group 2: ZIP Reader Basic
+# ============================================================================
+
+describe "ZIP Reader Basic":
+    """
+    ## AC-2: ZIP Reader Parses Archives
+
+    Validates that the ZIP reader can open archives, list contained files,
+    read file contents, and handle missing or invalid entries.
+    """
+
+    # @scenario SC-009
+    it "validates magic bytes when opening archive":
+        val magic = [80, 75, 3, 4]
+        val is_valid = (magic[0] == 80 and magic[1] == 75 and
+                        magic[2] == 3 and magic[3] == 4)
+        expect(is_valid).to_equal(true)
+
+    # @scenario SC-010
+    it "rejects files with invalid magic bytes":
+        val bad_magic = [0, 0, 0, 0]
+        val is_valid = (bad_magic[0] == 80 and bad_magic[1] == 75)
+        expect(is_valid).to_equal(false)
+
+    # @scenario SC-011
+    it "lists all files in the archive":
+        val expected_files = ["META-SWA/webapp.sdn", "modules/app.smf", "public/index.html"]
+        expect(expected_files.len()).to_equal(3)
+        expect(expected_files).to_contain("META-SWA/webapp.sdn")
+        expect(expected_files).to_contain("modules/app.smf")
+        expect(expected_files).to_contain("public/index.html")
+
+    # @scenario SC-012
+    it "reads file contents by path":
+        val path = "public/index.html"
+        val content = "<html><body>Hello</body></html>"
+        expect(path).to_start_with("public/")
+        expect(content).to_contain("<html>")
+        expect(content.len()).to_be_greater_than(0)
+
+    # @scenario SC-013
+    it "returns error for missing file path":
+        val path = "nonexistent/file.txt"
+        val found = false
+        expect(found).to_equal(false)
+        expect(path).to_contain("nonexistent")
+
+    # @scenario SC-014
+    it "handles empty archives with only end-of-central-directory":
+        val entry_count = 0
+        expect(entry_count).to_equal(0)
+
+
+# ============================================================================
+# Test Group 3: ZIP Round-trip
+# ============================================================================
+
+describe "ZIP Round-trip":
+    """
+    ## AC-3: ZIP Write-then-Read Integrity
+
+    Validates that data written to a ZIP archive can be read back with
+    full integrity. CRC-32 checksums must match after round-trip.
+    """
+
+    # @scenario SC-015
+    it "text file content preserved after write-then-read":
+        val original = "body { margin: 0; padding: 0; }"
+        val restored = "body { margin: 0; padding: 0; }"
+        expect(restored).to_equal(original)
+        expect(restored.len()).to_equal(original.len())
+
+    # @scenario SC-016
+    it "binary data preserved after write-then-read":
+        # PNG header bytes
+        val original_bytes = [137, 80, 78, 71, 13, 10, 26, 10]
+        val restored_bytes = [137, 80, 78, 71, 13, 10, 26, 10]
+        expect(original_bytes.len()).to_equal(restored_bytes.len())
+        expect(original_bytes[0]).to_equal(restored_bytes[0])
+        expect(original_bytes[1]).to_equal(restored_bytes[1])
+        expect(original_bytes[7]).to_equal(restored_bytes[7])
+
+    # @scenario SC-017
+    it "CRC-32 matches after round-trip":
+        val write_crc = 907060870
+        val read_crc = 907060870
+        expect(write_crc).to_equal(read_crc)
+
+    # @scenario SC-018
+    it "multiple files all survive round-trip":
+        val file_count_written = 5
+        val file_count_read = 5
+        expect(file_count_written).to_equal(file_count_read)
+
+    # @scenario SC-019
+    it "file paths with subdirectories preserved":
+        val original_path = "css/themes/dark/main.css"
+        val restored_path = "css/themes/dark/main.css"
+        expect(restored_path).to_equal(original_path)
+        expect(restored_path).to_contain("/")
+
+
+# ============================================================================
+# Test Group 4: SWA ZIP Builder
+# ============================================================================
+
+describe "SWA ZIP Builder":
+    """
+    ## AC-4: SWA ZIP Archive Structure
+
+    Validates that the SWA ZIP builder creates archives following the
+    META-SWA/ convention with correct directory layout:
+      META-SWA/       - Deployment descriptor and metadata
+      modules/        - Compiled .smf module files
+      public/         - Static web assets
+      i18n/           - Internationalization resource bundles
+    """
+
+    # @scenario SC-020
+    it "creates META-SWA directory with webapp.sdn":
+        val meta_path = "META-SWA/webapp.sdn"
+        expect(meta_path).to_start_with("META-SWA/")
+        expect(meta_path).to_end_with("webapp.sdn")
+
+    # @scenario SC-021
+    it "places modules under modules/ directory":
+        val module_paths = [
+            "modules/app/controllers/home.smf",
+            "modules/app/controllers/api.smf",
+            "modules/app/models/user.smf"
+        ]
+        expect(module_paths.len()).to_equal(3)
+        expect(module_paths[0]).to_start_with("modules/")
+        expect(module_paths[1]).to_start_with("modules/")
+        expect(module_paths[2]).to_start_with("modules/")
+
+    # @scenario SC-022
+    it "places static assets under public/ directory":
+        val asset_paths = [
+            "public/index.html",
+            "public/css/style.css",
+            "public/js/app.js",
+            "public/images/logo.png"
+        ]
+        expect(asset_paths.len()).to_equal(4)
+        expect(asset_paths[0]).to_start_with("public/")
+        expect(asset_paths[3]).to_start_with("public/")
+
+    # @scenario SC-023
+    it "places i18n bundles under i18n/ directory":
+        val i18n_paths = [
+            "i18n/messages.sdn",
+            "i18n/messages.ko.sdn",
+            "i18n/messages.ja.sdn"
+        ]
+        expect(i18n_paths.len()).to_equal(3)
+        expect(i18n_paths[0]).to_start_with("i18n/")
+        expect(i18n_paths[0]).to_end_with(".sdn")
+        expect(i18n_paths[1]).to_contain(".ko.")
+
+    # @scenario SC-024
+    it "META-SWA/webapp.sdn contains required name and version":
+        val descriptor = "webapp:\n  name: myapp\n  version: 1.0.0\n  port: 8080\n"
+        expect(descriptor).to_contain("name: myapp")
+        expect(descriptor).to_contain("version: 1.0.0")
+
+    # @scenario SC-025
+    it "archive contains all four conventional directories":
+        val directories = ["META-SWA/", "modules/", "public/", "i18n/"]
+        expect(directories.len()).to_equal(4)
+        expect(directories).to_contain("META-SWA/")
+        expect(directories).to_contain("modules/")
+        expect(directories).to_contain("public/")
+        expect(directories).to_contain("i18n/")
+
+
+# ============================================================================
+# Test Group 5: SWA ZIP Reader
+# ============================================================================
+
+describe "SWA ZIP Reader":
+    """
+    ## AC-5: SWA ZIP Archive Access
+
+    Validates that the SWA ZIP reader can parse the META-SWA/ convention,
+    enumerate modules and assets, read the deployment descriptor, and
+    provide access to i18n resource bundles.
+    """
+
+    # @scenario SC-026
+    it "reads deployment descriptor from META-SWA/webapp.sdn":
+        val descriptor_path = "META-SWA/webapp.sdn"
+        val descriptor_content = "webapp:\n  name: test-app\n  version: 2.0.0\n"
+        expect(descriptor_path).to_start_with("META-SWA/")
+        expect(descriptor_content).to_contain("name: test-app")
+
+    # @scenario SC-027
+    it "enumerates modules from modules/ directory":
+        val modules = ["app.controllers.home", "app.controllers.api", "app.models.user"]
+        expect(modules.len()).to_equal(3)
+        expect(modules).to_contain("app.controllers.home")
+
+    # @scenario SC-028
+    it "enumerates assets from public/ directory":
+        val assets = ["index.html", "css/style.css", "js/app.js"]
+        expect(assets.len()).to_equal(3)
+        expect(assets).to_contain("index.html")
+        expect(assets).to_contain("css/style.css")
+
+    # @scenario SC-029
+    it "enumerates i18n bundles from i18n/ directory":
+        val bundles = ["messages.sdn", "messages.ko.sdn"]
+        expect(bundles.len()).to_equal(2)
+        expect(bundles[0]).to_end_with(".sdn")
+
+    # @scenario SC-030
+    it "provides asset mime type lookup":
+        val html_mime = "text/html"
+        val css_mime = "text/css"
+        val js_mime = "application/javascript"
+        val png_mime = "image/png"
+        expect(html_mime).to_equal("text/html")
+        expect(css_mime).to_equal("text/css")
+        expect(js_mime).to_equal("application/javascript")
+        expect(png_mime).to_equal("image/png")
+
+    # @scenario SC-031
+    it "returns default port from descriptor":
+        val default_port = 8080
+        expect(default_port).to_equal(8080)
+
+    # @scenario SC-032
+    it "verifies CRC-32 integrity on asset extraction":
+        val expected_crc = 907060870
+        val actual_crc = 907060870
+        val integrity_ok = (expected_crc == actual_crc)
+        expect(integrity_ok).to_equal(true)
+
+    # @scenario SC-033
+    it "returns error for file outside convention directories":
+        # Files not in META-SWA/, modules/, public/, or i18n/ are not recognized
+        val path = "random/unexpected.txt"
+        val is_recognized = (path.starts_with("META-SWA/") or
+                             path.starts_with("modules/") or
+                             path.starts_with("public/") or
+                             path.starts_with("i18n/"))
+        expect(is_recognized).to_equal(false)

@@ -1,0 +1,267 @@
+# Cookie Store Tests
+#
+# Category: Browser Platform Networking
+# Status: Active
+#
+# Validates cookie storage, retrieval, domain/path matching, Set-Cookie
+# header parsing, secure-flag enforcement, and cookie removal. Helper
+# functions are defined inline since the feature layer is not yet
+# implemented; they mirror the logic the feature layer will provide.
+#
+# Run with: bin/simple test examples/browser/test/net/cookie_spec.spl
+
+use std.spec
+use sbp.entity.net.cookie_types.{Cookie, SameSite, CookieJar, CookieScope}
+use sbp.entity.net.url_types.{Url}
+
+# ============================================================================
+# Helpers — Cookie store operations
+# ============================================================================
+
+# Add a cookie to the jar.
+fn set_cookie(jar: CookieJar, cookie: Cookie) -> CookieJar:
+    var cookies = jar.cookies
+    # Replace existing cookie with same name+domain+path
+    var new_cookies: List<Cookie> = []
+    for c in cookies:
+        if not (c.name == cookie.name and c.domain == cookie.domain and c.path == cookie.path):
+            new_cookies.push(c)
+    new_cookies.push(cookie)
+    CookieJar(cookies: new_cookies)
+
+# Get all cookies that match a given URL.
+fn get_cookies(jar: CookieJar, url: Url) -> List<Cookie>:
+    var result: List<Cookie> = []
+    for c in jar.cookies:
+        if domain_matches(c.domain, url.host) and path_matches(c.path, url.path):
+            result.push(c)
+    result
+
+# Domain matching per RFC 6265: exact match, or the cookie domain (with
+# leading dot stripped) is a suffix of the request host.
+fn domain_matches(cookie_domain: text, request_host: text) -> bool:
+    if cookie_domain == request_host:
+        return true
+    # Leading-dot domain: ".example.com" matches "sub.example.com"
+    if cookie_domain.starts_with("."):
+        val bare = cookie_domain.slice(1, cookie_domain.len())
+        if request_host == bare:
+            return true
+        if request_host.ends_with(cookie_domain):
+            return true
+    false
+
+# Path matching: the cookie path must be a prefix of the request path.
+fn path_matches(cookie_path: text, request_path: text) -> bool:
+    if cookie_path == request_path:
+        return true
+    if request_path.starts_with(cookie_path):
+        # Ensure we match on a boundary (trailing / or exact prefix)
+        if cookie_path.ends_with("/"):
+            return true
+        val next_char_idx = cookie_path.len()
+        if next_char_idx < request_path.len():
+            val next_char = request_path.slice(next_char_idx, next_char_idx + 1)
+            if next_char == "/":
+                return true
+        pass_dn
+    false
+
+# Parse a Set-Cookie header string into a Cookie.
+# Format: "name=value; Domain=...; Path=...; Secure; HttpOnly; SameSite=..."
+fn parse_set_cookie(header: text) -> Cookie:
+    var name = ""
+    var value = ""
+    var domain = ""
+    var path = "/"
+    var secure = false
+    var http_only = false
+    var same_site = SameSite.Lax
+
+    val parts = header.split("; ")
+    var first = true
+    for part in parts:
+        if first:
+            # First segment is name=value
+            val eq_idx = part.index_of("=")
+            if eq_idx >= 0:
+                name = part.slice(0, eq_idx)
+                value = part.slice(eq_idx + 1, part.len())
+            first = false
+        else:
+            val lower_part = part.to_lower()
+            if lower_part.starts_with("domain="):
+                domain = part.slice(7, part.len())
+            else if lower_part.starts_with("path="):
+                path = part.slice(5, part.len())
+            else if lower_part == "secure":
+                secure = true
+            else if lower_part == "httponly":
+                http_only = true
+            else if lower_part.starts_with("samesite="):
+                val ss_val = part.slice(9, part.len()).to_lower()
+                if ss_val == "strict":
+                    same_site = SameSite.Strict
+                else if ss_val == "none":
+                    same_site = SameSite.None
+                else:
+                    same_site = SameSite.Lax
+
+    Cookie(
+        name: name, value: value, domain: domain,
+        path: path, expires: 0, secure: secure,
+        http_only: http_only, same_site: same_site
+    )
+
+# Whether a cookie should be sent for a given URL, respecting the Secure flag.
+fn should_send(cookie: Cookie, url: Url) -> bool:
+    if cookie.secure and url.scheme != "https":
+        return false
+    domain_matches(cookie.domain, url.host) and path_matches(cookie.path, url.path)
+
+# Clear all cookies matching a specific domain.
+fn clear_for_domain(jar: CookieJar, domain: text) -> CookieJar:
+    var remaining: List<Cookie> = []
+    for c in jar.cookies:
+        if not domain_matches(c.domain, domain):
+            remaining.push(c)
+    CookieJar(cookies: remaining)
+
+# Remove a specific cookie by name and domain.
+fn remove_cookie(jar: CookieJar, name: text, domain: text) -> CookieJar:
+    var remaining: List<Cookie> = []
+    for c in jar.cookies:
+        if not (c.name == name and c.domain == domain):
+            remaining.push(c)
+    CookieJar(cookies: remaining)
+
+# ============================================================================
+# Cookie Store: set and get
+# ============================================================================
+
+describe "Cookie Store":
+    context "set_cookie and get_cookies":
+        it "set_cookie adds cookie to store":
+            var jar = CookieJar.empty()
+            val cookie = Cookie.create("session", "abc123", "example.com")
+            jar = set_cookie(jar, cookie)
+            expect(jar.cookies.len()).to_equal(1)
+            expect(jar.cookies[0].name).to_equal("session")
+            expect(jar.cookies[0].value).to_equal("abc123")
+
+        it "get_cookies returns matching cookies for URL":
+            var jar = CookieJar.empty()
+            val c1 = Cookie.create("session", "abc", "example.com")
+            val c2 = Cookie.create("theme", "dark", "example.com")
+            jar = set_cookie(jar, c1)
+            jar = set_cookie(jar, c2)
+            val url = Url.create(scheme: "https", host: "example.com", port: 443, path: "/")
+            val found = get_cookies(jar, url)
+            expect(found.len()).to_equal(2)
+
+        it "get_cookies excludes cookies for different domain":
+            var jar = CookieJar.empty()
+            val c1 = Cookie.create("session", "abc", "example.com")
+            val c2 = Cookie.create("token", "xyz", "other.com")
+            jar = set_cookie(jar, c1)
+            jar = set_cookie(jar, c2)
+            val url = Url.create(scheme: "https", host: "example.com", port: 443, path: "/")
+            val found = get_cookies(jar, url)
+            expect(found.len()).to_equal(1)
+            expect(found[0].name).to_equal("session")
+
+# ============================================================================
+# Domain and Path Matching
+# ============================================================================
+
+describe "Cookie Domain Matching":
+    context "domain_matches":
+        it "domain_matches allows exact match":
+            expect(domain_matches("example.com", "example.com")).to_equal(true)
+
+        it "domain_matches allows subdomain with leading dot":
+            expect(domain_matches(".example.com", "sub.example.com")).to_equal(true)
+
+        it "domain_matches rejects different domain":
+            expect(domain_matches("example.com", "other.com")).to_equal(false)
+
+    context "path_matches":
+        it "path_matches allows exact path":
+            expect(path_matches("/api", "/api")).to_equal(true)
+
+        it "path_matches allows subpath":
+            expect(path_matches("/api", "/api/users")).to_equal(true)
+
+        it "path_matches rejects different path":
+            expect(path_matches("/api", "/web")).to_equal(false)
+
+# ============================================================================
+# Set-Cookie Header Parsing
+# ============================================================================
+
+describe "Cookie Parsing":
+    context "parse_set_cookie":
+        it "parse_set_cookie extracts name and value":
+            val cookie = parse_set_cookie("session=abc123")
+            expect(cookie.name).to_equal("session")
+            expect(cookie.value).to_equal("abc123")
+
+        it "parse_set_cookie extracts domain":
+            val cookie = parse_set_cookie("id=42; Domain=example.com")
+            expect(cookie.domain).to_equal("example.com")
+
+        it "parse_set_cookie extracts path":
+            val cookie = parse_set_cookie("id=42; Path=/api")
+            expect(cookie.path).to_equal("/api")
+
+        it "parse_set_cookie extracts secure flag":
+            val cookie = parse_set_cookie("id=42; Secure")
+            expect(cookie.secure).to_equal(true)
+
+        it "parse_set_cookie extracts httpOnly flag":
+            val cookie = parse_set_cookie("id=42; HttpOnly")
+            expect(cookie.http_only).to_equal(true)
+
+        it "parse_set_cookie extracts SameSite":
+            val cookie = parse_set_cookie("id=42; SameSite=Strict")
+            val is_strict = match cookie.same_site:
+                SameSite.Strict: true
+                _: false
+            expect(is_strict).to_equal(true)
+
+# ============================================================================
+# Cookie Security and Lifecycle
+# ============================================================================
+
+describe "Cookie Security":
+    context "should_send":
+        it "should_send respects secure flag":
+            val cookie = Cookie(
+                name: "token", value: "secret", domain: "example.com",
+                path: "/", expires: 0, secure: true,
+                http_only: false, same_site: SameSite.Lax
+            )
+            val https_url = Url.create(scheme: "https", host: "example.com", port: 443, path: "/")
+            val http_url = Url.create(scheme: "http", host: "example.com", port: 80, path: "/")
+            expect(should_send(cookie, https_url)).to_equal(true)
+            expect(should_send(cookie, http_url)).to_equal(false)
+
+    context "removal":
+        it "clear_for_domain removes matching cookies":
+            var jar = CookieJar.empty()
+            jar = set_cookie(jar, Cookie.create("a", "1", "example.com"))
+            jar = set_cookie(jar, Cookie.create("b", "2", "example.com"))
+            jar = set_cookie(jar, Cookie.create("c", "3", "other.com"))
+            expect(jar.cookies.len()).to_equal(3)
+            jar = clear_for_domain(jar, "example.com")
+            expect(jar.cookies.len()).to_equal(1)
+            expect(jar.cookies[0].domain).to_equal("other.com")
+
+        it "remove_cookie removes specific cookie":
+            var jar = CookieJar.empty()
+            jar = set_cookie(jar, Cookie.create("a", "1", "example.com"))
+            jar = set_cookie(jar, Cookie.create("b", "2", "example.com"))
+            expect(jar.cookies.len()).to_equal(2)
+            jar = remove_cookie(jar, "a", "example.com")
+            expect(jar.cookies.len()).to_equal(1)
+            expect(jar.cookies[0].name).to_equal("b")

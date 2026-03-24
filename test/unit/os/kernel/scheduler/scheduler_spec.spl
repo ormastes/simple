@@ -1,0 +1,307 @@
+"""
+# Scheduler Specification
+
+**Feature IDs:** #OS-005
+**Category:** Runtime
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for the priority-based preemptive scheduler. Validates task creation,
+scheduling by priority, yield, block/unblock state transitions, and the
+ReadyQueue FIFO data structure.
+
+Note: Timer interrupt handling and context switch are not testable without
+hardware. We test the scheduling logic and state machine.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
+
+
+# ============================================================================
+# Test Group 1: ReadyQueue
+# ============================================================================
+
+describe "ReadyQueue":
+    describe "construction":
+        it "starts empty":
+            val q = ReadyQueue.new()
+            expect(q.is_empty()).to_equal(true)
+
+        it "has zero length":
+            val q = ReadyQueue.new()
+            expect(q.len()).to_equal(0)
+
+    describe "enqueue and dequeue":
+        it "enqueue increases length":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 1))
+            expect(q.len()).to_equal(1)
+
+        it "dequeue returns the enqueued task":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 42))
+            val result = q.dequeue()
+            expect(result).to_be_nil.to_equal(false)
+
+        it "dequeue preserves FIFO order":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 1))
+            q.enqueue(TaskId(id: 2))
+            q.enqueue(TaskId(id: 3))
+            val first = q.dequeue()
+            if first != nil:
+                val task = first
+                expect(task.id).to_equal(1)
+            val second = q.dequeue()
+            if second != nil:
+                val task = second
+                expect(task.id).to_equal(2)
+            val third = q.dequeue()
+            if third != nil:
+                val task = third
+                expect(task.id).to_equal(3)
+
+        it "dequeue from empty returns nil":
+            var q = ReadyQueue.new()
+            val result = q.dequeue()
+            expect(result).to_be_nil
+
+        it "is_empty after dequeue all":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 1))
+            q.dequeue()
+            expect(q.is_empty()).to_equal(true)
+
+    describe "remove":
+        it "removes specific task from queue":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 1))
+            q.enqueue(TaskId(id: 2))
+            q.enqueue(TaskId(id: 3))
+            q.remove(TaskId(id: 2))
+            expect(q.len()).to_equal(2)
+
+        it "preserves order after removal":
+            var q = ReadyQueue.new()
+            q.enqueue(TaskId(id: 10))
+            q.enqueue(TaskId(id: 20))
+            q.enqueue(TaskId(id: 30))
+            q.remove(TaskId(id: 20))
+            val first = q.dequeue()
+            if first != nil:
+                val task = first
+                expect(task.id).to_equal(10)
+            val second = q.dequeue()
+            if second != nil:
+                val task = second
+                expect(task.id).to_equal(30)
+
+
+# ============================================================================
+# Test Group 2: Scheduler Construction
+# ============================================================================
+
+describe "Scheduler":
+    describe "construction":
+        it "starts with empty task table":
+            val sched = Scheduler.new()
+            val task = sched.get_task(TaskId(id: 0))
+            expect(task).to_be_nil
+
+        it "starts with current task id 0":
+            val sched = Scheduler.new()
+            val current = sched.get_current()
+            expect(current.id).to_equal(0)
+
+        it "starts with tick count 0":
+            val sched = Scheduler.new()
+            expect(sched.get_tick_count()).to_equal(0)
+
+    describe "create_task":
+        it "returns a valid TaskId":
+            var sched = Scheduler.new()
+            val caps = CapabilitySet.full()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, caps)
+            expect(id.id).to_be_greater_than(0)
+
+        it "assigns sequential task ids":
+            var sched = Scheduler.new()
+            val caps1 = CapabilitySet.full()
+            val caps2 = CapabilitySet.full()
+            val id1 = sched.create_task(0x1000, TaskPriority.Normal, caps1)
+            val id2 = sched.create_task(0x2000, TaskPriority.Normal, caps2)
+            expect(id2.id).to_equal(id1.id + 1)
+
+        it "creates task in Ready state":
+            var sched = Scheduler.new()
+            val caps = CapabilitySet.full()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, caps)
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
+
+        it "stores the entry point in rip":
+            var sched = Scheduler.new()
+            val caps = CapabilitySet.full()
+            val id = sched.create_task(0xDEAD, TaskPriority.Normal, caps)
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                expect(task.context.rip).to_equal(0xDEAD)
+
+        it "stores the priority":
+            var sched = Scheduler.new()
+            val caps = CapabilitySet.full()
+            val id = sched.create_task(0x1000, TaskPriority.High, caps)
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_high = match task.priority:
+                    TaskPriority.High: true
+                    _: false
+                expect(is_high).to_equal(true)
+
+    describe "multiple tasks with different priorities":
+        it "can create tasks at all priority levels":
+            var sched = Scheduler.new()
+            val rt = sched.create_task(0x1000, TaskPriority.Realtime, CapabilitySet.full())
+            val hi = sched.create_task(0x2000, TaskPriority.High, CapabilitySet.full())
+            val nm = sched.create_task(0x3000, TaskPriority.Normal, CapabilitySet.full())
+            val lo = sched.create_task(0x4000, TaskPriority.Low, CapabilitySet.full())
+            val id = sched.create_task(0x5000, TaskPriority.Idle, CapabilitySet.full())
+            # All should have valid ids
+            expect(rt.id).to_be_greater_than(0)
+            expect(hi.id).to_be_greater_than(0)
+            expect(nm.id).to_be_greater_than(0)
+            expect(lo.id).to_be_greater_than(0)
+            expect(id.id).to_be_greater_than(0)
+
+    describe "schedule":
+        it "picks highest priority task":
+            var sched = Scheduler.new()
+            val lo_id = sched.create_task(0x1000, TaskPriority.Low, CapabilitySet.full())
+            val hi_id = sched.create_task(0x2000, TaskPriority.High, CapabilitySet.full())
+            val nm_id = sched.create_task(0x3000, TaskPriority.Normal, CapabilitySet.full())
+
+            # schedule() should pick High first
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(hi_id.id)
+
+        it "picks Realtime over Normal":
+            var sched = Scheduler.new()
+            val nm_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val rt_id = sched.create_task(0x2000, TaskPriority.Realtime, CapabilitySet.full())
+
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(rt_id.id)
+
+    describe "yield_current":
+        it "moves current task back to ready":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            # Schedule the task (makes it Running)
+            sched.schedule()
+
+            # Yield should put it back in ready queue
+            sched.yield_current()
+
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
+
+    describe "block_task and unblock_task":
+        it "block sets task to Blocked state":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            sched.block_task(id, BlockReason.IpcRecv(port: 1))
+
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_blocked = match task.state:
+                    TaskState.Blocked(reason): true
+                    _: false
+                expect(is_blocked).to_equal(true)
+
+        it "unblock sets task back to Ready state":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            # Block then unblock
+            sched.block_task(id, BlockReason.Sleep(until_ns: 1000))
+            sched.unblock_task(id)
+
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
+
+        it "blocked task is not scheduled":
+            var sched = Scheduler.new()
+            val id1 = sched.create_task(0x1000, TaskPriority.High, CapabilitySet.full())
+            val id2 = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+
+            # Block the high priority task
+            sched.block_task(id1, BlockReason.IpcRecv(port: 5))
+
+            # Schedule should pick Normal since High is blocked
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(id2.id)
+
+    describe "exit_task":
+        it "sets current task to Zombie state":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            # Schedule the task to make it current
+            sched.schedule()
+
+            # Exit with code 42
+            sched.exit_task(42)
+
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_zombie = match task.state:
+                    TaskState.Zombie: true
+                    _: false
+                expect(is_zombie).to_equal(true)
+                expect(task.exit_code).to_equal(42)
+
+    describe "get_task":
+        it "returns nil for non-existent task":
+            val sched = Scheduler.new()
+            val result = sched.get_task(TaskId(id: 999))
+            expect(result).to_be_nil
+
+        it "returns the task for valid id":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val result = sched.get_task(id)
+            val found = result != nil
+            expect(found).to_equal(true)

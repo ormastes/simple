@@ -1,0 +1,395 @@
+# Element operations — attribute manipulation, class list, HTML serialization,
+# and element classification helpers.
+# All functions operate on a Document (which owns the NodeStore) by node ID.
+
+use examples.browser.entity.dom.node_types
+use examples.browser.entity.dom.attribute_types
+use examples.browser.feature.dom.document
+
+# --- ElementOps — stateless helper for element-centric DOM operations ---------
+
+class ElementOps:
+    pass_dn
+
+    # --- Attribute operations -------------------------------------------------
+
+    static fn getAttribute(doc: Document, node_id: i64, name: text) -> text?:
+        val el_opt = doc.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            var i = 0
+            while i < el.attributes.len():
+                val attr = el.attributes.get(i)
+                if attr.name == name:
+                    return attr.value
+                i = i + 1
+        nil
+
+    static fn setAttribute(doc: Document, node_id: i64, name: text, value: text):
+        val el_opt = doc.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            # Check if attribute already exists
+            var found = false
+            var new_attrs = List<Attr>()
+            var i = 0
+            while i < el.attributes.len():
+                val attr = el.attributes.get(i)
+                if attr.name == name:
+                    new_attrs.push(Attr(name: name, value: value, namespace: attr.namespace))
+                    found = true
+                else:
+                    new_attrs.push(attr)
+                i = i + 1
+            if not found:
+                new_attrs.push(Attr.create(name, value))
+            val updated = Element(node_id: el.node_id, tag_name: el.tag_name, attributes: new_attrs, namespace: el.namespace)
+            doc.node_store.update_element(node_id, updated)
+
+    static fn removeAttribute(doc: Document, node_id: i64, name: text):
+        val el_opt = doc.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            var new_attrs = List<Attr>()
+            var i = 0
+            while i < el.attributes.len():
+                val attr = el.attributes.get(i)
+                if attr.name != name:
+                    new_attrs.push(attr)
+                i = i + 1
+            val updated = Element(node_id: el.node_id, tag_name: el.tag_name, attributes: new_attrs, namespace: el.namespace)
+            doc.node_store.update_element(node_id, updated)
+
+    static fn hasAttribute(doc: Document, node_id: i64, name: text) -> bool:
+        val v = ElementOps.getAttribute(doc, node_id, name)
+        if val Some(_) = v:
+            return true
+        false
+
+    static fn getAttributeNames(doc: Document, node_id: i64) -> List<text>:
+        var result = List<text>()
+        val el_opt = doc.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            var i = 0
+            while i < el.attributes.len():
+                result.push(el.attributes.get(i).name)
+                i = i + 1
+        result
+
+    static fn toggleAttribute(doc: Document, node_id: i64, name: text) -> bool:
+        if ElementOps.hasAttribute(doc, node_id, name):
+            ElementOps.removeAttribute(doc, node_id, name)
+            return false
+        else:
+            ElementOps.setAttribute(doc, node_id, name, "")
+            return true
+
+    # --- Class list operations ------------------------------------------------
+
+    static fn classList(doc: Document, node_id: i64) -> DOMTokenList:
+        val cls = ElementOps.getAttribute(doc, node_id, "class")
+        if val Some(c) = cls:
+            if c.len() == 0:
+                return DOMTokenList.empty()
+            val parts = c.split(" ")
+            var tokens = List<text>()
+            var i = 0
+            while i < parts.len():
+                val part = parts.get(i)
+                if part.len() > 0:
+                    tokens.push(part)
+                i = i + 1
+            return DOMTokenList(tokens: tokens)
+        DOMTokenList.empty()
+
+    static fn classList_add(doc: Document, node_id: i64, class_name: text):
+        if ElementOps.classList_contains(doc, node_id, class_name):
+            return
+        val current = ElementOps.getAttribute(doc, node_id, "class")
+        if val Some(c) = current:
+            if c.len() == 0:
+                ElementOps.setAttribute(doc, node_id, "class", class_name)
+            else:
+                ElementOps.setAttribute(doc, node_id, "class", "{c} {class_name}")
+        else:
+            ElementOps.setAttribute(doc, node_id, "class", class_name)
+
+    static fn classList_remove(doc: Document, node_id: i64, class_name: text):
+        val tl = ElementOps.classList(doc, node_id)
+        var new_tokens = List<text>()
+        var i = 0
+        while i < tl.tokens.len():
+            val tok = tl.tokens.get(i)
+            if tok != class_name:
+                new_tokens.push(tok)
+            i = i + 1
+        if new_tokens.len() == 0:
+            ElementOps.removeAttribute(doc, node_id, "class")
+        else:
+            val joined = _join_tokens(new_tokens)
+            ElementOps.setAttribute(doc, node_id, "class", joined)
+
+    static fn classList_toggle(doc: Document, node_id: i64, class_name: text) -> bool:
+        if ElementOps.classList_contains(doc, node_id, class_name):
+            ElementOps.classList_remove(doc, node_id, class_name)
+            return false
+        else:
+            ElementOps.classList_add(doc, node_id, class_name)
+            return true
+
+    static fn classList_contains(doc: Document, node_id: i64, class_name: text) -> bool:
+        val tl = ElementOps.classList(doc, node_id)
+        var i = 0
+        while i < tl.tokens.len():
+            if tl.tokens.get(i) == class_name:
+                return true
+            i = i + 1
+        false
+
+    # --- Element properties ---------------------------------------------------
+
+    static fn tagName(doc: Document, node_id: i64) -> text:
+        val el_opt = doc.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            return el.tag_name.to_upper()
+        ""
+
+    static fn id(doc: Document, node_id: i64) -> text:
+        val v = ElementOps.getAttribute(doc, node_id, "id")
+        if val Some(id_val) = v:
+            return id_val
+        ""
+
+    static fn className(doc: Document, node_id: i64) -> text:
+        val v = ElementOps.getAttribute(doc, node_id, "class")
+        if val Some(cls) = v:
+            return cls
+        ""
+
+    static fn innerHTML(doc: Document, node_id: i64) -> text:
+        val node_opt = doc.node_store.get_node(node_id)
+        if val Some(node) = node_opt:
+            var result = ""
+            var i = 0
+            while i < node.children.len():
+                val child_html = _serialize_node(doc, node.children.get(i))
+                result = result + child_html
+                i = i + 1
+            return result
+        ""
+
+    static fn outerHTML(doc: Document, node_id: i64) -> text:
+        _serialize_node(doc, node_id)
+
+    static fn textContent(doc: Document, node_id: i64) -> text:
+        doc.get_inner_text(node_id)
+
+    # --- Element classification -----------------------------------------------
+
+    static fn is_void_element(tag: text) -> bool:
+        val t = tag.to_lower()
+        if t == "area": return true
+        if t == "base": return true
+        if t == "br": return true
+        if t == "col": return true
+        if t == "embed": return true
+        if t == "hr": return true
+        if t == "img": return true
+        if t == "input": return true
+        if t == "link": return true
+        if t == "meta": return true
+        if t == "param": return true
+        if t == "source": return true
+        if t == "track": return true
+        if t == "wbr": return true
+        false
+
+    static fn is_block_element(tag: text) -> bool:
+        val t = tag.to_lower()
+        if t == "div": return true
+        if t == "p": return true
+        if t == "h1": return true
+        if t == "h2": return true
+        if t == "h3": return true
+        if t == "h4": return true
+        if t == "h5": return true
+        if t == "h6": return true
+        if t == "ul": return true
+        if t == "ol": return true
+        if t == "li": return true
+        if t == "table": return true
+        if t == "tr": return true
+        if t == "td": return true
+        if t == "th": return true
+        if t == "thead": return true
+        if t == "tbody": return true
+        if t == "tfoot": return true
+        if t == "form": return true
+        if t == "fieldset": return true
+        if t == "blockquote": return true
+        if t == "pre": return true
+        if t == "section": return true
+        if t == "article": return true
+        if t == "aside": return true
+        if t == "nav": return true
+        if t == "header": return true
+        if t == "footer": return true
+        if t == "main": return true
+        if t == "figure": return true
+        if t == "figcaption": return true
+        if t == "details": return true
+        if t == "summary": return true
+        false
+
+    static fn is_inline_element(tag: text) -> bool:
+        val t = tag.to_lower()
+        if t == "span": return true
+        if t == "a": return true
+        if t == "em": return true
+        if t == "strong": return true
+        if t == "b": return true
+        if t == "i": return true
+        if t == "u": return true
+        if t == "s": return true
+        if t == "small": return true
+        if t == "sub": return true
+        if t == "sup": return true
+        if t == "code": return true
+        if t == "kbd": return true
+        if t == "var": return true
+        if t == "abbr": return true
+        if t == "cite": return true
+        if t == "q": return true
+        if t == "mark": return true
+        if t == "time": return true
+        if t == "label": return true
+        if t == "img": return true
+        if t == "br": return true
+        false
+
+    static fn is_formatting_element(tag: text) -> bool:
+        val t = tag.to_lower()
+        if t == "b": return true
+        if t == "big": return true
+        if t == "code": return true
+        if t == "em": return true
+        if t == "font": return true
+        if t == "i": return true
+        if t == "nobr": return true
+        if t == "s": return true
+        if t == "small": return true
+        if t == "strike": return true
+        if t == "strong": return true
+        if t == "tt": return true
+        if t == "u": return true
+        false
+
+    static fn is_raw_text_element(tag: text) -> bool:
+        val t = tag.to_lower()
+        if t == "script": return true
+        if t == "style": return true
+        false
+
+    static fn is_html_namespace(namespace: text) -> bool:
+        namespace == "http://www.w3.org/1999/xhtml" or namespace == ""
+
+# --- Module-level helpers (private) -------------------------------------------
+
+fn _join_tokens(tokens: List<text>) -> text:
+    var result = ""
+    var i = 0
+    while i < tokens.len():
+        if i > 0:
+            result = result + " "
+        result = result + tokens.get(i)
+        i = i + 1
+    result
+
+fn _serialize_node(doc: Document, node_id: i64) -> text:
+    val node_opt = doc.node_store.get_node(node_id)
+    if val Some(node) = node_opt:
+        match node.kind:
+            NodeKind.Text:
+                val t = doc.node_store.get_text(node_id)
+                if val Some(tn) = t:
+                    return _escape_html(tn.content)
+                return _escape_html(node.data)
+            NodeKind.Comment:
+                val c = doc.node_store.get_comment(node_id)
+                if val Some(cm) = c:
+                    return "<!--{cm.content}-->"
+                return "<!--{node.data}-->"
+            NodeKind.Element:
+                return _serialize_element(doc, node_id, node)
+            NodeKind.DocumentFragment:
+                var result = ""
+                var i = 0
+                while i < node.children.len():
+                    result = result + _serialize_node(doc, node.children.get(i))
+                    i = i + 1
+                return result
+            _:
+                return ""
+    ""
+
+fn _serialize_element(doc: Document, node_id: i64, node: DomNode) -> text:
+    val el_opt = doc.node_store.get_element(node_id)
+    if val Some(el) = el_opt:
+        val tag = el.tag_name
+        var result = "<{tag}"
+
+        # Serialize attributes
+        var ai = 0
+        while ai < el.attributes.len():
+            val attr = el.attributes.get(ai)
+            val escaped_val = _escape_attr(attr.value)
+            result = result + " {attr.name}=\"{escaped_val}\""
+            ai = ai + 1
+
+        # Void elements: self-closing
+        if ElementOps.is_void_element(tag):
+            result = result + ">"
+            return result
+
+        result = result + ">"
+
+        # Serialize children
+        var ci = 0
+        while ci < node.children.len():
+            result = result + _serialize_node(doc, node.children.get(ci))
+            ci = ci + 1
+
+        result = result + "</{tag}>"
+        return result
+    ""
+
+fn _escape_html(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "&":
+            result = result + "&amp;"
+        else if ch == "<":
+            result = result + "&lt;"
+        else if ch == ">":
+            result = result + "&gt;"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _escape_attr(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "&":
+            result = result + "&amp;"
+        else if ch == "\"":
+            result = result + "&quot;"
+        else if ch == "<":
+            result = result + "&lt;"
+        else if ch == ">":
+            result = result + "&gt;"
+        else:
+            result = result + ch
+        i = i + 1
+    result

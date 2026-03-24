@@ -1,0 +1,254 @@
+# Structural Subtyping — System Tests
+#
+# Feature 6: Structural Subtyping
+# A struct with all fields of another struct satisfies it without explicit
+# declaration (Go-style duck typing at the type level).
+# An ExtendedRepo with extra fields can be passed where OrderRepoPort is expected.
+#
+# Implementation status: Runtime duck-types struct field access by name.
+# The runtime type_check_value function enforces structural compatibility:
+# - Structs with all required fields satisfy the expected type
+# - Structs with extra fields beyond the port are still accepted
+
+describe "Structural Subtyping: Phase 1 - Basic compatibility":
+
+    it "struct with same fields is compatible":
+        struct Minimal:
+            name: text
+        struct Extended:
+            name: text
+            extra: i64
+
+        fn get_name(obj: Minimal) -> text:
+            obj.name
+
+        fn make_minimal_name() -> text: "minimal"
+        fn make_extended_name() -> text: "extended"
+
+        val m = Minimal(name: "minimal")
+        val e = Extended(name: "extended", extra: 42)
+        expect(get_name(m)).to_equal("minimal")
+        expect(get_name(e)).to_equal("extended")
+
+    it "struct field access works regardless of type name":
+        struct PortA:
+            compute_fn: fn(i64) -> i64
+        struct PortB:
+            compute_fn: fn(i64) -> i64
+            extra_fn: fn() -> text
+
+        fn double(x: i64) -> i64: x * 2
+        fn get_info() -> text: "info"
+
+        val b = PortB(compute_fn: double, extra_fn: get_info)
+        val f = b.compute_fn
+        expect(f(5)).to_equal(10)
+
+    it "extended struct can be passed to function expecting base struct":
+        struct BasePort:
+            save_fn: fn(text) -> bool
+            find_fn: fn(text) -> text
+
+        struct ExtendedRepo:
+            save_fn: fn(text) -> bool
+            find_fn: fn(text) -> text
+            count_fn: fn() -> i64
+
+        fn process_base(repo: BasePort) -> text:
+            val f = repo.find_fn
+            f("item-42")
+
+        fn do_save(x: text) -> bool: true
+        fn do_find(x: text) -> text: "ext:" + x
+        fn do_count() -> i64: 0
+
+        val extended = ExtendedRepo(
+            save_fn: do_save,
+            find_fn: do_find,
+            count_fn: do_count
+        )
+        val result = process_base(extended)
+        expect(result).to_equal("ext:item-42")
+
+    it "exact type match still works after structural subtyping support":
+        struct ExactPort:
+            value_fn: fn() -> i64
+
+        fn get_value(p: ExactPort) -> i64:
+            val f = p.value_fn
+            f()
+
+        fn return_42() -> i64: 42
+        val port = ExactPort(value_fn: return_42)
+        val result = get_value(port)
+        expect(result).to_equal(42)
+
+describe "Structural Subtyping: Phase 2 - Port satisfaction":
+
+    it "extended repo satisfies order repo port fields":
+        struct OrderRepoPort:
+            save_fn: fn(text) -> bool
+            find_fn: fn(text) -> text
+
+        struct ExtendedOrderRepo:
+            save_fn: fn(text) -> bool
+            find_fn: fn(text) -> text
+            count_fn: fn() -> i64
+
+        fn always_save(order: text) -> bool: true
+        fn find_by_id(id: text) -> text: "order:{id}"
+        fn count_all() -> i64: 99
+
+        val repo = ExtendedOrderRepo(
+            save_fn: always_save,
+            find_fn: find_by_id,
+            count_fn: count_all
+        )
+
+        val sf = repo.save_fn
+        val ff = repo.find_fn
+        expect(sf("order1")).to_equal(true)
+        expect(ff("123")).to_equal("order:123")
+
+    it "structural subtyping works for multiple struct params":
+        struct LogPort:
+            log_fn: fn(text)
+
+        struct StoragePort:
+            store_fn: fn(text)
+
+        struct ExtendedLog:
+            log_fn: fn(text)
+            level_fn: fn() -> i64
+
+        struct ExtendedStorage:
+            store_fn: fn(text)
+            flush_fn: fn() -> bool
+
+        fn pipeline(logger: LogPort, storage: StoragePort) -> text:
+            val lf = logger.log_fn
+            lf("start")
+            val sf = storage.store_fn
+            sf("data")
+            "done"
+
+        fn do_log(msg: text): ()
+        fn do_store(d: text): ()
+        fn get_level() -> i64: 2
+        fn do_flush() -> bool: true
+
+        val ext_log = ExtendedLog(log_fn: do_log, level_fn: get_level)
+        val ext_storage = ExtendedStorage(store_fn: do_store, flush_fn: do_flush)
+        val result = pipeline(ext_log, ext_storage)
+        expect(result).to_equal("done")
+
+    it "struct with extra non-fn field satisfies port":
+        struct DataPort:
+            name: text
+            count: i64
+
+        struct RichData:
+            name: text
+            count: i64
+            extra: text
+
+        fn read_data(d: DataPort) -> text:
+            d.name + ":" + str(d.count)
+
+        val rich = RichData(name: "test", count: 5, extra: "unused")
+        val result = read_data(rich)
+        expect(result).to_equal("test:5")
+
+    it "field access on the passed structurally-compatible struct works":
+        struct ReaderPort:
+            read_fn: fn() -> text
+
+        struct FileReader:
+            read_fn: fn() -> text
+            path_fn: fn() -> text
+
+        fn do_read(r: ReaderPort) -> text:
+            val f = r.read_fn
+            f()
+
+        fn read_content() -> text: "file-content"
+        fn get_path() -> text: "/tmp/test.txt"
+
+        val reader = FileReader(
+            read_fn: read_content,
+            path_fn: get_path
+        )
+        val content = do_read(reader)
+        expect(content).to_equal("file-content")
+
+describe "Structural Subtyping: Phase 3 - System integration":
+
+    it "port-based dependency injection pattern works":
+        struct DatabasePort:
+            query_fn: fn(text) -> text
+            insert_fn: fn(text) -> bool
+
+        struct MockDatabase:
+            query_fn: fn(text) -> text
+            insert_fn: fn(text) -> bool
+            call_count: i64
+
+        fn run_service(db: DatabasePort) -> text:
+            val ins = db.insert_fn
+            ins("record1")
+            val qry = db.query_fn
+            qry("all")
+
+        fn mock_query(q: text) -> text: "mock_result_for:" + q
+        fn mock_insert(r: text) -> bool: true
+
+        val mock_db = MockDatabase(
+            query_fn: mock_query,
+            insert_fn: mock_insert,
+            call_count: 0
+        )
+        val result = run_service(mock_db)
+        expect(result).to_equal("mock_result_for:all")
+
+    it "chained structural compatibility with two levels of extension":
+        struct Level1:
+            basic_fn: fn() -> i64
+
+        struct Level2:
+            basic_fn: fn() -> i64
+            extra_fn: fn() -> text
+
+        struct Level3:
+            basic_fn: fn() -> i64
+            extra_fn: fn() -> text
+            advanced_fn: fn(i64) -> i64
+
+        fn use_level1(p: Level1) -> i64:
+            val f = p.basic_fn
+            f()
+
+        fn ret_num() -> i64: 100
+        fn ret_str() -> text: "extra"
+        fn double_it(x: i64) -> i64: x * 2
+
+        val l3 = Level3(basic_fn: ret_num, extra_fn: ret_str, advanced_fn: double_it)
+        val result = use_level1(l3)
+        expect(result).to_equal(100)
+
+    it "struct satisfies interface when passed as function argument":
+        struct Repository:
+            find_fn: fn(i64) -> text
+
+        struct UserRepository:
+            find_fn: fn(i64) -> text
+            name: text
+
+        fn find_user(repo: Repository, user_id: i64) -> text:
+            val f = repo.find_fn
+            f(user_id)
+
+        fn lookup_user(id: i64) -> text: "user_" + str(id)
+
+        val user_repo = UserRepository(find_fn: lookup_user, name: "users")
+        val result = find_user(user_repo, 42)
+        expect(result).to_equal("user_42")

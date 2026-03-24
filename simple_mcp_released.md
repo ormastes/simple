@@ -1,6 +1,7 @@
 # Simple MCP Release Guide
 
-This repository now ships a releasable Claude Code plugin bundle for `simple-mcp`.
+This repository ships a Claude Code plugin bundle for `simple-mcp` that is
+intended to be used from a Simple repository checkout.
 
 ## What Was Added
 
@@ -38,19 +39,26 @@ claude plugin marketplace add tools/claude-plugin/marketplace
 claude plugin install simple-mcp@simple-local
 ```
 
-## Direct Release Asset Install
+## Release Asset Semantics
 
-Download the tarball from the GitHub release and extract it into a Claude plugin directory:
+The `simple-mcp-claude-plugin-<version>.tar.gz` asset is a plugin metadata
+bundle for repo-based installation. It is not a standalone portable runtime
+bundle.
+
+The extracted bundle still expects to run from a Simple repository root that
+contains:
+
+- `bin/simple_mcp_server`
+- `bin/release/simple` or a platform release runtime
+- `src/app/mcp/main.spl`
+
+If you want to use `simple-mcp` without the Claude plugin bundle, register the
+MCP server directly from a repository checkout:
 
 ```bash
-curl -LO https://github.com/ormastes/simple/releases/download/v0.9.2/simple-mcp-claude-plugin-0.9.2.tar.gz
-tar -xzf simple-mcp-claude-plugin-0.9.2.tar.gz
-```
-
-The bundle contains `.mcp.json` configured to run:
-
-```bash
-bin/simple_mcp_server
+claude mcp add simple-mcp -- \
+  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/src/app/mcp/main.spl
 ```
 
 ## Release Procedure

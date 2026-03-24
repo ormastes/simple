@@ -1,0 +1,370 @@
+"""
+# Mixin Feature Specification
+
+## Overview
+Mixins provide a way to compose behavior into classes without using inheritance.
+They support:
+- Field and method composition
+- Generic type parameters with inference
+- Trait bounds and constraints
+- Required methods that targets must implement
+- Multiple mixin application
+
+## Syntax
+```simple
+mixin MixinName<T> where T: Trait {
+    field: Type
+    
+    fn method(arg: T) -> Result {
+        // implementation
+    }
+    
+    fn required_method() -> Type;  // Must be implemented by target
+}
+
+class Target with Mixin1, Mixin2<Type> {
+    // class body
+}
+```
+"""
+
+## Test: Basic Mixin Declaration
+
+"""
+### Scenario: Declare a simple mixin with fields
+
+A mixin can declare fields that will be added to any class that uses it.
+The mixin syntax follows:
+```
+mixin Name:
+    field_name: Type
+```
+"""
+mixin Timestamp:
+    created_at: i64
+    updated_at: i64
+
+test "Timestamp mixin has correct fields":
+    # This would be verified by the compiler's AST
+    assert_compiles()
+
+## Test: Mixin with Methods
+
+"""
+### Scenario: Mixin with instance methods
+
+Mixins can define methods that operate on `self` and access mixin fields.
+These methods become available on any class that applies the mixin.
+"""
+mixin Auditable:
+    created_by: str
+    modified_by: str
+    
+    fn record_creation(user: str):
+        self.created_by = user
+    
+    fn record_modification(user: str):
+        self.modified_by = user
+
+test "Auditable mixin methods compile":
+    assert_compiles()
+
+## Test: Generic Mixin
+
+"""
+### Scenario: Generic mixin with type parameter
+
+Mixins support generic type parameters that are unified with concrete types
+when applied to a class. The type parameter `T` is inferred from usage.
+
+```
+mixin Cache<T>:
+    cache: HashMap<str, T>
+```
+"""
+mixin Cache<T>:
+    cache_data: Map<str, T>
+    
+    fn get_cached(key: str) -> Option<T>:
+        return self.cache_data.get(key)
+    
+    fn set_cache(key: str, value: T):
+        self.cache_data.insert(key, value)
+
+test "Generic mixin with type parameter":
+    assert_compiles()
+
+## Test: Mixin Application
+
+"""
+### Scenario: Apply mixin to a class
+
+The `with` keyword applies one or more mixins to a class:
+```
+class MyClass with Mixin1, Mixin2:
+    # class body
+```
+
+All mixin fields and methods become available on the class.
+"""
+class User:
+    id: i64
+    name: str
+
+class UserWithTimestamp with Timestamp:
+    id: i64
+    name: str
+
+test "Class can apply mixin":
+    val user = UserWithTimestamp { id: 1, name: "Alice", created_at: 0, updated_at: 0 }
+    assert user.created_at == 0
+
+## Test: Multiple Mixin Application
+
+"""
+### Scenario: Apply multiple mixins to one class
+
+A class can apply multiple mixins by listing them after `with`:
+```
+class MyClass with Mixin1, Mixin2, Mixin3:
+    # body
+```
+"""
+class AuditedUser with Timestamp, Auditable:
+    id: i64
+    name: str
+
+test "Class can apply multiple mixins":
+    val user = AuditedUser {
+        id: 1,
+        name: "Bob",
+        created_at: 0,
+        updated_at: 0,
+        created_by: "admin",
+        modified_by: "admin"
+    }
+    assert user.created_at == 0
+    assert user.created_by == "admin"
+
+## Test: Generic Mixin Application
+
+"""
+### Scenario: Apply generic mixin with concrete type
+
+When applying a generic mixin, type parameters can be specified explicitly:
+```
+class MyClass with Cache<User>:
+    # T is unified with User
+```
+"""
+class UserService with Cache<User>:
+    users: List<User>
+
+test "Generic mixin application with concrete type":
+    val service = UserService { cache_data: Map::new(), users: List::new() }
+    val user = User { id: 1, name: "Charlie" }
+    service.set_cache("1", user)
+    assert_compiles()
+
+## Test: Mixin with Trait Bounds
+
+"""
+### Scenario: Mixin with trait requirements
+
+Mixins can require that the type parameter or target class implements
+specific traits using `where` clauses:
+```
+mixin Serializable<T> where T: Serialize + Deserialize:
+    # methods
+```
+"""
+trait Serialize:
+    fn serialize() -> str
+
+mixin JsonMixin<T> where T: Serialize:
+    fn to_json() -> str:
+        return self.serialize()
+
+test "Mixin with trait bounds compiles":
+    assert_compiles()
+
+## Test: Required Methods
+
+"""
+### Scenario: Mixin with required methods
+
+A mixin can declare required methods (without implementation) that must
+be provided by the target class:
+```
+mixin Repository<T>:
+    fn table_name() -> str;  # Required - no body
+    
+    fn find_by_id(id: i64) -> Option<T>:
+        val table = self.table_name()
+        # use table in query
+```
+"""
+mixin Repository<T>:
+    fn table_name() -> str;
+    
+    fn find_all() -> List<T>:
+        val table = self.table_name()
+        return fetch_from_db(table)
+
+class UserRepository with Repository<User>:
+    fn table_name() -> str:
+        return "users"
+
+test "Mixin with required method":
+    val repo = UserRepository {}
+    assert repo.table_name() == "users"
+
+## Test: Mixin Field Access
+
+"""
+### Scenario: Access mixin fields from class method
+
+Methods in the target class can access fields provided by mixins:
+"""
+class TimestampedEntity with Timestamp:
+    id: i64
+    
+    fn get_age() -> i64:
+        return current_time() - self.created_at
+
+test "Class method accesses mixin field":
+    assert_compiles()
+
+## Test: Mixin Method Call
+
+"""
+### Scenario: Call mixin methods from class method
+
+Methods in the target class can call methods provided by mixins:
+"""
+class CachedUserService with Cache<User>:
+    fn load_user(id: str) -> Option<User>:
+        # Try cache first
+        if val Some(user) = self.get_cached(id):
+            return Some(user)
+        # Load from database
+        val user = load_from_db(id)
+        self.set_cache(id, user)
+        return Some(user)
+
+test "Class method calls mixin method":
+    assert_compiles()
+
+## Test: Type Inference with Mixins
+
+"""
+### Scenario: Type inference for mixin fields and methods
+
+The type system should infer types for:
+- Mixin field accesses
+- Mixin method return types
+- Generic type parameter unification
+"""
+class InferredService with Cache<User>, Timestamp:
+    pass
+
+test "Type inference with mixins":
+    val service = InferredService { cache_data: Map::new(), created_at: 0, updated_at: 0 }
+    # Infer that get_cached returns Option<User>
+    val cached = service.get_cached("1")
+    # Infer that created_at is i64
+    val time: i64 = service.created_at
+    assert_compiles()
+
+## Test: Mixin Composition
+
+"""
+### Scenario: Mixin can apply another mixin
+
+Mixins themselves can apply other mixins, creating composition:
+```
+mixin AuditLog with Timestamp:
+    # inherits created_at, updated_at from Timestamp
+    modified_by: str
+```
+"""
+mixin AuditLog with Timestamp:
+    audit_user: str
+    
+    fn log_change(user: str):
+        self.audit_user = user
+        self.updated_at = current_time()
+
+test "Mixin composition":
+    assert_compiles()
+
+## Test: Mixin Field Conflict Detection
+
+"""
+### Scenario: Detect field name conflicts
+
+If two mixins define the same field name, or a mixin field conflicts
+with a class field, the compiler should report an error.
+"""
+mixin HasId:
+    id: i64
+
+class ConflictingClass with HasId:
+    id: str  # Conflict: different type
+
+test "Field conflict is detected":
+    assert_fails_with("field 'id' conflicts")
+
+## Test: Mixin Method Conflict Detection
+
+"""
+### Scenario: Detect method name conflicts
+
+If two mixins define methods with the same name, the compiler should
+report an ambiguity error.
+"""
+mixin Logger1:
+    fn log(msg: str):
+        print("Logger1: " + msg)
+
+mixin Logger2:
+    fn log(msg: str):
+        print("Logger2: " + msg)
+
+class ConflictingLogger with Logger1, Logger2:
+    pass
+
+test "Method conflict is detected":
+    assert_fails_with("method 'log' is ambiguous")
+
+## Helper Types and Functions
+
+struct Map<K, V>:
+    static fn new() -> Map<K, V>:
+        return Map {}
+    
+    fn get(key: K) -> Option<V>:
+        return None
+    
+    fn insert(key: K, value: V):
+        pass
+
+struct List<T>:
+    static fn new() -> List<T>:
+        return List {}
+
+fn current_time() -> i64:
+    return 1234567890
+
+fn fetch_from_db<T>(table: str) -> List<T>:
+    return List::new()
+
+fn load_from_db(id: str) -> User:
+    return User { id: 0, name: "Unknown" }
+
+# Test assertion helpers
+fn assert_compiles():
+    pass
+
+fn assert_fails_with(msg: str):
+    pass

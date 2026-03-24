@@ -1,0 +1,188 @@
+# Framebuffer Driver — Pixel Rendering on Limine Framebuffer
+#
+# MDSOC: feature dimension, drivers layer
+# Input: BootOutputPort.framebuffer (address, width, height, pitch, bpp)
+# Provides: fill_rect, draw_char, blit, swap_buffers
+#
+# Uses double buffering: draw to back buffer, swap to front on vsync.
+
+use os.kernel.boot.ports.{FramebufferInfo}
+use os.kernel.boot.mmio.{mmio_write32}
+
+# ============================================================================
+# Color
+# ============================================================================
+
+struct Color:
+    """32-bit ARGB color."""
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+
+impl Color:
+    fn to_u32() -> u32:
+        """Convert to 32-bit ARGB pixel value."""
+        (self.a.to_u32() << 24) | (self.r.to_u32() << 16) |
+        (self.g.to_u32() << 8) | self.b.to_u32()
+
+    static fn rgb(r: u8, g: u8, b: u8) -> Color:
+        Color(r: r, g: g, b: b, a: 255)
+
+    static fn black() -> Color: Color.rgb(0, 0, 0)
+    static fn white() -> Color: Color.rgb(255, 255, 255)
+    static fn red() -> Color: Color.rgb(255, 0, 0)
+    static fn green() -> Color: Color.rgb(0, 255, 0)
+    static fn blue() -> Color: Color.rgb(0, 0, 255)
+    static fn gray() -> Color: Color.rgb(128, 128, 128)
+    static fn dark_gray() -> Color: Color.rgb(64, 64, 64)
+    static fn light_gray() -> Color: Color.rgb(192, 192, 192)
+
+# ============================================================================
+# Framebuffer Driver
+# ============================================================================
+
+class FramebufferDriver:
+    """Double-buffered framebuffer driver.
+
+    Draws to back buffer, swaps to front via memcpy.
+    Front buffer is the actual hardware framebuffer from Limine.
+    """
+    front_addr: u64         # Hardware framebuffer address (from Limine)
+    back_buffer: [u32]      # Software back buffer
+    width: u32
+    height: u32
+    pitch: u32              # Bytes per scanline
+    bpp: u32                # Bits per pixel
+    dirty: bool             # Back buffer has changes
+
+impl FramebufferDriver:
+    static fn from_boot_info(fb: FramebufferInfo) -> FramebufferDriver:
+        """Create driver from Limine framebuffer info."""
+        val pixel_count = fb.width * fb.height
+        var back: [u32] = []
+        var i: u32 = 0
+        while i < pixel_count:
+            back.push(0)
+            i = i + 1
+
+        FramebufferDriver(
+            front_addr: fb.addr.addr,
+            back_buffer: back,
+            width: fb.width,
+            height: fb.height,
+            pitch: fb.pitch,
+            bpp: fb.bpp,
+            dirty: false
+        )
+
+    me put_pixel(x: u32, y: u32, color: Color):
+        """Set a single pixel in the back buffer."""
+        if x >= self.width or y >= self.height:
+            return
+        val index = y * self.width + x
+        self.back_buffer[index] = color.to_u32()
+        self.dirty = true
+
+    me fill_rect(x: u32, y: u32, w: u32, h: u32, color: Color):
+        """Fill a rectangle in the back buffer."""
+        val pixel = color.to_u32()
+        var row: u32 = 0
+        while row < h:
+            val py = y + row
+            if py >= self.height:
+                return
+            var col: u32 = 0
+            while col < w:
+                val px = x + col
+                if px < self.width:
+                    val index = py * self.width + px
+                    self.back_buffer[index] = pixel
+                col = col + 1
+            row = row + 1
+        self.dirty = true
+
+    me draw_char_8x16(x: u32, y: u32, ch: u8, fg: Color, bg: Color):
+        """Draw a single character using built-in 8x16 bitmap font.
+
+        Each character is 8 pixels wide, 16 pixels tall.
+        Font data from VGA ROM bitmap (PSF format).
+        """
+        val glyph = get_glyph_8x16(ch)
+        var row: u32 = 0
+        while row < 16:
+            val bits = glyph[row]
+            var col: u32 = 0
+            while col < 8:
+                val mask = 0x80 >> col
+                val color = if (bits & mask) != 0: fg else: bg
+                me put_pixel(x + col, y + row, color)
+                col = col + 1
+            row = row + 1
+
+    me draw_text(x: u32, y: u32, text_str: text, fg: Color, bg: Color):
+        """Draw a text string using 8x16 font."""
+        var cx = x
+        for ch in text_str:
+            me draw_char_8x16(cx, y, ch.to_u8(), fg, bg)
+            cx = cx + 8
+
+    me swap_buffers():
+        """Copy back buffer to front (hardware framebuffer)."""
+        if not self.dirty:
+            return
+        # Copy pixel by pixel via MMIO writes
+        var i: u32 = 0
+        val total = self.width * self.height
+        while i < total:
+            val addr = self.front_addr + (i * 4).to_u64()
+            mmio_write32(addr, self.back_buffer[i])
+            i = i + 1
+        self.dirty = false
+
+    me clear(color: Color):
+        """Clear entire back buffer."""
+        val pixel = color.to_u32()
+        var i: u32 = 0
+        val total = self.width * self.height
+        while i < total:
+            self.back_buffer[i] = pixel
+            i = i + 1
+        self.dirty = true
+
+    fn pixel_count() -> u32:
+        self.width * self.height
+
+# ============================================================================
+# VGA 8x16 Bitmap Font (stub — first 128 ASCII glyphs)
+# ============================================================================
+
+fn get_glyph_8x16(ch: u8) -> [u8]:
+    """Return 16-byte glyph bitmap for ASCII character.
+
+    Each byte represents one row (MSB = leftmost pixel).
+    Full font table would be 128 * 16 = 2048 bytes.
+    """
+    # Space (0x20)
+    if ch == 0x20:
+        return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+    # 'A' (0x41)
+    if ch == 0x41:
+        return [0x00, 0x00, 0x10, 0x38, 0x6C, 0xC6, 0xC6, 0xFE,
+                0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
+
+    # 'B' (0x42)
+    if ch == 0x42:
+        return [0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x66,
+                0x66, 0x66, 0x66, 0xFC, 0x00, 0x00, 0x00, 0x00]
+
+    # 'S' for "SimpleOS"
+    if ch == 0x53:
+        return [0x00, 0x00, 0x3C, 0x66, 0x66, 0x30, 0x18, 0x0C,
+                0x06, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00, 0x00]
+
+    # Default: filled block for unknown chars
+    [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]

@@ -1,0 +1,893 @@
+# CSS Parser producing CSSOM from a CssToken stream.
+# Implements CSS Syntax Level 3 (W3C CR) section 5 "Parsing" plus
+# Selectors Level 4 for selector grammar.
+#
+# Produces CSSRule values referencing types from css_types.spl:
+#   CSSRule, CSSDeclaration, CSSValue, Selector, SelectorPart, Specificity.
+#
+# Supports: rule lists, compound selectors with combinators,
+# attribute selectors, pseudo-classes/elements, declaration blocks
+# with !important, color values (hex, rgb/rgba, named), lengths,
+# percentages, functions, keyword values, and specificity calculation.
+#
+# Spec references:
+#   https://www.w3.org/TR/css-syntax-3/#parsing
+#   https://www.w3.org/TR/selectors-4/
+
+use examples.browser.entity.dom.css_types.CSSValue
+use examples.browser.entity.dom.css_types.CSSDeclaration
+use examples.browser.entity.dom.css_types.CSSRule
+use examples.browser.entity.dom.css_types.Selector
+use examples.browser.entity.dom.css_types.SelectorPart
+use examples.browser.entity.dom.css_types.Specificity
+use examples.browser.shared.error.BrowserResult
+use examples.browser.shared.error.BrowserError
+use examples.browser.shared.error.BrowserErrorKind
+use examples.browser.shared.error.parse_error
+use examples.browser.shared.logging.Logger
+use examples.browser.feature.parser.css_tokenizer.CssToken
+use examples.browser.feature.parser.css_tokenizer.CssTokenizer
+
+# ---------- Named color map ----------
+
+fn named_color_to_rgb(name: text) -> CSSValue?:
+    val lower = name.to_lower()
+    if lower == "black":
+        return CSSValue.Color(r: 0, g: 0, b: 0, a: 255)
+    if lower == "white":
+        return CSSValue.Color(r: 255, g: 255, b: 255, a: 255)
+    if lower == "red":
+        return CSSValue.Color(r: 255, g: 0, b: 0, a: 255)
+    if lower == "green":
+        return CSSValue.Color(r: 0, g: 128, b: 0, a: 255)
+    if lower == "blue":
+        return CSSValue.Color(r: 0, g: 0, b: 255, a: 255)
+    if lower == "yellow":
+        return CSSValue.Color(r: 255, g: 255, b: 0, a: 255)
+    if lower == "cyan" or lower == "aqua":
+        return CSSValue.Color(r: 0, g: 255, b: 255, a: 255)
+    if lower == "magenta" or lower == "fuchsia":
+        return CSSValue.Color(r: 255, g: 0, b: 255, a: 255)
+    if lower == "orange":
+        return CSSValue.Color(r: 255, g: 165, b: 0, a: 255)
+    if lower == "purple":
+        return CSSValue.Color(r: 128, g: 0, b: 128, a: 255)
+    if lower == "gray" or lower == "grey":
+        return CSSValue.Color(r: 128, g: 128, b: 128, a: 255)
+    if lower == "silver":
+        return CSSValue.Color(r: 192, g: 192, b: 192, a: 255)
+    if lower == "navy":
+        return CSSValue.Color(r: 0, g: 0, b: 128, a: 255)
+    if lower == "teal":
+        return CSSValue.Color(r: 0, g: 128, b: 128, a: 255)
+    if lower == "olive":
+        return CSSValue.Color(r: 128, g: 128, b: 0, a: 255)
+    if lower == "maroon":
+        return CSSValue.Color(r: 128, g: 0, b: 0, a: 255)
+    if lower == "lime":
+        return CSSValue.Color(r: 0, g: 255, b: 0, a: 255)
+    if lower == "transparent":
+        return CSSValue.Color(r: 0, g: 0, b: 0, a: 0)
+    nil
+
+# ---------- Hex color helpers ----------
+
+fn hex_char_value(c: text) -> i64:
+    val code = c.char_code_at(0)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 65 and code <= 70:
+        return code - 55
+    if code >= 97 and code <= 102:
+        return code - 87
+    0
+
+fn parse_hex_color(hex: text) -> CSSValue?:
+    val len = hex.len()
+    if len == 3:
+        val r = hex_char_value(hex.char_at(0))
+        val g = hex_char_value(hex.char_at(1))
+        val b = hex_char_value(hex.char_at(2))
+        return CSSValue.Color(r: r * 17, g: g * 17, b: b * 17, a: 255)
+    if len == 4:
+        val r = hex_char_value(hex.char_at(0))
+        val g = hex_char_value(hex.char_at(1))
+        val b = hex_char_value(hex.char_at(2))
+        val a = hex_char_value(hex.char_at(3))
+        return CSSValue.Color(r: r * 17, g: g * 17, b: b * 17, a: a * 17)
+    if len == 6:
+        val r = hex_char_value(hex.char_at(0)) * 16 + hex_char_value(hex.char_at(1))
+        val g = hex_char_value(hex.char_at(2)) * 16 + hex_char_value(hex.char_at(3))
+        val b = hex_char_value(hex.char_at(4)) * 16 + hex_char_value(hex.char_at(5))
+        return CSSValue.Color(r: r, g: g, b: b, a: 255)
+    if len == 8:
+        val r = hex_char_value(hex.char_at(0)) * 16 + hex_char_value(hex.char_at(1))
+        val g = hex_char_value(hex.char_at(2)) * 16 + hex_char_value(hex.char_at(3))
+        val b = hex_char_value(hex.char_at(4)) * 16 + hex_char_value(hex.char_at(5))
+        val a = hex_char_value(hex.char_at(6)) * 16 + hex_char_value(hex.char_at(7))
+        return CSSValue.Color(r: r, g: g, b: b, a: a)
+    nil
+
+# ---------- Specificity ----------
+
+fn calculate_specificity(selector: Selector) -> Specificity:
+    var ids = 0
+    var classes = 0
+    var elements = 0
+    for part in selector.parts:
+        match part:
+            SelectorPart.Id(name: _):
+                ids = ids + 1
+            SelectorPart.Class(name: _):
+                classes = classes + 1
+            SelectorPart.Attribute(name: _, op: _, value: _):
+                classes = classes + 1
+            SelectorPart.PseudoClass(name: _):
+                classes = classes + 1
+            SelectorPart.Type(name: _):
+                elements = elements + 1
+            SelectorPart.PseudoElement(name: _):
+                elements = elements + 1
+            SelectorPart.Universal:
+                pass_dn
+            SelectorPart.Combinator(kind: _):
+                pass_dn
+    Specificity.create(ids, classes, elements)
+
+# ---------- Parser class ----------
+
+class CssParser:
+    tokenizer: CssTokenizer
+    current: CssToken
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> CssParser:
+        var tok = CssTokenizer.new(input, logger)
+        val first = tok.next_token()
+        CssParser(tokenizer: tok, current: first, logger: logger)
+
+    me advance() -> CssToken:
+        val prev = self.current
+        self.current = self.tokenizer.next_token()
+        prev
+
+    me skip_whitespace():
+        while true:
+            match self.current:
+                CssToken.Whitespace:
+                    self.advance()
+                _:
+                    break
+
+    me expect(token_type: text) -> BrowserResult<CssToken>:
+        val tok = self.current
+        val matches = self._token_matches(tok, token_type)
+        if matches:
+            self.advance()
+            return Ok(tok)
+        val msg = "Expected {token_type}, got unexpected token"
+        self.logger.warn(msg)
+        Err(parse_error(msg))
+
+    fn _token_matches(tok: CssToken, token_type: text) -> bool:
+        match tok:
+            CssToken.OpenBrace:
+                return token_type == "{"
+            CssToken.CloseBrace:
+                return token_type == "}"
+            CssToken.OpenParen:
+                return token_type == "("
+            CssToken.CloseParen:
+                return token_type == ")"
+            CssToken.OpenBracket:
+                return token_type == "["
+            CssToken.CloseBracket:
+                return token_type == "]"
+            CssToken.Colon:
+                return token_type == ":"
+            CssToken.Semicolon:
+                return token_type == ";"
+            CssToken.Comma:
+                return token_type == ","
+            _:
+                return false
+
+    # ---------- Stylesheet parsing ----------
+
+    me parse_stylesheet() -> List<CSSRule>:
+        var rules = List<CSSRule>()
+        self.skip_whitespace()
+        while true:
+            match self.current:
+                CssToken.Eof:
+                    break
+                CssToken.AtKeyword(value: _):
+                    # Skip at-rules for now (consume until semicolon or block)
+                    self._skip_at_rule()
+                CssToken.CdoToken:
+                    self.advance()
+                CssToken.CdcToken:
+                    self.advance()
+                _:
+                    val rule = self.parse_rule()
+                    if val Some(r) = rule:
+                        rules.push(r)
+            self.skip_whitespace()
+        rules
+
+    me _skip_at_rule():
+        self.advance()  # skip the at-keyword
+        while true:
+            match self.current:
+                CssToken.Eof:
+                    break
+                CssToken.Semicolon:
+                    self.advance()
+                    break
+                CssToken.OpenBrace:
+                    self._skip_block()
+                    break
+                _:
+                    self.advance()
+
+    me _skip_block():
+        self.advance()  # skip open brace
+        var depth = 1
+        while depth > 0:
+            match self.current:
+                CssToken.Eof:
+                    break
+                CssToken.OpenBrace:
+                    depth = depth + 1
+                    self.advance()
+                CssToken.CloseBrace:
+                    depth = depth - 1
+                    self.advance()
+                _:
+                    self.advance()
+
+    me parse_rule() -> CSSRule?:
+        val selectors = self.parse_selector_list()
+        if selectors.len() == 0:
+            # Error recovery: skip to next rule
+            self._skip_to_next_rule()
+            return nil
+        self.skip_whitespace()
+        val declarations = self.parse_declaration_block()
+        # Use first selector for simplicity; full impl would store list
+        val selector = selectors.get(0)
+        CSSRule.create(selector, declarations)
+
+    me _skip_to_next_rule():
+        while true:
+            match self.current:
+                CssToken.Eof:
+                    break
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.OpenBrace:
+                    self._skip_block()
+                    break
+                _:
+                    self.advance()
+
+    # ---------- Selector parsing ----------
+
+    me parse_selector_list() -> List<Selector>:
+        var selectors = List<Selector>()
+        self.skip_whitespace()
+        val first = self.parse_selector()
+        if first.parts.len() > 0:
+            selectors.push(first)
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    val next_sel = self.parse_selector()
+                    if next_sel.parts.len() > 0:
+                        selectors.push(next_sel)
+                _:
+                    break
+        selectors
+
+    me parse_selector() -> Selector:
+        var parts = List<SelectorPart>()
+        self.skip_whitespace()
+
+        # Parse first compound selector
+        val initial = self._parse_compound_selector()
+        for p in initial:
+            parts.push(p)
+
+        # Parse combinator + compound sequences
+        while true:
+            val comb = self.parse_combinator()
+            if comb == "":
+                break
+            parts.push(SelectorPart.Combinator(kind: comb))
+            val compound = self._parse_compound_selector()
+            if compound.len() == 0:
+                break
+            for p in compound:
+                parts.push(p)
+
+        Selector.create(parts)
+
+    me _parse_compound_selector() -> List<SelectorPart>:
+        var parts = List<SelectorPart>()
+        while true:
+            val part = self.parse_simple_selector()
+            if val Some(p) = part:
+                parts.push(p)
+            else:
+                break
+        parts
+
+    me parse_simple_selector() -> SelectorPart?:
+        match self.current:
+            CssToken.Ident(value: name):
+                self.advance()
+                return SelectorPart.Type(name: name)
+            CssToken.Delim(value: v):
+                if v == "*":
+                    self.advance()
+                    return SelectorPart.Universal
+                if v == ".":
+                    self.advance()
+                    # Expect class name
+                    match self.current:
+                        CssToken.Ident(value: class_name):
+                            self.advance()
+                            return SelectorPart.Class(name: class_name)
+                        _:
+                            self.logger.warn("Expected class name after '.'")
+                            return nil
+                return nil
+            CssToken.Hash(value: id_name, is_id: _):
+                self.advance()
+                return SelectorPart.Id(name: id_name)
+            CssToken.OpenBracket:
+                return self._parse_attribute_selector()
+            CssToken.Colon:
+                return self._parse_pseudo()
+            _:
+                return nil
+
+    me _parse_attribute_selector() -> SelectorPart?:
+        self.advance()  # consume '['
+        self.skip_whitespace()
+        var attr_name = ""
+        match self.current:
+            CssToken.Ident(value: name):
+                attr_name = name
+                self.advance()
+            _:
+                self.logger.warn("Expected attribute name in selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+
+        # Check for close bracket (presence selector)
+        match self.current:
+            CssToken.CloseBracket:
+                self.advance()
+                return SelectorPart.Attribute(name: attr_name, op: "", value: "")
+            _:
+                pass_dn
+
+        # Parse operator
+        var op = ""
+        match self.current:
+            CssToken.Delim(value: d):
+                if d == "=":
+                    op = "="
+                    self.advance()
+                else if d == "~" or d == "|" or d == "^" or d == "$" or d == "*":
+                    op = d
+                    self.advance()
+                    # Expect '=' after
+                    match self.current:
+                        CssToken.Delim(value: eq):
+                            if eq == "=":
+                                op = op + "="
+                                self.advance()
+                        _:
+                            pass_dn
+                else:
+                    self.logger.warn("Unexpected delimiter in attribute selector")
+                    self._skip_until_bracket()
+                    return nil
+            _:
+                self.logger.warn("Expected operator in attribute selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+
+        # Parse value
+        var attr_value = ""
+        match self.current:
+            CssToken.Ident(value: v):
+                attr_value = v
+                self.advance()
+            CssToken.String(value: v):
+                attr_value = v
+                self.advance()
+            _:
+                self.logger.warn("Expected value in attribute selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+        # Consume closing bracket
+        match self.current:
+            CssToken.CloseBracket:
+                self.advance()
+            _:
+                self.logger.warn("Expected ']' in attribute selector")
+
+        SelectorPart.Attribute(name: attr_name, op: op, value: attr_value)
+
+    me _skip_until_bracket():
+        while true:
+            match self.current:
+                CssToken.CloseBracket:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+    me _parse_pseudo() -> SelectorPart?:
+        self.advance()  # consume first ':'
+
+        # Check for pseudo-element (::)
+        match self.current:
+            CssToken.Colon:
+                self.advance()
+                # Pseudo-element
+                match self.current:
+                    CssToken.Ident(value: name):
+                        self.advance()
+                        return SelectorPart.PseudoElement(name: name)
+                    _:
+                        self.logger.warn("Expected pseudo-element name")
+                        return nil
+            _:
+                pass_dn
+
+        # Pseudo-class
+        match self.current:
+            CssToken.Ident(value: name):
+                self.advance()
+                return SelectorPart.PseudoClass(name: name)
+            CssToken.Function(name: fn_name):
+                self.advance()
+                # Consume function arguments (simplified: skip until closing paren)
+                var depth = 1
+                while depth > 0:
+                    match self.current:
+                        CssToken.OpenParen:
+                            depth = depth + 1
+                            self.advance()
+                        CssToken.CloseParen:
+                            depth = depth - 1
+                            self.advance()
+                        CssToken.Eof:
+                            break
+                        _:
+                            self.advance()
+                return SelectorPart.PseudoClass(name: fn_name)
+            _:
+                self.logger.warn("Expected pseudo-class name")
+                return nil
+
+    me parse_combinator() -> text:
+        # Check for whitespace (descendant combinator)
+        var had_whitespace = false
+        match self.current:
+            CssToken.Whitespace:
+                had_whitespace = true
+                self.skip_whitespace()
+            _:
+                pass_dn
+
+        # Check for explicit combinators
+        match self.current:
+            CssToken.Delim(value: v):
+                if v == ">":
+                    self.advance()
+                    self.skip_whitespace()
+                    return ">"
+                if v == "+":
+                    self.advance()
+                    self.skip_whitespace()
+                    return "+"
+                if v == "~":
+                    self.advance()
+                    self.skip_whitespace()
+                    return "~"
+                pass_dn
+            _:
+                pass_dn
+
+        # Whitespace was a descendant combinator if followed by selector start
+        if had_whitespace:
+            val is_sel_start = self._is_selector_start()
+            if is_sel_start:
+                return " "
+        ""
+
+    fn _is_selector_start() -> bool:
+        match self.current:
+            CssToken.Ident(value: _):
+                return true
+            CssToken.Hash(value: _, is_id: _):
+                return true
+            CssToken.OpenBracket:
+                return true
+            CssToken.Colon:
+                return true
+            CssToken.Delim(value: v):
+                return v == "." or v == "*"
+            _:
+                return false
+
+    # ---------- Declaration block parsing ----------
+
+    me parse_declaration_block() -> List<CSSDeclaration>:
+        var declarations = List<CSSDeclaration>()
+
+        self.skip_whitespace()
+        match self.current:
+            CssToken.OpenBrace:
+                self.advance()
+            _:
+                self.logger.warn("Expected '{' for declaration block")
+                return declarations
+
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    self.logger.warn("Unterminated declaration block")
+                    break
+                _:
+                    val decl = self.parse_declaration()
+                    if val Some(d) = decl:
+                        declarations.push(d)
+                    else:
+                        # Error recovery: skip to next semicolon or close brace
+                        self._skip_to_declaration_end()
+
+        declarations
+
+    me _skip_to_declaration_end():
+        while true:
+            match self.current:
+                CssToken.Semicolon:
+                    self.advance()
+                    break
+                CssToken.CloseBrace:
+                    break
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+    me parse_declaration() -> CSSDeclaration?:
+        self.skip_whitespace()
+
+        # Property name
+        var property = ""
+        match self.current:
+            CssToken.Ident(value: name):
+                property = name
+                self.advance()
+            _:
+                return nil
+
+        self.skip_whitespace()
+
+        # Colon
+        match self.current:
+            CssToken.Colon:
+                self.advance()
+            _:
+                self.logger.warn("Expected ':' in declaration")
+                return nil
+
+        self.skip_whitespace()
+
+        # Value
+        val value = self.parse_value()
+
+        # Check for !important
+        var important = false
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Delim(value: d):
+                if d == "!":
+                    self.advance()
+                    self.skip_whitespace()
+                    match self.current:
+                        CssToken.Ident(value: kw):
+                            if kw.to_lower() == "important":
+                                important = true
+                                self.advance()
+                        _:
+                            pass_dn
+            _:
+                pass_dn
+
+        # Consume optional semicolon
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Semicolon:
+                self.advance()
+            _:
+                pass_dn
+
+        CSSDeclaration(property: property, value: value, important: important)
+
+    # ---------- Value parsing ----------
+
+    me parse_value() -> CSSValue:
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Hash(value: hex, is_id: _):
+                return self.parse_color()
+            CssToken.Number(value: v, is_integer: _):
+                return self.parse_length()
+            CssToken.Dimension(value: v, unit: u):
+                self.advance()
+                return CSSValue.Length(v: v, unit: u)
+            CssToken.Percentage(value: v):
+                self.advance()
+                return CSSValue.Percentage(v: v)
+            CssToken.String(value: v):
+                self.advance()
+                return CSSValue.Keyword(v: v)
+            CssToken.Url(value: v):
+                self.advance()
+                return CSSValue.Url(v: v)
+            CssToken.Function(name: fn_name):
+                return self.parse_function()
+            CssToken.Ident(value: name):
+                return self._parse_ident_value()
+            _:
+                self.advance()
+                return CSSValue.Keyword(v: "unknown")
+
+    me _parse_ident_value() -> CSSValue:
+        var name = ""
+        match self.current:
+            CssToken.Ident(value: n):
+                name = n
+                self.advance()
+            _:
+                return CSSValue.Keyword(v: "unknown")
+
+        val lower = name.to_lower()
+
+        # Global keywords
+        if lower == "inherit":
+            return CSSValue.Inherit
+        if lower == "initial":
+            return CSSValue.Initial
+        if lower == "unset":
+            return CSSValue.Unset
+
+        # Named colors
+        val color = named_color_to_rgb(name)
+        if val Some(c) = color:
+            return c
+
+        # Generic keyword
+        CSSValue.Keyword(v: name)
+
+    me parse_color() -> CSSValue:
+        match self.current:
+            CssToken.Hash(value: hex, is_id: _):
+                self.advance()
+                val parsed = parse_hex_color(hex)
+                if val Some(c) = parsed:
+                    return c
+                self.logger.warn("Invalid hex color: #{hex}")
+                return CSSValue.Keyword(v: "#{hex}")
+            CssToken.Function(name: fn_name):
+                val lower = fn_name.to_lower()
+                if lower == "rgb" or lower == "rgba":
+                    return self._parse_rgb_function()
+                return self.parse_function()
+            CssToken.Ident(value: name):
+                return self._parse_ident_value()
+            _:
+                return self.parse_value()
+
+    me _parse_rgb_function() -> CSSValue:
+        self.advance()  # consume Function token
+        self.skip_whitespace()
+
+        var r = self._consume_number_value()
+        self.skip_whitespace()
+        self._skip_comma()
+        self.skip_whitespace()
+
+        var g = self._consume_number_value()
+        self.skip_whitespace()
+        self._skip_comma()
+        self.skip_whitespace()
+
+        var b = self._consume_number_value()
+        self.skip_whitespace()
+
+        var a = 255
+        # Check for alpha component
+        match self.current:
+            CssToken.Comma:
+                self.advance()
+                self.skip_whitespace()
+                val alpha_f = self._consume_float_value()
+                # Alpha is 0.0-1.0, convert to 0-255
+                a = (alpha_f * 255.0).to_i64()
+                if a < 0:
+                    a = 0
+                if a > 255:
+                    a = 255
+            _:
+                pass_dn
+
+        self.skip_whitespace()
+        # Consume closing paren
+        match self.current:
+            CssToken.CloseParen:
+                self.advance()
+            _:
+                self.logger.warn("Expected ')' after rgb/rgba")
+
+        CSSValue.Color(r: r.to_i64(), g: g.to_i64(), b: b.to_i64(), a: a)
+
+    me _consume_number_value() -> f64:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                return v
+            CssToken.Percentage(value: v):
+                self.advance()
+                # Percentage in rgb: 100% = 255
+                return (v / 100.0) * 255.0
+            _:
+                return 0.0
+
+    me _consume_float_value() -> f64:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                return v
+            CssToken.Percentage(value: v):
+                self.advance()
+                return v / 100.0
+            _:
+                return 0.0
+
+    me _skip_comma():
+        match self.current:
+            CssToken.Comma:
+                self.advance()
+            _:
+                pass_dn
+
+    me parse_length() -> CSSValue:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                # Check if followed by a unit or '%'
+                match self.current:
+                    CssToken.Ident(value: unit):
+                        self.advance()
+                        return CSSValue.Length(v: v, unit: unit)
+                    CssToken.Delim(value: d):
+                        if d == "%":
+                            self.advance()
+                            return CSSValue.Percentage(v: v)
+                        return CSSValue.Number(v: v)
+                    _:
+                        return CSSValue.Number(v: v)
+            CssToken.Dimension(value: v, unit: u):
+                self.advance()
+                return CSSValue.Length(v: v, unit: u)
+            CssToken.Percentage(value: v):
+                self.advance()
+                return CSSValue.Percentage(v: v)
+            _:
+                self.advance()
+                return CSSValue.Number(v: 0.0)
+
+    me parse_function() -> CSSValue:
+        var fn_name = ""
+        match self.current:
+            CssToken.Function(name: n):
+                fn_name = n
+                self.advance()
+            _:
+                return CSSValue.Keyword(v: "unknown")
+
+        val lower = fn_name.to_lower()
+
+        # Handle rgb/rgba specially
+        if lower == "rgb" or lower == "rgba":
+            # We already advanced past the function token, so parse args directly
+            self.skip_whitespace()
+            var r = self._consume_number_value()
+            self.skip_whitespace()
+            self._skip_comma()
+            self.skip_whitespace()
+            var g = self._consume_number_value()
+            self.skip_whitespace()
+            self._skip_comma()
+            self.skip_whitespace()
+            var b = self._consume_number_value()
+            self.skip_whitespace()
+            var a = 255
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    val alpha_f = self._consume_float_value()
+                    a = (alpha_f * 255.0).to_i64()
+                _:
+                    pass_dn
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Color(r: r.to_i64(), g: g.to_i64(), b: b.to_i64(), a: a)
+
+        # Handle url() function
+        if lower == "url":
+            var url_val = ""
+            self.skip_whitespace()
+            match self.current:
+                CssToken.String(value: v):
+                    url_val = v
+                    self.advance()
+                CssToken.Ident(value: v):
+                    url_val = v
+                    self.advance()
+                _:
+                    pass_dn
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Url(v: url_val)
+
+        # Generic function: skip arguments, return keyword
+        var depth = 1
+        while depth > 0:
+            match self.current:
+                CssToken.OpenParen:
+                    depth = depth + 1
+                    self.advance()
+                CssToken.CloseParen:
+                    depth = depth - 1
+                    self.advance()
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+        CSSValue.Keyword(v: "{fn_name}(...)")

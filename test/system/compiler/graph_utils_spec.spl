@@ -1,0 +1,308 @@
+# SSpec: Graph Utilities for Control Flow Analysis
+#
+# Comprehensive tests for CFG graph algorithms
+# Tests reachability, cycles, topological order, dominators
+
+import sspec
+import std_lib.tooling.compiler.graph_utils
+
+Feature "Block and Terminator Basics":
+
+    Scenario "Create block ID":
+        Given "an ID value"
+        val id = BlockId.new(5)
+        When "getting the value"
+        val val = id.value()
+        Then "it should be 5"
+        sspec.expect(val).to_equal(5)
+
+    Scenario "Jump has one successor":
+        Given "a Jump terminator"
+        val term = Terminator.Jump(BlockId.new(10))
+        When "getting successors"
+        val succs = term.successors()
+        Then "it should have 1 successor"
+        sspec.expect(succs.length()).to_equal(1)
+
+    Scenario "Branch has two successors":
+        Given "a Branch terminator"
+        val term = Terminator.Branch(BlockId.new(1), BlockId.new(2))
+        When "getting successors"
+        val succs = term.successors()
+        Then "it should have 2 successors"
+        sspec.expect(succs.length()).to_equal(2)
+
+    Scenario "Return has no successors":
+        Given "a Return terminator"
+        val term = Terminator.Return
+        When "getting successors"
+        val succs = term.successors()
+        Then "it should have 0 successors"
+        sspec.expect(succs.length()).to_equal(0)
+
+    Scenario "Return is terminal":
+        Given "a Return terminator"
+        val term = Terminator.Return
+        When "checking if terminal"
+        val is_term = term.is_terminal()
+        Then "it should be terminal"
+        sspec.expect(is_term).to_be_true()
+
+    Scenario "Jump is not terminal":
+        Given "a Jump terminator"
+        val term = Terminator.Jump(BlockId.new(1))
+        When "checking if terminal"
+        val is_term = term.is_terminal()
+        Then "it should not be terminal"
+        sspec.expect(is_term).to_be_false()
+
+Feature "Simple Reachability":
+
+    Scenario "Linear chain is reachable":
+        Given "a linear CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing reachable from block 0"
+        val reachable = reachable_from(cfg, BlockId.new(0))
+        Then "all 3 blocks should be reachable"
+        sspec.expect(reachable.size()).to_equal(3)
+        sspec.expect(reachable.contains(BlockId.new(0))).to_be_true()
+        sspec.expect(reachable.contains(BlockId.new(1))).to_be_true()
+        sspec.expect(reachable.contains(BlockId.new(2))).to_be_true()
+
+    Scenario "Branch reachability":
+        Given "a branching CFG: 0 branches to 1 and 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Branch(BlockId.new(1), BlockId.new(2))),
+            Block.new(BlockId.new(1), Terminator.Return),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing reachable from block 0"
+        val reachable = reachable_from(cfg, BlockId.new(0))
+        Then "all 3 blocks should be reachable"
+        sspec.expect(reachable.size()).to_equal(3)
+
+    Scenario "Unreachable block":
+        Given "a CFG with unreachable block: 0 -> 1, 2 is separate"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Return),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing reachable from block 0"
+        val reachable = reachable_from(cfg, BlockId.new(0))
+        Then "block 2 should not be reachable"
+        sspec.expect(reachable.size()).to_equal(2)
+        sspec.expect(reachable.contains(BlockId.new(2))).to_be_false()
+
+Feature "Reachability Queries":
+
+    Scenario "Check direct reachability":
+        Given "a CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "checking if 2 is reachable from 0"
+        val reach = is_reachable(cfg, BlockId.new(0), BlockId.new(2))
+        Then "it should be reachable"
+        sspec.expect(reach).to_be_true()
+
+    Scenario "Check unreachability":
+        Given "a CFG: 0 -> 1, 2 is separate"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Return),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "checking if 2 is reachable from 0"
+        val reach = is_reachable(cfg, BlockId.new(0), BlockId.new(2))
+        Then "it should not be reachable"
+        sspec.expect(reach).to_be_false()
+
+Feature "Cycle Detection":
+
+    Scenario "Acyclic graph has no cycles":
+        Given "an acyclic CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "checking for cycles"
+        val cycles = has_cycles(cfg)
+        Then "it should have no cycles"
+        sspec.expect(cycles).to_be_false()
+
+    Scenario "Loop has cycle":
+        Given "a CFG with loop: 0 -> 1 -> 0"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(0)))
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "checking for cycles"
+        val cycles = has_cycles(cfg)
+        Then "it should have cycles"
+        sspec.expect(cycles).to_be_true()
+
+Feature "Predecessor Counting":
+
+    Scenario "Count predecessors in linear chain":
+        Given "a CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "counting predecessors"
+        val counts = predecessor_counts(cfg)
+        Then "block 0 should have 0 predecessors"
+        sspec.expect(counts.get(BlockId.new(0)).unwrap()).to_equal(0)
+        And "block 1 should have 1 predecessor"
+        sspec.expect(counts.get(BlockId.new(1)).unwrap()).to_equal(1)
+        And "block 2 should have 1 predecessor"
+        sspec.expect(counts.get(BlockId.new(2)).unwrap()).to_equal(1)
+
+    Scenario "Count predecessors with branch":
+        Given "a CFG: 0 branches to 1 and 2, both goto 3"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Branch(BlockId.new(1), BlockId.new(2))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(3))),
+            Block.new(BlockId.new(2), Terminator.Jump(BlockId.new(3))),
+            Block.new(BlockId.new(3), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "counting predecessors"
+        val counts = predecessor_counts(cfg)
+        Then "block 3 should have 2 predecessors"
+        sspec.expect(counts.get(BlockId.new(3)).unwrap()).to_equal(2)
+
+Feature "Entry and Exit Blocks":
+
+    Scenario "Find entry block":
+        Given "a CFG with one entry: 0 -> 1"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "finding entry blocks"
+        val entries = entry_blocks(cfg)
+        Then "there should be 1 entry block"
+        sspec.expect(entries.length()).to_equal(1)
+        And "it should be block 0"
+        sspec.expect(entries[0].equals(BlockId.new(0))).to_be_true()
+
+    Scenario "Find exit blocks":
+        Given "a CFG with two exits"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Branch(BlockId.new(1), BlockId.new(2))),
+            Block.new(BlockId.new(1), Terminator.Return),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "finding exit blocks"
+        val exits = exit_blocks(cfg)
+        Then "there should be 2 exit blocks"
+        sspec.expect(exits.length()).to_equal(2)
+
+Feature "Topological Ordering":
+
+    Scenario "Topological order of acyclic graph":
+        Given "an acyclic CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing topological order"
+        val order = topological_order(cfg)
+        Then "it should succeed"
+        sspec.expect(order.is_some()).to_be_true()
+
+    Scenario "Topological order fails on cyclic graph":
+        Given "a cyclic CFG: 0 -> 1 -> 0"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(0)))
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing topological order"
+        val order = topological_order(cfg)
+        Then "it should fail"
+        sspec.expect(order.is_none()).to_be_true()
+
+Feature "Strongly Connected Components":
+
+    Scenario "SCC of acyclic graph":
+        Given "an acyclic CFG: 0 -> 1 -> 2"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(2))),
+            Block.new(BlockId.new(2), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing SCCs"
+        val sccs = strongly_connected_components(cfg)
+        Then "each block should be its own SCC"
+        sspec.expect(sccs.length()).to_equal(3)
+
+    Scenario "SCC of cyclic graph":
+        Given "a CFG with loop: 0 -> 1 -> 0"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(0)))
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing SCCs"
+        val sccs = strongly_connected_components(cfg)
+        Then "both blocks should be in one SCC"
+        sspec.expect(sccs.length()).to_equal(1)
+        And "the SCC should have size 2"
+        sspec.expect(sccs[0].size()).to_equal(2)
+
+Feature "Reachability from Multiple Sources":
+
+    Scenario "Reachable from multiple starts":
+        Given "a CFG with two disconnected chains"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Jump(BlockId.new(1))),
+            Block.new(BlockId.new(1), Terminator.Return),
+            Block.new(BlockId.new(2), Terminator.Jump(BlockId.new(3))),
+            Block.new(BlockId.new(3), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "computing reachable from blocks 0 and 2"
+        val starts = [BlockId.new(0), BlockId.new(2)]
+        val reachable = reachable_from_many(cfg, starts)
+        Then "all 4 blocks should be reachable"
+        sspec.expect(reachable.size()).to_equal(4)
+
+Feature "Reverse Reachability":
+
+    Scenario "Find blocks that can reach target":
+        Given "a diamond CFG: 0 branches to 1,2 which join at 3"
+        val blocks = [
+            Block.new(BlockId.new(0), Terminator.Branch(BlockId.new(1), BlockId.new(2))),
+            Block.new(BlockId.new(1), Terminator.Jump(BlockId.new(3))),
+            Block.new(BlockId.new(2), Terminator.Jump(BlockId.new(3))),
+            Block.new(BlockId.new(3), Terminator.Return)
+        ]
+        val cfg = ControlFlowGraph.new(blocks)
+        When "finding blocks that can reach block 3"
+        val can_reach_3 = can_reach(cfg, BlockId.new(3))
+        Then "all 4 blocks should be able to reach block 3"
+        sspec.expect(can_reach_3.size()).to_equal(4)

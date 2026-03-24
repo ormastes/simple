@@ -1,0 +1,1251 @@
+# HTML5 Tree Builder — tree construction algorithm for building the DOM.
+#
+# Compliance level: Implements the core insertion modes from WHATWG HTML5
+# specification section 13.2.6 (Tree construction). Covers the primary
+# document lifecycle modes: Initial, BeforeHtml, BeforeHead, InHead,
+# AfterHead, InBody, Text, AfterBody. InBody handles the most common
+# HTML elements including headings, paragraphs, lists, tables, forms,
+# inline elements, void elements, and raw text elements (script/style).
+#
+# Not yet implemented: InTable, InTableText, InCaption, InColumnGroup,
+# InTableBody, InRow, InCell, InSelect, InSelectInTable, InTemplate,
+# InFrameset, AfterFrameset, AfterAfterBody, AfterAfterFrameset,
+# InHeadNoscript, adoption agency algorithm, active formatting element
+# reconstruction. These are marked with pass_todo for future expansion.
+#
+# Depends on:
+#   examples/browser/entity/dom/node_types.spl       (DomNode, Element, NodeKind)
+#   examples/browser/entity/dom/attribute_types.spl   (Attr)
+#   examples/browser/feature/parser/html_tokenizer.spl (HtmlTokenizer, HtmlToken)
+#   examples/browser/shared/error.spl                 (BrowserResult, parse_error)
+#   examples/browser/shared/logging.spl               (Logger)
+
+use examples.browser.entity.dom.node_types
+use examples.browser.entity.dom.attribute_types
+use examples.browser.feature.parser.html_tokenizer
+use examples.browser.shared.error
+use examples.browser.shared.logging
+
+# ---------------------------------------------------------------------------
+# InsertionMode — the tree construction insertion modes
+# ---------------------------------------------------------------------------
+
+enum InsertionMode:
+    Initial
+    BeforeHtml
+    BeforeHead
+    InHead
+    InHeadNoscript
+    AfterHead
+    InBody
+    Text
+    InTable
+    InTableText
+    InCaption
+    InColumnGroup
+    InTableBody
+    InRow
+    InCell
+    InSelect
+    InSelectInTable
+    InTemplate
+    AfterBody
+    InFrameset
+    AfterFrameset
+    AfterAfterBody
+    AfterAfterFrameset
+
+# ---------------------------------------------------------------------------
+# Scope element lists used by the has_in_scope family of checks.
+# These are the elements that define scope boundaries in the HTML5 spec.
+# ---------------------------------------------------------------------------
+
+val SCOPE_ELEMENTS: List<text> = [
+    "applet", "caption", "html", "table", "td", "th",
+    "marquee", "object", "template"
+]
+
+val BUTTON_SCOPE_ELEMENTS: List<text> = [
+    "applet", "caption", "html", "table", "td", "th",
+    "marquee", "object", "template", "button"
+]
+
+val TABLE_SCOPE_ELEMENTS: List<text> = [
+    "html", "table", "template"
+]
+
+# Elements with optional end tags that get implied end tags
+val IMPLIED_END_TAG_ELEMENTS: List<text> = [
+    "dd", "dt", "li", "optgroup", "option", "p",
+    "rb", "rp", "rt", "rtc"
+]
+
+# Void elements that cannot have children
+val VOID_ELEMENTS: List<text> = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr"
+]
+
+# Raw text elements whose content is not parsed as HTML
+val RAW_TEXT_ELEMENTS: List<text> = ["script", "style"]
+
+# Heading elements
+val HEADING_ELEMENTS: List<text> = ["h1", "h2", "h3", "h4", "h5", "h6"]
+
+# ---------------------------------------------------------------------------
+# TreeBuilder — the tree construction class
+# ---------------------------------------------------------------------------
+
+class TreeBuilder:
+    tokenizer: HtmlTokenizer
+    insertion_mode: InsertionMode
+    open_elements: List<i64>
+    active_formatting: List<i64>
+    head_element: i64
+    body_element: i64
+    document_node: i64
+    nodes: List<DomNode>
+    elements: List<Element>
+    next_node_id: i64
+    foster_parenting: bool
+    frameset_ok: bool
+    scripting: bool
+    original_insertion_mode: InsertionMode
+    template_modes: List<InsertionMode>
+    logger: Logger
+
+    static fn new(tokenizer: HtmlTokenizer, logger: Logger) -> TreeBuilder:
+        TreeBuilder(
+            tokenizer: tokenizer,
+            insertion_mode: InsertionMode.Initial,
+            open_elements: List<i64>(),
+            active_formatting: List<i64>(),
+            head_element: -1,
+            body_element: -1,
+            document_node: -1,
+            nodes: List<DomNode>(),
+            elements: List<Element>(),
+            next_node_id: 0,
+            foster_parenting: false,
+            frameset_ok: true,
+            scripting: false,
+            original_insertion_mode: InsertionMode.Initial,
+            template_modes: List<InsertionMode>(),
+            logger: logger
+        )
+
+    # ===================================================================
+    # Main parse loop
+    # ===================================================================
+
+    me parse() -> BrowserResult<i64>:
+        # Create the document node
+        self.document_node = self.create_node(NodeKind.Document, "#document")
+        self.logger.info("Starting HTML parse, document node={self.document_node}")
+
+        var done = false
+        while not done:
+            val token = self.tokenizer.next_token()
+            match token:
+                HtmlToken.Eof:
+                    done = true
+                _:
+                    self.process_token(token)
+
+        self.logger.info("Parse complete, {self.nodes.len()} nodes created")
+        Ok(self.document_node)
+
+    # ===================================================================
+    # Token dispatch to current insertion mode
+    # ===================================================================
+
+    me process_token(token: HtmlToken):
+        match self.insertion_mode:
+            InsertionMode.Initial:
+                self.process_initial(token)
+            InsertionMode.BeforeHtml:
+                self.process_before_html(token)
+            InsertionMode.BeforeHead:
+                self.process_before_head(token)
+            InsertionMode.InHead:
+                self.process_in_head(token)
+            InsertionMode.InHeadNoscript:
+                pass_todo
+            InsertionMode.AfterHead:
+                self.process_after_head(token)
+            InsertionMode.InBody:
+                self.process_in_body(token)
+            InsertionMode.Text:
+                self.process_text(token)
+            InsertionMode.InTable:
+                pass_todo
+            InsertionMode.InTableText:
+                pass_todo
+            InsertionMode.InCaption:
+                pass_todo
+            InsertionMode.InColumnGroup:
+                pass_todo
+            InsertionMode.InTableBody:
+                pass_todo
+            InsertionMode.InRow:
+                pass_todo
+            InsertionMode.InCell:
+                pass_todo
+            InsertionMode.InSelect:
+                pass_todo
+            InsertionMode.InSelectInTable:
+                pass_todo
+            InsertionMode.InTemplate:
+                pass_todo
+            InsertionMode.AfterBody:
+                self.process_after_body(token)
+            InsertionMode.InFrameset:
+                pass_todo
+            InsertionMode.AfterFrameset:
+                pass_todo
+            InsertionMode.AfterAfterBody:
+                pass_todo
+            InsertionMode.AfterAfterFrameset:
+                pass_todo
+
+    # ===================================================================
+    # Initial mode — handle doctype, then switch to BeforeHtml
+    # ===================================================================
+
+    me process_initial(token: HtmlToken):
+        match token:
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.debug("Initial: doctype name={name}")
+                val comment_id = self.create_node(NodeKind.Comment, "DOCTYPE {name}")
+                self.append_child(self.document_node, comment_id)
+                self.insertion_mode = InsertionMode.BeforeHtml
+            HtmlToken.CommentToken(data):
+                val comment_id = self.create_node(NodeKind.Comment, data)
+                self.append_child(self.document_node, comment_id)
+            HtmlToken.Character(data):
+                # Ignore whitespace in Initial mode
+                if self.is_whitespace(data):
+                    pass_do_nothing
+                else:
+                    self.insertion_mode = InsertionMode.BeforeHtml
+                    self.process_before_html(token)
+            _:
+                # Any other token: switch to BeforeHtml and reprocess
+                self.insertion_mode = InsertionMode.BeforeHtml
+                self.process_before_html(token)
+
+    # ===================================================================
+    # BeforeHtml mode — insert the html element
+    # ===================================================================
+
+    me process_before_html(token: HtmlToken):
+        match token:
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("BeforeHtml: unexpected doctype, ignoring")
+            HtmlToken.CommentToken(data):
+                val comment_id = self.create_node(NodeKind.Comment, data)
+                self.append_child(self.document_node, comment_id)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "html":
+                    val html_id = self.create_element("html", attributes)
+                    self.append_child(self.document_node, html_id)
+                    self.open_elements.push(html_id)
+                    self.insertion_mode = InsertionMode.BeforeHead
+                else:
+                    # Implied <html> tag
+                    val html_id = self.create_element("html", List<Attr>())
+                    self.append_child(self.document_node, html_id)
+                    self.open_elements.push(html_id)
+                    self.insertion_mode = InsertionMode.BeforeHead
+                    self.process_before_head(token)
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    pass_do_nothing
+                else:
+                    val html_id = self.create_element("html", List<Attr>())
+                    self.append_child(self.document_node, html_id)
+                    self.open_elements.push(html_id)
+                    self.insertion_mode = InsertionMode.BeforeHead
+                    self.process_before_head(token)
+            _:
+                # Implied <html>
+                val html_id = self.create_element("html", List<Attr>())
+                self.append_child(self.document_node, html_id)
+                self.open_elements.push(html_id)
+                self.insertion_mode = InsertionMode.BeforeHead
+                self.process_before_head(token)
+
+    # ===================================================================
+    # BeforeHead mode — insert the head element
+    # ===================================================================
+
+    me process_before_head(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    pass_do_nothing
+                else:
+                    # Implied <head>
+                    self.head_element = self.insert_element("head", List<Attr>())
+                    self.insertion_mode = InsertionMode.InHead
+                    self.process_in_head(token)
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "html":
+                    # Merge attributes into existing html element
+                    self.process_in_body(token)
+                else if name == "head":
+                    self.head_element = self.insert_element("head", attributes)
+                    self.insertion_mode = InsertionMode.InHead
+                else:
+                    # Implied <head>
+                    self.head_element = self.insert_element("head", List<Attr>())
+                    self.insertion_mode = InsertionMode.InHead
+                    self.process_in_head(token)
+            HtmlToken.EndTag(name):
+                if (name == "head" or name == "body" or name == "html" or name == "br"):
+                    self.head_element = self.insert_element("head", List<Attr>())
+                    self.insertion_mode = InsertionMode.InHead
+                    self.process_in_head(token)
+                else:
+                    self.logger.warn("BeforeHead: unexpected end tag </{name}>, ignoring")
+            _:
+                self.head_element = self.insert_element("head", List<Attr>())
+                self.insertion_mode = InsertionMode.InHead
+                self.process_in_head(token)
+
+    # ===================================================================
+    # InHead mode — handle head-content elements
+    # ===================================================================
+
+    me process_in_head(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.insert_text(data)
+                else:
+                    # Act as if </head> was seen
+                    self.pop_current()
+                    self.insertion_mode = InsertionMode.AfterHead
+                    self.process_after_head(token)
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "base":
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "basefont":
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "link":
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "meta":
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "title":
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = self.insertion_mode
+                        self.insertion_mode = InsertionMode.Text
+                    "noscript":
+                        if self.scripting:
+                            self.insert_element(name, attributes)
+                            self.original_insertion_mode = self.insertion_mode
+                            self.insertion_mode = InsertionMode.Text
+                        else:
+                            self.insert_element(name, attributes)
+                            self.insertion_mode = InsertionMode.InHeadNoscript
+                    "style":
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = self.insertion_mode
+                        self.insertion_mode = InsertionMode.Text
+                    "script":
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = self.insertion_mode
+                        self.insertion_mode = InsertionMode.Text
+                    "head":
+                        self.logger.warn("InHead: unexpected <head>, ignoring")
+                    _:
+                        # Act as if </head> was seen
+                        self.pop_current()
+                        self.insertion_mode = InsertionMode.AfterHead
+                        self.process_after_head(token)
+            HtmlToken.EndTag(name):
+                match name:
+                    "head":
+                        self.pop_current()
+                        self.insertion_mode = InsertionMode.AfterHead
+                    "body":
+                        self.pop_current()
+                        self.insertion_mode = InsertionMode.AfterHead
+                        self.process_after_head(token)
+                    "html":
+                        self.pop_current()
+                        self.insertion_mode = InsertionMode.AfterHead
+                        self.process_after_head(token)
+                    "br":
+                        self.pop_current()
+                        self.insertion_mode = InsertionMode.AfterHead
+                        self.process_after_head(token)
+                    _:
+                        self.logger.warn("InHead: unexpected end tag </{name}>, ignoring")
+            _:
+                self.pop_current()
+                self.insertion_mode = InsertionMode.AfterHead
+                self.process_after_head(token)
+
+    # ===================================================================
+    # AfterHead mode — between </head> and <body>
+    # ===================================================================
+
+    me process_after_head(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.insert_text(data)
+                else:
+                    self.body_element = self.insert_element("body", List<Attr>())
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "body":
+                        self.body_element = self.insert_element("body", attributes)
+                        self.frameset_ok = false
+                        self.insertion_mode = InsertionMode.InBody
+                    "frameset":
+                        self.insert_element("frameset", attributes)
+                        self.insertion_mode = InsertionMode.InFrameset
+                    "base":
+                        # Push back onto head
+                        self.logger.warn("AfterHead: <{name}> should be in head")
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "link":
+                        self.logger.warn("AfterHead: <{name}> should be in head")
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "meta":
+                        self.logger.warn("AfterHead: <{name}> should be in head")
+                        self.insert_element(name, attributes)
+                        self.pop_current()
+                    "script":
+                        self.logger.warn("AfterHead: <script> should be in head")
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = InsertionMode.AfterHead
+                        self.insertion_mode = InsertionMode.Text
+                    "style":
+                        self.logger.warn("AfterHead: <style> should be in head")
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = InsertionMode.AfterHead
+                        self.insertion_mode = InsertionMode.Text
+                    "title":
+                        self.logger.warn("AfterHead: <title> should be in head")
+                        self.insert_element(name, attributes)
+                        self.original_insertion_mode = InsertionMode.AfterHead
+                        self.insertion_mode = InsertionMode.Text
+                    "head":
+                        self.logger.warn("AfterHead: unexpected <head>, ignoring")
+                    _:
+                        # Implied <body>
+                        self.body_element = self.insert_element("body", List<Attr>())
+                        self.insertion_mode = InsertionMode.InBody
+                        self.process_in_body(token)
+            HtmlToken.EndTag(name):
+                if (name == "body" or name == "html" or name == "br"):
+                    self.body_element = self.insert_element("body", List<Attr>())
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+                else:
+                    self.logger.warn("AfterHead: unexpected end tag </{name}>, ignoring")
+            _:
+                self.body_element = self.insert_element("body", List<Attr>())
+                self.insertion_mode = InsertionMode.InBody
+                self.process_in_body(token)
+
+    # ===================================================================
+    # InBody mode — the primary mode for document content
+    # ===================================================================
+
+    me process_in_body(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                self.frameset_ok = false
+                self.insert_text(data)
+
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("InBody: unexpected doctype, ignoring")
+
+            HtmlToken.StartTag(name, attributes, self_closing):
+                self.process_in_body_start_tag(name, attributes, self_closing)
+
+            HtmlToken.EndTag(name):
+                self.process_in_body_end_tag(name)
+
+            HtmlToken.Eof:
+                pass_do_nothing
+
+    # --- InBody start tag dispatcher ---
+
+    me process_in_body_start_tag(name: text, attributes: List<Attr>, self_closing: bool):
+        match name:
+            "html":
+                # Merge attributes into existing html element
+                self.logger.warn("InBody: unexpected <html>, merging attributes")
+
+            "body":
+                # Merge attributes into existing body element
+                self.logger.warn("InBody: unexpected <body>, merging attributes")
+                self.frameset_ok = false
+
+            "head":
+                self.logger.warn("InBody: unexpected <head>, ignoring")
+
+            # --- Block-level elements ---
+            "div":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "p":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "section":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "article":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "aside":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "nav":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "main":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "header":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "footer":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "address":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "blockquote":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "pre":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "figure":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "figcaption":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+
+            # --- Headings ---
+            "h1":
+                self.handle_heading(name, attributes)
+            "h2":
+                self.handle_heading(name, attributes)
+            "h3":
+                self.handle_heading(name, attributes)
+            "h4":
+                self.handle_heading(name, attributes)
+            "h5":
+                self.handle_heading(name, attributes)
+            "h6":
+                self.handle_heading(name, attributes)
+
+            # --- Lists ---
+            "ul":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "ol":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "li":
+                self.frameset_ok = false
+                # Close any open <li> in scope
+                if self.has_in_list_item_scope("li"):
+                    self.generate_implied_end_tags("li")
+                    self.pop_until("li")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dl":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dt":
+                self.frameset_ok = false
+                if self.has_in_scope("dt"):
+                    self.generate_implied_end_tags("dt")
+                    self.pop_until("dt")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dd":
+                self.frameset_ok = false
+                if self.has_in_scope("dd"):
+                    self.generate_implied_end_tags("dd")
+                    self.pop_until("dd")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+
+            # --- Inline elements ---
+            "span":
+                self.insert_element(name, attributes)
+            "a":
+                # TODO: adoption agency for nested <a>
+                self.insert_element(name, attributes)
+            "b":
+                self.insert_element(name, attributes)
+            "strong":
+                self.insert_element(name, attributes)
+            "i":
+                self.insert_element(name, attributes)
+            "em":
+                self.insert_element(name, attributes)
+            "u":
+                self.insert_element(name, attributes)
+            "s":
+                self.insert_element(name, attributes)
+            "small":
+                self.insert_element(name, attributes)
+            "code":
+                self.insert_element(name, attributes)
+            "abbr":
+                self.insert_element(name, attributes)
+            "cite":
+                self.insert_element(name, attributes)
+            "mark":
+                self.insert_element(name, attributes)
+            "sub":
+                self.insert_element(name, attributes)
+            "sup":
+                self.insert_element(name, attributes)
+
+            # --- Void elements (self-closing, no end tag) ---
+            "br":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "hr":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "img":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "input":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "embed":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "wbr":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "area":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "source":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "track":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "col":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "param":
+                self.insert_element(name, attributes)
+                self.pop_current()
+
+            # --- Table elements ---
+            "table":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "tr":
+                self.insert_element(name, attributes)
+            "td":
+                self.insert_element(name, attributes)
+            "th":
+                self.insert_element(name, attributes)
+            "caption":
+                self.insert_element(name, attributes)
+            "thead":
+                self.insert_element(name, attributes)
+            "tbody":
+                self.insert_element(name, attributes)
+            "tfoot":
+                self.insert_element(name, attributes)
+            "colgroup":
+                self.insert_element(name, attributes)
+
+            # --- Form elements ---
+            "form":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "button":
+                if self.has_in_scope("button"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("button")
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "select":
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "textarea":
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "label":
+                self.insert_element(name, attributes)
+            "fieldset":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "legend":
+                self.insert_element(name, attributes)
+            "optgroup":
+                self.insert_element(name, attributes)
+            "option":
+                self.insert_element(name, attributes)
+
+            # --- Meta/Link elements in body ---
+            "link":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "meta":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "base":
+                self.insert_element(name, attributes)
+                self.pop_current()
+
+            # --- Raw text elements ---
+            "script":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+            "style":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+            "title":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+
+            # --- Default: insert as generic element ---
+            _:
+                self.insert_element(name, attributes)
+
+    # --- InBody end tag dispatcher ---
+
+    me process_in_body_end_tag(name: text):
+        match name:
+            "body":
+                if self.has_in_scope("body"):
+                    self.insertion_mode = InsertionMode.AfterBody
+                else:
+                    self.logger.warn("InBody: </body> without <body> in scope")
+            "html":
+                if self.has_in_scope("body"):
+                    self.insertion_mode = InsertionMode.AfterBody
+                    self.process_after_body(HtmlToken.EndTag(name: "html"))
+                else:
+                    self.logger.warn("InBody: </html> without <body> in scope")
+
+            # --- Block end tags with scope checking ---
+            "div":
+                self.close_block_element(name)
+            "p":
+                if self.has_in_button_scope("p"):
+                    self.generate_implied_end_tags("p")
+                    self.pop_until("p")
+                else:
+                    # Insert an empty <p> per spec
+                    self.insert_element("p", List<Attr>())
+                    self.pop_current()
+            "section":
+                self.close_block_element(name)
+            "article":
+                self.close_block_element(name)
+            "aside":
+                self.close_block_element(name)
+            "nav":
+                self.close_block_element(name)
+            "main":
+                self.close_block_element(name)
+            "header":
+                self.close_block_element(name)
+            "footer":
+                self.close_block_element(name)
+            "address":
+                self.close_block_element(name)
+            "blockquote":
+                self.close_block_element(name)
+            "pre":
+                self.close_block_element(name)
+            "figure":
+                self.close_block_element(name)
+            "figcaption":
+                self.close_block_element(name)
+
+            # --- Heading end tags ---
+            "h1":
+                self.close_heading()
+            "h2":
+                self.close_heading()
+            "h3":
+                self.close_heading()
+            "h4":
+                self.close_heading()
+            "h5":
+                self.close_heading()
+            "h6":
+                self.close_heading()
+
+            # --- List end tags ---
+            "ul":
+                self.close_block_element(name)
+            "ol":
+                self.close_block_element(name)
+            "li":
+                if self.has_in_list_item_scope("li"):
+                    self.generate_implied_end_tags("li")
+                    self.pop_until("li")
+            "dl":
+                self.close_block_element(name)
+            "dt":
+                if self.has_in_scope("dt"):
+                    self.generate_implied_end_tags("dt")
+                    self.pop_until("dt")
+            "dd":
+                if self.has_in_scope("dd"):
+                    self.generate_implied_end_tags("dd")
+                    self.pop_until("dd")
+
+            # --- Table end tags ---
+            "table":
+                if self.has_in_table_scope("table"):
+                    self.pop_until("table")
+            "tr":
+                if self.has_in_table_scope("tr"):
+                    self.pop_until("tr")
+            "td":
+                if self.has_in_table_scope("td"):
+                    self.pop_until("td")
+            "th":
+                if self.has_in_table_scope("th"):
+                    self.pop_until("th")
+            "caption":
+                if self.has_in_table_scope("caption"):
+                    self.pop_until("caption")
+            "thead":
+                if self.has_in_table_scope("thead"):
+                    self.pop_until("thead")
+            "tbody":
+                if self.has_in_table_scope("tbody"):
+                    self.pop_until("tbody")
+            "tfoot":
+                if self.has_in_table_scope("tfoot"):
+                    self.pop_until("tfoot")
+            "colgroup":
+                if self.has_in_table_scope("colgroup"):
+                    self.pop_until("colgroup")
+
+            # --- Form end tags ---
+            "form":
+                if self.has_in_scope("form"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("form")
+            "button":
+                if self.has_in_scope("button"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("button")
+            "select":
+                if self.has_in_scope("select"):
+                    self.pop_until("select")
+            "textarea":
+                if self.has_in_scope("textarea"):
+                    self.pop_until("textarea")
+            "fieldset":
+                self.close_block_element(name)
+
+            # --- Inline end tags (simplified — full spec uses adoption agency) ---
+            "a":
+                self.close_inline_element(name)
+            "b":
+                self.close_inline_element(name)
+            "strong":
+                self.close_inline_element(name)
+            "i":
+                self.close_inline_element(name)
+            "em":
+                self.close_inline_element(name)
+            "u":
+                self.close_inline_element(name)
+            "s":
+                self.close_inline_element(name)
+            "small":
+                self.close_inline_element(name)
+            "code":
+                self.close_inline_element(name)
+            "span":
+                self.close_inline_element(name)
+            "abbr":
+                self.close_inline_element(name)
+            "cite":
+                self.close_inline_element(name)
+            "mark":
+                self.close_inline_element(name)
+            "sub":
+                self.close_inline_element(name)
+            "sup":
+                self.close_inline_element(name)
+            "label":
+                self.close_inline_element(name)
+            "legend":
+                self.close_inline_element(name)
+            "optgroup":
+                self.close_inline_element(name)
+            "option":
+                self.close_inline_element(name)
+
+            # --- Void elements should not have end tags ---
+            "br":
+                self.logger.warn("InBody: unexpected </br>, treating as <br>")
+                self.insert_element("br", List<Attr>())
+                self.pop_current()
+
+            # --- Default: walk up the stack (any other end tag) ---
+            _:
+                self.close_inline_element(name)
+
+    # ===================================================================
+    # Text mode — raw text content (script, style, title, etc.)
+    # ===================================================================
+
+    me process_text(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                self.insert_text(data)
+            HtmlToken.EndTag(name):
+                self.pop_current()
+                self.insertion_mode = self.original_insertion_mode
+            HtmlToken.Eof:
+                self.logger.warn("Text mode: unexpected EOF")
+                self.pop_current()
+                self.insertion_mode = self.original_insertion_mode
+            _:
+                pass_do_nothing
+
+    # ===================================================================
+    # AfterBody mode — after </body>
+    # ===================================================================
+
+    me process_after_body(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    # Process as InBody for whitespace
+                    self.insert_text(data)
+                else:
+                    self.logger.warn("AfterBody: unexpected character, switching to InBody")
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            HtmlToken.CommentToken(data):
+                # Append comment to html element
+                val comment_id = self.create_node(NodeKind.Comment, data)
+                if self.open_elements.len() > 0:
+                    val html_node = self.open_elements.get(0)
+                    self.append_child(html_node, comment_id)
+                else:
+                    self.append_child(self.document_node, comment_id)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                self.logger.warn("AfterBody: unexpected start tag <{name}>, switching to InBody")
+                self.insertion_mode = InsertionMode.InBody
+                self.process_in_body(token)
+            HtmlToken.EndTag(name):
+                if name == "html":
+                    self.logger.debug("AfterBody: </html>, parsing complete")
+                    # Done — stay in AfterBody
+                else:
+                    self.logger.warn("AfterBody: unexpected end tag </{name}>, switching to InBody")
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            _:
+                self.insertion_mode = InsertionMode.InBody
+                self.process_in_body(token)
+
+    # ===================================================================
+    # Node / tree manipulation methods
+    # ===================================================================
+
+    me create_node(kind: NodeKind, data: text) -> i64:
+        val id = self.next_node_id
+        self.next_node_id = self.next_node_id + 1
+        val node = DomNode.create(id, kind, -1, data)
+        self.nodes.push(node)
+        self.logger.trace("Create node id={id} kind={kind} data=\"{data}\"")
+        id
+
+    me create_element(tag: text, attrs: List<Attr>) -> i64:
+        val id = self.create_node(NodeKind.Element, tag)
+        val elem = Element(node_id: id, tag_name: tag, attributes: attrs, namespace: "http://www.w3.org/1999/xhtml")
+        self.elements.push(elem)
+        id
+
+    me insert_element(tag: text, attrs: List<Attr>) -> i64:
+        val id = self.create_element(tag, attrs)
+        val parent_id = self.appropriate_insert_point()
+        self.append_child(parent_id, id)
+        self.open_elements.push(id)
+        self.logger.debug("Insert element <{tag}> id={id} parent={parent_id}")
+        id
+
+    me insert_text(data: text):
+        val parent_id = self.appropriate_insert_point()
+        # Try to merge with previous text node
+        if self.nodes.len() > 0 and parent_id >= 0:
+            val parent_node = self.get_node(parent_id)
+            if parent_node.children.len() > 0:
+                val last_child_id = parent_node.children.get(parent_node.children.len() - 1)
+                val last_child = self.get_node(last_child_id)
+                if last_child.kind == NodeKind.Text:
+                    # Merge text — update the existing node's data
+                    self.update_node_data(last_child_id, last_child.data + data)
+                    return
+        # Create new text node
+        val text_id = self.create_node(NodeKind.Text, data)
+        self.append_child(parent_id, text_id)
+
+    me insert_comment(data: text):
+        val parent_id = self.appropriate_insert_point()
+        val comment_id = self.create_node(NodeKind.Comment, data)
+        self.append_child(parent_id, comment_id)
+
+    fn current_node() -> i64:
+        if self.open_elements.len() == 0:
+            return -1
+        self.open_elements.get(self.open_elements.len() - 1)
+
+    fn appropriate_insert_point() -> i64:
+        # Simplified foster parenting logic
+        # Full spec: when foster_parenting is true and current node is table/tbody/tfoot/thead/tr,
+        # insert before the table element. For now, always return current node.
+        val cn = self.current_node()
+        if cn >= 0:
+            return cn
+        self.document_node
+
+    me pop_current():
+        if self.open_elements.len() > 0:
+            val popped = self.open_elements.pop()
+            val tag = self.get_element_tag(popped)
+            self.logger.trace("Pop element <{tag}> id={popped}")
+
+    me pop_until(tag: text):
+        var guard = 0
+        while guard < 1000:
+            guard = guard + 1
+            if self.open_elements.len() == 0:
+                return
+            val top = self.current_node()
+            val top_tag = self.get_element_tag(top)
+            self.open_elements.pop()
+            self.logger.trace("Pop until <{tag}>: popped <{top_tag}> id={top}")
+            if top_tag == tag:
+                return
+
+    me has_in_scope(tag: text) -> bool:
+        self.has_in_scope_with_list(tag, SCOPE_ELEMENTS)
+
+    me has_in_button_scope(tag: text) -> bool:
+        self.has_in_scope_with_list(tag, BUTTON_SCOPE_ELEMENTS)
+
+    me has_in_table_scope(tag: text) -> bool:
+        self.has_in_scope_with_list(tag, TABLE_SCOPE_ELEMENTS)
+
+    me has_in_list_item_scope(tag: text) -> bool:
+        # List item scope adds <ol> and <ul> to scope elements
+        var idx = self.open_elements.len() - 1
+        while idx >= 0:
+            val node_id = self.open_elements.get(idx)
+            val node_tag = self.get_element_tag(node_id)
+            if node_tag == tag:
+                return true
+            if (SCOPE_ELEMENTS.contains(node_tag) or node_tag == "ol" or node_tag == "ul"):
+                return false
+            idx = idx - 1
+        false
+
+    fn has_in_scope_with_list(tag: text, scope_list: List<text>) -> bool:
+        var idx = self.open_elements.len() - 1
+        while idx >= 0:
+            val node_id = self.open_elements.get(idx)
+            val node_tag = self.get_element_tag(node_id)
+            if node_tag == tag:
+                return true
+            if scope_list.contains(node_tag):
+                return false
+            idx = idx - 1
+        false
+
+    me generate_implied_end_tags(except: text):
+        var guard = 0
+        while guard < 100:
+            guard = guard + 1
+            if self.open_elements.len() == 0:
+                return
+            val top_id = self.current_node()
+            val top_tag = self.get_element_tag(top_id)
+            if top_tag == except:
+                return
+            if IMPLIED_END_TAG_ELEMENTS.contains(top_tag):
+                self.pop_current()
+            else:
+                return
+
+    # ===================================================================
+    # Helper methods for InBody tag processing
+    # ===================================================================
+
+    me handle_heading(name: text, attributes: List<Attr>):
+        self.close_p_if_in_button_scope()
+        # If current node is a heading, close it (no nested headings)
+        val cn = self.current_node()
+        if cn >= 0:
+            val cn_tag = self.get_element_tag(cn)
+            if HEADING_ELEMENTS.contains(cn_tag):
+                self.logger.warn("InBody: nested heading <{name}> inside <{cn_tag}>, closing")
+                self.pop_current()
+        self.insert_element(name, attributes)
+
+    me close_p_if_in_button_scope():
+        if self.has_in_button_scope("p"):
+            self.generate_implied_end_tags("p")
+            self.pop_until("p")
+
+    me close_block_element(name: text):
+        if self.has_in_scope(name):
+            self.generate_implied_end_tags("")
+            self.pop_until(name)
+        else:
+            self.logger.warn("InBody: </{name}> without matching open element")
+
+    me close_heading():
+        # Close any heading element in scope
+        var found = false
+        var idx = self.open_elements.len() - 1
+        while idx >= 0 and not found:
+            val node_id = self.open_elements.get(idx)
+            val node_tag = self.get_element_tag(node_id)
+            if HEADING_ELEMENTS.contains(node_tag):
+                found = true
+            if SCOPE_ELEMENTS.contains(node_tag):
+                idx = -1  # break
+            idx = idx - 1
+        if found:
+            self.generate_implied_end_tags("")
+            # Pop until we find a heading element
+            var guard = 0
+            while guard < 100:
+                guard = guard + 1
+                if self.open_elements.len() == 0:
+                    return
+                val top_id = self.current_node()
+                val top_tag = self.get_element_tag(top_id)
+                self.pop_current()
+                if HEADING_ELEMENTS.contains(top_tag):
+                    return
+
+    me close_inline_element(name: text):
+        # Simplified: walk up the stack and close if found
+        # Full spec uses the adoption agency algorithm for formatting elements
+        if self.has_in_scope(name):
+            self.generate_implied_end_tags("")
+            self.pop_until(name)
+        else:
+            self.logger.trace("InBody: </{name}> not in scope, ignoring")
+
+    # ===================================================================
+    # Node access helpers
+    # ===================================================================
+
+    fn get_node(id: i64) -> DomNode:
+        # Linear scan — sufficient for typical document sizes
+        var idx = 0
+        while idx < self.nodes.len():
+            val node = self.nodes.get(idx)
+            if node.id == id:
+                return node
+            idx = idx + 1
+        # Fallback: return a dummy node (should not happen in valid trees)
+        DomNode.create(-1, NodeKind.Document, -1, "")
+
+    fn get_element_tag(node_id: i64) -> text:
+        # Look up element tag name by node id
+        var idx = 0
+        while idx < self.elements.len():
+            val elem = self.elements.get(idx)
+            if elem.node_id == node_id:
+                return elem.tag_name
+            idx = idx + 1
+        # If not an element node, return the node data
+        val node = self.get_node(node_id)
+        node.data
+
+    me append_child(parent_id: i64, child_id: i64):
+        # Update parent's children list and child's parent_id
+        var idx = 0
+        while idx < self.nodes.len():
+            var node = self.nodes.get(idx)
+            if node.id == parent_id:
+                node.children.push(child_id)
+            if node.id == child_id:
+                node.parent_id = parent_id
+            idx = idx + 1
+
+    me update_node_data(node_id: i64, new_data: text):
+        var idx = 0
+        while idx < self.nodes.len():
+            var node = self.nodes.get(idx)
+            if node.id == node_id:
+                node.data = new_data
+                return
+            idx = idx + 1
+
+    # ===================================================================
+    # Utility
+    # ===================================================================
+
+    fn is_whitespace(data: text) -> bool:
+        if data.len() == 0:
+            return true
+        var idx = 0
+        while idx < data.len():
+            val c = data.char_at(idx)
+            if (c != " " and c != "\t" and c != "\n" and c != "\r"):
+                return false
+            idx = idx + 1
+        true

@@ -1,0 +1,302 @@
+# HTTP cache with eviction for the Simple Browser Platform.
+# Stores responses keyed by URL, enforces Cache-Control directives,
+# checks freshness via max-age / stored_at, and evicts oldest entries
+# when the cache exceeds its configured size budget.
+
+use examples.browser.entity.net.cache_types.(CacheEntry, CachePolicy, CacheControl, ETag)
+use examples.browser.shared.error.(BrowserResult, BrowserError, network_error)
+use examples.browser.shared.logging.Logger
+use std.io_runtime.time
+
+# --- HttpCache ---
+
+class HttpCache:
+    entries: List<CacheEntry>
+    max_size_bytes: i64
+    current_size: i64
+    logger: Logger
+
+    static fn new(logger: Logger, max_size_mb: i64) -> HttpCache:
+        HttpCache(
+            entries: List<CacheEntry>(),
+            max_size_bytes: max_size_mb * 1024 * 1024,
+            current_size: 0,
+            logger: logger
+        )
+
+    me lookup(url: text) -> CacheEntry?:
+        # Find a cached entry for the given URL and check freshness.
+        val now = time.now_seconds()
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries.get(i)
+            if entry.url == url:
+                if is_fresh(entry, now):
+                    self.logger.debug("Cache hit for {url}")
+                    return Some(entry)
+                else:
+                    # Stale entry — remove it
+                    self.logger.debug("Cache stale for {url}, removing")
+                    self.entries.remove(i)
+                    self.current_size = self.current_size - entry_size(entry)
+                    return nil
+            i = i + 1
+        self.logger.debug("Cache miss for {url}")
+        nil
+
+    me store(url: text, body: text, headers: List<Pair<text, text>>) -> BrowserResult<()>:
+        # Store a response in the cache if the response is cacheable.
+        val status = 200  # Caller should provide; default to 200
+        if not should_cache(status, headers):
+            self.logger.debug("Response not cacheable for {url}")
+            return Ok(())
+
+        # Parse cache policy from headers
+        val controls = extract_cache_controls(headers)
+        # Check for no-store — never cache
+        if has_directive(controls, "no-store"):
+            self.logger.debug("no-store directive, skipping cache for {url}")
+            return Ok(())
+
+        val etag = extract_etag(headers)
+        val last_modified = extract_last_modified(headers)
+        val now = time.now_seconds()
+        val policy = CachePolicy.create(controls, etag, last_modified)
+
+        # Remove existing entry for this URL if present
+        self.invalidate(url)
+
+        val entry = CacheEntry(
+            url: url,
+            body: body,
+            headers: headers,
+            policy: policy,
+            stored_at: now
+        )
+
+        val size = entry_size(entry)
+
+        # Evict if necessary to stay under budget
+        while self.current_size + size > self.max_size_bytes and self.entries.len() > 0:
+            self.evict()
+
+        if size > self.max_size_bytes:
+            self.logger.warn("Single entry too large to cache: {url} ({size} bytes)")
+            return Err(network_error("Entry exceeds cache size limit"))
+
+        self.entries.push(entry)
+        self.current_size = self.current_size + size
+        self.logger.info("Cached {url} ({size} bytes, total {self.current_size}/{self.max_size_bytes})")
+        Ok(())
+
+    me invalidate(url: text):
+        # Remove a cached entry by URL.
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries.get(i)
+            if entry.url == url:
+                self.current_size = self.current_size - entry_size(entry)
+                self.entries.remove(i)
+                self.logger.debug("Invalidated cache entry for {url}")
+                return
+            i = i + 1
+
+    me evict():
+        # Remove the oldest entry (first in list, FIFO order).
+        if self.entries.len() == 0:
+            return
+        val oldest = self.entries.get(0)
+        self.current_size = self.current_size - entry_size(oldest)
+        self.entries.remove(0)
+        self.logger.debug("Evicted oldest cache entry: {oldest.url}")
+
+# --- Cache-Control parsing ---
+
+fn parse_cache_control(header: text) -> List<CacheControl>:
+    # Parse a Cache-Control header value into a list of directives.
+    # Example: "public, max-age=3600, must-revalidate"
+    var result = List<CacheControl>()
+    val parts = header.split(",")
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i).trim()
+        val lower = part.to_lower()
+
+        if lower == "no-cache":
+            result.push(CacheControl.NoCache)
+        else if lower == "no-store":
+            result.push(CacheControl.NoStore)
+        else if lower == "public":
+            result.push(CacheControl.Public)
+        else if lower == "private":
+            result.push(CacheControl.Private)
+        else if lower == "must-revalidate":
+            result.push(CacheControl.MustRevalidate)
+        else if lower.starts_with("max-age="):
+            val age_str = lower.slice(8, lower.len())
+            val seconds = parse_i64(age_str)
+            match seconds:
+                Some(s):
+                    result.push(CacheControl.MaxAge(seconds: s))
+                nil:
+                    pass_dn  # Ignore malformed max-age
+        # else: ignore unknown directives
+
+        i = i + 1
+    result
+
+fn is_fresh(entry: CacheEntry, now: i64) -> bool:
+    # Determine if a cache entry is still fresh.
+    # First check for no-cache (always revalidate).
+    val controls = entry.policy.controls
+    if has_directive(controls, "no-cache"):
+        return false
+
+    # Check max-age
+    val max_age = extract_max_age(controls)
+    if max_age > 0:
+        val age = now - entry.stored_at
+        return age < max_age
+
+    # No max-age directive — treat as stale after 1 hour default
+    val default_max_age = 3600
+    val age = now - entry.stored_at
+    age < default_max_age
+
+fn extract_max_age(controls: List<CacheControl>) -> i64:
+    # Extract the max-age value from a list of cache control directives.
+    # Returns 0 if no max-age is present.
+    var i = 0
+    while i < controls.len():
+        val ctrl = controls.get(i)
+        match ctrl:
+            CacheControl.MaxAge(seconds):
+                return seconds
+            _:
+                pass_dn
+        i = i + 1
+    0
+
+fn should_cache(status: i64, headers: List<Pair<text, text>>) -> bool:
+    # Determine if a response is cacheable based on status code and headers.
+    # Cacheable status codes: 200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501
+    val cacheable_statuses = [200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501]
+    var status_ok = false
+    var j = 0
+    while j < cacheable_statuses.len():
+        if cacheable_statuses.get(j) == status:
+            status_ok = true
+        j = j + 1
+
+    if not status_ok:
+        return false
+
+    # Check headers for no-store
+    val cc_header = find_header(headers, "cache-control")
+    match cc_header:
+        Some(value):
+            val controls = parse_cache_control(value)
+            if has_directive(controls, "no-store"):
+                return false
+        nil:
+            pass_dn
+
+    true
+
+# --- Internal helpers ---
+
+fn entry_size(entry: CacheEntry) -> i64:
+    # Approximate memory cost: URL length + body length + header overhead
+    var size = entry.url.len() + entry.body.len()
+    var i = 0
+    while i < entry.headers.len():
+        val pair = entry.headers.get(i)
+        size = size + pair.first.len() + pair.second.len()
+        i = i + 1
+    size
+
+fn has_directive(controls: List<CacheControl>, name: text) -> bool:
+    # Check if a specific directive type is present.
+    var i = 0
+    while i < controls.len():
+        val ctrl = controls.get(i)
+        val matches = match ctrl:
+            CacheControl.NoCache: name == "no-cache"
+            CacheControl.NoStore: name == "no-store"
+            CacheControl.Public: name == "public"
+            CacheControl.Private: name == "private"
+            CacheControl.MustRevalidate: name == "must-revalidate"
+            CacheControl.MaxAge(_): name == "max-age"
+        if matches:
+            return true
+        i = i + 1
+    false
+
+fn extract_cache_controls(headers: List<Pair<text, text>>) -> List<CacheControl>:
+    # Collect all Cache-Control directives from headers.
+    val cc_header = find_header(headers, "cache-control")
+    match cc_header:
+        Some(value):
+            parse_cache_control(value)
+        nil:
+            List<CacheControl>()
+
+fn extract_etag(headers: List<Pair<text, text>>) -> ETag:
+    # Extract ETag from headers, default to empty strong tag.
+    val value = find_header(headers, "etag")
+    match value:
+        Some(v):
+            if v.starts_with("W/"):
+                ETag.weak(v.slice(2, v.len()))
+            else:
+                ETag.strong(v)
+        nil:
+            ETag.strong("")
+
+fn extract_last_modified(headers: List<Pair<text, text>>) -> i64:
+    # Extract Last-Modified as epoch seconds (simplified).
+    # Full HTTP date parsing would require a date parser.
+    val value = find_header(headers, "last-modified")
+    match value:
+        Some(v):
+            val parsed = parse_i64(v)
+            match parsed:
+                Some(ts): ts
+                nil: 0
+        nil:
+            0
+
+fn find_header(headers: List<Pair<text, text>>, name: text) -> Option<text>:
+    # Case-insensitive header lookup.
+    val lower_name = name.to_lower()
+    var i = 0
+    while i < headers.len():
+        val pair = headers.get(i)
+        if pair.first.to_lower() == lower_name:
+            return Some(pair.second)
+        i = i + 1
+    nil
+
+fn parse_i64(s: text) -> Option<i64>:
+    # Parse a text string as an i64. Returns nil on failure.
+    # Simple digit-by-digit parser.
+    if s.len() == 0:
+        return nil
+    var result: i64 = 0
+    var i = 0
+    var negative = false
+    if s.get(0) == "-":
+        negative = true
+        i = 1
+    while i < s.len():
+        val ch = s.get(i)
+        if ch >= "0" and ch <= "9":
+            val digit = ch.to_i64() - "0".to_i64()
+            result = result * 10 + digit
+        else:
+            return nil
+        i = i + 1
+    if negative:
+        Some(-result)
+    else:
+        Some(result)

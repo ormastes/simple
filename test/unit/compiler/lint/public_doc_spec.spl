@@ -1,0 +1,76 @@
+"""
+# Public Documentation Lint Specification
+
+**Feature IDs:** #PDOC-001 through #PDOC-005
+**Category:** Tooling / Lint
+**Status:** PDOC001 fully tested; PDOC002-005 implemented, require compiled mode
+**Requirements:** doc/requirement/doc_ref_lint.md
+
+## Interpreter Limitation
+
+PDOC002-005 use pdoc_extract_refs which calls pdoc_index_of internally.
+The interpreter has a bug where .find() returns an Option/enum type that
+cannot be compared or used in arithmetic in nested scopes. pdoc_index_of
+works around this but the ref extraction still fails when called from
+inside while loops in the interpreter. These rules work in compiled mode.
+"""
+
+use compiler.semantics.lint.public_doc.{check_public_doc, PublicDocWarning}
+
+fn count_by_code(warnings: [PublicDocWarning], code: text) -> i64:
+    var n = 0
+    for w in warnings:
+        if w.code == code:
+            n = n + 1
+    n
+
+# ============================================================================
+# PDOC001: Missing sdoctest — fully tested in interpreter mode
+# ============================================================================
+
+describe "PDOC001":
+    it "warns on fn without sdoctest":
+        val source = "fn helper(x: i64) -> i64:\n    x + 1\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_be_greater_than(0)
+
+    it "no warning with sdoctest":
+        val source = "\"\"\"\nsdoctest:\n    expect(1).to_equal(1)\n\"\"\"\nfn square(x: i64) -> i64:\n    x * x\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)
+
+    it "no warning with @sdoctest delegation":
+        val source = "\"\"\"\nsdoctest:\n    expect(foo(1)).to_equal(2)\n\"\"\"\nfn foo(x: i64) -> i64:\n    x * 2\n\n\"\"\"\n@sdoctest(foo)\n\"\"\"\nfn bar(x: i64) -> i64:\n    foo(x)\n"
+        val warnings = check_public_doc(source)
+        # bar has @sdoctest(foo), foo has sdoctest — neither should warn
+        # (foo has sdoctest, bar has @sdoctest)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)
+
+    it "skips extern fn":
+        val source = "extern fn rt_read(path: text) -> text\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)
+
+    it "skips _private":
+        val source = "fn _helper(x: i64) -> i64:\n    x + 1\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)
+
+    it "skips pass_todo":
+        val source = "fn future_work(x: i64) -> i64:\n    pass_todo\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)
+
+    it "warns on class":
+        val source = "class Parser:\n    input: text\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_be_greater_than(0)
+
+    it "handles empty source":
+        val warnings = check_public_doc("")
+        expect(warnings.len()).to_equal(0)
+
+    it "struct and enum no PDOC001":
+        val source = "struct Point:\n    x: i64\n\nenum Color:\n    Red\n"
+        val warnings = check_public_doc(source)
+        expect(count_by_code(warnings, "PDOC001")).to_equal(0)

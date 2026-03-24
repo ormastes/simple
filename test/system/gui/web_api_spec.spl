@@ -1,0 +1,164 @@
+# @cover app.ui.web.html
+# @cover app.ui.web.server
+# @cover app.ui.render.widgets
+# @gui: headless
+
+# @tag:system
+
+use app.ui.web.html.{generate_html_page, generate_css, generate_js}
+use app.ui.web.server.{state_to_json, widgets_to_json}
+use common.ui.parse.sdn.{parse_ui_file}
+use common.ui.state.{init_state}
+use common.ui.widget.{UIState}
+
+# ============================================================================
+# Web HTML/JSON generation — system-level tests (no TCP needed)
+# ============================================================================
+
+describe "generate_html_page":
+
+    it "produces a full HTML page from demo.ui.sdn":
+        val tree_result = parse_ui_file("examples/ui/demo.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val html = generate_html_page(state, 3000)
+                # Must start with DOCTYPE
+                expect(html).to_start_with("<!DOCTYPE html>")
+                # Must contain essential HTML structure
+                expect(html).to_contain("<html")
+                expect(html).to_contain("<head>")
+                expect(html).to_contain("<body>")
+                expect(html).to_contain("</html>")
+                # Must contain style and script tags
+                expect(html).to_contain("<style>")
+                expect(html).to_contain("<script>")
+                # Must contain the app title
+                expect(html).to_contain("Simple UI Demo")
+                # Must contain widget content from the demo
+                expect(html).to_contain("widget-panel")
+                expect(html).to_contain("widget-statusbar")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "produces a full HTML page from minimal.ui.sdn":
+        val tree_result = parse_ui_file("examples/ui/minimal.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val html = generate_html_page(state, 8080)
+                expect(html).to_start_with("<!DOCTYPE html>")
+                expect(html).to_contain("<title>Minimal</title>")
+                expect(html).to_contain("widget-panel")
+                expect(html).to_contain("Hello from Simple UI!")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+describe "generate_css":
+
+    it "dark theme contains dark background color":
+        val css = generate_css("dark")
+        expect(css.len()).to_be_greater_than(0)
+        # Dark theme uses #1e1e2e background
+        expect(css).to_contain("#1e1e2e")
+        # Dark theme text color
+        expect(css).to_contain("#cdd6f4")
+        # Must contain widget classes
+        expect(css).to_contain(".widget-panel")
+        expect(css).to_contain(".widget-statusbar")
+
+    it "light theme contains light background color":
+        val css = generate_css("light")
+        expect(css.len()).to_be_greater_than(0)
+        # Light theme uses #ffffff background
+        expect(css).to_contain("#ffffff")
+        # Light theme text color
+        expect(css).to_contain("#333333")
+
+    it "dark and light themes produce different output":
+        val dark_css = generate_css("dark")
+        val light_css = generate_css("light")
+        expect(dark_css != light_css).to_equal(true)
+
+describe "generate_js":
+
+    it "produces WebSocket connection code":
+        val js = generate_js(3000)
+        expect(js.len()).to_be_greater_than(0)
+        expect(js).to_contain("WebSocket")
+        expect(js).to_contain("connect")
+        expect(js).to_contain("3000")
+        expect(js).to_contain("keydown")
+
+    it "uses correct port in WebSocket URL":
+        val js = generate_js(9999)
+        expect(js).to_contain("9999")
+
+describe "state_to_json":
+
+    it "serializes demo state to JSON with expected fields":
+        val tree_result = parse_ui_file("examples/ui/demo.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val json = state_to_json(state)
+                expect(json.len()).to_be_greater_than(0)
+                # Must contain mode field
+                expect(json).to_contain("mode")
+                expect(json).to_contain("NORMAL")
+                # Must contain title
+                expect(json).to_contain("title")
+                expect(json).to_contain("Simple UI Demo")
+                # Must contain theme
+                expect(json).to_contain("theme")
+                expect(json).to_contain("dark")
+                # Must contain focused_id
+                expect(json).to_contain("focused_id")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "serializes minimal state to JSON":
+        val tree_result = parse_ui_file("examples/ui/minimal.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val json = state_to_json(state)
+                expect(json).to_contain("Minimal")
+                expect(json).to_contain("NORMAL")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+describe "widgets_to_json":
+
+    it "serializes demo widgets to non-empty JSON array":
+        val tree_result = parse_ui_file("examples/ui/demo.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val json = widgets_to_json(state)
+                expect(json.len()).to_be_greater_than(2)
+                # Should be a JSON array
+                expect(json).to_start_with("[")
+                expect(json).to_end_with("]")
+                # Should contain known widget IDs from demo.ui.sdn
+                expect(json).to_contain("sidebar")
+                expect(json).to_contain("content")
+                expect(json).to_contain("status")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "serializes minimal widgets to non-empty JSON array":
+        val tree_result = parse_ui_file("examples/ui/minimal.ui.sdn")
+        match tree_result:
+            Ok(tree) =>
+                val state = init_state(tree)
+                val json = widgets_to_json(state)
+                expect(json.len()).to_be_greater_than(2)
+                expect(json).to_start_with("[")
+                expect(json).to_end_with("]")
+                # Should contain known widget IDs from minimal.ui.sdn
+                expect(json).to_contain("main")
+                expect(json).to_contain("greeting")
+                expect(json).to_contain("status")
+            Err(e) =>
+                expect(false).to_equal(true)

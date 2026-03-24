@@ -384,9 +384,51 @@ class MirToC:
 
             # === Inline Assembly ===
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
-                val volatile_str = if is_volatile: "volatile" else: ""
+                val volatile_str = if is_volatile: " volatile" else: ""
                 self.builder.emit(r"#if !(defined(_MSC_VER) && !defined(__clang__))")
-                self.builder.emit(r"asm " + volatile_str + r" (" + "\"" + asm_template + "\"" + r");")
+
+                # Convert template placeholders {0},{1} to GCC %0,%1 syntax
+                var c_template = asm_template
+                var placeholder_idx = 0
+                while placeholder_idx < 20:
+                    c_template = c_template.replace("{" + placeholder_idx.to_string() + "}", "%" + placeholder_idx.to_string())
+                    placeholder_idx = placeholder_idx + 1
+
+                # Build output constraints: "=r" (var), "=&r" (late_out_var)
+                var output_parts: [text] = []
+                for out_op in outputs:
+                    val constraint = self.asm_constraint_for_c(out_op.kind, out_op.location)
+                    val operand_val = self.translate_operand(out_op.operand)
+                    output_parts.push("\"" + constraint + "\" (" + operand_val + ")")
+
+                # Build input constraints: "r" (expr), "m" (addr)
+                var input_parts: [text] = []
+                for in_op in inputs:
+                    val constraint = self.asm_constraint_for_c(in_op.kind, in_op.location)
+                    val operand_val = self.translate_operand(in_op.operand)
+                    input_parts.push("\"" + constraint + "\" (" + operand_val + ")")
+
+                # Build clobber list: "memory", "cc", register names
+                var clobber_parts: [text] = []
+                for clob in clobbers:
+                    clobber_parts.push("\"" + clob + "\"")
+
+                # Emit GCC extended asm
+                var asm_str = "__asm__" + volatile_str + " (\n"
+                asm_str = asm_str + "    \"" + c_template + "\""
+
+                # Output operands section
+                asm_str = asm_str + "\n    : " + output_parts.join(", ")
+
+                # Input operands section
+                asm_str = asm_str + "\n    : " + input_parts.join(", ")
+
+                # Clobber section
+                if clobber_parts.len() > 0:
+                    asm_str = asm_str + "\n    : " + clobber_parts.join(", ")
+
+                asm_str = asm_str + "\n);"
+                self.builder.emit(asm_str)
                 self.builder.emit(r"#endif")
 
             # === Debug/Nop ===
