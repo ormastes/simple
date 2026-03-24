@@ -128,6 +128,18 @@ impl ModuleResolver {
                     }
                 }
 
+                // Strategy 4: Try source_root as base for top-level module names
+                // e.g., "use app.ffi_gen.parser" → source_root/app/ffi_gen/parser.spl
+                // This handles cross-project imports declared in simple.sdn
+                if segments[0] != "crate" && segments.len() > 1 {
+                    let top_dir = self.source_root.join(&segments[0]);
+                    if top_dir.is_dir() {
+                        if let Ok(resolved) = self.resolve_from_base(&top_dir, &segments[1..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 Err(err)
             }
         }

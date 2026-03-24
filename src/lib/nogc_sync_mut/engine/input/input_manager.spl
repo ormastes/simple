@@ -25,19 +25,6 @@ use std.nogc_sync_mut.io.window_ffi.{
     rt_winit_event_free
 }
 
-use std.nogc_sync_mut.io.gamepad_ffi.{
-    GamepadContext,
-    gamepad_init,
-    gamepad_shutdown,
-    gamepad_update,
-    gamepad_poll_event,
-    gamepad_event_free,
-    GamepadEventType,
-    gamepad_button_is_pressed,
-    GamepadButton,
-    code_to_button
-}
-
 use std.common.engine.signal.signal.{Signal}
 
 use std.nogc_sync_mut.engine.input.types.{
@@ -66,7 +53,7 @@ fn _compute_button_state(current: bool, previous: bool) -> ButtonState:
 
 class InputManager:
     event_loop_handle: i64
-    gamepad_ctx: GamepadContext
+    gamepad_ctx: i64
     # Key states: parallel arrays (keycode -> pressed bool)
     key_current_codes: [i64]
     key_current_states: [bool]
@@ -94,10 +81,9 @@ class InputManager:
 impl InputManager:
     static fn create(event_loop_handle: i64) -> InputManager:
         """Initialize InputManager with event loop handle and fresh gamepad context."""
-        val gp_ctx = gamepad_init()
         InputManager(
             event_loop_handle: event_loop_handle,
-            gamepad_ctx: gp_ctx,
+            gamepad_ctx: 0,
             key_current_codes: [],
             key_current_states: [],
             key_previous_codes: [],
@@ -111,10 +97,10 @@ impl InputManager:
             mouse_cur_middle: false,
             action_names: [],
             action_bindings: [],
-            on_key_pressed: Signal(name: "on_key_pressed", connections: [], next_id: 0, is_enabled: true),
-            on_key_released: Signal(name: "on_key_released", connections: [], next_id: 0, is_enabled: true),
-            on_action_pressed: Signal(name: "on_action_pressed", connections: [], next_id: 0, is_enabled: true),
-            on_action_released: Signal(name: "on_action_released", connections: [], next_id: 0, is_enabled: true),
+            on_key_pressed: Signal(name: "on_key_pressed", connections: [], next_id: 0, enabled: true),
+            on_key_released: Signal(name: "on_key_released", connections: [], next_id: 0, enabled: true),
+            on_action_pressed: Signal(name: "on_action_pressed", connections: [], next_id: 0, enabled: true),
+            on_action_released: Signal(name: "on_action_released", connections: [], next_id: 0, enabled: true),
             should_close: false
         )
 
@@ -183,10 +169,6 @@ impl InputManager:
         self.mouse.right = _compute_button_state(self.mouse_cur_right, self.mouse_prev_right)
         self.mouse.middle = _compute_button_state(self.mouse_cur_middle, self.mouse_prev_middle)
 
-        # Poll gamepad events
-        gamepad_update(self.gamepad_ctx)
-        self._process_gamepad_events()
-
         # Emit action signals
         self._emit_action_signals()
 
@@ -252,10 +234,9 @@ impl InputManager:
     # Internal: process pending gamepad events
     # ------------------------------------------------------------------
     me _process_gamepad_events():
-        var event = gamepad_poll_event(self.gamepad_ctx)
-        while event.is_valid:
-            gamepad_event_free(event)
-            event = gamepad_poll_event(self.gamepad_ctx)
+        # Gamepad support is intentionally disconnected until the new engine
+        # has a working end-to-end runtime path. Keyboard/mouse remain live.
+        ()
 
     # ------------------------------------------------------------------
     # Internal: check action transitions and emit signals
@@ -322,14 +303,6 @@ impl InputManager:
             if mb == 2 and self.mouse_cur_middle:
                 return true
             m = m + 1
-        # Check gamepad buttons
-        var g = 0
-        while g < binding.gamepad_buttons.len():
-            val gb = binding.gamepad_buttons[g]
-            val gp_button = code_to_button(gb)
-            if gamepad_button_is_pressed(self.gamepad_ctx, 0, gp_button):
-                return true
-            g = g + 1
         false
 
     # ==================================================================
@@ -460,7 +433,6 @@ impl InputManager:
 
     me destroy():
         """Shutdown gamepad context and clean up resources."""
-        gamepad_shutdown(self.gamepad_ctx)
         self.on_key_pressed.disconnect_all()
         self.on_key_released.disconnect_all()
         self.on_action_pressed.disconnect_all()

@@ -1,9 +1,15 @@
 # Simple 2D Engine Demo
 
-A minimal platformer demo using the Simple-native 2D game engine.
+A minimal platformer demo targeting the new Simple-native 2D engine.
 
-Demonstrates: window creation, input bindings, scene graph, physics simulation,
-and vector shape rendering -- all in ~140 lines of Simple.
+The example code now uses the new engine path only:
+- primitive vector commands instead of Lyon tessellation
+- keyboard and mouse input only
+- explicit silent audio backend until host audio runtime is wired
+
+The remaining end-to-end blockers are below the demo: window and physics host
+runtime support are still missing in the Rust driver, and the self-hosted
+`bin/simple_native` run/check path still segfaults.
 
 ## Run
 
@@ -11,14 +17,14 @@ and vector shape rendering -- all in ~140 lines of Simple.
 ./examples/engine_2d_demo/run.sh
 ```
 
-Direct command:
+Current direct check:
 
 ```bash
-bin/simple_native run examples/engine_2d_demo/main.spl
+src/compiler_rust/target/debug/simple examples/engine_2d_demo/main.spl
 ```
 
-`bin/simple` in this checkout is a bootstrap-only binary and does not support
-`run`.
+That command currently fails honestly on missing `rt_winit_*` / `rt_rapier2d_*`
+runtime support. The wrapper script reports those blockers directly.
 
 ## Controls
 
@@ -43,5 +49,5 @@ bin/simple_native run examples/engine_2d_demo/main.spl
 - `GameLoop` with `GameCallbacks` -- fixed-timestep game loop
 - `bind_wasd_movement()` / `bind_platformer_defaults()` -- preset input bindings
 - `PhysicsWorld2D` -- dynamic/static bodies, box/circle colliders, forces, impulses
-- `VectorRenderer` -- fill_rect, fill_circle for shape rendering
+- `VectorRenderer` -- fill_rect, fill_circle, stroke_line via direct render commands
 - `NodeStore` -- scene graph with position tracking

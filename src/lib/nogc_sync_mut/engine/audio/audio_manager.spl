@@ -1,32 +1,13 @@
-# AudioManager — Bus-Based Audio System for 2D Game Engine
+# AudioManager — Silent backend for the new 2D engine
 #
-# High-level audio manager that wraps the Rodio FFI layer with:
-# - Named audio buses (sfx, music, ui) for grouped volume control
-# - Clip caching by file path to avoid redundant loads
-# - 2D spatial audio (converts x,y to x,y,0 for 3D FFI)
-# - One-shot and looped playback helpers
-#
-# Usage:
-#   var manager = AudioManager.create(default_audio_config())
-#   val clip = manager.load_clip("assets/sfx/hit.wav")
-#   val sound = manager.play(clip, "sfx")
-#   manager.set_bus_volume("music", 0.5)
-#   manager.destroy()
+# The new 2D engine keeps the public audio API shape, but the Rust driver does
+# not currently expose the host `rt_audio_*` extern family. Instead of
+# pretending audio is connected, this module implements an explicit silent
+# backend. Callers can still cache clips, create sound handles, and adjust bus
+# state without pulling in unavailable runtime symbols.
 
-use std.nogc_sync_mut.io.audio_ffi.{
-    audio_init, audio_shutdown, audio_set_master_volume, audio_get_master_volume,
-    audio_load_from_file, audio_source_free,
-    audio_play_sound, audio_play_sound_with_volume, audio_play_sound_looped,
-    audio_play_music_looped,
-    audio_playback_stop, audio_playback_pause, audio_playback_resume,
-    audio_playback_set_volume,
-    audio_play_sound_spatial, audio_playback_set_position,
-    audio_set_listener_position,
-    audio_mixer_create, audio_mixer_set_volume, audio_mixer_play,
-    AudioEngine, AudioSource, AudioPlayback, AudioMixer, Vec3
-}
 use std.nogc_sync_mut.engine.audio.types.{
-    AudioClip, SoundHandle, AudioBus, AudioConfig, default_audio_config
+    AudioClip, SoundHandle, AudioBus, AudioConfig
 }
 
 # ============================================================================
@@ -34,326 +15,84 @@ use std.nogc_sync_mut.engine.audio.types.{
 # ============================================================================
 
 class AudioManager:
-    """Bus-based audio manager for the 2D game engine.
+    """Audio API with an explicit silent backend.
 
-    Manages an FFI audio engine, named mixing buses, a clip cache,
-    and 2D listener position (projected to 3D with z=0).
+    The manager tracks clip metadata, bus state, and listener position, but
+    performs no host-side playback until a real runtime audio backend is wired.
     """
-    engine_handle: i64               # FFI AudioEngine handle id
-    engine: AudioEngine              # FFI AudioEngine struct
+    engine_handle: i64
     config: AudioConfig
-    buses: Dict<text, AudioBus>      # bus_name -> bus
-    clip_cache: Dict<text, AudioClip>  # file_path -> cached clip
+    buses: Dict<text, AudioBus>
+    clip_cache: Dict<text, AudioClip>
     listener_x: f64
     listener_y: f64
+    next_playback_handle: i64
 
 impl AudioManager:
     static fn create(config: AudioConfig) -> AudioManager:
-        """Initialize the audio system and create default buses.
-
-        Creates three default buses: "sfx", "music", and "ui".
-        Sets master volume from config.
-
-        Args:
-            config: Audio configuration settings
-
-        Returns:
-            A new AudioManager ready for use
-        """
-        val engine = audio_init()
-        audio_set_master_volume(engine, config.master_volume)
-
         var buses: Dict<text, AudioBus> = {}
-
-        # Create default buses
-        val sfx_mixer = audio_mixer_create(engine)
-        buses["sfx"] = AudioBus(
-            name: "sfx",
-            mixer_handle: sfx_mixer.handle,
-            volume: 1.0,
-            muted: false
-        )
-
-        val music_mixer = audio_mixer_create(engine)
-        buses["music"] = AudioBus(
-            name: "music",
-            mixer_handle: music_mixer.handle,
-            volume: 1.0,
-            muted: false
-        )
-
-        val ui_mixer = audio_mixer_create(engine)
-        buses["ui"] = AudioBus(
-            name: "ui",
-            mixer_handle: ui_mixer.handle,
-            volume: 1.0,
-            muted: false
-        )
-
-        var clip_cache: Dict<text, AudioClip> = {}
+        buses["sfx"] = AudioBus(name: "sfx", mixer_handle: 0, volume: 1.0, muted: false)
+        buses["music"] = AudioBus(name: "music", mixer_handle: 0, volume: 1.0, muted: false)
+        buses["ui"] = AudioBus(name: "ui", mixer_handle: 0, volume: 1.0, muted: false)
 
         AudioManager(
-            engine_handle: engine.handle,
-            engine: engine,
+            engine_handle: 0,
             config: config,
             buses: buses,
-            clip_cache: clip_cache,
+            clip_cache: {},
             listener_x: 0.0,
-            listener_y: 0.0
+            listener_y: 0.0,
+            next_playback_handle: 1
         )
-
-    # ========================================================================
-    # Clip Loading
-    # ========================================================================
 
     me load_clip(path: text) -> AudioClip:
-        """Load an audio clip from a file path.
-
-        Always loads fresh from disk, replacing any cached version.
-
-        Args:
-            path: File path to the audio file
-
-        Returns:
-            The loaded AudioClip
-        """
-        val source = audio_load_from_file(self.engine, path)
-        val clip = AudioClip(
-            source_handle: source.handle,
-            path: path,
-            is_loaded: source.is_valid
-        )
+        val clip = AudioClip(source_handle: 0, path: path, is_loaded: true)
         self.clip_cache[path] = clip
         clip
 
     me load_clip_cached(path: text) -> AudioClip:
-        """Load an audio clip, returning a cached version if available.
-
-        Only loads from disk if the clip has not been loaded before.
-
-        Args:
-            path: File path to the audio file
-
-        Returns:
-            The cached or newly loaded AudioClip
-        """
         if val Some(cached) = self.clip_cache.get(path):
             return cached
         self.load_clip(path)
 
-    # ========================================================================
-    # Playback
-    # ========================================================================
-
     me play(clip: AudioClip, bus_name: text) -> SoundHandle:
-        """Play a clip on the specified bus.
-
-        Args:
-            clip: The audio clip to play
-            bus_name: Name of the bus ("sfx", "music", "ui")
-
-        Returns:
-            A SoundHandle for controlling the playback
-        """
-        val source = AudioSource(handle: clip.source_handle, engine: self.engine, is_valid: clip.is_loaded)
-        val playback = audio_play_sound(self.engine, source)
-        self._apply_bus_volume(playback, bus_name)
-        SoundHandle(
-            playback_handle: playback.handle,
-            clip_path: clip.path,
-            bus_name: bus_name,
-            is_spatial: false
-        )
+        self._new_sound_handle(clip.path, bus_name, false)
 
     me play_with_volume(clip: AudioClip, bus_name: text, volume: f64) -> SoundHandle:
-        """Play a clip on the specified bus with a specific volume.
-
-        The volume is applied directly to the playback, independent of bus volume.
-
-        Args:
-            clip: The audio clip to play
-            bus_name: Name of the bus
-            volume: Playback volume (0.0 - 1.0)
-
-        Returns:
-            A SoundHandle for controlling the playback
-        """
-        val source = AudioSource(handle: clip.source_handle, engine: self.engine, is_valid: clip.is_loaded)
-        val playback = audio_play_sound_with_volume(self.engine, source, volume)
-        SoundHandle(
-            playback_handle: playback.handle,
-            clip_path: clip.path,
-            bus_name: bus_name,
-            is_spatial: false
-        )
+        self.play(clip, bus_name)
 
     me play_looped(clip: AudioClip, bus_name: text) -> SoundHandle:
-        """Play a clip in a loop on the specified bus.
-
-        Args:
-            clip: The audio clip to loop
-            bus_name: Name of the bus
-
-        Returns:
-            A SoundHandle for controlling the playback
-        """
-        val source = AudioSource(handle: clip.source_handle, engine: self.engine, is_valid: clip.is_loaded)
-        val playback = audio_play_sound_looped(self.engine, source)
-        self._apply_bus_volume(playback, bus_name)
-        SoundHandle(
-            playback_handle: playback.handle,
-            clip_path: clip.path,
-            bus_name: bus_name,
-            is_spatial: false
-        )
+        self._new_sound_handle(clip.path, bus_name, false)
 
     me play_one_shot(path: text) -> SoundHandle:
-        """Convenience: load (cached) and play a sound on the "sfx" bus.
-
-        Args:
-            path: File path to the audio file
-
-        Returns:
-            A SoundHandle for the one-shot playback
-        """
         val clip = self.load_clip_cached(path)
         self.play(clip, "sfx")
 
     me play_music(path: text) -> SoundHandle:
-        """Convenience: load and play music looped on the "music" bus.
-
-        Uses streaming playback via the music FFI path.
-
-        Args:
-            path: File path to the music file
-
-        Returns:
-            A SoundHandle for controlling the music playback
-        """
         val clip = self.load_clip_cached(path)
         self.play_looped(clip, "music")
 
-    # ========================================================================
-    # Spatial Audio (2D -> 3D projection, z=0)
-    # ========================================================================
-
     me play_at(clip: AudioClip, bus_name: text, x: f64, y: f64) -> SoundHandle:
-        """Play a clip with 2D spatial positioning.
-
-        Converts 2D coordinates (x, y) to 3D (x, y, 0) for the FFI layer.
-
-        Args:
-            clip: The audio clip to play
-            bus_name: Name of the bus
-            x: X position in world space
-            y: Y position in world space
-
-        Returns:
-            A SoundHandle for the spatial playback
-        """
-        val source = AudioSource(handle: clip.source_handle, engine: self.engine, is_valid: clip.is_loaded)
-        val position = Vec3(x: x, y: y, z: 0.0)
-        val playback = audio_play_sound_spatial(self.engine, source, position)
-        self._apply_bus_volume(playback, bus_name)
-        SoundHandle(
-            playback_handle: playback.handle,
-            clip_path: clip.path,
-            bus_name: bus_name,
-            is_spatial: true
-        )
+        self._new_sound_handle(clip.path, bus_name, true)
 
     me set_listener_position(x: f64, y: f64):
-        """Set the 2D listener position for spatial audio.
-
-        Converts to 3D (x, y, 0) for the FFI layer.
-
-        Args:
-            x: Listener X position in world space
-            y: Listener Y position in world space
-        """
         self.listener_x = x
         self.listener_y = y
-        val position = Vec3(x: x, y: y, z: 0.0)
-        audio_set_listener_position(self.engine, position)
-
-    # ========================================================================
-    # Playback Control
-    # ========================================================================
 
     me stop_sound(handle: SoundHandle) -> bool:
-        """Stop a playing sound.
-
-        Args:
-            handle: The sound to stop
-
-        Returns:
-            true if the sound was stopped
-        """
-        if not handle.is_valid():
-            return false
-        val playback = AudioPlayback(handle: handle.playback_handle, engine: self.engine, is_valid: true)
-        audio_playback_stop(playback)
+        handle.is_valid()
 
     me pause_sound(handle: SoundHandle) -> bool:
-        """Pause a playing sound.
-
-        Args:
-            handle: The sound to pause
-
-        Returns:
-            true if the sound was paused
-        """
-        if not handle.is_valid():
-            return false
-        val playback = AudioPlayback(handle: handle.playback_handle, engine: self.engine, is_valid: true)
-        audio_playback_pause(playback)
+        handle.is_valid()
 
     me resume_sound(handle: SoundHandle) -> bool:
-        """Resume a paused sound.
-
-        Args:
-            handle: The sound to resume
-
-        Returns:
-            true if the sound was resumed
-        """
-        if not handle.is_valid():
-            return false
-        val playback = AudioPlayback(handle: handle.playback_handle, engine: self.engine, is_valid: true)
-        audio_playback_resume(playback)
+        handle.is_valid()
 
     me set_sound_volume(handle: SoundHandle, volume: f64) -> bool:
-        """Set the volume of a playing sound.
-
-        Args:
-            handle: The sound to adjust
-            volume: New volume (0.0 - 1.0)
-
-        Returns:
-            true if the volume was set
-        """
-        if not handle.is_valid():
-            return false
-        val playback = AudioPlayback(handle: handle.playback_handle, engine: self.engine, is_valid: true)
-        audio_playback_set_volume(playback, volume)
-
-    # ========================================================================
-    # Bus Control
-    # ========================================================================
+        handle.is_valid()
 
     me set_bus_volume(bus_name: text, volume: f64) -> bool:
-        """Set the volume of a named audio bus.
-
-        Args:
-            bus_name: Name of the bus ("sfx", "music", "ui")
-            volume: New volume (0.0 - 1.0)
-
-        Returns:
-            true if the bus was found and volume set
-        """
         if val Some(bus) = self.buses.get(bus_name):
-            val mixer = AudioMixer(handle: bus.mixer_handle, engine: self.engine, is_valid: true)
-            audio_mixer_set_volume(mixer, volume)
             self.buses[bus_name] = AudioBus(
                 name: bus.name,
                 mixer_handle: bus.mixer_handle,
@@ -364,32 +103,12 @@ impl AudioManager:
         false
 
     fn get_bus_volume(bus_name: text) -> f64:
-        """Get the current volume of a named audio bus.
-
-        Args:
-            bus_name: Name of the bus
-
-        Returns:
-            The bus volume (0.0 - 1.0), or 0.0 if bus not found
-        """
         if val Some(bus) = self.buses.get(bus_name):
             return bus.volume
         0.0
 
     me mute_bus(bus_name: text) -> bool:
-        """Mute a named audio bus (sets mixer volume to 0).
-
-        The original volume is preserved for unmute.
-
-        Args:
-            bus_name: Name of the bus
-
-        Returns:
-            true if the bus was found and muted
-        """
         if val Some(bus) = self.buses.get(bus_name):
-            val mixer = AudioMixer(handle: bus.mixer_handle, engine: self.engine, is_valid: true)
-            audio_mixer_set_volume(mixer, 0.0)
             self.buses[bus_name] = AudioBus(
                 name: bus.name,
                 mixer_handle: bus.mixer_handle,
@@ -400,17 +119,7 @@ impl AudioManager:
         false
 
     me unmute_bus(bus_name: text) -> bool:
-        """Unmute a named audio bus (restores original volume).
-
-        Args:
-            bus_name: Name of the bus
-
-        Returns:
-            true if the bus was found and unmuted
-        """
         if val Some(bus) = self.buses.get(bus_name):
-            val mixer = AudioMixer(handle: bus.mixer_handle, engine: self.engine, is_valid: true)
-            audio_mixer_set_volume(mixer, bus.volume)
             self.buses[bus_name] = AudioBus(
                 name: bus.name,
                 mixer_handle: bus.mixer_handle,
@@ -420,72 +129,28 @@ impl AudioManager:
             return true
         false
 
-    # ========================================================================
-    # Master Volume
-    # ========================================================================
-
     me set_master_volume(volume: f64):
-        """Set the master volume for the entire audio engine.
-
-        Args:
-            volume: New master volume (0.0 - 1.0)
-        """
         self.config = AudioConfig(
             master_volume: volume,
             spatial_max_distance: self.config.spatial_max_distance,
             spatial_min_distance: self.config.spatial_min_distance
         )
-        audio_set_master_volume(self.engine, volume)
 
     fn get_master_volume() -> f64:
-        """Get the current master volume.
-
-        Returns:
-            The master volume (0.0 - 1.0)
-        """
         self.config.master_volume
 
-    # ========================================================================
-    # Bulk Operations
-    # ========================================================================
-
     me stop_all():
-        """Stop all sounds on all buses.
-
-        Frees all cached clips and resets the clip cache.
-        """
-        # Free all cached audio sources
-        for path in self.clip_cache.keys():
-            if val Some(clip) = self.clip_cache.get(path):
-                if clip.is_loaded:
-                    val source = AudioSource(handle: clip.source_handle, engine: self.engine, is_valid: true)
-                    audio_source_free(source)
         self.clip_cache = {}
 
-    # ========================================================================
-    # Lifecycle
-    # ========================================================================
-
     me destroy():
-        """Shut down the audio engine and release all resources.
-
-        Must be called when the game engine shuts down.
-        """
         self.stop_all()
-        audio_shutdown(self.engine)
 
-    # ========================================================================
-    # Internal Helpers
-    # ========================================================================
-
-    me _apply_bus_volume(playback: AudioPlayback, bus_name: text):
-        """Apply the bus volume to a playback handle (internal).
-
-        If the bus is muted, sets volume to 0.
-        Otherwise applies the bus volume level.
-        """
-        if val Some(bus) = self.buses.get(bus_name):
-            if bus.muted:
-                audio_playback_set_volume(playback, 0.0)
-            else:
-                audio_playback_set_volume(playback, bus.volume)
+    me _new_sound_handle(clip_path: text, bus_name: text, is_spatial: bool) -> SoundHandle:
+        val handle = self.next_playback_handle
+        self.next_playback_handle = self.next_playback_handle + 1
+        SoundHandle(
+            playback_handle: handle,
+            clip_path: clip_path,
+            bus_name: bus_name,
+            is_spatial: is_spatial
+        )

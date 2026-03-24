@@ -7,10 +7,10 @@
 
 ## LIM-001: Software Renderer Only (No GPU Acceleration)
 
-**Severity:** Medium
-**Description:** The engine uses a CPU-based software renderer (`SoftwareRenderer`) that writes pixels to a buffer and presents via `graphics2d_ffi`. There is no GPU-accelerated rendering path. Performance degrades at high resolutions or with many draw calls.
+**Severity:** High
+**Description:** The engine uses a CPU-based software renderer (`SoftwareRenderer`) that writes pixels to an in-memory buffer, but the new-engine runtime path still has no connected framebuffer upload/present API. `GameLoop` can rasterize and request redraw, but that does not yet display the buffer in a real window on the Rust-driver path.
 **Workaround:** Keep game resolution at 800x600 or lower. Minimize overdraw by culling off-screen sprites. Reduce particle counts.
-**Future:** Phase 8 adds a Vulkan render backend behind the same `RenderCommand` interface. GPU modules already exist in `src/lib/nogc_sync_mut/gpu/`.
+**Future:** Add an explicit host present/upload API for packed RGBA frame buffers, then call it after `render_frame()`. A future GPU backend can still sit behind the same `RenderCommand` interface.
 
 ## LIM-002: No Image File Loading
 
@@ -40,26 +40,40 @@
 **Workaround:** Increase segment count in `debug_draw.spl` for more accurate circles. Use debug draw only during development.
 **Future:** Use the renderer's native `DrawCircle` command once the software renderer supports anti-aliased circle drawing.
 
-## LIM-006: Chained Method Calls Avoided
+## LIM-006: New Engine Window Runtime Not Wired In Rust Driver
+
+**Severity:** High
+**Description:** The Rust driver currently does not expose the `rt_winit_*` extern family used by the new 2D engine window/input layer. The demo therefore fails during semantic/runtime binding before a window can open.
+**Workaround:** None in the Rust driver today. The old self-hosted path still contains these symbols but currently crashes in generic `run` / `check`, so it is not a valid fallback.
+**Future:** Add `rt_winit_*` runtime symbol registration and implementations to the Rust driver/runtime.
+
+## LIM-007: New Engine Physics Runtime Not Wired In Rust Driver
+
+**Severity:** High
+**Description:** The Rust driver also lacks the `rt_rapier2d_*` extern family used by `PhysicsWorld2D`, so even after module loading succeeds the demo cannot execute the real physics stack there yet.
+**Workaround:** None.
+**Future:** Add `rt_rapier2d_*` runtime symbol registration and implementations to the Rust driver/runtime.
+
+## LIM-008: Chained Method Calls Avoided
 
 **Severity:** Low
 **Description:** Simple's runtime has a known limitation where chained method calls (`node.get_child(0).set_position(v)`) can fail. All engine code uses intermediate `var` bindings.
 **Workaround:** Always assign method results to a `var` before calling the next method. This is already followed throughout the engine source.
 **Future:** Tracked as a Simple runtime fix. No engine-side change needed once resolved.
 
-## LIM-007: Signals Use Text-Serialized Data
+## LIM-009: Signals Use Text-Serialized Data
 
 **Severity:** Low
 **Description:** Simple's nested closure capture cannot modify outer variables. The signal/event system passes data as text-serialized payloads (`text` type) rather than typed structs. Subscribers must parse the payload string.
 **Workaround:** Use a consistent serialization format (e.g., `"key1:value1,key2:value2"`) and parse in subscriber callbacks. Keep payloads simple.
 **Future:** Once Simple supports mutable closure capture or adds typed channels, signals can carry typed payloads directly.
 
-## LIM-008: Bootstrap Binary Cannot Run Tests
+## LIM-010: Self-Hosted Driver Run/Check/Test Still Segfault
 
-**Severity:** Low
-**Description:** The Rust bootstrap binary (`src/compiler_rust/target/bootstrap/simple`) does not support the `test` command. Unit tests require the full self-hosted `bin/release/simple` binary.
-**Workaround:** Build the self-hosted binary first (`scripts/bootstrap/bootstrap-from-scratch.sh`), then run tests with `bin/simple test test/unit/lib/engine/`.
-**Future:** Not applicable. This is a bootstrap limitation by design.
+**Severity:** High
+**Description:** The self-hosted `bin/simple_native` / `bin/simple_stage4` path still segfaults in generic `run`, `check`, and `test`, including trivial programs. This blocks the only runtime path that already contains the new engine's window symbols.
+**Workaround:** Use the Rust driver for non-engine programs and engine code audit, but not for end-to-end new-engine execution.
+**Future:** Fix the crash in `CompilerDriver.load_sources_impl()` and related generic driver flow.
 
 ---
 
@@ -67,14 +81,16 @@
 
 | ID | Severity | Summary |
 |----|----------|---------|
-| LIM-001 | Medium | Software renderer only, no GPU |
+| LIM-001 | High | Software renderer has no connected present path |
 | LIM-002 | High | No image file loading |
 | LIM-003 | Medium | No font/text rendering |
 | LIM-004 | Medium | Sprites render as colored rects |
 | LIM-005 | Low | Circle debug draw is approximate |
-| LIM-006 | Low | Chained methods avoided |
-| LIM-007 | Low | Signal payloads are text-only |
-| LIM-008 | Low | Bootstrap binary lacks test command |
+| LIM-006 | High | Rust driver lacks new-engine window runtime |
+| LIM-007 | High | Rust driver lacks new-engine physics runtime |
+| LIM-008 | Low | Chained methods avoided |
+| LIM-009 | Low | Signal payloads are text-only |
+| LIM-010 | High | Self-hosted driver still segfaults |
 
 ## Cross-References
 
