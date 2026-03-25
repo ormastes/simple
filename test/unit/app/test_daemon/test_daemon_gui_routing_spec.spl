@@ -1,10 +1,18 @@
 # Test Daemon GUI Routing Specification
 #
-# Verifies GUI test path classification and session key mapping.
+# Verifies GUI test path classification, session key mapping,
+# mode normalization, and QEMU architecture inference using the
+# actual gui_adapter implementation.
+#
+# **Feature IDs:** #TDMN-GUI-01 to #TDMN-GUI-15
+# **Category:** Infrastructure
 
-use app.test_daemon.daemon.{
+use std.spec.{describe, it, expect}
+use std.io_runtime
+
+use app.test_daemon.adapters.gui_adapter.{
     is_gui_test_path, gui_session_key_for_path, normalize_gui_mode,
-    is_qemu_test_path, infer_qemu_arch
+    infer_qemu_arch
 }
 
 describe "TestDaemon GUI routing":
@@ -18,8 +26,14 @@ describe "TestDaemon GUI routing":
         it "treats .ui.sdn files as GUI targets":
             expect(is_gui_test_path("examples/ui/minimal.ui.sdn")).to_equal(true)
 
+        it "treats app/ui paths as GUI tests":
+            expect(is_gui_test_path("src/app/ui/main_window.spl")).to_equal(true)
+
         it "does not treat non-gui specs as GUI tests":
             expect(is_gui_test_path("test/system/test_daemon/test_daemon_flow_system_spec.spl")).to_equal(false)
+
+        it "does not treat plain spl files as GUI tests":
+            expect(is_gui_test_path("test/unit/parser/lexer_spec.spl")).to_equal(false)
 
     describe "session key mapping":
         it "maps system gui tests to shared system key":
@@ -51,17 +65,24 @@ describe "TestDaemon GUI routing":
         it "returns empty for unknown mode":
             expect(normalize_gui_mode("weird_mode")).to_equal("")
 
-    describe "qemu routing":
-        it "detects baremetal tests as qemu targets":
-            expect(is_qemu_test_path("test/feature/baremetal/arm64_boot_spec.spl")).to_equal(true)
-
-        it "detects qemu-named integration tests":
-            expect(is_qemu_test_path("test/integration/baremetal/qemu_unified_execution_demo.spl")).to_equal(true)
-
-        it "ignores normal non-baremetal tests":
-            expect(is_qemu_test_path("test/system/test_daemon/test_daemon_flow_system_spec.spl")).to_equal(false)
-
-        it "infers qemu arch from path":
+    describe "QEMU arch inference":
+        it "infers riscv64 from path":
             expect(infer_qemu_arch("test/feature/baremetal/riscv64_boot_spec.spl")).to_equal("riscv64")
+
+        it "infers riscv32 from path":
+            expect(infer_qemu_arch("test/feature/baremetal/riscv32_blink_spec.spl")).to_equal("riscv32")
+
+        it "infers arm64 from path":
             expect(infer_qemu_arch("test/feature/baremetal/arm64_boot_spec.spl")).to_equal("arm64")
+
+        it "infers aarch64 as arm64":
+            expect(infer_qemu_arch("test/feature/baremetal/aarch64_uart_spec.spl")).to_equal("arm64")
+
+        it "infers x86_64 from path":
             expect(infer_qemu_arch("test/unit/compiler/native/x86_64_simd_spec.spl")).to_equal("x86_64")
+
+        it "infers amd64 as x86_64":
+            expect(infer_qemu_arch("test/feature/baremetal/amd64_paging_spec.spl")).to_equal("x86_64")
+
+        it "defaults to x86_64 when no arch detected":
+            expect(infer_qemu_arch("test/unit/parser/lexer_spec.spl")).to_equal("x86_64")

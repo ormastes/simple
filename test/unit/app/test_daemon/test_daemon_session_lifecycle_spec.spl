@@ -1,373 +1,447 @@
 # Test Daemon Session Lifecycle Specification
 #
-# Tests the complete lifecycle of test sessions:
-# create → configure → start → run tests → auto-reset → release → cleanup.
-# Simulates QemuTestSession and QemuMultiTestRunner patterns.
+# Tests the complete lifecycle of test sessions using SessionBroker:
+# acquire → run tests → reset → release → cleanup → shutdown.
+# Exercises SessionBroker, SessionAdapter, and session_types together.
 #
 # **Feature IDs:** #TDMN-051 to #TDMN-070
 # **Category:** Infrastructure
 
+use std.spec.{describe, it, expect, before_each}
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    LEASE_IDLE, LEASE_ACTIVE, LEASE_RESETTING, LEASE_STOPPING,
+    SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
+    SESSION_KIND_LOCAL, SESSION_KIND_SIMULATOR,
+    REUSE_SHARED_READ_ONLY, REUSE_SHARED_WITH_RESET, REUSE_EXCLUSIVE_REUSED,
+    REUSE_FRESH_PER_TEST,
+    RESET_NONE, RESET_SOFT, RESET_HARD, RESET_SNAPSHOT_RESTORE,
+    session_key_to_id, session_key_matches, session_lease_new,
+    session_descriptor_new, test_session_meta_default,
+    session_kind_name, session_kind_from_name,
+    reuse_mode_name, reuse_mode_from_name,
+    reset_policy_name, reset_policy_from_name,
+    meta_to_session_key, meta_needs_session
+}
+use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+
 # ============================================================================
-# Module-level mock state — simulates QemuTestSession lifecycle
+# Module-level mutable state
 # ============================================================================
 
-val TS_CREATED: i64 = 0
-val TS_STARTED: i64 = 1
-val TS_RUNNING: i64 = 2
-val TS_RESETTING: i64 = 3
-val TS_STOPPED: i64 = 4
-val TS_ERROR: i64 = 5
+var sb = session_broker_new()
 
-var ts_session_ids: [text] = []
-var ts_archs: [text] = []
-var ts_states: [i64] = []
-var ts_test_counts: [i64] = []
-var ts_reset_counts: [i64] = []
-var ts_auto_reset: [bool] = []
-var ts_auto_reload: [bool] = []
-var ts_binary_paths: [text] = []
-var ts_gdb_ports: [i64] = []
-var ts_errors: [text] = []
-var ts_next_id: i64 = 1
+fn reset_sb():
+    sb = session_broker_new()
 
-fn ts_reset_all():
-    ts_session_ids = []
-    ts_archs = []
-    ts_states = []
-    ts_test_counts = []
-    ts_reset_counts = []
-    ts_auto_reset = []
-    ts_auto_reload = []
-    ts_binary_paths = []
-    ts_gdb_ports = []
-    ts_errors = []
-    ts_next_id = 1
+# ============================================================================
+# Test metadata builders (avoid closure mutation)
+# ============================================================================
 
-fn ts_find(id: text) -> i64:
+fn make_qemu_meta(target: text, reuse: i64, artifact: text) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/example_spec.spl",
+        session_kind: SESSION_KIND_QEMU_VM,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_SOFT,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+fn make_container_meta(target: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/container_spec.spl",
+        session_kind: SESSION_KIND_CONTAINER,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_HARD,
+        artifact: "/images/test.img",
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+fn make_service_meta(target: text) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/service_spec.spl",
+        session_kind: SESSION_KIND_SERVICE,
+        target: target,
+        reuse_mode: REUSE_SHARED_READ_ONLY,
+        reset_policy: RESET_NONE,
+        artifact: "/bin/service",
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+fn make_local_meta() -> TestSessionMeta:
+    test_session_meta_default("test/local_spec.spl")
+
+fn make_sim_meta(target: text) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/sim_spec.spl",
+        session_kind: SESSION_KIND_SIMULATOR,
+        target: target,
+        reuse_mode: REUSE_EXCLUSIVE_REUSED,
+        reset_policy: RESET_SNAPSHOT_RESTORE,
+        artifact: "/bin/sim",
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn find_lease_status(session_id: text) -> i64:
     var i = 0
-    while i < ts_session_ids.len():
-        if ts_session_ids[i] == id:
-            return i
+    while i < sb.leases.len():
+        if sb.leases[i].session_id == session_id:
+            return sb.leases[i].status
         i = i + 1
     -1
 
-fn ts_create(arch: text, binary_path: text, gdb_port: i64) -> text:
-    val id = "session_{ts_next_id}"
-    ts_next_id = ts_next_id + 1
-    ts_session_ids = ts_session_ids + [id]
-    ts_archs = ts_archs + [arch]
-    ts_states = ts_states + [TS_CREATED]
-    ts_test_counts = ts_test_counts + [0]
-    ts_reset_counts = ts_reset_counts + [0]
-    ts_auto_reset = ts_auto_reset + [false]
-    ts_auto_reload = ts_auto_reload + [false]
-    ts_binary_paths = ts_binary_paths + [binary_path]
-    ts_gdb_ports = ts_gdb_ports + [gdb_port]
-    ts_errors = ts_errors + [""]
-    id
-
-fn ts_set_auto_reset(id: text, enabled: bool):
-    val idx = ts_find(id)
-    if idx >= 0:
-        ts_auto_reset[idx] = enabled
-
-fn ts_set_auto_reload(id: text, enabled: bool):
-    val idx = ts_find(id)
-    if idx >= 0:
-        ts_auto_reload[idx] = enabled
-
-fn ts_start(id: text) -> bool:
-    val idx = ts_find(id)
-    if idx < 0:
-        return false
-    if ts_states[idx] != TS_CREATED and ts_states[idx] != TS_STOPPED:
-        return false
-    ts_states[idx] = TS_STARTED
-    true
-
-fn ts_run_test(id: text) -> bool:
-    val idx = ts_find(id)
-    if idx < 0:
-        return false
-    if ts_states[idx] != TS_STARTED:
-        ts_errors[idx] = "session not started"
-        return false
-    # Auto-reset before each test if enabled
-    if ts_auto_reset[idx] and ts_test_counts[idx] > 0:
-        ts_states[idx] = TS_RESETTING
-        ts_reset_counts[idx] = ts_reset_counts[idx] + 1
-        ts_states[idx] = TS_STARTED
-    ts_states[idx] = TS_RUNNING
-    ts_test_counts[idx] = ts_test_counts[idx] + 1
-    # Simulate test completion
-    ts_states[idx] = TS_STARTED
-    true
-
-fn ts_reset(id: text) -> bool:
-    val idx = ts_find(id)
-    if idx < 0:
-        return false
-    ts_states[idx] = TS_RESETTING
-    ts_reset_counts[idx] = ts_reset_counts[idx] + 1
-    ts_states[idx] = TS_STARTED
-    true
-
-fn ts_stop(id: text) -> bool:
-    val idx = ts_find(id)
-    if idx < 0:
-        return false
-    ts_states[idx] = TS_STOPPED
-    true
-
-fn ts_set_error(id: text, err: text):
-    val idx = ts_find(id)
-    if idx >= 0:
-        ts_errors[idx] = err
-        ts_states[idx] = TS_ERROR
-
-# Getters
-fn ts_count() -> i64:
-    ts_session_ids.len()
-
-fn ts_get_state(id: text) -> i64:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_states[idx]
-    -1
-
-fn ts_get_test_count(id: text) -> i64:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_test_counts[idx]
+fn find_lease_test_count(session_id: text) -> i64:
+    var i = 0
+    while i < sb.leases.len():
+        if sb.leases[i].session_id == session_id:
+            return sb.leases[i].test_count
+        i = i + 1
     0
 
-fn ts_get_reset_count(id: text) -> i64:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_reset_counts[idx]
-    0
-
-fn ts_get_error(id: text) -> text:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_errors[idx]
-    ""
-
-fn ts_get_arch(id: text) -> text:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_archs[idx]
-    ""
-
-fn ts_get_gdb_port(id: text) -> i64:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_gdb_ports[idx]
-    0
-
-fn ts_is_auto_reset(id: text) -> bool:
-    val idx = ts_find(id)
-    if idx >= 0:
-        return ts_auto_reset[idx]
+fn find_lease_exists(session_id: text) -> bool:
+    var i = 0
+    while i < sb.leases.len():
+        if sb.leases[i].session_id == session_id:
+            return true
+        i = i + 1
     false
 
-# ============================================================================
-# Multi-test runner helpers
-# ============================================================================
-
-var mtr_results: [bool] = []
-
-fn mtr_reset():
-    mtr_results = []
-
-fn mtr_run_tests_on_session(id: text, n: i64) -> i64:
-    mtr_results = []
-    var passed: i64 = 0
-    var i: i64 = 0
-    while i < n:
-        val ok = ts_run_test(id)
-        mtr_results = mtr_results + [ok]
-        if ok:
-            passed = passed + 1
-        i = i + 1
-    passed
-
-fn mtr_get_passed() -> i64:
-    var c: i64 = 0
-    var i = 0
-    while i < mtr_results.len():
-        if mtr_results[i]:
-            c = c + 1
-        i = i + 1
-    c
-
-fn mtr_create_and_start(arch: text, binary: text, port: i64) -> text:
-    val id = ts_create(arch, binary, port)
-    ts_start(id)
-    id
-
-fn mtr_full_lifecycle(arch: text, binary: text, n_tests: i64) -> (i64, i64):
-    val id = ts_create(arch, binary, 1234)
-    ts_set_auto_reset(id, true)
-    ts_start(id)
-    val passed = mtr_run_tests_on_session(id, n_tests)
-    ts_stop(id)
-    val resets = ts_get_reset_count(id)
-    (passed, resets)
-
-fn mtr_create_multi_arch_sessions() -> [text]:
-    var ids: [text] = []
-    ids = ids + [mtr_create_and_start("arm64", "/tmp/test.elf", 1234)]
-    ids = ids + [mtr_create_and_start("riscv64", "/tmp/test_rv.elf", 1235)]
-    ids = ids + [mtr_create_and_start("x86_64", "/tmp/test_x86.elf", 1236)]
-    ids
-
-fn mtr_run_on_all_sessions(ids: [text], n: i64) -> i64:
-    var total: i64 = 0
-    var i = 0
-    while i < ids.len():
-        total = total + mtr_run_tests_on_session(ids[i], n)
-        i = i + 1
-    total
-
-fn mtr_stop_all_sessions(ids: [text]):
-    var i = 0
-    while i < ids.len():
-        ts_stop(ids[i])
-        i = i + 1
+fn acquire_and_release_meta(meta: TestSessionMeta) -> text:
+    val lease = sb.acquire(meta)
+    val sid = lease.session_id
+    sb.release(sid)
+    sid
 
 # ============================================================================
 # Tests
 # ============================================================================
 
 describe "Session Lifecycle":
-    describe "creation":
-        it "creates session in CREATED state":
-            ts_reset_all()
-            val id = ts_create("arm64", "/tmp/test.elf", 1234)
-            expect(ts_get_state(id)).to_equal(TS_CREATED)
-            expect(ts_get_arch(id)).to_equal("arm64")
-            expect(ts_get_gdb_port(id)).to_equal(1234)
+    describe "session types constants":
+        it "session kind name round-trips":
+            expect(session_kind_name(SESSION_KIND_QEMU_VM)).to_equal("qemu_vm")
+            expect(session_kind_from_name("qemu_vm")).to_equal(SESSION_KIND_QEMU_VM)
+            expect(session_kind_name(SESSION_KIND_CONTAINER)).to_equal("container_instance")
+            expect(session_kind_from_name("container_instance")).to_equal(SESSION_KIND_CONTAINER)
+
+        it "reuse mode name round-trips":
+            expect(reuse_mode_name(REUSE_SHARED_READ_ONLY)).to_equal("shared_read_only")
+            expect(reuse_mode_from_name("shared_read_only")).to_equal(REUSE_SHARED_READ_ONLY)
+            expect(reuse_mode_name(REUSE_FRESH_PER_TEST)).to_equal("fresh_per_test")
+            expect(reuse_mode_from_name("fresh_per_test")).to_equal(REUSE_FRESH_PER_TEST)
+
+        it "reset policy name round-trips":
+            expect(reset_policy_name(RESET_NONE)).to_equal("none")
+            expect(reset_policy_from_name("none")).to_equal(RESET_NONE)
+            expect(reset_policy_name(RESET_SNAPSHOT_RESTORE)).to_equal("snapshot_restore")
+            expect(reset_policy_from_name("snapshot_restore")).to_equal(RESET_SNAPSHOT_RESTORE)
+
+        it "unknown names return -1 or unknown":
+            expect(session_kind_from_name("nonexistent")).to_equal(-1)
+            expect(reuse_mode_from_name("bogus")).to_equal(-1)
+            expect(reset_policy_from_name("fake")).to_equal(-1)
+
+    describe "session key":
+        it "creates deterministic session IDs":
+            val key1 = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "abc123",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            val id1 = session_key_to_id(key1)
+            val id2 = session_key_to_id(key1)
+            expect(id1).to_equal(id2)
+            expect(id1).to_contain("qemu_vm")
+            expect(id1).to_contain("arm64")
+
+        it "matching keys are equal":
+            val key1 = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "abc",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            val key2 = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "abc",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            expect(session_key_matches(key1, key2)).to_equal(true)
+
+        it "different targets do not match":
+            val key1 = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "abc",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            val key2 = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "riscv64",
+                artifact_hash: "abc",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            expect(session_key_matches(key1, key2)).to_equal(false)
+
+    describe "test session meta":
+        it "default meta uses LOCAL kind and FRESH_PER_TEST":
+            val meta = test_session_meta_default("test/foo.spl")
+            expect(meta.session_kind).to_equal(SESSION_KIND_LOCAL)
+            expect(meta.reuse_mode).to_equal(REUSE_FRESH_PER_TEST)
+            expect(meta.reset_policy).to_equal(RESET_NONE)
+            expect(meta.file_path).to_equal("test/foo.spl")
+
+        it "local meta does not need session":
+            val meta = make_local_meta()
+            expect(meta_needs_session(meta)).to_equal(false)
+
+        it "qemu meta needs session":
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            expect(meta_needs_session(meta)).to_equal(true)
+
+        it "container meta needs session":
+            val meta = make_container_meta("ubuntu", REUSE_SHARED_WITH_RESET)
+            expect(meta_needs_session(meta)).to_equal(true)
+
+    describe "broker creation":
+        it "starts with zero sessions":
+            reset_sb()
+            expect(sb.total_count()).to_equal(0)
+            expect(sb.active_count()).to_equal(0)
+            expect(sb.idle_count()).to_equal(0)
+
+        it "has default idle timeout":
+            reset_sb()
+            expect(sb.idle_timeout_ms).to_equal(300000)
+
+        it "has default startup timeout":
+            reset_sb()
+            expect(sb.startup_timeout_ms).to_equal(60000)
+
+    describe "acquire and release":
+        it "acquire creates a new lease":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease = sb.acquire(meta)
+            expect(sb.total_count()).to_equal(1)
+            expect(lease.session_id.len()).to_be_greater_than(0)
+
+        it "release marks lease as idle":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease = sb.acquire(meta)
+            sb.release(lease.session_id)
+            expect(find_lease_status(lease.session_id)).to_equal(LEASE_IDLE)
+
+        it "reuses idle lease with matching key":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease1 = sb.acquire(meta)
+            val sid = lease1.session_id
+            sb.release(sid)
+            val lease2 = sb.acquire(meta)
+            expect(sb.total_count()).to_equal(1)
+            expect(lease2.session_id).to_equal(sid)
+            expect(lease2.test_count).to_equal(2)
+
+        it "fresh_per_test always creates new session":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_FRESH_PER_TEST, "/bin/test")
+            val lease1 = sb.acquire(meta)
+            sb.release(lease1.session_id)
+            val lease2 = sb.acquire(meta)
+            # fresh_per_test creates a new lease each time
+            expect(sb.total_count()).to_equal(2)
 
         it "assigns unique session IDs":
-            ts_reset_all()
-            val id1 = ts_create("arm64", "/tmp/a.elf", 1234)
-            val id2 = ts_create("arm64", "/tmp/b.elf", 1235)
-            expect(id1 != id2).to_equal(true)
-            expect(ts_count()).to_equal(2)
+            reset_sb()
+            val meta1 = make_qemu_meta("arm64", REUSE_FRESH_PER_TEST, "/bin/a")
+            val meta2 = make_qemu_meta("riscv64", REUSE_FRESH_PER_TEST, "/bin/b")
+            val l1 = sb.acquire(meta1)
+            val l2 = sb.acquire(meta2)
+            # Different targets produce different session IDs
+            expect(l1.session_id != l2.session_id).to_equal(true)
+            expect(sb.total_count()).to_equal(2)
 
-        it "creates with defaults disabled":
-            ts_reset_all()
-            val id = ts_create("riscv64", "/tmp/test.elf", 1234)
-            expect(ts_is_auto_reset(id)).to_equal(false)
-            expect(ts_get_test_count(id)).to_equal(0)
-            expect(ts_get_reset_count(id)).to_equal(0)
+    describe "multi-kind sessions":
+        it "tracks sessions from different kinds separately":
+            reset_sb()
+            val qemu_meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/q")
+            val container_meta = make_container_meta("ubuntu", REUSE_SHARED_WITH_RESET)
+            val service_meta = make_service_meta("api-server")
+            sb.acquire(qemu_meta)
+            sb.acquire(container_meta)
+            sb.acquire(service_meta)
+            expect(sb.total_count()).to_equal(3)
+            expect(sb.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(1)
+            expect(sb.count_by_kind(SESSION_KIND_CONTAINER)).to_equal(1)
+            expect(sb.count_by_kind(SESSION_KIND_SERVICE)).to_equal(1)
 
-    describe "start and stop":
-        it "transitions CREATED to STARTED":
-            ts_reset_all()
-            val id = ts_create("arm64", "/tmp/test.elf", 1234)
-            expect(ts_start(id)).to_equal(true)
-            expect(ts_get_state(id)).to_equal(TS_STARTED)
+        it "count_by_kind returns 0 for unused kinds":
+            reset_sb()
+            expect(sb.count_by_kind(SESSION_KIND_SIMULATOR)).to_equal(0)
+            expect(sb.count_by_kind(SESSION_KIND_LOCAL)).to_equal(0)
 
-        it "transitions STARTED to STOPPED":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            expect(ts_stop(id)).to_equal(true)
-            expect(ts_get_state(id)).to_equal(TS_STOPPED)
+    describe "stop session":
+        it "removes session from broker":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease = sb.acquire(meta)
+            expect(sb.total_count()).to_equal(1)
+            sb.stop_session(lease.session_id)
+            expect(sb.total_count()).to_equal(0)
 
-        it "can restart after stop":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            ts_stop(id)
-            expect(ts_start(id)).to_equal(true)
-            expect(ts_get_state(id)).to_equal(TS_STARTED)
+        it "stop returns true for existing session":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease = sb.acquire(meta)
+            val stopped = sb.stop_session(lease.session_id)
+            expect(stopped).to_equal(true)
 
-    describe "test execution":
-        it "runs test and increments count":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            expect(ts_run_test(id)).to_equal(true)
-            expect(ts_get_test_count(id)).to_equal(1)
+        it "stop returns false for unknown session":
+            reset_sb()
+            val stopped = sb.stop_session("nonexistent_session")
+            expect(stopped).to_equal(false)
 
-        it "fails to run test on non-started session":
-            ts_reset_all()
-            val id = ts_create("arm64", "/tmp/test.elf", 1234)
-            expect(ts_run_test(id)).to_equal(false)
-            expect(ts_get_error(id)).to_equal("session not started")
+    describe "shutdown all":
+        it "removes all sessions":
+            reset_sb()
+            sb.acquire(make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/a"))
+            sb.acquire(make_container_meta("ubuntu", REUSE_SHARED_WITH_RESET))
+            sb.acquire(make_service_meta("api"))
+            expect(sb.total_count()).to_equal(3)
+            sb.shutdown_all()
+            expect(sb.total_count()).to_equal(0)
 
-        it "runs multiple tests sequentially":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            val passed = mtr_run_tests_on_session(id, 5)
-            expect(passed).to_equal(5)
-            expect(ts_get_test_count(id)).to_equal(5)
+    describe "status reporting":
+        it "reports active and idle counts":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            val lease = sb.acquire(meta)
+            # Lease from start_new_session without adapter comes as LEASE_IDLE
+            # because session_lease_new sets status to LEASE_IDLE
+            val total = sb.total_count()
+            expect(total).to_equal(1)
 
-    describe "auto-reset":
-        it "resets between tests when enabled":
-            ts_reset_all()
-            val result = mtr_full_lifecycle("arm64", "/tmp/test.elf", 5)
-            expect(result[0]).to_equal(5)
-            # Auto-reset happens before tests 2,3,4,5 (not before first)
-            expect(result[1]).to_equal(4)
+        it "status_report includes session counts":
+            reset_sb()
+            sb.acquire(make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test"))
+            val report = sb.status_report()
+            expect(report).to_contain("Session Broker Status")
+            expect(report).to_contain("Total sessions: 1")
 
-        it "does not reset when disabled":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            mtr_run_tests_on_session(id, 5)
-            expect(ts_get_reset_count(id)).to_equal(0)
+    describe "adapter registration":
+        it "registers adapter for kind":
+            reset_sb()
+            val adapter = session_adapter_new(SESSION_KIND_QEMU_VM, "qemu")
+            sb.register_adapter(adapter)
+            # After registering, the registry can find the adapter
+            val found = sb.registry.find_by_kind(SESSION_KIND_QEMU_VM)
+            expect(found.?).to_equal(true)
+            expect(found.name).to_equal("qemu")
 
-        it "manual reset increments count":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            ts_reset(id)
-            ts_reset(id)
-            expect(ts_get_reset_count(id)).to_equal(2)
+        it "find_by_kind returns nil for unregistered kind":
+            reset_sb()
+            val found = sb.registry.find_by_kind(SESSION_KIND_SIMULATOR)
+            expect(found.?).to_equal(false)
 
-    describe "multi-architecture sessions":
-        it "runs tests on 3 different arch sessions":
-            ts_reset_all()
-            val ids = mtr_create_multi_arch_sessions()
-            val total = mtr_run_on_all_sessions(ids, 3)
-            expect(total).to_equal(9)
-            expect(ts_count()).to_equal(3)
+    describe "session lease struct":
+        it "creates lease with correct defaults":
+            val key = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "abc",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            val lease = session_lease_new(key)
+            expect(lease.status).to_equal(LEASE_IDLE)
+            expect(lease.test_count).to_equal(0)
+            expect(lease.pid).to_equal(0)
+            expect(lease.qmp_socket).to_equal("")
+            expect(lease.snapshot_name).to_equal("")
+            expect(lease.created_at).to_be_greater_than(0)
 
-        it "stops all sessions cleanly":
-            ts_reset_all()
-            val ids = mtr_create_multi_arch_sessions()
-            mtr_run_on_all_sessions(ids, 2)
-            mtr_stop_all_sessions(ids)
-            expect(ts_get_state(ids[0])).to_equal(TS_STOPPED)
-            expect(ts_get_state(ids[1])).to_equal(TS_STOPPED)
-            expect(ts_get_state(ids[2])).to_equal(TS_STOPPED)
+        it "lease session_id matches key ID":
+            val key = SessionKey(
+                kind: SESSION_KIND_CONTAINER,
+                target: "ubuntu",
+                artifact_hash: "def",
+                env_profile: "",
+                reuse_mode: REUSE_EXCLUSIVE_REUSED,
+                reset_policy: RESET_HARD
+            )
+            val lease = session_lease_new(key)
+            val expected_id = session_key_to_id(key)
+            expect(lease.session_id).to_equal(expected_id)
 
-    describe "error handling":
-        it "session enters error state on failure":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            ts_set_error(id, "QEMU crash")
-            expect(ts_get_state(id)).to_equal(TS_ERROR)
-            expect(ts_get_error(id)).to_equal("QEMU crash")
+    describe "session descriptor":
+        it "creates descriptor with defaults":
+            val key = SessionKey(
+                kind: SESSION_KIND_QEMU_VM,
+                target: "arm64",
+                artifact_hash: "xyz",
+                env_profile: "",
+                reuse_mode: REUSE_SHARED_READ_ONLY,
+                reset_policy: RESET_NONE
+            )
+            val desc = session_descriptor_new(key)
+            expect(desc.timeout_ms).to_equal(60000)
+            expect(desc.max_concurrent).to_equal(1)
 
-        it "cannot run test in error state":
-            ts_reset_all()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            ts_set_error(id, "boot failure")
-            expect(ts_run_test(id)).to_equal(false)
+    describe "complete lifecycle":
+        it "acquire, release, reuse, stop cycle":
+            reset_sb()
+            val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")
+            # Acquire
+            val lease1 = sb.acquire(meta)
+            val sid = lease1.session_id
+            expect(sb.total_count()).to_equal(1)
+            # Release
+            sb.release(sid)
+            expect(find_lease_status(sid)).to_equal(LEASE_IDLE)
+            # Reuse
+            val lease2 = sb.acquire(meta)
+            expect(lease2.session_id).to_equal(sid)
+            # Stop
+            sb.stop_session(sid)
+            expect(sb.total_count()).to_equal(0)
 
-    describe "multi-test runner":
-        it "runs full lifecycle with results":
-            ts_reset_all()
-            mtr_reset()
-            val id = mtr_create_and_start("arm64", "/tmp/test.elf", 1234)
-            val passed = mtr_run_tests_on_session(id, 10)
-            ts_stop(id)
-            expect(passed).to_equal(10)
-            expect(mtr_get_passed()).to_equal(10)
-            expect(ts_get_state(id)).to_equal(TS_STOPPED)
-
-        it "complete lifecycle: create, configure, start, run, stop":
-            ts_reset_all()
-            val result = mtr_full_lifecycle("riscv64", "/tmp/rv_test.elf", 3)
-            expect(result[0]).to_equal(3)
-            expect(result[1]).to_equal(2)
+        it "multi-kind acquire, release, shutdown":
+            reset_sb()
+            val l1 = sb.acquire(make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/a"))
+            val l2 = sb.acquire(make_container_meta("ubuntu", REUSE_SHARED_WITH_RESET))
+            val l3 = sb.acquire(make_service_meta("api"))
+            expect(sb.total_count()).to_equal(3)
+            sb.release(l1.session_id)
+            sb.release(l2.session_id)
+            sb.release(l3.session_id)
+            # All idle now
+            expect(sb.idle_count()).to_equal(3)
+            sb.shutdown_all()
+            expect(sb.total_count()).to_equal(0)

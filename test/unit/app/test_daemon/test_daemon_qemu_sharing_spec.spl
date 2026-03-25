@@ -1,456 +1,262 @@
 # Test Daemon QEMU Session Sharing Specification
 #
-# Tests QEMU session sharing patterns: read-only sharing across tests,
-# mutating isolation, concurrent multi-arch sessions, binary hash matching,
-# session migration, and warm session reuse.
+# Tests QEMU session sharing patterns using the real QemuBroker:
+# session pooling, acquire/release cycles, multi-arch sessions,
+# binary hash matching, eviction under pressure, and warm session reuse.
 #
 # **Feature IDs:** #TDMN-031 to #TDMN-050
 # **Category:** Infrastructure
 
+use std.spec.{describe, it, expect, before_each}
+use app.test_daemon.qemu_broker.{
+    QemuBroker, QemuSessionEntry, qemu_broker_new,
+    QEMU_IDLE, QEMU_IN_USE, QEMU_STALE
+}
+
 # ============================================================================
-# Module-level mock state — simulates shared QEMU sessions
+# Module-level mutable broker — reset before each test group
 # ============================================================================
 
-val SH_IDLE: i64 = 0
-val SH_IN_USE: i64 = 1
-val SH_SHARED: i64 = 3       # Read-only shared across tests
-val SH_EXCLUSIVE: i64 = 4    # Exclusive for mutating test
+var broker = qemu_broker_new(6)
 
-var sh_keys: [text] = []
-var sh_archs: [text] = []
-var sh_statuses: [i64] = []
-var sh_test_counts: [i64] = []
-var sh_last_used: [i64] = []
-var sh_share_counts: [i64] = []     # How many tests currently sharing
-var sh_annotations: [text] = []     # "read_only", "mutating", "destructive"
-var sh_binary_hashes: [i64] = []
-var sh_max_sessions: i64 = 6
-var sh_time: i64 = 1000000
+fn reset_broker():
+    broker = qemu_broker_new(6)
 
-fn sh_reset():
-    sh_keys = []
-    sh_archs = []
-    sh_statuses = []
-    sh_test_counts = []
-    sh_last_used = []
-    sh_share_counts = []
-    sh_annotations = []
-    sh_binary_hashes = []
-    sh_max_sessions = 6
-    sh_time = 1000000
-
-fn sh_set_max(n: i64):
-    sh_max_sessions = n
-
-fn sh_set_time(t: i64):
-    sh_time = t
-
-fn sh_find(key: text) -> i64:
-    var i = 0
-    while i < sh_keys.len():
-        if sh_keys[i] == key:
-            return i
-        i = i + 1
-    -1
-
-fn sh_find_shareable(key: text) -> i64:
-    var i = 0
-    while i < sh_keys.len():
-        if sh_keys[i] == key and sh_statuses[i] == SH_SHARED:
-            return i
-        i = i + 1
-    -1
-
-fn sh_find_idle(key: text) -> i64:
-    var i = 0
-    while i < sh_keys.len():
-        if sh_keys[i] == key and sh_statuses[i] == SH_IDLE:
-            return i
-        i = i + 1
-    -1
-
-fn sh_acquire_shared(arch: text, binary_hash: i64, annotation: text) -> text:
-    val key = "{arch}_{binary_hash}"
-
-    # For read-only, can join existing shared session
-    if annotation == "read_only":
-        val shared_idx = sh_find_shareable(key)
-        if shared_idx >= 0:
-            sh_share_counts[shared_idx] = sh_share_counts[shared_idx] + 1
-            sh_test_counts[shared_idx] = sh_test_counts[shared_idx] + 1
-            sh_last_used[shared_idx] = sh_time
-            return key
-
-    # For mutating/destructive, need exclusive or idle
-    val idle_idx = sh_find_idle(key)
-    if idle_idx >= 0:
-        if annotation == "read_only":
-            sh_statuses[idle_idx] = SH_SHARED
-            sh_share_counts[idle_idx] = 1
-        else:
-            sh_statuses[idle_idx] = SH_EXCLUSIVE
-            sh_share_counts[idle_idx] = 1
-        sh_test_counts[idle_idx] = sh_test_counts[idle_idx] + 1
-        sh_last_used[idle_idx] = sh_time
-        sh_annotations[idle_idx] = annotation
-        return key
-
-    # Create new session (evict if at limit)
-    if sh_keys.len() >= sh_max_sessions:
-        sh_evict_oldest_idle()
-
-    var status = SH_IN_USE
-    if annotation == "read_only":
-        status = SH_SHARED
-    if annotation == "mutating" or annotation == "destructive":
-        status = SH_EXCLUSIVE
-
-    sh_keys = sh_keys + [key]
-    sh_archs = sh_archs + [arch]
-    sh_statuses = sh_statuses + [status]
-    sh_test_counts = sh_test_counts + [1]
-    sh_last_used = sh_last_used + [sh_time]
-    sh_share_counts = sh_share_counts + [1]
-    sh_annotations = sh_annotations + [annotation]
-    sh_binary_hashes = sh_binary_hashes + [binary_hash]
-    key
-
-fn sh_release_shared(key: text):
-    val idx = sh_find(key)
-    if idx < 0:
-        return
-    sh_share_counts[idx] = sh_share_counts[idx] - 1
-    sh_last_used[idx] = sh_time
-    if sh_share_counts[idx] <= 0:
-        sh_statuses[idx] = SH_IDLE
-        sh_share_counts[idx] = 0
-
-fn sh_evict_oldest_idle():
-    var oldest_idx = -1
-    var oldest_time: i64 = 9999999999
-    var i = 0
-    while i < sh_keys.len():
-        if sh_statuses[i] == SH_IDLE and sh_last_used[i] < oldest_time:
-            oldest_idx = i
-            oldest_time = sh_last_used[i]
-        i = i + 1
-    if oldest_idx >= 0:
-        sh_remove_at(oldest_idx)
-
-fn sh_remove_at(idx: i64):
-    var nk: [text] = []
-    var na: [text] = []
-    var ns: [i64] = []
-    var nt: [i64] = []
-    var nl: [i64] = []
-    var nc: [i64] = []
-    var nn: [text] = []
-    var nb: [i64] = []
-    var j = 0
-    while j < sh_keys.len():
-        if j != idx:
-            nk = nk + [sh_keys[j]]
-            na = na + [sh_archs[j]]
-            ns = ns + [sh_statuses[j]]
-            nt = nt + [sh_test_counts[j]]
-            nl = nl + [sh_last_used[j]]
-            nc = nc + [sh_share_counts[j]]
-            nn = nn + [sh_annotations[j]]
-            nb = nb + [sh_binary_hashes[j]]
-        j = j + 1
-    sh_keys = nk
-    sh_archs = na
-    sh_statuses = ns
-    sh_test_counts = nt
-    sh_last_used = nl
-    sh_share_counts = nc
-    sh_annotations = nn
-    sh_binary_hashes = nb
-
-fn sh_cleanup_idle(timeout: i64):
-    var nk: [text] = []
-    var na: [text] = []
-    var ns: [i64] = []
-    var nt: [i64] = []
-    var nl: [i64] = []
-    var nc: [i64] = []
-    var nn: [text] = []
-    var nb: [i64] = []
-    var i = 0
-    while i < sh_keys.len():
-        if sh_statuses[i] != SH_IDLE or (sh_time - sh_last_used[i]) <= timeout:
-            nk = nk + [sh_keys[i]]
-            na = na + [sh_archs[i]]
-            ns = ns + [sh_statuses[i]]
-            nt = nt + [sh_test_counts[i]]
-            nl = nl + [sh_last_used[i]]
-            nc = nc + [sh_share_counts[i]]
-            nn = nn + [sh_annotations[i]]
-            nb = nb + [sh_binary_hashes[i]]
-        i = i + 1
-    sh_keys = nk
-    sh_archs = na
-    sh_statuses = ns
-    sh_test_counts = nt
-    sh_last_used = nl
-    sh_share_counts = nc
-    sh_annotations = nn
-    sh_binary_hashes = nb
-
-# Getters
-fn sh_count() -> i64:
-    sh_keys.len()
-
-fn sh_shared_count() -> i64:
-    var c: i64 = 0
-    var i = 0
-    while i < sh_statuses.len():
-        if sh_statuses[i] == SH_SHARED:
-            c = c + 1
-        i = i + 1
-    c
-
-fn sh_exclusive_count() -> i64:
-    var c: i64 = 0
-    var i = 0
-    while i < sh_statuses.len():
-        if sh_statuses[i] == SH_EXCLUSIVE:
-            c = c + 1
-        i = i + 1
-    c
-
-fn sh_idle_count() -> i64:
-    var c: i64 = 0
-    var i = 0
-    while i < sh_statuses.len():
-        if sh_statuses[i] == SH_IDLE:
-            c = c + 1
-        i = i + 1
-    c
-
-fn sh_get_status(key: text) -> i64:
-    val idx = sh_find(key)
-    if idx >= 0:
-        return sh_statuses[idx]
-    -1
-
-fn sh_get_share_count(key: text) -> i64:
-    val idx = sh_find(key)
-    if idx >= 0:
-        return sh_share_counts[idx]
-    0
-
-fn sh_get_test_count(key: text) -> i64:
-    val idx = sh_find(key)
-    if idx >= 0:
-        return sh_test_counts[idx]
-    0
-
-fn sh_get_annotation(key: text) -> text:
-    val idx = sh_find(key)
-    if idx >= 0:
-        return sh_annotations[idx]
-    ""
+fn reset_broker_with_max(n: i64):
+    broker = qemu_broker_new(n)
 
 # ============================================================================
 # Helper functions (avoid closure mutation in it blocks)
 # ============================================================================
 
-fn sh_acquire_n_shared_readonly(arch: text, hash: i64, n: i64) -> text:
+fn acquire_and_release(arch: text, binary: text) -> text:
+    val entry = broker.acquire(arch, binary)
+    broker.release(entry.session_key)
+    entry.session_key
+
+fn acquire_n_and_release(arch: text, binary: text, n: i64) -> text:
     var key = ""
     var i: i64 = 0
     while i < n:
-        key = sh_acquire_shared(arch, hash, "read_only")
+        val entry = broker.acquire(arch, binary)
+        key = entry.session_key
+        broker.release(key)
         i = i + 1
     key
 
-fn sh_release_n_shared(key: text, n: i64):
-    var i: i64 = 0
-    while i < n:
-        sh_release_shared(key)
+fn find_session_status(key: text) -> i64:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return broker.sessions[i].status
         i = i + 1
+    -1
 
-fn sh_acquire_multi_arch_sessions() -> [text]:
+fn find_session_test_count(key: text) -> i64:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return broker.sessions[i].test_count
+        i = i + 1
+    0
+
+fn find_session_exists(key: text) -> bool:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return true
+        i = i + 1
+    false
+
+fn total_session_count() -> i64:
+    broker.sessions.len()
+
+fn acquire_multi_arch() -> [text]:
     var keys: [text] = []
-    keys = keys + [sh_acquire_shared("arm64", 100, "read_only")]
-    keys = keys + [sh_acquire_shared("riscv64", 200, "read_only")]
-    keys = keys + [sh_acquire_shared("x86_64", 300, "mutating")]
-    keys = keys + [sh_acquire_shared("arm32", 400, "read_only")]
+    val e1 = broker.acquire("arm64", "/bin/arm64_test")
+    keys = keys + [e1.session_key]
+    val e2 = broker.acquire("riscv64", "/bin/riscv64_test")
+    keys = keys + [e2.session_key]
+    val e3 = broker.acquire("x86_64", "/bin/x86_64_test")
+    keys = keys + [e3.session_key]
+    val e4 = broker.acquire("arm32", "/bin/arm32_test")
+    keys = keys + [e4.session_key]
     keys
 
-fn sh_acquire_mixed_annotations(arch: text, hash: i64) -> [text]:
-    var keys: [text] = []
-    keys = keys + [sh_acquire_shared(arch, hash, "read_only")]
-    sh_release_shared(keys[0])
-    keys = keys + [sh_acquire_shared(arch, hash, "mutating")]
-    keys
-
-fn sh_concurrent_readonly_scenario() -> text:
-    # 5 tests share one session
-    val key = sh_acquire_n_shared_readonly("arm64", 555, 5)
-    key
-
-fn sh_eviction_under_pressure():
-    sh_set_max(3)
-    sh_set_time(1000)
-    sh_acquire_shared("a", 1, "read_only")
-    sh_release_shared("a_1")
-    sh_set_time(2000)
-    sh_acquire_shared("b", 2, "read_only")
-    sh_release_shared("b_2")
-    sh_set_time(3000)
-    sh_acquire_shared("c", 3, "read_only")
-    sh_release_shared("c_3")
-    sh_set_time(4000)
-    # This should evict a_1 (oldest idle)
-    sh_acquire_shared("d", 4, "read_only")
-
-fn sh_sequential_reuse_scenario(n: i64) -> i64:
+fn sequential_reuse_cycle(arch: text, binary: text, n: i64) -> i64:
+    # Acquire then release n times — session should be reused
     var i: i64 = 0
     while i < n:
-        sh_acquire_shared("arm64", 999, "mutating")
-        sh_release_shared("arm64_999")
+        val entry = broker.acquire(arch, binary)
+        broker.release(entry.session_key)
         i = i + 1
-    sh_get_test_count("arm64_999")
-
-fn sh_mixed_sharing_scenario():
-    # 3 read-only share, then 1 exclusive waits
-    sh_acquire_shared("arm64", 100, "read_only")
-    sh_acquire_shared("arm64", 100, "read_only")
-    sh_acquire_shared("arm64", 100, "read_only")
-    # Release all 3 shared
-    sh_release_n_shared("arm64_100", 3)
-    # Now exclusive can acquire
-    sh_acquire_shared("arm64", 100, "mutating")
+    val entry = broker.acquire(arch, binary)
+    val tc = entry.test_count
+    broker.release(entry.session_key)
+    tc
 
 # ============================================================================
 # Tests
 # ============================================================================
 
 describe "QEMU Session Sharing":
-    describe "read-only sharing":
-        it "allows multiple tests to share one session":
-            sh_reset()
-            val key = sh_concurrent_readonly_scenario()
-            expect(sh_count()).to_equal(1)
-            expect(sh_get_share_count(key)).to_equal(5)
-            expect(sh_get_status(key)).to_equal(SH_SHARED)
-            expect(sh_get_test_count(key)).to_equal(5)
+    describe "read-only sharing via pooling":
+        it "acquires session and marks it in-use":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(entry.status).to_equal(QEMU_IN_USE)
+            expect(entry.arch).to_equal("arm64")
 
-        it "session stays shared until all tests release":
-            sh_reset()
-            val key = sh_acquire_n_shared_readonly("arm64", 100, 3)
-            expect(sh_get_share_count(key)).to_equal(3)
-            sh_release_shared(key)
-            expect(sh_get_share_count(key)).to_equal(2)
-            expect(sh_get_status(key)).to_equal(SH_SHARED)
-            sh_release_n_shared(key, 2)
-            expect(sh_get_share_count(key)).to_equal(0)
-            expect(sh_get_status(key)).to_equal(SH_IDLE)
+        it "reuses idle session with same key":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            val key = e1.session_key
+            broker.release(key)
+            expect(find_session_status(key)).to_equal(QEMU_IDLE)
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(e2.session_key).to_equal(key)
+            expect(e2.test_count).to_equal(2)
 
-        it "shared session tracks total test count":
-            sh_reset()
-            sh_acquire_n_shared_readonly("riscv64", 200, 4)
-            expect(sh_get_test_count("riscv64_200")).to_equal(4)
+        it "session becomes idle after release":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            val key = entry.session_key
+            expect(find_session_status(key)).to_equal(QEMU_IN_USE)
+            broker.release(key)
+            expect(find_session_status(key)).to_equal(QEMU_IDLE)
 
-    describe "exclusive sessions":
-        it "mutating test gets exclusive access":
-            sh_reset()
-            val key = sh_acquire_shared("arm64", 100, "mutating")
-            expect(sh_get_status(key)).to_equal(SH_EXCLUSIVE)
-            expect(sh_exclusive_count()).to_equal(1)
-            expect(sh_shared_count()).to_equal(0)
+        it "tracks test count across reuse cycles":
+            reset_broker()
+            val key = acquire_n_and_release("arm64", "/bin/test", 4)
+            # After 4 acquire+release cycles, acquiring once more gives test_count=5
+            val entry = broker.acquire("arm64", "/bin/test")
+            expect(entry.test_count).to_equal(5)
 
-        it "destructive test gets exclusive access":
-            sh_reset()
-            val key = sh_acquire_shared("x86_64", 500, "destructive")
-            expect(sh_get_status(key)).to_equal(SH_EXCLUSIVE)
-            expect(sh_get_annotation(key)).to_equal("destructive")
+    describe "exclusive session patterns":
+        it "in-use session is not reused for new acquire":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            # Session is IN_USE, so next acquire with same key creates new one
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(2)
 
-        it "exclusive session becomes idle after release":
-            sh_reset()
-            val key = sh_acquire_shared("arm64", 100, "mutating")
-            sh_release_shared(key)
-            expect(sh_get_status(key)).to_equal(SH_IDLE)
+        it "active count tracks in-use sessions":
+            reset_broker()
+            broker.acquire("arm64", "/bin/test_a")
+            broker.acquire("arm64", "/bin/test_b")
+            expect(broker.active_count()).to_equal(2)
+            expect(broker.idle_count()).to_equal(0)
 
-    describe "annotation transitions":
-        it "idle session can transition to shared":
-            sh_reset()
-            val key = sh_acquire_shared("arm64", 100, "read_only")
-            sh_release_shared(key)
-            expect(sh_get_status(key)).to_equal(SH_IDLE)
-            sh_acquire_shared("arm64", 100, "read_only")
-            expect(sh_get_status(key)).to_equal(SH_SHARED)
-
-        it "idle session can transition to exclusive":
-            sh_reset()
-            val key = sh_acquire_shared("arm64", 100, "read_only")
-            sh_release_shared(key)
-            sh_acquire_shared("arm64", 100, "mutating")
-            expect(sh_get_status(key)).to_equal(SH_EXCLUSIVE)
-
-        it "shared to idle to exclusive sequence works":
-            sh_reset()
-            sh_mixed_sharing_scenario()
-            expect(sh_get_status("arm64_100")).to_equal(SH_EXCLUSIVE)
-            expect(sh_count()).to_equal(1)
+        it "release reduces active and increases idle":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            expect(broker.active_count()).to_equal(1)
+            broker.release(e1.session_key)
+            expect(broker.active_count()).to_equal(0)
+            expect(broker.idle_count()).to_equal(1)
 
     describe "multi-architecture":
         it "creates separate sessions per architecture":
-            sh_reset()
-            val keys = sh_acquire_multi_arch_sessions()
-            expect(sh_count()).to_equal(4)
-            expect(sh_get_status("arm64_100")).to_equal(SH_SHARED)
-            expect(sh_get_status("riscv64_200")).to_equal(SH_SHARED)
-            expect(sh_get_status("x86_64_300")).to_equal(SH_EXCLUSIVE)
-            expect(sh_get_status("arm32_400")).to_equal(SH_SHARED)
+            reset_broker()
+            val keys = acquire_multi_arch()
+            expect(total_session_count()).to_equal(4)
+            # All keys should be different
+            expect(keys[0] != keys[1]).to_equal(true)
+            expect(keys[1] != keys[2]).to_equal(true)
+            expect(keys[2] != keys[3]).to_equal(true)
 
         it "same arch different binary creates separate sessions":
-            sh_reset()
-            val k1 = sh_acquire_shared("arm64", 111, "read_only")
-            val k2 = sh_acquire_shared("arm64", 222, "read_only")
-            expect(sh_count()).to_equal(2)
-            expect(k1 != k2).to_equal(true)
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test_a")
+            val e2 = broker.acquire("arm64", "/bin/test_b")
+            expect(total_session_count()).to_equal(2)
+            expect(e1.session_key != e2.session_key).to_equal(true)
+
+        it "same arch same binary reuses idle session":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            broker.release(e1.session_key)
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(e2.session_key).to_equal(e1.session_key)
 
     describe "eviction with sharing":
         it "evicts oldest idle under pressure":
-            sh_reset()
-            sh_eviction_under_pressure()
-            expect(sh_count()).to_equal(3)
-            expect(sh_find("a_1")).to_equal(-1)
+            reset_broker_with_max(2)
+            val e1 = broker.acquire("a", "/bin/a1")
+            val k1 = e1.session_key
+            broker.release(k1)
+            val e2 = broker.acquire("b", "/bin/b2")
+            val k2 = e2.session_key
+            broker.release(k2)
+            # At max (2), acquiring new should evict oldest idle (k1)
+            val e3 = broker.acquire("c", "/bin/c3")
+            expect(total_session_count()).to_equal(2)
+            expect(find_session_exists(k1)).to_equal(false)
 
-        it "does not evict shared sessions":
-            sh_reset()
-            sh_set_max(2)
-            sh_acquire_shared("a", 1, "read_only")
-            sh_acquire_shared("b", 2, "read_only")
-            # Both shared, can't evict — new session still added
-            sh_acquire_shared("c", 3, "read_only")
-            expect(sh_count()).to_equal(3)
+        it "does not evict in-use sessions":
+            reset_broker_with_max(2)
+            # Two in-use sessions, can't evict either
+            val e1 = broker.acquire("a", "/bin/a1")
+            val e2 = broker.acquire("b", "/bin/b2")
+            # Exceeds max but nothing to evict
+            val e3 = broker.acquire("c", "/bin/c3")
+            expect(total_session_count()).to_equal(3)
 
     describe "session reuse":
         it "reuses session across sequential tests":
-            sh_reset()
-            val tc = sh_sequential_reuse_scenario(5)
-            expect(sh_count()).to_equal(1)
-            expect(tc).to_equal(5)
+            reset_broker()
+            val tc = sequential_reuse_cycle("arm64", "/bin/test", 5)
+            expect(total_session_count()).to_equal(1)
+            # 5 cycles + 1 final acquire = 6
+            expect(tc).to_equal(6)
+
+        it "session key is deterministic for same inputs":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/same")
+            val k1 = e1.session_key
+            broker.release(k1)
+            broker.shutdown_all()
+            val e2 = broker.acquire("arm64", "/bin/same")
+            expect(e2.session_key).to_equal(k1)
 
     describe "cleanup with shared sessions":
-        it "only cleans up idle sessions":
-            sh_reset()
-            sh_set_time(1000)
-            sh_acquire_shared("arm64", 100, "read_only")
-            sh_set_time(5000)
-            sh_cleanup_idle(2000)
-            # Shared session NOT cleaned (not idle)
-            expect(sh_count()).to_equal(1)
-            expect(sh_get_status("arm64_100")).to_equal(SH_SHARED)
+        it "keeps in-use sessions during cleanup":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            # cleanup_idle uses rt_time_now_unix_micros internally;
+            # with timeout_ms=0, only idle sessions older than 0ms are cleaned
+            broker.cleanup_idle(0)
+            expect(total_session_count()).to_equal(1)
+            expect(find_session_status(entry.session_key)).to_equal(QEMU_IN_USE)
 
-        it "cleans up idle after all shares released":
-            sh_reset()
-            sh_set_time(1000)
-            val key = sh_acquire_n_shared_readonly("arm64", 100, 2)
-            sh_release_n_shared(key, 2)
-            sh_set_time(5000)
-            sh_cleanup_idle(2000)
-            expect(sh_count()).to_equal(0)
+        it "shutdown removes all sessions":
+            reset_broker()
+            broker.acquire("arm64", "/bin/a")
+            broker.acquire("riscv64", "/bin/b")
+            broker.acquire("x86_64", "/bin/c")
+            expect(total_session_count()).to_equal(3)
+            broker.shutdown_all()
+            expect(total_session_count()).to_equal(0)
+
+    describe "pool lifecycle":
+        it "full cycle: acquire, use, release, reuse, shutdown":
+            reset_broker()
+            # Acquire
+            val e1 = broker.acquire("arm64", "/bin/test")
+            val key = e1.session_key
+            expect(broker.active_count()).to_equal(1)
+            # Release
+            broker.release(key)
+            expect(broker.idle_count()).to_equal(1)
+            # Reuse
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(e2.session_key).to_equal(key)
+            expect(e2.test_count).to_equal(2)
+            # Release again
+            broker.release(key)
+            # Shutdown
+            broker.shutdown_all()
+            expect(total_session_count()).to_equal(0)

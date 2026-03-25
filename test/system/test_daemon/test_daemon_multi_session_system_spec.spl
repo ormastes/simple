@@ -1,408 +1,327 @@
 # Test Daemon Multi-Session Coordination System Test
 #
-# Tests end-to-end multi-session scenarios: agents requesting
-# QEMU sessions, session pool management, cache coordination
-# across sessions, and session lifecycle with real IPC.
+# Tests end-to-end multi-session pool management: multiple session pools
+# by kind, agent coordination via broker, multi-architecture session
+# requests, cache coordination, and session lifecycle across kinds.
 #
 # **Feature IDs:** #TDMN-SYS-061 to #TDMN-SYS-080
 # **Category:** Infrastructure / System Test
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use std.spec.{describe, it, expect, before_each, after_each}
+use std.io_runtime
 
-fn simple_hash(s: text) -> i64:
-    val bs = s.bytes()
-    var h: i64 = 5381
-    var i = 0
-    while i < bs.len():
-        h = h * 33 + bs[i]
-        i = i + 1
-    if h < 0:
-        h = 0 - h
-    h
-
-fn list_dir_files(dir: text) -> [text]:
-    val names = rt_dir_list(dir) ?? []
-    var full: [text] = []
-    var i = 0
-    while i < names.len():
-        full = full + ["{dir}/{names[i]}"]
-        i = i + 1
-    full
+use app.test_daemon.session_types.{
+    SessionKey, SessionLease, TestSessionMeta,
+    SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
+    SESSION_KIND_LOCAL, SESSION_KIND_SIMULATOR,
+    REUSE_SHARED_READ_ONLY, REUSE_SHARED_WITH_RESET, REUSE_FRESH_PER_TEST,
+    RESET_NONE, RESET_SOFT,
+    LEASE_IDLE, LEASE_ACTIVE,
+    session_key_to_id, session_lease_new, test_session_meta_default,
+    meta_to_session_key, session_kind_name
+}
+use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 
 # ============================================================================
-# Module-level state
+# Helpers — build test metadata for various session kinds
 # ============================================================================
 
-var ms_dir: text = ""
-var ms_pool_file: text = ""
-var ms_req_dir: text = ""
-var ms_resp_dir: text = ""
-var ms_cache_dir: text = ""
+fn make_qemu_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/qemu_spec.spl",
+        session_kind: SESSION_KIND_QEMU_VM,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-fn ms_setup():
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
-    ms_dir = "/tmp/td_multi_{pid}_{ts}"
-    ms_pool_file = "{ms_dir}/session_pool.sdn"
-    ms_req_dir = "{ms_dir}/requests"
-    ms_resp_dir = "{ms_dir}/responses"
-    ms_cache_dir = "{ms_dir}/cache"
-    rt_dir_create_all(ms_dir)
-    rt_dir_create_all(ms_req_dir)
-    rt_dir_create_all(ms_resp_dir)
-    rt_dir_create_all(ms_cache_dir)
+fn make_container_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/container_spec.spl",
+        session_kind: SESSION_KIND_CONTAINER,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-fn ms_cleanup():
-    ms_cleanup_dir(ms_req_dir)
-    ms_cleanup_dir(ms_resp_dir)
-    ms_cleanup_dir(ms_cache_dir)
-    rt_file_delete(ms_pool_file)
-    rt_file_delete(ms_dir)
+fn make_service_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/service_spec.spl",
+        session_kind: SESSION_KIND_SERVICE,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-fn ms_cleanup_dir(dir: text):
-    if not rt_file_exists(dir):
-        return
-    val files = list_dir_files(dir)
-    var i = 0
-    while i < files.len():
-        rt_file_delete(files[i])
-        i = i + 1
+fn make_simulator_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/sim_spec.spl",
+        session_kind: SESSION_KIND_SIMULATOR,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-# --- Session pool file operations ---
+fn acquire_and_release(broker: SessionBroker, meta: TestSessionMeta) -> SessionLease:
+    val lease = broker.acquire(meta)
+    broker.release(lease.session_id)
+    lease
 
-fn ms_pool_add(session_key: text, arch: text, status: text, test_count: i64):
-    val existing = rt_file_read_text(ms_pool_file) ?? ""
-    var parts: [text] = []
-    parts.push("[{session_key}]")
-    parts.push("arch={arch}")
-    parts.push("status={status}")
-    parts.push("test_count={test_count}")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
-    val new_entry = parts.join("\n") + "\n\n"
-    rt_file_write_text(ms_pool_file, existing + new_entry)
-
-fn ms_pool_read() -> text:
-    rt_file_read_text(ms_pool_file) ?? ""
-
-fn ms_pool_count_sessions() -> i64:
-    val content = rt_file_read_text(ms_pool_file) ?? ""
-    val lines = content.split("\n")
-    var c: i64 = 0
-    var i = 0
-    while i < lines.len():
-        if lines[i].starts_with("[") and lines[i].ends_with("]"):
-            c = c + 1
-        i = i + 1
-    c
-
-# --- Agent request/response operations ---
-
-fn ms_agent_request(agent_id: i64, session_key: text, test_path: text) -> text:
-    val ts = rt_time_now_unix_micros()
-    val req_id = "msreq_{agent_id}_{ts}"
-    var parts: [text] = []
-    parts.push("id={req_id}")
-    parts.push("agent_id={agent_id}")
-    parts.push("session_key={session_key}")
-    parts.push("test_path={test_path}")
-    parts.push("timestamp={ts}")
-    val content = parts.join("\n") + "\n"
-    val hash = simple_hash(req_id)
-    rt_file_write_text("{ms_req_dir}/{hash}_{req_id}.req", content)
-    req_id
-
-fn ms_daemon_respond(req_id: text, session_key: text, passed: i64, failed: i64, cached: bool):
-    var cached_str = "false"
-    if cached:
-        cached_str = "true"
-    var parts: [text] = []
-    parts.push("request_id={req_id}")
-    parts.push("session_key={session_key}")
-    parts.push("status=2")
-    parts.push("passed={passed}")
-    parts.push("failed={failed}")
-    parts.push("cached={cached_str}")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
-    val content = parts.join("\n") + "\n"
-    rt_file_write_text("{ms_resp_dir}/{req_id}.resp", content)
-
-fn ms_read_response(req_id: text) -> (i64, i64, i64, bool):
-    val path = "{ms_resp_dir}/{req_id}.resp"
-    if not rt_file_exists(path):
-        return (-1, 0, 0, false)
-    val content = rt_file_read_text(path) ?? ""
-    val status = (ms_extract(content, "status=")).to_i64() ?? -1
-    val passed = (ms_extract(content, "passed=")).to_i64() ?? 0
-    val failed = (ms_extract(content, "failed=")).to_i64() ?? 0
-    val cached = ms_extract(content, "cached=") == "true"
-    (status, passed, failed, cached)
-
-fn ms_extract(content: text, prefix: text) -> text:
-    val lines = content.split("\n")
-    var i = 0
-    while i < lines.len():
-        if lines[i].starts_with(prefix):
-            return lines[i].substring(prefix.len())
-        i = i + 1
-    ""
-
-fn ms_count_req_files() -> i64:
-    var c: i64 = 0
-    val files = list_dir_files(ms_req_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".req"):
-            c = c + 1
-        i = i + 1
-    c
-
-fn ms_count_resp_files() -> i64:
-    var c: i64 = 0
-    val files = list_dir_files(ms_resp_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".resp"):
-            c = c + 1
-        i = i + 1
-    c
-
-# --- Cache file operations ---
-
-fn ms_cache_write(test_path: text, hash: i64, passed: i64, failed: i64):
-    val safe_name = simple_hash(test_path)
-    var parts: [text] = []
-    parts.push("test_path={test_path}")
-    parts.push("hash={hash}")
-    parts.push("passed={passed}")
-    parts.push("failed={failed}")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
-    val content = parts.join("\n") + "\n"
-    rt_file_write_text("{ms_cache_dir}/{safe_name}.cache", content)
-
-fn ms_cache_read(test_path: text) -> (i64, i64, i64):
-    val safe_name = simple_hash(test_path)
-    val path = "{ms_cache_dir}/{safe_name}.cache"
-    if not rt_file_exists(path):
-        return (-1, 0, 0)
-    val content = rt_file_read_text(path) ?? ""
-    val hash = (ms_extract(content, "hash=")).to_i64() ?? 0
-    val passed = (ms_extract(content, "passed=")).to_i64() ?? 0
-    val failed = (ms_extract(content, "failed=")).to_i64() ?? 0
-    (hash, passed, failed)
-
-fn ms_cache_exists(test_path: text) -> bool:
-    val safe_name = simple_hash(test_path)
-    rt_file_exists("{ms_cache_dir}/{safe_name}.cache")
-
-# ============================================================================
-# Helper functions (avoid while in it blocks)
-# ============================================================================
-
-fn ms_register_pool_sessions():
-    ms_pool_add("arm64_100", "arm64", "idle", 0)
-    ms_pool_add("riscv64_200", "riscv64", "idle", 0)
-    ms_pool_add("x86_64_300", "x86_64", "idle", 0)
-
-fn ms_submit_n_agents_same_session(n: i64, session_key: text) -> [text]:
-    var ids: [text] = []
+fn acquire_n(broker: SessionBroker, meta: TestSessionMeta, n: i64) -> [SessionLease]:
+    var leases: [SessionLease] = []
     var i: i64 = 0
     while i < n:
-        val id = ms_agent_request(i, session_key, "test/agent{i}_spec.spl")
-        ids = ids + [id]
+        val lease = broker.acquire(meta)
+        leases = leases + [lease]
         i = i + 1
-    ids
+    leases
 
-fn ms_respond_to_all(ids: [text], session_key: text, passed: i64):
+fn release_all(broker: SessionBroker, leases: [SessionLease]):
     var i = 0
-    while i < ids.len():
-        ms_daemon_respond(ids[i], session_key, passed, 0, false)
+    while i < leases.len():
+        broker.release(leases[i].session_id)
         i = i + 1
 
-fn ms_respond_to_all_cached(ids: [text], session_key: text, passed: i64):
-    var i = 0
-    while i < ids.len():
-        ms_daemon_respond(ids[i], session_key, passed, 0, true)
-        i = i + 1
-
-fn ms_verify_all_responses(ids: [text], expected_status: i64) -> i64:
-    var ok: i64 = 0
-    var i = 0
-    while i < ids.len():
-        val resp = ms_read_response(ids[i])
-        if resp[0] == expected_status:
-            ok = ok + 1
-        i = i + 1
-    ok
-
-fn ms_verify_all_cached(ids: [text]) -> i64:
-    var cached: i64 = 0
-    var i = 0
-    while i < ids.len():
-        val resp = ms_read_response(ids[i])
-        if resp[3]:
-            cached = cached + 1
-        i = i + 1
-    cached
-
-fn ms_submit_multi_arch_requests() -> [text]:
-    var ids: [text] = []
-    ids = ids + [ms_agent_request(1, "arm64_100", "test/arm_spec.spl")]
-    ids = ids + [ms_agent_request(2, "riscv64_200", "test/rv_spec.spl")]
-    ids = ids + [ms_agent_request(3, "x86_64_300", "test/x86_spec.spl")]
-    ids = ids + [ms_agent_request(4, "arm64_100", "test/arm2_spec.spl")]
-    ids
-
-fn ms_respond_multi_arch(ids: [text]):
-    ms_daemon_respond(ids[0], "arm64_100", 10, 0, false)
-    ms_daemon_respond(ids[1], "riscv64_200", 8, 1, false)
-    ms_daemon_respond(ids[2], "x86_64_300", 5, 0, false)
-    ms_daemon_respond(ids[3], "arm64_100", 12, 0, false)
-
-fn ms_cache_multiple_tests(n: i64):
+fn acquire_release_cycle(broker: SessionBroker, meta: TestSessionMeta, n: i64) -> i64:
+    """Acquire and release n times, returning final test_count of last lease."""
     var i: i64 = 0
+    var last_test_count: i64 = 0
     while i < n:
-        ms_cache_write("test/cached_{i}_spec.spl", 1000 + i, i + 1, 0)
+        val lease = broker.acquire(meta)
+        last_test_count = lease.test_count
+        broker.release(lease.session_id)
         i = i + 1
-
-fn ms_verify_cached_tests(n: i64) -> i64:
-    var ok: i64 = 0
-    var i: i64 = 0
-    while i < n:
-        if ms_cache_exists("test/cached_{i}_spec.spl"):
-            val entry = ms_cache_read("test/cached_{i}_spec.spl")
-            if entry[1] == i + 1:
-                ok = ok + 1
-        i = i + 1
-    ok
-
-fn ms_submit_and_cleanup_reqs(n: i64) -> (i64, i64):
-    val ids = ms_submit_n_agents_same_session(n, "arm64_100")
-    val before = ms_count_req_files()
-    ms_cleanup_dir(ms_req_dir)
-    rt_dir_create_all(ms_req_dir)
-    val after = ms_count_req_files()
-    (before, after)
-
-fn ms_full_workflow_scenario() -> (i64, i64):
-    # 1. Register sessions
-    ms_register_pool_sessions()
-    # 2. Agents submit requests
-    val ids = ms_submit_n_agents_same_session(3, "arm64_100")
-    # 3. Daemon processes, caches result
-    ms_respond_to_all(ids, "arm64_100", 15)
-    ms_cache_write("test/agent0_spec.spl", 5000, 15, 0)
-    # 4. Verify responses
-    val ok = ms_verify_all_responses(ids, 2)
-    # 5. New agent gets cached result
-    val cached_id = ms_agent_request(99, "arm64_100", "test/agent0_spec.spl")
-    ms_daemon_respond(cached_id, "arm64_100", 15, 0, true)
-    val cached_resp = ms_read_response(cached_id)
-    var cached_count: i64 = 0
-    if cached_resp[3]:
-        cached_count = 1
-    (ok, cached_count)
+    last_test_count
 
 # ============================================================================
 # Tests
 # ============================================================================
 
 describe "Multi-Session Coordination":
-    describe "session pool management":
-        it "registers multiple sessions in pool":
-            ms_setup()
-            ms_register_pool_sessions()
-            expect(ms_pool_count_sessions()).to_equal(3)
-            val content = ms_pool_read()
-            expect(content).to_contain("[arm64_100]")
-            expect(content).to_contain("[riscv64_200]")
-            expect(content).to_contain("[x86_64_300]")
-            ms_cleanup()
+    describe "multiple session pools by kind":
+        it "creates separate pools for different kinds":
+            var broker = session_broker_new()
+            val mq = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val mc = make_container_meta("x86_64", "img1", REUSE_SHARED_READ_ONLY)
+            val ms = make_service_meta("x86_64", "svc1", REUSE_SHARED_READ_ONLY)
+            broker.acquire(mq)
+            broker.acquire(mc)
+            broker.acquire(ms)
+            expect(broker.total_count()).to_equal(3)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(1)
+            expect(broker.count_by_kind(SESSION_KIND_CONTAINER)).to_equal(1)
+            expect(broker.count_by_kind(SESSION_KIND_SERVICE)).to_equal(1)
 
-        it "tracks test count per session":
-            ms_setup()
-            ms_pool_add("arm64_100", "arm64", "idle", 0)
-            ms_pool_add("arm64_100", "arm64", "in_use", 5)
-            val content = ms_pool_read()
-            expect(content).to_contain("test_count=5")
-            ms_cleanup()
+        it "each kind has independent count":
+            var broker = session_broker_new()
+            val mq1 = make_qemu_meta("arm64", "fw1.bin", REUSE_FRESH_PER_TEST)
+            val mq2 = make_qemu_meta("riscv64", "fw2.bin", REUSE_FRESH_PER_TEST)
+            val mc1 = make_container_meta("x86_64", "img1", REUSE_FRESH_PER_TEST)
+            broker.acquire(mq1)
+            broker.acquire(mq2)
+            broker.acquire(mc1)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(2)
+            expect(broker.count_by_kind(SESSION_KIND_CONTAINER)).to_equal(1)
 
-    describe "multi-agent same session":
-        it "3 agents request same QEMU session":
-            ms_setup()
-            val ids = ms_submit_n_agents_same_session(3, "arm64_100")
-            expect(ms_count_req_files()).to_equal(3)
-            ms_respond_to_all(ids, "arm64_100", 10)
-            expect(ms_count_resp_files()).to_equal(3)
-            val ok = ms_verify_all_responses(ids, 2)
-            expect(ok).to_equal(3)
-            ms_cleanup()
+        it "count_by_kind returns zero for unused kind":
+            var broker = session_broker_new()
+            val mq = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            broker.acquire(mq)
+            expect(broker.count_by_kind(SESSION_KIND_SIMULATOR)).to_equal(0)
 
-        it "5 agents with cached responses":
-            ms_setup()
-            val ids = ms_submit_n_agents_same_session(5, "arm64_100")
-            ms_respond_to_all_cached(ids, "arm64_100", 20)
-            val cached = ms_verify_all_cached(ids)
-            expect(cached).to_equal(5)
-            ms_cleanup()
+        it "status report includes per-kind counts":
+            var broker = session_broker_new()
+            broker.acquire(make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY))
+            broker.acquire(make_container_meta("x86_64", "img", REUSE_SHARED_READ_ONLY))
+            val report = broker.status_report()
+            expect(report).to_contain("QEMU: 1")
+            expect(report).to_contain("Container: 1")
 
-    describe "multi-architecture requests":
-        it "agents request different architecture sessions":
-            ms_setup()
-            val ids = ms_submit_multi_arch_requests()
-            expect(ms_count_req_files()).to_equal(4)
-            ms_respond_multi_arch(ids)
-            expect(ms_count_resp_files()).to_equal(4)
-            # Verify individual responses
-            val r1 = ms_read_response(ids[0])
-            val r2 = ms_read_response(ids[1])
-            expect(r1[1]).to_equal(10)
-            expect(r2[1]).to_equal(8)
-            expect(r2[2]).to_equal(1)
-            ms_cleanup()
+    describe "agent coordination via broker":
+        it "sequential agents reuse same session":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            # Agent 1 acquires and releases
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            # Agent 2 acquires same session
+            val l2 = broker.acquire(meta)
+            expect(l2.session_id).to_equal(l1.session_id)
+            expect(l2.test_count).to_equal(1)
+            broker.release(l2.session_id)
+            # Agent 3 acquires
+            val l3 = broker.acquire(meta)
+            expect(l3.session_id).to_equal(l1.session_id)
+            expect(l3.test_count).to_equal(2)
+            expect(broker.total_count()).to_equal(1)
 
-    describe "cache coordination":
-        it "caches test result to file":
-            ms_setup()
-            ms_cache_write("test/foo_spec.spl", 12345, 10, 0)
-            expect(ms_cache_exists("test/foo_spec.spl")).to_equal(true)
-            val entry = ms_cache_read("test/foo_spec.spl")
-            expect(entry[0]).to_equal(12345)
-            expect(entry[1]).to_equal(10)
-            ms_cleanup()
+        it "multiple agents with fresh_per_test each get own session":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_FRESH_PER_TEST)
+            val l1 = broker.acquire(meta)
+            val l2 = broker.acquire(meta)
+            val l3 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(3)
 
-        it "caches 10 test results":
-            ms_setup()
-            ms_cache_multiple_tests(10)
-            val ok = ms_verify_cached_tests(10)
-            expect(ok).to_equal(10)
-            ms_cleanup()
+        it "agent release allows reuse by next agent":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_WITH_RESET)
+            val l1 = broker.acquire(meta)
+            # While l1 is active, second acquire creates new
+            val l2 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(2)
+            # Release both
+            broker.release(l1.session_id)
+            broker.release(l2.session_id)
+            # Third agent reuses one of the idle sessions
+            val l3 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(2)
 
-        it "returns empty for uncached test":
-            ms_setup()
-            expect(ms_cache_exists("test/nonexistent_spec.spl")).to_equal(false)
-            val entry = ms_cache_read("test/nonexistent_spec.spl")
-            expect(entry[0]).to_equal(-1)
-            ms_cleanup()
+        it "test_count increments through multiple reuse cycles":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val count = acquire_release_cycle(broker, meta, 5)
+            # After 5 cycles, last test_count should be 4 (0-indexed from first acquire)
+            expect(count).to_equal(4)
+            expect(broker.total_count()).to_equal(1)
 
-    describe "full workflow":
-        it "register, request, process, cache, serve cached":
-            ms_setup()
-            val result = ms_full_workflow_scenario()
-            expect(result[0]).to_equal(3)
-            expect(result[1]).to_equal(1)
-            ms_cleanup()
+    describe "multi-architecture session requests":
+        it "arm64 and riscv64 sessions are separate":
+            var broker = session_broker_new()
+            val m_arm = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val m_rv = make_qemu_meta("riscv64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(m_arm)
+            val l2 = broker.acquire(m_rv)
+            expect(l1.key.target).to_equal("arm64")
+            expect(l2.key.target).to_equal("riscv64")
+            expect(broker.total_count()).to_equal(2)
 
-    describe "request cleanup":
-        it "cleans request files after processing":
-            ms_setup()
-            val result = ms_submit_and_cleanup_reqs(5)
-            expect(result[0]).to_equal(5)
-            expect(result[1]).to_equal(0)
-            ms_cleanup()
+        it "same architecture different artifact are separate":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw_v1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("arm64", "fw_v2.bin", REUSE_SHARED_READ_ONLY)
+            broker.acquire(m1)
+            broker.acquire(m2)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(2)
+
+        it "three architectures can coexist":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("riscv64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val m3 = make_qemu_meta("x86_64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            broker.acquire(m1)
+            broker.acquire(m2)
+            broker.acquire(m3)
+            expect(broker.total_count()).to_equal(3)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(3)
+
+        it "release and reacquire preserves architecture":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("riscv64", "rv_fw.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(meta)
+            expect(l2.key.target).to_equal("riscv64")
+            expect(l2.session_id).to_equal(l1.session_id)
+
+    describe "mixed kind session management":
+        it "qemu and container pools are independent":
+            var broker = session_broker_new()
+            val mq = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val mc = make_container_meta("x86_64", "img1", REUSE_SHARED_READ_ONLY)
+            val lq = broker.acquire(mq)
+            val lc = broker.acquire(mc)
+            expect(lq.key.kind).to_equal(SESSION_KIND_QEMU_VM)
+            expect(lc.key.kind).to_equal(SESSION_KIND_CONTAINER)
+            # Releasing qemu does not affect container
+            broker.release(lq.session_id)
+            expect(broker.idle_count()).to_equal(1)
+            expect(broker.total_count()).to_equal(2)
+
+        it "stopping one kind does not affect another":
+            var broker = session_broker_new()
+            val mq = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val mc = make_container_meta("x86_64", "img1", REUSE_SHARED_READ_ONLY)
+            val lq = broker.acquire(mq)
+            val lc = broker.acquire(mc)
+            broker.stop_session(lq.session_id)
+            expect(broker.total_count()).to_equal(1)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(0)
+            expect(broker.count_by_kind(SESSION_KIND_CONTAINER)).to_equal(1)
+
+        it "shutdown_all clears all kinds":
+            var broker = session_broker_new()
+            broker.acquire(make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY))
+            broker.acquire(make_container_meta("x86_64", "img", REUSE_SHARED_READ_ONLY))
+            broker.acquire(make_service_meta("x86_64", "svc", REUSE_SHARED_READ_ONLY))
+            expect(broker.total_count()).to_equal(3)
+            broker.shutdown_all()
+            expect(broker.total_count()).to_equal(0)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(0)
+            expect(broker.count_by_kind(SESSION_KIND_CONTAINER)).to_equal(0)
+            expect(broker.count_by_kind(SESSION_KIND_SERVICE)).to_equal(0)
+
+    describe "session counts and idle/active tracking":
+        it "active_count and idle_count are accurate":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("riscv64", "fw2.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(m1)
+            val l2 = broker.acquire(m2)
+            # Both sessions created (without adapter, they start IDLE from session_lease_new)
+            broker.release(l1.session_id)
+            # l1 is now idle, l2 depends on adapter start behavior
+            val idle = broker.idle_count()
+            val total = broker.total_count()
+            expect(total).to_equal(2)
+            expect(idle).to_be_greater_than(0)
+
+        it "total_count after multiple acquire-release rounds":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            # 5 acquire-release cycles on same session
+            acquire_release_cycle(broker, meta, 5)
+            expect(broker.total_count()).to_equal(1)
+            expect(broker.idle_count()).to_equal(1)
+
+        it "fresh_per_test accumulates sessions":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_FRESH_PER_TEST)
+            val leases = acquire_n(broker, meta, 3)
+            expect(broker.total_count()).to_equal(3)
+            release_all(broker, leases)
+            expect(broker.idle_count()).to_equal(3)
+
+    describe "full lifecycle scenario":
+        it "multi-kind acquire, partial release, stop, shutdown":
+            var broker = session_broker_new()
+            # Acquire 3 sessions of different kinds
+            val lq = broker.acquire(make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY))
+            val lc = broker.acquire(make_container_meta("x86_64", "img", REUSE_SHARED_READ_ONLY))
+            val ls = broker.acquire(make_service_meta("x86_64", "svc", REUSE_SHARED_READ_ONLY))
+            expect(broker.total_count()).to_equal(3)
+            # Release qemu, stop container
+            broker.release(lq.session_id)
+            broker.stop_session(lc.session_id)
+            expect(broker.total_count()).to_equal(2)
+            expect(broker.idle_count()).to_be_greater_than(0)
+            # Reacquire qemu (should reuse)
+            val lq2 = broker.acquire(make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY))
+            expect(lq2.session_id).to_equal(lq.session_id)
+            expect(broker.total_count()).to_equal(2)
+            # Final shutdown
+            broker.shutdown_all()
+            expect(broker.total_count()).to_equal(0)

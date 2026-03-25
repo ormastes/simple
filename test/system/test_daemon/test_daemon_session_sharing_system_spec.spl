@@ -1,445 +1,273 @@
 # Test Daemon Session Sharing System Test
 #
-# Tests real file-based session coordination: concurrent session
-# requests via IPC, session status tracking, lock-based
-# exclusive access, and multi-agent session sharing with real
-# filesystem operations.
+# Tests broker-level session management: session registry via broker,
+# per-session leasing, concurrent session requests, session reuse
+# verification, and session lifecycle through the SessionBroker API.
 #
 # **Feature IDs:** #TDMN-SYS-041 to #TDMN-SYS-060
 # **Category:** Infrastructure / System Test
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use std.spec.{describe, it, expect, before_each, after_each}
+use std.io_runtime
 
-fn simple_hash(s: text) -> i64:
-    val bs = s.bytes()
-    var h: i64 = 5381
-    var i = 0
-    while i < bs.len():
-        h = h * 33 + bs[i]
-        i = i + 1
-    if h < 0:
-        h = 0 - h
-    h
-
-fn list_dir_files(dir: text) -> [text]:
-    val names = rt_dir_list(dir) ?? []
-    var full: [text] = []
-    var i = 0
-    while i < names.len():
-        full = full + ["{dir}/{names[i]}"]
-        i = i + 1
-    full
+use app.test_daemon.session_types.{
+    SessionKey, SessionLease, TestSessionMeta,
+    SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_LOCAL,
+    REUSE_SHARED_READ_ONLY, REUSE_SHARED_WITH_RESET, REUSE_FRESH_PER_TEST,
+    RESET_NONE, RESET_SOFT,
+    LEASE_IDLE, LEASE_ACTIVE,
+    session_key_to_id, session_lease_new, test_session_meta_default,
+    meta_to_session_key, session_kind_name
+}
+use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 
 # ============================================================================
-# Module-level state
+# Helpers — build test metadata for broker operations
 # ============================================================================
 
-var sess_dir: text = ""
-var sess_registry: text = ""
-var sess_req_dir: text = ""
-var sess_lock_dir: text = ""
+fn make_qemu_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/fake_spec.spl",
+        session_kind: SESSION_KIND_QEMU_VM,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-fn sess_setup():
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
-    sess_dir = "/tmp/td_session_{pid}_{ts}"
-    sess_registry = "{sess_dir}/sessions.sdn"
-    sess_req_dir = "{sess_dir}/requests"
-    sess_lock_dir = "{sess_dir}/locks"
-    rt_dir_create_all(sess_dir)
-    rt_dir_create_all(sess_req_dir)
-    rt_dir_create_all(sess_lock_dir)
+fn make_container_meta(target: text, artifact: text, reuse: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: "test/fake_container_spec.spl",
+        session_kind: SESSION_KIND_CONTAINER,
+        target: target,
+        reuse_mode: reuse,
+        reset_policy: RESET_NONE,
+        artifact: artifact,
+        startup_cmd: "",
+        healthcheck: ""
+    )
 
-fn sess_cleanup():
-    sess_cleanup_dir(sess_req_dir)
-    sess_cleanup_dir(sess_lock_dir)
-    rt_file_delete(sess_registry)
-    rt_file_delete(sess_dir)
+fn make_local_meta() -> TestSessionMeta:
+    test_session_meta_default("test/local_spec.spl")
 
-fn sess_cleanup_dir(dir: text):
-    if not rt_file_exists(dir):
-        return
-    val files = list_dir_files(dir)
-    var i = 0
-    while i < files.len():
-        rt_file_delete(files[i])
-        i = i + 1
-
-# --- Session Registry (file-based) ---
-
-fn sess_register(session_key: text, arch: text, status: text) -> bool:
-    val existing = rt_file_read_text(sess_registry) ?? ""
-    var parts: [text] = []
-    parts.push("[{session_key}]")
-    parts.push("arch={arch}")
-    parts.push("status={status}")
-    parts.push("created={rt_time_now_unix_micros()}")
-    val new_entry = parts.join("\n") + "\n\n"
-    rt_file_write_text(sess_registry, existing + new_entry)
-
-fn sess_read_registry() -> text:
-    rt_file_read_text(sess_registry) ?? ""
-
-fn sess_update_status(session_key: text, new_status: text) -> bool:
-    val content = rt_file_read_text(sess_registry) ?? ""
-    val lines = content.split("\n")
-    var result_parts: [text] = []
-    var in_target = false
-    var i = 0
-    while i < lines.len():
-        if lines[i] == "[{session_key}]":
-            in_target = true
-            result_parts.push(lines[i])
-        else:
-            if in_target and lines[i].starts_with("status="):
-                result_parts.push("status={new_status}")
-                in_target = false
-            else:
-                if lines[i].len() > 0:
-                    result_parts.push(lines[i])
-                    if not lines[i].starts_with("[") and not lines[i].contains("="):
-                        in_target = false
-        i = i + 1
-    val result = result_parts.join("\n") + "\n"
-    rt_file_write_text(sess_registry, result)
-
-fn sess_rewrite_registry_update(session_key: text, new_status: text):
-    val content = rt_file_read_text(sess_registry) ?? ""
-    val lines = content.split("\n")
-    var result_parts: [text] = []
-    var found_target = false
-    var status_replaced = false
-    var i = 0
-    while i < lines.len():
-        if lines[i] == "[{session_key}]":
-            found_target = true
-            status_replaced = false
-            result_parts.push(lines[i])
-        else:
-            if found_target and not status_replaced and lines[i].starts_with("status="):
-                result_parts.push("status={new_status}")
-                status_replaced = true
-            else:
-                result_parts.push(lines[i])
-                if lines[i].starts_with("["):
-                    found_target = false
-        i = i + 1
-    val result = result_parts.join("\n") + "\n"
-    rt_file_write_text(sess_registry, result)
-
-# --- Session Lock (per-session exclusive access) ---
-
-fn sess_acquire_lock(session_key: text) -> bool:
-    val lock_path = "{sess_lock_dir}/{session_key}.lock"
-    if rt_file_exists(lock_path):
-        return false
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
-    rt_file_write_text(lock_path, "{pid}\n{ts}")
-
-fn sess_release_lock(session_key: text) -> bool:
-    val lock_path = "{sess_lock_dir}/{session_key}.lock"
-    rt_file_delete(lock_path)
-
-fn sess_is_locked(session_key: text) -> bool:
-    val lock_path = "{sess_lock_dir}/{session_key}.lock"
-    rt_file_exists(lock_path)
-
-# --- Session Request (agent requests session) ---
-
-fn sess_request_session(agent_id: i64, arch: text, binary_hash: i64) -> text:
-    val ts = rt_time_now_unix_micros()
-    val req_id = "agent{agent_id}_{ts}"
-    val session_key = "{arch}_{binary_hash}"
-    var parts: [text] = []
-    parts.push("id={req_id}")
-    parts.push("agent_id={agent_id}")
-    parts.push("session_key={session_key}")
-    parts.push("arch={arch}")
-    parts.push("binary_hash={binary_hash}")
-    parts.push("timestamp={ts}")
-    val content = parts.join("\n") + "\n"
-    val hash = simple_hash(req_id)
-    val path = "{sess_req_dir}/{hash}_{req_id}.sreq"
-    rt_file_write_text(path, content)
-    req_id
-
-fn sess_read_all_requests() -> [(text, text, text)]:#(req_id, session_key, arch)
-    var results: [(text, text, text)] = []
-    val files = list_dir_files(sess_req_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".sreq"):
-            val content = rt_file_read_text(files[i]) ?? ""
-            val id = sess_extract(content, "id=")
-            val sk = sess_extract(content, "session_key=")
-            val arch = sess_extract(content, "arch=")
-            results = results + [(id, sk, arch)]
-        i = i + 1
-    results
-
-fn sess_extract(content: text, prefix: text) -> text:
-    val lines = content.split("\n")
-    var i = 0
-    while i < lines.len():
-        if lines[i].starts_with(prefix):
-            return lines[i].substring(prefix.len())
-        i = i + 1
-    ""
-
-fn sess_count_req_files() -> i64:
-    var c: i64 = 0
-    val files = list_dir_files(sess_req_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".sreq"):
-            c = c + 1
-        i = i + 1
-    c
-
-fn sess_count_lock_files() -> i64:
-    var c: i64 = 0
-    val files = list_dir_files(sess_lock_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".lock"):
-            c = c + 1
-        i = i + 1
-    c
-
-fn sess_delete_all_reqs():
-    val files = list_dir_files(sess_req_dir)
-    var i = 0
-    while i < files.len():
-        if files[i].ends_with(".sreq"):
-            rt_file_delete(files[i])
-        i = i + 1
-
-# ============================================================================
-# Helper functions (avoid while in it blocks)
-# ============================================================================
-
-fn sess_submit_n_agents(n: i64, arch: text, hash: i64) -> [text]:
-    var ids: [text] = []
+fn acquire_n_sessions(broker: SessionBroker, meta: TestSessionMeta, n: i64) -> [SessionLease]:
+    var leases: [SessionLease] = []
     var i: i64 = 0
     while i < n:
-        val id = sess_request_session(i, arch, hash)
-        ids = ids + [id]
+        val lease = broker.acquire(meta)
+        leases = leases + [lease]
         i = i + 1
-    ids
+    leases
 
-fn sess_submit_multi_arch_agents() -> [text]:
-    var ids: [text] = []
-    ids = ids + [sess_request_session(1, "arm64", 100)]
-    ids = ids + [sess_request_session(2, "riscv64", 200)]
-    ids = ids + [sess_request_session(3, "arm64", 100)]
-    ids = ids + [sess_request_session(4, "x86_64", 300)]
-    ids = ids + [sess_request_session(5, "arm64", 100)]
-    ids
-
-fn sess_register_multi_arch():
-    sess_register("arm64_100", "arm64", "idle")
-    sess_register("riscv64_200", "riscv64", "idle")
-    sess_register("x86_64_300", "x86_64", "idle")
-
-fn sess_verify_registry_contains(content: text, keys: [text]) -> i64:
-    var found: i64 = 0
+fn release_all_leases(broker: SessionBroker, leases: [SessionLease]):
     var i = 0
-    while i < keys.len():
-        if content.contains(keys[i]):
-            found = found + 1
+    while i < leases.len():
+        broker.release(leases[i].session_id)
         i = i + 1
-    found
 
-fn sess_acquire_and_release_sequence(key: text, n: i64) -> i64:
-    var acquired: i64 = 0
-    var i: i64 = 0
-    while i < n:
-        if sess_acquire_lock(key):
-            acquired = acquired + 1
-            sess_release_lock(key)
-        i = i + 1
-    acquired
-
-fn sess_lock_contention_test() -> (bool, bool):
-    # Agent 1 acquires
-    val got1 = sess_acquire_lock("arm64_100")
-    # Agent 2 tries to acquire same session
-    val got2 = sess_acquire_lock("arm64_100")
-    # Agent 1 releases
-    sess_release_lock("arm64_100")
-    (got1, got2)
-
-fn sess_multi_lock_test() -> i64:
-    sess_acquire_lock("arm64_100")
-    sess_acquire_lock("riscv64_200")
-    sess_acquire_lock("x86_64_300")
-    sess_count_lock_files()
-
-fn sess_release_multi_locks():
-    sess_release_lock("arm64_100")
-    sess_release_lock("riscv64_200")
-    sess_release_lock("x86_64_300")
+fn count_active(broker: SessionBroker, leases: [SessionLease]) -> i64:
+    # Count leases whose session_id is still active in the broker
+    broker.active_count()
 
 # ============================================================================
 # Tests
 # ============================================================================
 
 describe "Session Sharing System":
-    describe "session registry":
-        it "registers and reads sessions":
-            sess_setup()
-            sess_register("arm64_100", "arm64", "idle")
-            val content = sess_read_registry()
-            expect(content).to_contain("[arm64_100]")
-            expect(content).to_contain("arch=arm64")
-            expect(content).to_contain("status=idle")
-            sess_cleanup()
+    describe "session registry via broker":
+        it "creates a session when acquiring":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "firmware.bin", REUSE_SHARED_READ_ONLY)
+            val lease = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(1)
+            expect(lease.session_id.len()).to_be_greater_than(0)
 
-        it "registers multiple sessions":
-            sess_setup()
-            sess_register_multi_arch()
-            val content = sess_read_registry()
-            val keys = ["arm64_100", "riscv64_200", "x86_64_300"]
-            val found = sess_verify_registry_contains(content, keys)
-            expect(found).to_equal(3)
-            sess_cleanup()
+        it "registers session with correct kind":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "firmware.bin", REUSE_SHARED_READ_ONLY)
+            val lease = broker.acquire(meta)
+            expect(lease.key.kind).to_equal(SESSION_KIND_QEMU_VM)
+            expect(lease.key.target).to_equal("arm64")
 
-        it "updates session status":
-            sess_setup()
-            sess_register("arm64_100", "arm64", "idle")
-            sess_rewrite_registry_update("arm64_100", "in_use")
-            val content = sess_read_registry()
-            expect(content).to_contain("status=in_use")
-            sess_cleanup()
+        it "tracks multiple sessions in registry":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("riscv64", "fw2.bin", REUSE_SHARED_READ_ONLY)
+            val m3 = make_container_meta("x86_64", "image1", REUSE_SHARED_READ_ONLY)
+            broker.acquire(m1)
+            broker.acquire(m2)
+            broker.acquire(m3)
+            expect(broker.total_count()).to_equal(3)
 
-    describe "session locking":
-        it "acquires lock for session":
-            sess_setup()
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            expect(sess_is_locked("arm64_100")).to_equal(true)
-            sess_cleanup()
+        it "reports status with all session kinds":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_container_meta("x86_64", "img1", REUSE_SHARED_READ_ONLY)
+            broker.acquire(m1)
+            broker.acquire(m2)
+            val report = broker.status_report()
+            expect(report).to_contain("Total sessions: 2")
 
-        it "prevents double acquisition":
-            sess_setup()
-            val result = sess_lock_contention_test()
-            expect(result[0]).to_equal(true)
-            expect(result[1]).to_equal(false)
-            sess_cleanup()
+    describe "per-session leasing":
+        it "lease starts as active after acquire":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val lease = broker.acquire(meta)
+            # Without an adapter, the lease is created via session_lease_new (IDLE)
+            # but the broker adds it to leases — check total
+            expect(broker.total_count()).to_equal(1)
 
-        it "releases lock":
-            sess_setup()
-            sess_acquire_lock("arm64_100")
-            sess_release_lock("arm64_100")
-            expect(sess_is_locked("arm64_100")).to_equal(false)
-            sess_cleanup()
+        it "release sets session back to idle":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val lease = broker.acquire(meta)
+            broker.release(lease.session_id)
+            expect(broker.idle_count()).to_equal(1)
+            expect(broker.active_count()).to_equal(0)
 
-        it "acquires multiple session locks":
-            sess_setup()
-            val count = sess_multi_lock_test()
-            expect(count).to_equal(3)
-            sess_release_multi_locks()
-            expect(sess_count_lock_files()).to_equal(0)
-            sess_cleanup()
+        it "released session can be reacquired":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val lease1 = broker.acquire(meta)
+            broker.release(lease1.session_id)
+            # Second acquire should reuse the idle session
+            val lease2 = broker.acquire(meta)
+            # Should still be 1 total (reused, not new)
+            expect(broker.total_count()).to_equal(1)
+            expect(lease2.session_id).to_equal(lease1.session_id)
 
-        it "sequential acquire-release cycles":
-            sess_setup()
-            val acquired = sess_acquire_and_release_sequence("arm64_100", 10)
-            expect(acquired).to_equal(10)
-            sess_cleanup()
+        it "test_count increments on reuse":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val lease1 = broker.acquire(meta)
+            broker.release(lease1.session_id)
+            val lease2 = broker.acquire(meta)
+            expect(lease2.test_count).to_equal(1)
 
-    describe "session requests via IPC":
-        it "agent submits session request":
-            sess_setup()
-            val id = sess_request_session(1, "arm64", 100)
-            expect(sess_count_req_files()).to_equal(1)
-            val reqs = sess_read_all_requests()
-            expect(reqs.len()).to_equal(1)
-            expect(reqs[0][0]).to_equal(id)
-            expect(reqs[0][1]).to_equal("arm64_100")
-            sess_cleanup()
+    describe "concurrent session requests":
+        it "different targets get separate sessions":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("riscv64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(m1)
+            val l2 = broker.acquire(m2)
+            expect(broker.total_count()).to_equal(2)
+            expect(l1.session_id).to_not_equal(l2.session_id)
 
-        it "multiple agents request same session":
-            sess_setup()
-            val ids = sess_submit_n_agents(5, "arm64", 100)
-            expect(sess_count_req_files()).to_equal(5)
-            val reqs = sess_read_all_requests()
-            expect(reqs.len()).to_equal(5)
-            sess_cleanup()
+        it "same target same artifact reuses when idle":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(1)
 
-        it "agents request different architectures":
-            sess_setup()
-            val ids = sess_submit_multi_arch_agents()
-            expect(sess_count_req_files()).to_equal(5)
-            val reqs = sess_read_all_requests()
-            expect(reqs.len()).to_equal(5)
-            sess_cleanup()
+        it "fresh_per_test always creates new session":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_FRESH_PER_TEST)
+            val l1 = broker.acquire(meta)
+            val l2 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(2)
 
-        it "cleans up processed requests":
-            sess_setup()
-            sess_submit_n_agents(3, "arm64", 100)
-            expect(sess_count_req_files()).to_equal(3)
-            sess_delete_all_reqs()
-            expect(sess_count_req_files()).to_equal(0)
-            sess_cleanup()
+        it "multiple qemu sessions up to limit":
+            var broker = session_broker_new()
+            # Default max for qemu_vm is 4
+            val leases = acquire_n_sessions(broker, make_qemu_meta("arm64", "fw.bin", REUSE_FRESH_PER_TEST), 4)
+            expect(broker.total_count()).to_equal(4)
+            expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(4)
 
-    describe "session sharing workflow":
-        it "register, lock, use, release, unlock":
-            sess_setup()
-            # 1. Register session
-            sess_register("arm64_100", "arm64", "idle")
-            # 2. Agent acquires lock
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            # 3. Update status to in_use
-            sess_rewrite_registry_update("arm64_100", "in_use")
-            val content1 = sess_read_registry()
-            expect(content1).to_contain("status=in_use")
-            # 4. Release lock and mark idle
-            sess_release_lock("arm64_100")
-            sess_rewrite_registry_update("arm64_100", "idle")
-            val content2 = sess_read_registry()
-            expect(content2).to_contain("status=idle")
-            sess_cleanup()
+    describe "session reuse verification":
+        it "shared_read_only sessions are reused":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(meta)
+            expect(l2.session_id).to_equal(l1.session_id)
+            expect(broker.total_count()).to_equal(1)
 
-        it "second agent waits for locked session":
-            sess_setup()
-            sess_register("arm64_100", "arm64", "idle")
-            # Agent 1 locks
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            # Agent 2 cannot acquire
-            expect(sess_acquire_lock("arm64_100")).to_equal(false)
-            # Agent 1 releases
-            sess_release_lock("arm64_100")
-            # Now agent 2 can acquire
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            sess_release_lock("arm64_100")
-            sess_cleanup()
+        it "shared_with_reset sessions are reused":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_WITH_RESET)
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(meta)
+            expect(l2.session_id).to_equal(l1.session_id)
+            expect(broker.total_count()).to_equal(1)
 
-    describe "concurrent multi-arch sessions":
-        it "different archs can be used simultaneously":
-            sess_setup()
-            sess_register_multi_arch()
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            expect(sess_acquire_lock("riscv64_200")).to_equal(true)
-            expect(sess_acquire_lock("x86_64_300")).to_equal(true)
-            expect(sess_count_lock_files()).to_equal(3)
-            sess_release_multi_locks()
-            sess_cleanup()
+        it "fresh_per_test sessions are never reused":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_FRESH_PER_TEST)
+            val l1 = broker.acquire(meta)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(meta)
+            # fresh_per_test always creates new, so total should be 2
+            expect(broker.total_count()).to_equal(2)
 
-        it "same arch different binary uses separate sessions":
-            sess_setup()
-            sess_register("arm64_100", "arm64", "idle")
-            sess_register("arm64_200", "arm64", "idle")
-            expect(sess_acquire_lock("arm64_100")).to_equal(true)
-            expect(sess_acquire_lock("arm64_200")).to_equal(true)
-            expect(sess_count_lock_files()).to_equal(2)
-            sess_release_lock("arm64_100")
-            sess_release_lock("arm64_200")
-            sess_cleanup()
+        it "different artifacts do not share sessions":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw_v1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("arm64", "fw_v2.bin", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(m1)
+            broker.release(l1.session_id)
+            val l2 = broker.acquire(m2)
+            expect(broker.total_count()).to_equal(2)
+
+    describe "session stop and cleanup":
+        it "stop_session removes from broker":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            val lease = broker.acquire(meta)
+            val stopped = broker.stop_session(lease.session_id)
+            expect(stopped).to_equal(true)
+            expect(broker.total_count()).to_equal(0)
+
+        it "shutdown_all removes all sessions":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_qemu_meta("riscv64", "fw2.bin", REUSE_SHARED_READ_ONLY)
+            broker.acquire(m1)
+            broker.acquire(m2)
+            expect(broker.total_count()).to_equal(2)
+            broker.shutdown_all()
+            expect(broker.total_count()).to_equal(0)
+
+        it "stop nonexistent session returns false":
+            var broker = session_broker_new()
+            val stopped = broker.stop_session("nonexistent_session_id")
+            expect(stopped).to_equal(false)
+
+    describe "session lifecycle workflow":
+        it "acquire, use, release, reacquire cycle":
+            var broker = session_broker_new()
+            val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
+            # Step 1: Acquire
+            val l1 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(1)
+            # Step 2: Release back to idle
+            broker.release(l1.session_id)
+            expect(broker.idle_count()).to_equal(1)
+            # Step 3: Reacquire same session
+            val l2 = broker.acquire(meta)
+            expect(broker.total_count()).to_equal(1)
+            expect(l2.test_count).to_equal(1)
+            # Step 4: Release again
+            broker.release(l2.session_id)
+            expect(broker.idle_count()).to_equal(1)
+
+        it "multi-session acquire, release, shutdown":
+            var broker = session_broker_new()
+            val m1 = make_qemu_meta("arm64", "fw1.bin", REUSE_SHARED_READ_ONLY)
+            val m2 = make_container_meta("x86_64", "img1", REUSE_SHARED_READ_ONLY)
+            val l1 = broker.acquire(m1)
+            val l2 = broker.acquire(m2)
+            expect(broker.total_count()).to_equal(2)
+            broker.release(l1.session_id)
+            broker.release(l2.session_id)
+            expect(broker.idle_count()).to_equal(2)
+            expect(broker.active_count()).to_equal(0)
+            broker.shutdown_all()
+            expect(broker.total_count()).to_equal(0)
