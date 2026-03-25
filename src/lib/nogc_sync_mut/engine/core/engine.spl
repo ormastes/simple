@@ -23,6 +23,7 @@ use std.nogc_sync_mut.engine.input.input_manager.{InputManager}
 use std.nogc_sync_mut.engine.audio.audio_manager.{AudioManager}
 use std.nogc_sync_mut.engine.audio.types.{AudioConfig, default_audio_config}
 use std.nogc_sync_mut.engine.render.pipeline.{SoftwareRenderer}
+use std.gc_async_mut.gpu.context.{Context}
 use std.nogc_sync_mut.engine.render.gpu_pipeline.{GpuRenderer2D}
 use std.nogc_sync_mut.engine.render.vector.{VectorRenderer}
 use std.nogc_sync_mut.engine.resource.manager.{ResourceManager}
@@ -69,6 +70,7 @@ class Engine2D:
     vector: VectorRenderer
     window_handle: i64
     event_loop_handle: i64
+    gpu_ctx: Context
 
 impl Engine2D:
     static fn create(title: text, width: i64, height: i64) -> Engine2D:
@@ -115,6 +117,7 @@ impl Engine2D:
         val input = InputManager.create(event_loop.handle)
         val audio = AudioManager.create(audio_config)
         val renderer = SoftwareRenderer.create(width, height)
+        val gpu_ctx = Context.default()
         val gpu_renderer = GpuRenderer2D.create(width, height)
         val resources = ResourceManager.create("assets")
         val vector = VectorRenderer.create()
@@ -131,7 +134,8 @@ impl Engine2D:
             resources: resources,
             vector: vector,
             window_handle: window.handle,
-            event_loop_handle: event_loop.handle
+            event_loop_handle: event_loop.handle,
+            gpu_ctx: gpu_ctx
         )
 
     # ========================================================================
@@ -202,13 +206,9 @@ impl Engine2D:
         Args:
             mode: RendererMode.Software or RendererMode.Gpu
         """
+        self.renderer_mode = mode
         if val RendererMode.Gpu = mode:
-            if self.gpu_renderer.init_gpu(self.window_handle):
-                self.renderer_mode = RendererMode.Gpu
-            else:
-                self.renderer_mode = RendererMode.Software
-        else:
-            self.renderer_mode = RendererMode.Software
+            self.gpu_renderer.init_gpu(self.gpu_ctx, self.window_handle)
 
     fn get_renderer_mode() -> RendererMode:
         """Get the current renderer mode."""
@@ -223,7 +223,7 @@ impl Engine2D:
 
         Must be called when the game exits to release FFI resources.
         """
-        self.gpu_renderer.destroy_gpu()
+        self.gpu_renderer.destroy_gpu(self.gpu_ctx)
         self.input.destroy()
         self.physics.destroy()
         self.audio.destroy()

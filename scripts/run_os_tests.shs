@@ -1,0 +1,106 @@
+#!/bin/bash
+# run_os_tests.shs — Compile and run all OS unit tests, report results.
+#
+# Usage: scripts/run_os_tests.shs
+#
+# Finds test/unit/os/test_*.spl, compiles each with the Rust bootstrap
+# compiler, runs with a 10s timeout, and checks output for FAIL:/OK:.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+COMPILER="$REPO_ROOT/src/compiler_rust/target/bootstrap/simple"
+BUILD_DIR="$REPO_ROOT/build"
+TEST_DIR="$REPO_ROOT/test/unit/os"
+
+# Ensure build directory exists
+mkdir -p "$BUILD_DIR"
+
+# Collect test files
+shopt -s nullglob
+test_files=("$TEST_DIR"/test_*.spl)
+shopt -u nullglob
+
+total=${#test_files[@]}
+if [ "$total" -eq 0 ]; then
+    echo "No test files found matching test/unit/os/test_*.spl"
+    exit 1
+fi
+
+passed=0
+failed=0
+no_output=0
+
+for test_file in "${test_files[@]}"; do
+    # Derive test name from filename (strip directory and .spl extension)
+    basename_spl="$(basename "$test_file")"
+    testname="${basename_spl%.spl}"
+    binary="$BUILD_DIR/$testname"
+
+    echo "========================================"
+    echo "TEST: $testname"
+    echo "  Source: $test_file"
+
+    # --- Compile ---
+    echo "  Compiling..."
+    compile_output=$("$COMPILER" native-build --entry "$test_file" -o "$binary" 2>&1 | grep -E "failed|complete" || true)
+    echo "  Compile: $compile_output"
+
+    if echo "$compile_output" | grep -qi "failed"; then
+        echo "  RESULT: COMPILE FAILED"
+        failed=$((failed + 1))
+        continue
+    fi
+
+    if [ ! -x "$binary" ]; then
+        echo "  RESULT: COMPILE FAILED (no binary produced)"
+        failed=$((failed + 1))
+        continue
+    fi
+
+    # --- Run ---
+    echo "  Running (timeout 10s)..."
+    run_output=$(timeout 10 "$binary" 2>&1 || true)
+
+    if [ -z "$run_output" ]; then
+        echo "  RESULT: NO OUTPUT (possible entry point bug)"
+        no_output=$((no_output + 1))
+        continue
+    fi
+
+    echo "  Output:"
+    echo "$run_output" | sed 's/^/    /'
+
+    # --- Check results ---
+    has_fail=false
+    has_ok=false
+
+    if echo "$run_output" | grep -q "FAIL:"; then
+        has_fail=true
+    fi
+    if echo "$run_output" | grep -q "OK:"; then
+        has_ok=true
+    fi
+
+    if $has_fail; then
+        echo "  RESULT: FAILED"
+        failed=$((failed + 1))
+    elif $has_ok; then
+        echo "  RESULT: PASSED"
+        passed=$((passed + 1))
+    else
+        echo "  RESULT: NO OUTPUT (no OK:/FAIL: markers found)"
+        no_output=$((no_output + 1))
+    fi
+done
+
+echo ""
+echo "========================================"
+echo "SUMMARY: $passed passed, $failed failed, $no_output no-output out of $total total"
+echo "========================================"
+
+if [ "$failed" -gt 0 ] || [ "$no_output" -gt 0 ]; then
+    exit 1
+fi
+
+exit 0

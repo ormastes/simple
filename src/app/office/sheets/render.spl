@@ -12,10 +12,11 @@ fn format_number(value: f64, decimals: i32) -> text:
         val rounded = _round_to_int(value)
         return "{rounded}"
     val factor = _pow10(decimals)
+    val factor_i = _pow10_i64(decimals)
     val shifted = value * factor
     val rounded_i = _round_to_int(shifted)
-    val int_part = rounded_i / factor.to_i64()
-    var frac_abs = rounded_i - (int_part * factor.to_i64())
+    val int_part = rounded_i / factor_i
+    var frac_abs = rounded_i - (int_part * factor_i)
     if frac_abs < 0:
         frac_abs = 0 - frac_abs
     var frac_str = "{frac_abs}"
@@ -52,7 +53,7 @@ fn apply_cell_format(value: f64, format: text) -> text:
         'number:N'         — fixed N decimal places
         'currency:SYM:N'   — currency with symbol and N decimals
         'percent:N'        — percentage with N decimal places
-        'date'             — passthrough (not a real date formatter)
+        'date'             — minimal ISO date formatting for non-negative serial day values
     """
     if format == "general":
         return _format_general(value)
@@ -73,8 +74,7 @@ fn apply_cell_format(value: f64, format: text) -> text:
         val decimals = _parse_int(dec_str)
         return format_percent(value, decimals)
     if format == "date":
-        # Simple passthrough: not a real date engine
-        return "{value}"
+        return _format_serial_date(value)
     # Fallback: general
     _format_general(value)
 
@@ -84,7 +84,7 @@ fn apply_cell_format(value: f64, format: text) -> text:
 
 fn _format_general(value: f64) -> text:
     """Format in general mode: show integer if no fractional part, otherwise float."""
-    val int_val = value.to_i64()
+    val int_val = _truncate_to_i64(value)
     val diff = value - int_val.to_f64()
     if diff == 0.0:
         return "{int_val}"
@@ -120,8 +120,8 @@ fn _insert_commas(int_str: text) -> text:
 fn _round_to_int(value: f64) -> i64:
     """Round a float to the nearest integer."""
     if value >= 0.0:
-        return (value + 0.5).to_i64()
-    return (value - 0.5).to_i64()
+        return _truncate_to_i64(value + 0.5)
+    return _truncate_to_i64(value - 0.5)
 
 fn _pow10(exp: i32) -> f64:
     """Calculate 10^exp for small non-negative exponents."""
@@ -131,6 +131,38 @@ fn _pow10(exp: i32) -> f64:
         result = result * 10.0
         i = i + 1
     result
+
+fn _pow10_i64(exp: i32) -> i64:
+    """Calculate 10^exp as i64 for small non-negative exponents."""
+    var result = 1
+    var i = 0
+    while i < exp:
+        result = result * 10
+        i = i + 1
+    result
+
+fn _format_serial_date(value: f64) -> text:
+    """Format a non-negative serial day count as YYYY-MM-DD using a simple 365/30 calendar."""
+    if value < 0.0:
+        return _format_general(value)
+    val serial = _round_to_int(value)
+    val year_offset = serial / 365
+    val day_of_year = serial - (year_offset * 365)
+    val month_index = day_of_year / 30
+    val day_index = day_of_year - (month_index * 30)
+
+    var year = 1970 + year_offset
+    var month = month_index + 1
+    var day = day_index + 1
+
+    if month > 12:
+        month = 12
+    if day > 31:
+        day = 31
+
+    val month_text = if month < 10: "0{month}" else: "{month}"
+    val day_text = if day < 10: "0{day}" else: "{day}"
+    "{year}-{month_text}-{day_text}"
 
 fn _parse_int(s: text) -> i32:
     """Parse a small non-negative integer from text. Returns 0 on failure."""
@@ -154,3 +186,8 @@ fn _is_digit(c: text) -> bool:
 fn _digit_value(c: text) -> i32:
     val code = c.char_code_at(0)
     code - 48
+
+fn _truncate_to_i64(value: f64) -> i64:
+    """Convert f64 to i64 by truncation toward zero."""
+    val truncated: i64 = value
+    truncated
