@@ -148,9 +148,13 @@ if [ ! -x "${seed_bin}" ]; then
   cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 fi
 
-if [ ! -x "bin/release/simple" ]; then
-  echo "error: bin/release/simple is required for the staged bootstrap wrapper in this checkout" >&2
-  exit 1
+# Detect whether bin/release/simple is a full CLI or bootstrap-only
+can_full_bootstrap=0
+if [ -x "bin/release/simple" ]; then
+  # Full CLI supports "build"; bootstrap-only does not
+  if bin/release/simple build --help >/dev/null 2>&1; then
+    can_full_bootstrap=1
+  fi
 fi
 
 echo "Running bootstrap pipeline..."
@@ -158,8 +162,34 @@ echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
 echo "  output:   ${output_dir}"
 
-RUST_LOG="${RUST_LOG:-error}" \
-  bin/release/simple build bootstrap "--backend=${backend}" "--output=${output_dir}"
+if [ "${can_full_bootstrap}" -eq 1 ]; then
+  # Full CLI available — use high-level staged bootstrap
+  echo "  mode:     full CLI (build bootstrap)"
+  RUST_LOG="${RUST_LOG:-error}" \
+    bin/release/simple build bootstrap "--backend=${backend}" "--output=${output_dir}"
+else
+  # Bootstrap-only or missing — manual staged bootstrap via seed
+  echo "  mode:     manual (seed → bootstrap_main → bootstrap_main)"
+  if [ ! -x "${seed_bin}" ]; then
+    echo "error: Rust seed required for manual bootstrap (${seed_bin})" >&2
+    echo "Run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver" >&2
+    exit 1
+  fi
+
+  # Stage 2: seed compiles bootstrap_main.spl
+  mkdir -p "${output_dir}/stage2/${PLATFORM}"
+  echo "Stage 2: seed → bootstrap_main.spl"
+  "${seed_bin}" native-build \
+    --entry src/app/cli/bootstrap_main.spl \
+    -o "${output_dir}/stage2/${PLATFORM}/simple"
+
+  # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
+  mkdir -p "${output_dir}/stage3/${PLATFORM}"
+  echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
+  "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+    --entry src/app/cli/bootstrap_main.spl \
+    -o "${output_dir}/stage3/${PLATFORM}/simple"
+fi
 
 # Locate stage outputs — check new layout first, fall back to flat
 if [ -x "${output_dir}/stage2/${PLATFORM}/simple" ]; then
@@ -189,10 +219,44 @@ if [ "${hash2}" != "${hash3}" ]; then
   exit 1
 fi
 
-if [ "${deploy}" -eq 1 ]; then
-  install -Dm755 "${stage3}" "bin/release/simple"
-  echo "Deployed verified binary to bin/release/simple"
+echo "Bootstrap verification passed."
+
+# ===========================================================================
+# Stage 4: Compile full CLI (main.spl) with verified bootstrap compiler
+# ===========================================================================
+
+echo "Stage 4: compiling full CLI (main.spl) with verified bootstrap compiler..."
+full_dir="${output_dir}/full/${PLATFORM}"
+mkdir -p "${full_dir}"
+"${stage3}" native-build \
+  --entry src/app/cli/main.spl \
+  -o "${full_dir}/simple"
+
+full_bin="${full_dir}/simple"
+if [ ! -x "${full_bin}" ]; then
+  echo "error: failed to compile full CLI binary from main.spl" >&2
+  exit 1
 fi
 
-echo "Bootstrap verification passed."
-echo "Final binary: ${stage3}"
+echo "Full CLI binary: ${full_bin}"
+
+# ===========================================================================
+# Deploy
+# ===========================================================================
+
+if [ "${deploy}" -eq 1 ]; then
+  # Resolve deploy directory — prefer existing legacy format (os-arch), else use triple
+  if [ -d "bin/release/${os}-${arch}" ]; then
+    deploy_dir="bin/release/${os}-${arch}"
+  else
+    deploy_dir="bin/release/${PLATFORM}"
+  fi
+  mkdir -p "${deploy_dir}"
+  install -m755 "${full_bin}" "${deploy_dir}/simple"
+  echo "Deployed full CLI binary to ${deploy_dir}/simple"
+
+  # Recreate symlinks (bin/simple → release/<platform>/simple)
+  "${repo_root}/scripts/setup.sh"
+fi
+
+echo "Final binary: ${full_bin}"

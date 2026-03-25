@@ -201,6 +201,15 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 // Handle -j4 style (no space)
                 options.max_threads = arg[2..].parse().unwrap_or(0);
             }
+            "--slow-threshold" => {
+                i += 1;
+                if i < args.len() {
+                    options.slow_threshold_ms = args[i].parse().ok();
+                }
+            }
+            arg if arg.starts_with("--slow-threshold=") => {
+                options.slow_threshold_ms = arg.trim_start_matches("--slow-threshold=").parse().ok();
+            }
             "--cpu-threshold" => {
                 i += 1;
                 if i < args.len() {

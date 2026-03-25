@@ -31,8 +31,8 @@ impl ResultCache {
                 if line.starts_with('#') || line.is_empty() {
                     continue;
                 }
-                let parts: Vec<&str> = line.splitn(6, '\t').collect();
-                if parts.len() == 6 {
+                let parts: Vec<&str> = line.splitn(7, '\t').collect();
+                if parts.len() >= 6 {
                     if let (Ok(mtime), Ok(size), Ok(passed), Ok(failed), Ok(skipped)) = (
                         parts[1].parse::<u64>(),
                         parts[2].parse::<u64>(),
@@ -40,9 +40,14 @@ impl ResultCache {
                         parts[4].parse::<usize>(),
                         parts[5].parse::<usize>(),
                     ) {
+                        let duration_ms = if parts.len() >= 7 {
+                            parts[6].parse::<u64>().unwrap_or(0)
+                        } else {
+                            0
+                        };
                         entries.insert(
                             parts[0].to_string(),
-                            CachedResult { mtime, size, passed, failed, skipped, duration_ms: 0 },
+                            CachedResult { mtime, size, passed, failed, skipped, duration_ms },
                         );
                     }
                 }
@@ -73,7 +78,7 @@ impl ResultCache {
     }
 
     /// Record a test result for caching.
-    pub fn record(&mut self, path: &Path, passed: usize, failed: usize, skipped: usize) {
+    pub fn record(&mut self, path: &Path, passed: usize, failed: usize, skipped: usize, duration_ms: u64) {
         let key = path.to_string_lossy().to_string();
         if let Ok(meta) = fs::metadata(path) {
             let size = meta.len();
@@ -85,7 +90,7 @@ impl ResultCache {
                 .unwrap_or(0);
             self.entries.insert(
                 key,
-                CachedResult { mtime, size, passed, failed, skipped, duration_ms: 0 },
+                CachedResult { mtime, size, passed, failed, skipped, duration_ms },
             );
         }
     }
@@ -94,11 +99,11 @@ impl ResultCache {
     pub fn save(&self) {
         let _ = fs::create_dir_all(".simple");
         let mut lines = Vec::with_capacity(self.entries.len() + 1);
-        lines.push("# path\tmtime\tsize\tpassed\tfailed\tskipped".to_string());
+        lines.push("# path\tmtime\tsize\tpassed\tfailed\tskipped\tduration_ms".to_string());
         for (path, entry) in &self.entries {
             lines.push(format!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                path, entry.mtime, entry.size, entry.passed, entry.failed, entry.skipped
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                path, entry.mtime, entry.size, entry.passed, entry.failed, entry.skipped, entry.duration_ms
             ));
         }
         let _ = fs::write(CACHE_PATH, lines.join("\n") + "\n");

@@ -217,6 +217,8 @@ pub struct TestOptions {
     pub full_parallel: bool,
     /// Seconds between resource usage checks
     pub cpu_check_interval: u64,
+    /// Threshold in ms above which a test is flagged as slow (None = disabled)
+    pub slow_threshold_ms: Option<u64>,
     /// Enable runtime profiling
     pub profile: bool,
     /// Profile mode (statistics, sequence, combined)
@@ -286,6 +288,7 @@ impl Default for TestOptions {
             throttled_threads: 1,
             full_parallel: false,
             cpu_check_interval: 5,
+            slow_threshold_ms: None,
             profile: false,
             profile_mode: None,
             rust_tests: false,

@@ -115,6 +115,7 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
 
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
+    let suite_start = Instant::now();
     // Make options mutable to apply config file settings
     let mut options = options;
 
@@ -286,14 +287,13 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         );
     }
 
-    let start = Instant::now();
     let result = TestRunResult {
         files: results,
         total_passed,
         total_failed,
         total_skipped,
         total_ignored,
-        total_duration_ms: start.elapsed().as_millis() as u64,
+        total_duration_ms: suite_start.elapsed().as_millis() as u64,
     };
 
     // Post-processing (skip in list mode)
@@ -636,7 +636,7 @@ fn execute_test_files(
                         failed: cached.failed,
                         skipped: cached.skipped,
                         ignored: 0,
-                        duration_ms: 0,
+                        duration_ms: cached.duration_ms,
                         error: None,
                         individual_results: vec![],
                     };
@@ -721,12 +721,22 @@ fn execute_test_files(
             print_result(&result, quiet);
         }
 
+        // Per-file slow warning
+        if let Some(threshold) = options.slow_threshold_ms {
+            if result.duration_ms > threshold {
+                eprintln!(
+                    "\x1b[33m[SLOW] {} took {}ms (threshold: {}ms)\x1b[0m",
+                    path.display(), result.duration_ms, threshold
+                );
+            }
+        }
+
         let failed = result.failed > 0 || result.error.is_some();
         let memory_abort = result.error.as_ref().is_some_and(|e| e.contains("MEMORY LIMIT"));
 
         // Record result in cache
         if use_cache && !list_mode {
-            result_cache.record(path, result.passed, result.failed, result.skipped);
+            result_cache.record(path, result.passed, result.failed, result.skipped, result.duration_ms);
         }
 
         results.push(result);

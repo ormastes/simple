@@ -49,6 +49,20 @@ fn print_summary_text(result: &TestRunResult) {
             }
         }
     }
+
+    // Print slowest tests (top 10 by duration)
+    let mut sorted_files: Vec<_> = result.files.iter()
+        .filter(|f| f.duration_ms > 0)
+        .collect();
+    sorted_files.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
+    if !sorted_files.is_empty() {
+        println!();
+        println!("Slowest tests:");
+        for file in sorted_files.iter().take(10) {
+            let flag = if file.duration_ms >= 60000 { " \x1b[31m[PERF BUG]\x1b[0m" } else { "" };
+            println!("  {:>8}ms  {}{}", file.duration_ms, file.path.display(), flag);
+        }
+    }
 }
 
 /// Print JSON format summary (CLI-008)

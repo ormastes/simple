@@ -21,7 +21,7 @@ set -euo pipefail
 # Options:
 #   --backend=<name>   Backend for stage2/stage3 (default: llvm-lib)
 #   --output=<dir>     Output directory (default: build/bootstrap)
-#   --deploy           Copy verified stage3 to bin/release/simple.exe
+#   --deploy           Compile full CLI and deploy to bin/release/<triple>/simple.exe
 #   --msvc             Force MSVC toolchain
 #   --mingw            Force MinGW toolchain
 #   --help             Show this help
@@ -38,7 +38,7 @@ Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple.exe
 Options:
   --backend=<name>   Backend for stage2/stage3 (default: llvm-lib)
   --output=<dir>     Output directory (default: build/bootstrap)
-  --deploy           Copy verified stage3 to bin/release/simple.exe
+  --deploy           Compile full CLI and deploy to bin/release/<triple>/simple.exe
   --msvc             Force MSVC toolchain
   --mingw            Force MinGW toolchain
   --help             Show this help
@@ -246,14 +246,42 @@ if [[ "${hash2}" != "${hash3}" ]]; then
   exit 1
 fi
 
+echo ""
+echo "Bootstrap verification passed."
+
+# ===========================================================================
+# Stage 4: Compile full CLI (main.spl) with verified bootstrap compiler
+# ===========================================================================
+
+echo ""
+echo "=== Stage 4: compiling full CLI (main.spl) with verified bootstrap compiler ==="
+full_dir="${output_dir}/full/${PLATFORM}"
+mkdir -p "${full_dir}"
+full_bin="${full_dir}/simple.exe"
+
+"${stage3_bin}" native-build \
+  --entry src/app/cli/main.spl \
+  -o "${full_bin}" \
+  ${backend:+--backend="${backend}"}
+
+if [[ ! -f "${full_bin}" ]]; then
+  echo "error: failed to compile full CLI binary from main.spl" >&2
+  exit 1
+fi
+
+echo "Full CLI binary: ${full_bin}"
+
 if (( deploy )); then
   # Deploy to triple-specific directory
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
-  cp "${stage3_bin}" "${deploy_dir}/simple.exe"
-  echo "Deployed verified binary to ${deploy_dir}/simple.exe"
+  cp "${full_bin}" "${deploy_dir}/simple.exe"
+  echo "Deployed full CLI binary to ${deploy_dir}/simple.exe"
+
+  # Recreate symlinks
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  "${script_dir}/../../scripts/setup.sh" || true
 fi
 
 echo ""
-echo "Bootstrap verification passed."
-echo "Final binary: ${stage3_bin}"
+echo "Final binary: ${full_bin}"
