@@ -1,0 +1,482 @@
+# Test Daemon Hardware Adapter — OpenOCD + TRACE32 debug sessions
+#
+# Manages hardware debug sessions for on-target testing. Both adapters
+# use exclusive lease semantics with max 1 session per board.
+# OpenOCD connects via GDB port, TRACE32 via RCL (Remote Control Line).
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    SESSION_KIND_OPENOCD, SESSION_KIND_TRACE32, LEASE_IDLE, LEASE_ACTIVE,
+    REUSE_SHARED_WITH_RESET, REUSE_EXCLUSIVE_REUSED,
+    RESET_HARD, RESET_RELOAD_BINARY,
+    session_key_to_id, session_lease_new
+}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_spawn_async(cmd: text, args: [text], env: {text: text}) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_is_alive(pid: i64) -> bool
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+extern fn rt_tcp_connect(host: text, port: i64) -> bool
+
+# ============================================================================
+# OpenOCD Adapter
+# ============================================================================
+
+val OPENOCD_DEFAULT_GDB_PORT: i64 = 3333
+val OPENOCD_DEFAULT_TELNET_PORT: i64 = 4444
+val OPENOCD_STARTUP_WAIT_MS: i64 = 2000
+
+class OpenocdAdapter:
+    base: SessionAdapter
+    gdb_port: i64
+    telnet_port: i64
+
+fn openocd_adapter_new() -> OpenocdAdapter:
+    OpenocdAdapter(
+        base: session_adapter_new(SESSION_KIND_OPENOCD, "openocd"),
+        gdb_port: OPENOCD_DEFAULT_GDB_PORT,
+        telnet_port: OPENOCD_DEFAULT_TELNET_PORT
+    )
+
+fn openocd_adapter_with_ports(gdb_port: i64, telnet_port: i64) -> OpenocdAdapter:
+    OpenocdAdapter(
+        base: session_adapter_new(SESSION_KIND_OPENOCD, "openocd"),
+        gdb_port: gdb_port,
+        telnet_port: telnet_port
+    )
+
+impl OpenocdAdapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        self.base.kind == meta.session_kind
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        OpenOCD sessions are keyed by board target. Each physical board
+        can only have one active debug session.
+        """
+        SessionKey(
+            kind: SESSION_KIND_OPENOCD,
+            target: meta.target,
+            artifact_hash: meta.artifact,
+            env_profile: "",
+            reuse_mode: REUSE_SHARED_WITH_RESET,
+            reset_policy: RESET_HARD
+        )
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts OpenOCD with the appropriate config for the target board.
+        Waits for the GDB port to become available.
+        """
+        var lease = session_lease_new(desc.key)
+
+        val target = desc.key.target
+        val config_file = desc.config["openocd_cfg"] ?? ""
+
+        if config_file == "" and target == "":
+            return lease
+
+        # Build OpenOCD command
+        val effective_cfg = if config_file != "": config_file
+            else: self.default_config_for_target(target)
+
+        val gdb_port_str = desc.config["gdb_port"] ?? "{self.gdb_port}"
+        val telnet_port_str = desc.config["telnet_port"] ?? "{self.telnet_port}"
+
+        val args = [
+            "-f", effective_cfg,
+            "-c", "gdb_port {gdb_port_str}",
+            "-c", "telnet_port {telnet_port_str}"
+        ]
+
+        val env: {text: text} = {}
+        val pid = rt_process_spawn_async("openocd", args, env)
+
+        if pid <= 0:
+            return lease
+
+        # Wait for OpenOCD to start and listen on GDB port
+        rt_sleep_ms(OPENOCD_STARTUP_WAIT_MS)
+
+        val effective_gdb_port = gdb_port_str.to_i64() ?? self.gdb_port
+        val connected = self.wait_for_gdb_port("localhost", effective_gdb_port, 10)
+
+        if not connected:
+            rt_process_kill(pid)
+            return lease
+
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_key_to_id(desc.key),
+            key: desc.key,
+            pid: pid,
+            qmp_socket: "localhost:{effective_gdb_port}",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Checks OpenOCD health by verifying the process is alive
+        and the GDB port is reachable.
+        """
+        if lease.pid <= 0:
+            return false
+        if not rt_process_is_alive(lease.pid):
+            return false
+
+        # Try connecting to the GDB port
+        val parts = lease.qmp_socket.split(":")
+        if parts.len() < 2:
+            return false
+        val host = parts[0]
+        val port = parts[1].to_i64() ?? OPENOCD_DEFAULT_GDB_PORT
+        rt_tcp_connect(host, port)
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Resets the target via OpenOCD telnet interface.
+        RESET_HARD: sends 'monitor reset halt' via GDB
+        RESET_RELOAD_BINARY: sends reset + reflash
+        """
+        if policy == RESET_HARD:
+            val cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
+            rt_shell_exec(cmd)
+            val exit_code = rt_shell_exit_code()
+            rt_sleep_ms(500)
+            return exit_code == 0
+
+        if policy == RESET_RELOAD_BINARY:
+            # Reset and reload the binary
+            val binary = lease.key.artifact_hash
+            val reset_cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
+            rt_shell_exec(reset_cmd)
+            rt_sleep_ms(500)
+
+            if binary != "":
+                val flash_cmd = "echo 'program {binary} verify reset' | nc localhost {self.telnet_port}"
+                rt_shell_exec(flash_cmd)
+                val exit_code = rt_shell_exit_code()
+                rt_sleep_ms(1000)
+                return exit_code == 0
+            return true
+
+        false
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test against the OpenOCD-managed target.
+        Sets GDB_PORT env var for the test to connect.
+        """
+        val gdb_endpoint = lease.qmp_socket
+        val cmd = "GDB_PORT={gdb_endpoint} bin/simple test {test_path} 2>&1"
+
+        val start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        TestResult(
+            test_path: test_path,
+            status: status,
+            passed: passed,
+            failed: failed,
+            skipped: 0,
+            duration_ms: duration_ms,
+            output: output,
+            cached: false
+        )
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Shuts down OpenOCD cleanly via telnet, then kills the process.
+        """
+        # Try graceful shutdown via telnet
+        val shutdown_cmd = "echo 'shutdown' | nc localhost {self.telnet_port}"
+        rt_shell_exec(shutdown_cmd)
+        rt_sleep_ms(500)
+
+        if lease.pid > 0:
+            rt_process_kill(lease.pid)
+        true
+
+    # --- Private helpers ---
+
+    fn default_config_for_target(target: text) -> text:
+        """
+        Returns the default OpenOCD config file path for a given target.
+        """
+        if target.contains("stm32"):
+            return "board/stm32f4discovery.cfg"
+        if target.contains("zynq") or target.contains("zedboard"):
+            return "board/digilent_zedboard.cfg"
+        if target.contains("riscv") or target.contains("rv32") or target.contains("rv64"):
+            return "target/riscv.cfg"
+        if target.contains("arm") or target.contains("cortex"):
+            return "target/cortex_m.cfg"
+        # Generic fallback
+        "target/generic.cfg"
+
+    fn wait_for_gdb_port(host: text, port: i64, max_retries: i64) -> bool:
+        """
+        Polls the GDB port until it accepts connections.
+        """
+        var attempt = 0
+        while attempt < max_retries:
+            if rt_tcp_connect(host, port):
+                return true
+            rt_sleep_ms(500)
+            attempt = attempt + 1
+        false
+
+# ============================================================================
+# TRACE32 Adapter
+# ============================================================================
+
+val T32_DEFAULT_RCL_PORT: i64 = 20000
+val T32_STARTUP_WAIT_MS: i64 = 3000
+
+class Trace32Adapter:
+    base: SessionAdapter
+    rcl_port: i64
+    t32_install_dir: text
+
+fn trace32_adapter_new() -> Trace32Adapter:
+    Trace32Adapter(
+        base: session_adapter_new(SESSION_KIND_TRACE32, "trace32"),
+        rcl_port: T32_DEFAULT_RCL_PORT,
+        t32_install_dir: "/opt/t32"
+    )
+
+fn trace32_adapter_with_config(rcl_port: i64, install_dir: text) -> Trace32Adapter:
+    Trace32Adapter(
+        base: session_adapter_new(SESSION_KIND_TRACE32, "trace32"),
+        rcl_port: rcl_port,
+        t32_install_dir: install_dir
+    )
+
+impl Trace32Adapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        self.base.kind == meta.session_kind
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        TRACE32 sessions are keyed by board target. Each physical board
+        can only have one active debug session (exclusive).
+        """
+        SessionKey(
+            kind: SESSION_KIND_TRACE32,
+            target: meta.target,
+            artifact_hash: meta.artifact,
+            env_profile: "",
+            reuse_mode: REUSE_EXCLUSIVE_REUSED,
+            reset_policy: RESET_RELOAD_BINARY
+        )
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts TRACE32 PowerView and connects via RCL (Remote Control Line).
+        Waits for the RCL port to become available.
+        """
+        var lease = session_lease_new(desc.key)
+
+        val target = desc.key.target
+        val config_file = desc.config["t32_config"] ?? ""
+        val practice_script = desc.config["practice_script"] ?? ""
+
+        # Determine TRACE32 executable based on target architecture
+        val t32_exe = self.t32_executable_for_target(target)
+        val t32_path = "{self.t32_install_dir}/bin/pc_linux64/{t32_exe}"
+
+        val rcl_port_str = desc.config["rcl_port"] ?? "{self.rcl_port}"
+
+        # Build args: config file, RCL port, optional PRACTICE script
+        var args: [text] = []
+        if config_file != "":
+            args.push("-c")
+            args.push(config_file)
+
+        args.push("-s")
+        args.push("RCL=NETTCP")
+        args.push("PORT={rcl_port_str}")
+
+        val env: {text: text} = {}
+        env["T32SYS"] = self.t32_install_dir
+        val pid = rt_process_spawn_async(t32_path, args, env)
+
+        if pid <= 0:
+            return lease
+
+        # Wait for TRACE32 to initialize
+        rt_sleep_ms(T32_STARTUP_WAIT_MS)
+
+        val effective_rcl_port = rcl_port_str.to_i64() ?? self.rcl_port
+        val connected = self.wait_for_rcl_port("localhost", effective_rcl_port, 15)
+
+        if not connected:
+            rt_process_kill(pid)
+            return lease
+
+        # Run startup PRACTICE script if provided
+        if practice_script != "":
+            self.run_practice_command("localhost", effective_rcl_port,
+                "DO {practice_script}")
+            rt_sleep_ms(1000)
+
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_key_to_id(desc.key),
+            key: desc.key,
+            pid: pid,
+            qmp_socket: "localhost:{effective_rcl_port}",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Checks TRACE32 health by verifying the process is alive
+        and the RCL port is reachable.
+        """
+        if lease.pid <= 0:
+            return false
+        if not rt_process_is_alive(lease.pid):
+            return false
+
+        val parts = lease.qmp_socket.split(":")
+        if parts.len() < 2:
+            return false
+        val host = parts[0]
+        val port = parts[1].to_i64() ?? self.rcl_port
+        rt_tcp_connect(host, port)
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Resets the target via TRACE32 RCL interface.
+        RESET_HARD: sends SYStem.RESetTarget
+        RESET_RELOAD_BINARY: resets target and reloads binary via Data.LOAD
+        """
+        val parts = lease.qmp_socket.split(":")
+        if parts.len() < 2:
+            return false
+        val host = parts[0]
+        val port = parts[1].to_i64() ?? self.rcl_port
+
+        if policy == RESET_HARD:
+            self.run_practice_command(host, port, "SYStem.RESetTarget")
+            rt_sleep_ms(1000)
+            return true
+
+        if policy == RESET_RELOAD_BINARY:
+            # Reset target
+            self.run_practice_command(host, port, "SYStem.RESetTarget")
+            rt_sleep_ms(500)
+
+            # Reload binary if specified
+            val binary = lease.key.artifact_hash
+            if binary != "":
+                self.run_practice_command(host, port,
+                    "Data.LOAD.Elf {binary}")
+                rt_sleep_ms(1000)
+
+            # Set PC to entry point
+            self.run_practice_command(host, port, "Register.Set PC Reset")
+            rt_sleep_ms(200)
+            return true
+
+        false
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test against the TRACE32-managed target.
+        Sets T32_RCL_PORT env var for the test to connect.
+        """
+        val rcl_endpoint = lease.qmp_socket
+        val cmd = "T32_RCL_PORT={rcl_endpoint} bin/simple test {test_path} 2>&1"
+
+        val start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        TestResult(
+            test_path: test_path,
+            status: status,
+            passed: passed,
+            failed: failed,
+            skipped: 0,
+            duration_ms: duration_ms,
+            output: output,
+            cached: false
+        )
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Shuts down TRACE32 cleanly via RCL QUIT command, then kills process.
+        """
+        val parts = lease.qmp_socket.split(":")
+        if parts.len() >= 2:
+            val host = parts[0]
+            val port = parts[1].to_i64() ?? self.rcl_port
+            self.run_practice_command(host, port, "QUIT")
+            rt_sleep_ms(1000)
+
+        if lease.pid > 0:
+            rt_process_kill(lease.pid)
+        true
+
+    # --- Private helpers ---
+
+    fn t32_executable_for_target(target: text) -> text:
+        """
+        Returns the TRACE32 executable name for the given target architecture.
+        """
+        if target.contains("arm") or target.contains("cortex"):
+            return "t32marm"
+        if target.contains("riscv") or target.contains("rv32") or target.contains("rv64"):
+            return "t32mriscv"
+        if target.contains("x86") or target.contains("amd64"):
+            return "t32mx86"
+        if target.contains("ppc") or target.contains("powerpc"):
+            return "t32mppc"
+        # Generic ARM as default (most common embedded target)
+        "t32marm"
+
+    fn run_practice_command(host: text, port: i64, command: text):
+        """
+        Sends a PRACTICE command to TRACE32 via RCL TCP interface.
+        Uses netcat (nc) for simplicity.
+        """
+        val cmd = "echo '{command}' | nc {host} {port}"
+        rt_shell_exec(cmd)
+
+    fn wait_for_rcl_port(host: text, port: i64, max_retries: i64) -> bool:
+        """
+        Polls the RCL port until it accepts connections.
+        """
+        var attempt = 0
+        while attempt < max_retries:
+            if rt_tcp_connect(host, port):
+                return true
+            rt_sleep_ms(500)
+            attempt = attempt + 1
+        false

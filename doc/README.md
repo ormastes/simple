@@ -28,7 +28,7 @@
 
 ### Core Reports
 - [report/EXECUTIVE_SUMMARY.md](report/EXECUTIVE_SUMMARY.md) - High-level overview
-- [release/PRODUCTION_READINESS.md](release/PRODUCTION_READINESS.md) - Deployment assessment
+- [archive/release/PRODUCTION_READINESS.md](archive/release/PRODUCTION_READINESS.md) - Deployment assessment
 - [feature/needed_feature.md](feature/needed_feature.md) - Feature status (updated)
 - [feature/FEATURES_THAT_WORK.md](feature/FEATURES_THAT_WORK.md) - Working features
 
@@ -44,7 +44,11 @@
 ### Technical Analysis
 - [report/IMPLEMENTATION_FIXES.md](report/IMPLEMENTATION_FIXES.md) - Recent fixes
 - [report/TEST_STATUS_AUDIT.md](report/TEST_STATUS_AUDIT.md) - Complete test audit
-- [test/HANG_ANALYSIS.md](test/HANG_ANALYSIS.md) - Root cause analysis
+- [tracking/test/HANG_ANALYSIS.md](tracking/test/HANG_ANALYSIS.md) - Root cause analysis
+
+### Project Tracking
+- [tracking/README.md](tracking/README.md) - Bug, test, todo, task, build tracking
+- [metrics/README.md](metrics/README.md) - Dashboard and coverage metrics
 
 ---
 

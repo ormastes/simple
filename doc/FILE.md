@@ -198,16 +198,7 @@ METRICS (doc/metrics/) ← dashboard, coverage
 
 ---
 
-## 🗂️ Supporting Categories
-
-### contributing/ (Contribution Guides)
-How to contribute to Simple project:
-- Code style guidelines
-- Pull request process
-- I18n translation guide
-- Testing requirements
-
----
+## Supporting Categories
 
 ### feature/ (Feature Specifications)
 BDD-style feature documents bridging requirements and tests:
@@ -218,61 +209,48 @@ BDD-style feature documents bridging requirements and tests:
 
 ---
 
-### test/ (Test Documentation)
-Testing documentation:
-- `test_result.md` - Test results (auto-generated)
-- `llm_integration_testing.md` - LLM testing guide
-- Test methodology
+### tracking/ (Project Tracking)
+Unified hub for bug, test, todo, task, and build tracking:
+- `bug/` - Bug tracking (`bug_db.sdn`, `bug_report.md`)
+- `test/` - Test results (`test_db.sdn`, `test_result.md`)
+- `todo/` - TODO tracking (`todo_db.sdn`)
+- `task/` - Task tracking (`task_db.sdn`)
+- `build/` - Build status (`recent_build.md`)
+
+See [tracking/README.md](tracking/README.md)
 
 ---
 
-### bug/ (Bug Documentation)
-Bug tracking:
-- `bug_report.md` - Bug list (auto-generated)
-- Known issues
-- Bug analysis
+### metrics/ (Project Metrics)
+Unified hub for project metrics and analysis:
+- `dashboard/` - Dashboard data, tables, history
+- `coverage/` - Code coverage reports
+
+See [metrics/README.md](metrics/README.md)
 
 ---
 
-### build/ (Build Documentation)
-Build system docs:
-- `recent_build.md` - Build status (auto-generated)
-- Build process
-- Bootstrap documentation
+### archive/ (Archive)
+Historical and deprecated documentation:
+- `refactoring/` - Refactoring phase tracking
+- `release/` - Release checklists, version history, release notes
 
 ---
 
-### release/ (Release Documentation)
-Release process:
-- Release checklists
-- Version history
-- Release notes
+### Subdirectories of Major Categories
 
----
-
-### format/ (Format Specifications)
-- SDN (Simple Data Notation), SMF (Simple Module Format)
-
----
-
-### Other Directories
-
-| Directory | Purpose |
-|-----------|---------|
-| **session/** | Development session notes and summaries |
-| **progress/** | Milestone tracking and feature completion |
-| **refactoring/** | Refactoring phase tracking |
-| **coverage/** | Test coverage reports |
-| **analysis/** | Code quality and complexity analysis |
-| **todo/** | TODO groupings and investigation notes |
-| **dashboard/** | SDN database for project dashboards |
-| **task/** | Task tracking system |
-| **archive/** | Historical/deprecated documentation |
-| **contributing/** | Contribution guides (i18n translations) |
-| **adr/** | Architecture Decision Records — see [adr/README.md](adr/README.md) |
-| **requirement/** | Functional requirements — see [requirement/README.md](requirement/README.md) |
-| **nfr/** | Non-functional requirements / SLOs — see [nfr/README.md](nfr/README.md) |
-| **rule/** | Engineering rules — see [rule/README.md](rule/README.md) |
+| Parent | Subdirectory | Purpose |
+|--------|-------------|---------|
+| **plan/** | `requirement/` | Functional requirements — REQ-NNN |
+| **plan/** | `nfr/` | Non-functional requirements / SLOs |
+| **architecture/** | `adr/` | Architecture Decision Records |
+| **architecture/** | `rule/` | Engineering rules |
+| **architecture/** | `format/` | Format specs (SDN, SMF) |
+| **guide/** | `contributing/` | Contribution guides (i18n translations) |
+| **guide/** | `examples/` | Documentation examples |
+| **research/** | `analysis/` | Code quality and complexity analysis |
+| **report/** | `session/` | Development session notes |
+| **report/** | `misc/` | Miscellaneous reports |
 
 ---
 
@@ -446,7 +424,7 @@ grep -l "Status.*In Progress" doc/design/*.md
 ### Must-Read for Developers
 1. `architecture/file_class_structure.md` - Codebase overview
 2. `guide/quick_reference/syntax_quick_reference.md` - Language reference
-3. `contributing/` - How to contribute
+3. `guide/contributing/` - How to contribute
 4. `guide/container_testing.md` - Testing guide
 
 ### Must-Read for Users
@@ -456,10 +434,9 @@ grep -l "Status.*In Progress" doc/design/*.md
 4. `examples/` - Code examples
 
 ### Must-Read for Integrators
-1. `integration/` - Integration guides
-2. `api/` - API documentation
-3. `spec/` - Formal specifications
-4. `format/` - Data formats
+1. `api/` - API documentation
+2. `spec/` - Formal specifications
+3. `architecture/format/` - Data formats (SDN, SMF)
 
 ---
 
@@ -479,7 +456,7 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ---
 
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-03-25
 **Maintainer:** Documentation Team
 **Size:** 3,462 .md files
 **Index:** This file (`FILE.md`) is the complete documentation hub

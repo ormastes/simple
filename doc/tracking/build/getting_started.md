@@ -301,7 +301,7 @@ If you're currently using `make`, see the [Migration Guide](../migration_guide.m
 
 - **Read the Reference:** [Complete command reference](reference.md)
 - **Understand Internals:** [Implementation details](internals.md)
-- **See Examples:** [More examples](../examples/)
+- **See Examples:** [More examples](../../guide/examples/)
 - **Get Help:** File issues on GitHub
 
 ## Tips & Best Practices

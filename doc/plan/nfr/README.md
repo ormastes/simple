@@ -26,7 +26,7 @@ These do not fit naturally into BDD feature scenarios.
 # NFR – [Feature / System Area]
 
 **Related requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
-**Related design:** [doc/design/xxx.md](../design/xxx.md)
+**Related design:** [doc/design/xxx.md](../../design/xxx.md)
 
 ## Performance
 

@@ -75,10 +75,10 @@ The system shall NOT ...
 
 ## Cross-References
 
-- **Plan:** [doc/plan/xxx.md](../plan/xxx.md)
-- **Design:** [doc/design/xxx.md](../design/xxx.md)
-- **Research:** [doc/research/xxx.md](../research/xxx.md)
-- **Feature spec:** [test/xxx_spec.spl](../../test/xxx_spec.spl)
+- **Plan:** [doc/plan/xxx.md](../xxx.md)
+- **Design:** [doc/design/xxx.md](../../design/xxx.md)
+- **Research:** [doc/research/xxx.md](../../research/xxx.md)
+- **Feature spec:** [test/xxx_spec.spl](../../../test/xxx_spec.spl)
 - **NFR:** [doc/nfr/xxx.md](../nfr/xxx.md)
 ```
 

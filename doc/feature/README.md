@@ -41,7 +41,7 @@ Feature Specification → verified by → BDD Tests
 ```markdown
 # Feature Specification – [Feature Name]
 
-**Requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
+**Requirements:** [doc/requirement/xxx.md](../plan/requirement/xxx.md)
 **Plan:** [doc/plan/xxx.md](../plan/xxx.md)
 **Design:** [doc/design/xxx.md](../design/xxx.md)
 **Status:** Draft | In Progress | Implemented | Complete

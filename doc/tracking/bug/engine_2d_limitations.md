@@ -1,7 +1,7 @@
 # Simple-Native 2D Game Engine - Known Limitations
 
 **Date:** 2026-03-24
-**Related:** [Requirements](../requirement/engine_2d.md) | [Plan](../plan/engine_2d.md) | [Design](../design/engine_2d.md) | [Research](../research/engine_2d.md)
+**Related:** [Requirements](../../plan/requirement/engine_2d.md) | [Plan](../../plan/engine_2d.md) | [Design](../../design/engine_2d.md) | [Research](../../research/engine_2d.md)
 
 ---
 

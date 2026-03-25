@@ -62,7 +62,7 @@ Why was this option chosen over the alternatives?
 ## References
 
 - [Research document](../research/xxx.md)
-- [Related requirement](../requirement/xxx.md)
+- [Related requirement](../../plan/requirement/xxx.md)
 - [Design document](../design/xxx.md)
 ```
 

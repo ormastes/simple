@@ -299,7 +299,7 @@ Based on:
 
 - [Rust Compiler Translation Guide](https://rustc-dev-guide.rust-lang.org/diagnostics/translation.html)
 - [Simple ARCHITECTURE.md](../../src/diagnostics/ARCHITECTURE.md)
-- [I18n Contributor Guide](../contributing/i18n.md)
+- [I18n Contributor Guide](../../guide/contributing/i18n.md)
 - [CHANGELOG.md](../../CHANGELOG.md)
 
 ## Conclusion

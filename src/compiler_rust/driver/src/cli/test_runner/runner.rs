@@ -708,7 +708,7 @@ fn execute_test_files(
                         Ok(_) => {
                             let meta = static_reg.files.get(path);
                             let (passed, skipped) = match meta {
-                                Some(m) => (m.total_count().saturating_sub(m.skipped_count()), m.skipped_count()),
+                                Some(m) => (m.total_tests.saturating_sub(m.skipped_count), m.skipped_count),
                                 None => (0, 0),
                             };
                             TestFileResult {
