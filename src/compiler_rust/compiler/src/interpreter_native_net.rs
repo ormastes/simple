@@ -515,7 +515,9 @@ pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
     match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
         Ok(n) => {
             buf.truncate(n);
-            Ok(Value::Array(Arc::new(buf.into_iter().map(|b| Value::Int(b as i64)).collect())))
+            Ok(Value::Array(Arc::new(
+                buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+            )))
         }
         Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
     }
@@ -525,18 +527,16 @@ pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError>
     let handle = extract_handle(args, 0)?;
     let mut out: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
-    let result = with_tcp_stream_mut(handle, |stream| {
-        loop {
-            match stream.read(&mut byte) {
-                Ok(0) => return Ok(()),
-                Ok(_) => {
-                    out.push(byte[0]);
-                    if byte[0] == b'\n' {
-                        return Ok(());
-                    }
+    let result = with_tcp_stream_mut(handle, |stream| loop {
+        match stream.read(&mut byte) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                out.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(());
                 }
-                Err(err) => return Err(err),
             }
+            Err(err) => return Err(err),
         }
     });
     match result {
@@ -605,7 +605,9 @@ pub fn rt_io_tcp_write_all_interp(args: &[Value]) -> Result<Value, CompileError>
 
 pub fn rt_io_tcp_flush_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    Ok(Value::Bool(with_tcp_stream_mut(handle, |stream| stream.flush()).is_ok()))
+    Ok(Value::Bool(
+        with_tcp_stream_mut(handle, |stream| stream.flush()).is_ok(),
+    ))
 }
 
 pub fn rt_io_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -639,7 +641,9 @@ pub fn native_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileErr
 pub fn rt_io_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
-    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_nodelay(enabled)).is_ok()))
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| stream.set_nodelay(enabled)).is_ok(),
+    ))
 }
 
 pub fn native_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -656,7 +660,9 @@ pub fn rt_io_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, Compil
             Some(Duration::from_millis(ms as u64))
         }
     });
-    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)).is_ok()))
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)).is_ok(),
+    ))
 }
 
 pub fn native_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -673,7 +679,9 @@ pub fn rt_io_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, Compi
             Some(Duration::from_millis(ms as u64))
         }
     });
-    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)).is_ok()))
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)).is_ok(),
+    ))
 }
 
 pub fn native_tcp_get_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -683,7 +691,9 @@ pub fn native_tcp_get_nodelay_interp(args: &[Value]) -> Result<Value, CompileErr
 pub fn rt_io_tcp_shutdown_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let how = extract_shutdown_how(args, 1);
-    Ok(Value::Bool(with_tcp_stream(handle, |stream| stream.shutdown(how)).is_ok()))
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| stream.shutdown(how)).is_ok(),
+    ))
 }
 
 pub fn native_tcp_peek_interp(args: &[Value]) -> Result<Value, CompileError> {

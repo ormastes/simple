@@ -5,15 +5,16 @@
 
 use examples.browser.shared.error {BrowserError, BrowserResult, network_error}
 use examples.browser.shared.logging {Logger, LogLevel}
+use std.io_runtime.{time_now_unix_micros}
 
 # A single cached DNS entry: resolved addresses plus a timestamp and TTL.
 class DnsCacheEntry:
     hostname: text
-    addresses: List<text>
+    addresses: [text]
     created_at: i64
     ttl: i64
 
-    static fn create(hostname: text, addresses: List<text>, created_at: i64, ttl: i64) -> DnsCacheEntry:
+    static fn create(hostname: text, addresses: [text], created_at: i64, ttl: i64) -> DnsCacheEntry:
         DnsCacheEntry(
             hostname: hostname,
             addresses: addresses,
@@ -27,39 +28,63 @@ class DnsCacheEntry:
 # In-memory DNS cache keyed by hostname.
 # Stores resolved addresses with per-entry TTL expiration.
 class DnsCache:
-    entries: Map<text, DnsCacheEntry>
+    entries: [DnsCacheEntry]
     max_ttl: i64
 
     static fn create(max_ttl: i64) -> DnsCache:
-        DnsCache(entries: Map<text, DnsCacheEntry>(), max_ttl: max_ttl)
+        DnsCache(entries: [], max_ttl: max_ttl)
 
     # Look up a hostname in the cache. Returns nil if not found or expired.
-    me lookup(hostname: text, now: i64) -> List<text>?:
-        val entry = self.entries.get(hostname)
-        if val e = entry:
+    me lookup(hostname: text, now: i64) -> [text]?:
+        val index = self.find_index(hostname)
+        if index >= 0:
+            val e = self.entries[index]
             if e.is_expired(now):
-                self.entries.remove(hostname)
+                self.remove_at(index)
                 return nil
             return e.addresses
         nil
 
     # Store resolved addresses for a hostname with the given TTL.
     # The TTL is clamped to the cache-wide max_ttl.
-    me store(hostname: text, addresses: List<text>, now: i64, ttl: i64):
+    me store(hostname: text, addresses: [text], now: i64, ttl: i64):
         val effective_ttl = if ttl > self.max_ttl: self.max_ttl else: ttl
         val entry = DnsCacheEntry.create(hostname, addresses, now, effective_ttl)
-        self.entries.set(hostname, entry)
+        val index = self.find_index(hostname)
+        if index >= 0:
+            self.entries[index] = entry
+        else:
+            self.entries = self.entries + [entry]
 
     # Remove a specific hostname from the cache.
     me invalidate(hostname: text):
-        self.entries.remove(hostname)
+        val index = self.find_index(hostname)
+        if index >= 0:
+            self.remove_at(index)
 
     # Remove all entries from the cache.
     me flush():
-        self.entries.clear()
+        self.entries = []
 
     fn size() -> i64:
         self.entries.len()
+
+    fn find_index(hostname: text) -> i64:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].hostname == hostname:
+                return i
+            i = i + 1
+        -1
+
+    me remove_at(index: i64):
+        var result: [DnsCacheEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i != index:
+                result = result + [self.entries[i]]
+            i = i + 1
+        self.entries = result
 
 # DNS resolver with an integrated TTL cache.
 # Checks the cache before performing a system DNS lookup.
@@ -78,12 +103,13 @@ class DnsResolver:
     # Resolve a hostname to a list of IP address strings.
     # Returns cached addresses if available and not expired.
     # Falls back to a system DNS lookup and caches the result.
-    me resolve(hostname: text) -> BrowserResult<List<text>>:
+    me resolve(hostname: text) -> BrowserResult<[text]>:
         self.logger.debug("dns: resolving {hostname}")
 
         # Fast path: check the cache first
         val cached = self.cache_lookup(hostname)
-        if val addrs = cached:
+        if cached.?:
+            val addrs = cached.unwrap()
             self.logger.debug("dns: cache hit for {hostname} ({addrs.len()} addresses)")
             return Ok(addrs)
 
@@ -104,7 +130,7 @@ class DnsResolver:
                 Err(e)
 
     # Check the cache for a hostname. Returns the address list or nil if expired/missing.
-    me cache_lookup(hostname: text) -> List<text>?:
+    me cache_lookup(hostname: text) -> [text]?:
         val now = self.current_time()
         self.cache.lookup(hostname, now)
 
@@ -121,7 +147,7 @@ class DnsResolver:
     # Perform the actual system DNS lookup.
     # This is the platform boundary; returns resolved IP addresses for a hostname.
     # Handles special cases (localhost, IP literals) directly.
-    me system_lookup(hostname: text) -> BrowserResult<List<text>>:
+    me system_lookup(hostname: text) -> BrowserResult<[text]>:
         # Handle localhost directly
         if hostname == "localhost":
             return Ok(["127.0.0.1"])
@@ -134,9 +160,8 @@ class DnsResolver:
         if not self.is_valid_hostname(hostname):
             return Err(network_error("Invalid hostname: {hostname}"))
 
-        # Actual system DNS resolution call
-        # This requires platform-specific socket/resolver integration.
-        pass_todo
+        # Actual system DNS resolution requires platform-specific resolver wiring.
+        Err(network_error("System DNS lookup for {hostname} is not wired yet"))
 
     # Check whether a string looks like an IPv4 address literal.
     fn is_ip_literal(s: text) -> bool:
@@ -171,5 +196,5 @@ class DnsResolver:
     # Return the current monotonic time in seconds.
     # Used for cache expiration calculations.
     fn current_time() -> i64:
-        # Platform time source; returns seconds since an arbitrary epoch.
-        pass_todo
+        # Use runtime wall clock seconds for cache expiration.
+        time_now_unix_micros() / 1_000_000

@@ -5,6 +5,8 @@
 
 extern fn sys_get_args() -> [text]
 extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 
 # Stored exit code from main(). -1 = not yet run.
 var _exit_code = -1
@@ -40,17 +42,20 @@ fn run_fmt() -> i64:
     exit_code
 
 fn run_check() -> i64:
-    # Lint
-    print "\n=== Running Lint (clippy) ==="
-    val lint_code = run_lint()
-    # Format check
-    print "\n=== Running Format (rustfmt) ==="
-    val fmt_args = ["fmt", "--manifest-path", "src/compiler_rust/Cargo.toml", "--all", "--check"]
-    val (fmt_stdout, fmt_stderr, fmt_code) = rt_process_run("cargo", fmt_args)
-    if fmt_stdout.?:
-        print fmt_stdout
-    if fmt_stderr.?:
-        print fmt_stderr
+    # Run lint + fmt in parallel (they are independent), then tests
+    print "\n=== Running Lint + Format (parallel) ==="
+    val lint_pid = rt_process_spawn_async("cargo", ["clippy", "--manifest-path", "src/compiler_rust/Cargo.toml", "--workspace", "--", "-W", "clippy::all"])
+    val fmt_pid = rt_process_spawn_async("cargo", ["fmt", "--manifest-path", "src/compiler_rust/Cargo.toml", "--all", "--check"])
+
+    # Wait for both (5 min timeout each)
+    val lint_code = rt_process_wait(lint_pid, 300000)
+    val fmt_code = rt_process_wait(fmt_pid, 300000)
+
+    if lint_code != 0:
+        print "Lint failed (exit code {lint_code})"
+    if fmt_code != 0:
+        print "Format check failed (exit code {fmt_code})"
+
     # Tests via subprocess
     print "\n=== Running Tests ==="
     val (test_stdout, test_stderr, test_code) = rt_process_run("bin/simple", ["test"])

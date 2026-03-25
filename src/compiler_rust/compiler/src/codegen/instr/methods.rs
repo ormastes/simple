@@ -221,7 +221,9 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let lower_name = format!("{}_{}", receiver_type.to_lowercase(), method);
             let dunder_name = format!("{}__{}", receiver_type, method);
 
-            let resolved_name = ctx.use_map.get(method)
+            let resolved_name = ctx
+                .use_map
+                .get(method)
                 .or_else(|| ctx.import_map.get(method))
                 .or_else(|| ctx.use_map.get(&dot_name))
                 .or_else(|| ctx.import_map.get(&dot_name))
@@ -262,7 +264,8 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 }
             } else {
                 None
-            }.or_else(|| {
+            }
+            .or_else(|| {
                 // Fallback: call rt_method_not_found
                 let type_bytes = receiver_type.as_bytes();
                 let type_data_id = declare_named_bytes(ctx, type_bytes).ok()?;

@@ -29,10 +29,7 @@ fn main() {
     let version_file = project_root.join("VERSION");
     println!("cargo:rerun-if-changed={}", version_file.display());
     if version_file.exists() {
-        let file_version = fs::read_to_string(&version_file)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let file_version = fs::read_to_string(&version_file).unwrap_or_default().trim().to_string();
         let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
         if !file_version.is_empty() && file_version != cargo_version {
             println!(

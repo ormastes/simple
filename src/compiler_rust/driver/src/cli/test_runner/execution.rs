@@ -13,7 +13,7 @@ use super::build_cache::BuildCache;
 use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
     clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state, clear_io_state,
-    clear_macro_state, clear_module_cache, clear_net_state, clear_collection_registries, clear_ast_ffi_registries,
+    clear_macro_state, clear_module_cache, clear_module_cache_selective, clear_net_state, clear_collection_registries, clear_ast_ffi_registries,
     clear_env_ffi_registry, clear_error_ffi_registry, clear_span_ffi_registry,
 };
 use simple_compiler::runtime_profile::profiler::clear_global_profiler;
@@ -224,40 +224,47 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     set_stack_overflow_detection_enabled(true);
     reset_recursion_depth();
 
-    // Clear all thread-local interpreter state to prevent leaks between tests.
+    // Clear essential interpreter state to prevent leaks between tests.
+    // Use selective module cache clear to preserve parsed stdlib modules
+    // (std.spec, std.io, etc.) across tests — avoids re-parsing on every test.
     clear_interpreter_state();
     clear_bdd_state();
-    clear_module_cache();
+    clear_module_cache_selective();
     clear_class_instantiation_state();
     clear_macro_state();
     clear_effects_state();
     clear_io_state();
     clear_net_state();
-    clear_i18n_state();
     clear_all_runtime_registries();
     clear_collection_registries();
-    clear_ast_ffi_registries();
     clear_env_ffi_registry();
     clear_error_ffi_registry();
-    clear_span_ffi_registry();
-    clear_global_profiler();
-    clear_recording();
     clear_interp_ffi_state();
     clear_expr_registry();
-    clear_hir_thread_arena();
-    clear_mir_thread_arena();
     clear_thread_buffer_pool();
     clear_pinned_strings();
     clear_concurrency_registries();
-    clear_cranelift_registries();
-    clear_compiled_functions();
+
+    // Skip non-essential clears for interpreter-mode tests:
+    // - clear_hir_thread_arena: HIR not used in interpreter path
+    // - clear_mir_thread_arena: MIR not used in interpreter path
+    // - clear_cranelift_registries: Cranelift not used in interpreter
+    // - clear_compiled_functions: no compilation in interpreter
+    // - clear_i18n_state: i18n state is idempotent across tests
+    // - clear_ast_ffi_registries: AST FFI is internal, rarely leaks
+    // - clear_span_ffi_registry: span tracking has negligible state
+    // - clear_global_profiler: profiling disabled during tests
+    // - clear_recording: recording disabled during tests
 
     // Force the system allocator to return freed memory to the OS.
-    // Without this, glibc's ptmalloc2 holds onto freed pages, causing
-    // RSS to grow monotonically even though allocations are freed.
+    // Only do this every 50 tests to avoid per-test overhead (~1ms each).
+    static TEST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = TEST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "linux")]
-    unsafe {
-        libc::malloc_trim(0);
+    if count % 50 == 0 {
+        unsafe {
+            libc::malloc_trim(0);
+        }
     }
 
     // Create a fresh Runner per test so ExecCore/GcAllocator/SmfLoader don't accumulate.
@@ -732,14 +739,14 @@ mod tests {
     #[test]
     fn test_build_safe_mode_child_args_forwards_composite_mode() {
         let options = super::super::types::TestOptions {
-            execution_mode: TestExecutionMode::Composite(
-                "interpreter(remote(baremetal(riscv32)))".to_string(),
-            ),
+            execution_mode: TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string()),
             ..Default::default()
         };
 
         let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
 
-        assert!(args.iter().any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
     }
 }

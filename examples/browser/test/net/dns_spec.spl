@@ -9,7 +9,8 @@
 # Run with: bin/simple test examples/browser/test/net/dns_spec.spl
 
 use std.spec
-use sbp.feature.net.dns.{DnsCacheEntry, DnsCache}
+use examples.browser.feature.net.dns.{DnsCacheEntry, DnsCache, DnsResolver}
+use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ============================================================================
 # Helpers
@@ -18,7 +19,10 @@ use sbp.feature.net.dns.{DnsCacheEntry, DnsCache}
 fn make_cache(ttl: i64) -> DnsCache:
     DnsCache.create(ttl)
 
-fn sample_addresses() -> List<text>:
+fn make_resolver(ttl: i64) -> DnsResolver:
+    DnsResolver.new(Logger.new("dns-test", LogLevel.Debug), ttl)
+
+fn sample_addresses() -> [text]:
     ["93.184.216.34", "93.184.216.35"]
 
 # ============================================================================
@@ -106,3 +110,30 @@ describe "DnsCacheEntry":
         val entry = DnsCacheEntry.create("example.com", ["1.2.3.4"], 1000, 60)
         expect(entry.is_expired(1061)).to_equal(true)
         expect(entry.is_expired(2000)).to_equal(true)
+
+describe "DnsResolver":
+    it "resolve returns localhost without system lookup":
+        val resolver = make_resolver(300)
+        val result = resolver.resolve("localhost")
+        match result:
+            Ok(addresses):
+                expect(addresses.len()).to_equal(1)
+                expect(addresses[0]).to_equal("127.0.0.1")
+            Err(_):
+                expect("localhost should resolve").to_equal("")
+
+    it "resolve rejects invalid hostnames":
+        val resolver = make_resolver(300)
+        val result = resolver.resolve("bad host")
+        val is_err = match result:
+            Err(_): true
+            Ok(_): false
+        expect(is_err).to_equal(true)
+
+    it "resolve fails honestly for unwired system DNS":
+        val resolver = make_resolver(300)
+        val result = resolver.resolve("example.com")
+        val is_err = match result:
+            Err(_): true
+            Ok(_): false
+        expect(is_err).to_equal(true)

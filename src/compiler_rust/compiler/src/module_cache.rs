@@ -64,6 +64,30 @@ pub fn clear_module_cache() {
     super::interpreter_module::reset_resolve_stats();
 }
 
+/// Clear module cache selectively — preserve stdlib modules (src/lib/) between tests.
+/// Only clears test-file-specific state while keeping parsed stdlib in cache.
+/// This avoids re-parsing std.spec, std.io, etc. for every test file.
+pub fn clear_module_cache_selective() {
+    // Helper: retain only entries whose path contains "src/lib/" (stdlib)
+    fn is_stdlib(p: &Path) -> bool {
+        let s = p.to_string_lossy();
+        s.contains("src/lib/") || s.contains("src\\lib\\")
+    }
+
+    MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    // Always clear loading/depth state (transient per-file)
+    MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
+    MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
+    PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
+    TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
+    // Keep path resolution cache (stable across tests)
+    super::interpreter_module::reset_resolve_stats();
+}
+
 /// Increment total modules loaded counter, return new count
 pub fn increment_total_modules() -> usize {
     TOTAL_MODULES_LOADED.with(|c| {

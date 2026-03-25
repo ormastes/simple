@@ -185,50 +185,71 @@ struct CoverageStats:
     path_coverage_percent: i64
 
 fn parse_coverage_stats(sdn: text) -> CoverageStats:
-    """Parse coverage report SDN to extract statistics
+    """Parse coverage report SDN to extract statistics using section-aware parsing.
+
+    Correctly skips section headers and only counts data lines within
+    decisions/conditions/paths sections. A decision/condition is "covered"
+    when it has been observed both true AND false (true_count > 0 and false_count > 0).
+
+    sdoctest:
+        val sdn = "decisions |id, file, line, column, true_count, false_count|\n    1, a.spl, 10, 5, 3, 2\n    2, a.spl, 15, 5, 1, 0\nsummary:\n"
+        val stats = parse_coverage_stats(sdn)
+        expect(stats.decisions_total).to_equal(2)
+        expect(stats.decisions_covered).to_equal(1)
 
     Args:
         sdn: SDN coverage report from coverage_report()
-
     Returns: CoverageStats with coverage percentages
-
-    Note: Simple SDN parsing - counts occurrences
-
-    Example:
-        val report = coverage_report()
-        val stats = parse_coverage_stats(report)
-        print "Decision coverage: {stats.decision_coverage_percent}%"
     """
-    # Count decision probes
     var decisions_total = 0
     var decisions_covered = 0
-
-    # Count condition probes
     var conditions_total = 0
     var conditions_covered = 0
-
-    # Count path probes
     var paths_total = 0
     var paths_covered = 0
 
-    # Parse SDN line by line
+    var section = ""
     val lines = sdn.split("\n")
     for line in lines:
-        if line.contains("decision"):
-            decisions_total = decisions_total + 1
-            if line.contains("true"):
-                decisions_covered = decisions_covered + 1
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
 
-        if line.contains("condition"):
-            conditions_total = conditions_total + 1
-            if line.contains("true"):
-                conditions_covered = conditions_covered + 1
+        # Detect section transitions
+        if trimmed.starts_with("decisions"):
+            section = "decisions"
+            continue
+        if trimmed.starts_with("conditions"):
+            section = "conditions"
+            continue
+        if trimmed.starts_with("paths"):
+            section = "paths"
+            continue
+        if trimmed.starts_with("summary") or trimmed.starts_with("version"):
+            section = ""
+            continue
 
-        if line.contains("path"):
+        # Process data lines within sections
+        if section == "decisions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 6:
+                val t = _parse_count(parts[4])
+                val f = _parse_count(parts[5])
+                decisions_total = decisions_total + 1
+                if t > 0 and f > 0:
+                    decisions_covered = decisions_covered + 1
+        elif section == "conditions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 7:
+                val t = _parse_count(parts[5])
+                val f = _parse_count(parts[6])
+                conditions_total = conditions_total + 1
+                if t > 0 and f > 0:
+                    conditions_covered = conditions_covered + 1
+        elif section == "paths":
             paths_total = paths_total + 1
-            paths_covered = paths_covered + 1  # All recorded paths are covered
+            paths_covered = paths_covered + 1
 
-    # Calculate percentages
     var decision_pct = 0
     if decisions_total > 0:
         decision_pct = (decisions_covered * 100) / decisions_total
@@ -252,6 +273,12 @@ fn parse_coverage_stats(sdn: text) -> CoverageStats:
         condition_coverage_percent: condition_pct,
         path_coverage_percent: path_pct
     )
+
+fn _parse_count(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed == "":
+        return 0
+    to_int(trimmed)
 
 # ============================================================================
 # Export Functions

@@ -1109,15 +1109,9 @@ pub(super) fn eval_op_expr(
                     // Preserve float type for negation
                     if matches!(val, Value::Float(_)) {
                         Value::Float(-val.as_float()?)
-                    } else if let Some(result) = try_dunder_unaryop(
-                        "__neg__",
-                        &val,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    ) {
+                    } else if let Some(result) =
+                        try_dunder_unaryop("__neg__", &val, env, functions, classes, enums, impl_methods)
+                    {
                         result?
                     } else {
                         Value::Int(-val.as_int()?)

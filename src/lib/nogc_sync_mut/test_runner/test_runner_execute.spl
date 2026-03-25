@@ -14,6 +14,7 @@
 
 use test_runner_types.{TestFileResult, TestOptions}
 use test_runner_files.{strip_ansi, read_file_content}
+use test_runner_fork.{run_test_file_fork}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{time_now_unix_micros}
 use std.io.{process_run_timeout, process_run_with_limits}
@@ -42,6 +43,10 @@ use test_executor_composite.{
 # =========================================================================
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
+    # Fork mode: use fork() + COW instead of subprocess spawn (Linux only)
+    if options.fork_mode:
+        return run_test_file_fork(file_path, options)
+
     val binary = find_simple_binary()
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
     val child_args = build_child_args(wrapped_path, options)
@@ -63,7 +68,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
                 if file_exists(cleanup_path):
                     file_delete(cleanup_path)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false, cached: false)
     else:
         val (out, err, code) = process_run_timeout(binary, child_args, timeout_ms)
         stdout = out
@@ -115,7 +120,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
                 val end2 = time_now_unix_micros()
                 val dur = (end2 - start) / 1000
                 return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                    duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                    duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false, cached: false)
         else:
             val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
             stdout = out
@@ -156,7 +161,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             val end2 = time_now_unix_micros()
             val dur = (end2 - start) / 1000
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false, cached: false)
     else:
         val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
         stdout = out
@@ -320,7 +325,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             duration_ms: duration_ms,
             setup_ms: 0,
             error: error_msg,
-            timed_out: false
+            timed_out: false,
+            cached: false
         )
 
     # Step 3: Run the compiled .smf
@@ -351,7 +357,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 if cleanup_path != "" and file_exists(cleanup_path):
                     file_delete(cleanup_path)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false, cached: false)
     else:
         val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
         stdout = out
@@ -412,7 +418,8 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
             duration_ms: duration_ms,
             setup_ms: 0,
             error: "Resource limit exceeded: {result.limit_type}",
-            timed_out: result.limit_type.contains("timeout")
+            timed_out: result.limit_type.contains("timeout"),
+            cached: false
         )
 
     make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)

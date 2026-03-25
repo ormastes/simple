@@ -510,10 +510,7 @@ pub fn native_get_term_size(_args: &[Value]) -> Result<Value, CompileError> {
     }
 
     extern "system" {
-        fn GetConsoleScreenBufferInfo(
-            handle: isize,
-            info: *mut ConsoleScreenBufferInfo,
-        ) -> i32;
+        fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
     }
 
     let handle = std::io::stdout().as_raw_handle() as isize;

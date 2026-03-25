@@ -129,7 +129,10 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
-    if let Expr::MethodCall { receiver, method, args, .. } = value_expr {
+    if let Expr::MethodCall {
+        receiver, method, args, ..
+    } = value_expr
+    {
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall { .. } = receiver.as_ref() {

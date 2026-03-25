@@ -105,22 +105,61 @@ impl Codegen {
 /// forward and updating nsyms in LC_SYMTAB.
 fn fix_macho_strsize(mut bytes: Vec<u8>) -> Vec<u8> {
     // Only fix Mach-O 64-bit (magic 0xFEEDFACF)
-    if bytes.len() < 32 { return bytes; }
+    if bytes.len() < 32 {
+        return bytes;
+    }
     let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    if magic != 0xFEEDFACF { return bytes; }
+    if magic != 0xFEEDFACF {
+        return bytes;
+    }
 
     let ncmds = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
     let mut cmd_offset = 32usize;
     for _ in 0..ncmds {
-        if cmd_offset + 8 > bytes.len() { break; }
-        let cmd = u32::from_le_bytes([bytes[cmd_offset], bytes[cmd_offset+1], bytes[cmd_offset+2], bytes[cmd_offset+3]]);
-        let cmdsize = u32::from_le_bytes([bytes[cmd_offset+4], bytes[cmd_offset+5], bytes[cmd_offset+6], bytes[cmd_offset+7]]) as usize;
-        if cmd == 2 { // LC_SYMTAB
-            if cmd_offset + 24 > bytes.len() { break; }
-            let symoff = u32::from_le_bytes([bytes[cmd_offset+8], bytes[cmd_offset+9], bytes[cmd_offset+10], bytes[cmd_offset+11]]) as usize;
-            let nsyms = u32::from_le_bytes([bytes[cmd_offset+12], bytes[cmd_offset+13], bytes[cmd_offset+14], bytes[cmd_offset+15]]) as usize;
-            let stroff = u32::from_le_bytes([bytes[cmd_offset+16], bytes[cmd_offset+17], bytes[cmd_offset+18], bytes[cmd_offset+19]]) as usize;
-            let strsize = u32::from_le_bytes([bytes[cmd_offset+20], bytes[cmd_offset+21], bytes[cmd_offset+22], bytes[cmd_offset+23]]) as usize;
+        if cmd_offset + 8 > bytes.len() {
+            break;
+        }
+        let cmd = u32::from_le_bytes([
+            bytes[cmd_offset],
+            bytes[cmd_offset + 1],
+            bytes[cmd_offset + 2],
+            bytes[cmd_offset + 3],
+        ]);
+        let cmdsize = u32::from_le_bytes([
+            bytes[cmd_offset + 4],
+            bytes[cmd_offset + 5],
+            bytes[cmd_offset + 6],
+            bytes[cmd_offset + 7],
+        ]) as usize;
+        if cmd == 2 {
+            // LC_SYMTAB
+            if cmd_offset + 24 > bytes.len() {
+                break;
+            }
+            let symoff = u32::from_le_bytes([
+                bytes[cmd_offset + 8],
+                bytes[cmd_offset + 9],
+                bytes[cmd_offset + 10],
+                bytes[cmd_offset + 11],
+            ]) as usize;
+            let nsyms = u32::from_le_bytes([
+                bytes[cmd_offset + 12],
+                bytes[cmd_offset + 13],
+                bytes[cmd_offset + 14],
+                bytes[cmd_offset + 15],
+            ]) as usize;
+            let stroff = u32::from_le_bytes([
+                bytes[cmd_offset + 16],
+                bytes[cmd_offset + 17],
+                bytes[cmd_offset + 18],
+                bytes[cmd_offset + 19],
+            ]) as usize;
+            let strsize = u32::from_le_bytes([
+                bytes[cmd_offset + 20],
+                bytes[cmd_offset + 21],
+                bytes[cmd_offset + 22],
+                bytes[cmd_offset + 23],
+            ]) as usize;
 
             // Pad file if stroff + strsize extends past EOF
             let needed = stroff + strsize;
@@ -133,8 +172,15 @@ fn fix_macho_strsize(mut bytes: Vec<u8>) -> Vec<u8> {
             let mut bad_count = 0usize;
             for i in 0..nsyms {
                 let nlist_off = symoff + i * nlist_size;
-                if nlist_off + 4 > bytes.len() { break; }
-                let n_strx = u32::from_le_bytes([bytes[nlist_off], bytes[nlist_off+1], bytes[nlist_off+2], bytes[nlist_off+3]]) as usize;
+                if nlist_off + 4 > bytes.len() {
+                    break;
+                }
+                let n_strx = u32::from_le_bytes([
+                    bytes[nlist_off],
+                    bytes[nlist_off + 1],
+                    bytes[nlist_off + 2],
+                    bytes[nlist_off + 3],
+                ]) as usize;
                 if n_strx >= strsize {
                     bad_count += 1;
                 } else {
@@ -178,8 +224,7 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
     use object::write;
     use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope};
 
-    let file = MachOFile64::<object::endian::LittleEndian>::parse(malformed)
-        .map_err(|e| format!("parse: {}", e))?;
+    let file = MachOFile64::<object::endian::LittleEndian>::parse(malformed).map_err(|e| format!("parse: {}", e))?;
 
     let mut out = write::Object::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
 
@@ -191,7 +236,8 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
         let kind = section.kind();
         let out_section = out.add_section(segment.as_bytes().to_vec(), name.as_bytes().to_vec(), kind);
         let data = section.data().unwrap_or(&[]);
-        out.section_mut(out_section).set_data(data.to_vec(), section.align() as u64);
+        out.section_mut(out_section)
+            .set_data(data.to_vec(), section.align() as u64);
         section_map.insert(section.index(), out_section);
     }
 
@@ -202,7 +248,9 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
             Ok(n) => n,
             Err(_) => continue, // skip corrupted symbols
         };
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
         let section = symbol.section_index().and_then(|idx| section_map.get(&idx).copied());
         let mut out_sym = write::Symbol {
             name: name.as_bytes().to_vec(),
@@ -213,11 +261,13 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
             weak: symbol.is_weak(),
             section: match section {
                 Some(s) => write::SymbolSection::Section(s),
-                None => if symbol.is_undefined() {
-                    write::SymbolSection::Undefined
-                } else {
-                    write::SymbolSection::Absolute
-                },
+                None => {
+                    if symbol.is_undefined() {
+                        write::SymbolSection::Undefined
+                    } else {
+                        write::SymbolSection::Absolute
+                    }
+                }
             },
             flags: SymbolFlags::None,
         };

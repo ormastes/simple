@@ -736,10 +736,7 @@ impl<M: Module> CodegenBackend<M> {
     /// 3. Stores the result to the global variable
     ///
     /// The function is registered via `.init_array` so it runs before `main()`.
-    fn generate_module_init(
-        &mut self,
-        init_strings: &std::collections::HashMap<String, String>,
-    ) -> BackendResult<()> {
+    fn generate_module_init(&mut self, init_strings: &std::collections::HashMap<String, String>) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
         let init_name = match &self.module_prefix {

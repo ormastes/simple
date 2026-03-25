@@ -28,6 +28,11 @@ struct TestDatabase:
     changes: List<ChangeEvent>
     test_runs: List<RunRecord>
     dirty: bool
+    # Perf indexes — O(1) lookups instead of linear scans
+    _file_index: Dict<i64, i64>        # path_str -> file_id
+    _suite_index: Dict<text, i64>      # "{file_id}:{name_str}" -> suite_id
+    _counter_index: Dict<i64, i64>     # test_id -> index in counters
+    _timing_index: Dict<i64, i64>      # test_id -> index in timing
 
 impl TestDatabase:
     static fn empty() -> TestDatabase:
@@ -41,8 +46,35 @@ impl TestDatabase:
             timing_runs: [],
             changes: [],
             test_runs: [],
-            dirty: false
+            dirty: false,
+            _file_index: {},
+            _suite_index: {},
+            _counter_index: {},
+            _timing_index: {}
         )
+
+    # -----------------------------------------------------------------
+    # Rebuild indexes from lists (call after load or deserialization)
+    # -----------------------------------------------------------------
+
+    me rebuild_indexes():
+        self._file_index = {}
+        self._suite_index = {}
+        self._counter_index = {}
+        self._timing_index = {}
+        for f in self.files:
+            self._file_index[f.path_str] = f.file_id
+        for s in self.suites:
+            val key = "{s.file_id}:{s.name_str}"
+            self._suite_index[key] = s.suite_id
+        var ci = 0
+        while ci < self.counters.len():
+            self._counter_index[self.counters[ci].test_id] = ci
+            ci = ci + 1
+        var ti = 0
+        while ti < self.timing.len():
+            self._timing_index[self.timing[ti].test_id] = ti
+            ti = ti + 1
 
     # -----------------------------------------------------------------
     # Load from disk
@@ -79,6 +111,7 @@ impl TestDatabase:
                 db.changes = parsed_vol.changes
                 db.test_runs = parsed_vol.test_runs
 
+        db.rebuild_indexes()
         Ok(db)
 
     # -----------------------------------------------------------------
@@ -122,6 +155,7 @@ impl TestDatabase:
             db.files = parsed.files
             db.suites = parsed.suites
             db.tests = parsed.tests
+        db.rebuild_indexes()
         Ok(db)
 
     me save_to(path: text) -> Result<(), text>:
@@ -140,26 +174,27 @@ impl TestDatabase:
 
     me get_or_create_file(path: text) -> i64:
         val path_str = self.interner.intern(path)
-        # Check if file already exists
-        for f in self.files:
-            if f.path_str == path_str:
-                return f.file_id
+        # O(1) index lookup
+        if self._file_index.contains_key(path_str):
+            return self._file_index[path_str]
         # Create new file
         val file_id = self.files.len()
         self.files.push(FileRecord(file_id: file_id, path_str: path_str))
+        self._file_index[path_str] = file_id
         self.dirty = true
         file_id
 
     me get_or_create_suite(file_path: text, suite_name: text) -> i64:
         val file_id = self.get_or_create_file(file_path)
         val name_str = self.interner.intern(suite_name)
-        # Check if suite already exists
-        for s in self.suites:
-            if s.file_id == file_id and s.name_str == name_str:
-                return s.suite_id
+        # O(1) index lookup
+        val key = "{file_id}:{name_str}"
+        if self._suite_index.contains_key(key):
+            return self._suite_index[key]
         # Create new suite
         val suite_id = self.suites.len()
         self.suites.push(SuiteRecord(suite_id: suite_id, file_id: file_id, name_str: name_str))
+        self._suite_index[key] = suite_id
         self.dirty = true
         suite_id
 
@@ -246,36 +281,31 @@ impl TestDatabase:
         # Map status to short label for last_10_runs
         val run_label = if status == "passed": "pass" elif status == "failed": "fail" else: "skip"
 
-        # Find existing counter
-        var found = false
-        var i = 0
-        while i < self.counters.len():
-            if self.counters[i].test_id == name_str:
-                var c = self.counters[i]
-                c.total_runs = c.total_runs + 1
-                if status == "passed":
-                    c.passed = c.passed + 1
-                elif status == "failed":
-                    c.failed = c.failed + 1
-                # C1: Increment flaky count on status flip
-                if is_flaky_change(change):
-                    c.flaky_count = c.flaky_count + 1
-                c.last_change = change
-                # B1: Update last_10_runs (cap at 10)
-                c.last_10_runs = append_run_label(c.last_10_runs, run_label)
-                # B2: Compute failure_rate_pct
-                val total = c.total_runs
-                if total > 0:
-                    c.failure_rate_pct = c.failed.to_float() / total.to_float() * 100.0
-                self.counters[i] = c
-                found = true
-                break
-            i = i + 1
-
-        if not found:
+        # O(1) index lookup
+        if self._counter_index.contains_key(name_str):
+            val i = self._counter_index[name_str]
+            var c = self.counters[i]
+            c.total_runs = c.total_runs + 1
+            if status == "passed":
+                c.passed = c.passed + 1
+            elif status == "failed":
+                c.failed = c.failed + 1
+            # C1: Increment flaky count on status flip
+            if is_flaky_change(change):
+                c.flaky_count = c.flaky_count + 1
+            c.last_change = change
+            # B1: Update last_10_runs (cap at 10)
+            c.last_10_runs = append_run_label(c.last_10_runs, run_label)
+            # B2: Compute failure_rate_pct
+            val total = c.total_runs
+            if total > 0:
+                c.failure_rate_pct = c.failed.to_float() / total.to_float() * 100.0
+            self.counters[i] = c
+        else:
             val passed_count = if status == "passed": 1 else: 0
             val failed_count = if status == "failed": 1 else: 0
             val fail_rate = if status == "failed": 100.0 else: 0.0
+            val idx = self.counters.len()
             self.counters.push(CounterRecord(
                 test_id: name_str,
                 total_runs: 1,
@@ -286,6 +316,7 @@ impl TestDatabase:
                 last_10_runs: run_label,
                 failure_rate_pct: fail_rate
             ))
+            self._counter_index[name_str] = idx
 
     # -----------------------------------------------------------------
     # Timing management (C2: percentiles, C3: window cap, C6: baseline)
@@ -316,49 +347,44 @@ impl TestDatabase:
         # B3: Compute full statistics
         val stats = compute_statistics(clean_runs)
 
-        # Update or create summary
-        var found = false
-        var i = 0
-        while i < self.timing.len():
-            if self.timing[i].test_id == name_str:
-                var ts = self.timing[i]
-                val old_baseline = ts.baseline_median
-                ts.last_ms = duration_ms
-                ts.p50 = stats.p50
-                ts.p90 = stats.p90
-                ts.p95 = stats.p95
-                ts.p99 = stats.p99
-                ts.min_time = stats.min
-                ts.max_time = stats.max
-                ts.iqr = stats.iqr
-                ts.mean = stats.mean
-                ts.std_dev = stats.std_dev
-                ts.cv_pct = stats.cv_pct
-                # C6: Baseline recomputation with change detection
-                if old_baseline == 0.0 or old_baseline < 0.001:
+        # Update or create summary — O(1) index lookup
+        if self._timing_index.contains_key(name_str):
+            val i = self._timing_index[name_str]
+            var ts = self.timing[i]
+            val old_baseline = ts.baseline_median
+            ts.last_ms = duration_ms
+            ts.p50 = stats.p50
+            ts.p90 = stats.p90
+            ts.p95 = stats.p95
+            ts.p99 = stats.p99
+            ts.min_time = stats.min
+            ts.max_time = stats.max
+            ts.iqr = stats.iqr
+            ts.mean = stats.mean
+            ts.std_dev = stats.std_dev
+            ts.cv_pct = stats.cv_pct
+            # C6: Baseline recomputation with change detection
+            if old_baseline == 0.0 or old_baseline < 0.001:
+                ts.baseline_median = stats.p50
+                ts.baseline_mean = stats.mean
+                ts.baseline_std_dev = stats.std_dev
+                ts.baseline_cv_pct = stats.cv_pct
+                ts.baseline_last_updated = now_str
+                ts.baseline_run_count = stats.count
+                ts.baseline_update_reason = "initial"
+            else:
+                val change_ratio = abs_f64(stats.p50 - old_baseline) / old_baseline
+                if change_ratio > config.baseline_change_threshold:
                     ts.baseline_median = stats.p50
                     ts.baseline_mean = stats.mean
                     ts.baseline_std_dev = stats.std_dev
                     ts.baseline_cv_pct = stats.cv_pct
                     ts.baseline_last_updated = now_str
                     ts.baseline_run_count = stats.count
-                    ts.baseline_update_reason = "initial"
-                else:
-                    val change_ratio = abs_f64(stats.p50 - old_baseline) / old_baseline
-                    if change_ratio > config.baseline_change_threshold:
-                        ts.baseline_median = stats.p50
-                        ts.baseline_mean = stats.mean
-                        ts.baseline_std_dev = stats.std_dev
-                        ts.baseline_cv_pct = stats.cv_pct
-                        ts.baseline_last_updated = now_str
-                        ts.baseline_run_count = stats.count
-                        ts.baseline_update_reason = "threshold_exceeded"
-                self.timing[i] = ts
-                found = true
-                break
-            i = i + 1
-
-        if not found:
+                    ts.baseline_update_reason = "threshold_exceeded"
+            self.timing[i] = ts
+        else:
+            val idx = self.timing.len()
             self.timing.push(TimingSummary(
                 test_id: name_str,
                 last_ms: duration_ms,
@@ -380,6 +406,7 @@ impl TestDatabase:
                 baseline_run_count: stats.count,
                 baseline_update_reason: "initial"
             ))
+            self._timing_index[name_str] = idx
 
     me cap_timing_runs(test_id: i64, max_count: i64):
         # Count runs for this test

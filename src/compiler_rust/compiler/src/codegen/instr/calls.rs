@@ -575,14 +575,18 @@ pub fn compile_call<M: Module>(
                 let method = &func_name[dot_pos + 1..];
 
                 // Try: bare method name
-                resolved_name = ctx.use_map.get(method)
+                resolved_name = ctx
+                    .use_map
+                    .get(method)
                     .or_else(|| ctx.import_map.get(method))
                     .map(|s| s.as_str());
 
                 // Try: lowercase_type_method (Simple convention)
                 if resolved_name.is_none() {
                     type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
-                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&type_prefixed_storage)
                         .or_else(|| ctx.import_map.get(&type_prefixed_storage))
                         .map(|s| s.as_str());
                 }
@@ -590,7 +594,9 @@ pub fn compile_call<M: Module>(
                 // Try: Type__method (double underscore variant)
                 if resolved_name.is_none() {
                     dunder_storage = format!("{}__{}", type_name, method);
-                    resolved_name = ctx.use_map.get(&dunder_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&dunder_storage)
                         .or_else(|| ctx.import_map.get(&dunder_storage))
                         .map(|s| s.as_str());
                 }
@@ -603,7 +609,9 @@ pub fn compile_call<M: Module>(
             if let Some((type_part, method_part)) = func_name.split_once("__") {
                 if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
                     type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
-                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&type_prefixed_storage)
                         .or_else(|| ctx.import_map.get(&type_prefixed_storage))
                         .map(|s| s.as_str());
                 }

@@ -345,11 +345,14 @@ impl NativeProjectBuilder {
 
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
-            let critical_failures: Vec<_> = failures.iter()
+            let critical_failures: Vec<_> = failures
+                .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
-                    p.contains("/src/compiler/") || p.contains("\\src\\compiler\\")
-                        || p.contains("/src/app/") || p.contains("\\src\\app\\")
+                    p.contains("/src/compiler/")
+                        || p.contains("\\src\\compiler\\")
+                        || p.contains("/src/app/")
+                        || p.contains("\\src\\app\\")
                 })
                 .collect();
 
@@ -366,10 +369,7 @@ impl NativeProjectBuilder {
                 ));
             }
 
-            eprintln!(
-                "\nWarning: {} non-critical file(s) failed to compile (skipped)",
-                failed
-            );
+            eprintln!("\nWarning: {} non-critical file(s) failed to compile (skipped)", failed);
         }
 
         if self.config.verbose {
@@ -386,11 +386,14 @@ impl NativeProjectBuilder {
 
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
-            let critical_failures: Vec<_> = failures.iter()
+            let critical_failures: Vec<_> = failures
+                .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
-                    p.contains("/src/compiler/") || p.contains("\\src\\compiler\\")
-                        || p.contains("/src/app/") || p.contains("\\src\\app\\")
+                    p.contains("/src/compiler/")
+                        || p.contains("\\src\\compiler\\")
+                        || p.contains("/src/app/")
+                        || p.contains("\\src\\app\\")
                 })
                 .collect();
 
@@ -407,10 +410,7 @@ impl NativeProjectBuilder {
                 ));
             }
 
-            eprintln!(
-                "\nWarning: {} non-critical file(s) failed to compile (skipped)",
-                failed
-            );
+            eprintln!("\nWarning: {} non-critical file(s) failed to compile (skipped)", failed);
         }
 
         if object_paths.is_empty() {
@@ -655,8 +655,7 @@ int main(int argc, char** argv) {
 "#
         };
 
-        std::fs::write(&main_cpp, stub_code)
-            .map_err(|e| format!("write main stub: {e}"))?;
+        std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
         // Use C++ compiler for main stub — ensures C++ runtime init hooks
@@ -732,8 +731,11 @@ int main(int argc, char** argv) {
         let init_o = temp_dir.join("_init_all.o");
         let cxx = find_cxx_compiler();
         let status = std::process::Command::new(&cxx)
-            .arg("-c").arg("-O2")
-            .arg(&init_cpp).arg("-o").arg(&init_o)
+            .arg("-c")
+            .arg("-O2")
+            .arg(&init_cpp)
+            .arg("-o")
+            .arg(&init_o)
             .status()
             .map_err(|e| format!("compile init_all: {e}"))?;
         if !status.success() {
@@ -789,11 +791,15 @@ int main(int argc, char** argv) {
 
         if is_clang_cl {
             cmd.arg(&main_o);
-            if let Some(ref init) = init_o { cmd.arg(init); }
+            if let Some(ref init) = init_o {
+                cmd.arg(init);
+            }
             cmd.arg(format!("/Fe:{}", self.output.display()));
         } else {
             cmd.arg("-o").arg(&self.output).arg(&main_o);
-            if let Some(ref init) = init_o { cmd.arg(init); }
+            if let Some(ref init) = init_o {
+                cmd.arg(init);
+            }
         }
 
         // For large builds, archive objects into a static library first to avoid
@@ -950,9 +956,7 @@ int main(int argc, char** argv) {
         #[cfg(target_os = "windows")]
         if is_clang_cl {
             // /link passes remaining args to MSVC linker
-            cmd.arg("/link")
-                .arg("/WHOLEARCHIVE")
-                .arg("/FORCE:MULTIPLE,UNRESOLVED");
+            cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
         } else if is_msvc {
             cmd.arg("-Wl,/FORCE:UNRESOLVED");
         }

@@ -28,6 +28,11 @@ var _platform_detected = false
 var _platform_linux = false
 var _platform_macos = false
 var _platform_windows = false
+
+# Cached CPU state — avoids 100ms sleep by reusing previous /proc/stat sample
+var _prev_cpu_total: i64 = 0
+var _prev_cpu_idle: i64 = 0
+var _prev_cpu_valid = false
 var _platform_freebsd = false
 
 fn detect_platform():
@@ -187,30 +192,55 @@ fn system_free_memory_low(threshold_gb: i64) -> (bool, text):
 # ============================================================================
 
 fn read_proc_stat_totals() -> (i64, i64):
-    """Read /proc/stat and return (total_ticks, idle_ticks).
-    Uses single awk call instead of spawning shell per value.
+    """Read /proc/stat directly and return (total_ticks, idle_ticks).
+    No subprocess spawns — reads the file and parses in-process.
     """
-    # awk prints: total idle
-    val output = shell_output("awk '/^cpu / {t=0; for(i=2;i<=NF;i++) t+=$i; print t, $5}' /proc/stat", "")
-    if output == "":
+    val content = rt_file_read_text("/proc/stat") ?? ""
+    if content == "":
         return (0, 0)
 
-    val parts = output.trim().split(" ")
-    if parts.len() < 2:
+    # First line is "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
+    val first_newline = content.index_of("\n")
+    val first_line = if first_newline > 0: content[0:first_newline] else: content
+    val parts = first_line.trim().split(" ")
+
+    # Filter empty parts (multiple spaces between "cpu" and values)
+    var values: [i64] = []
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed != "" and trimmed != "cpu":
+            val v = trimmed.to_int_or(0)
+            values.push(v)
+
+    if values.len() < 5:
         return (0, 0)
 
-    val total = shell_int("echo {parts[0]}", 0)
-    val idle = shell_int("echo {parts[1]}", 0)
+    var total: i64 = 0
+    for v in values:
+        total = total + v
+    val idle = values[3]
     (total, idle)
 
 fn get_linux_cpu_percent() -> f64:
-    """Measure CPU usage via two /proc/stat samples 100ms apart"""
-    val (total1, idle1) = read_proc_stat_totals()
-    rt_thread_sleep(100)
+    """Measure CPU usage via cached /proc/stat delta (no sleep).
+    First call seeds the cache and returns 0; subsequent calls compute
+    the delta against the previous sample instantly."""
     val (total2, idle2) = read_proc_stat_totals()
 
-    val total_delta = total2 - total1
-    val idle_delta = idle2 - idle1
+    if not _prev_cpu_valid:
+        # First call — seed cache, return 0 (unknown)
+        _prev_cpu_total = total2
+        _prev_cpu_idle = idle2
+        _prev_cpu_valid = true
+        return 0.0
+
+    val total_delta = total2 - _prev_cpu_total
+    val idle_delta = idle2 - _prev_cpu_idle
+
+    # Update cache for next call
+    _prev_cpu_total = total2
+    _prev_cpu_idle = idle2
+
     if total_delta == 0:
         return 0.0
 
@@ -374,13 +404,21 @@ fn read_freebsd_cp_time() -> (i64, i64):
     (total, idle)
 
 fn get_freebsd_cpu_percent() -> f64:
-    """Measure CPU usage via two kern.cp_time samples 100ms apart"""
-    val (total1, idle1) = read_freebsd_cp_time()
-    rt_thread_sleep(100)
+    """Measure CPU usage via cached kern.cp_time delta (no sleep)."""
     val (total2, idle2) = read_freebsd_cp_time()
 
-    val total_delta = total2 - total1
-    val idle_delta = idle2 - idle1
+    if not _prev_cpu_valid:
+        _prev_cpu_total = total2
+        _prev_cpu_idle = idle2
+        _prev_cpu_valid = true
+        return 0.0
+
+    val total_delta = total2 - _prev_cpu_total
+    val idle_delta = idle2 - _prev_cpu_idle
+
+    _prev_cpu_total = total2
+    _prev_cpu_idle = idle2
+
     if total_delta == 0:
         return 0.0
 

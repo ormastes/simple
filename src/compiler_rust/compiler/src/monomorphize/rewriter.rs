@@ -196,7 +196,12 @@ impl<'a> CallSiteRewriter<'a> {
                 op: *op,
                 operand: Box::new(self.rewrite_expr(operand)),
             },
-            Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                generic_args,
+            } => Expr::MethodCall {
                 receiver: Box::new(self.rewrite_expr(receiver)),
                 method: method.clone(),
                 args: args

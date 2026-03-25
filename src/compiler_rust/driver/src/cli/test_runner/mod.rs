@@ -34,6 +34,7 @@ mod resource_monitor;
 mod parallel;
 mod rust_tests;
 pub mod static_registry;
+mod result_cache;
 
 // Re-export public API for backward compatibility
 pub use types::{TestLevel, TestExecutionMode, OutputFormat, TestOptions, TestFileResult, TestRunResult};

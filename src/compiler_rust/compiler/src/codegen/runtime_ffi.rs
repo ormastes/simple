@@ -527,7 +527,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_println_value", &[I64], &[]),  // RuntimeValue
     RuntimeFuncSpec::new("rt_eprint_value", &[I64], &[]),   // RuntimeValue
     RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]), // RuntimeValue
-    RuntimeFuncSpec::new("rt_read_stdin_line", &[], &[I64]),  // -> RuntimeValue (string)
+    RuntimeFuncSpec::new("rt_read_stdin_line", &[], &[I64]), // -> RuntimeValue (string)
     RuntimeFuncSpec::new("rt_capture_stdout_start", &[], &[]),
     RuntimeFuncSpec::new("rt_capture_stderr_start", &[], &[]),
     // =========================================================================

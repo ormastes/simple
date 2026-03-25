@@ -446,7 +446,8 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             let nil = builder.ins().iconst(types::I64, 0);
             Ok(Some(nil))
         }
-        "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "spl_print" | "spl_println" | "spl_eprint" | "spl_eprintln" | "spl_print_raw" | "spl_eprint_raw" => {
+        "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "spl_print" | "spl_println"
+        | "spl_eprint" | "spl_eprintln" | "spl_print_raw" | "spl_eprint_raw" => {
             // Determine which runtime function to use
             // Note: In Simple, 'print' adds a newline (Python 3 convention)
             // print_raw prints without newline

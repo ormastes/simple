@@ -706,8 +706,7 @@ impl Lowerer {
         {
             // Build a map from binding name to its resolved type
             // (computed by extract_pattern_bindings using enum variant field types)
-            let binding_type_map: std::collections::HashMap<String, TypeId> =
-                bindings.iter().cloned().collect();
+            let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
 
             for (i, p) in payload_patterns.iter().enumerate() {
                 if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {

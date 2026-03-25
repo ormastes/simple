@@ -783,7 +783,8 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
-        && app_relative_path != "src/app/office/mod.spl" {
+        && app_relative_path != "src/app/office/mod.spl"
+    {
         return None;
     }
 

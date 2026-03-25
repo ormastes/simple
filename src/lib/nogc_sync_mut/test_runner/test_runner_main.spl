@@ -18,7 +18,7 @@ use std.io_runtime.{get_args}
 use test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult}
 use test_runner_args.parse_test_args
 use test_config.{TestConfig}
-use test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, save_manifest_from_discovery}
+use test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, save_manifest_from_discovery, order_tests_by_duration}
 use test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use test_manifest_scanner.{manifest_full_scan}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, run_test_file_composite}
@@ -42,6 +42,9 @@ use test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cl
 # use doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
 # use sdoctest.result_db.write_sdoctest_db
 # use sdoctest.doc_gen.generate_sdoctest_report
+# Change-detection cache for incremental test runs
+use app.test_runner_new.test_result_cache.{TestResultCache, TestCacheEntry, test_result_cache_new, test_result_cache_load, stale_entry}
+use app.test_runner_new.test_dep_graph.{TestDepGraph, test_dep_graph_new}
 # GROUP 6: Self-protection imports
 use app.test_runner_new.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
 use app.test_runner_new.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
@@ -66,19 +69,14 @@ use app.test_runner_new.qemu_test_runner.{run_qemu_tests_all}
 # =========================================================================
 
 fn run_tests(options: TestOptions) -> TestRunResult:
-    # Load test configuration
-    val config = TestConfig.load()
-
+    # CI mode override (config already loaded by main(), use options.ci_mode)
     # Apply CI mode overrides
     var updated_options = options
-    if config.ci_mode or options.ci_mode:
+    if options.ci_mode:
         updated_options.run_all = true
         updated_options.fail_fast = false
         updated_options.verbose = true
-        if config.ci_mode:
-            print "CI mode detected (via CI environment variable)"
-        else:
-            print "CI mode enabled (via --ci flag)"
+        print "CI mode enabled (via --ci flag)"
         print ""
 
     # MEMORY DEBUG: checkpoint disabled (GROUP 6)
@@ -100,7 +98,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "  Entries: {manifest_entries.len()} test files"
         print "  Sdoctest: {manifest_sdoctest.len()} files"
         print "  Scan timestamp: {manifest.scan_timestamp}"
-        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0)
+        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     # Handle --refresh-manifest: force full rescan before running
     if updated_options.refresh_manifest:
@@ -133,11 +131,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     if options.list:
         print_discovery_summary(files, options)
-        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0)
+        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     if files.len() == 0:
         print "No test files found in {options.path}"
-        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0)
+        return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     # MEMORY DEBUG: coverage disabled (GROUP 3)
     # if options.coverage:
@@ -155,25 +153,47 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # if is_container_seq or options.container_sequential:
     #     return run_tests_sequential_containers(files, options)
 
-    # Parallel execution with resource governor (Linux only — not robust enough on other platforms)
+    # Sequential flag overrides parallel
+    if updated_options.sequential:
+        updated_options.parallel = false
+
+    # Parallel execution with resource governor
     if updated_options.parallel:
         if not is_linux():
-            print "WARNING: --parallel is only supported on Linux. Running sequentially."
-            updated_options.parallel = false
-        else:
-            return run_tests_parallel_mode(files, updated_options, ckpt_passed, ckpt_failed, ckpt_skipped)
+            print "WARNING: --parallel is experimental on non-Linux platforms. Attempting with graceful fallback."
+        return run_tests_parallel_mode(files, updated_options, ckpt_passed, ckpt_failed, ckpt_skipped)
 
     report_free_mem("BEFORE_TEST_LOOP")
-    val mode_name = mode_to_str(options.mode)
-    print "Running {files.len()} test file(s) [mode: {mode_name}]..."
-    if options.has_seed:
-        print "Seed: {options.seed}"
-    if options.self_protect:
-        val free_cpu = 100.0 - options.cpu_threshold
-        val free_mem = 100.0 - options.mem_threshold
+    val mode_name = mode_to_str(updated_options.mode)
+    var fork_label = ""
+    if updated_options.fork_mode:
+        fork_label = ", fork"
+    print "Running {files.len()} test file(s) [mode: {mode_name}{fork_label}]..."
+    if updated_options.has_seed:
+        print "Seed: {updated_options.seed}"
+    if updated_options.self_protect:
+        val free_cpu = 100.0 - updated_options.cpu_threshold
+        val free_mem = 100.0 - updated_options.mem_threshold
         print "Self-protection enabled (stops when free CPU < {free_cpu}% AND free RAM < {free_mem}%)"
-    if options.max_mem_gb > 0 and not options.no_limits:
-        print "  Max memory per test: {options.max_mem_gb}GB"
+    if updated_options.max_mem_gb > 0 and not updated_options.no_limits:
+        print "  Max memory per test: {updated_options.max_mem_gb}GB"
+
+    # Load change-detection cache (skip if --clean)
+    val cache_path = ".simple/test-result-cache.sdn"
+    var cache = test_result_cache_new(cache_path)
+    var use_result_cache = not updated_options.clean
+    if use_result_cache:
+        cache = test_result_cache_load(cache_path)
+    else:
+        print "Change-detection cache bypassed (--clean)"
+
+    # Smart test ordering: sort longest-first to avoid tail blockers
+    if use_result_cache:
+        files = order_tests_by_duration(files, cache)
+
+    # Build dependency graph for cache checks
+    var dep_graph = test_dep_graph_new()
+
     print ""
 
     var results: [TestFileResult] = []
@@ -183,27 +203,57 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var total_pending = 0
     var total_timed_out = 0
     var total_duration_ms = 0
+    var total_cached = 0
     var completed_files: [text] = []
     var tests_run = 0
 
     for file_path in files:
-        if options.self_protect:
-            val (violated, reason) = system_exceeds_threshold(options.cpu_threshold, options.mem_threshold)
+        # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
+        if updated_options.self_protect and tests_run % 20 == 0:
+            val (violated, reason) = system_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
             if violated:
-                # Graceful shutdown - never returns
                 shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped)
 
-        if options.self_protect and tests_run % 10 == 0 and tests_run > 0:
+        if updated_options.self_protect and tests_run % 50 == 0 and tests_run > 0:
             checkpoint_save(completed_files, total_passed, total_failed, total_skipped, "periodic")
 
+        # Check change-detection cache before running
+        if use_result_cache:
+            dep_graph.analyze_test(file_path)
+            val dep_paths = dep_graph.get_deps(file_path)
+            val cached_entry = cache.check_freshness(file_path, dep_paths)
+            if cached_entry.result_status != -1:
+                val cached_result = TestFileResult(
+                    path: file_path,
+                    passed: cached_entry.result_passed,
+                    failed: cached_entry.result_failed,
+                    skipped: cached_entry.result_skipped,
+                    pending: 0,
+                    duration_ms: cached_entry.result_duration_ms,
+                    setup_ms: 0,
+                    error: "",
+                    timed_out: false,
+                    cached: true
+                )
+                print_result(cached_result, updated_options.format)
+                total_passed = total_passed + cached_result.passed
+                total_failed = total_failed + cached_result.failed
+                total_skipped = total_skipped + cached_result.skipped
+                total_duration_ms = total_duration_ms + cached_result.duration_ms
+                total_cached = total_cached + 1
+                results.push(cached_result)
+                completed_files.push(file_path)
+                tests_run = tests_run + 1
+                continue
+
         # Run test
-        val rss_before = current_rss_kb_main()
-        val result = run_single_test(file_path, options)
-        print_result(result, options.format)
-        val rss_after = current_rss_kb_main()
-        val rss_delta = rss_after - rss_before
-        if rss_delta != 0:
-            print "  [MEMDIFF] {file_path}: {rss_delta} kB (rss={rss_after})"
+        val result = run_single_test(file_path, updated_options)
+        print_result(result, updated_options.format)
+
+        # Record result in cache
+        if use_result_cache:
+            val dep_paths_for_record = dep_graph.get_deps(file_path)
+            cache.record_result(file_path, dep_paths_for_record, result.passed, result.failed, result.skipped, result.duration_ms)
 
         total_passed = total_passed + result.passed
         total_failed = total_failed + result.failed
@@ -216,13 +266,17 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         completed_files.push(file_path)
         tests_run = tests_run + 1
 
-        if tests_run % 50 == 0:
-            print "  [MEMCHK] after {tests_run} tests: rss={rss_after} kB"
-
-        if options.fail_fast and (result.failed > 0 or result.timed_out):
+        if updated_options.fail_fast and (result.failed > 0 or result.timed_out):
             print ""
             print "Stopping early (--fail-fast)"
             break
+
+    # Save cache
+    if use_result_cache:
+        cache.save()
+
+    if total_cached > 0:
+        print "Skipped {total_cached} unchanged test(s) (cached)"
 
     # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
     # if options.resume and checkpoint_exists():
@@ -236,7 +290,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_pending: total_pending,
         total_timed_out: total_timed_out,
         total_duration_ms: total_duration_ms,
-        total_setup_ms: 0
+        total_setup_ms: 0,
+        total_cached: total_cached
     )
 
 fn run_tests_parallel_mode(
@@ -248,8 +303,48 @@ fn run_tests_parallel_mode(
 ) -> TestRunResult:
     val mode_name = mode_to_str(options.mode)
 
-    # Separate QEMU and normal tests
-    val (normal_files, qemu_files) = separate_qemu_tests(files)
+    # Load change-detection cache (skip if --clean)
+    val cache_path = ".simple/test-result-cache.sdn"
+    var cache = test_result_cache_new(cache_path)
+    var use_result_cache = not options.clean
+    if use_result_cache:
+        cache = test_result_cache_load(cache_path)
+
+    # Build dependency graph and filter cached tests
+    var dep_graph = test_dep_graph_new()
+    var cached_results: [TestFileResult] = []
+    var uncached_files: [text] = []
+
+    if use_result_cache:
+        for file_path in files:
+            dep_graph.analyze_test(file_path)
+            val dep_paths = dep_graph.get_deps(file_path)
+            val cached_entry = cache.check_freshness(file_path, dep_paths)
+            if cached_entry.result_status != -1:
+                val cached_result = TestFileResult(
+                    path: file_path,
+                    passed: cached_entry.result_passed,
+                    failed: cached_entry.result_failed,
+                    skipped: cached_entry.result_skipped,
+                    pending: 0,
+                    duration_ms: cached_entry.result_duration_ms,
+                    setup_ms: 0,
+                    error: "",
+                    timed_out: false,
+                    cached: true
+                )
+                cached_results.push(cached_result)
+            else:
+                uncached_files.push(file_path)
+    else:
+        uncached_files = files
+
+    # Smart test ordering: sort longest-first to avoid tail blockers
+    if use_result_cache:
+        uncached_files = order_tests_by_duration(uncached_files, cache)
+
+    # Separate QEMU and normal tests from uncached files
+    val (normal_files, qemu_files) = separate_qemu_tests(uncached_files)
 
     # Determine worker count
     var max_workers = options.max_workers
@@ -258,10 +353,17 @@ fn run_tests_parallel_mode(
         if max_workers < 1:
             max_workers = 1
 
+    val total_cached = cached_results.len()
     print "Running {files.len()} test file(s) in parallel [mode: {mode_name}, workers: {max_workers}]"
+    if total_cached > 0:
+        print "  Cached: {total_cached}, to run: {uncached_files.len()}"
     if qemu_files.len() > 0:
         print "  Normal tests: {normal_files.len()}, QEMU tests: {qemu_files.len()}"
     print ""
+
+    # Print cached results first
+    for cached_r in cached_results:
+        print_result(cached_r, options.format)
 
     # Run normal files via parallel runner with resource governor
     val normal_results = run_tests_parallel_with_monitoring(normal_files, options, max_workers)
@@ -278,6 +380,14 @@ fn run_tests_parallel_mode(
     var total_duration_ms = 0
     var all_results: [TestFileResult] = []
 
+    # Add cached results
+    for cached_r in cached_results:
+        total_passed = total_passed + cached_r.passed
+        total_failed = total_failed + cached_r.failed
+        total_skipped = total_skipped + cached_r.skipped
+        total_duration_ms = total_duration_ms + cached_r.duration_ms
+        all_results.push(cached_r)
+
     for result in normal_results:
         print_result(result, options.format)
         total_passed = total_passed + result.passed
@@ -289,6 +399,11 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
+        # Record result in cache
+        if use_result_cache:
+            val dep_paths_r = dep_graph.get_deps(result.path)
+            cache.record_result(result.path, dep_paths_r, result.passed, result.failed, result.skipped, result.duration_ms)
+
     for result in qemu_results:
         total_passed = total_passed + result.passed
         total_failed = total_failed + result.failed
@@ -299,6 +414,13 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
+    # Save cache
+    if use_result_cache:
+        cache.save()
+
+    if total_cached > 0:
+        print "Skipped {total_cached} unchanged test(s) (cached)"
+
     TestRunResult(
         files: all_results,
         total_passed: total_passed,
@@ -307,7 +429,8 @@ fn run_tests_parallel_mode(
         total_pending: total_pending,
         total_timed_out: total_timed_out,
         total_duration_ms: total_duration_ms,
-        total_setup_ms: 0
+        total_setup_ms: 0,
+        total_cached: total_cached
     )
 
 fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:

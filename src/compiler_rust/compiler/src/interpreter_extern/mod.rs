@@ -407,6 +407,8 @@ pub(crate) fn call_extern_function(
         "rt_process_run" => system::rt_process_run(&evaluated),
         "rt_process_run_timeout" => system::rt_process_run_timeout(&evaluated),
         "rt_process_execute" => system::rt_process_execute(&evaluated),
+        "rt_process_spawn_async" => system::rt_process_spawn_async(&evaluated),
+        "rt_process_wait" => system::rt_process_wait(&evaluated),
 
         // ====================================================================
         // Filesystem Operations (18 fs_* + 6 file_* = 24 functions)
@@ -985,10 +987,16 @@ pub(crate) fn call_extern_function(
         "rt_coverage_condition_probe" => coverage::rt_coverage_condition_probe_fn(&evaluated),
         "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
         // Performance measurement functions (perf module not yet created — stubs)
-        "rt_perf_enable" | "rt_perf_enabled" | "rt_perf_clock_ns" |
-        "rt_perf_rdtsc" | "rt_perf_cycles_to_ns" |
-        "rt_perf_region_enter" | "rt_perf_region_exit" |
-        "rt_perf_dump_sdn" | "rt_perf_free_sdn" | "rt_perf_clear" => {
+        "rt_perf_enable"
+        | "rt_perf_enabled"
+        | "rt_perf_clock_ns"
+        | "rt_perf_rdtsc"
+        | "rt_perf_cycles_to_ns"
+        | "rt_perf_region_enter"
+        | "rt_perf_region_exit"
+        | "rt_perf_dump_sdn"
+        | "rt_perf_free_sdn"
+        | "rt_perf_clear" => {
             // TODO: implement perf module
             Ok(Value::Nil)
         }

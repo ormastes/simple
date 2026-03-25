@@ -47,11 +47,19 @@ fn clear_coverage_error():
 
 fn _get_coverage_data_path() -> text:
     val env_path = rt_env_get("SIMPLE_COVERAGE_DATA")
-    if env_path.not_empty:
+    if env_path.? and env_path.not_empty:
         return env_path
     "build/coverage/coverage.json"
 
 fn _load_coverage_data():
+    """Load and parse coverage data from SDN file into _coverage_files.
+
+    sdoctest:
+        _coverage_data_loaded = false
+        _coverage_files = []
+        _load_coverage_data()
+        # Verifies loading attempt (may set error if file missing)
+    """
     if _coverage_data_loaded:
         return
     val path = _get_coverage_data_path()
@@ -59,7 +67,77 @@ fn _load_coverage_data():
     if not rt_file_exists(path):
         _coverage_error("CoverageDataNotFoundException: No coverage data at " + path)
         return
+    val content = rt_file_read(path)
+    if content == "":
+        _coverage_error("EmptyCoverageDataException: Coverage data file is empty at " + path)
+        return
+    _coverage_files = _parse_coverage_file(content)
     _coverage_data_loaded = true
+
+fn _parse_coverage_file(content: text) -> [FileResult]:
+    """Parse SDN coverage content into FileResult entries."""
+    var results: [FileResult] = []
+    val lines = content.split("\n")
+    var in_decisions = false
+    # Track per-file aggregated stats using parallel arrays
+    var file_paths: [text] = []
+    var file_dec_total: [i64] = []
+    var file_dec_covered: [i64] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("decisions"):
+            in_decisions = true
+            continue
+        if trimmed.starts_with("conditions") or trimmed.starts_with("summary"):
+            in_decisions = false
+            continue
+        if in_decisions:
+            val parts = trimmed.split(",")
+            if parts.len() >= 6:
+                val fpath = parts[1].trim()
+                val t_str = parts[4].trim()
+                val f_str = parts[5].trim()
+                val t = _safe_parse_int(t_str)
+                val f = _safe_parse_int(f_str)
+                val fi = _find_or_add(file_paths, file_dec_total, file_dec_covered, fpath)
+                file_dec_total[fi] = file_dec_total[fi] + 1
+                if t > 0 and f > 0:
+                    file_dec_covered[fi] = file_dec_covered[fi] + 1
+
+    var i = 0
+    while i < file_paths.len():
+        val total = file_dec_total[i]
+        val covered = file_dec_covered[i]
+        val pct = if total > 0: (covered as f64 / total as f64) * 100.0 else: 100.0
+        results = results.push(FileResult(
+            path: file_paths[i],
+            lines_total: 0, lines_covered: 0,
+            branches_total: total, branches_covered: covered,
+            functions_total: 0, functions_covered: 0,
+            coverage_percent: pct
+        ))
+        i = i + 1
+    results
+
+fn _safe_parse_int(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed == "":
+        return 0
+    to_int(trimmed)
+
+fn _find_or_add(paths: [text], totals: [i64], covered: [i64], fpath: text) -> i64:
+    var i = 0
+    while i < paths.len():
+        if paths[i] == fpath:
+            return i
+        i = i + 1
+    paths.push(fpath)
+    totals.push(0)
+    covered.push(0)
+    paths.len() - 1
 
 fn _match_pattern(pattern: text, path: text) -> bool:
     if pattern.contains("**"):

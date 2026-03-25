@@ -231,7 +231,9 @@ fn set_last_error(message: impl Into<String>) {
 }
 
 fn unsupported_window_mutation(name: &str) -> Value {
-    set_last_error(format!("{name} is not supported by the interpreter-backed window runtime"));
+    set_last_error(format!(
+        "{name} is not supported by the interpreter-backed window runtime"
+    ));
     bool_value(false)
 }
 
@@ -286,8 +288,11 @@ fn tuple_value(values: Vec<Value>) -> Value {
 
 fn parse_window_config(config_json: &str) -> Result<WindowConfig, String> {
     let mut config = WindowConfig::default();
-    let json: JsonValue = serde_json::from_str(config_json).map_err(|err| format!("invalid window config JSON: {err}"))?;
-    let obj = json.as_object().ok_or_else(|| String::from("window config must be a JSON object"))?;
+    let json: JsonValue =
+        serde_json::from_str(config_json).map_err(|err| format!("invalid window config JSON: {err}"))?;
+    let obj = json
+        .as_object()
+        .ok_or_else(|| String::from("window config must be a JSON object"))?;
 
     if let Some(width) = obj.get("width").and_then(|v| v.as_u64()) {
         config.width = width.max(1) as u32;
@@ -388,7 +393,9 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
             };
 
             let _ = event_loop.run(move |event, target| match event {
-                Event::UserEvent(UserEvent::Command(command)) => handle_command(command, event_loop_id, &mut state, target),
+                Event::UserEvent(UserEvent::Command(command)) => {
+                    handle_command(command, event_loop_id, &mut state, target)
+                }
                 Event::WindowEvent { window_id, event } => handle_window_event(window_id, event, &state),
                 Event::AboutToWait => {}
                 _ => {}
@@ -452,10 +459,10 @@ fn handle_command(
                         window.set_max_inner_size(Some(PhysicalSize::new(w, h)));
                     }
 
-                    let context =
-                        Context::new(window.clone()).map_err(|err| format!("failed to create surface context: {err:?}"))?;
-                    let mut surface =
-                        Surface::new(&context, window.clone()).map_err(|err| format!("failed to create surface: {err:?}"))?;
+                    let context = Context::new(window.clone())
+                        .map_err(|err| format!("failed to create surface context: {err:?}"))?;
+                    let mut surface = Surface::new(&context, window.clone())
+                        .map_err(|err| format!("failed to create surface: {err:?}"))?;
                     let nz_width = NonZeroU32::new(config.width.max(1)).unwrap();
                     let nz_height = NonZeroU32::new(config.height.max(1)).unwrap();
                     surface
@@ -533,7 +540,9 @@ fn handle_command(
                     for (dst, src) in buffer.iter_mut().zip(pixels.iter()) {
                         *dst = *src;
                     }
-                    buffer.present().map_err(|err| format!("failed to present buffer: {err:?}"))
+                    buffer
+                        .present()
+                        .map_err(|err| format!("failed to present buffer: {err:?}"))
                 })()
             } else {
                 Err(format!("invalid window handle: {window_id}"))
@@ -627,7 +636,11 @@ fn handle_window_event(window_id: winit::window::WindowId, event: WindowEvent, s
                 y: position.y,
             })
         }
-        WindowEvent::MouseInput { state: button_state, button, .. } => Some(RuntimeEvent::MouseButton {
+        WindowEvent::MouseInput {
+            state: button_state,
+            button,
+            ..
+        } => Some(RuntimeEvent::MouseButton {
             window_id: runtime_window_id,
             button: mouse_button_to_simple(button),
             pressed: button_state == winit::event::ElementState::Pressed,
@@ -749,7 +762,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     set_last_error(err);
                     Ok(int_value(0))
                 }
-                Err(err) => Err(runtime_error(format!("failed to receive create window response: {err}"))),
+                Err(err) => Err(runtime_error(format!(
+                    "failed to receive create window response: {err}"
+                ))),
             }
         }
         "rt_winit_window_new_with_config" => {
@@ -781,7 +796,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     set_last_error(err);
                     Ok(int_value(0))
                 }
-                Err(err) => Err(runtime_error(format!("failed to receive create window response: {err}"))),
+                Err(err) => Err(runtime_error(format!(
+                    "failed to receive create window response: {err}"
+                ))),
             }
         }
         "rt_winit_window_free" => {
@@ -841,7 +858,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let window_id = get_i64(args, 0, name)?;
             let states = WINDOW_STATES.lock();
             if let Some(window) = states.get(&window_id) {
-                Ok(tuple_value(vec![Value::Int(window.width as i64), Value::Int(window.height as i64)]))
+                Ok(tuple_value(vec![
+                    Value::Int(window.width as i64),
+                    Value::Int(window.height as i64),
+                ]))
             } else {
                 set_last_error(format!("invalid window handle: {window_id}"));
                 Ok(tuple_value(vec![Value::Int(0), Value::Int(0)]))
@@ -851,7 +871,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let window_id = get_i64(args, 0, name)?;
             let states = WINDOW_STATES.lock();
             if let Some(window) = states.get(&window_id) {
-                Ok(tuple_value(vec![Value::Int(window.x as i64), Value::Int(window.y as i64)]))
+                Ok(tuple_value(vec![
+                    Value::Int(window.x as i64),
+                    Value::Int(window.y as i64),
+                ]))
             } else {
                 set_last_error(format!("invalid window handle: {window_id}"));
                 Ok(tuple_value(vec![Value::Int(0), Value::Int(0)]))
@@ -875,18 +898,28 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         | "rt_winit_window_set_cursor_position" => Ok(unsupported_window_mutation(name)),
         "rt_winit_window_is_visible" => {
             let window_id = get_i64(args, 0, name)?;
-            Ok(bool_value(WINDOW_STATES.lock().get(&window_id).map(|w| w.visible).unwrap_or(false)))
+            Ok(bool_value(
+                WINDOW_STATES.lock().get(&window_id).map(|w| w.visible).unwrap_or(false),
+            ))
         }
         "rt_winit_window_is_maximized" => {
             let window_id = get_i64(args, 0, name)?;
             Ok(bool_value(
-                WINDOW_STATES.lock().get(&window_id).map(|w| w.maximized).unwrap_or(false),
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|w| w.maximized)
+                    .unwrap_or(false),
             ))
         }
         "rt_winit_window_is_fullscreen" => {
             let window_id = get_i64(args, 0, name)?;
             Ok(bool_value(
-                WINDOW_STATES.lock().get(&window_id).map(|w| w.fullscreen).unwrap_or(false),
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|w| w.fullscreen)
+                    .unwrap_or(false),
             ))
         }
         "rt_winit_window_id" => {
@@ -947,16 +980,17 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
-                Some(RuntimeEvent::WindowMoved { x, y, .. }) => {
-                    Ok(tuple_value(vec![Value::Int(*x), Value::Int(*y)]))
-                }
+                Some(RuntimeEvent::WindowMoved { x, y, .. }) => Ok(tuple_value(vec![Value::Int(*x), Value::Int(*y)])),
                 _ => Ok(tuple_value(vec![Value::Int(0), Value::Int(0)])),
             }
         }
         "rt_winit_event_window_close_requested" => {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
-            Ok(bool_value(matches!(events.get(&event_id), Some(RuntimeEvent::CloseRequested { .. }))))
+            Ok(bool_value(matches!(
+                events.get(&event_id),
+                Some(RuntimeEvent::CloseRequested { .. })
+            )))
         }
         "rt_winit_event_window_focused" => {
             let event_id = get_i64(args, 0, name)?;
@@ -1015,7 +1049,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
-                Some(RuntimeEvent::MouseMoved { x, y, .. }) => Ok(tuple_value(vec![Value::Float(*x), Value::Float(*y)])),
+                Some(RuntimeEvent::MouseMoved { x, y, .. }) => {
+                    Ok(tuple_value(vec![Value::Float(*x), Value::Float(*y)]))
+                }
                 _ => Ok(tuple_value(vec![Value::Float(0.0), Value::Float(0.0)])),
             }
         }
@@ -1023,7 +1059,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
-                Some(RuntimeEvent::MouseWheel { x, y, .. }) => Ok(tuple_value(vec![Value::Float(*x), Value::Float(*y)])),
+                Some(RuntimeEvent::MouseWheel { x, y, .. }) => {
+                    Ok(tuple_value(vec![Value::Float(*x), Value::Float(*y)]))
+                }
                 _ => Ok(tuple_value(vec![Value::Float(0.0), Value::Float(0.0)])),
             }
         }
@@ -1039,7 +1077,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "rt_winit_monitor_get_size" => {
             let states = WINDOW_STATES.lock();
             if let Some((_, window)) = states.iter().next() {
-                Ok(tuple_value(vec![Value::Int(window.width as i64), Value::Int(window.height as i64)]))
+                Ok(tuple_value(vec![
+                    Value::Int(window.width as i64),
+                    Value::Int(window.height as i64),
+                ]))
             } else {
                 Ok(tuple_value(vec![Value::Int(0), Value::Int(0)]))
             }

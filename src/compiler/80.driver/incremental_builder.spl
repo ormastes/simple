@@ -36,11 +36,12 @@ struct SourceInfo:
     functions: [text]
     types: [text]
     macros: [text]
+    symbol_hashes: {text: text}
 
 impl SourceInfo:
     static fn from_path(path: text) -> SourceInfo:
         SourceInfo(path: path, content_hash: 0, dependencies: [],
-                   functions: [], types: [], macros: [])
+                   functions: [], types: [], macros: [], symbol_hashes: {})
 
     fn update_from_content(content: text) -> SourceInfo:
         """Parse imports, functions, types, macros from content."""
@@ -91,8 +92,10 @@ impl SourceInfo:
                     macs = macs.push(name.trim())
 
         extern fn rt_hash_text(t: text) -> i64
+        val sym_hashes = compute_symbol_hashes(content)
         SourceInfo(path: self.path, content_hash: rt_hash_text(content),
-                   dependencies: deps, functions: funcs, types: tys, macros: macs)
+                   dependencies: deps, functions: funcs, types: tys, macros: macs,
+                   symbol_hashes: sym_hashes)
 
 struct CachedArtifact:
     source: SourceInfo
@@ -251,3 +254,119 @@ impl IncrementalBuilder:
 
     fn stats() -> IncrementalStats:
         self.state.get_stats()
+
+# ============================================================================
+# Symbol-Level Hashing
+# ============================================================================
+
+fn compute_symbol_hashes(source: text) -> {text: text}:
+    """Parse source and hash each top-level symbol (fn/struct/class/enum/impl) independently.
+
+    Skips comments and normalizes whitespace so formatting changes don't trigger recompilation.
+    """
+    extern fn rt_hash_sha256(content: text) -> text
+
+    var hashes: {text: text} = {}
+    val lines = source.lines()
+    var i = 0
+    var current_name = ""
+    var current_body: [text] = []
+    var in_symbol = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Skip blank lines and comments when not inside a symbol body
+        if not in_symbol:
+            if trimmed == "" or trimmed.starts_with("#"):
+                i = i + 1
+                continue
+
+        # Detect top-level symbol start (no leading whitespace)
+        val is_top_level = line.len() > 0 and line[0:1] != " " and line[0:1] != "\t"
+        var symbol_name = ""
+
+        if is_top_level:
+            # Flush previous symbol
+            if in_symbol and current_name != "":
+                val body_text = current_body.join("\n")
+                hashes[current_name] = rt_hash_sha256(body_text)
+                current_body = []
+
+            # Check for symbol declaration
+            if trimmed.starts_with("fn "):
+                val rest = trimmed[3:]
+                symbol_name = rest.split("(").first ?? ""
+                symbol_name = symbol_name.trim()
+            elif trimmed.starts_with("me "):
+                val rest = trimmed[3:]
+                symbol_name = rest.split("(").first ?? ""
+                symbol_name = symbol_name.trim()
+            elif trimmed.starts_with("static fn "):
+                val rest = trimmed[10:]
+                symbol_name = rest.split("(").first ?? ""
+                symbol_name = symbol_name.trim()
+            elif trimmed.starts_with("struct "):
+                val rest: text = trimmed[7:]
+                symbol_name = rest.split_whitespace().first ?? ""
+                if symbol_name.ends_with(":"):
+                    symbol_name = symbol_name[0:symbol_name.len() - 1]
+            elif trimmed.starts_with("class "):
+                val rest: text = trimmed[6:]
+                symbol_name = rest.split_whitespace().first ?? ""
+                if symbol_name.ends_with(":"):
+                    symbol_name = symbol_name[0:symbol_name.len() - 1]
+            elif trimmed.starts_with("enum "):
+                val rest: text = trimmed[5:]
+                symbol_name = rest.split_whitespace().first ?? ""
+                if symbol_name.ends_with(":"):
+                    symbol_name = symbol_name[0:symbol_name.len() - 1]
+            elif trimmed.starts_with("impl "):
+                val rest: text = trimmed[5:]
+                symbol_name = rest.split_whitespace().first ?? ""
+                if symbol_name.ends_with(":"):
+                    symbol_name = symbol_name[0:symbol_name.len() - 1]
+                symbol_name = "impl_{symbol_name}"
+
+            if symbol_name != "":
+                in_symbol = true
+                current_name = symbol_name
+                current_body = [trimmed]
+            else:
+                in_symbol = false
+                current_name = ""
+        else:
+            # Continuation line inside a symbol body
+            if in_symbol:
+                # Skip comment-only lines from hash
+                if not trimmed.starts_with("#"):
+                    current_body = current_body.push(trimmed)
+
+        i = i + 1
+
+    # Flush last symbol
+    if in_symbol and current_name != "":
+        val body_text = current_body.join("\n")
+        hashes[current_name] = rt_hash_sha256(body_text)
+
+    hashes
+
+fn changed_symbols(old_hashes: {text: text}, new_hashes: {text: text}) -> [text]:
+    """Return list of symbol names whose hash changed, were added, or were removed."""
+    var changed: [text] = []
+
+    # Check for changed or added symbols
+    for (name, new_hash) in new_hashes:
+        if old_hashes.contains_key(name):
+            if old_hashes[name] != new_hash:
+                changed = changed.push(name)
+        else:
+            changed = changed.push(name)
+
+    # Check for removed symbols
+    for (name, _) in old_hashes:
+        if not new_hashes.contains_key(name):
+            changed = changed.push(name)
+
+    changed

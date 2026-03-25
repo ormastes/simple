@@ -49,7 +49,9 @@ fn expr_to_source_string(expr: &Expr) -> String {
             let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
             format!("{}({})", expr_to_source_string(callee), args_str.join(", "))
         }
-        Expr::MethodCall { receiver, method, args, .. } => {
+        Expr::MethodCall {
+            receiver, method, args, ..
+        } => {
             let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
             format!(
                 "{}.{}({})",

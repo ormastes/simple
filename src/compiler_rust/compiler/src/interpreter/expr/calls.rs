@@ -34,7 +34,9 @@ pub(super) fn eval_call_expr(
         // In interpreter mode, kernel launches are no-ops since GPU code
         // (GpuBuffer indexing, thread intrinsics) can't run on the CPU.
         Expr::KernelLaunch { .. } => Ok(Some(Value::Nil)),
-        Expr::MethodCall { receiver, method, args, .. } => {
+        Expr::MethodCall {
+            receiver, method, args, ..
+        } => {
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
             if let Expr::Identifier(var_name) = receiver.as_ref() {

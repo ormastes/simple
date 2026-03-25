@@ -3,11 +3,12 @@
 # Integration module for the MIR optimization framework.
 # Provides simple interface for pipeline to call optimization passes.
 #
-# NOTE: MIR-level optimization passes are not yet functional in interpreter mode.
-# The actual optimization happens via llc -O3 in the LLVM backend.
-# These stubs allow the build pipeline to proceed without errors.
+# The pass manager in mir_opt.mod dispatches to individual passes
+# (DCE, const fold, copy prop, CSE, inlining, loop opts, etc.).
+# llc -O3 in the LLVM backend provides additional low-level optimization.
 
 use mir.MirModule
+use compiler.mir_opt.mod.{optimize_module, OptLevel}
 
 # ============================================================================
 # Optimization Configuration
@@ -69,17 +70,34 @@ fn optimizationconfig_aggressive() -> OptimizationConfig:
 # Optimization Entry Point
 # ============================================================================
 
+fn _config_to_opt_level(config: OptimizationConfig) -> OptLevel:
+    """Convert OptimizationConfig to the pass manager's OptLevel."""
+    match config:
+        case OptimizationConfig.Disabled:
+            OptLevel.NoOpt
+        case OptimizationConfig.Enabled(level):
+            match level:
+                case 0: OptLevel.NoOpt
+                case 1: OptLevel.Size
+                case 2: OptLevel.Speed
+                case _: OptLevel.Aggressive
+
 fn optimize_mir_module(
     mir: MirModule,
     config: OptimizationConfig
 ) -> MirModule:
     """Optimize MIR module according to configuration.
 
-    MIR-level optimization passes are not yet functional in interpreter mode.
-    The actual optimization happens via llc -O3 in the LLVM backend.
-    Returns the module unchanged for now.
+    Dispatches to the MIR optimization pass manager which runs
+    DCE, const folding, copy propagation, CSE, inlining, and
+    loop optimizations based on the configured level.
     """
-    mir
+    val opt_level = _config_to_opt_level(config)
+    match opt_level:
+        case OptLevel.NoOpt:
+            mir
+        case _:
+            optimize_module(mir, opt_level)
 
 fn optimize_mir_module_with_stats(
     mir: MirModule,
@@ -87,13 +105,32 @@ fn optimize_mir_module_with_stats(
     show_stats: bool
 ) -> MirModule:
     """Optimize MIR module and optionally display statistics."""
+    val opt_level = _config_to_opt_level(config)
     if show_stats:
         match config:
             case OptimizationConfig.Disabled:
                 print "MIR Optimization: Disabled"
+            case OptimizationConfig.Enabled(level):
+                val level_name = match level:
+                    case 0: "None"
+                    case 1: "Size"
+                    case 2: "Speed"
+                    case _: "Aggressive"
+                val func_count = mir.functions.keys().len()
+                print "MIR Optimization: {level_name} ({func_count} functions)"
+    val result = match opt_level:
+        case OptLevel.NoOpt:
+            mir
+        case _:
+            optimize_module(mir, opt_level)
+    if show_stats:
+        match config:
+            case OptimizationConfig.Enabled(level):
+                if level > 0:
+                    print "MIR Optimization: Complete"
             case _:
-                print "MIR Optimization: Enabled (passes deferred to LLVM backend)"
-    mir
+                pass_do_nothing
+    result
 
 # ============================================================================
 # Convenience Functions

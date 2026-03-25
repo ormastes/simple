@@ -12,10 +12,7 @@ use inkwell::types::BasicTypeEnum;
 /// Mirrors the Cranelift backend's name mapping in codegen/instr/calls.rs.
 fn map_ffi_name(func_name: &str) -> &str {
     // Strip module prefix to find the base function name
-    let base = func_name
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .unwrap_or(func_name);
+    let base = func_name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(func_name);
     match base {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
@@ -117,7 +114,6 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Native build (takes args RuntimeValue, not text)
         // rt_native_build does NOT have text args — its single arg is a RuntimeValue array
-
         _ => None,
     }
 }
@@ -573,7 +569,8 @@ impl LlvmBackend {
                 // Prepend i64 type for the implicit closure pointer parameter.
                 // Use actual arg count for function type (param_types from HIR may differ).
                 // All args are coerced to i64 matching the tagged-value ABI.
-                let mut llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.context.i64_type().into()];
+                let mut llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    vec![self.context.i64_type().into()];
                 let user_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     args.iter().map(|_| i64_type.into()).collect();
                 llvm_param_types.extend(user_param_types);

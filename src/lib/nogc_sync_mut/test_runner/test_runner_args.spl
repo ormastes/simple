@@ -3,6 +3,9 @@
 # Parses command-line arguments and creates TestOptions.
 
 use test_runner_types.{OutputFormat, TestExecutionMode, TestLevel, TestOptions}
+use std.io.{shell_output}
+
+extern fn rt_file_exists(path: text) -> bool
 
 # =========================================================================
 # Mode String Parsing
@@ -64,7 +67,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var resume = false
     var cpu_threshold = 75.0  # Stop at 75% CPU usage (= less than 25% free)
     var mem_threshold = 75.0  # Stop at 75% RAM usage (= less than 25% free)
-    var parallel = false  # ALWAYS false - parallel execution permanently disabled
+    var parallel = true
+    var sequential = false
     var max_workers = 0
     var parallel_timeout = 300
     var closure_warnings = false
@@ -87,11 +91,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var spl_doctest = false
     var max_mem_gb = 16
     var mem_check = false
-    var fork_mode = false
+    var fork_mode = _is_fork_available()
     var resource_limit_pct = 75
     var no_cache = false
     var refresh_manifest = false
     var manifest_status = false
+    var clean = false
 
     var i = 0
     while i < args.len():
@@ -178,6 +183,10 @@ fn parse_test_args(args: [text]) -> TestOptions:
             mem_threshold = parse_f64(arg[16:])
         elif arg == "--parallel":
             parallel = true
+            sequential = false
+        elif arg == "--sequential" or arg == "-s":
+            sequential = true
+            parallel = false
         elif arg == "--resource-limit":
             i = i + 1
             if i < args.len():
@@ -256,12 +265,16 @@ fn parse_test_args(args: [text]) -> TestOptions:
             mem_check = true
         elif arg == "--fork-mode" or arg == "--fork":
             fork_mode = true
+        elif arg == "--no-fork":
+            fork_mode = false
         elif arg == "--no-cache":
             no_cache = true
         elif arg == "--refresh-manifest":
             refresh_manifest = true
         elif arg == "--manifest-status":
             manifest_status = true
+        elif arg == "--clean":
+            clean = true
         elif arg == "--sdoctest":
             sdoctest = true
         elif arg == "--sdoctest-force":
@@ -346,6 +359,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         cpu_threshold: cpu_threshold,
         mem_threshold: mem_threshold,
         parallel: parallel,
+        sequential: sequential,
         max_workers: max_workers,
         parallel_timeout: parallel_timeout,
         closure_warnings: closure_warnings,
@@ -371,7 +385,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
         resource_limit_pct: resource_limit_pct,
         no_cache: no_cache,
         refresh_manifest: refresh_manifest,
-        manifest_status: manifest_status
+        manifest_status: manifest_status,
+        clean: clean
     )
 
 # =========================================================================
@@ -415,6 +430,11 @@ fn parse_f64(s: text) -> f64:
         result = result + (decimal_part / decimal_divisor)
 
     result
+
+fn _is_fork_available() -> bool:
+    """Auto-detect fork availability. fork() is Linux-only.
+    Uses /proc/stat existence check instead of spawning uname subprocess."""
+    rt_file_exists("/proc/stat")
 
 # =========================================================================
 # Exports

@@ -135,3 +135,85 @@ impl MonoCache:
 
     fn get_stats() -> MonoCacheStats:
         self.stats
+
+    me save_to_disk(cache_dir: text):
+        """Serialize current cache entries to disk as SDN."""
+        if not self.config.persist_to_disk:
+            return
+
+        extern fn rt_mkdir_p(path: text) -> bool
+        extern fn rt_file_write_text(path: text, content: text) -> bool
+        use std.sdn.{SdnValue, render_value}
+
+        rt_mkdir_p(cache_dir)
+
+        var sdn_entries: [SdnValue] = []
+        for (key, entry) in self.entries:
+            val entry_dict = SdnValue.Dict({
+                "key": SdnValue.String(entry.key),
+                "content_hash": SdnValue.Int(entry.content_hash),
+                "last_access": SdnValue.Int(entry.last_access)
+            })
+            sdn_entries = sdn_entries.push(entry_dict)
+
+        val sdn_doc = SdnValue.Dict({
+            "max_entries": SdnValue.Int(self.config.max_entries),
+            "entry_count": SdnValue.Int(self.entries.len()),
+            "entries": SdnValue.Array(sdn_entries)
+        })
+
+        val sdn_text = render_value(sdn_doc, 0)
+        val index_path = "{cache_dir}/mono_cache_index.sdn"
+        rt_file_write_text(index_path, sdn_text)
+
+    static fn load_from_disk(cache_dir: text) -> MonoCache:
+        """Load a persistent mono cache from disk."""
+        extern fn rt_file_exists(path: text) -> bool
+        use std.sdn.{parse_file, SdnValue}
+
+        val config = MonoCacheConfig.persistent(cache_dir)
+        val index_path = "{cache_dir}/mono_cache_index.sdn"
+
+        if not rt_file_exists(index_path):
+            return MonoCache.create(config)
+
+        match parse_file(index_path):
+            case Ok(sdn_value):
+                var cache = MonoCache.create(config)
+
+                val entries_val = sdn_value.get("entries")
+                if entries_val.?:
+                    val arr = entries_val.unwrap().as_array()
+                    if arr.?:
+                        for item in arr.unwrap():
+                            var key = ""
+                            var content_hash: i64 = 0
+                            var last_access: i64 = 0
+
+                            val k = item.get("key")
+                            if k.?:
+                                val ks = k.unwrap().as_str()
+                                if ks.?:
+                                    key = ks.unwrap()
+
+                            val h = item.get("content_hash")
+                            if h.?:
+                                val hi = h.unwrap().as_i64()
+                                if hi.?:
+                                    content_hash = hi.unwrap()
+
+                            val la = item.get("last_access")
+                            if la.?:
+                                val lai = la.unwrap().as_i64()
+                                if lai.?:
+                                    last_access = lai.unwrap()
+
+                            if key != "":
+                                cache.entries[key] = CacheEntry(
+                                    key: key, value: nil,
+                                    last_access: last_access,
+                                    content_hash: content_hash)
+
+                cache
+            case Err(_):
+                MonoCache.create(config)

@@ -162,42 +162,145 @@ impl BuildCache:
         if not rt_file_exists(cache_path):
             return BuildCache.empty(cache_path)
 
-        # Deserialize from SDN format (Phase 1B.2 - TODO #82 ✅)
-        use std.sdn.{parse_file}
-        use app.io.{file_read}
+        use std.sdn.{parse_file, SdnValue}
 
         match parse_file(cache_path):
             case Ok(sdn_value):
-                # Successfully parsed - extract cache data
-                # For now, return empty (field mapping can be added later)
-                BuildCache.empty(cache_path)
+                val ver = sdn_value.get("version")
+                var version: i64 = 0
+                if ver.?:
+                    val v = ver.unwrap().as_i64()
+                    if v.?:
+                        version = v.unwrap()
+
+                var entries: {text: DependencyEntry} = {}
+                var fingerprints: {text: FileFingerprint} = {}
+
+                val entries_val = sdn_value.get("entries")
+                if entries_val.?:
+                    val arr = entries_val.unwrap().as_array()
+                    if arr.?:
+                        for item in arr.unwrap():
+                            val src = item.get("source")
+                            if not src.?:
+                                continue
+                            val source_str = src.unwrap().as_str()
+                            if not source_str.?:
+                                continue
+                            val source = source_str.unwrap()
+
+                            # Parse fingerprint
+                            var fp_hash = ""
+                            var fp_size: i64 = 0
+                            var fp_mtime: i64 = 0
+                            val fp_val = item.get("fingerprint")
+                            if fp_val.?:
+                                val fp_obj = fp_val.unwrap()
+                                val h = fp_obj.get("hash")
+                                if h.?:
+                                    val hs = h.unwrap().as_str()
+                                    if hs.?:
+                                        fp_hash = hs.unwrap()
+                                val s = fp_obj.get("size")
+                                if s.?:
+                                    val si = s.unwrap().as_i64()
+                                    if si.?:
+                                        fp_size = si.unwrap()
+                                val m = fp_obj.get("modified_time")
+                                if m.?:
+                                    val mi = m.unwrap().as_i64()
+                                    if mi.?:
+                                        fp_mtime = mi.unwrap()
+
+                            val fp = FileFingerprint(
+                                path: source, content_hash: fp_hash,
+                                modified_time: fp_mtime, size: fp_size)
+
+                            # Parse dependencies
+                            var deps: [text] = []
+                            val deps_val = item.get("dependencies")
+                            if deps_val.?:
+                                val deps_arr = deps_val.unwrap().as_array()
+                                if deps_arr.?:
+                                    for d in deps_arr.unwrap():
+                                        val ds = d.as_str()
+                                        if ds.?:
+                                            deps = deps.push(ds.unwrap())
+
+                            # Parse outputs
+                            var outs: [text] = []
+                            val outs_val = item.get("outputs")
+                            if outs_val.?:
+                                val outs_arr = outs_val.unwrap().as_array()
+                                if outs_arr.?:
+                                    for o in outs_arr.unwrap():
+                                        val os = o.as_str()
+                                        if os.?:
+                                            outs = outs.push(os.unwrap())
+
+                            val entry = DependencyEntry(
+                                source: source, fingerprint: fp,
+                                dependencies: deps, outputs: outs)
+                            entries[source] = entry
+                            fingerprints[source] = fp
+
+                BuildCache(entries: entries, fingerprints: fingerprints,
+                           cache_path: cache_path, version: version)
             case Err(error):
-                # Parse error - return empty cache
                 BuildCache.empty(cache_path)
 
     me save():
         """Persist cache to disk."""
-        # Serialize to SDN format (Phase 1B.2 - TODO #83 ✅)
         use std.sdn.{SdnValue, render_value}
-        use app.io.{file_write}
+        extern fn rt_file_write_text(path: text, content: text) -> bool
+        extern fn rt_mkdir_p(path: text) -> bool
 
         self.version = self.version + 1
 
-        # Create SDN representation of cache
-        var sdn_entries = []
+        var sdn_entries: [SdnValue] = []
         for key in self.entries.keys():
             val entry = self.entries[key]
-            # Build entry dict (simplified - full implementation would include all fields)
-            sdn_entries.push(SdnValue.String(entry.source))
 
-        val sdn_doc = SdnValue.Object({
-            "version": SdnValue.Number(self.version),
+            # Serialize fingerprint
+            val fp_dict = SdnValue.Dict({
+                "hash": SdnValue.String(entry.fingerprint.content_hash),
+                "size": SdnValue.Int(entry.fingerprint.size),
+                "modified_time": SdnValue.Int(entry.fingerprint.modified_time)
+            })
+
+            # Serialize dependencies
+            var dep_values: [SdnValue] = []
+            for dep in entry.dependencies:
+                dep_values = dep_values.push(SdnValue.String(dep))
+
+            # Serialize outputs
+            var out_values: [SdnValue] = []
+            for out in entry.outputs:
+                out_values = out_values.push(SdnValue.String(out))
+
+            val entry_dict = SdnValue.Dict({
+                "source": SdnValue.String(entry.source),
+                "fingerprint": fp_dict,
+                "dependencies": SdnValue.Array(dep_values),
+                "outputs": SdnValue.Array(out_values)
+            })
+            sdn_entries = sdn_entries.push(entry_dict)
+
+        val sdn_doc = SdnValue.Dict({
+            "version": SdnValue.Int(self.version),
             "entries": SdnValue.Array(sdn_entries)
         })
 
-        # Render to text and save
-        val sdn_text = render_value(sdn_doc)
-        file_write(self.cache_path, sdn_text)
+        # Ensure parent directory exists
+        val parent_end = self.cache_path.last_index_of("/")
+        if parent_end.?:
+            val idx = parent_end.unwrap()
+            if idx > 0:
+                val parent = self.cache_path[0:idx]
+                rt_mkdir_p(parent)
+
+        val sdn_text = render_value(sdn_doc, 0)
+        rt_file_write_text(self.cache_path, sdn_text)
 
     me update_entry(source: text, fingerprint: FileFingerprint,
                     dependencies: [text], outputs: [text]):
@@ -210,6 +313,34 @@ impl BuildCache:
     me remove_entry(source: text):
         self.entries.remove(source)
         self.fingerprints.remove(source)
+
+    fn has_cached_object(source: text) -> bool:
+        """Check if source has a cached entry with fresh fingerprint and existing outputs."""
+        extern fn rt_file_exists(path: text) -> bool
+        if not self.entries.contains_key(source):
+            return false
+        val entry = self.entries[source]
+        # Check fingerprint is still fresh
+        val fresh = FileFingerprint.from_file(source)
+        if not fresh.?:
+            return false
+        if entry.fingerprint.is_stale(fresh.unwrap()):
+            return false
+        # Check all output files still exist on disk
+        for out in entry.outputs:
+            if not rt_file_exists(out):
+                return false
+        true
+
+    fn get_cached_outputs(source: text) -> [text]?:
+        """Return cached output paths if entry is fresh, else nil."""
+        if not self.has_cached_object(source):
+            return nil
+        Some(self.entries[source].outputs)
+
+    me invalidate(source: text):
+        """Remove a stale entry."""
+        self.remove_entry(source)
 
     fn get_entry(source: text) -> DependencyEntry?:
         if self.entries.contains_key(source):
@@ -271,11 +402,14 @@ class IncrementalCompiler:
     """Orchestrates incremental compilation using build cache."""
     cache: BuildCache
     source_root: text
+    symbol_hashes: {text: {text: text}}
+    cached_mir_index: {text: [text]}
 
 impl IncrementalCompiler:
     static fn create(source_root: text, cache_path: text) -> IncrementalCompiler:
         val cache = BuildCache.load(cache_path)
-        IncrementalCompiler(cache: cache, source_root: source_root)
+        IncrementalCompiler(cache: cache, source_root: source_root,
+                            symbol_hashes: {}, cached_mir_index: {})
 
     me compile_incremental(source_files: [text]) -> ([text], ChangeSet):
         """Determine which files need recompilation.
@@ -303,4 +437,103 @@ impl IncrementalCompiler:
     me clean():
         """Clear build cache."""
         self.cache.invalidate_all()
+        self.symbol_hashes = {}
+        self.cached_mir_index = {}
         self.cache.save()
+
+    # --- Symbol-Level Incremental MIR Cache ---
+
+    me update_symbol_hashes(source: text, hashes: {text: text}):
+        """Store symbol hashes for a source file after compilation."""
+        self.symbol_hashes[source] = hashes
+
+    fn get_changed_symbols(source: text, new_hashes: {text: text}) -> [text]:
+        """Compare new symbol hashes against cached ones, return changed symbol names."""
+        if not self.symbol_hashes.contains_key(source):
+            var all_names: [text] = []
+            for (name, _) in new_hashes:
+                all_names = all_names.push(name)
+            return all_names
+
+        val old_hashes = self.symbol_hashes[source]
+        var changed: [text] = []
+
+        for (name, new_hash) in new_hashes:
+            if old_hashes.contains_key(name):
+                if old_hashes[name] != new_hash:
+                    changed = changed.push(name)
+            else:
+                changed = changed.push(name)
+
+        for (name, _) in old_hashes:
+            if not new_hashes.contains_key(name):
+                changed = changed.push(name)
+
+        changed
+
+    fn get_cached_mir_functions(source: text):
+        """Return cached MIR function SDN blobs for unchanged functions in a source file.
+
+        Returns a dict mapping function name to serialized MIR text, or nil if no cache.
+        Uses .build/mir_cache/ directory for per-function MIR storage.
+        """
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_read_text(path: text) -> text
+
+        if not self.cached_mir_index.contains_key(source):
+            return nil
+
+        val func_names = self.cached_mir_index[source]
+        var result: {text: text} = {}
+        val cache_dir = ".build/mir_cache"
+
+        for name in func_names:
+            val safe_name = name.replace("/", "_").replace(":", "_")
+            val mir_path = "{cache_dir}/{safe_name}.sdn"
+            if rt_file_exists(mir_path):
+                val content = rt_file_read_text(mir_path)
+                if content != "":
+                    result[name] = content
+
+        if result.len() == 0:
+            return nil
+        Some(result)
+
+    me cache_mir_function(source: text, func_name: text, mir_sdn: text):
+        """Cache a single function's MIR to disk."""
+        extern fn rt_mkdir_p(path: text) -> bool
+        extern fn rt_file_write_text(path: text, content: text) -> bool
+
+        val cache_dir = ".build/mir_cache"
+        rt_mkdir_p(cache_dir)
+
+        val safe_name = func_name.replace("/", "_").replace(":", "_")
+        val mir_path = "{cache_dir}/{safe_name}.sdn"
+        rt_file_write_text(mir_path, mir_sdn)
+
+        if not self.cached_mir_index.contains_key(source):
+            self.cached_mir_index[source] = []
+        val existing = self.cached_mir_index[source]
+        if not existing.contains(func_name):
+            self.cached_mir_index[source] = existing.push(func_name)
+
+# ============================================================================
+# MIR Merge (Symbol-Level)
+# ============================================================================
+
+fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
+    """Merge cached unchanged MIR functions with newly compiled changed functions.
+
+    For each function, if it exists in new_fns (freshly compiled), use the new version.
+    Otherwise, use the cached version. This allows symbol-level granularity:
+    only changed functions are recompiled, unchanged ones reuse cached MIR.
+    """
+    var merged: {text: text} = {}
+
+    for (name, mir_sdn) in cached_fns:
+        merged[name] = mir_sdn
+
+    for (name, mir_sdn) in new_fns:
+        merged[name] = mir_sdn
+
+    merged

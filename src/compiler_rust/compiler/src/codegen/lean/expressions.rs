@@ -715,12 +715,12 @@ impl<'a> ExprTranslator<'a> {
             BinOp::BitXor => "^^^".to_string(),
             BinOp::ShiftLeft => "<<<".to_string(),
             BinOp::ShiftRight => ">>>".to_string(),
-            BinOp::Is => "==".to_string(),          // Identity check becomes equality
-            BinOp::In => "∈".to_string(),           // Membership
-            BinOp::NotIn => "∉".to_string(),        // Not in
-            BinOp::PipeForward => "|>".to_string(), // Function application
-            BinOp::Parallel => "//".to_string(),    // Parallel execution
-            BinOp::Compose => "∘".to_string(),      // Function composition
+            BinOp::Is => "==".to_string(),           // Identity check becomes equality
+            BinOp::In => "∈".to_string(),            // Membership
+            BinOp::NotIn => "∉".to_string(),         // Not in
+            BinOp::PipeForward => "|>".to_string(),  // Function application
+            BinOp::Parallel => "//".to_string(),     // Parallel execution
+            BinOp::Compose => "∘".to_string(),       // Function composition
             BinOp::LayerConnect => "~>".to_string(), // Layer connect
         }
     }

@@ -7,7 +7,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{
-    exec_node, exec_block_fn, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
+    exec_node, exec_block_fn, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env,
+    FunctionDef, ImplMethods,
 };
 
 pub(super) fn eval_control_expr(

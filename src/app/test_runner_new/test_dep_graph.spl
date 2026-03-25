@@ -1,0 +1,151 @@
+# Test Dependency Graph — Import-based dependency tracking for change detection
+#
+# Extracted from test_daemon/deps.spl for standalone use in the test runner.
+# Analyzes `use` statements in test files to build a dependency graph.
+# Used by the cache to determine which tests need re-running.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# Dependency Graph
+# ============================================================================
+
+class TestDepGraph:
+    deps: {text: [text]}
+
+fn test_dep_graph_new() -> TestDepGraph:
+    TestDepGraph(deps: {})
+
+impl TestDepGraph:
+    fn get_deps(test_path: text) -> [text]:
+        self.deps[test_path] ?? []
+
+    me analyze_test(test_path: text):
+        val source = rt_file_read_text(test_path) ?? ""
+        if source == "":
+            return
+
+        val imports = _extract_imports(source)
+        var resolved: [text] = []
+        var seen: {text: bool} = {}
+        var i = 0
+        while i < imports.len():
+            val module_path = _resolve_module_to_file(imports[i])
+            if module_path != "":
+                if not (seen[module_path] ?? false):
+                    resolved.push(module_path)
+                    seen[module_path] = true
+                val transitive = _extract_transitive_deps(module_path, 5)
+                var j = 0
+                while j < transitive.len():
+                    if not (seen[transitive[j]] ?? false):
+                        resolved.push(transitive[j])
+                        seen[transitive[j]] = true
+                    j = j + 1
+            i = i + 1
+
+        self.deps[test_path] = resolved
+
+# ============================================================================
+# Import Extraction
+# ============================================================================
+
+fn _extract_imports(source: text) -> [text]:
+    var imports: [text] = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("use "):
+            val module = _parse_use_statement(line)
+            if module != "":
+                imports.push(module)
+        i = i + 1
+    imports
+
+fn _parse_use_statement(line: text) -> text:
+    val rest = line.substring(4).trim()
+    val brace_pos = rest.index_of(".{")
+    if brace_pos > 0:
+        return rest.substring(0, brace_pos)
+    val star_pos = rest.index_of(".*")
+    if star_pos > 0:
+        return rest.substring(0, star_pos)
+    rest
+
+# ============================================================================
+# Module Resolution
+# ============================================================================
+
+var _module_path_cache: {text: text} = {}
+
+fn _resolve_module_to_file(module_path: text) -> text:
+    val cached = _module_path_cache[module_path] ?? ""
+    if cached != "":
+        if cached == "_NONE_":
+            return ""
+        return cached
+
+    val result = _resolve_module_uncached(module_path)
+    if result == "":
+        _module_path_cache[module_path] = "_NONE_"
+    else:
+        _module_path_cache[module_path] = result
+    result
+
+fn _resolve_module_uncached(module_path: text) -> text:
+    val parts = module_path.split(".")
+    if parts.len() == 0:
+        return ""
+
+    val prefix = parts[0]
+    var base_dirs: [text] = []
+    if prefix == "std" or prefix == "lib":
+        base_dirs = ["src/lib/common", "src/lib/nogc_sync_mut", "src/lib/nogc_async_mut", "src/lib/gc_async_mut", "src/lib/nogc_async_mut_noalloc"]
+    else if prefix == "compiler":
+        base_dirs = ["src/compiler"]
+    else if prefix == "app":
+        base_dirs = ["src/app"]
+    else:
+        return ""
+
+    var rel_path = ""
+    var i = 1
+    while i < parts.len():
+        if rel_path != "":
+            rel_path = rel_path + "/"
+        rel_path = rel_path + parts[i]
+        i = i + 1
+
+    var bi = 0
+    while bi < base_dirs.len():
+        val candidate = "{base_dirs[bi]}/{rel_path}.spl"
+        if rt_file_exists(candidate):
+            return candidate
+        val mod_candidate = "{base_dirs[bi]}/{rel_path}/mod.spl"
+        if rt_file_exists(mod_candidate):
+            return mod_candidate
+        bi = bi + 1
+
+    ""
+
+fn _extract_transitive_deps(file_path: text, max_depth: i64) -> [text]:
+    if max_depth <= 0:
+        return []
+
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        return []
+
+    val imports = _extract_imports(source)
+    var result: [text] = []
+    var seen: {text: bool} = {}
+    var i = 0
+    while i < imports.len():
+        val resolved = _resolve_module_to_file(imports[i])
+        if resolved != "" and not (seen[resolved] ?? false):
+            result.push(resolved)
+            seen[resolved] = true
+        i = i + 1
+    result

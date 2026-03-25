@@ -34,7 +34,9 @@ pub(crate) fn compile_closure_create<M: Module>(
         builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
     } else {
         // Cross-module closure: resolve via use_map → import_map
-        let mut resolved_name = ctx.use_map.get(func_name)
+        let mut resolved_name = ctx
+            .use_map
+            .get(func_name)
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
@@ -44,7 +46,9 @@ pub(crate) fn compile_closure_create<M: Module>(
             if let Some((type_part, method_part)) = func_name.split_once("__") {
                 if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
                     dunder_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
-                    resolved_name = ctx.use_map.get(&dunder_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&dunder_storage)
                         .or_else(|| ctx.import_map.get(&dunder_storage))
                         .map(|s| s.as_str());
                 }
@@ -214,7 +218,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
     } else {
         // Cross-module method: resolve via use_map → import_map
-        let mut resolved_name = ctx.use_map.get(func_name)
+        let mut resolved_name = ctx
+            .use_map
+            .get(func_name)
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
@@ -227,14 +233,18 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 let method = &func_name[dot_pos + 1..];
 
                 // Try: bare method name
-                resolved_name = ctx.use_map.get(method)
+                resolved_name = ctx
+                    .use_map
+                    .get(method)
                     .or_else(|| ctx.import_map.get(method))
                     .map(|s| s.as_str());
 
                 // Try: lowercase_type_method (Simple convention)
                 if resolved_name.is_none() {
                     type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
-                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&type_prefixed_storage)
                         .or_else(|| ctx.import_map.get(&type_prefixed_storage))
                         .map(|s| s.as_str());
                 }
@@ -242,7 +252,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 // Try: Type__method (double underscore variant)
                 if resolved_name.is_none() {
                     dunder_storage = format!("{}__{}", type_name, method);
-                    resolved_name = ctx.use_map.get(&dunder_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&dunder_storage)
                         .or_else(|| ctx.import_map.get(&dunder_storage))
                         .map(|s| s.as_str());
                 }
@@ -255,7 +267,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
             if let Some((type_part, method_part)) = func_name.split_once("__") {
                 if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
                     type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
-                    resolved_name = ctx.use_map.get(&type_prefixed_storage)
+                    resolved_name = ctx
+                        .use_map
+                        .get(&type_prefixed_storage)
                         .or_else(|| ctx.import_map.get(&type_prefixed_storage))
                         .map(|s| s.as_str());
                 }
@@ -278,7 +292,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.returns.push(AbiParam::new(types::I64));
-                ctx.module.declare_function(&resolved, Linkage::Import, &sig)
+                ctx.module
+                    .declare_function(&resolved, Linkage::Import, &sig)
                     .unwrap_or_else(|_| {
                         // If declaration fails, try with just i64 params (no receiver)
                         let mut sig2 = Signature::new(call_conv);
@@ -286,13 +301,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
                             sig2.params.push(AbiParam::new(types::I64));
                         }
                         sig2.returns.push(AbiParam::new(types::I64));
-                        ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
+                        ctx.module
+                            .declare_function(&resolved, Linkage::Import, &sig2)
                             .unwrap_or_else(|_| ctx.runtime_funcs["rt_function_not_found"])
                     })
             });
             let fref = ctx.module.declare_func_in_func(fid, builder.func);
             let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
-            for a in args { call_args.push(get_vreg_or_default(ctx, builder, a)); }
+            for a in args {
+                call_args.push(get_vreg_or_default(ctx, builder, a));
+            }
             let call_args = super::calls::adapt_args_to_signature(builder, fref, call_args);
             let call = adapted_call(builder, fref, &call_args);
             if let Some(d) = dest {

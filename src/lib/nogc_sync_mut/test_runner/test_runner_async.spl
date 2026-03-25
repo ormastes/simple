@@ -10,6 +10,7 @@ use std.io.{file_write, file_read, file_delete, file_exists}
 use std.io.{time_now_unix_micros}
 use app.test_runner_new.test_runner_types.{TestFileResult, TestOptions}
 use app.test_runner_new.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
+use app.test_runner_new.test_runner_fork.{run_test_file_fork}
 use app.test_runner_new.runner_lifecycle.{spawn_tracked_process, untrack_process}
 use app.test_runner_new.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn, governor_wait_until_ready}
 
@@ -111,12 +112,7 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
     # Build redirected command (shell wrapper)
     # NOTE: process_spawn_async doesn't support redirection directly,
     # so we wrap in shell command
-    var args_str = ""
-    for arg in child_args:
-        if args_str == "":
-            args_str = arg
-        else:
-            args_str = args_str + " " + arg
+    val args_str = child_args.join(" ")
 
     val shell_cmd = "{binary} {args_str} > {stdout_file} 2> {stderr_file}"
 
@@ -178,6 +174,16 @@ fn collect_async_result(run: AsyncTestRun) -> TestFileResult:
     )
 
 # ============================================================================
+# Fork-based Test Execution (for parallel + fork mode)
+# ============================================================================
+
+fn spawn_fork_test(file_path: text, options: TestOptions) -> TestFileResult:
+    """Run a single test via fork() instead of subprocess spawn.
+    Returns the result directly (fork is synchronous from parent perspective).
+    Used when fork_mode is enabled to eliminate 220ms CLI startup overhead."""
+    run_test_file_fork(file_path, options)
+
+# ============================================================================
 # Wait for Any Process
 # ============================================================================
 
@@ -192,21 +198,26 @@ fn wait_for_any_process(runs: [AsyncTestRun]) -> i64:
 
     NOTE: Uses polling (100ms interval) since rt_process_wait_any doesn't exist
     """
-    val max_iterations = 3000  # 300 seconds max wait
+    val max_iterations = 6000  # 300 seconds max wait (at 50ms base)
+    var sleep_ms = 10
 
     for iteration in max_iterations:
         var idx = 0
         while idx < runs.len():
             val run = runs[idx]
 
-            # Check if process still running
             if not process_is_running(run.pid):
                 return idx
 
             idx = idx + 1
 
-        # Sleep 100ms to avoid busy-wait
-        rt_thread_sleep(100)
+        rt_thread_sleep(sleep_ms)
+
+        # Adaptive polling: 10ms -> 50ms -> 100ms
+        if iteration == 10:
+            sleep_ms = 50
+        elif iteration == 50:
+            sleep_ms = 100
 
     -1  # Timeout
 
@@ -290,6 +301,11 @@ fn run_tests_parallel_with_monitoring(
     var results: [TestFileResult] = []
     var active_runs: [AsyncTestRun] = []
     var next_file_idx = 0
+    var poll_iteration = 0
+
+    # Fork mode is sequential — skip it when parallel is explicitly requested.
+    # Subprocess parallelism with N workers is faster than sequential fork
+    # even with the per-test startup overhead.
 
     # Create resource governor (default 75%, overridable via options)
     val gov = governor_create(options.resource_limit_pct)
@@ -310,30 +326,35 @@ fn run_tests_parallel_with_monitoring(
         # Check for timeouts and completions
         var new_runs: [AsyncTestRun] = []
         val current_time = time_now_unix_micros()
+        var had_completion = false
 
         for run in active_runs:
             val elapsed_ms = (current_time - run.start_time) / 1000
 
-            # Check timeout
             if elapsed_ms > run.timeout_ms:
-                # Kill process
                 process_kill(run.pid)
-
-                # Collect result (will show as timeout)
                 val result = collect_async_result(run)
                 results.push(result)
+                had_completion = true
             elif not process_is_running(run.pid):
-                # Completed normally
                 val result = collect_async_result(run)
                 results.push(result)
+                had_completion = true
             else:
-                # Still running
                 new_runs.push(run)
 
         active_runs = new_runs
 
-        # Sleep 100ms to avoid busy-wait
-        rt_thread_sleep(100)
+        # Adaptive polling: 10ms -> 50ms -> 100ms
+        if had_completion:
+            poll_iteration = 0
+        var sleep_ms = 10
+        if poll_iteration >= 50:
+            sleep_ms = 100
+        elif poll_iteration >= 10:
+            sleep_ms = 50
+        rt_thread_sleep(sleep_ms)
+        poll_iteration = poll_iteration + 1
 
     results
 

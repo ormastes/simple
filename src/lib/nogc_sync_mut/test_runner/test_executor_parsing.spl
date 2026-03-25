@@ -52,24 +52,30 @@ fn find_runtime_lib_dir() -> text:
         return "rust/target/release"
     "rust/target/debug"
 
+# Cache for find_simple_binary — avoids 15 file_exists probes per test spawn
+var _cached_binary_path = ""
+
 fn find_simple_binary() -> text:
+    if _cached_binary_path != "":
+        return _cached_binary_path
+
     # Prefer the currently running executable — subprocess tests should use
     # the same binary that invoked the test runner (self-hosted consistency).
     val args = cli_get_args()
     if args.len() > 0:
         val self_exe = args[0]
         if self_exe != "" and file_exists(self_exe):
+            _cached_binary_path = self_exe
             return self_exe
 
     # Check environment variable
     val env_path = env_get("SIMPLE_RUNTIME")
     if env_path != "" and env_path != nil:
         if file_exists(env_path):
+            _cached_binary_path = env_path
             return env_path
 
     # Fallback: try multiple known locations.
-    # Platform-specific binaries first (real ELF executables),
-    # then wrapper scripts (bin/release/simple needs downloaded/ which may not exist).
     val candidates = [
         "bin/release/linux-x86_64/simple",
         "./bin/release/linux-x86_64/simple",
@@ -89,9 +95,11 @@ fn find_simple_binary() -> text:
 
     for candidate in candidates:
         if file_exists(candidate):
+            _cached_binary_path = candidate
             return candidate
 
     # Fallback to bin/release/simple (primary location in pure Simple setup)
+    _cached_binary_path = "bin/release/simple"
     "bin/release/simple"
 
 # =========================================================================
@@ -221,14 +229,14 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Check for timeout
     if exit_code == -1:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
 
     val combined = stdout + "\n" + stderr
     val (passed, failed, skipped, pending) = parse_test_output(combined)
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
-            return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false)
+            return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
         else:
             # Extract error message from output
             val extracted_error = extract_error_message(combined)
@@ -236,7 +244,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
                 extracted_error
             else:
                 "Process exited with code {exit_code}"
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error_msg, timed_out: false)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error_msg, timed_out: false, cached: false)
 
     # Extract error messages when tests fail
     var error = ""
@@ -245,7 +253,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     elif exit_code != 0:
         error = "Process exited with code {exit_code}"
 
-    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false)
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
 
 # =========================================================================
 # Coverage Wrapper Generation

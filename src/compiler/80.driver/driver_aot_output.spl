@@ -17,8 +17,11 @@ use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.common.config.{Logger}
+use compiler.driver.incremental.{BuildCache, FileFingerprint}
+use compiler.driver.driver.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
@@ -44,36 +47,86 @@ impl CompilerDriver:
         val effective_backend = get_effective_backend_name(backend_name, is_release)
         print "[NATIVE] effective_backend={effective_backend}"
 
+        # Load build cache
+        val cache_path = ".build/build_cache.sdn"
+        var build_cache = BuildCache.load(cache_path)
+        var cache_hit_count: i64 = 0
+        var cache_miss_count: i64 = 0
+
         # Compile all modules and collect object files
         var object_files: [text] = []
 
         val low_memory = self.ctx.options.low_memory
         val module_names = self.ctx.mir_modules.keys()
-        print "[NATIVE] compiling {module_names.len()} modules..."
+        val total_modules = module_names.len()
+        print "[NATIVE] compiling {total_modules} modules..."
+
+        # Phase 1: Check cache, collect cached objects, identify uncached modules
+        var uncached_names: [text] = []
         for name in module_names:
-            print "[NATIVE] compiling module: {name}"
-            val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            val cached_entry = build_cache.get_entry(name)
+            var used_cache = false
+            if cached_entry.?:
+                val entry = cached_entry.unwrap()
+                if entry.outputs.len() > 0:
+                    var all_exist = true
+                    for out in entry.outputs:
+                        if not rt_file_exists(out):
+                            all_exist = false
+                    if all_exist:
+                        print "[NATIVE] cache hit: {name}"
+                        cache_hit_count = cache_hit_count + 1
+                        for obj in entry.outputs:
+                            object_files = object_files.push(obj)
+                        if low_memory:
+                            self.ctx.evict_mir_module(name)
+                        used_cache = true
+            if not used_cache:
+                uncached_names = uncached_names.push(name)
 
-            # Evict this module's MIR immediately after codegen
+        # Phase 2: Compile uncached modules through ParallelBuilder
+        if uncached_names.len() > 0:
+            val parallel_cfg = ParallelBuildConfig(
+                num_threads: 0,
+                parallel_threshold: 4,
+                deterministic: false,
+                verbose: self.ctx.options.verbose
+            )
+            var builder = ParallelBuilder.create(parallel_cfg)
+
+            for name in uncached_names:
+                builder.add_unit(name, [])
+
+            val build_result = builder.build(\name:
+                _compile_one_module(self.ctx, backend_name, is_release, output, name)
+            )
+            cache_miss_count = build_result.stats.completed + build_result.stats.failed
+
+            if not build_result.success:
+                val first_err = build_result.errors[0]
+                return CompileResult.CodegenError(first_err[1])
+
+            # Post-process: update cache and collect object paths
+            for obj_path in build_result.outputs:
+                object_files = object_files.push(obj_path)
+                val obj_fp = FileFingerprint.from_file(obj_path)
+                if obj_fp.?:
+                    # Extract module name from obj_path: "{output}.{name}.o"
+                    val prefix = output + "."
+                    var mod_name = obj_path
+                    if obj_path.starts_with(prefix):
+                        mod_name = obj_path[prefix.len():obj_path.len() - 2]
+                    build_cache.update_entry(mod_name, obj_fp.unwrap(), [], [obj_path])
+
+            # Evict MIR for compiled modules in low-memory mode
             if low_memory:
-                self.ctx.evict_mir_module(name)
+                for name in uncached_names:
+                    self.ctx.evict_mir_module(name)
 
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("AOT compile error in {name}: {err}")
-
-            val module = compiled.unwrap()
-            if module.object_code.?:
-                # Write object bytes to file for linking (Phase 2.1: Direct ELF writing)
-                val obj_path = "{output}.{name}.o"
-                match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
-                    case Ok(_):
-                        object_files = object_files.push(obj_path)
-                    case Err(e):
-                        return CompileResult.CodegenError("Failed to write object file {obj_path}: {e}")
-            else:
-                return CompileResult.CodegenError("Backend produced no object code for {name}")
+        # Save build cache
+        build_cache.save()
+        if cache_hit_count > 0 or cache_miss_count > 0:
+            print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
 
         # Link object files into final executable
         print "[NATIVE] linking {object_files.len()} object files..."
@@ -313,10 +366,34 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         link_to_native(objects, output, config)
 
 # ============================================================================
+# Single-Module Compilation Helper (for ParallelBuilder)
+# ============================================================================
+
+fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, output_base: text, name: text) -> Result<text, text>:
+    """Compile a single module by name, write object file, return path."""
+    print "[NATIVE] compiling module: {name}"
+    val mir_module = ctx.mir_modules[name]
+    val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+
+    if compiled.is_err():
+        val err = compiled.unwrap_err()
+        return Err("AOT compile error in {name}: {err}")
+
+    val module = compiled.unwrap()
+    if module.object_code.?:
+        val obj_path = "{output_base}.{name}.o"
+        match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
+            case Ok(_):
+                Ok(obj_path)
+            case Err(e):
+                Err("Failed to write object file {obj_path}: {e}")
+    else:
+        Err("Backend produced no object code for {name}")
+
+# ============================================================================
 # Dependency Collection for SMF Staleness Tracking
 # ============================================================================
 
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
 
 fn collect_dependency_hashes(ctx: any) -> [SmfDependencyEntry]:

@@ -297,7 +297,12 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
         },
-        Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            generic_args,
+        } => Expr::MethodCall {
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),
             method: method.clone(),
             args: args
@@ -452,7 +457,9 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .iter()
                 .map(|(field, expr)| (field.clone(), apply_macro_hygiene_expr(expr, ctx)))
                 .collect(),
-            spread: spread.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            spread: spread
+                .as_ref()
+                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Await(expr) => Expr::Await(Box::new(apply_macro_hygiene_expr(expr, ctx))),

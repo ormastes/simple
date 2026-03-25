@@ -166,7 +166,12 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
                 .map(|a| Argument::with_span(a.name, replace_numbered_placeholders(a.value), a.span))
                 .collect(),
         },
-        Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            generic_args,
+        } => Expr::MethodCall {
             receiver: Box::new(replace_numbered_placeholders(*receiver)),
             method,
             args: args
@@ -314,7 +319,12 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
                 .map(|a| Argument::with_span(a.name, replace_placeholders(a.value, counter), a.span))
                 .collect(),
         },
-        Expr::MethodCall { receiver, method, args, generic_args } => Expr::MethodCall {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            generic_args,
+        } => Expr::MethodCall {
             receiver: Box::new(replace_placeholders(*receiver, counter)),
             method,
             args: args

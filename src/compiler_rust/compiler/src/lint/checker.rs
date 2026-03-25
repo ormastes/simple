@@ -219,7 +219,10 @@ impl LintChecker {
             if trimmed.starts_with("fn ")
                 || trimmed.starts_with("pub fn ")
                 || trimmed.starts_with("pub ")
-                    && (trimmed.contains("fn ") || trimmed.contains("struct ") || trimmed.contains("class ") || trimmed.contains("enum "))
+                    && (trimmed.contains("fn ")
+                        || trimmed.contains("struct ")
+                        || trimmed.contains("class ")
+                        || trimmed.contains("enum "))
                 || trimmed.starts_with("struct ")
                 || trimmed.starts_with("class ")
                 || trimmed.starts_with("enum ")
@@ -1439,7 +1442,9 @@ impl LintChecker {
                         check_expr(checker, &arg.value);
                     }
                 }
-                Expr::MethodCall { receiver, method, args, .. } => {
+                Expr::MethodCall {
+                    receiver, method, args, ..
+                } => {
                     // Try to look up method
                     check_call(checker, method, args, Span::new(0, 0, 0, 0));
                     check_expr(checker, receiver);

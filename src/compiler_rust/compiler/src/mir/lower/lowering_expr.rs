@@ -121,8 +121,10 @@ impl<'a> MirLowerer<'a> {
                     // String concatenation: if either side is text/string and op is Add,
                     // emit rt_string_concat call instead of iadd
                     let is_string_add = op == BinOp::Add
-                        && (left.ty == TypeId::STRING || right.ty == TypeId::STRING
-                            || left.ty == TypeId::ANY || right.ty == TypeId::ANY);
+                        && (left.ty == TypeId::STRING
+                            || right.ty == TypeId::STRING
+                            || left.ty == TypeId::ANY
+                            || right.ty == TypeId::ANY);
                     if is_string_add {
                         // Convert non-string side to string via rt_to_string if needed
                         let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
@@ -975,8 +977,10 @@ impl<'a> MirLowerer<'a> {
                 // fields as RuntimeValues so the codegen receives tagged values.
                 if (*ty == TypeId::STRING || *ty == TypeId::ANY) && field_regs.len() == 1 {
                     let field_ty = fields[0].ty;
-                    let needs_boxing = field_ty == TypeId::I64 || field_ty == TypeId::I32
-                        || field_ty == TypeId::I8 || field_ty == TypeId::BOOL;
+                    let needs_boxing = field_ty == TypeId::I64
+                        || field_ty == TypeId::I32
+                        || field_ty == TypeId::I8
+                        || field_ty == TypeId::BOOL;
                     if needs_boxing {
                         let reg = field_regs[0];
                         let boxed = self.with_func(|func, current_block| {

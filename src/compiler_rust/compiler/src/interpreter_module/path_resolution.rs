@@ -183,8 +183,8 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
     // Only attempt numbered dir resolution if base is within a project source tree.
     // Scanning arbitrary dirs like /tmp or / for numbered subdirs wastes ~90 syscalls.
     let base_str = base.to_string_lossy();
-    let in_src = base_str.contains("/src/") || base_str.ends_with("/src")
-        || base_str.starts_with("src/") || base_str == "src";
+    let in_src =
+        base_str.contains("/src/") || base_str.ends_with("/src") || base_str.starts_with("src/") || base_str == "src";
     if !in_src {
         return None;
     }

@@ -609,6 +609,11 @@ fn execute_test_files(
     let mut total_failed = 0;
     let mut total_skipped = 0;
     let mut total_ignored = 0;
+    let mut total_cached = 0;
+
+    // Load result cache for incremental test runs (skip unchanged files)
+    let mut result_cache = super::result_cache::ResultCache::load();
+    let use_cache = !options.force_rebuild;
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
@@ -620,6 +625,31 @@ fn execute_test_files(
     }
 
     for (idx, path) in test_files.iter().enumerate() {
+        // Check result cache — skip unchanged files
+        if use_cache && !list_mode {
+            if let Some(cached) = result_cache.check(path) {
+                // Only use cache if the test passed last time (re-run failures)
+                {
+                    let result = TestFileResult {
+                        path: path.to_path_buf(),
+                        passed: cached.passed,
+                        failed: cached.failed,
+                        skipped: cached.skipped,
+                        ignored: 0,
+                        duration_ms: 0,
+                        error: None,
+                        individual_results: vec![],
+                    };
+                    total_passed += result.passed;
+                    total_failed += result.failed;
+                    total_skipped += result.skipped;
+                    total_cached += 1;
+                    results.push(result);
+                    continue;
+                }
+            }
+        }
+
         if !quiet && !options.list && !options.list_ignored {
             println!("Running: {}", path.display());
         }
@@ -693,6 +723,12 @@ fn execute_test_files(
 
         let failed = result.failed > 0 || result.error.is_some();
         let memory_abort = result.error.as_ref().is_some_and(|e| e.contains("MEMORY LIMIT"));
+
+        // Record result in cache
+        if use_cache && !list_mode {
+            result_cache.record(path, result.passed, result.failed, result.skipped);
+        }
+
         results.push(result);
 
         // Always abort on memory limit — continuing would just OOM the system.
@@ -721,6 +757,14 @@ fn execute_test_files(
         total_skipped,
         total_ignored
     );
+
+    // Save result cache and print skip summary
+    if use_cache && !list_mode {
+        result_cache.save();
+        if total_cached > 0 && !quiet {
+            println!("Skipped {} unchanged test(s) (cached)", total_cached);
+        }
+    }
 
     (results, total_passed, total_failed, total_skipped, total_ignored)
 }

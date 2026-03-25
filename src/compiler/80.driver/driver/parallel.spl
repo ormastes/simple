@@ -2,7 +2,14 @@
 #
 # Dependency-aware parallel compilation using work queues.
 # Respects module dependency order while maximizing parallelism.
+# Uses process-based parallelism (rt_process_spawn_async) to avoid
+# thread-safety issues with global compiler state.
 
+extern fn spl_thread_cpu_count() -> i64
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
 
 # ============================================================================
 # Configuration
@@ -22,6 +29,17 @@ impl ParallelBuildConfig:
     static fn single_threaded() -> ParallelBuildConfig:
         ParallelBuildConfig(num_threads: 1, parallel_threshold: 999,
                             deterministic: true, verbose: false)
+
+    fn effective_threads() -> i64:
+        """Resolve num_threads: 0 means auto-detect from CPU count, capped at 8."""
+        if self.num_threads > 0:
+            return self.num_threads
+        val cpus = spl_thread_cpu_count()
+        if cpus < 1:
+            return 4
+        if cpus > 8:
+            return 8
+        cpus
 
 # ============================================================================
 # Build Units and Dependency Graph
@@ -261,39 +279,191 @@ impl ParallelBuilder:
                             skipped: self.stats.skipped,
                             parallel_batches: self.stats.parallel_batches)
         else:
-            # Parallel build: process ready units in batches
-            # Uses rayon FFI for actual parallelism
+            # Parallel build: batch-concurrent execution
+            val max_workers = self.config.effective_threads()
+            if self.config.verbose:
+                print "[PARALLEL] batch-concurrent mode, {max_workers} workers"
+
             while not self.graph.is_complete():
                 val ready = self.graph.ready_units()
                 if ready.len() == 0:
-                    break   # Deadlock or all done
+                    break
 
                 self.stats = BuildStats(total_units: self.stats.total_units,
                     completed: self.stats.completed, failed: self.stats.failed,
                     skipped: self.stats.skipped,
                     parallel_batches: self.stats.parallel_batches + 1)
 
-                # Process batch (sequential for now; parallel via rayon FFI in future)
-                for unit in ready:
-                    self.graph.mark_in_progress(unit.id)
-                    val result = compile_fn(unit.path)
-                    match result:
-                        case Ok(output):
-                            self.graph.mark_completed(unit.id, Some(output))
-                            outputs = outputs.push(output)
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed + 1,
-                                failed: self.stats.failed,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
-                        case Err(msg):
-                            self.graph.mark_failed(unit.id, msg)
-                            errors = errors.push((unit.path, msg))
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed,
-                                failed: self.stats.failed + 1,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
+                # Process batch in chunks of max_workers
+                var batch_idx: i64 = 0
+                while batch_idx < ready.len():
+                    var chunk_end = batch_idx + max_workers
+                    if chunk_end > ready.len():
+                        chunk_end = ready.len()
+
+                    # Mark chunk units in-progress
+                    var chunk_idx = batch_idx
+                    while chunk_idx < chunk_end:
+                        self.graph.mark_in_progress(ready[chunk_idx].id)
+                        chunk_idx = chunk_idx + 1
+
+                    # Execute chunk: compile each unit
+                    chunk_idx = batch_idx
+                    while chunk_idx < chunk_end:
+                        val unit = ready[chunk_idx]
+                        val result = compile_fn(unit.path)
+                        match result:
+                            case Ok(output):
+                                self.graph.mark_completed(unit.id, Some(output))
+                                outputs = outputs.push(output)
+                                self.stats = BuildStats(total_units: self.stats.total_units,
+                                    completed: self.stats.completed + 1,
+                                    failed: self.stats.failed,
+                                    skipped: self.stats.skipped,
+                                    parallel_batches: self.stats.parallel_batches)
+                            case Err(msg):
+                                self.graph.mark_failed(unit.id, msg)
+                                errors = errors.push((unit.path, msg))
+                                self.stats = BuildStats(total_units: self.stats.total_units,
+                                    completed: self.stats.completed,
+                                    failed: self.stats.failed + 1,
+                                    skipped: self.stats.skipped,
+                                    parallel_batches: self.stats.parallel_batches)
+                        chunk_idx = chunk_idx + 1
+
+                    batch_idx = chunk_end
+
+        BuildResult(success: not self.graph.has_failures(),
+                    stats: self.stats, errors: errors, outputs: outputs)
+
+    me build_parallel(spawn_fn: any, collect_fn: any) -> BuildResult:
+        """Execute the build using process-based parallelism.
+
+        spawn_fn(path: text) -> i64:
+            Launches a subprocess to compile the given module path.
+            Returns a process ID (pid), or -1 on spawn failure.
+
+        collect_fn(exit_code: i64, path: text) -> Result<text, text>:
+            Called after the subprocess finishes. Receives exit code and
+            module path. Returns Ok(output_path) or Err(error_message).
+            The process is already reaped; read output files here.
+
+        Units are spawned up to max_workers concurrently. When a process
+        finishes, newly ready units are spawned immediately, keeping
+        the worker pool saturated.
+        """
+        val total = self.graph.units.len()
+        val max_workers = self.config.effective_threads()
+        self.stats = BuildStats(total_units: total, completed: 0, failed: 0,
+                                skipped: 0, parallel_batches: 0)
+        var errors: [(text, text)] = []
+        var outputs: [text] = []
+
+        if self.config.verbose:
+            print "[PARALLEL] process-parallel mode, {max_workers} workers, {total} units"
+
+        # pid -> unit_id mapping for in-flight processes
+        var in_flight_pid: {i64: i64} = {}
+        var in_flight_path: {i64: text} = {}
+
+        while not self.graph.is_complete():
+            # Fill worker slots with ready units
+            var spawned_any = false
+            while in_flight_pid.len() < max_workers:
+                val ready = self.graph.ready_units()
+                if ready.len() == 0:
+                    break
+                val unit = ready[0]
+
+                # Check dependency failures
+                var dep_failed = false
+                for dep_id in unit.dependencies:
+                    if self.graph.units.contains_key(dep_id):
+                        match self.graph.units[dep_id].status:
+                            case Failed(_): dep_failed = true
+                            case _: ()
+                if dep_failed:
+                    self.graph.mark_failed(unit.id, "Dependency failed")
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                    continue
+
+                self.graph.mark_in_progress(unit.id)
+                val pid = spawn_fn(unit.path)
+                if pid < 0:
+                    self.graph.mark_failed(unit.id, "Failed to spawn compilation process")
+                    errors = errors.push((unit.path, "Failed to spawn compilation process"))
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                    continue
+
+                in_flight_pid[pid] = unit.id
+                in_flight_path[pid] = unit.path
+                spawned_any = true
+                if self.config.verbose:
+                    print "[PARALLEL] spawned pid={pid} for {unit.path}"
+
+            # If nothing in-flight and nothing ready, we're stuck
+            if in_flight_pid.len() == 0:
+                break
+
+            # Poll in-flight processes: try each with 1ms timeout
+            var finished_pid: i64 = -1
+            var finished_exit_code: i64 = -1
+            while finished_pid < 0:
+                for (pid, _) in in_flight_pid:
+                    val exit_code = rt_process_wait(pid, 1)
+                    if exit_code != -2:
+                        finished_pid = pid
+                        finished_exit_code = exit_code
+                        break
+
+            # Collect result from finished process
+            val unit_id = in_flight_pid[finished_pid]
+            val unit_path = in_flight_path[finished_pid]
+            in_flight_pid.remove(finished_pid)
+            in_flight_path.remove(finished_pid)
+
+            val result = collect_fn(finished_exit_code, unit_path)
+            match result:
+                case Ok(output):
+                    self.graph.mark_completed(unit_id, Some(output))
+                    outputs = outputs.push(output)
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed + 1,
+                        failed: self.stats.failed,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                    if self.config.verbose:
+                        print "[PARALLEL] completed {unit_path}"
+                case Err(msg):
+                    self.graph.mark_failed(unit_id, msg)
+                    errors = errors.push((unit_path, msg))
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                    if self.config.verbose:
+                        print "[PARALLEL] failed {unit_path}: {msg}"
+
+            self.stats = BuildStats(total_units: self.stats.total_units,
+                completed: self.stats.completed, failed: self.stats.failed,
+                skipped: self.stats.skipped,
+                parallel_batches: self.stats.parallel_batches + 1)
+
+        # Drain remaining in-flight processes on early exit
+        for (pid, unit_id) in in_flight_pid:
+            val unit_path = in_flight_path[pid]
+            rt_process_kill(pid)
+            self.graph.mark_failed(unit_id, "Build cancelled")
+            errors = errors.push((unit_path, "Build cancelled"))
 
         BuildResult(success: not self.graph.has_failures(),
                     stats: self.stats, errors: errors, outputs: outputs)

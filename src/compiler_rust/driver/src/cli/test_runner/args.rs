@@ -174,7 +174,11 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     options.safe_mode_timeout = args[i].parse().unwrap_or(60);
                 }
             }
-            // Parallel execution options
+            // Parallel execution options (parallel is default; --sequential to disable)
+            "--sequential" | "--seq" => {
+                options.parallel = false;
+                options.safe_mode = false;
+            }
             "--parallel" | "-p" => {
                 options.parallel = true;
                 options.safe_mode = true; // Parallel requires safe mode

@@ -5,12 +5,19 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::runtime_to_value;
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    /// Map of spawned child processes by PID for rt_process_spawn_async/rt_process_wait
+    static ref SPAWNED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
+}
 use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
-    rt_platform_name as ffi_platform_name,
-    rt_term_enable_ansi as ffi_term_enable_ansi,
+    rt_platform_name as ffi_platform_name, rt_term_enable_ansi as ffi_term_enable_ansi,
 };
 use simple_runtime::value::ffi::config::{
     rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
@@ -498,6 +505,93 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
                 Value::Str("Process timed out".to_string()),
                 Value::Int(-1),
             ]))
+        }
+    }
+}
+
+/// Spawn a process asynchronously and return its PID
+///
+/// Callable from Simple as: `rt_process_spawn_async(cmd, args)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [cmd: String, args: List<String>]
+///
+/// # Returns
+/// * Int - process ID (PID), or -1 on failure
+pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_process_spawn_async requires 2 arguments (cmd, args)",
+        ));
+    }
+
+    let cmd = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_process_spawn_async: cmd must be a string")),
+    };
+
+    let cmd_args: Vec<String> = match &args[1] {
+        Value::Array(arr) => {
+            let mut v = Vec::new();
+            for item in arr.iter() {
+                if let Value::Str(s) = item {
+                    v.push(s.clone());
+                }
+            }
+            v
+        }
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_spawn_async: args must be an array of strings",
+            ))
+        }
+    };
+
+    match std::process::Command::new(&cmd)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            let pid = child.id() as i64;
+            // Store the child process for later wait
+            SPAWNED_PROCESSES.lock().unwrap().insert(pid, child);
+            Ok(Value::Int(pid))
+        }
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+/// Wait for a spawned process to complete
+///
+/// Callable from Simple as: `rt_process_wait(pid)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [pid: Int]
+///
+/// # Returns
+/// * Int - exit code, or -1 on failure
+pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_process_wait requires 1 argument (pid)"));
+    }
+
+    let pid = match &args[0] {
+        Value::Int(n) => *n,
+        _ => return Err(CompileError::runtime("rt_process_wait: pid must be an integer")),
+    };
+
+    let mut processes = SPAWNED_PROCESSES.lock().unwrap();
+    match processes.remove(&pid) {
+        Some(mut child) => match child.wait() {
+            Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
+            Err(_) => Ok(Value::Int(-1)),
+        },
+        None => {
+            // Process not found in our map - may have already been waited on
+            Ok(Value::Int(-1))
         }
     }
 }

@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-03-25 02:15:04
+**Generated:** 2026-03-25 11:14:44
 **Total Tests:** 92
 **Status:** ⚠️ 12 FAILED
 
@@ -63,10 +63,19 @@
 
 ---
 
-### 🔴 stub_impl_spec
+### 🔴 comment_only_spec
 
-**File:** `test/unit/compiler/lint/stub_impl_spec.spl`
-**Category:** Unit
+**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 sdn_minimal_spec
+
+**File:** `test/tmp/sdn_minimal_spec.spl`
+**Category:** Unknown
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -81,6 +90,24 @@
 
 ---
 
+### 🔴 mat4_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 loss_nograd_blocks_spec
+
+**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
 ### 🔴 gpu_kernel_launch_syntax_spec
 
 **File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
@@ -90,18 +117,18 @@
 
 ---
 
-### 🔴 comment_only_spec
+### 🔴 ids_spec
 
-**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
-**Category:** Unknown
+**File:** `test/unit/lib/engine/ids_spec.spl`
+**Category:** Unit
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
 ---
 
-### 🔴 mat4_spec
+### 🔴 fixed_size_edge_cases_spec
 
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
 **Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
@@ -117,43 +144,10 @@
 
 ---
 
-### 🔴 sdn_minimal_spec
+### 🔴 stub_impl_spec
 
-**File:** `test/tmp/sdn_minimal_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 ids_spec
-
-**File:** `test/unit/lib/engine/ids_spec.spl`
+**File:** `test/unit/compiler/lint/stub_impl_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-25T02:15:04.492344120+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-failed to read test/unit/lib/engine/ids_spec.spl: No such file or directory (os error 2)
-Location: test/unit/lib/engine/ids_spec.spl
-```
-
----
-
-### 🔴 fixed_size_edge_cases_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 loss_nograd_blocks_spec
-
-**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
-**Category:** Unknown
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -171,7 +165,7 @@ Location: test/unit/lib/engine/ids_spec.spl
 
 1. **type_conversion_spec** - 
 2. **tensor_bridge_spec** - 
-3. **stub_impl_spec** - 
-4. **fixed_size_arrays_spec** - 
-5. **gpu_kernel_launch_syntax_spec** - 
+3. **comment_only_spec** - 
+4. **sdn_minimal_spec** - 
+5. **fixed_size_arrays_spec** - 
 

@@ -22,9 +22,7 @@ pub(super) fn is_bare_bool(ty: &Type) -> bool {
 
 /// Numeric primitive types eligible for the pure-math-function exemption.
 /// `bool` is intentionally excluded — it has its own `bare_bool` lint.
-const MATH_PRIMITIVES: &[&str] = &[
-    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
-];
+const MATH_PRIMITIVES: &[&str] = &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"];
 
 /// Check if a type is a bare numeric primitive (excludes `bool`).
 pub(super) fn is_math_primitive(ty: &Type) -> bool {

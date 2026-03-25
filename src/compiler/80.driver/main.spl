@@ -31,6 +31,7 @@ struct CliArgs:
     input_files: [text]
     output_file: text?
     optimize: bool
+    opt_level: i64?
     debug_info: bool
     verbose: bool
     log_level: i64
@@ -49,6 +50,7 @@ struct CliArgs:
             input_files: [],
             output_file: nil,
             optimize: false,
+            opt_level: nil,
             debug_info: true,
             verbose: false,
             log_level: 4,
@@ -59,16 +61,18 @@ struct CliArgs:
         args
 
     fn to_options(self) -> CompileOptions:
-        CompileOptions(
-            mode: self.mode,
-            input_files: self.input_files,
-            output_file: self.output_file,
-            optimize: self.optimize,
-            debug_info: self.debug_info,
-            verbose: self.verbose,
-            log_level: self.log_level,
-            profile: self.profile
-        )
+        var opts = CompileOptions.default()
+        opts.mode = self.mode
+        opts.input_files = self.input_files
+        opts.output_file = self.output_file
+        opts.optimize = self.optimize
+        opts.opt_level = self.opt_level
+        opts.debug_info = self.debug_info
+        opts.verbose = self.verbose
+        opts.log_level = self.log_level
+        opts.profile = self.profile
+        opts.release = self.optimize or self.profile == "prod"
+        opts
 
 # ------------------------------------------------------------------------------
 # Argument Parser
@@ -164,6 +168,21 @@ class ArgParser:
             case "verbose" | "v":
                 result.verbose = true
                 return Ok(result)
+            case "O0":
+                result.opt_level = Some(0)
+                return Ok(result)
+            case "O1":
+                result.opt_level = Some(1)
+                result.optimize = true
+                return Ok(result)
+            case "O2":
+                result.opt_level = Some(2)
+                result.optimize = true
+                return Ok(result)
+            case "O3":
+                result.opt_level = Some(3)
+                result.optimize = true
+                return Ok(result)
             case "check":
                 result.mode = CompileMode.Check
                 return Ok(result)
@@ -205,6 +224,17 @@ class ArgParser:
                 if level.is_none():
                     return Err("Invalid log level: {value}")
                 result.log_level = level.unwrap()
+
+            case "opt-level":
+                val level = value.parse_int()
+                if level.is_none():
+                    return Err("Invalid optimization level: {value}")
+                val lv = level.unwrap()
+                if lv < 0 or lv > 3:
+                    return Err("Optimization level must be 0-3, got: {value}")
+                result.opt_level = Some(lv)
+                if lv > 0:
+                    result.optimize = true
 
             case "profile" | "p":
                 result.profile = value
@@ -297,7 +327,9 @@ fn print_help():
     print ""
     print "Options:"
     print "  -o, --output=FILE   Output file (for --aot)"
-    print "  -O, --optimize      Enable optimizations"
+    print "  -O, --optimize      Enable optimizations (default: speed)"
+    print "  --opt-level=N       Optimization level: 0=none, 1=size, 2=speed, 3=aggressive"
+    print "  --O0/--O1/--O2/--O3 Short optimization level flags"
     print "  -g, --debug         Include debug info (default)"
     print "  --no-debug          Exclude debug info"
     print "  -v, --verbose       Verbose output"
@@ -389,6 +421,22 @@ fn main() -> i32:
             cli_args.mode = CompileMode.from_text("sdn").unwrap()
         elif arg == "-O" or arg == "--optimize":
             cli_args.optimize = true
+        elif arg == "--O0":
+            cli_args.opt_level = Some(0)
+        elif arg == "--O1":
+            cli_args.opt_level = Some(1)
+            cli_args.optimize = true
+        elif arg == "--O2":
+            cli_args.opt_level = Some(2)
+            cli_args.optimize = true
+        elif arg == "--O3":
+            cli_args.opt_level = Some(3)
+            cli_args.optimize = true
+        elif arg.starts_with("--opt-level="):
+            val level_str = arg.slice(12, arg.len())
+            val parsed = level_str.parse_int()
+            if parsed.?:
+                cli_args.opt_level = Some(parsed.unwrap())
         elif arg == "-g" or arg == "--debug":
             cli_args.debug_info = true
         elif arg == "--no-debug":
@@ -448,6 +496,7 @@ fn main() -> i32:
     options.input_files = cli_args.input_files
     options.output_file = cli_args.output_file
     options.optimize = cli_args.optimize
+    options.opt_level = cli_args.opt_level
     options.release = cli_args.optimize or cli_args.profile == "prod"
     options.debug_info = cli_args.debug_info
     options.verbose = cli_args.verbose

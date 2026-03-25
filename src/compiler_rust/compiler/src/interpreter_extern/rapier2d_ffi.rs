@@ -142,10 +142,7 @@ fn world_body_aabb(body: &BodyState, collider: &ColliderState) -> Aabb {
             min_y: center_y - half_height,
             max_y: center_y + half_height,
         },
-        ColliderShape::Capsule {
-            half_height,
-            radius,
-        } => Aabb {
+        ColliderShape::Capsule { half_height, radius } => Aabb {
             min_x: center_x - radius,
             max_x: center_x + radius,
             min_y: center_y - half_height - radius,
@@ -176,7 +173,12 @@ fn aabb_overlap(a: Aabb, b: Aabb) -> Option<(f64, f64, f64, f64)> {
     let overlap_x = (a.max_x.min(b.max_x) - a.min_x.max(b.min_x)).max(0.0);
     let overlap_y = (a.max_y.min(b.max_y) - a.min_y.max(b.min_y)).max(0.0);
     if overlap_x > 0.0 && overlap_y > 0.0 {
-        Some((overlap_x, overlap_y, (a.min_x + a.max_x) * 0.5, (a.min_y + a.max_y) * 0.5))
+        Some((
+            overlap_x,
+            overlap_y,
+            (a.min_x + a.max_x) * 0.5,
+            (a.min_y + a.max_y) * 0.5,
+        ))
     } else {
         None
     }
@@ -184,7 +186,8 @@ fn aabb_overlap(a: Aabb, b: Aabb) -> Option<(f64, f64, f64, f64)> {
 
 fn compute_contacts(world: &PhysicsWorldState) -> Vec<ContactRecord> {
     let mut contacts = Vec::new();
-    let collider_items: Vec<(i64, &ColliderState)> = world.colliders.iter().map(|(id, collider)| (*id, collider)).collect();
+    let collider_items: Vec<(i64, &ColliderState)> =
+        world.colliders.iter().map(|(id, collider)| (*id, collider)).collect();
     for i in 0..collider_items.len() {
         for j in (i + 1)..collider_items.len() {
             let (id_a, collider_a) = collider_items[i];
@@ -421,7 +424,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     ]));
                 }
             }
-            Ok(Value::Tuple(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]))
+            Ok(Value::Tuple(vec![
+                Value::Float(0.0),
+                Value::Float(0.0),
+                Value::Float(0.0),
+            ]))
         }
         "rt_rapier2d_body_set_position" => {
             clear_last_error();
@@ -430,7 +437,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let x = get_f64(args, 2, name)?;
             let y = get_f64(args, 3, name)?;
             let rotation = get_f64(args, 4, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.x = x;
                 body.y = y;
                 body.rotation = rotation;
@@ -451,7 +462,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     ]));
                 }
             }
-            Ok(Value::Tuple(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]))
+            Ok(Value::Tuple(vec![
+                Value::Float(0.0),
+                Value::Float(0.0),
+                Value::Float(0.0),
+            ]))
         }
         "rt_rapier2d_body_set_velocity" => {
             clear_last_error();
@@ -460,7 +475,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let vx = get_f64(args, 2, name)?;
             let vy = get_f64(args, 3, name)?;
             let angular = get_f64(args, 4, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.vx = vx;
                 body.vy = vy;
                 body.angular_velocity = angular;
@@ -474,7 +493,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let fx = get_f64(args, 2, name)?;
             let fy = get_f64(args, 3, name)?;
             let _wake_up = get_bool(args, 4, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.force_x += fx;
                 body.force_y += fy;
             }
@@ -487,7 +510,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let ix = get_f64(args, 2, name)?;
             let iy = get_f64(args, 3, name)?;
             let _wake_up = get_bool(args, 4, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.vx += ix;
                 body.vy += iy;
             }
@@ -502,7 +529,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let mass = get_f64(args, 2, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.mass = mass.max(0.001);
             }
             Ok(Value::Bool(true))
@@ -524,7 +555,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let damping = get_f64(args, 2, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.linear_damping = damping;
             }
             Ok(Value::Bool(true))
@@ -534,7 +569,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let damping = get_f64(args, 2, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.angular_damping = damping;
             }
             Ok(Value::Bool(true))
@@ -555,7 +594,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.sleeping = false;
                 return Ok(Value::Bool(true));
             }
@@ -566,7 +609,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
-            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+            if let Some(body) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.bodies.get_mut(&body_id))
+            {
                 body.sleeping = true;
                 body.vx = 0.0;
                 body.vy = 0.0;
@@ -698,14 +745,20 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let offset_x = get_f64(args, 2, name)?;
             let offset_y = get_f64(args, 3, name)?;
             let offset_rotation = get_f64(args, 4, name)?;
-            if let Some(collider) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.colliders.get_mut(&collider_id)) {
+            if let Some(collider) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.colliders.get_mut(&collider_id))
+            {
                 collider.offset_x = offset_x;
                 collider.offset_y = offset_y;
                 collider.offset_rotation = offset_rotation;
             }
             Ok(Value::Bool(true))
         }
-        "rt_rapier2d_collider_set_restitution" | "rt_rapier2d_collider_set_friction" | "rt_rapier2d_collider_set_density" => {
+        "rt_rapier2d_collider_set_restitution"
+        | "rt_rapier2d_collider_set_friction"
+        | "rt_rapier2d_collider_set_density" => {
             set_last_error("material coefficients are not modeled by the interpreter 2D physics runtime");
             Ok(Value::Bool(false))
         }
@@ -714,7 +767,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let world_id = get_i64(args, 0, name)?;
             let collider_id = get_i64(args, 1, name)?;
             let sensor = get_bool(args, 2, name)?;
-            if let Some(collider) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.colliders.get_mut(&collider_id)) {
+            if let Some(collider) = WORLDS
+                .lock()
+                .get_mut(&world_id)
+                .and_then(|world| world.colliders.get_mut(&collider_id))
+            {
                 collider.sensor = sensor;
             }
             Ok(Value::Bool(true))
@@ -731,7 +788,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "rt_rapier2d_contacts_count" => {
             clear_last_error();
             let list_id = get_i64(args, 0, name)?;
-            let count = CONTACT_LISTS.lock().get(&list_id).map(|items| items.len() as i64).unwrap_or(0);
+            let count = CONTACT_LISTS
+                .lock()
+                .get(&list_id)
+                .map(|items| items.len() as i64)
+                .unwrap_or(0);
             Ok(Value::Int(count))
         }
         "rt_rapier2d_contacts_get" => {
@@ -800,13 +861,21 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "rt_rapier2d_world_body_count" => {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
-            let count = WORLDS.lock().get(&world_id).map(|world| world.bodies.len() as i64).unwrap_or(0);
+            let count = WORLDS
+                .lock()
+                .get(&world_id)
+                .map(|world| world.bodies.len() as i64)
+                .unwrap_or(0);
             Ok(Value::Int(count))
         }
         "rt_rapier2d_world_collider_count" => {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
-            let count = WORLDS.lock().get(&world_id).map(|world| world.colliders.len() as i64).unwrap_or(0);
+            let count = WORLDS
+                .lock()
+                .get(&world_id)
+                .map(|world| world.colliders.len() as i64)
+                .unwrap_or(0);
             Ok(Value::Int(count))
         }
         "rt_rapier2d_world_joint_count" => {

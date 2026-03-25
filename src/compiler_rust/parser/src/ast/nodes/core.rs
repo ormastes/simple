@@ -874,8 +874,8 @@ pub enum BinOp {
     In,
     NotIn,
     // Pipeline
-    PipeForward,  // |> pipe forward operator
-    Parallel,     // // parallel execution (was floor division - use .fdiv() method)
+    PipeForward, // |> pipe forward operator
+    Parallel,    // // parallel execution (was floor division - use .fdiv() method)
     // Composition
     Compose,      // >> function composition: f >> g means \x: g(f(x))
     LayerConnect, // ~> ML layer composition (neural network layer connection)

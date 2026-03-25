@@ -277,8 +277,8 @@ impl Default for TestOptions {
             keep_artifacts: false,
             safe_mode: false,
             safe_mode_timeout: 120,
-            // Default: sequential (single-threaded) execution
-            // Parallel requires explicit --parallel or -p flag
+            // Default: sequential in-process with selective module cache
+            // Use --parallel for subprocess parallelism
             parallel: false,
             max_threads: 0, // Auto-detect (only used when parallel=true)
             cpu_threshold: 70,

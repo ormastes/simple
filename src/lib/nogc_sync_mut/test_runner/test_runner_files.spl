@@ -3,6 +3,7 @@
 # File discovery, filtering, shuffling, and skip feature tracking.
 
 use test_runner_types.{SkipFeatureInfo, TestExecutionMode, TestLevel, TestOptions, execution_mode_is_composite, execution_mode_target_arch}
+use app.test_runner_new.test_result_cache.{TestResultCache}
 use std.io.{path_basename}
 use std.io.{file_read, file_exists}
 use std.io.{dir_walk}
@@ -10,7 +11,7 @@ use test_manifest.{
     TestManifest, TestManifestEntry,
     MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
 }
-use test_manifest_scanner.{manifest_full_scan}
+use test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -259,7 +260,14 @@ fn save_manifest_from_discovery(base_path: text):
         dirs = ["test/"]
     else:
         dirs = [base_path]
-    val manifest = manifest_full_scan(dirs)
+    # Use incremental update when an existing manifest is available —
+    # only re-reads files whose size or mtime changed.
+    val old = manifest_load(MANIFEST_PATH)
+    var manifest = old
+    if old.entries.len() > 0:
+        manifest = manifest_incremental_update(old, dirs)
+    else:
+        manifest = manifest_full_scan(dirs)
     manifest_save(manifest, MANIFEST_PATH)
 
 # =========================================================================
@@ -488,6 +496,93 @@ fn print_skip_features(files: [text], planned_only: bool):
         print ""
 
     print "Total: {features.len()} features"
+
+# =========================================================================
+# Smart Test Ordering (Longest-First)
+# =========================================================================
+
+fn order_tests_by_duration(files: [text], cache: TestResultCache) -> [text]:
+    """Sort test files by last known duration (longest first).
+    Files with no cached duration get median estimated duration.
+    This prevents a single slow test from being a tail blocker in parallel mode."""
+    if files.len() <= 1:
+        return files
+
+    # Collect durations from cache
+    var durations: [i64] = []
+    var known_durations: [i64] = []
+    var i = 0
+    while i < files.len():
+        val path = files[i]
+        val entries = cache.entries
+        val entry = entries[path]
+        if entry.?:
+            val dur = entry.result_duration_ms
+            durations.push(dur)
+            known_durations.push(dur)
+        else:
+            durations.push(-1)
+        i = i + 1
+
+    # Compute median for files without cached duration
+    var median_duration = 500
+    if known_durations.len() > 0:
+        known_durations = _sort_i64(known_durations)
+        median_duration = known_durations[known_durations.len() / 2]
+
+    # Replace unknowns with median
+    i = 0
+    while i < durations.len():
+        if durations[i] == -1:
+            durations[i] = median_duration
+        i = i + 1
+
+    # Shell sort by duration descending (longest first)
+    var n = files.len()
+    var idx: [i64] = []
+    var j = 0
+    while j < n:
+        idx.push(j)
+        j = j + 1
+
+    var gap = n / 2
+    while gap > 0:
+        i = gap
+        while i < n:
+            val tmp_idx = idx[i]
+            val tmp_dur = durations[tmp_idx]
+            var k = i
+            while k >= gap and durations[idx[k - gap]] < tmp_dur:
+                idx[k] = idx[k - gap]
+                k = k - gap
+            idx[k] = tmp_idx
+            i = i + 1
+        gap = gap / 2
+
+    var result: [text] = []
+    var k = 0
+    while k < n:
+        result.push(files[idx[k]])
+        k = k + 1
+    result
+
+fn _sort_i64(arr: [i64]) -> [i64]:
+    """Simple shell sort for i64 array (ascending)."""
+    var n = arr.len()
+    var result = arr
+    var gap = n / 2
+    while gap > 0:
+        var i = gap
+        while i < n:
+            val tmp = result[i]
+            var k = i
+            while k >= gap and result[k - gap] > tmp:
+                result[k] = result[k - gap]
+                k = k - gap
+            result[k] = tmp
+            i = i + 1
+        gap = gap / 2
+    result
 
 # =========================================================================
 # Discovery Summary / List Mode
