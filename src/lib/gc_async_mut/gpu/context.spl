@@ -6,6 +6,9 @@ use std.gpu.device.{GpuBackend, Gpu, detect_backends, preferred_backend, gpu_cud
 use std.gpu.memory.{GpuArray, gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros}
 use std.torch.{TorchStream}
 use std.gpu.{GpuModule, GpuLaunchConfig, GpuError, gpu_launch}
+use std.gpu.graphics.{GpuTextureDesc, GpuTexture, GpuRenderPassDesc, GpuRenderPass, GpuPipelineDesc, GpuGraphicsPipeline, GpuSwapchainDesc, GpuSwapchain, GpuFramebuffer, GpuFormat, GpuLoadOp, GpuStoreOp, GpuBlendMode, GpuTopology}
+use std.io.vulkan_ffi.{rt_vulkan_create_render_pass, rt_vulkan_create_graphics_pipeline, rt_vulkan_create_image, rt_vulkan_destroy_image, rt_vulkan_create_swapchain, rt_vulkan_create_framebuffer, rt_vulkan_begin_render_pass_gfx, rt_vulkan_end_render_pass_gfx, rt_vulkan_bind_graphics_pipeline, rt_vulkan_draw_indexed, rt_vulkan_present}
+use std.io.metal_ffi.{rt_metal_create_texture, rt_metal_free_texture, rt_metal_begin_render_pass, rt_metal_end_render_pass, rt_metal_draw_indexed, rt_metal_present, rt_metal_create_swapchain}
 
 # ============================================================================
 # Context Type
@@ -225,6 +228,118 @@ class Context:
             case nil:
                 ()
 
+    # ========================================================================
+    # Graphics Operations
+    # ========================================================================
+
+    me create_texture(desc: GpuTextureDesc) -> GpuTexture:
+        # Create a GPU texture. Only Vulkan and Metal support graphics.
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val format_i = _gpu_format_to_i64(desc.format)
+                val usage_i = 0
+                val h = rt_vulkan_create_image(self.device.device_id, desc.width, desc.height, format_i, usage_i)
+                GpuTexture(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case GpuBackend.Metal:
+                val format_i = _gpu_format_to_i64(desc.format)
+                val h = rt_metal_create_texture(self.device.device_id, desc.width, desc.height, format_i)
+                GpuTexture(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case _:
+                GpuTexture(handle: 0, width: 0, height: 0, format: desc.format)
+
+    me destroy_texture(texture: GpuTexture):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_destroy_image(texture.handle)
+            case GpuBackend.Metal:
+                rt_metal_free_texture(texture.handle)
+            case _:
+                pass_do_nothing
+
+    me create_render_pass(desc: GpuRenderPassDesc) -> GpuRenderPass:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val cf = _gpu_format_to_i64(desc.color_format)
+                val df = if desc.has_depth: _gpu_format_to_i64(desc.depth_format) else: 0
+                val lo = _load_op_to_i64(desc.load_op)
+                val so = _store_op_to_i64(desc.store_op)
+                val h = rt_vulkan_create_render_pass(self.device.device_id, cf, df, lo, so)
+                GpuRenderPass(handle: h)
+            case _:
+                GpuRenderPass(handle: 0)
+
+    me create_graphics_pipeline(desc: GpuPipelineDesc) -> GpuGraphicsPipeline:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val h = rt_vulkan_create_graphics_pipeline(self.device.device_id, desc.vertex_shader.handle, desc.fragment_shader.handle, desc.render_pass.handle, _blend_mode_to_i64(desc.blend_mode), _topology_to_i64(desc.topology))
+                GpuGraphicsPipeline(handle: h)
+            case _:
+                GpuGraphicsPipeline(handle: 0)
+
+    me create_swapchain(desc: GpuSwapchainDesc) -> GpuSwapchain:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val f = _gpu_format_to_i64(desc.format)
+                val vs = if desc.vsync: 1 else: 0
+                val h = rt_vulkan_create_swapchain(self.device.device_id, desc.window_handle, desc.width, desc.height, f, vs)
+                GpuSwapchain(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case GpuBackend.Metal:
+                val h = rt_metal_create_swapchain(self.device.device_id, desc.window_handle, desc.width, desc.height)
+                GpuSwapchain(handle: h, width: desc.width, height: desc.height, format: desc.format)
+            case _:
+                GpuSwapchain(handle: 0, width: 0, height: 0, format: desc.format)
+
+    me create_framebuffer(render_pass: GpuRenderPass, texture: GpuTexture) -> GpuFramebuffer:
+        match self.backend:
+            case GpuBackend.Vulkan:
+                val h = rt_vulkan_create_framebuffer(self.device.device_id, render_pass.handle, texture.handle, texture.width, texture.height)
+                GpuFramebuffer(handle: h, width: texture.width, height: texture.height)
+            case _:
+                GpuFramebuffer(handle: 0, width: 0, height: 0)
+
+    me begin_render_pass(render_pass: GpuRenderPass, fb: GpuFramebuffer, clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_begin_render_pass_gfx(0, render_pass.handle, fb.handle, clear_r, clear_g, clear_b, clear_a)
+            case GpuBackend.Metal:
+                rt_metal_begin_render_pass(0, fb.handle, clear_r, clear_g, clear_b, clear_a)
+            case _:
+                pass_do_nothing
+
+    me end_render_pass():
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_end_render_pass_gfx(0)
+            case GpuBackend.Metal:
+                rt_metal_end_render_pass(0)
+            case _:
+                pass_do_nothing
+
+    me bind_pipeline(pipeline: GpuGraphicsPipeline):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_bind_graphics_pipeline(0, pipeline.handle)
+            case _:
+                pass_do_nothing
+
+    me draw_indexed(index_count: i64):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_draw_indexed(0, index_count)
+            case GpuBackend.Metal:
+                rt_metal_draw_indexed(0, index_count, 0)
+            case _:
+                pass_do_nothing
+
+    me present(swapchain: GpuSwapchain):
+        match self.backend:
+            case GpuBackend.Vulkan:
+                rt_vulkan_present(swapchain.handle, 0)
+            case GpuBackend.Metal:
+                rt_metal_present(swapchain.handle)
+            case _:
+                pass_do_nothing
+
 # ============================================================================
 # Config Integration
 # ============================================================================
@@ -251,6 +366,45 @@ fn create_context_from_config() -> Context:
             Context.new(backend: GpuBackend.None, device: -1)
         case Device.CUDA(id):
             Context.new(backend: GpuBackend.Cuda, device: id)
+
+# ============================================================================
+# Graphics Format Conversion Helpers
+# ============================================================================
+
+fn _gpu_format_to_i64(format: GpuFormat) -> i64:
+    match format:
+        case RGBA8: 0
+        case BGRA8: 1
+        case RGB8: 2
+        case R8: 3
+        case Depth32F: 4
+        case Depth24Stencil8: 5
+
+fn _load_op_to_i64(op: GpuLoadOp) -> i64:
+    match op:
+        case Clear: 0
+        case Load: 1
+        case DontCare: 2
+
+fn _store_op_to_i64(op: GpuStoreOp) -> i64:
+    match op:
+        case Store: 0
+        case DontCare: 1
+
+fn _blend_mode_to_i64(mode: GpuBlendMode) -> i64:
+    match mode:
+        case Opaque: 0
+        case AlphaBlend: 1
+        case Additive: 2
+        case Multiply: 3
+
+fn _topology_to_i64(topo: GpuTopology) -> i64:
+    match topo:
+        case TriangleList: 0
+        case TriangleStrip: 1
+        case LineList: 2
+        case LineStrip: 3
+        case PointList: 4
 
 # ============================================================================
 # Exports

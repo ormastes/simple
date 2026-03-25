@@ -1,0 +1,297 @@
+#![allow(primitive_api)]
+# Forward 3D Renderer — Software Rasterizer with Depth Buffer
+#
+# Walks a 3D scene graph, projects vertices through MVP pipeline,
+# rasterizes triangles with depth testing, applies Phong shading.
+#
+# Usage:
+#   var renderer = ForwardRenderer3D.create(320, 240)
+#   renderer.clear()
+#   val stats = renderer.render_scene(nodes, components, camera_id)
+#   val pixels = renderer.get_pixels()
+
+use std.common.engine.color.{EngineColor}
+use std.common.engine.math3d.{Vec3, Vec4, Mat4, Transform3D}
+use std.common.engine.units.{Angle}
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.render.types.{DrawStats}
+use std.nogc_sync_mut.engine.component.mesh.{Vertex3D, MeshData, LightData}
+use std.nogc_sync_mut.engine.render.material3d.{Material3D, MaterialType3D}
+use std.nogc_sync_mut.engine.component.camera3d.{Camera3DData}
+use std.nogc_sync_mut.engine.component.registry3d.{Component3D, ComponentRegistry3D}
+use std.nogc_sync_mut.engine.scene.node3d.{Node3D, NodeStore3D, get_world_transform_3d}
+
+# Light with resolved world-space transform
+class LightInstance:
+    data: LightData
+    world_position: Vec3
+    world_direction: Vec3
+
+# Projected screen-space vertex
+class ScreenVertex:
+    sx: f64
+    sy: f64
+    depth: f64
+    color: EngineColor
+
+class ForwardRenderer3D:
+    width: i64
+    height: i64
+    pixels: [i64]
+    depth: [f64]
+    clear_color: EngineColor
+    stats: DrawStats
+
+impl ForwardRenderer3D:
+    static fn create(width: i64, height: i64) -> ForwardRenderer3D:
+        val size = width * height
+        var px: [i64] = []
+        var dp: [f64] = []
+        var i = 0
+        while i < size:
+            px.push(0)
+            dp.push(1.0)
+            i = i + 1
+        ForwardRenderer3D(
+            width: width,
+            height: height,
+            pixels: px,
+            depth: dp,
+            clear_color: EngineColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0),
+            stats: DrawStats.zero()
+        )
+
+    me clear():
+        val size = self.width * self.height
+        val rgba = self.clear_color.to_rgba8()
+        val packed = rgba.r * 16777216 + rgba.g * 65536 + rgba.b * 256 + rgba.a
+        var i = 0
+        while i < size:
+            self.pixels[i] = packed
+            self.depth[i] = 1.0
+            i = i + 1
+
+    me resize(width: i64, height: i64):
+        self.width = width
+        self.height = height
+        val size = width * height
+        var px: [i64] = []
+        var dp: [f64] = []
+        var i = 0
+        while i < size:
+            px.push(0)
+            dp.push(1.0)
+            i = i + 1
+        self.pixels = px
+        self.depth = dp
+
+    fn get_pixels() -> [i64]:
+        self.pixels
+
+    fn get_stats() -> DrawStats:
+        self.stats
+
+    me render_scene(
+        nodes: NodeStore3D,
+        components: ComponentRegistry3D,
+        camera_node_id: NodeId
+    ) -> DrawStats:
+        self.stats = DrawStats.zero()
+
+        # Get camera
+        val maybe_cam = components.get_camera(camera_node_id)
+        if val Some(cam_data) = maybe_cam:
+            val cam_transform = get_world_transform_3d(nodes, camera_node_id)
+            val proj = cam_data.projection_matrix()
+            val view = cam_data.view_matrix(cam_transform)
+            val view_proj = proj.mul(view)
+
+            # Collect lights
+            var lights: [LightInstance] = []
+            val keys = components.entries.keys()
+            var k = 0
+            while k < keys.len():
+                val key = keys[k]
+                val comps = components.entries[key]
+                var ci = 0
+                while ci < comps.len():
+                    val comp = comps[ci]
+                    match comp:
+                        Component3D.Light(light_data):
+                            val li = LightInstance(
+                                data: light_data,
+                                world_position: Vec3.zero(),
+                                world_direction: light_data.direction
+                            )
+                            lights.push(li)
+                        _:
+                            pass
+                    ci = ci + 1
+                k = k + 1
+
+            # Render meshes
+            k = 0
+            while k < keys.len():
+                val key = keys[k]
+                val comps = components.entries[key]
+                var ci = 0
+                while ci < comps.len():
+                    val comp = comps[ci]
+                    match comp:
+                        Component3D.Mesh(mesh, material):
+                            val model_mat = Mat4.identity()
+                            val mvp = view_proj.mul(model_mat)
+                            self._render_mesh(mesh, material, mvp, lights)
+                        _:
+                            pass
+                    ci = ci + 1
+                k = k + 1
+
+        self.stats
+
+    me _render_mesh(mesh: MeshData, material: Material3D, mvp: Mat4, lights: [LightInstance]):
+        val tri_count = mesh.indices.len() / 3
+        var t = 0
+        while t < tri_count:
+            val i0 = mesh.indices[t * 3]
+            val i1 = mesh.indices[t * 3 + 1]
+            val i2 = mesh.indices[t * 3 + 2]
+            val v0 = mesh.vertices[i0]
+            val v1 = mesh.vertices[i1]
+            val v2 = mesh.vertices[i2]
+
+            # Shade vertices
+            val c0 = _shade_vertex(v0, material, lights)
+            val c1 = _shade_vertex(v1, material, lights)
+            val c2 = _shade_vertex(v2, material, lights)
+
+            # Project to screen space
+            val s0 = self._project_vertex(v0.position, mvp, c0)
+            val s1 = self._project_vertex(v1.position, mvp, c1)
+            val s2 = self._project_vertex(v2.position, mvp, c2)
+
+            # Rasterize with depth test
+            self._rasterize_triangle_3d(s0, s1, s2)
+            t = t + 1
+
+        self.stats = DrawStats(
+            draw_calls: self.stats.draw_calls + 1,
+            triangles: self.stats.triangles + tri_count,
+            vertices: self.stats.vertices + mesh.vertices.len()
+        )
+
+    fn _project_vertex(pos: Vec3, mvp: Mat4, color: EngineColor) -> ScreenVertex:
+        # Transform to clip space
+        val clip = mvp.transform_point(pos)
+        # NDC to screen
+        val sx = (clip.x * 0.5 + 0.5) * self.width * 1.0
+        val sy = (1.0 - (clip.y * 0.5 + 0.5)) * self.height * 1.0
+        val depth = clip.z * 0.5 + 0.5
+        ScreenVertex(sx: sx, sy: sy, depth: depth, color: color)
+
+    me _rasterize_triangle_3d(v0: ScreenVertex, v1: ScreenVertex, v2: ScreenVertex):
+        # Bounding box
+        var min_x = v0.sx
+        if v1.sx < min_x: min_x = v1.sx
+        if v2.sx < min_x: min_x = v2.sx
+        var max_x = v0.sx
+        if v1.sx > max_x: max_x = v1.sx
+        if v2.sx > max_x: max_x = v2.sx
+        var min_y = v0.sy
+        if v1.sy < min_y: min_y = v1.sy
+        if v2.sy < min_y: min_y = v2.sy
+        var max_y = v0.sy
+        if v1.sy > max_y: max_y = v1.sy
+        if v2.sy > max_y: max_y = v2.sy
+
+        # Clip to screen
+        var ix0: i64 = min_x
+        var iy0: i64 = min_y
+        var ix1: i64 = max_x
+        ix1 = ix1 + 1
+        var iy1: i64 = max_y
+        iy1 = iy1 + 1
+        if ix0 < 0: ix0 = 0
+        if iy0 < 0: iy0 = 0
+        if ix1 > self.width: ix1 = self.width
+        if iy1 > self.height: iy1 = self.height
+
+        # Edge function area for barycentric
+        val area = _edge_fn_3d(v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy)
+        if area == 0.0:
+            return
+
+        var py = iy0
+        while py < iy1:
+            val pyf = py * 1.0 + 0.5
+            var px = ix0
+            while px < ix1:
+                val pxf = px * 1.0 + 0.5
+                val e0 = _edge_fn_3d(v1.sx, v1.sy, v2.sx, v2.sy, pxf, pyf)
+                val e1 = _edge_fn_3d(v2.sx, v2.sy, v0.sx, v0.sy, pxf, pyf)
+                val e2 = _edge_fn_3d(v0.sx, v0.sy, v1.sx, v1.sy, pxf, pyf)
+                val all_pos = e0 >= 0.0 and e1 >= 0.0 and e2 >= 0.0
+                val all_neg = e0 <= 0.0 and e1 <= 0.0 and e2 <= 0.0
+                if all_pos or all_neg:
+                    # Barycentric interpolation for depth
+                    val w0 = e0 / area
+                    val w1 = e1 / area
+                    val w2 = 1.0 - w0 - w1
+                    val z = v0.depth * w0 + v1.depth * w1 + v2.depth * w2
+                    val idx = py * self.width + px
+                    # Depth test
+                    if z < self.depth[idx]:
+                        self.depth[idx] = z
+                        # Interpolate color
+                        val r = v0.color.r * w0 + v1.color.r * w1 + v2.color.r * w2
+                        val g_val = v0.color.g * w0 + v1.color.g * w1 + v2.color.g * w2
+                        val b = v0.color.b * w0 + v1.color.b * w1 + v2.color.b * w2
+                        val a = v0.color.a * w0 + v1.color.a * w1 + v2.color.a * w2
+                        val ri: i64 = r * 255.0
+                        val gi: i64 = g_val * 255.0
+                        val bi: i64 = b * 255.0
+                        val ai: i64 = a * 255.0
+                        self.pixels[idx] = ri * 16777216 + gi * 65536 + bi * 256 + ai
+                px = px + 1
+            py = py + 1
+
+fn _shade_vertex(v: Vertex3D, material: Material3D, lights: [LightInstance]) -> EngineColor:
+    # Unlit materials return albedo directly
+    match material.material_type:
+        MaterialType3D.Unlit:
+            return material.albedo
+        _:
+            pass
+
+    # Phong shading
+    val ambient_strength = 0.1
+    var total_r = material.albedo.r * ambient_strength
+    var total_g = material.albedo.g * ambient_strength
+    var total_b = material.albedo.b * ambient_strength
+
+    var li = 0
+    while li < lights.len():
+        val light = lights[li]
+        # Diffuse: N dot L
+        val n = v.normal.normalize()
+        val light_dir = light.world_direction.negate().normalize()
+        val ndotl = n.dot(light_dir)
+        var diff = ndotl
+        if diff < 0.0:
+            diff = 0.0
+        total_r = total_r + material.albedo.r * light.data.color.r * light.data.intensity * diff
+        total_g = total_g + material.albedo.g * light.data.color.g * light.data.intensity * diff
+        total_b = total_b + material.albedo.b * light.data.color.b * light.data.intensity * diff
+        li = li + 1
+
+    # Clamp
+    if total_r > 1.0:
+        total_r = 1.0
+    if total_g > 1.0:
+        total_g = 1.0
+    if total_b > 1.0:
+        total_b = 1.0
+    EngineColor(r: total_r, g: total_g, b: total_b, a: material.albedo.a)
+
+fn _edge_fn_3d(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64:
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)

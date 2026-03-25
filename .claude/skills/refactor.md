@@ -27,7 +27,7 @@ Comprehensive code quality refactoring workflow. Run all checks, fix issues, ver
 
 ### Line Duplication (5+ lines)
 ```bash
-bin/simple src/compiler/90.tools/duplicate_check/run_check.spl <dir> 5
+bin/simple src/compiler/90.tools/duplicate_check/main.spl <dir> 5
 ```
 - Fix by extracting shared helper functions
 - Use parameter objects for repeated param lists
