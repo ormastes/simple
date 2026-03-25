@@ -131,6 +131,70 @@ fn t32_add_history(command: text, result: text, session_id: text, core_id: text)
 
 var MCP_T32_NEXT_SESSION_ID: i64 = 1
 
+# --- Blocking pattern detection ---
+# Detects GUI-interactive / script-blocking PRACTICE commands that hang headless MCP
+
+fn t32_check_blocking(text_to_scan: text) -> [text]:
+    val lower = text_to_scan.to_lower()
+    var warnings: [text] = []
+    # GUI dialog blocking — hang in headless/MCP mode
+    if lower.contains("dialog.ok"):
+        warnings.push("BLOCK: DIALOG.OK waits for user click — will hang in headless/MCP mode")
+    if lower.contains("dialog.yesno"):
+        warnings.push("BLOCK: DIALOG.YESNO waits for user choice — will hang in headless/MCP mode")
+    if lower.contains("dialog.file"):
+        warnings.push("BLOCK: DIALOG.File opens file picker — will hang in headless/MCP mode")
+    if lower.contains("dialog.dir"):
+        warnings.push("BLOCK: DIALOG.Dir opens directory picker — will hang in headless/MCP mode")
+    if lower.contains("dialog.string"):
+        warnings.push("BLOCK: DIALOG.String opens text input — will hang in headless/MCP mode")
+    if lower.contains("dialog.view"):
+        warnings.push("WARN: DIALOG.view opens dialog window — may block if script waits for result")
+    # Input wait — keypress/user input
+    if lower.contains("inkey"):
+        warnings.push("BLOCK: INKEY waits for keypress — will hang in headless/MCP mode")
+    if lower.contains("enter") and not lower.contains("entry"):
+        warnings.push("BLOCK: ENTER waits for user input — will hang in headless/MCP mode")
+    # Screen wait
+    if lower.contains("screen.wait"):
+        warnings.push("BLOCK: SCREEN.WAIT waits for screen update — will hang in headless/MCP mode")
+    # Zero I/O in headless
+    if lower.contains("screen.on"):
+        warnings.push("INFO: SCREEN.ON has no effect in headless/MCP mode (display is off)")
+    if lower.contains("winpos"):
+        warnings.push("INFO: WINPOS has no effect in headless/MCP mode (no display)")
+    warnings
+
+fn t32_has_blocking(warnings: [text]) -> bool:
+    for w in warnings:
+        if w.starts_with("BLOCK:"):
+            return true
+    false
+
+fn t32_blocking_result(id: text, command: text, warnings: [text]) -> text:
+    var warn_arr = t32_SB_L()
+    var first = true
+    for w in warnings:
+        if not first:
+            warn_arr = warn_arr + ","
+        first = false
+        warn_arr = warn_arr + t32_js(w)
+    warn_arr = warn_arr + t32_SB_R()
+    var r = t32_LB()
+    r = r + t32_jp("blocked", "true")
+    r = r + "," + t32_jp("command", t32_js(command))
+    r = r + "," + t32_jp("warnings", warn_arr)
+    r = r + "," + t32_jp("hint", t32_js("Use force: \"true\" to execute anyway, or rewrite to avoid GUI-blocking commands"))
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+# Scan a CMM script file for blocking patterns
+fn t32_scan_cmm_file(path: text) -> [text]:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return []
+    t32_check_blocking(content)
+
 # --- Tool handlers ---
 
 fn handle_t32_sessions_list(id: text, body: text) -> text:
@@ -335,6 +399,18 @@ fn handle_t32_cmd_run(id: text, body: text) -> text:
     val command = t32_extract_field(body, "command")
     if command == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("command", "t32_cmd_run", "t32_cmd_run(command: \"<PRACTICE command>\")", "t32_cmd_run(command: \"Break.Set main\")"))
+    val force_str = t32_extract_field(body, "force")
+    var force = false
+    if force_str.to_lower() == "true":
+        force = true
+    # Blocking pattern detection
+    if not force:
+        val warnings = t32_check_blocking(command)
+        var warn_count: i64 = 0
+        for _w in warnings:
+            warn_count = warn_count + 1
+        if warn_count > 0 and t32_has_blocking(warnings):
+            return t32_blocking_result(id, command, warnings)
     val session_opt = t32_find_current_session()
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
@@ -348,10 +424,25 @@ fn handle_t32_cmd_run(id: text, body: text) -> text:
             if rc == -1:
                 # t32rem not found
                 return t32_make_tool_error(id, -32000, stdout.trim())
+            # Collect any info/warn-level pattern notes
+            val cmd_warnings = t32_check_blocking(command)
             var r = t32_LB()
             r = r + t32_jp("command", t32_js(command))
             r = r + "," + t32_jp("output", t32_js(stdout.trim()))
             r = r + "," + t32_jp("exit_code", str(rc))
+            var cw_count: i64 = 0
+            for _cw in cmd_warnings:
+                cw_count = cw_count + 1
+            if cw_count > 0:
+                var warn_arr = t32_SB_L()
+                var wfirst = true
+                for w in cmd_warnings:
+                    if not wfirst:
+                        warn_arr = warn_arr + ","
+                    wfirst = false
+                    warn_arr = warn_arr + t32_js(w)
+                warn_arr = warn_arr + t32_SB_R()
+                r = r + "," + t32_jp("warnings", warn_arr)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 
@@ -359,6 +450,24 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
     val script = t32_extract_field(body, "script")
     if script == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("script", "t32_cmm_run", "t32_cmm_run(script: \"<path>\")", "t32_cmm_run(script: \"scripts/init.cmm\")"))
+    val force_str = t32_extract_field(body, "force")
+    var force = false
+    if force_str.to_lower() == "true":
+        force = true
+    # Blocking pattern detection — scan script file or inline content
+    if not force:
+        var scan_text = script
+        # If script looks like a file path (no newlines, ends with .cmm), read and scan it
+        if not script.contains("\n") and not script.contains(";"):
+            val file_content = rt_file_read_text(script) ?? ""
+            if file_content != "":
+                scan_text = file_content
+        val warnings = t32_check_blocking(scan_text)
+        var warn_count: i64 = 0
+        for _w in warnings:
+            warn_count = warn_count + 1
+        if warn_count > 0 and t32_has_blocking(warnings):
+            return t32_blocking_result(id, "DO " + script, warnings)
     val wait_str = t32_extract_field(body, "wait")
     var wait = false
     if wait_str == "true":

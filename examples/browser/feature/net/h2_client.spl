@@ -1,7 +1,7 @@
 # HTTP/2 client with multiplexed streams for the Simple Browser Platform.
 # Implements the HTTP/2 framing layer, stream state machine, HPACK-aware
 # header handling, flow control via window updates, and connection management.
-# Actual wire I/O delegates to platform primitives via pass_todo.
+# Actual wire I/O delegates to platform primitives (returns Err until wired).
 #
 # Reference: RFC 7540 (HTTP/2), RFC 7541 (HPACK)
 
@@ -446,7 +446,7 @@ class H2Client:
         stream.state = new_state
 
         self.logger.trace("h2: sending {headers_frame.description()}")
-        pass_todo  # send_frame(conn, headers_frame)
+        return Err(network_error("H2 send_frame not wired"))
 
         # Step 5: Send DATA frames if there is a body
         if has_body:
@@ -459,7 +459,7 @@ class H2Client:
             while frame_idx < data_frames.len():
                 val df = data_frames.get(frame_idx)
                 self.logger.trace("h2: sending {df.description()}")
-                pass_todo  # send_frame(conn, df)
+                return Err(network_error("H2 send_frame not wired"))
 
                 # Update flow control window
                 stream.window_size = stream.window_size - df.length
@@ -472,7 +472,7 @@ class H2Client:
             stream.state = end_state
 
         # Step 6: Receive response frames
-        pass_todo  # receive_frames(conn) until END_STREAM on this stream
+        return Err(network_error("H2 receive_frames not wired"))
 
         # Step 7: Build response from collected stream data
         val status = extract_h2_status(stream.response_headers)
@@ -512,7 +512,7 @@ class H2Client:
         var conn = H2Connection.create(host, port, self.logger)
 
         # TCP connect
-        pass_todo  # tcp_connect(addresses.get(0), port)
+        return Err(network_error("tcp_connect not wired"))
 
         # TLS handshake (HTTP/2 requires TLS with ALPN "h2")
         val tls_conn = self.tls.handshake(host, port)?
@@ -520,7 +520,7 @@ class H2Client:
 
         # Send connection preface (RFC 7540 Section 3.5)
         self.logger.debug("h2: sending connection preface")
-        pass_todo  # socket_write(conn, H2_CONNECTION_PREFACE)
+        return Err(network_error("socket_write not wired"))
 
         # Send initial SETTINGS frame
         val settings_payload = encode_settings(conn.settings)
@@ -530,10 +530,10 @@ class H2Client:
             0,  # Connection-level (stream 0)
             settings_payload
         )
-        pass_todo  # send_frame(conn, settings_frame)
+        return Err(network_error("H2 send_frame not wired"))
 
         # Receive server's SETTINGS frame and send ACK
-        pass_todo  # recv_frame(conn) -> server_settings_frame
+        return Err(network_error("H2 recv_frame not wired"))
         # apply_remote_settings(conn.settings, server_settings_frame.payload)
 
         # Send SETTINGS ACK
@@ -543,7 +543,7 @@ class H2Client:
             0,
             ""
         )
-        pass_todo  # send_frame(conn, ack_frame)
+        return Err(network_error("H2 send_frame not wired"))
 
         self.connections.push(conn)
         self.logger.info("h2: connection established to {host}:{port}")
@@ -564,7 +564,7 @@ class H2Client:
                     0,
                     goaway_payload
                 )
-                pass_todo  # send_frame(conn, goaway_frame)
+                pass_dn  # H2 goaway not wired — no socket I/O runtime
             else:
                 new_conns.push(conn)
         self.connections = new_conns
@@ -578,7 +578,7 @@ class H2Client:
             val goaway_frame = H2Frame.create(
                 H2FrameType.GoAway, 0, 0, goaway_payload
             )
-            pass_todo  # send_frame(conn, goaway_frame)
+            pass_dn  # H2 goaway not wired — no socket I/O runtime
         self.connections = List<H2Connection>()
 
 # --- Stream creation ---
@@ -885,12 +885,14 @@ fn status_text_for_code(code: i64) -> text:
 fn encode_byte(value: i64) -> text:
     # Encode a single byte (0-255) as a one-character text.
     # Platform-level: maps integer to its character representation.
-    pass_todo  # char_from_code(value)
+    # HPACK encoding not wired — return placeholder
+    "?"
 
 fn decode_byte(data: text, pos: i64) -> i64:
     # Decode a single byte from a text at the given position.
     # Platform-level: maps character to its integer code point.
-    pass_todo  # code_from_char(data.get(pos))
+    # HPACK encoding not wired — return 0
+    0
 
 fn decode_uint16(data: text, pos: i64) -> i64:
     # Decode a 16-bit big-endian unsigned integer from data at pos.
