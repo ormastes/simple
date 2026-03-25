@@ -68,6 +68,10 @@ class MirToC:
             string_counter: 0
         )
 
+    me emit_unsupported_panic(message: text):
+        """Emit a hard runtime panic instead of a placeholder result."""
+        self.builder.emit(r"spl_panic(" + "\"" + escape_c_string(message) + "\"" + r");")
+
     me translate_module(module: MirModule) -> text:
         """Translate entire MIR module to C++20 source (implementation file)."""
         print "[translate_module] functions count: {module.functions.len()}"
@@ -438,39 +442,24 @@ class MirToC:
             case Nop:
                 pass_dn
 
-            # === Async/Actor (stubs) ===
+            # === Async/Actor (unsupported on C backend) ===
             case CreatePromise(dest, body, result_type):
-                eprint("ERROR: [C-backend] async operation 'CreatePromise' not supported, producing zero; use LLVM backend for async")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "(void*)0")
-                self.builder.emit_comment("CreatePromise (async stub)")
+                self.emit_unsupported_panic("C backend does not support async CreatePromise lowering")
 
             case Await(dest, promise):
-                eprint("ERROR: [C-backend] async operation 'Await' not supported, producing zero; use LLVM backend for async")
-                val dest_name = self.get_local(dest.id)
-                val promise_val = self.translate_operand(promise)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("Await (async stub)")
+                self.emit_unsupported_panic("C backend does not support async Await lowering")
 
             case Yield(value):
-                eprint("ERROR: [C-backend] async operation 'Yield' not supported, producing zero; use LLVM backend for async")
-                self.builder.emit_comment("Yield (async stub)")
+                self.emit_unsupported_panic("C backend does not support async Yield lowering")
 
             case Spawn(dest, handler, args):
-                eprint("ERROR: [C-backend] async operation 'Spawn' not supported, producing zero; use LLVM backend for async")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "(void*)0")
-                self.builder.emit_comment("Spawn (async stub)")
+                self.emit_unsupported_panic("C backend does not support async Spawn lowering")
 
             case Send(target, message):
-                eprint("ERROR: [C-backend] async operation 'Send' not supported, producing zero; use LLVM backend for async")
-                self.builder.emit_comment("Send (actor stub)")
+                self.emit_unsupported_panic("C backend does not support actor Send lowering")
 
             case Receive(dest, timeout):
-                eprint("ERROR: [C-backend] async operation 'Receive' not supported, producing zero; use LLVM backend for async")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("Receive (actor stub)")
+                self.emit_unsupported_panic("C backend does not support actor Receive lowering")
 
             # === Borrow checking ===
             case Ref(dest, borrow_kind, place):
@@ -478,151 +467,97 @@ class MirToC:
                 val place_val = self.get_local(place.local.id)
                 self.builder.emit_assign(dest_name, place_val)
 
-            # === GPU instructions (stubs) ===
+            # === GPU instructions (unsupported on C backend) ===
             case GpuKernelDef(name):
-                self.builder.emit_comment(r"GpuKernelDef: " + name + r" (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GPU kernel definitions")
             case GpuLaunch(args):
-                self.builder.emit_comment("GpuLaunch (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GPU launches")
             case GpuGlobalId(dest, dim):
-                eprint("ERROR: [C-backend] GPU operation 'GpuGlobalId' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support GpuGlobalId")
             case GpuLocalId(dest, dim):
-                eprint("ERROR: [C-backend] GPU operation 'GpuLocalId' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support GpuLocalId")
             case GpuBlockId(dest, dim):
-                eprint("ERROR: [C-backend] GPU operation 'GpuBlockId' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support GpuBlockId")
             case GpuBlockDim(dest, dim):
-                eprint("ERROR: [C-backend] GPU operation 'GpuBlockDim' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support GpuBlockDim")
             case GpuGridDim(dest, dim):
-                eprint("ERROR: [C-backend] GPU operation 'GpuGridDim' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support GpuGridDim")
             case GpuBarrier(scope):
-                eprint("ERROR: [C-backend] GPU operation 'GpuBarrier' not supported, producing zero; use CUDA backend")
-                self.builder.emit_comment("GpuBarrier (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GpuBarrier")
             case GpuMemFence(scope):
-                eprint("ERROR: [C-backend] GPU operation 'GpuMemFence' not supported, producing zero; use CUDA backend")
-                self.builder.emit_comment("GpuMemFence (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GpuMemFence")
             case GpuSharedAlloc(dest, type_, size):
-                eprint("ERROR: [C-backend] GPU operation 'GpuSharedAlloc' not supported, producing zero; use CUDA backend")
-                val slot_name = self.ensure_stack_slot(dest.id, size)
-                self.emit_pointer_assign(dest.id, slot_name)
+                self.emit_unsupported_panic("C backend does not support GpuSharedAlloc")
             case GpuAtomicOp(dest, op, ptr, value):
-                eprint("ERROR: [C-backend] GPU operation 'GpuAtomicOp' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("GpuAtomicOp (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GpuAtomicOp")
             case GpuAtomicCas(dest, ptr, expected, desired):
-                eprint("ERROR: [C-backend] GPU operation 'GpuAtomicCas' not supported, producing zero; use CUDA backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("GpuAtomicCas (requires GPU backend)")
+                self.emit_unsupported_panic("C backend does not support GpuAtomicCas")
 
-            # === VHDL instructions (stubs) ===
+            # === VHDL instructions (unsupported on C backend) ===
             case VhdlProcess(kind, body_block):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlProcess' not supported, producing zero; use VHDL backend")
-                self.builder.emit_comment("VhdlProcess (requires VHDL backend)")
+                self.emit_unsupported_panic("C backend does not support VHDL process lowering")
             case VhdlSignalAssign(target, value, delay_ns):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlSignalAssign' not supported, producing zero; use VHDL backend")
-                self.builder.emit_comment("VhdlSignalAssign (requires VHDL backend)")
+                self.emit_unsupported_panic("C backend does not support VHDL signal assignment lowering")
             case VhdlVarAssign(target, value):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlVarAssign' not supported, producing zero; use VHDL backend")
-                self.builder.emit_comment("VhdlVarAssign (requires VHDL backend)")
+                self.emit_unsupported_panic("C backend does not support VHDL variable assignment lowering")
             case VhdlPortMap(entity, instance, connections):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlPortMap' not supported, producing zero; use VHDL backend")
-                self.builder.emit_comment(r"VhdlPortMap: " + entity + r"/" + instance + r" (requires VHDL backend)")
+                self.emit_unsupported_panic("C backend does not support VHDL port maps")
             case VhdlResize(dest, operand, new_width, signed):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlResize' not supported, producing zero; use VHDL backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support VHDL resize")
             case VhdlSlice(dest, signal, hi, lo):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlSlice' not supported, producing zero; use VHDL backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support VHDL slice")
             case VhdlConcat(dest, parts):
-                eprint("Warning: [C-backend] VHDL operation 'VhdlConcat' not supported, producing zero; use VHDL backend")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
+                self.emit_unsupported_panic("C backend does not support VHDL concat")
 
-            # === SIMD instructions (stubs) ===
+            # === SIMD instructions (unsupported on C backend) ===
             case SimdAddF32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "+")
+                self.emit_unsupported_panic("C backend does not support SIMD add_f32x4")
             case SimdSubF32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "-")
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f32x4")
             case SimdMulF32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "*")
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f32x4")
             case SimdDivF32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "/")
+                self.emit_unsupported_panic("C backend does not support SIMD div_f32x4")
             case SimdFmaF32x4(dest, a, b, c):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdFmaF32x4 (stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f32x4")
             case SimdAddF32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "+")
+                self.emit_unsupported_panic("C backend does not support SIMD add_f32x8")
             case SimdSubF32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "-")
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f32x8")
             case SimdMulF32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "*")
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f32x8")
             case SimdDivF32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "/")
+                self.emit_unsupported_panic("C backend does not support SIMD div_f32x8")
             case SimdFmaF32x8(dest, a, b, c):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdFmaF32x8 (stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f32x8")
             case SimdAddF64x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "+")
+                self.emit_unsupported_panic("C backend does not support SIMD add_f64x4")
             case SimdSubF64x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "-")
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f64x4")
             case SimdMulF64x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "*")
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f64x4")
             case SimdDivF64x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "/")
+                self.emit_unsupported_panic("C backend does not support SIMD div_f64x4")
             case SimdFmaF64x4(dest, a, b, c):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdFmaF64x4 (stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f64x4")
             case SimdAddI32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "+")
+                self.emit_unsupported_panic("C backend does not support SIMD add_i32x4")
             case SimdSubI32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "-")
+                self.emit_unsupported_panic("C backend does not support SIMD sub_i32x4")
             case SimdMulI32x4(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "*")
+                self.emit_unsupported_panic("C backend does not support SIMD mul_i32x4")
             case SimdAddI32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "+")
+                self.emit_unsupported_panic("C backend does not support SIMD add_i32x8")
             case SimdSubI32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "-")
+                self.emit_unsupported_panic("C backend does not support SIMD sub_i32x8")
             case SimdMulI32x8(dest, a, b):
-                self.emit_simd_stub(dest, a, b, "*")
+                self.emit_unsupported_panic("C backend does not support SIMD mul_i32x8")
             case SimdHaddF32x4(dest, a):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdHaddF32x4 (stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD hadd_f32x4")
             case SimdHmaxF32x4(dest, a):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdHmaxF32x4 (stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD hmax_f32x4")
             case SimdHminF32x4(dest, a):
-                eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "0")
-                self.builder.emit_comment("SimdHminF32x4 (stub)")
-
-    me emit_simd_stub(dest: LocalId, a: MirOperand, b: MirOperand, op: text):
-        eprint("ERROR: [C-backend] SIMD operation not supported, producing scalar fallback zero")
-        val dest_name = self.get_local(dest.id)
-        self.builder.emit_assign(dest_name, "0")
-        self.builder.emit_comment(r"SIMD " + op + r" (scalar fallback stub)")
+                self.emit_unsupported_panic("C backend does not support SIMD hmin_f32x4")
 
     # === Terminators ===
 
@@ -672,5 +607,3 @@ class MirToC:
 # ============================================================================
 # Export
 # ============================================================================
-
-

@@ -3,10 +3,9 @@
 # matching (including wildcard certificates). Actual cryptographic operations
 # delegate to SFFI (std.crypto); this module focuses on validation logic.
 
-use examples.browser.entity.net.tls_types.(TlsConfig, CertChain, TlsVersion)
-use examples.browser.shared.error.(BrowserResult, BrowserError, network_error)
+use examples.browser.entity.net.tls_types.{TlsConfig, CertChain, TlsVersion}
+use examples.browser.shared.error.{BrowserResult, BrowserError, network_error}
 use examples.browser.shared.logging.Logger
-use std.io_runtime.time
 
 # --- TlsConnection ---
 
@@ -30,7 +29,7 @@ class TlsConnection:
 class TlsManager:
     config: TlsConfig
     logger: Logger
-    trusted_certs: List<text>
+    trusted_certs: [text]
 
     static fn new(logger: Logger, config: TlsConfig) -> TlsManager:
         TlsManager(
@@ -58,17 +57,9 @@ class TlsManager:
 
         # Determine TLS version to negotiate
         val version = negotiate_version(self.config.min_version)
-
-        # The actual handshake would use SFFI crypto primitives.
-        # Here we model the verification steps that happen during handshake.
-        pass_todo  # Actual TCP connect + ClientHello/ServerHello via std.crypto
-
-        # After handshake, we would have the server's certificate chain.
-        # For now, create a placeholder connection representing success.
-        val cipher = default_cipher(version)
-        self.logger.info("TLS handshake complete: {host}:{port} using {cipher}")
-
-        Ok(TlsConnection.create(host, port, version, cipher))
+        val version_name = format_version(version)
+        self.logger.warn("TLS handshake unavailable for {host}:{port}; std.crypto handshake wiring is not implemented")
+        Err(network_error("TLS handshake for {host}:{port} is not wired yet (wanted {version_name})"))
 
 # --- Certificate verification ---
 
@@ -85,31 +76,12 @@ fn verify_certificate(chain: CertChain, hostname: text) -> BrowserResult<()>:
         return Err(network_error("Certificate chain is empty"))
 
     # Verify leaf certificate hostname
-    val leaf_cert = chain.certs.get(0)
+    val leaf_cert = chain.certs[0]
     if not check_hostname(leaf_cert, hostname):
         return Err(network_error("Certificate hostname mismatch: expected {hostname}, got {leaf_cert}"))
 
-    # Verify none of the certs are expired
-    val now = time.now_seconds()
-    var i = 0
-    while i < chain.certs.len():
-        val cert = chain.certs.get(i)
-        # In a real implementation, we would parse the cert to extract
-        # not_before and not_after. Here we model the validation flow.
-        # Actual cert parsing would use std.cert
-        i = i + 1
-
-    # Verify chain of trust: each cert is signed by the next
-    # This requires actual cryptographic signature verification via SFFI.
-    pass_todo  # Delegate to std.crypto for signature verification
-
-    # Verify root is trusted
-    if chain.ca_certs.len() > 0:
-        val root = chain.ca_certs.get(chain.ca_certs.len() - 1)
-        # In a real implementation, check root against trusted store
-        pass_todo  # Match against trusted_certs list
-
-    Ok(())
+    # Signature and trust-chain verification are not wired yet.
+    return Err(network_error("TLS certificate signature and trust-chain verification are not wired yet"))
 
 fn check_hostname(cert_cn: text, hostname: text) -> bool:
     # Check if a certificate's CN or SAN matches the requested hostname.
@@ -186,18 +158,18 @@ fn default_cipher(version: TlsVersion) -> text:
         TlsVersion.Tls12:
             "ECDHE-RSA-AES256-GCM-SHA384"
 
-fn default_trusted_certs() -> List<text>:
+fn default_trusted_certs() -> [text]:
     # Placeholder for the system's trusted CA certificate store.
     # In a real implementation, this would load from the OS trust store
     # or a bundled CA bundle (e.g., Mozilla's certdata.txt).
-    var certs = List<text>()
-    certs.push("DigiCert Global Root G2")
-    certs.push("ISRG Root X1")
-    certs.push("Baltimore CyberTrust Root")
-    certs.push("Amazon Root CA 1")
-    certs.push("Google Trust Services - GlobalSign Root CA-R2")
-    certs.push("Sectigo RSA Domain Validation Secure Server CA")
-    certs
+    [
+        "DigiCert Global Root G2",
+        "ISRG Root X1",
+        "Baltimore CyberTrust Root",
+        "Amazon Root CA 1",
+        "Google Trust Services - GlobalSign Root CA-R2",
+        "Sectigo RSA Domain Validation Secure Server CA"
+    ]
 
 # --- Internal helpers ---
 
@@ -205,7 +177,7 @@ fn contains_char(s: text, ch: text) -> bool:
     # Check if a string contains a specific character (as a single-char string).
     var i = 0
     while i < s.len():
-        if s.get(i) == ch:
+        if s.slice(i, i + 1) == ch:
             return true
         i = i + 1
     false
