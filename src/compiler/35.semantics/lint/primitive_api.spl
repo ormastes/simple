@@ -10,6 +10,8 @@
 # - Expression-level usage of primitives
 # - Private functions/fields
 # - Code annotated with #[allow(primitive_api)]
+# - Pure math functions where all params + return are the same primitive
+#   (e.g., fn abs(x: f64) -> f64, fn max(a: i64, b: i64) -> i64)
 
 from ast import {Node, FunctionDef, StructDef, ClassDef, Type, Visibility, Parameter, Field}
 
@@ -34,6 +36,40 @@ fn is_bare_primitive(ty: Type) -> bool:
             false
         case _: false
 
+fn is_pure_math_function(func: FunctionDef) -> bool:
+    """Check if a function is a pure math helper where all params and return share the same primitive type.
+    Examples: fn abs(x: f64) -> f64, fn max(a: i64, b: i64) -> i64"""
+    # Must have at least 1 parameter and a return type
+    if func.params.len() == 0:
+        return false
+    if not func.return_type.?:
+        return false
+
+    val ret = func.return_type.unwrap()
+
+    # Return type must be a bare primitive
+    if not is_bare_primitive(ret):
+        return false
+
+    # Extract return type name
+    var ret_name = ""
+    match ret:
+        case Simple(name): ret_name = name
+        case _: return false
+
+    # All parameter types must match the return type
+    for param in func.params:
+        if not param.ty.?:
+            return false
+        val ty = param.ty.unwrap()
+        match ty:
+            case Simple(name):
+                if name != ret_name:
+                    return false
+            case _: return false
+
+    true
+
 fn check_function(func: FunctionDef) -> [LintWarning]:
     """Check a public function for bare primitive usage."""
     var warnings = []
@@ -42,6 +78,10 @@ fn check_function(func: FunctionDef) -> [LintWarning]:
     match func.visibility:
         case Public: pass
         case _: return []
+
+    # Exempt pure math functions (all params + return are same primitive)
+    if is_pure_math_function(func):
+        return []
 
     # Check parameters
     for param in func.params:

@@ -50,14 +50,43 @@ mod tests {
 
     #[test]
     fn test_public_function_with_primitive_param() {
+        // Mixed types: i64 param + text return — NOT a pure math function
         let code = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 "#;
         let diagnostics = check_code(code);
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
         assert!(diagnostics.iter().all(|d| d.level == LintLevel::Warn));
+    }
+
+    #[test]
+    fn test_pure_math_function_exempt() {
+        // All params + return are the same primitive — exempt from primitive_api
+        let code = r#"
+pub fn abs(x: f64) -> f64:
+    return x
+
+pub fn max(a: i64, b: i64) -> i64:
+    return a
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi),
+            "pure math functions should be exempt from primitive_api lint"
+        );
+    }
+
+    #[test]
+    fn test_mixed_primitive_types_not_exempt() {
+        // Param is i32 but return is i64 — different primitives, NOT exempt
+        let code = r#"
+pub fn widen(x: i32) -> i64:
+    return 0
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
     }
 
     #[test]
@@ -93,9 +122,10 @@ pub fn set_active(active: bool):
 
     #[test]
     fn test_deny_makes_error() {
+        // Mixed types so it's NOT exempt as a pure math function
         let code = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 "#;
         let diagnostics = check_code_with_deny(code);
         assert!(!diagnostics.is_empty());
@@ -243,9 +273,10 @@ primitive_api = "warn"
 
     #[test]
     fn test_lint_checker_json_export() {
+        // Mixed types so not exempt as pure math function
         let code = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 "#;
         let module = parse_code(code);
         let mut checker = LintChecker::new();

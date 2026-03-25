@@ -1,0 +1,210 @@
+#![allow(primitive_api)]
+# GPU 2D Render Pipeline
+#
+# GPU-accelerated 2D renderer using the backend-agnostic GPU abstraction.
+# Builds on gc_async_mut/gpu/graphics.spl types (GpuTexture, GpuRenderPass, etc.)
+# for hardware-accelerated sprite rendering, batched draw calls.
+#
+# Pure data orchestration layer — actual GPU calls go through Context.
+
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.engine.render.batch.{sort_commands_by_z}
+use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
+
+# GPU vertex for 2D rendering (position + UV + color)
+class GpuVertex2D:
+    pos_x: f64
+    pos_y: f64
+    uv_x: f64
+    uv_y: f64
+    color_r: f64
+    color_g: f64
+    color_b: f64
+    color_a: f64
+
+impl GpuVertex2D:
+    static fn from_pos_uv_color(px: f64, py: f64, u: f64, v: f64, color: EngineColor) -> GpuVertex2D:
+        GpuVertex2D(
+            pos_x: px, pos_y: py,
+            uv_x: u, uv_y: v,
+            color_r: color.r, color_g: color.g, color_b: color.b, color_a: color.a
+        )
+
+# A batch of quads sharing the same texture
+class SpriteBatch:
+    texture_handle: i64    # 0 = no texture (solid color)
+    vertices: [GpuVertex2D]
+    indices: [i64]
+    quad_count: i64
+
+impl SpriteBatch:
+    static fn create(tex_handle: i64) -> SpriteBatch:
+        SpriteBatch(texture_handle: tex_handle, vertices: [], indices: [], quad_count: 0)
+
+    me add_quad(x0: f64, y0: f64, x1: f64, y1: f64, u0: f64, v0: f64, u1: f64, v1: f64, color: EngineColor):
+        # Add 4 vertices and 6 indices for a quad
+        val base = self.vertices.len()
+        self.vertices.push(GpuVertex2D.from_pos_uv_color(x0, y0, u0, v0, color))
+        self.vertices.push(GpuVertex2D.from_pos_uv_color(x1, y0, u1, v0, color))
+        self.vertices.push(GpuVertex2D.from_pos_uv_color(x1, y1, u1, v1, color))
+        self.vertices.push(GpuVertex2D.from_pos_uv_color(x0, y1, u0, v1, color))
+        self.indices.push(base)
+        self.indices.push(base + 1)
+        self.indices.push(base + 2)
+        self.indices.push(base)
+        self.indices.push(base + 2)
+        self.indices.push(base + 3)
+        self.quad_count = self.quad_count + 1
+
+# GPU 2D renderer state
+class GpuRenderer2D:
+    screen_width: i64
+    screen_height: i64
+    batches: [SpriteBatch]
+    current_batch: SpriteBatch
+    stats: DrawStats
+    max_quads_per_batch: i64
+
+impl GpuRenderer2D:
+    static fn create(width: i64, height: i64) -> GpuRenderer2D:
+        GpuRenderer2D(
+            screen_width: width,
+            screen_height: height,
+            batches: [],
+            current_batch: SpriteBatch.create(0),
+            stats: DrawStats.zero(),
+            max_quads_per_batch: 1024
+        )
+
+    me resize(width: i64, height: i64):
+        self.screen_width = width
+        self.screen_height = height
+
+    me begin_frame():
+        # Reset batches for new frame
+        self.batches = []
+        self.current_batch = SpriteBatch.create(0)
+        self.stats = DrawStats.zero()
+
+    me flush_batch():
+        # Push current batch if it has quads
+        if self.current_batch.quad_count > 0:
+            self.batches.push(self.current_batch)
+            self.current_batch = SpriteBatch.create(0)
+
+    me end_frame() -> DrawStats:
+        self.flush_batch()
+        self.stats
+
+    me submit_commands(commands: RenderCommandBuffer) -> DrawStats:
+        # Sort by z and convert to GPU batches
+        self.begin_frame()
+        val sorted = sort_commands_by_z(commands.commands)
+        for cmd in sorted:
+            self._process_command(cmd)
+        self.end_frame()
+
+    me _process_command(cmd: RenderCommand):
+        match cmd:
+            case Clear(color):
+                # Clear is handled at render pass level, record for later
+                pass_do_nothing
+            case DrawRect(rect, color, z_order):
+                self._ensure_batch(0)
+                self.current_batch.add_quad(
+                    rect.x, rect.y,
+                    rect.x + rect.width, rect.y + rect.height,
+                    0.0, 0.0, 1.0, 1.0,
+                    color
+                )
+                self._check_batch_flush()
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawCircle(cx, cy, radius, color, z_order):
+                # Approximate circle as a rect for GPU (tessellation done in shader)
+                self._ensure_batch(0)
+                self.current_batch.add_quad(
+                    cx - radius, cy - radius,
+                    cx + radius, cy + radius,
+                    0.0, 0.0, 1.0, 1.0,
+                    color
+                )
+                self._check_batch_flush()
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawLine(x1, y1, x2, y2, line_width, color, z_order):
+                # Convert line to thin quad
+                self._ensure_batch(0)
+                val hw = line_width / 2.0
+                self.current_batch.add_quad(
+                    x1 - hw, y1 - hw,
+                    x2 + hw, y2 + hw,
+                    0.0, 0.0, 1.0, 1.0,
+                    color
+                )
+                self._check_batch_flush()
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawSprite(texture_id, src_rect, dst_rect, tint, z_order):
+                val tex_handle = texture_id.to_index()
+                self._ensure_batch(tex_handle)
+                # Map src_rect to UV coordinates (assuming normalized 0-1)
+                self.current_batch.add_quad(
+                    dst_rect.x, dst_rect.y,
+                    dst_rect.x + dst_rect.width, dst_rect.y + dst_rect.height,
+                    src_rect.x, src_rect.y,
+                    src_rect.x + src_rect.width, src_rect.y + src_rect.height,
+                    tint
+                )
+                self._check_batch_flush()
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawTriangles(verts, idxs, color, z_order):
+                # Triangles go through as-is (flush current batch first for ordering)
+                self.flush_batch()
+                val tri_count = idxs.len() / 3
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + tri_count,
+                    vertices: self.stats.vertices + verts.len()
+                )
+
+    me _ensure_batch(tex_handle: i64):
+        # If current batch has a different texture, flush and start new
+        if self.current_batch.texture_handle != tex_handle:
+            self.flush_batch()
+            self.current_batch = SpriteBatch.create(tex_handle)
+
+    me _check_batch_flush():
+        if self.current_batch.quad_count >= self.max_quads_per_batch:
+            self.flush_batch()
+
+    fn get_batches() -> [SpriteBatch]:
+        self.batches
+
+    fn get_batch_count() -> i64:
+        self.batches.len()
+
+    fn get_stats() -> DrawStats:
+        self.stats
+
+    # Convert screen coordinates to normalized device coordinates (-1 to 1)
+    fn screen_to_ndc(sx: f64, sy: f64) -> Vec2:
+        val nx = (sx / (self.screen_width * 1.0)) * 2.0 - 1.0
+        val ny = 1.0 - (sy / (self.screen_height * 1.0)) * 2.0
+        Vec2(x: nx, y: ny)

@@ -53,6 +53,43 @@ fn try_dunder_binop(
     }
     None
 }
+/// Try to dispatch a unary operator to a dunder method on an Object value.
+/// Returns None if the value is not an Object or doesn't have the method.
+#[allow(clippy::too_many_arguments)]
+fn try_dunder_unaryop(
+    dunder_name: &str,
+    operand: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Result<Value, CompileError>> {
+    if let Value::Object { class, fields } = operand {
+        let method = classes
+            .get(class.as_str())
+            .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
+            .or_else(|| {
+                impl_methods
+                    .get(class.as_str())
+                    .and_then(|ms| ms.iter().find(|m| m.name == dunder_name).cloned())
+            });
+        if let Some(method) = method {
+            let self_ctx = Some((class.as_str(), fields));
+            return Some(super::super::interpreter_call::exec_function_with_values_and_self(
+                &method,
+                &[],
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                self_ctx,
+            ));
+        }
+    }
+    None
+}
 use super::super::coverage_helpers::record_condition_coverage;
 
 /// Check if a variable name refers to an immutable binding
@@ -457,7 +494,20 @@ pub(super) fn eval_op_expr(
                     if use_float {
                         Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
                     } else {
-                        Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
+                        if let Some(result) = try_dunder_binop(
+                            "__sub__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
+                        }
                     }
                 }
                 BinOp::Mul => {
@@ -510,16 +560,29 @@ pub(super) fn eval_op_expr(
                             Ok(Value::Float(left_val.as_float()? / r))
                         }
                     } else {
-                        let r = right_val.as_int()?;
-                        if r == 0 {
-                            // E3001 - Division By Zero
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::DIVISION_BY_ZERO)
-                                .with_help("cannot divide by zero")
-                                .with_note("check that the divisor is not zero before division");
-                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                        if let Some(result) = try_dunder_binop(
+                            "__div__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
                         } else {
-                            Ok(Value::Int(left_val.as_int()? / r))
+                            let r = right_val.as_int()?;
+                            if r == 0 {
+                                // E3001 - Division By Zero
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::DIVISION_BY_ZERO)
+                                    .with_help("cannot divide by zero")
+                                    .with_note("check that the divisor is not zero before division");
+                                Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                            } else {
+                                Ok(Value::Int(left_val.as_int()? / r))
+                            }
                         }
                     }
                 }
@@ -537,21 +600,64 @@ pub(super) fn eval_op_expr(
                             Ok(Value::Float(left_val.as_float()? % r))
                         }
                     } else {
-                        let r = right_val.as_int()?;
-                        if r == 0 {
-                            // E3001 - Division By Zero (includes modulo)
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::DIVISION_BY_ZERO)
-                                .with_help("cannot perform modulo by zero")
-                                .with_note("check that the divisor is not zero before modulo operation");
-                            Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
+                        if let Some(result) = try_dunder_binop(
+                            "__mod__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
                         } else {
-                            Ok(Value::Int(left_val.as_int()? % r))
+                            let r = right_val.as_int()?;
+                            if r == 0 {
+                                // E3001 - Division By Zero (includes modulo)
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::DIVISION_BY_ZERO)
+                                    .with_help("cannot perform modulo by zero")
+                                    .with_note("check that the divisor is not zero before modulo operation");
+                                Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
+                            } else {
+                                Ok(Value::Int(left_val.as_int()? % r))
+                            }
                         }
                     }
                 }
-                BinOp::Eq => Ok(Value::Bool(left_val == right_val)),
-                BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
+                BinOp::Eq => {
+                    if let Some(result) = try_dunder_binop(
+                        "__eq__",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
+                    } else {
+                        Ok(Value::Bool(left_val == right_val))
+                    }
+                }
+                BinOp::NotEq => {
+                    if let Some(result) = try_dunder_binop(
+                        "__ne__",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
+                    } else {
+                        Ok(Value::Bool(left_val != right_val))
+                    }
+                }
                 BinOp::Lt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
@@ -564,7 +670,22 @@ pub(super) fn eval_op_expr(
                         ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
-                    _ => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
+                    _ => {
+                        if let Some(result) = try_dunder_binop(
+                            "__lt__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else {
+                            Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?))
+                        }
+                    }
                 },
                 BinOp::Gt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
@@ -578,7 +699,22 @@ pub(super) fn eval_op_expr(
                         ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
-                    _ => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
+                    _ => {
+                        if let Some(result) = try_dunder_binop(
+                            "__gt__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else {
+                            Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?))
+                        }
+                    }
                 },
                 BinOp::LtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
@@ -592,7 +728,22 @@ pub(super) fn eval_op_expr(
                         ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
-                    _ => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
+                    _ => {
+                        if let Some(result) = try_dunder_binop(
+                            "__le__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else {
+                            Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?))
+                        }
+                    }
                 },
                 BinOp::GtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
@@ -606,7 +757,22 @@ pub(super) fn eval_op_expr(
                         ))
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
-                    _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
+                    _ => {
+                        if let Some(result) = try_dunder_binop(
+                            "__ge__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else {
+                            Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?))
+                        }
+                    }
                 },
                 BinOp::Is => Ok(Value::Bool(left_val == right_val)),
                 BinOp::And | BinOp::AndSuspend => {
@@ -943,6 +1109,16 @@ pub(super) fn eval_op_expr(
                     // Preserve float type for negation
                     if matches!(val, Value::Float(_)) {
                         Value::Float(-val.as_float()?)
+                    } else if let Some(result) = try_dunder_unaryop(
+                        "__neg__",
+                        &val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result?
                     } else {
                         Value::Int(-val.as_int()?)
                     }

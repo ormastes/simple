@@ -1,0 +1,242 @@
+# Scene Serializer — SDN scene graph serialization/deserialization
+#
+# Converts NodeStore to/from SDN text format for scene persistence.
+# Each node is serialized as a [node.N] section with key=value pairs.
+#
+# Usage:
+#   val sdn = serialize_scene(store)
+#   val restored = deserialize_scene(sdn)
+
+use std.common.engine.ids.{NodeId, RawHandle, Generation}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.units.{Angle, ZIndex}
+use std.nogc_sync_mut.engine.scene.node.{Node2D, NodeStore}
+
+# ============================================================================
+# Serialize
+# ============================================================================
+
+fn serialize_scene(store: NodeStore) -> text:
+    """Serialize all valid nodes in the store to SDN text format."""
+    var result = ""
+    var i = 0
+    while i < store.nodes.len():
+        val maybe_node = store.nodes[i]
+        if val Some(node) = maybe_node:
+            if result.len() > 0:
+                result = result + "\n"
+            result = result + _serialize_node(node, i)
+        i = i + 1
+    result
+
+fn _serialize_node(node: Node2D, slot: i64) -> text:
+    """Serialize a single Node2D to SDN section text."""
+    var s = "[node.{slot}]\n"
+    s = s + "name = {node.name}\n"
+    # Parent: use raw index, -1 for no parent
+    var parent_idx = -1
+    if node.parent.is_valid():
+        parent_idx = node.parent.to_index()
+    s = s + "parent = {parent_idx}\n"
+    s = s + "position_x = {node.position.x}\n"
+    s = s + "position_y = {node.position.y}\n"
+    s = s + "rotation = {node.rotation.radians}\n"
+    s = s + "scale_x = {node.scale.x}\n"
+    s = s + "scale_y = {node.scale.y}\n"
+    s = s + "z_index = {node.z_index.value}\n"
+    if node.visible:
+        s = s + "visible = true\n"
+    else:
+        s = s + "visible = false\n"
+    if node.active:
+        s = s + "active = true\n"
+    else:
+        s = s + "active = false\n"
+    # Tags as comma-separated
+    var tags_str = ""
+    var ti = 0
+    while ti < node.tags.len():
+        if ti > 0:
+            tags_str = tags_str + ","
+        tags_str = tags_str + node.tags[ti]
+        ti = ti + 1
+    s = s + "tags = {tags_str}\n"
+    # Children as comma-separated indices
+    var children_str = ""
+    var ci = 0
+    while ci < node.children.len():
+        if ci > 0:
+            children_str = children_str + ","
+        val child_idx = node.children[ci].to_index()
+        children_str = children_str + "{child_idx}"
+        ci = ci + 1
+    s = s + "children = {children_str}\n"
+    s
+
+# ============================================================================
+# Deserialize
+# ============================================================================
+
+fn deserialize_scene(sdn: text) -> NodeStore:
+    """Parse SDN text and reconstruct a NodeStore with all nodes."""
+    var store = NodeStore.new()
+    val sections = _split_sections(sdn)
+    # First pass: create all nodes in order so slots match
+    var si = 0
+    while si < sections.len():
+        val section = sections[si]
+        val name = _get_value(section, "name")
+        val node_id = store.create_node(name)
+        si = si + 1
+    # Second pass: set properties and relationships
+    var si2 = 0
+    while si2 < sections.len():
+        val section = sections[si2]
+        val raw = RawHandle.new(si2, 1)
+        val node_id = NodeId(raw: raw)
+        # Position
+        val pos_x = _parse_f64(_get_value(section, "position_x"))
+        val pos_y = _parse_f64(_get_value(section, "position_y"))
+        store.set_position(node_id, Vec2(x: pos_x, y: pos_y))
+        # Rotation
+        val rot = _parse_f64(_get_value(section, "rotation"))
+        store.set_rotation(node_id, Angle(radians: rot))
+        # Scale
+        val sc_x = _parse_f64(_get_value(section, "scale_x"))
+        val sc_y = _parse_f64(_get_value(section, "scale_y"))
+        store.set_scale(node_id, Vec2(x: sc_x, y: sc_y))
+        # Z-index
+        val z_val = _parse_i64(_get_value(section, "z_index"))
+        store.set_z_index(node_id, ZIndex(value: z_val))
+        # Visible
+        val vis_str = _get_value(section, "visible")
+        store.set_visible(node_id, vis_str == "true")
+        # Active
+        val act_str = _get_value(section, "active")
+        store.set_active(node_id, act_str == "true")
+        # Tags
+        val tags_str = _get_value(section, "tags")
+        if tags_str.len() > 0:
+            val tag_list = _split_comma(tags_str)
+            var tgi = 0
+            while tgi < tag_list.len():
+                store.add_tag(node_id, tag_list[tgi])
+                tgi = tgi + 1
+        # Parent
+        val parent_str = _get_value(section, "parent")
+        val parent_idx = _parse_i64(parent_str)
+        if parent_idx >= 0:
+            val parent_raw = RawHandle.new(parent_idx, 1)
+            val parent_id = NodeId(raw: parent_raw)
+            store.set_parent(node_id, parent_id)
+        si2 = si2 + 1
+    store
+
+# ============================================================================
+# Internal parsing helpers
+# ============================================================================
+
+fn _split_sections(sdn: text) -> [text]:
+    """Split SDN text into sections by [node.N] headers."""
+    var sections: [text] = []
+    var current = ""
+    var in_section = false
+    val lines = _split_lines(sdn)
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if _starts_with(line, "[node."):
+            if in_section:
+                sections.push(current)
+            current = ""
+            in_section = true
+        else:
+            if in_section and line.len() > 0:
+                if current.len() > 0:
+                    current = current + "\n"
+                current = current + line
+        i = i + 1
+    if in_section:
+        sections.push(current)
+    sections
+
+fn _get_value(section: text, key: text) -> text:
+    """Extract value for a given key from section text (key = value format)."""
+    val lines = _split_lines(section)
+    val prefix = key + " = "
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if _starts_with(line, prefix):
+            val value = _substring_from(line, prefix.len())
+            return value
+        i = i + 1
+    ""
+
+fn _split_lines(s: text) -> [text]:
+    """Split text by newline characters."""
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\n":
+            lines.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.len() > 0:
+        lines.push(current)
+    lines
+
+fn _split_comma(s: text) -> [text]:
+    """Split text by comma."""
+    var parts: [text] = []
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == ",":
+            parts.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.len() > 0:
+        parts.push(current)
+    parts
+
+fn _starts_with(s: text, prefix: text) -> bool:
+    """Check if s starts with prefix."""
+    if prefix.len() > s.len():
+        return false
+    var i = 0
+    while i < prefix.len():
+        if s[i] != prefix[i]:
+            return false
+        i = i + 1
+    true
+
+fn _substring_from(s: text, start: i64) -> text:
+    """Extract substring from start index to end."""
+    var result = ""
+    var i = start
+    while i < s.len():
+        result = result + s[i]
+        i = i + 1
+    result
+
+fn _parse_f64(s: text) -> f64:
+    """Parse a text string as f64. Returns 0.0 on empty/invalid."""
+    if s.len() == 0:
+        return 0.0
+    val result: f64 = s
+    result
+
+fn _parse_i64(s: text) -> i64:
+    """Parse a text string as i64. Returns -1 on empty/invalid."""
+    if s.len() == 0:
+        return -1
+    val result: i64 = s
+    result

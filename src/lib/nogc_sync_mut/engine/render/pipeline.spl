@@ -15,6 +15,7 @@ use std.common.engine.rect.{Rect2}
 use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
 use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
 use std.nogc_sync_mut.engine.render.batch.{sort_commands_by_z}
+use std.nogc_sync_mut.engine.sprite.texture.{Texture, TextureStore}
 
 # ============================================================================
 # SoftwareRenderer
@@ -73,6 +74,127 @@ impl SoftwareRenderer:
         for cmd in sorted:
             self._process_command(cmd)
         self.stats
+
+    me render_frame_with_textures(commands: RenderCommandBuffer, textures: TextureStore) -> DrawStats:
+        """Sort commands by z_order and rasterize, using real texture blitting for sprites."""
+        self.stats = DrawStats.zero()
+        val sorted = sort_commands_by_z(commands.commands)
+        for cmd in sorted:
+            self._process_command_with_textures(cmd, textures)
+        self.stats
+
+    me _process_command_with_textures(cmd: RenderCommand, textures: TextureStore):
+        """Dispatch a single render command, using textures for DrawSprite."""
+        match cmd:
+            case Clear(color):
+                self.clear_color = color
+                self.clear()
+            case DrawRect(rect, color, z_order):
+                val xi = _f64_to_i64(rect.x)
+                val yi = _f64_to_i64(rect.y)
+                val wi = _f64_to_i64(rect.width)
+                val hi = _f64_to_i64(rect.height)
+                self.fill_rect_pixels(xi, yi, wi, hi, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawCircle(cx, cy, radius, color, z_order):
+                val xi = _f64_to_i64(cx - radius)
+                val yi = _f64_to_i64(cy - radius)
+                val di = _f64_to_i64(radius * 2.0)
+                self.fill_rect_pixels(xi, yi, di, di, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawLine(x1, y1, x2, y2, width, color, z_order):
+                self._rasterize_line(x1, y1, x2, y2, width, color)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawSprite(texture_id, src_rect, dst_rect, tint, z_order):
+                val maybe_tex = textures.get(texture_id)
+                if val Some(texture) = maybe_tex:
+                    self._blit_sprite(texture, src_rect, dst_rect, tint, false, false)
+                else:
+                    # Fallback: draw tinted rectangle when texture not found
+                    val xi = _f64_to_i64(dst_rect.x)
+                    val yi = _f64_to_i64(dst_rect.y)
+                    val wi = _f64_to_i64(dst_rect.width)
+                    val hi = _f64_to_i64(dst_rect.height)
+                    self.fill_rect_pixels(xi, yi, wi, hi, tint)
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + 2,
+                    vertices: self.stats.vertices + 4
+                )
+            case DrawTriangles(vertices, indices, color, z_order):
+                val tri_count = indices.len() / 3
+                var t = 0
+                while t < tri_count:
+                    val i0 = indices[t * 3]
+                    val i1 = indices[t * 3 + 1]
+                    val i2 = indices[t * 3 + 2]
+                    val v0 = vertices[i0]
+                    val v1 = vertices[i1]
+                    val v2 = vertices[i2]
+                    self._rasterize_triangle(v0, v1, v2, color)
+                    t = t + 1
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + 1,
+                    triangles: self.stats.triangles + tri_count,
+                    vertices: self.stats.vertices + vertices.len()
+                )
+
+    me _blit_sprite(texture: Texture, src_rect: Rect2, dst_rect: Rect2, tint: EngineColor, flip_x: bool, flip_y: bool):
+        """Blit texture pixels from src_rect to dst_rect with tint and optional flipping."""
+        val dst_x0 = _f64_to_i64(dst_rect.x)
+        val dst_y0 = _f64_to_i64(dst_rect.y)
+        val dst_w = _f64_to_i64(dst_rect.width)
+        val dst_h = _f64_to_i64(dst_rect.height)
+        if dst_w <= 0 or dst_h <= 0:
+            return
+        val src_x0 = src_rect.x
+        val src_y0 = src_rect.y
+        val src_w = src_rect.width
+        val src_h = src_rect.height
+        # Scale ratios: map dst pixel to src pixel
+        val x_ratio = src_w / dst_rect.width
+        val y_ratio = src_h / dst_rect.height
+        var dy = 0
+        while dy < dst_h:
+            val py = dst_y0 + dy
+            if py >= 0 and py < self.height:
+                var dx = 0
+                while dx < dst_w:
+                    val px = dst_x0 + dx
+                    if px >= 0 and px < self.width:
+                        # Map destination pixel to source coordinates
+                        var src_dx = dx
+                        var src_dy = dy
+                        if flip_x:
+                            src_dx = dst_w - 1 - dx
+                        if flip_y:
+                            src_dy = dst_h - 1 - dy
+                        val sx = _f64_to_i64(src_x0 + src_dx * 1.0 * x_ratio)
+                        val sy = _f64_to_i64(src_y0 + src_dy * 1.0 * y_ratio)
+                        val tex_color = texture.get_pixel(sx, sy)
+                        # Multiply by tint (component-wise)
+                        val tinted = EngineColor(
+                            r: tex_color.r * tint.r,
+                            g: tex_color.g * tint.g,
+                            b: tex_color.b * tint.b,
+                            a: tex_color.a * tint.a
+                        )
+                        if tinted.a > 0.001:
+                            self.set_pixel(px, py, tinted)
+                    dx = dx + 1
+            dy = dy + 1
 
     me set_pixel(x: i64, y: i64, color: EngineColor):
         """Set a single pixel with bounds checking and alpha blending."""

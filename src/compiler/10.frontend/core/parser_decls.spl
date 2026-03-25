@@ -11,7 +11,7 @@ use compiler.core.tokens.{TOK_KW_IF, TOK_KW_FOR, TOK_KW_WHILE}
 use compiler.core.tokens.{TOK_KW_STRUCT, TOK_KW_ENUM}
 use compiler.core.tokens.{TOK_KW_EXTERN, TOK_KW_USE, TOK_KW_EXPORT, TOK_KW_IMPORT, TOK_KW_TRAIT}
 use compiler.core.tokens.{TOK_KW_TYPE, TOK_KW_ASM}
-use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
@@ -29,7 +29,8 @@ use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
 use compiler.core.tokens.{TOK_KW_BITFIELD}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
-use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block}
+use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
+use compiler.core.ast.{stmt_expr_stmt}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use compiler.core.ast.{DECL_CE, decl_ce_block}
@@ -613,16 +614,110 @@ fn parse_module_body():
                     module_add_decl(d)
         elif par_kind_get() == TOK_KW_NEWTYPE:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
+            # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__
             parser_advance()
             val nt_name = par_text_get()
             parser_expect(TOK_IDENT)
             parser_expect(TOK_ASSIGN)
             val inner_type = parser_parse_type()
+            # Pre-register newtype so type references resolve (same as parse_struct_decl)
+            par_struct_names.push(nt_name)
+            named_type_register(nt_name, ["value"], [inner_type])
             val nt_field_names: [text] = ["value"]
             val nt_field_types: [i64] = [inner_type]
             val nt_field_defaults: [i64] = [-1]
             val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, 0)
             module_add_decl(nt_d)
+
+            # Check if inner type is numeric — auto-derive operator methods
+            val inner_name = type_tag_name(inner_type)
+            val is_i64: bool = inner_name == "i64"
+            val is_i32: bool = inner_name == "i32"
+            val is_i16: bool = inner_name == "i16"
+            val is_i8: bool = inner_name == "i8"
+            val is_u64: bool = inner_name == "u64"
+            val is_u32: bool = inner_name == "u32"
+            val is_u16: bool = inner_name == "u16"
+            val is_u8: bool = inner_name == "u8"
+            val is_f64: bool = inner_name == "f64"
+            val is_f32: bool = inner_name == "f32"
+            val is_int: bool = inner_name == "Int"
+            val is_float: bool = inner_name == "Float"
+            val is_numeric_a: bool = is_i64 or is_i32
+            val is_numeric_b: bool = is_i16 or is_i8
+            val is_numeric_c: bool = is_u64 or is_u32
+            val is_numeric_d: bool = is_u16 or is_u8
+            val is_numeric_e: bool = is_f64 or is_f32
+            val is_numeric_f: bool = is_int or is_float
+            val is_numeric_ab: bool = is_numeric_a or is_numeric_b
+            val is_numeric_cd: bool = is_numeric_c or is_numeric_d
+            val is_numeric_ef: bool = is_numeric_e or is_numeric_f
+            val is_numeric_abcd: bool = is_numeric_ab or is_numeric_cd
+            val is_numeric: bool = is_numeric_abcd or is_numeric_ef
+
+            if is_numeric:
+                # Resolve the newtype's type tag for return types
+                val nt_type_id = named_type_find(nt_name)
+                var nt_type_tag: i64 = 0
+                if nt_type_id >= 0:
+                    nt_type_tag = TYPE_NAMED_BASE + nt_type_id
+                else:
+                    nt_type_tag = inner_type
+
+                var nt_method_ids: [i64] = []
+
+                # Generate arithmetic dunder methods: __add__, __sub__, __mul__, __div__
+                # Each: fn __op__(self, other: T) -> T: T(value: self.value OP other.value)
+                var arith_ops: [text] = ["__add__", "__sub__", "__mul__", "__div__"]
+                var arith_toks: [i64] = [TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH]
+                for ai in 0..4:
+                    val op_name = arith_ops[ai]
+                    val op_tok = arith_toks[ai]
+                    # Build body: self.value OP other.value -> wrap in constructor
+                    val self_e = expr_ident("self", 0)
+                    val self_val = expr_field_access(self_e, "value", 0)
+                    val other_e = expr_ident("other", 0)
+                    val other_val = expr_field_access(other_e, "value", 0)
+                    val bin_expr = expr_binary(op_tok, self_val, other_val, 0)
+                    # Constructor call: TypeName(result) — single positional arg for single-field struct
+                    val ctor = expr_ident(nt_name, 0)
+                    var ctor_args: [i64] = []
+                    ctor_args.push(bin_expr)
+                    val ctor_call = expr_call(ctor, ctor_args, 0)
+                    val body_stmt = stmt_expr_stmt(ctor_call, 0)
+                    var body: [i64] = []
+                    body.push(body_stmt)
+                    var pnames: [text] = ["self", "other"]
+                    var ptypes: [i64] = [nt_type_tag, nt_type_tag]
+                    var tparams: [text] = []
+                    val m = decl_fn(op_name, pnames, ptypes, nt_type_tag, body, 0, tparams, 0)
+                    nt_method_ids.push(m)
+
+                # Generate comparison dunder methods: __eq__, __lt__, __gt__
+                # Each: fn __op__(self, other: T) -> bool: self.value OP other.value
+                var cmp_ops: [text] = ["__eq__", "__lt__", "__gt__"]
+                var cmp_toks: [i64] = [TOK_EQ, TOK_LT, TOK_GT]
+                for ci in 0..3:
+                    val cmp_name = cmp_ops[ci]
+                    val cmp_tok = cmp_toks[ci]
+                    val self_c = expr_ident("self", 0)
+                    val self_cv = expr_field_access(self_c, "value", 0)
+                    val other_c = expr_ident("other", 0)
+                    val other_cv = expr_field_access(other_c, "value", 0)
+                    val cmp_expr = expr_binary(cmp_tok, self_cv, other_cv, 0)
+                    val cmp_body_stmt = stmt_expr_stmt(cmp_expr, 0)
+                    var cmp_body: [i64] = []
+                    cmp_body.push(cmp_body_stmt)
+                    var cpnames: [text] = ["self", "other"]
+                    var cptypes: [i64] = [nt_type_tag, nt_type_tag]
+                    var ctparams: [text] = []
+                    val cm = decl_fn(cmp_name, cpnames, cptypes, TYPE_BOOL, cmp_body, 0, ctparams, 0)
+                    nt_method_ids.push(cm)
+
+                # Create impl block for the auto-derived methods
+                val nt_impl = decl_impl_block(nt_name, nt_method_ids, 0)
+                module_add_decl(nt_impl)
+
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == TOK_STRING_LIT:
             # Skip module-level docstrings

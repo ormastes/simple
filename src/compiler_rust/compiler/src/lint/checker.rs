@@ -4,7 +4,7 @@
 
 use super::config::LintConfig;
 use super::diagnostics::LintDiagnostic;
-use super::rules::{is_bare_bool, is_primitive_type};
+use super::rules::{is_bare_bool, is_primitive_type, math_primitive_name};
 use super::types::{LintLevel, LintName};
 use simple_common::diagnostic::{EasyFix, FixConfidence, Replacement};
 use simple_parser::ast::{
@@ -58,6 +58,38 @@ fn format_type(ty: &Type) -> String {
         }
         _ => format!("{:?}", ty),
     }
+}
+
+/// Check if a function is a "pure math function" — all parameters and the return
+/// type are the *same* bare numeric primitive (e.g. `fn abs(x: f64) -> f64`).
+/// Such functions are exempt from the `primitive_api` lint.
+fn is_pure_math_function(func: &FunctionDef) -> bool {
+    // Must have at least one parameter
+    if func.params.is_empty() {
+        return false;
+    }
+
+    // Return type must be a math primitive
+    let ret_name = match func.return_type {
+        Some(ref ret_ty) => match math_primitive_name(ret_ty) {
+            Some(name) => name,
+            None => return false,
+        },
+        None => return false,
+    };
+
+    // Every parameter type must be the same math primitive as the return type
+    for param in &func.params {
+        match param.ty {
+            Some(ref ty) => match math_primitive_name(ty) {
+                Some(name) if name == ret_name => {}
+                _ => return false,
+            },
+            None => return false,
+        }
+    }
+
+    true
 }
 
 /// Lint checker for a compilation unit
@@ -590,6 +622,12 @@ impl LintChecker {
     fn check_function(&mut self, func: &FunctionDef) {
         // Only check public functions
         if !func.visibility.is_public() {
+            return;
+        }
+
+        // Exempt pure math functions where all params + return are the same
+        // bare numeric primitive (e.g., fn abs(x: f64) -> f64).
+        if is_pure_math_function(func) {
             return;
         }
 

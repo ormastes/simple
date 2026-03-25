@@ -11,8 +11,21 @@ use std.torch.{torch_cuda_available}
 enum GpuBackend:
     """GPU backend type."""
     Cuda       # NVIDIA CUDA (via PyTorch)
-    Vulkan     # Vulkan compute (planned)
-    None_       # No GPU / CPU fallback
+    Vulkan     # Vulkan compute
+    Rocm       # AMD ROCm HIP
+    OneApi     # Intel oneAPI SYCL / Level Zero
+    Metal      # Apple Metal
+    None_      # No GPU / CPU fallback
+
+impl GpuBackend:
+    fn to_text() -> text:
+        match self:
+            case Cuda: "CUDA"
+            case Vulkan: "Vulkan"
+            case Rocm: "ROCm"
+            case OneApi: "oneAPI"
+            case Metal: "Metal"
+            case None_: "None"
 
 # ============================================================================
 # Device Info
@@ -39,6 +52,15 @@ impl Gpu:
             case GpuBackend.Vulkan:
                 # Vulkan device sync not yet implemented (needs vkDeviceWaitIdle FFI)
                 true
+            case GpuBackend.Rocm:
+                # ROCm device sync (needs hipDeviceSynchronize FFI)
+                true
+            case GpuBackend.OneApi:
+                # oneAPI device sync (needs queue wait FFI)
+                true
+            case GpuBackend.Metal:
+                # Metal device sync (needs MTLCommandBuffer waitUntilCompleted FFI)
+                true
             case GpuBackend.None:
                 true
 
@@ -50,9 +72,12 @@ fn detect_backends() -> [GpuBackend]:
     """Detect available GPU backends.
 
     Checks in priority order:
-    1. CUDA (via PyTorch)
-    2. Vulkan compute (future)
-    3. CPU fallback (always available)
+    1. CUDA (via PyTorch) — NVIDIA
+    2. ROCm (via HIP) — AMD
+    3. Metal — Apple
+    4. oneAPI (via SYCL) — Intel
+    5. Vulkan compute — Cross-platform
+    6. CPU fallback (always available)
 
     Returns:
         Array of available backends
@@ -63,7 +88,19 @@ fn detect_backends() -> [GpuBackend]:
     if torch_cuda_available():
         backends.push(GpuBackend.Cuda)
 
-    # Vulkan support (future)
+    # ROCm support (HIP runtime)
+    # if rocm_available():
+    #     backends.push(GpuBackend.Rocm)
+
+    # Metal support (macOS/iOS)
+    # if metal_available():
+    #     backends.push(GpuBackend.Metal)
+
+    # oneAPI support (Intel SYCL / Level Zero)
+    # if oneapi_available():
+    #     backends.push(GpuBackend.OneApi)
+
+    # Vulkan support
     # if vulkan_available():
     #     backends.push(GpuBackend.Vulkan)
 
@@ -111,6 +148,51 @@ fn gpu_vulkan(device_id: i32) -> Gpu:
     """
     Gpu(
         backend: GpuBackend.Vulkan,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_rocm(device_id: i32) -> Gpu:
+    """Create ROCm GPU handle.
+
+    Args:
+        device_id: Device ID (0=1st GPU, 1=2nd GPU, etc.)
+
+    Returns:
+        GPU handle for AMD ROCm device
+    """
+    Gpu(
+        backend: GpuBackend.Rocm,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_oneapi(device_id: i32) -> Gpu:
+    """Create oneAPI GPU handle.
+
+    Args:
+        device_id: Device ID
+
+    Returns:
+        GPU handle for Intel oneAPI device
+    """
+    Gpu(
+        backend: GpuBackend.OneApi,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_metal(device_id: i32) -> Gpu:
+    """Create Metal GPU handle.
+
+    Args:
+        device_id: Device ID
+
+    Returns:
+        GPU handle for Apple Metal device
+    """
+    Gpu(
+        backend: GpuBackend.Metal,
         device_id: device_id,
         is_initialized: true
     )

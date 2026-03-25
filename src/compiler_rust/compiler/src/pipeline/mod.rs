@@ -255,10 +255,10 @@ mod tests {
 
     #[test]
     fn test_pipeline_lint_warnings_collected() {
-        // Public function with primitive param should generate warning
+        // Mixed types (i64 param + text return) — NOT a pure math function
         let source = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 
 main = 0
 "#;
@@ -271,16 +271,16 @@ main = 0
 
         let diagnostics = pipeline.lint_diagnostics();
         assert!(!diagnostics.is_empty());
-        // Should warn about primitive_api for both param and return type
+        // Should warn about primitive_api for the param
         assert!(diagnostics.iter().any(|d| d.message.contains("i64")));
     }
 
     #[test]
     fn test_pipeline_lint_deny_fails_compilation() {
-        // Public function with primitive param + deny level should fail
+        // Mixed types (i64 param + text return) + deny level should fail
         let source = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 
 main = 0
 "#;
@@ -339,9 +339,10 @@ main = 0
 
     #[test]
     fn test_pipeline_diagnostics_cleared_on_recompile() {
+        // Mixed types — NOT a pure math function
         let source_with_warning = r#"
-pub fn get_value(x: i64) -> i64:
-    return x
+pub fn format_number(x: i64) -> text:
+    return "hello"
 
 main = 0
 "#;
@@ -363,9 +364,10 @@ main = 42
     #[test]
     fn test_pipeline_native_lint_integration() {
         // Native compilation should also run lint checks
+        // Mixed types (i64 param + text return) — NOT a pure math function
         let source = r#"
-pub fn compute(x: i64) -> i64:
-    return x * 2
+pub fn format_number(x: i64) -> text:
+    return "hello"
 
 main = 0
 "#;

@@ -1,0 +1,608 @@
+#![allow(primitive_api)]
+# Engine 3D Math — Vec3, Vec4, Mat4, Quaternion, Transform3D
+#
+# Core 3D math types for the game engine.
+# All angles in radians. Mat4 is column-major (GPU-ready).
+#
+# Usage:
+#   val pos = Vec3(x: 1.0, y: 2.0, z: 3.0)
+#   val len = pos.length()
+#   val norm = pos.normalize()
+#   val m = Mat4.identity()
+#   val world_pos = m.transform_point(pos)
+#   val q = Quaternion.identity()
+#   val rotated = q.rotate_vector(pos)
+
+use std.common.math.{MATH_PI, math_abs, math_lerp, math_clamp}
+use std.common.engine.units.{Angle}
+
+# ============================================================================
+# Pure math helpers (reused from math2d pattern)
+# ============================================================================
+
+val _EPSILON = 0.0000000001
+
+fn _sqrt(x: f64) -> f64:
+    """Newton's method square root."""
+    if x < 0.0:
+        return 0.0
+    if x < _EPSILON:
+        return 0.0
+    var guess = x
+    if x > 1.0:
+        guess = x / 2.0
+    var i = 0
+    while i < 20:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn _sin(x: f64) -> f64:
+    """Taylor series sine approximation. Normalize to [-PI, PI]."""
+    var a = x
+    val two_pi = MATH_PI * 2.0
+    while a > MATH_PI:
+        a = a - two_pi
+    while a < -MATH_PI:
+        a = a + two_pi
+    val x2 = a * a
+    val x3 = a * x2
+    val x5 = x3 * x2
+    val x7 = x5 * x2
+    val x9 = x7 * x2
+    val x11 = x9 * x2
+    val x13 = x11 * x2
+    a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0 - x11 / 39916800.0 + x13 / 6227020800.0
+
+fn _cos(x: f64) -> f64:
+    """Cosine via sine shift."""
+    _sin(x + MATH_PI / 2.0)
+
+fn _acos(x: f64) -> f64:
+    """Approximation of acos(x) using atan2-based identity."""
+    val clamped = math_clamp(x, -1.0, 1.0)
+    val s = _sqrt(1.0 - clamped * clamped)
+    _atan2(s, clamped)
+
+fn _atan2(y: f64, x: f64) -> f64:
+    """Approximation of atan2(y, x)."""
+    if math_abs(x) < _EPSILON:
+        if y > 0.0:
+            return MATH_PI / 2.0
+        if y < 0.0:
+            return -MATH_PI / 2.0
+        return 0.0
+    val ratio = y / x
+    val abs_ratio = math_abs(ratio)
+    var atan_val = 0.0
+    if abs_ratio <= 1.0:
+        val r2 = ratio * ratio
+        val r3 = ratio * r2
+        val r5 = r3 * r2
+        val r7 = r5 * r2
+        val r9 = r7 * r2
+        atan_val = ratio - r3 / 3.0 + r5 / 5.0 - r7 / 7.0 + r9 / 9.0
+    else:
+        val inv = 1.0 / ratio
+        val inv2 = inv * inv
+        val inv3 = inv * inv2
+        val inv5 = inv3 * inv2
+        val inv7 = inv5 * inv2
+        val inv9 = inv7 * inv2
+        val atan_inv = inv - inv3 / 3.0 + inv5 / 5.0 - inv7 / 7.0 + inv9 / 9.0
+        if ratio > 0.0:
+            atan_val = MATH_PI / 2.0 - atan_inv
+        else:
+            atan_val = -MATH_PI / 2.0 - atan_inv
+    if x < 0.0:
+        if y >= 0.0:
+            return atan_val + MATH_PI
+        else:
+            return atan_val - MATH_PI
+    atan_val
+
+# ============================================================================
+# Vec3
+# ============================================================================
+
+class Vec3:
+    x: f64
+    y: f64
+    z: f64
+
+impl Vec3:
+    # --- Static constructors ---
+
+    static fn zero() -> Vec3:
+        Vec3(x: 0.0, y: 0.0, z: 0.0)
+
+    static fn one() -> Vec3:
+        Vec3(x: 1.0, y: 1.0, z: 1.0)
+
+    static fn up() -> Vec3:
+        Vec3(x: 0.0, y: 1.0, z: 0.0)
+
+    static fn right() -> Vec3:
+        Vec3(x: 1.0, y: 0.0, z: 0.0)
+
+    static fn forward() -> Vec3:
+        Vec3(x: 0.0, y: 0.0, z: 1.0)
+
+    # --- Arithmetic ---
+
+    fn add(other: Vec3) -> Vec3:
+        Vec3(x: self.x + other.x, y: self.y + other.y, z: self.z + other.z)
+
+    fn sub(other: Vec3) -> Vec3:
+        Vec3(x: self.x - other.x, y: self.y - other.y, z: self.z - other.z)
+
+    fn mul_scalar(s: f64) -> Vec3:
+        Vec3(x: self.x * s, y: self.y * s, z: self.z * s)
+
+    fn div_scalar(s: f64) -> Vec3:
+        Vec3(x: self.x / s, y: self.y / s, z: self.z / s)
+
+    fn negate() -> Vec3:
+        Vec3(x: -self.x, y: -self.y, z: -self.z)
+
+    # --- Products ---
+
+    fn dot(other: Vec3) -> f64:
+        self.x * other.x + self.y * other.y + self.z * other.z
+
+    fn cross(other: Vec3) -> Vec3:
+        """3D cross product."""
+        val cx = self.y * other.z - self.z * other.y
+        val cy = self.z * other.x - self.x * other.z
+        val cz = self.x * other.y - self.y * other.x
+        Vec3(x: cx, y: cy, z: cz)
+
+    # --- Length ---
+
+    fn length_squared() -> f64:
+        self.x * self.x + self.y * self.y + self.z * self.z
+
+    fn length() -> f64:
+        _sqrt(self.length_squared())
+
+    fn normalize() -> Vec3:
+        val len = self.length()
+        if len < _EPSILON:
+            return Vec3.zero()
+        Vec3(x: self.x / len, y: self.y / len, z: self.z / len)
+
+    fn distance_to(other: Vec3) -> f64:
+        val diff = self.sub(other)
+        diff.length()
+
+    # --- Interpolation ---
+
+    fn lerp(other: Vec3, t: f64) -> Vec3:
+        val lx = math_lerp(self.x, other.x, t)
+        val ly = math_lerp(self.y, other.y, t)
+        val lz = math_lerp(self.z, other.z, t)
+        Vec3(x: lx, y: ly, z: lz)
+
+    # --- Comparison ---
+
+    fn eq(other: Vec3) -> bool:
+        val dx = math_abs(self.x - other.x)
+        val dy = math_abs(self.y - other.y)
+        val dz = math_abs(self.z - other.z)
+        val x_eq = dx < _EPSILON
+        val y_eq = dy < _EPSILON
+        val z_eq = dz < _EPSILON
+        val xy = x_eq and y_eq
+        xy and z_eq
+
+# ============================================================================
+# Vec4
+# ============================================================================
+
+class Vec4:
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+
+impl Vec4:
+    static fn zero() -> Vec4:
+        Vec4(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+
+    static fn from_vec3(v: Vec3, w: f64) -> Vec4:
+        Vec4(x: v.x, y: v.y, z: v.z, w: w)
+
+    fn add(other: Vec4) -> Vec4:
+        Vec4(x: self.x + other.x, y: self.y + other.y, z: self.z + other.z, w: self.w + other.w)
+
+    fn sub(other: Vec4) -> Vec4:
+        Vec4(x: self.x - other.x, y: self.y - other.y, z: self.z - other.z, w: self.w - other.w)
+
+    fn mul_scalar(s: f64) -> Vec4:
+        Vec4(x: self.x * s, y: self.y * s, z: self.z * s, w: self.w * s)
+
+    fn dot(other: Vec4) -> f64:
+        self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+    fn to_vec3() -> Vec3:
+        Vec3(x: self.x, y: self.y, z: self.z)
+
+# ============================================================================
+# Mat4 — 4x4 matrix, column-major
+#
+# Storage: [f64] with 16 elements
+# Index = col * 4 + row
+# Column-major: first 4 elements = column 0, next 4 = column 1, etc.
+# ============================================================================
+
+class Mat4:
+    data: [f64]
+
+impl Mat4:
+    fn get(row: i64, col: i64) -> f64:
+        """Get element at (row, col). Column-major: index = col*4 + row."""
+        self.data[col * 4 + row]
+
+    # --- Static constructors ---
+
+    static fn identity() -> Mat4:
+        Mat4(data: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn translation(x: f64, y: f64, z: f64) -> Mat4:
+        Mat4(data: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            x,   y,   z,   1.0
+        ])
+
+    static fn scaling(x: f64, y: f64, z: f64) -> Mat4:
+        Mat4(data: [
+            x,   0.0, 0.0, 0.0,
+            0.0, y,   0.0, 0.0,
+            0.0, 0.0, z,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_x(angle: Angle) -> Mat4:
+        val c = _cos(angle.radians)
+        val s = _sin(angle.radians)
+        Mat4(data: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, c,   s,   0.0,
+            0.0, -s,  c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_y(angle: Angle) -> Mat4:
+        val c = _cos(angle.radians)
+        val s = _sin(angle.radians)
+        Mat4(data: [
+            c,   0.0, -s,  0.0,
+            0.0, 1.0, 0.0, 0.0,
+            s,   0.0, c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_z(angle: Angle) -> Mat4:
+        val c = _cos(angle.radians)
+        val s = _sin(angle.radians)
+        Mat4(data: [
+            c,   s,   0.0, 0.0,
+            -s,  c,   0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn perspective(fov: Angle, aspect: f64, near: f64, far: f64) -> Mat4:
+        """Create a perspective projection matrix (right-handed, clip space z in [0,1])."""
+        val half_fov = fov.radians / 2.0
+        val tan_half = _sin(half_fov) / _cos(half_fov)
+        val f = 1.0 / tan_half
+        val range_inv = 1.0 / (near - far)
+        Mat4(data: [
+            f / aspect, 0.0, 0.0,                    0.0,
+            0.0,        f,   0.0,                    0.0,
+            0.0,        0.0, (far + near) * range_inv, -1.0,
+            0.0,        0.0, 2.0 * far * near * range_inv, 0.0
+        ])
+
+    static fn orthographic(left: f64, right_val: f64, bottom: f64, top: f64, near: f64, far: f64) -> Mat4:
+        """Create an orthographic projection matrix."""
+        val rl = right_val - left
+        val tb = top - bottom
+        val fn_val = far - near
+        Mat4(data: [
+            2.0 / rl,  0.0,       0.0,        0.0,
+            0.0,       2.0 / tb,  0.0,        0.0,
+            0.0,       0.0,       -2.0 / fn_val, 0.0,
+            -(right_val + left) / rl, -(top + bottom) / tb, -(far + near) / fn_val, 1.0
+        ])
+
+    static fn look_at(eye: Vec3, target: Vec3, up_dir: Vec3) -> Mat4:
+        """Create a view matrix looking from eye towards target."""
+        val f = target.sub(eye).normalize()
+        val s = f.cross(up_dir).normalize()
+        val u = s.cross(f)
+
+        val d0 = -s.dot(eye)
+        val d1 = -u.dot(eye)
+        val d2 = f.dot(eye)
+
+        Mat4(data: [
+            s.x,  u.x,  -f.x, 0.0,
+            s.y,  u.y,  -f.y, 0.0,
+            s.z,  u.z,  -f.z, 0.0,
+            d0,   d1,   d2,   1.0
+        ])
+
+    # --- Operations ---
+
+    fn mul(other: Mat4) -> Mat4:
+        """4x4 matrix multiply: self * other."""
+        var result: [f64] = []
+        var col = 0
+        while col < 4:
+            var row = 0
+            while row < 4:
+                val a0 = self.get(row, 0) * other.get(0, col)
+                val a1 = self.get(row, 1) * other.get(1, col)
+                val a2 = self.get(row, 2) * other.get(2, col)
+                val a3 = self.get(row, 3) * other.get(3, col)
+                val sum = a0 + a1 + a2 + a3
+                result.push(sum)
+                row = row + 1
+            col = col + 1
+        Mat4(data: result)
+
+    fn transform_point(p: Vec3) -> Vec3:
+        """Multiply by point (w=1), perspective divide."""
+        val x = self.get(0, 0) * p.x + self.get(0, 1) * p.y + self.get(0, 2) * p.z + self.get(0, 3)
+        val y = self.get(1, 0) * p.x + self.get(1, 1) * p.y + self.get(1, 2) * p.z + self.get(1, 3)
+        val z = self.get(2, 0) * p.x + self.get(2, 1) * p.y + self.get(2, 2) * p.z + self.get(2, 3)
+        val w = self.get(3, 0) * p.x + self.get(3, 1) * p.y + self.get(3, 2) * p.z + self.get(3, 3)
+        if math_abs(w) < _EPSILON:
+            return Vec3(x: x, y: y, z: z)
+        Vec3(x: x / w, y: y / w, z: z / w)
+
+    fn transform_direction(d: Vec3) -> Vec3:
+        """Multiply by direction (w=0), no translation applied."""
+        val x = self.get(0, 0) * d.x + self.get(0, 1) * d.y + self.get(0, 2) * d.z
+        val y = self.get(1, 0) * d.x + self.get(1, 1) * d.y + self.get(1, 2) * d.z
+        val z = self.get(2, 0) * d.x + self.get(2, 1) * d.y + self.get(2, 2) * d.z
+        Vec3(x: x, y: y, z: z)
+
+# ============================================================================
+# Quaternion
+# ============================================================================
+
+class Quaternion:
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+
+impl Quaternion:
+    # --- Static constructors ---
+
+    static fn identity() -> Quaternion:
+        Quaternion(x: 0.0, y: 0.0, z: 0.0, w: 1.0)
+
+    static fn from_axis_angle(axis: Vec3, angle: Angle) -> Quaternion:
+        """Create quaternion from axis (should be normalized) and angle."""
+        val half = angle.radians / 2.0
+        val s = _sin(half)
+        val c = _cos(half)
+        val a = axis.normalize()
+        Quaternion(x: a.x * s, y: a.y * s, z: a.z * s, w: c)
+
+    static fn from_euler(pitch: Angle, yaw: Angle, roll: Angle) -> Quaternion:
+        """Create quaternion from Euler angles (pitch=X, yaw=Y, roll=Z)."""
+        val hp = pitch.radians / 2.0
+        val hy = yaw.radians / 2.0
+        val hr = roll.radians / 2.0
+
+        val sp = _sin(hp)
+        val cp = _cos(hp)
+        val sy = _sin(hy)
+        val cy = _cos(hy)
+        val sr = _sin(hr)
+        val cr = _cos(hr)
+
+        val qx = sp * cy * cr - cp * sy * sr
+        val qy = cp * sy * cr + sp * cy * sr
+        val qz = cp * cy * sr - sp * sy * cr
+        val qw = cp * cy * cr + sp * sy * sr
+
+        Quaternion(x: qx, y: qy, z: qz, w: qw)
+
+    # --- Properties ---
+
+    fn length_squared() -> f64:
+        self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+
+    fn length() -> f64:
+        _sqrt(self.length_squared())
+
+    fn normalize() -> Quaternion:
+        val len = self.length()
+        if len < _EPSILON:
+            return Quaternion.identity()
+        Quaternion(x: self.x / len, y: self.y / len, z: self.z / len, w: self.w / len)
+
+    fn conjugate() -> Quaternion:
+        Quaternion(x: -self.x, y: -self.y, z: -self.z, w: self.w)
+
+    fn inverse() -> Quaternion:
+        val len_sq = self.length_squared()
+        if len_sq < _EPSILON:
+            return Quaternion.identity()
+        val conj = self.conjugate()
+        Quaternion(x: conj.x / len_sq, y: conj.y / len_sq, z: conj.z / len_sq, w: conj.w / len_sq)
+
+    # --- Operations ---
+
+    fn mul(other: Quaternion) -> Quaternion:
+        """Hamilton product: self * other."""
+        val qx = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y
+        val qy = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x
+        val qz = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
+        val qw = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z
+        Quaternion(x: qx, y: qy, z: qz, w: qw)
+
+    fn slerp(other: Quaternion, t: f64) -> Quaternion:
+        """Spherical linear interpolation between self and other."""
+        var dot_val = self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+        # If dot is negative, negate one quaternion to take shorter path
+        var ox = other.x
+        var oy = other.y
+        var oz = other.z
+        var ow = other.w
+        if dot_val < 0.0:
+            dot_val = -dot_val
+            ox = -ox
+            oy = -oy
+            oz = -oz
+            ow = -ow
+
+        # If very close, use linear interpolation
+        if dot_val > 0.9995:
+            val rx = math_lerp(self.x, ox, t)
+            val ry = math_lerp(self.y, oy, t)
+            val rz = math_lerp(self.z, oz, t)
+            val rw = math_lerp(self.w, ow, t)
+            val result = Quaternion(x: rx, y: ry, z: rz, w: rw)
+            return result.normalize()
+
+        val theta = _acos(dot_val)
+        val sin_theta = _sin(theta)
+        val s0 = _sin((1.0 - t) * theta) / sin_theta
+        val s1 = _sin(t * theta) / sin_theta
+
+        val rx = self.x * s0 + ox * s1
+        val ry = self.y * s0 + oy * s1
+        val rz = self.z * s0 + oz * s1
+        val rw = self.w * s0 + ow * s1
+        Quaternion(x: rx, y: ry, z: rz, w: rw)
+
+    fn to_mat4() -> Mat4:
+        """Convert quaternion to 4x4 rotation matrix."""
+        val xx = self.x * self.x
+        val yy = self.y * self.y
+        val zz = self.z * self.z
+        val xy = self.x * self.y
+        val xz = self.x * self.z
+        val yz = self.y * self.z
+        val wx = self.w * self.x
+        val wy = self.w * self.y
+        val wz = self.w * self.z
+
+        Mat4(data: [
+            1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz),       2.0 * (xz - wy),       0.0,
+            2.0 * (xy - wz),        1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx),       0.0,
+            2.0 * (xz + wy),        2.0 * (yz - wx),        1.0 - 2.0 * (xx + yy), 0.0,
+            0.0,                     0.0,                     0.0,                     1.0
+        ])
+
+    fn rotate_vector(v: Vec3) -> Vec3:
+        """Rotate a vector by this quaternion: q * v * q^-1."""
+        val qv = Vec3(x: self.x, y: self.y, z: self.z)
+        val uv = qv.cross(v)
+        val uuv = qv.cross(uv)
+        val scaled_uv = uv.mul_scalar(2.0 * self.w)
+        val scaled_uuv = uuv.mul_scalar(2.0)
+        v.add(scaled_uv).add(scaled_uuv)
+
+# ============================================================================
+# Transform3D
+# ============================================================================
+
+class Transform3D:
+    position: Vec3
+    rotation: Quaternion
+    scale: Vec3
+
+impl Transform3D:
+    static fn identity() -> Transform3D:
+        Transform3D(
+            position: Vec3.zero(),
+            rotation: Quaternion.identity(),
+            scale: Vec3.one()
+        )
+
+    fn to_mat4() -> Mat4:
+        """Compose TRS matrix: Translation * Rotation * Scale."""
+        val s = Mat4.scaling(self.scale.x, self.scale.y, self.scale.z)
+        val r = self.rotation.to_mat4()
+        val t = Mat4.translation(self.position.x, self.position.y, self.position.z)
+        t.mul(r.mul(s))
+
+    fn transform_point(p: Vec3) -> Vec3:
+        """Apply scale, rotation, then translation to a point."""
+        # 1. Scale
+        val scaled = Vec3(x: p.x * self.scale.x, y: p.y * self.scale.y, z: p.z * self.scale.z)
+        # 2. Rotate
+        val rotated = self.rotation.rotate_vector(scaled)
+        # 3. Translate
+        rotated.add(self.position)
+
+    fn compose(child: Transform3D) -> Transform3D:
+        """Compose parent (self) with child: parent * child.
+
+        Result transforms a point as: parent(child(point)).
+        """
+        # Combined scale (component-wise)
+        val new_scale = Vec3(
+            x: self.scale.x * child.scale.x,
+            y: self.scale.y * child.scale.y,
+            z: self.scale.z * child.scale.z
+        )
+        # Combined rotation
+        val new_rotation = self.rotation.mul(child.rotation)
+        # Combined position: transform child's position through parent
+        val child_pos = self.transform_point(child.position)
+        Transform3D(
+            position: child_pos,
+            rotation: new_rotation,
+            scale: new_scale
+        )
+
+    fn inverse() -> Transform3D:
+        """Compute the inverse transform."""
+        val inv_scale = Vec3(
+            x: 1.0 / self.scale.x,
+            y: 1.0 / self.scale.y,
+            z: 1.0 / self.scale.z
+        )
+        val inv_rotation = self.rotation.inverse()
+        # Inverse position: un-rotate and un-scale the negated position
+        val neg_pos = self.position.negate()
+        val unrotated = inv_rotation.rotate_vector(neg_pos)
+        val inv_pos = Vec3(
+            x: unrotated.x * inv_scale.x,
+            y: unrotated.y * inv_scale.y,
+            z: unrotated.z * inv_scale.z
+        )
+        Transform3D(
+            position: inv_pos,
+            rotation: inv_rotation,
+            scale: inv_scale
+        )
+
+    fn forward() -> Vec3:
+        """Forward direction (local +Z rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.forward())
+
+    fn right() -> Vec3:
+        """Right direction (local +X rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.right())
+
+    fn up() -> Vec3:
+        """Up direction (local +Y rotated by quaternion)."""
+        self.rotation.rotate_vector(Vec3.up())
