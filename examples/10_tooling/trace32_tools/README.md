@@ -174,6 +174,14 @@ Controls live TRACE32 debug sessions. Requires a running TRACE32 PowerView insta
 | **Action** | `t32_action_invoke`, `t32_field_get`, `t32_field_set` | Named actions from SDN catalogs |
 | **History** | `t32_history_tail`, `t32_resources_list`, `t32_resource_read` | Command history and MCP resources |
 
+`t32_cmd_run` and `t32_cmm_run` include headless blocking detection. GUI/input PRACTICE commands such as `DIALOG.*`, `ENTER`, `INKEY`, `PAUSE`, and `SCREEN.WAIT` return a blocked tool result unless `force: "true"` is passed.
+
+The built-in window catalog now includes additional status views:
+- `riscv_csr_view`
+- `flash_status`
+- `system_status`
+- `nexus_trace`
+
 **Example workflow:**
 
 ```
@@ -309,6 +317,52 @@ claude plugin install cmm-lsp@simple-local
 | t32-cli | Yes | Interactive session management |
 
 **TRACE32 setup:** Enable the Remote API in PowerView: `RCL.Port 20000` or set `RCL=NETASSIST` in your `config.t32`.
+
+## MCP Config
+
+The T32 MCP server reads `config/t32/t32_mcp.sdn` for default connection settings:
+
+```sdn
+connection
+  default_port: 20000
+  default_host: localhost
+  rcl_port: 20000
+  rcl_host: localhost
+  backend_preference: t32rem
+```
+
+Notes:
+- CLI flags still override config.
+- Environment variables such as `T32_DEFAULT_HOST`, `T32_DEFAULT_PORT`, `T32_RCL_HOST`, `T32_RCL_PORT`, and `T32_BACKEND_PREFERENCE` override the file.
+- `backend_preference: python_rcl` prefers the Python RCL bridge when it is installed.
+
+The window catalog lives in `config/t32/catalogs/windows.sdn`. Entries may include optional metadata such as `capture_mode`, `arch`, and `notes`. The MCP exposes that metadata through `t32_window_list`, `t32_window_describe`, and the `t32:///windows` resource.
+
+## Blocking Guard
+
+`t32_check_blocking()` is the headless guard used by both command tools.
+
+- `BLOCK` prevents execution unless `force: "true"` is set
+- `WARN` allows execution but returns cautionary metadata
+- `INFO` reports no-op display commands in headless mode
+
+Typical blocking commands:
+- `DIALOG.OK`, `DIALOG.YESNO`, `DIALOG.FILE`, `DIALOG.STRING`
+- `ENTER`, `INKEY`, `PAUSE`, `STOP`
+- `SCREEN.WAIT`
+
+Typical non-blocking notes:
+- `SCREEN.ON`
+- `WINPOS`
+- timing-sensitive `WAIT`
+
+Example:
+
+```text
+t32_cmd_run(command: "ENTER")
+```
+
+returns a blocked result with warnings and a hint to use `force: "true"` only when the caller really intends to bypass the guard.
 
 ---
 

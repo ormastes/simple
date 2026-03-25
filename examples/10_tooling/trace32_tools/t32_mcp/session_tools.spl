@@ -44,6 +44,13 @@ fn t32_find_backend() -> text:
     # Return cached result
     if MCP_T32_BACKEND_CMD != "":
         return MCP_T32_BACKEND_CMD
+    val prefer_python = T32_BACKEND_PREFERENCE.to_lower() == "python_rcl"
+    if prefer_python:
+        val python_bridge = t32_find_python_rcl_bridge()
+        if python_bridge != "":
+            MCP_T32_BACKEND_TYPE = "python_rcl"
+            MCP_T32_BACKEND_CMD = python_bridge
+            return python_bridge
     # --- Primary: t32rem binary ---
     # Check T32REM env var first
     val env_path = rt_env_get("T32REM") ?? ""
@@ -134,6 +141,38 @@ var MCP_T32_NEXT_SESSION_ID: i64 = 1
 # --- Blocking pattern detection ---
 # Detects GUI-interactive / script-blocking PRACTICE commands that hang headless MCP
 
+fn t32_block_contains_word(text_to_scan: text, word: text) -> bool:
+    val lower = text_to_scan.to_lower()
+    if lower == word:
+        return true
+    if lower.starts_with(word + " "):
+        return true
+    if lower.starts_with(word + "\n"):
+        return true
+    if lower.starts_with(word + "."):
+        return true
+    if lower.starts_with(word + "("):
+        return true
+    if lower.contains("\n" + word + " "):
+        return true
+    if lower.contains("\n" + word + "\n"):
+        return true
+    if lower.contains("\n" + word + "."):
+        return true
+    if lower.contains("\n" + word + "("):
+        return true
+    if lower.contains(" " + word + " "):
+        return true
+    if lower.contains(" " + word + "."):
+        return true
+    if lower.contains(" " + word + "("):
+        return true
+    if lower.ends_with(" " + word):
+        return true
+    if lower.ends_with("\n" + word):
+        return true
+    false
+
 fn t32_check_blocking(text_to_scan: text) -> [text]:
     val lower = text_to_scan.to_lower()
     var warnings: [text] = []
@@ -153,8 +192,14 @@ fn t32_check_blocking(text_to_scan: text) -> [text]:
     # Input wait — keypress/user input
     if lower.contains("inkey"):
         warnings.push("BLOCK: INKEY waits for keypress — will hang in headless/MCP mode")
-    if lower.contains("enter") and not lower.contains("entry"):
+    if t32_block_contains_word(lower, "enter"):
         warnings.push("BLOCK: ENTER waits for user input — will hang in headless/MCP mode")
+    if t32_block_contains_word(lower, "pause"):
+        warnings.push("BLOCK: PAUSE stops script flow until user interaction — will hang in headless/MCP mode")
+    if t32_block_contains_word(lower, "stop"):
+        warnings.push("BLOCK: STOP halts PRACTICE execution for inspection — will hang in headless/MCP mode")
+    if t32_block_contains_word(lower, "wait"):
+        warnings.push("WARN: WAIT may stall scripted automation depending on timing condition and target state")
     # Screen wait
     if lower.contains("screen.wait"):
         warnings.push("BLOCK: SCREEN.WAIT waits for screen update — will hang in headless/MCP mode")
@@ -163,6 +208,10 @@ fn t32_check_blocking(text_to_scan: text) -> [text]:
         warnings.push("INFO: SCREEN.ON has no effect in headless/MCP mode (display is off)")
     if lower.contains("winpos"):
         warnings.push("INFO: WINPOS has no effect in headless/MCP mode (no display)")
+    if lower.contains("menu.reprogram"):
+        warnings.push("WARN: MENU.ReProgram opens UI-driven menu state — may not behave as expected in headless/MCP mode")
+    if lower.contains("print ") or lower.ends_with("print") or lower.contains("\nprint "):
+        warnings.push("INFO: PRINT writes text only; it is safe but may not appear in a TRACE32 window capture")
     warnings
 
 fn t32_has_blocking(warnings: [text]) -> bool:
