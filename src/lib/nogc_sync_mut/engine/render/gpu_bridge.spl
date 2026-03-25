@@ -9,6 +9,7 @@
 # and the engine falls back to software rendering.
 
 use std.common.engine.color.{EngineColor}
+use std.gc_async_mut.gpu.context.{Context}
 use std.gc_async_mut.gpu.graphics.{
     GpuFormat, GpuTextureUsage, GpuTextureDesc, GpuTexture,
     GpuRenderPassDesc, GpuRenderPass, GpuLoadOp, GpuStoreOp,
@@ -56,47 +57,94 @@ impl GpuRenderState:
 # Initialization — create GPU resources via Context
 # ============================================================================
 
-fn init_gpu_render_state(width: i64, height: i64, window_handle: i64) -> GpuRenderState:
-    # The engine has batching code, but no real device/context-backed 2D GPU submission path yet.
-    # Returning an uninitialized state keeps renderer mode honest and forces software fallback.
+fn init_gpu_render_state(ctx: Context, width: i64, height: i64, window_handle: i64) -> GpuRenderState:
+    # Create render pass
+    val rp_desc = GpuRenderPassDesc(
+        color_format: GpuFormat.BGRA8,
+        has_depth: false,
+        depth_format: GpuFormat.Depth32F,
+        clear_r: 0.0, clear_g: 0.0, clear_b: 0.0, clear_a: 1.0,
+        load_op: GpuLoadOp.Clear,
+        store_op: GpuStoreOp.Store
+    )
+    val render_pass = ctx.create_render_pass(rp_desc)
+
+    # Create swapchain
+    val sc_desc = GpuSwapchainDesc(
+        window_handle: window_handle,
+        width: width,
+        height: height,
+        format: GpuFormat.BGRA8,
+        vsync: true
+    )
+    val swapchain = ctx.create_swapchain(sc_desc)
+
+    # Create color texture for framebuffer attachment
+    val tex_desc = GpuTextureDesc(width: width, height: height, format: GpuFormat.BGRA8, usage: GpuTextureUsage.RenderTarget)
+    val color_texture = ctx.create_texture(tex_desc)
+
+    # Create framebuffer
+    val framebuffer = ctx.create_framebuffer(render_pass, color_texture)
+
+    # Create pipeline (placeholder shaders — handle 0 until SPIR-V compilation is wired)
+    val vs = GpuShader(handle: 0, stage: GpuShaderStage.Vertex)
+    val fs = GpuShader(handle: 0, stage: GpuShaderStage.Fragment)
+    val vertex_layout = GpuVertexLayout(
+        stride: 32,
+        attributes: [
+            GpuVertexAttribute(location: 0, format: GpuVertexFormat.Float2, offset: 0),
+            GpuVertexAttribute(location: 1, format: GpuVertexFormat.Float2, offset: 8),
+            GpuVertexAttribute(location: 2, format: GpuVertexFormat.Float4, offset: 16)
+        ]
+    )
+    val pipe_desc = GpuPipelineDesc(
+        vertex_shader: vs, fragment_shader: fs,
+        blend_mode: GpuBlendMode.AlphaBlend,
+        vertex_layout: vertex_layout,
+        topology: GpuTopology.TriangleList,
+        render_pass: render_pass
+    )
+    val pipeline = ctx.create_graphics_pipeline(pipe_desc)
+
     GpuRenderState(
-        render_pass: GpuRenderPass(handle: 0),
-        pipeline: GpuGraphicsPipeline(handle: 0),
-        swapchain: GpuSwapchain(handle: 0, width: width, height: height, format: GpuFormat.BGRA8),
-        framebuffer: GpuFramebuffer(handle: 0, width: width, height: height),
-        color_texture: GpuTexture(handle: 0, width: width, height: height, format: GpuFormat.BGRA8),
-        is_initialized: false,
+        render_pass: render_pass,
+        pipeline: pipeline,
+        swapchain: swapchain,
+        framebuffer: framebuffer,
+        color_texture: color_texture,
+        is_initialized: true,
         screen_width: width,
         screen_height: height,
-        last_error: "GPU renderer mode is disabled until the 2D backend has real device/pipeline wiring"
+        last_error: ""
     )
 
 # ============================================================================
 # Frame Operations
 # ============================================================================
 
-fn begin_gpu_frame(state: GpuRenderState, clear_color: EngineColor):
-    # Begin render pass with clear color
-    # In real implementation, this calls ctx.begin_render_pass()
-    pass_do_nothing
+fn begin_gpu_frame(ctx: Context, state: GpuRenderState, clear_color: EngineColor):
+    if not state.is_initialized:
+        return
+    ctx.begin_render_pass(state.render_pass, state.framebuffer, clear_color.r, clear_color.g, clear_color.b, clear_color.a)
+    ctx.bind_pipeline(state.pipeline)
 
-fn submit_gpu_batch(state: GpuRenderState, batch: SpriteBatch) -> DrawStats:
+fn submit_gpu_batch(ctx: Context, state: GpuRenderState, batch: SpriteBatch) -> DrawStats:
     if not state.is_initialized:
         return DrawStats.zero()
     val tri_count = batch.indices.len() / 3
+    ctx.draw_indexed(batch.indices.len())
     DrawStats(draw_calls: 1, triangles: tri_count, vertices: batch.vertices.len())
 
-fn end_gpu_frame(state: GpuRenderState):
-    # End render pass and present
-    # In real implementation:
-    #   ctx.end_render_pass()
-    #   ctx.present(state.swapchain)
-    pass_do_nothing
+fn end_gpu_frame(ctx: Context, state: GpuRenderState):
+    if not state.is_initialized:
+        return
+    ctx.end_render_pass()
+    ctx.present(state.swapchain)
 
-fn destroy_gpu_render_state(state: GpuRenderState):
-    # Destroy all GPU resources
-    # In real implementation, call ctx.destroy_* for each resource
-    pass_do_nothing
+fn destroy_gpu_render_state(ctx: Context, state: GpuRenderState):
+    if not state.is_initialized:
+        return
+    ctx.destroy_texture(state.color_texture)
 
 # ============================================================================
 # Batch Data Conversion

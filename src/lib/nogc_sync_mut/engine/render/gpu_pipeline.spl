@@ -13,6 +13,7 @@ use std.common.engine.math2d.{Vec2}
 use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
 use std.nogc_sync_mut.engine.render.batch.{sort_commands_by_z}
 use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
+use std.gc_async_mut.gpu.context.{Context}
 use std.nogc_sync_mut.engine.render.gpu_bridge.{GpuRenderState, init_gpu_render_state, begin_gpu_frame, submit_gpu_batch, end_gpu_frame, destroy_gpu_render_state}
 
 # GPU vertex for 2D rendering (position + UV + color)
@@ -218,12 +219,12 @@ impl GpuRenderer2D:
         val ny = 1.0 - (sy / (self.screen_height * 1.0)) * 2.0
         Vec2(x: nx, y: ny)
 
-    me init_gpu(window_handle: i64) -> bool:
-        # Initialize GPU resources for rendering
-        self.gpu_state = init_gpu_render_state(self.screen_width, self.screen_height, window_handle)
+    me init_gpu(ctx: Context, window_handle: i64) -> bool:
+        # Initialize GPU resources for rendering via Context
+        self.gpu_state = init_gpu_render_state(ctx, self.screen_width, self.screen_height, window_handle)
         self.gpu_state.is_initialized
 
-    me submit_commands_gpu(commands: RenderCommandBuffer) -> DrawStats:
+    me submit_commands_gpu(commands: RenderCommandBuffer, ctx: Context) -> DrawStats:
         # Sort + batch commands (reuse existing logic)
         self.begin_frame()
         val sorted = sort_commands_by_z(commands.commands)
@@ -231,27 +232,27 @@ impl GpuRenderer2D:
             self._process_command(cmd)
         self.flush_batch()
 
-        # Submit batches to GPU
+        # Submit batches to GPU via Context
         if self.gpu_state.is_initialized:
             val clear = EngineColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
-            begin_gpu_frame(self.gpu_state, clear)
+            begin_gpu_frame(ctx, self.gpu_state, clear)
             var total = DrawStats.zero()
             var bi = 0
             while bi < self.batches.len():
                 val batch = self.batches[bi]
-                val batch_stats = submit_gpu_batch(self.gpu_state, batch)
+                val batch_stats = submit_gpu_batch(ctx, self.gpu_state, batch)
                 total = DrawStats(
                     draw_calls: total.draw_calls + batch_stats.draw_calls,
                     triangles: total.triangles + batch_stats.triangles,
                     vertices: total.vertices + batch_stats.vertices
                 )
                 bi = bi + 1
-            end_gpu_frame(self.gpu_state)
+            end_gpu_frame(ctx, self.gpu_state)
             self.stats = total
         else:
             self.stats = DrawStats.zero()
         self.stats
 
-    me destroy_gpu():
+    me destroy_gpu(ctx: Context):
         if self.gpu_state.is_initialized:
-            destroy_gpu_render_state(self.gpu_state)
+            destroy_gpu_render_state(ctx, self.gpu_state)

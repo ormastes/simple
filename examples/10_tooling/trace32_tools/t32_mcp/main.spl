@@ -70,13 +70,55 @@ var MCP_T32_AREA_READY = false
 var MCP_T32_AREA_NAME = ""
 var T32_SEEN_FIRST_MESSAGE = false
 
+# --- Default connection config ---
+var T32_DEFAULT_PORT: i64 = 20000
+var T32_DEFAULT_HOST = "localhost"
+
 fn t32_startup_diag(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
     stderr_flush()
 
+fn t32_load_default_config():
+    # 1. Config file
+    val config_candidates = ["config/t32/t32_mcp.sdn", "../config/t32/t32_mcp.sdn", "../../config/t32/t32_mcp.sdn"]
+    for config_path in config_candidates:
+        if rt_file_exists(config_path):
+            val content = rt_file_read_text(config_path) ?? ""
+            if content == "":
+                continue
+            val lines = content.split("\n")
+            for line in lines:
+                val trimmed = line.trim()
+                if trimmed.starts_with("default_port:"):
+                    val port_str = trimmed[13:trimmed.len()].trim()
+                    T32_DEFAULT_PORT = int(port_str)
+                if trimmed.starts_with("default_host:"):
+                    T32_DEFAULT_HOST = trimmed[13:trimmed.len()].trim()
+            break
+    # 2. Environment variables (override config file)
+    val env_port = rt_env_get("T32_DEFAULT_PORT") ?? ""
+    if env_port != "":
+        T32_DEFAULT_PORT = int(env_port)
+    val env_host = rt_env_get("T32_DEFAULT_HOST") ?? ""
+    if env_host != "":
+        T32_DEFAULT_HOST = env_host
+
+extern fn sys_get_args() -> [text]
+
 # --- Entry point ---
 
 fn main():
+    t32_load_default_config()
+    # CLI args (highest priority)
+    val args = sys_get_args()
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg.starts_with("--port="):
+            T32_DEFAULT_PORT = int(arg[7:arg.len()])
+        if arg.starts_with("--host="):
+            T32_DEFAULT_HOST = arg[7:arg.len()]
+        ai = ai + 1
     if rt_env_get("SIMPLE_LIB") == "":
         t32_startup_diag("startup warning: SIMPLE_LIB is not set; relative imports/resources may fail in some launch modes")
     t32_start_server()
