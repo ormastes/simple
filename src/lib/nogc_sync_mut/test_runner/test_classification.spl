@@ -1,9 +1,15 @@
-# Test Classification — Categorizes tests for QEMU session sharing
+# Test Classification — Categorizes tests for QEMU session sharing and session routing
 #
 # Classifies test files by their QEMU session requirements so the
 # test runner can batch tests that share the same VM.
+# Also parses extended session metadata for the session broker.
 
 extern fn rt_file_read_text(path: text) -> text
+
+use app.test_daemon.session_types.{
+    TestSessionMeta, test_session_meta_default, parse_session_meta,
+    meta_needs_session, SESSION_KIND_LOCAL
+}
 
 # ============================================================================
 # Session Mode Constants
@@ -132,6 +138,44 @@ fn separate_qemu_tests(files: [text]) -> ([text], [text]):
         else:
             normal.push(f)
     (normal, qemu)
+
+# ============================================================================
+# Extended Session Classification
+# ============================================================================
+
+fn classify_test_session(file_path: text) -> TestSessionMeta:
+    """
+    Reads the first 30 lines of a test file and parses @session-kind,
+    @target, @reuse, @reset, @artifact, @startup, @healthcheck markers.
+    Returns TestSessionMeta for session broker routing.
+    """
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        return test_session_meta_default(file_path)
+
+    val lines = content.split("\n")
+    var header_lines: [text] = []
+    var i = 0
+    while i < lines.len() and i < 30:
+        header_lines.push(lines[i])
+        i = i + 1
+
+    parse_session_meta(file_path, header_lines)
+
+fn separate_session_tests(files: [text]) -> ([text], [text]):
+    """
+    Separates tests that need session management from regular tests.
+    Returns (regular_files, session_files).
+    """
+    var regular: [text] = []
+    var session: [text] = []
+    for f in files:
+        val meta = classify_test_session(f)
+        if meta_needs_session(meta):
+            session.push(f)
+        else:
+            regular.push(f)
+    (regular, session)
 
 # ============================================================================
 # Exports

@@ -18,6 +18,8 @@ class TestDepGraph:
     reverse_deps: {text: [text]}
     graph_path: text
 
+val TEST_DEP_GRAPH_VERSION: i64 = 2
+
 fn test_dep_graph_new(graph_path: text) -> TestDepGraph:
     TestDepGraph(deps: {}, reverse_deps: {}, graph_path: graph_path)
 
@@ -54,6 +56,15 @@ impl TestDepGraph:
                     j = j + 1
             i = i + 1
 
+        val previous = self.deps[test_path] ?? []
+        var pi = 0
+        while pi < previous.len():
+            val old_dep = previous[pi]
+            var tests = self.reverse_deps[old_dep] ?? []
+            tests = list_remove(tests, test_path)
+            self.reverse_deps[old_dep] = tests
+            pi = pi + 1
+
         self.deps[test_path] = resolved
 
         # Update reverse deps
@@ -72,16 +83,17 @@ impl TestDepGraph:
 
         var lines: [text] = []
         lines.push("# Test Dependency Graph")
+        lines.push("version={TEST_DEP_GRAPH_VERSION}")
         val keys = self.deps.keys()
         var i = 0
         while i < keys.len():
             val key = keys[i]
             val dep_list = self.deps[key] ?? []
             lines.push("")
-            lines.push("[{key}]")
+            lines.push("[{dep_graph_escape_text(key)}]")
             var di = 0
             while di < dep_list.len():
-                lines.push("dep={dep_list[di]}")
+                lines.push("dep={dep_graph_escape_text(dep_list[di])}")
                 di = di + 1
             i = i + 1
 
@@ -102,6 +114,8 @@ fn test_dep_graph_load(graph_path: text) -> TestDepGraph:
     if content == "":
         return graph
 
+    var seen_entry = false
+    var declared_version: i64 = 1
     var current_key = ""
     var current_deps: [text] = []
 
@@ -110,6 +124,7 @@ fn test_dep_graph_load(graph_path: text) -> TestDepGraph:
     while li < lines.len():
         val line = lines[li].trim()
         if line.starts_with("[") and line.ends_with("]"):
+            seen_entry = true
             if current_key != "":
                 graph.deps[current_key] = current_deps
                 # Rebuild reverse deps
@@ -121,10 +136,14 @@ fn test_dep_graph_load(graph_path: text) -> TestDepGraph:
                     graph.reverse_deps[current_deps[ri]] = tests
                     ri = ri + 1
 
-            current_key = line.substring(1, line.len() - 1)
+            current_key = dep_graph_unescape_text(line.substring(1, line.len() - 1))
             current_deps = []
+        else if line.starts_with("version=") and not seen_entry:
+            declared_version = line.substring(8).to_i64() ?? 0
+            if declared_version != 1 and declared_version != TEST_DEP_GRAPH_VERSION:
+                return test_dep_graph_new(graph_path)
         else if line.starts_with("dep="):
-            current_deps.push(line.substring(4))
+            current_deps.push(dep_graph_unescape_text(line.substring(4)))
         li = li + 1
 
     if current_key != "":
@@ -261,8 +280,37 @@ fn list_contains(list: [text], item: text) -> bool:
         i = i + 1
     false
 
+fn list_remove(list: [text], item: text) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < list.len():
+        if list[i] != item:
+            result.push(list[i])
+        i = i + 1
+    result
+
 fn dep_graph_parent(path: text) -> text:
     val last_slash = path.last_index_of("/")
     if last_slash < 0:
         return "."
     path.substring(0, last_slash)
+
+fn dep_graph_escape_text(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\n", "\\n").replace("=", "\\=").replace("[", "\\[").replace("]", "\\]")
+
+fn dep_graph_unescape_text(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "\\" and i + 1 < s.len():
+            val next = s.substring(i + 1, i + 2)
+            if next == "n":
+                result = result + "\n"
+            else:
+                result = result + next
+            i = i + 2
+        else:
+            result = result + ch
+            i = i + 1
+    result

@@ -54,8 +54,12 @@ use app.test_runner_new.test_runner_async.{run_tests_parallel_with_monitoring, g
 # GROUP 7: Lifecycle imports
 # use app.test_runner_new.runner_lifecycle.{cleanup_all_children, lifecycle_enable_heartbeat, lifecycle_send_heartbeat}
 # GROUP 7b: QEMU test runner + classification
-use app.test_runner_new.test_classification.{separate_qemu_tests}
+use app.test_runner_new.test_classification.{separate_qemu_tests, classify_test_session, separate_session_tests}
 use app.test_runner_new.qemu_test_runner.{run_qemu_tests_all}
+# Session sharing: daemon client + broker
+use app.test_daemon.client.{test_daemon_ensure_running, test_submit_and_wait, test_daemon_status, test_daemon_stop}
+use app.test_daemon.types.{TestDaemonConfig, test_daemon_config_default, TestResult, TRESP_COMPLETED, TRESP_FAILED, TRESP_CACHED}
+use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_session_key, session_kind_name}
 # GROUP 8: Signal handler imports (with fallback)
 # use app.io.signal_handlers.{install_signal_handlers, create_signal_cleanup_handler, signal_handlers_available}
 # use app.test_runner_new.process_tracker.{tracker_kill_all_children, tracker_stop_all_containers}
@@ -152,6 +156,32 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # val is_container_seq = is_container_seq1 or is_container_seq2 or is_container_seq3
     # if is_container_seq or options.container_sequential:
     #     return run_tests_sequential_containers(files, options)
+
+    # Session-daemon mode: route all tests through daemon (sequential path)
+    if (updated_options.session_daemon or updated_options.session_share) and not updated_options.parallel:
+        val daemon_config = test_daemon_config_default()
+        val daemon_ok = test_daemon_ensure_running(daemon_config)
+        if daemon_ok:
+            val (regular_files, session_files) = separate_session_tests(files)
+            if session_files.len() > 0:
+                if updated_options.session_debug:
+                    print "  [session] Routing {session_files.len()} session test(s) through daemon (sequential)"
+                val daemon_results = run_tests_via_daemon(session_files, updated_options, daemon_config)
+                # Print and aggregate daemon results
+                var daemon_passed: i64 = 0
+                var daemon_failed: i64 = 0
+                for dr in daemon_results:
+                    print_result(dr, updated_options.format)
+                    daemon_passed = daemon_passed + dr.passed
+                    daemon_failed = daemon_failed + dr.failed
+                total_passed = total_passed + daemon_passed
+                total_failed = total_failed + daemon_failed
+                files = regular_files
+                if updated_options.session_debug:
+                    print "  [session] Done: {daemon_passed} passed, {daemon_failed} failed"
+        else:
+            if updated_options.session_debug:
+                print "  [session] Daemon unavailable, using direct execution"
 
     # Sequential flag overrides parallel
     if updated_options.sequential:
@@ -343,6 +373,24 @@ fn run_tests_parallel_mode(
     if use_result_cache:
         uncached_files = order_tests_by_duration(uncached_files, cache)
 
+    # Session-aware routing: if --session-daemon, route session tests through daemon
+    var daemon_results: [TestFileResult] = []
+    var session_routed: i64 = 0
+    if options.session_daemon or options.session_share:
+        val daemon_config = test_daemon_config_default()
+        val daemon_ok = test_daemon_ensure_running(daemon_config)
+        if daemon_ok:
+            val (regular_files, session_files) = separate_session_tests(uncached_files)
+            if session_files.len() > 0:
+                if options.session_debug:
+                    print "  [session] {session_files.len()} session-capable test(s) routed to daemon"
+                daemon_results = run_tests_via_daemon(session_files, options, daemon_config)
+                session_routed = session_files.len()
+            uncached_files = regular_files
+        else:
+            if options.session_debug:
+                print "  [session] Daemon unavailable, falling back to direct execution"
+
     # Separate QEMU and normal tests from uncached files
     val (normal_files, qemu_files) = separate_qemu_tests(uncached_files)
 
@@ -357,6 +405,8 @@ fn run_tests_parallel_mode(
     print "Running {files.len()} test file(s) in parallel [mode: {mode_name}, workers: {max_workers}]"
     if total_cached > 0:
         print "  Cached: {total_cached}, to run: {uncached_files.len()}"
+    if session_routed > 0:
+        print "  Session-routed: {session_routed}"
     if qemu_files.len() > 0:
         print "  Normal tests: {normal_files.len()}, QEMU tests: {qemu_files.len()}"
     print ""
@@ -413,6 +463,22 @@ fn run_tests_parallel_mode(
             total_timed_out = total_timed_out + 1
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
+
+    # Add daemon session results
+    for result in daemon_results:
+        print_result(result, options.format)
+        total_passed = total_passed + result.passed
+        total_failed = total_failed + result.failed
+        total_skipped = total_skipped + result.skipped
+        total_pending = total_pending + result.pending
+        if result.timed_out:
+            total_timed_out = total_timed_out + 1
+        total_duration_ms = total_duration_ms + result.duration_ms
+        all_results.push(result)
+
+        if use_result_cache:
+            val dep_paths_d = dep_graph.get_deps(result.path)
+            cache.record_result(result.path, dep_paths_d, result.passed, result.failed, result.skipped, result.duration_ms)
 
     # Save cache
     if use_result_cache:
@@ -474,6 +540,64 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_native(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
             run_test_file_composite(file_path, effective_options, spec)
+
+# =========================================================================
+# Session-Aware Daemon Execution
+# =========================================================================
+
+fn run_tests_via_daemon(
+    files: [text],
+    options: TestOptions,
+    daemon_config: TestDaemonConfig
+) -> [TestFileResult]:
+    """
+    Runs tests through the test daemon, which manages session sharing.
+    Falls back to direct execution if daemon is unavailable.
+    """
+    var results: [TestFileResult] = []
+    val clean = options.clean
+
+    if options.session_debug:
+        print "  [session] Routing {files.len()} test(s) through daemon"
+
+    for file_path in files:
+        val start_time = time_now_unix_micros()
+
+        # Submit to daemon and wait for result
+        val daemon_result = test_submit_and_wait(file_path, daemon_config, clean, options.timeout * 1000)
+
+        if daemon_result.status == TRESP_COMPLETED or daemon_result.status == TRESP_FAILED or daemon_result.status == TRESP_CACHED:
+            val duration_ms = (time_now_unix_micros() - start_time) / 1000
+            val result = TestFileResult(
+                path: file_path,
+                passed: daemon_result.passed,
+                failed: daemon_result.failed,
+                skipped: daemon_result.skipped,
+                pending: 0,
+                duration_ms: if daemon_result.duration_ms > 0: daemon_result.duration_ms else: duration_ms,
+                setup_ms: 0,
+                error: if daemon_result.status == TRESP_FAILED: daemon_result.output else: "",
+                timed_out: false,
+                cached: daemon_result.cached
+            )
+            results.push(result)
+
+            if options.session_debug:
+                val cached_str = if daemon_result.cached: " (cached)" else: ""
+                print "  [session] {file_path}: {daemon_result.passed}p {daemon_result.failed}f{cached_str}"
+        else:
+            # Daemon returned unexpected status — fall back to direct execution
+            if options.session_debug:
+                print "  [session] Fallback to direct execution for {file_path}"
+            val fallback_result = run_single_test(file_path, options)
+            results.push(fallback_result)
+
+        if options.fail_fast:
+            val last = results[results.len() - 1]
+            if last.failed > 0 or last.timed_out:
+                break
+
+    results
 
 # =========================================================================
 # Main Entry Point
