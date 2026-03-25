@@ -29,6 +29,10 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
 
     val pid_or_zero = rt_fork_child_setup()
 
+    # Measure session setup time (fork overhead)
+    val after_fork = time_now_unix_micros()
+    val setup_ms = (after_fork - start) / 1000
+
     if pid_or_zero == 0:
         # === CHILD PROCESS ===
         # Binary already in memory (COW), no loading needed.
@@ -51,7 +55,7 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
             skipped: 0,
             pending: 0,
             duration_ms: duration_ms,
-            setup_ms: 0,
+            setup_ms: setup_ms,
             error: "fork() failed",
             timed_out: false,
             cached: false
@@ -62,9 +66,23 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
     val stdout = rt_fork_parent_stdout()
     val stderr = rt_fork_parent_stderr()
     val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
+    # duration_ms = only test execution time (excludes fork setup)
+    val duration_ms = (end - after_fork) / 1000
 
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    # Attach setup_ms to the result
+    TestFileResult(
+        path: result.path,
+        passed: result.passed,
+        failed: result.failed,
+        skipped: result.skipped,
+        pending: result.pending,
+        duration_ms: result.duration_ms,
+        setup_ms: setup_ms,
+        error: result.error,
+        timed_out: result.timed_out,
+        cached: result.cached
+    )
 
 # =========================================================================
 # Exports

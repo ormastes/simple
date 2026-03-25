@@ -117,6 +117,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "  Indexed {fresh_entries.len()} test files, {fresh_sdoctest.len()} sdoctest files"
         print ""
 
+    # Session env setup starts here — this time is tracked separately
+    val session_setup_start = time_now_unix_micros()
+
     val use_cache = not updated_options.no_cache
     val all_files = discover_test_files_fast(updated_options.path, updated_options, use_cache)
 
@@ -224,6 +227,12 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # Build dependency graph for cache checks
     var dep_graph = test_dep_graph_new()
 
+    # Session env setup complete — record setup time
+    val session_setup_end = time_now_unix_micros()
+    val session_setup_ms = (session_setup_end - session_setup_start) / 1000
+    if session_setup_ms > 0:
+        print "Session setup: {session_setup_ms}ms"
+
     print ""
 
     var results: [TestFileResult] = []
@@ -233,6 +242,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var total_pending = 0
     var total_timed_out = 0
     var total_duration_ms = 0
+    var total_setup_ms = session_setup_ms
     var total_cached = 0
     var completed_files: [text] = []
     var tests_run = 0
@@ -292,6 +302,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         if result.timed_out:
             total_timed_out = total_timed_out + 1
         total_duration_ms = total_duration_ms + result.duration_ms
+        total_setup_ms = total_setup_ms + result.setup_ms
         results.push(result)
         completed_files.push(file_path)
         tests_run = tests_run + 1
@@ -320,7 +331,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_pending: total_pending,
         total_timed_out: total_timed_out,
         total_duration_ms: total_duration_ms,
-        total_setup_ms: 0,
+        total_setup_ms: total_setup_ms,
         total_cached: total_cached
     )
 
@@ -331,6 +342,7 @@ fn run_tests_parallel_mode(
     ckpt_failed: i64,
     ckpt_skipped: i64
 ) -> TestRunResult:
+    val parallel_setup_start = time_now_unix_micros()
     val mode_name = mode_to_str(options.mode)
 
     # Load change-detection cache (skip if --clean)
@@ -401,8 +413,13 @@ fn run_tests_parallel_mode(
         if max_workers < 1:
             max_workers = 1
 
+    val parallel_setup_end = time_now_unix_micros()
+    val parallel_setup_ms = (parallel_setup_end - parallel_setup_start) / 1000
+
     val total_cached = cached_results.len()
     print "Running {files.len()} test file(s) in parallel [mode: {mode_name}, workers: {max_workers}]"
+    if parallel_setup_ms > 0:
+        print "  Session setup: {parallel_setup_ms}ms"
     if total_cached > 0:
         print "  Cached: {total_cached}, to run: {uncached_files.len()}"
     if session_routed > 0:
@@ -495,7 +512,7 @@ fn run_tests_parallel_mode(
         total_pending: total_pending,
         total_timed_out: total_timed_out,
         total_duration_ms: total_duration_ms,
-        total_setup_ms: 0,
+        total_setup_ms: parallel_setup_ms,
         total_cached: total_cached
     )
 
