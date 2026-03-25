@@ -423,6 +423,17 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_DASHBOARD_RUST",
         needs_rust_flags: &[],
     },
+    // Office suite
+    CommandEntry {
+        name: "office",
+        app_path: "src/app/office/mod.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: office app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Verification
     CommandEntry {
         name: "verify",
@@ -769,9 +780,10 @@ fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
     // Keep Simple app dispatch narrow. Most compiler/build commands still rely on
-    // Rust handlers, but the UI command needs a real `simple ui ...` surface.
+    // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"
-        && app_relative_path != "src/app/ui.tauri/tauri_entry.spl" {
+        && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
+        && app_relative_path != "src/app/office/mod.spl" {
         return None;
     }
 
