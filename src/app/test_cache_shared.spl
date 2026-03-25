@@ -1,0 +1,296 @@
+# Shared Test Result Cache Helpers
+#
+# Used by both the standalone test runner and the test daemon.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+
+struct TestCacheEntry:
+    test_path: text
+    test_hash: i64
+    dep_hashes: {text: i64}
+    dep_sizes: {text: i64}
+    test_size: i64
+    result_status: i64
+    result_passed: i64
+    result_failed: i64
+    result_skipped: i64
+    result_duration_ms: i64
+    result_output: text
+    last_run_timestamp: i64
+
+val TEST_RESULT_CACHE_VERSION: i64 = 2
+
+fn stale_entry() -> TestCacheEntry:
+    TestCacheEntry(
+        test_path: "", test_hash: 0, dep_hashes: {}, dep_sizes: {},
+        test_size: 0, result_status: -1, result_passed: 0, result_failed: 0,
+        result_skipped: 0, result_duration_ms: 0, result_output: "",
+        last_run_timestamp: 0
+    )
+
+fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text, dep_paths: [text]) -> TestCacheEntry:
+    val entry = entries[test_path]
+    if entry.?:
+        val existing = entry
+        if dep_paths.len() != existing.dep_hashes.keys().len():
+            return stale_entry()
+
+        val current_size = rt_file_size(test_path)
+        if current_size != existing.test_size:
+            return stale_entry()
+
+        val source = rt_file_read_text(test_path) ?? ""
+        val current_hash = rt_hash_text(source)
+        if current_hash != existing.test_hash:
+            return stale_entry()
+
+        var i = 0
+        while i < dep_paths.len():
+            val dep_path = dep_paths[i]
+            val dep_size = rt_file_size(dep_path)
+            val cached_size = existing.dep_sizes[dep_path] ?? -1
+            if dep_size != cached_size:
+                return stale_entry()
+            val dep_source = rt_file_read_text(dep_path) ?? ""
+            val dep_hash = rt_hash_text(dep_source)
+            val cached_hash = existing.dep_hashes[dep_path] ?? 0
+            if dep_hash != cached_hash:
+                return stale_entry()
+            i = i + 1
+
+        return existing
+
+    stale_entry()
+
+fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, passed: i64, failed: i64, skipped: i64, duration_ms: i64, output: text) -> TestCacheEntry:
+    val source = rt_file_read_text(test_path) ?? ""
+    val test_hash = rt_hash_text(source)
+    val test_size = rt_file_size(test_path)
+
+    var dep_hashes: {text: i64} = {}
+    var dep_sizes: {text: i64} = {}
+    var i = 0
+    while i < dep_paths.len():
+        val dep_path = dep_paths[i]
+        val dep_source = rt_file_read_text(dep_path) ?? ""
+        dep_hashes[dep_path] = rt_hash_text(dep_source)
+        dep_sizes[dep_path] = rt_file_size(dep_path)
+        i = i + 1
+
+    var truncated_output = output
+    if output.len() > 10240:
+        truncated_output = output.substring(0, 10240) + "\n... (truncated)"
+
+    TestCacheEntry(
+        test_path: test_path,
+        test_hash: test_hash,
+        dep_hashes: dep_hashes,
+        dep_sizes: dep_sizes,
+        test_size: test_size,
+        result_status: status,
+        result_passed: passed,
+        result_failed: failed,
+        result_skipped: skipped,
+        result_duration_ms: duration_ms,
+        result_output: truncated_output,
+        last_run_timestamp: rt_time_now_unix_micros()
+    )
+
+fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text):
+    val parent = cache_path_parent(cache_path)
+    rt_mkdir_p(parent)
+
+    var lines: [text] = []
+    lines.push("# Test Result Cache")
+    lines.push("version={TEST_RESULT_CACHE_VERSION}")
+    val keys = entries.keys()
+    var i = 0
+    while i < keys.len():
+        val key = keys[i]
+        val entry = entries[key]
+        lines.push("")
+        lines.push("[{cache_escape_text(key)}]")
+        lines.push("test_hash={entry.test_hash}")
+        lines.push("test_size={entry.test_size}")
+        lines.push("result_status={entry.result_status}")
+        lines.push("result_passed={entry.result_passed}")
+        lines.push("result_failed={entry.result_failed}")
+        lines.push("result_skipped={entry.result_skipped}")
+        lines.push("result_duration_ms={entry.result_duration_ms}")
+        lines.push("result_output={cache_escape_text(entry.result_output)}")
+        lines.push("last_run_timestamp={entry.last_run_timestamp}")
+
+        val dep_keys = entry.dep_hashes.keys()
+        var di = 0
+        while di < dep_keys.len():
+            val dk = dep_keys[di]
+            val dv = entry.dep_hashes[dk] ?? 0
+            lines.push("dep.{cache_escape_text(dk)}={dv}")
+            val ds = entry.dep_sizes[dk] ?? 0
+            lines.push("dep_size.{cache_escape_text(dk)}={ds}")
+            di = di + 1
+        i = i + 1
+
+    val content = lines.join("\n") + "\n"
+    rt_file_write_text(cache_path, content)
+
+fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
+    var entries: {text: TestCacheEntry} = {}
+
+    if not rt_file_exists(cache_path):
+        return entries
+
+    val content = rt_file_read_text(cache_path) ?? ""
+    if content == "":
+        return entries
+
+    var seen_entry = false
+    var declared_version: i64 = 1
+    var current_key = ""
+    var current_test_hash: i64 = 0
+    var current_test_size: i64 = 0
+    var current_status: i64 = 0
+    var current_passed: i64 = 0
+    var current_failed: i64 = 0
+    var current_skipped: i64 = 0
+    var current_duration: i64 = 0
+    var current_output = ""
+    var current_timestamp: i64 = 0
+    var current_deps: {text: i64} = {}
+    var current_dep_sizes: {text: i64} = {}
+
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("[") and line.ends_with("]"):
+            seen_entry = true
+            if current_key != "":
+                entries[current_key] = TestCacheEntry(
+                    test_path: current_key,
+                    test_hash: current_test_hash,
+                    dep_hashes: current_deps,
+                    dep_sizes: current_dep_sizes,
+                    test_size: current_test_size,
+                    result_status: current_status,
+                    result_passed: current_passed,
+                    result_failed: current_failed,
+                    result_skipped: current_skipped,
+                    result_duration_ms: current_duration,
+                    result_output: current_output,
+                    last_run_timestamp: current_timestamp
+                )
+
+            current_key = cache_unescape_text(line.substring(1, line.len() - 1))
+            current_test_hash = 0
+            current_test_size = 0
+            current_status = 0
+            current_passed = 0
+            current_failed = 0
+            current_skipped = 0
+            current_duration = 0
+            current_output = ""
+            current_timestamp = 0
+            current_deps = {}
+            current_dep_sizes = {}
+        else if line.starts_with("version=") and not seen_entry:
+            declared_version = line.substring(8).to_i64() ?? 0
+            if declared_version != 1 and declared_version != TEST_RESULT_CACHE_VERSION:
+                return {}
+        else if line.starts_with("test_hash="):
+            current_test_hash = line.substring(10).to_i64() ?? 0
+        else if line.starts_with("test_size="):
+            current_test_size = line.substring(10).to_i64() ?? 0
+        else if line.starts_with("result_status="):
+            current_status = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_passed="):
+            current_passed = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_failed="):
+            current_failed = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_skipped="):
+            current_skipped = line.substring(15).to_i64() ?? 0
+        else if line.starts_with("result_duration_ms="):
+            current_duration = line.substring(19).to_i64() ?? 0
+        else if line.starts_with("result_output="):
+            current_output = cache_unescape_text(line.substring(14))
+        else if line.starts_with("last_run_timestamp="):
+            current_timestamp = line.substring(19).to_i64() ?? 0
+        else if line.starts_with("dep_size."):
+            val rest = line.substring(9)
+            val eq_pos = cache_find_unescaped_equals(rest)
+            if eq_pos > 0:
+                val dk = cache_unescape_text(rest.substring(0, eq_pos))
+                val dv = rest.substring(eq_pos + 1).to_i64() ?? 0
+                current_dep_sizes[dk] = dv
+        else if line.starts_with("dep."):
+            val rest = line.substring(4)
+            val eq_pos = cache_find_unescaped_equals(rest)
+            if eq_pos > 0:
+                val dk = cache_unescape_text(rest.substring(0, eq_pos))
+                val dv = rest.substring(eq_pos + 1).to_i64() ?? 0
+                current_deps[dk] = dv
+        li = li + 1
+
+    if current_key != "":
+        entries[current_key] = TestCacheEntry(
+            test_path: current_key,
+            test_hash: current_test_hash,
+            dep_hashes: current_deps,
+            dep_sizes: current_dep_sizes,
+            test_size: current_test_size,
+            result_status: current_status,
+            result_passed: current_passed,
+            result_failed: current_failed,
+            result_skipped: current_skipped,
+            result_duration_ms: current_duration,
+            result_output: current_output,
+            last_run_timestamp: current_timestamp
+        )
+
+    entries
+
+fn cache_path_parent(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    path.substring(0, last_slash)
+
+fn cache_escape_text(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\n", "\\n").replace("=", "\\=").replace("[", "\\[").replace("]", "\\]")
+
+fn cache_unescape_text(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "\\" and i + 1 < s.len():
+            val next = s.substring(i + 1, i + 2)
+            if next == "n":
+                result = result + "\n"
+            else:
+                result = result + next
+            i = i + 2
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+fn cache_find_unescaped_equals(s: text) -> i64:
+    var i = 0
+    var escaped = false
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if escaped:
+            escaped = false
+        else if ch == "\\":
+            escaped = true
+        else if ch == "=":
+            return i
+        i = i + 1
+    -1
