@@ -1,4 +1,4 @@
-use crate::ast::{Argument, Expr, LambdaParam, MoveMode, Type};
+use crate::ast::{Argument, BinOp, Expr, LambdaParam, MoveMode, Type, UnaryOp};
 use crate::error::ParseError;
 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
@@ -47,6 +47,43 @@ impl<'a> Parser<'a> {
             // Don't convert field accesses to paths - let the interpreter handle module.Type.method()
             _ => false,
         }
+    }
+
+    fn validate_bracket_operand(&self, expr: &Expr, context: &str) -> Result<(), ParseError> {
+        match expr {
+            Expr::Binary { op, .. }
+                if matches!(
+                    op,
+                    BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::Lt
+                        | BinOp::Gt
+                        | BinOp::LtEq
+                        | BinOp::GtEq
+                        | BinOp::And
+                        | BinOp::Or
+                        | BinOp::AndSuspend
+                        | BinOp::OrSuspend
+                ) =>
+            {
+                Err(ParseError::syntax_error_with_span(
+                    format!("{context} cannot be a comparison or logical expression inside []"),
+                    self.previous.span,
+                ))
+            }
+            Expr::Unary { op: UnaryOp::Not, .. } => Err(ParseError::syntax_error_with_span(
+                format!("{context} cannot use `not` inside []"),
+                self.previous.span,
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_optional_bracket_operand(&self, expr: &Option<Box<Expr>>, context: &str) -> Result<(), ParseError> {
+        if let Some(expr) = expr {
+            self.validate_bracket_operand(expr, context)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -124,8 +161,10 @@ impl<'a> Parser<'a> {
 
                         if self.check(&TokenKind::DoubleColon) {
                             // Slice with start::step (no end)
+                            self.validate_bracket_operand(&first, "slice start")?;
                             self.advance();
                             let step = self.parse_optional_expr_before_bracket()?;
+                            self.validate_optional_bracket_operand(&step, "slice step")?;
                             self.expect(&TokenKind::RBracket)?;
                             expr = Expr::Slice {
                                 receiver: Box::new(expr),
@@ -170,7 +209,10 @@ impl<'a> Parser<'a> {
                                     Some(Box::new(self.parse_expression()?))
                                 }
                             };
+                            self.validate_bracket_operand(&first, "slice start")?;
+                            self.validate_optional_bracket_operand(&end, "slice end")?;
                             let step = self.parse_optional_step()?;
+                            self.validate_optional_bracket_operand(&step, "slice step")?;
                             self.expect(&TokenKind::RBracket)?;
                             expr = Expr::Slice {
                                 receiver: Box::new(expr),
@@ -180,6 +222,7 @@ impl<'a> Parser<'a> {
                             };
                         } else {
                             // Regular index access
+                            self.validate_bracket_operand(&first, "index expression")?;
                             self.expect(&TokenKind::RBracket)?;
                             expr = Expr::Index {
                                 receiver: Box::new(expr),
@@ -807,7 +850,8 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Gt) {
                 // End of generic args — check that `(` follows
                 self.advance(); // consume '>'
-                if self.check(&TokenKind::LParen) || self.check(&TokenKind::Backslash) || self.check(&TokenKind::LBrace) {
+                if self.check(&TokenKind::LParen) || self.check(&TokenKind::Backslash) || self.check(&TokenKind::LBrace)
+                {
                     succeeded = true;
                 }
                 break;

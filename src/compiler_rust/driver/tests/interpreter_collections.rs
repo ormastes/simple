@@ -3,6 +3,7 @@
 //! Interpreter tests - collections
 
 use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+mod test_helpers;
 
 #[test]
 fn interpreter_array_literal() {
@@ -159,6 +160,36 @@ main = if s[1] == "b": 1 else: 0
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_rejects_bool_array_index() {
+    let code = r#"
+arr = [10, 20, 30]
+flag = true
+main = arr[flag]
+"#;
+    test_helpers::run_expect_runtime_error(code, "cannot index array with type `bool`");
+}
+
+#[test]
+fn interpreter_rejects_bool_string_index() {
+    let code = r#"
+s = "abc"
+flag = true
+main = s[flag]
+"#;
+    test_helpers::run_expect_runtime_error(code, "cannot index string with type `bool`");
+}
+
+#[test]
+fn interpreter_rejects_non_integer_slice_bounds() {
+    let code = r#"
+s = "abcdef"
+flag = true
+main = len(s[flag:3])
+"#;
+    test_helpers::run_expect_runtime_error(code, "slice start must be int, got bool");
 }
 
 // ============= Pattern Matching with Collections =============

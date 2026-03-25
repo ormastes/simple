@@ -259,6 +259,10 @@ impl Lowerer {
             }
         };
 
+        self.require_integer_index_operand(receiver_ty, start_hir.ty)?;
+        self.require_integer_index_operand(receiver_ty, end_hir.ty)?;
+        self.require_integer_index_operand(receiver_ty, step_hir.ty)?;
+
         // Generate a builtin call to rt_slice
         Ok(HirExpr {
             kind: HirExprKind::BuiltinCall {

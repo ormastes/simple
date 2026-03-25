@@ -5,6 +5,15 @@ fn parse_ok(src: &str) {
     parser.parse().expect("should parse");
 }
 
+fn parse_err(src: &str, expected: &str) {
+    let mut parser = Parser::new(src);
+    let err = parser.parse().expect_err("should fail to parse");
+    assert!(
+        err.to_string().contains(expected),
+        "expected parse error containing '{expected}', got: {err}"
+    );
+}
+
 // Nested expressions
 #[test]
 fn parse_nested_expressions() {
@@ -93,6 +102,35 @@ fn parse_indexing() {
     parse_ok("let x = arr[0]");
     parse_ok("let x = arr[i]");
     parse_ok("let x = arr[1 + 2]");
+}
+
+#[test]
+fn reject_comparison_and_logical_expressions_in_brackets() {
+    parse_err(
+        "let x = arr[i == 1]",
+        "index expression cannot be a comparison or logical expression inside []",
+    );
+    parse_err(
+        "let x = arr[ready and other]",
+        "index expression cannot be a comparison or logical expression inside []",
+    );
+    parse_err("let x = arr[not ready]", "index expression cannot use `not` inside []");
+}
+
+#[test]
+fn reject_comparison_and_logical_slice_bounds_in_brackets() {
+    parse_err(
+        "let x = arr[i < limit:4]",
+        "slice start cannot be a comparison or logical expression inside []",
+    );
+    parse_err(
+        "let x = arr[1:done == false]",
+        "slice end cannot be a comparison or logical expression inside []",
+    );
+    parse_err(
+        "let x = arr[1:4:1 == 1]",
+        "slice step cannot be a comparison or logical expression inside []",
+    );
 }
 
 // Function call expression

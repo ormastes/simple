@@ -73,6 +73,27 @@ use compiler.frontend.core.parser_primary.{parse_primary_expr}
 fn parse_expr() -> i64:
     parse_pipe()
 
+fn bracket_expr_is_invalid(eid: i64) -> bool:
+    if eid < 0: return false
+    val tag = expr_get_tag(eid)
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        return true
+    if tag == EXPR_BINARY:
+        val op = expr_get(eid).i_val
+        if op == TOK_EQ or op == TOK_NEQ or op == TOK_LT or op == TOK_GT or op == TOK_LEQ or op == TOK_GEQ:
+            return true
+        if op == TOK_AND or op == TOK_OR:
+            return true
+    if tag == EXPR_UNARY and expr_get(eid).i_val == TOK_NOT:
+        return true
+    false
+
+fn validate_bracket_expr(eid: i64, context: text) -> bool:
+    if bracket_expr_is_invalid(eid):
+        parser_error(context + " cannot be an assignment, comparison, or logical expression inside []")
+        return false
+    true
+
 fn parse_pipe() -> i64:
     var left = parse_compose()
     for i in 0..1000:
@@ -562,12 +583,14 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             if par_kind_get() == TOK_COLON:
                 parser_advance()
                 val end_idx = parse_expr()
+                if not validate_bracket_expr(end_idx, "slice end"): return base
                 parser_expect(TOK_RBRACKET)
                 val zero = expr_int_lit(0, 0)
                 base = expr_slice(base, zero, end_idx, 0)
             else:
                 val index_expr = parse_expr()
                 if par_kind_get() == TOK_COLON:
+                    if not validate_bracket_expr(index_expr, "slice start"): return base
                     parser_advance()
                     if par_kind_get() == TOK_RBRACKET:
                         parser_advance()
@@ -575,9 +598,11 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                         base = expr_slice(base, index_expr, neg1, 0)
                     else:
                         val end_idx = parse_expr()
+                        if not validate_bracket_expr(end_idx, "slice end"): return base
                         parser_expect(TOK_RBRACKET)
                         base = expr_slice(base, index_expr, end_idx, 0)
                 else:
+                    if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(TOK_RBRACKET)
                     base = expr_index(base, index_expr, 0)
         elif par_kind_get() == TOK_LPAREN:
@@ -686,6 +711,7 @@ fn parse_postfix() -> i64:
             if par_kind_get() == TOK_COLON:
                 parser_advance()
                 val end_idx = parse_expr()
+                if not validate_bracket_expr(end_idx, "slice end"): return base
                 parser_expect(TOK_RBRACKET)
                 val zero = expr_int_lit(0, 0)
                 base = expr_slice(base, zero, end_idx, 0)
@@ -693,6 +719,7 @@ fn parse_postfix() -> i64:
                 val index_expr = parse_expr()
                 if par_kind_get() == TOK_COLON:
                     # Slice: a[start:end]
+                    if not validate_bracket_expr(index_expr, "slice start"): return base
                     parser_advance()
                     if par_kind_get() == TOK_RBRACKET:
                         # a[start:] -- open-ended
@@ -701,9 +728,11 @@ fn parse_postfix() -> i64:
                         base = expr_slice(base, index_expr, neg1, 0)
                     else:
                         val end_idx = parse_expr()
+                        if not validate_bracket_expr(end_idx, "slice end"): return base
                         parser_expect(TOK_RBRACKET)
                         base = expr_slice(base, index_expr, end_idx, 0)
                 else:
+                    if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(TOK_RBRACKET)
                     base = expr_index(base, index_expr, 0)
         elif par_kind_get() == TOK_LPAREN:
@@ -737,4 +766,3 @@ fn parse_postfix() -> i64:
 use compiler.core.parser_primary.*
 
 # ===== Exports =====
-

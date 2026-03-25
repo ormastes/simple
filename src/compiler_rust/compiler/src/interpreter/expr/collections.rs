@@ -34,6 +34,33 @@ fn compute_slice_indices(start: i64, end: Option<i64>, len: i64, inclusive: bool
     (start_idx, end_idx)
 }
 
+fn require_integer_index_value(value: &Value, context: &str) -> Result<i64, CompileError> {
+    if let Value::Int(i) = value {
+        return Ok(*i);
+    }
+
+    let help = match context {
+        "array" | "frozen array" | "fixed-size array" | "tuple" | "string" => {
+            format!("{context} indices must be integers")
+        }
+        "slice start" | "slice end" | "slice step" => format!("{context} must be an integer"),
+        _ => format!("{context} must be an integer"),
+    };
+
+    let message = match context {
+        "array" | "frozen array" | "fixed-size array" | "tuple" | "string" => {
+            format!("cannot index {context} with type `{}`", value.type_name())
+        }
+        "slice start" | "slice end" | "slice step" => {
+            format!("type mismatch: {context} must be int, got {}", value.type_name())
+        }
+        _ => format!("type mismatch: {context} must be int, got {}", value.type_name()),
+    };
+
+    let ctx = ErrorContext::new().with_code(codes::INVALID_INDEX_TYPE).with_help(help);
+    Err(CompileError::semantic_with_context(message, ctx))
+}
+
 pub(super) fn eval_collection_expr(
     expr: &Expr,
     env: &mut Env,
@@ -50,7 +77,9 @@ pub(super) fn eval_collection_expr(
             if let Some(spread_expr) = spread {
                 let base_val = evaluate_expr(spread_expr, env, functions, classes, enums, impl_methods)?;
                 match &base_val {
-                    Value::Object { fields: base_fields, .. } => {
+                    Value::Object {
+                        fields: base_fields, ..
+                    } => {
                         // Copy all fields from the base struct
                         for (k, v) in base_fields.as_ref() {
                             map.insert(k.clone(), v.clone());
@@ -350,16 +379,7 @@ pub(super) fn eval_collection_expr(
 
             let result = match recv_val {
                 Value::Array(arr) => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("array indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index array with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    let raw_idx = require_integer_index_value(&idx_val, "array")?;
                     let len = arr.len() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -380,16 +400,7 @@ pub(super) fn eval_collection_expr(
                     })
                 }
                 Value::FrozenArray(arr) => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("array indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index frozen array with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    let raw_idx = require_integer_index_value(&idx_val, "frozen array")?;
                     let len = arr.len() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -410,16 +421,7 @@ pub(super) fn eval_collection_expr(
                     })
                 }
                 Value::FixedSizeArray { size, data } => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("array indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index fixed-size array with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    let raw_idx = require_integer_index_value(&idx_val, "fixed-size array")?;
                     let len = size as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -440,16 +442,7 @@ pub(super) fn eval_collection_expr(
                     })
                 }
                 Value::Tuple(tup) => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("tuple indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index tuple with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    let raw_idx = require_integer_index_value(&idx_val, "tuple")?;
                     let len = tup.len() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -480,16 +473,7 @@ pub(super) fn eval_collection_expr(
                     Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
                 }
                 Value::Str(s) => {
-                    // E1043 - Invalid Index Type
-                    let raw_idx = idx_val.as_int().map_err(|_| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_INDEX_TYPE)
-                            .with_help("string indices must be integers");
-                        CompileError::semantic_with_context(
-                            format!("cannot index string with type `{}`", idx_val.type_name()),
-                            ctx,
-                        )
-                    })?;
+                    let raw_idx = require_integer_index_value(&idx_val, "string")?;
                     // Fast path: if string is ASCII-only, use byte indexing O(1)
                     // instead of chars().nth() which is O(n)
                     if s.is_ascii() {
@@ -741,21 +725,24 @@ pub(super) fn eval_collection_expr(
 
             // Parse start, end, step with Python-style semantics
             let start_idx = if let Some(s) = start {
-                let v = evaluate_expr(s, env, functions, classes, enums, impl_methods)?.as_int()?;
+                let value = evaluate_expr(s, env, functions, classes, enums, impl_methods)?;
+                let v = require_integer_index_value(&value, "slice start")?;
                 normalize_index(v, len)
             } else {
                 0
             };
 
             let end_idx = if let Some(e) = end {
-                let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?.as_int()?;
+                let value = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                let v = require_integer_index_value(&value, "slice end")?;
                 normalize_index(v, len)
             } else {
                 len
             };
 
             let step_val = if let Some(st) = step {
-                evaluate_expr(st, env, functions, classes, enums, impl_methods)?.as_int()?
+                let value = evaluate_expr(st, env, functions, classes, enums, impl_methods)?;
+                require_integer_index_value(&value, "slice step")?
             } else {
                 1
             };

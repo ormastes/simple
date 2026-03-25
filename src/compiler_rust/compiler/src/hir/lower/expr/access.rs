@@ -12,6 +12,43 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    fn index_type_must_be_integer(&self, ty: TypeId) -> bool {
+        if ty == TypeId::STRING {
+            return true;
+        }
+
+        match self.module.types.get(ty) {
+            Some(HirType::Array { .. } | HirType::Simd { .. } | HirType::Tuple(_) | HirType::String) => true,
+            Some(HirType::Pointer { inner, .. }) => self.index_type_must_be_integer(*inner),
+            _ => false,
+        }
+    }
+
+    fn is_integer_type(&self, ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::CHAR
+        )
+    }
+
+    pub(super) fn require_integer_index_operand(&self, receiver_ty: TypeId, index_ty: TypeId) -> LowerResult<()> {
+        if self.index_type_must_be_integer(receiver_ty) && !self.is_integer_type(index_ty) {
+            return Err(LowerError::TypeMismatch {
+                expected: TypeId::I64,
+                found: index_ty,
+            });
+        }
+        Ok(())
+    }
+
     /// Lower a field access expression to HIR
     ///
     /// Handles:
@@ -236,6 +273,7 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
         let idx_hir = Box::new(self.lower_expr(index, ctx)?);
+        self.require_integer_index_operand(recv_hir.ty, idx_hir.ty)?;
         let elem_ty = self.get_index_element_type(recv_hir.ty)?;
 
         // Check if receiver is SIMD type - use SimdExtract intrinsic
