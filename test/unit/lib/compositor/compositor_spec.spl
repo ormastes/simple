@@ -1,0 +1,170 @@
+# Compositor Library Tests
+# Tests GpuSurface pixel buffer, Rasterizer drawing, FrameScheduler, DamageTracker, StackingContext
+
+use std.spec.{describe, it, expect}
+use std.common.engine.color.{EngineColor}
+use std.compositor.gpu_surface.{GpuSurface, SurfaceFormat, SurfacePool}
+use std.compositor.damage.{DamageTracker}
+use std.compositor.frame.{FrameScheduler, FrameState}
+use std.compositor.stacking.{StackingContext}
+use std.compositor.layer.{DisplayEntry}
+use std.compositor.rasterizer.{Rasterizer, ClipStack}
+use core.collections.{List}
+
+describe "GpuSurface":
+    it "creates with pixel buffer":
+        val surface = GpuSurface.create(1, 4, 3, SurfaceFormat.BGRA8)
+        expect(surface.width).to_equal(4)
+        expect(surface.height).to_equal(3)
+        expect(surface.pixels.len()).to_equal(12)
+
+    it "sets and gets pixel":
+        var surface = GpuSurface.create(1, 4, 3, SurfaceFormat.BGRA8)
+        surface.set_pixel(2, 1, 0xFF0000FF)
+        val got = surface.get_pixel(2, 1)
+        expect(got).to_equal(0xFF0000FF)
+
+    it "bounds checks pixel access":
+        var surface = GpuSurface.create(1, 2, 2, SurfaceFormat.BGRA8)
+        surface.set_pixel(-1, 0, 0xFF)
+        surface.set_pixel(5, 0, 0xFF)
+        val oob = surface.get_pixel(-1, 0)
+        expect(oob).to_equal(0)
+
+    it "fills all pixels":
+        var surface = GpuSurface.create(1, 2, 2, SurfaceFormat.BGRA8)
+        surface.fill(0xAABBCCDD)
+        expect(surface.get_pixel(0, 0)).to_equal(0xAABBCCDD)
+        expect(surface.get_pixel(1, 1)).to_equal(0xAABBCCDD)
+
+describe "Rasterizer fill_rect":
+    it "fills pixels on surface":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 8, 8, SurfaceFormat.BGRA8)
+        val red = EngineColor.red()
+        raster.raster_fill_rect(surface, 1, 1, 3, 2, red)
+        # Pixel at (2, 1) should be filled (inside rect)
+        val filled = surface.get_pixel(2, 1)
+        expect(filled).to_be_greater_than(0)
+        # Pixel at (0, 0) should be untouched (outside rect)
+        val empty = surface.get_pixel(0, 0)
+        expect(empty).to_equal(0)
+
+    it "respects clip stack":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 10, 10, SurfaceFormat.BGRA8)
+        val white = EngineColor.white()
+        # Clip to a 3x3 region at (2,2)
+        raster.push_clip(2, 2, 3, 3)
+        # Fill a large rect that exceeds the clip
+        raster.raster_fill_rect(surface, 0, 0, 10, 10, white)
+        # (3, 3) is inside clip, should be filled
+        val inside = surface.get_pixel(3, 3)
+        expect(inside).to_be_greater_than(0)
+        # (0, 0) is outside clip, should be empty
+        val outside = surface.get_pixel(0, 0)
+        expect(outside).to_equal(0)
+
+describe "Rasterizer draw_line":
+    it "draws a horizontal line":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 10, 10, SurfaceFormat.BGRA8)
+        val blue = EngineColor.blue()
+        raster.raster_draw_line(surface, 1, 5, 8, 5, blue, 1.0)
+        # Midpoint (4, 5) should be filled
+        val mid = surface.get_pixel(4, 5)
+        expect(mid).to_be_greater_than(0)
+        # Off-line pixel should be empty
+        val off = surface.get_pixel(4, 0)
+        expect(off).to_equal(0)
+
+    it "draws a single point for zero-length line":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 4, 4, SurfaceFormat.BGRA8)
+        val green = EngineColor.green()
+        raster.raster_draw_line(surface, 2, 2, 2, 2, green, 1.0)
+        val pt = surface.get_pixel(2, 2)
+        expect(pt).to_be_greater_than(0)
+
+describe "Rasterizer draw_text":
+    it "renders block characters on surface":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 40, 20, SurfaceFormat.BGRA8)
+        val color = EngineColor.white()
+        raster.raster_draw_text(surface, 0, 0, "AB", 10.0, color)
+        # First char 'A' at (0,0) with 8px wide block, pixel (4, 5) should be filled
+        val char_pixel = surface.get_pixel(4, 5)
+        expect(char_pixel).to_be_greater_than(0)
+        # Second char 'B' at (8,0), pixel (12, 5) should be filled
+        val char2_pixel = surface.get_pixel(12, 5)
+        expect(char2_pixel).to_be_greater_than(0)
+
+    it "skips spaces in text":
+        var raster = Rasterizer.new()
+        var surface = GpuSurface.create(1, 40, 20, SurfaceFormat.BGRA8)
+        val color = EngineColor.white()
+        raster.raster_draw_text(surface, 0, 0, " X", 10.0, color)
+        # Space at position 0 should leave pixels empty
+        val space_pixel = surface.get_pixel(4, 5)
+        expect(space_pixel).to_equal(0)
+        # 'X' at position 8 should be filled
+        val x_pixel = surface.get_pixel(12, 5)
+        expect(x_pixel).to_be_greater_than(0)
+
+describe "DamageTracker":
+    it "starts with no damage":
+        val tracker = DamageTracker.new()
+        expect(tracker.regions.len()).to_equal(0)
+
+    it "accumulates damage rects":
+        var tracker = DamageTracker.new()
+        tracker.add_damage(10.0, 20.0, 30.0, 40.0)
+        expect(tracker.regions.len()).to_equal(1)
+        tracker.add_damage(50.0, 60.0, 10.0, 10.0)
+        expect(tracker.regions.len()).to_equal(2)
+
+    it "clears damage":
+        var tracker = DamageTracker.new()
+        tracker.add_damage(0.0, 0.0, 100.0, 100.0)
+        tracker.clear()
+        expect(tracker.regions.len()).to_equal(0)
+
+describe "FrameScheduler":
+    it "creates with target fps":
+        val scheduler = FrameScheduler.new(60)
+        expect(scheduler.target_fps).to_equal(60)
+        expect(scheduler.frame_count).to_equal(0)
+
+    it "begins first frame":
+        var scheduler = FrameScheduler.new(60)
+        val started = scheduler.begin_frame(0.0)
+        expect(started).to_equal(true)
+        expect(scheduler.frame_count).to_equal(1)
+
+describe "StackingContext":
+    it "creates with z_index":
+        val ctx = StackingContext.create(1, 5, 1.0)
+        expect(ctx.z_index).to_equal(5)
+        expect(ctx.opacity).to_equal(1.0)
+        expect(ctx.is_root).to_equal(false)
+
+    it "creates root context":
+        val root = StackingContext.root(0)
+        expect(root.z_index).to_equal(0)
+        expect(root.is_root).to_equal(true)
+
+describe "ClipStack":
+    it "starts empty":
+        val stack = ClipStack.empty()
+        val clip = stack.current_clip()
+        expect(clip).to_be_nil()
+
+    it "pushes and pops clips":
+        var stack = ClipStack.empty()
+        stack.push_clip(10, 20, 100, 200)
+        val clip = stack.current_clip()
+        # clip should not be nil after push
+        expect(clip.?).to_equal(true)
+        stack.pop_clip()
+        val after_pop = stack.current_clip()
+        expect(after_pop).to_be_nil()

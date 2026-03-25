@@ -14,21 +14,34 @@ use std.common.engine.color.{EngineColor}
 use std.compositor.gpu_surface.{GpuSurface, SurfaceFormat, bytes_per_pixel}
 use core.collections.{List}
 
+# Pack an EngineColor into a single i64 RGBA value.
+fn _raster_pack_rgba(color: EngineColor) -> i64:
+    val rgba = color.to_rgba8()
+    rgba.r * 16777216 + rgba.g * 65536 + rgba.b * 256 + rgba.a
+
+# ---------------------------------------------------------------------------
+# ClipRect — a simple rectangle for clipping (avoids nested generics).
+# ---------------------------------------------------------------------------
+
+class ClipRect:
+    x: i64
+    y: i64
+    w: i64
+    h: i64
+
 # ---------------------------------------------------------------------------
 # ClipStack — manages nested clip rectangles.
 # ---------------------------------------------------------------------------
 
 class ClipStack:
-    clips: List<Pair<Pair<i64, i64>, Pair<i64, i64>>>
+    clips: List<ClipRect>
 
     static fn empty() -> ClipStack:
-        ClipStack(clips: List<Pair<Pair<i64, i64>, Pair<i64, i64>>>())
+        ClipStack(clips: List<ClipRect>())
 
     # Push a new clip rectangle onto the stack.
     me push_clip(x: i64, y: i64, w: i64, h: i64):
-        val top_left = Pair(first: x, second: y)
-        val size = Pair(first: w, second: h)
-        val clip = Pair(first: top_left, second: size)
+        val clip = ClipRect(x: x, y: y, w: w, h: h)
         self.clips.push(clip)
 
     # Pop the topmost clip rectangle from the stack.
@@ -37,7 +50,7 @@ class ClipStack:
             self.clips.pop()
 
     # Get the current (topmost) clip rectangle.
-    fn current_clip() -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+    fn current_clip() -> ClipRect?:
         if self.clips.len() == 0:
             return nil
         self.clips.get(self.clips.len() - 1)
@@ -48,7 +61,7 @@ class ClipStack:
 
 # Compute the intersection of two axis-aligned rectangles.
 # Returns nil if no intersection exists.
-fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i64, clip_h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i64, clip_h: i64) -> ClipRect?:
     val left = if x > clip_x: x else: clip_x
     val top = if y > clip_y: y else: clip_y
 
@@ -66,9 +79,7 @@ fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i
     if cw <= 0 or ch <= 0:
         return nil
 
-    val pos = Pair(first: left, second: top)
-    val sz = Pair(first: cw, second: ch)
-    Pair(first: pos, second: sz)
+    ClipRect(x: left, y: top, w: cw, h: ch)
 
 # ---------------------------------------------------------------------------
 # Color utility functions
@@ -149,20 +160,88 @@ class Rasterizer:
         val clipped = self._apply_clip(x, y, w, h)
         if val cr = clipped:
             val alpha = self._current_opacity()
-            # Actual pixel writing would happen here via GPU or framebuffer
-            pass_todo("fill_rect needs GpuSurface pixel buffer for scanline fill")
+            val tinted = EngineColor(r: color.r, g: color.g, b: color.b, a: color.a * alpha)
+            val packed = _raster_pack_rgba(tinted)
+            var row = 0
+            val cr_x = cr.first.first
+            val cr_y = cr.first.second
+            val cr_w = cr.second.first
+            val cr_h = cr.second.second
+            while row < cr_h:
+                val py = cr_y + row
+                if py >= 0 and py < target.height:
+                    var col = 0
+                    while col < cr_w:
+                        val px = cr_x + col
+                        if px >= 0 and px < target.width:
+                            target.set_pixel(px, py, packed)
+                        col = col + 1
+                row = row + 1
 
-    # Draw text at a position (placeholder — actual glyph rasterization is pass_todo).
+    # Draw text at a position using simple block-based rendering.
+    # Each character is rendered as a solid 8px-wide block of font_size height.
+    # Spaces are skipped (left as background). Upgrade to glyph atlas for real fonts.
     me raster_draw_text(target: GpuSurface, x: i64, y: i64, text_content: text, font_size: f64, color: EngineColor):
         val alpha = self._current_opacity()
-        # Actual glyph rasterization requires a font atlas
-        pass_todo("text rendering needs font atlas + glyph lookup")
+        val tinted = EngineColor(r: color.r, g: color.g, b: color.b, a: color.a * alpha)
+        val packed = _raster_pack_rgba(tinted)
+        # Simple block-based text rendering (8px wide per char, font_size height)
+        val char_width = 8
+        val char_height: i64 = font_size
+        if char_height <= 0:
+            return
+        val chars = text_content.chars()
+        var cursor_x = x
+        var ci = 0
+        while ci < chars.len():
+            val ch = chars[ci]
+            if ch != " ":
+                # Draw a filled block for non-space characters
+                var row = 0
+                while row < char_height:
+                    val py = y + row
+                    if py >= 0 and py < target.height:
+                        var col = 0
+                        while col < char_width:
+                            val px = cursor_x + col
+                            if px >= 0 and px < target.width:
+                                target.set_pixel(px, py, packed)
+                            col = col + 1
+                    row = row + 1
+            cursor_x = cursor_x + char_width
+            ci = ci + 1
 
     # Draw a line between two points with the given color and width.
+    # Uses DDA (Digital Differential Analyzer) line drawing algorithm.
     me raster_draw_line(target: GpuSurface, x1: i64, y1: i64, x2: i64, y2: i64, color: EngineColor, line_width: f64):
         val alpha = self._current_opacity()
-        # Bresenham line rasterization would go here
-        pass_todo("line drawing needs Bresenham on GpuSurface pixel buffer")
+        val tinted = EngineColor(r: color.r, g: color.g, b: color.b, a: color.a * alpha)
+        val packed = _raster_pack_rgba(tinted)
+        # DDA line drawing
+        var dx = x2 - x1
+        var dy = y2 - y1
+        if dx < 0:
+            dx = -dx
+        if dy < 0:
+            dy = -dy
+        var steps = dx
+        if dy > steps:
+            steps = dy
+        if steps == 0:
+            target.set_pixel(x1, y1, packed)
+            return
+        val x_inc_f = (x2 - x1).to_f64() / steps.to_f64()
+        val y_inc_f = (y2 - y1).to_f64() / steps.to_f64()
+        var cx = x1.to_f64()
+        var cy = y1.to_f64()
+        var s = 0
+        while s <= steps:
+            val px: i64 = cx
+            val py: i64 = cy
+            target.set_pixel(px, py, packed)
+            cx = cx + x_inc_f
+            cy = cy + y_inc_f
+            s = s + 1
 
     # Draw a border as four filled rectangles.
     me raster_draw_border(target: GpuSurface, x: i64, y: i64, w: i64, h: i64, widths: List<f64>, colors: List<EngineColor>):
@@ -193,14 +272,12 @@ class Rasterizer:
             self.raster_fill_rect(target, x + w - right_w, y + top_w, right_w, h - top_w - bottom_w, right_color)
 
     # Apply the current clip stack to a rectangle, returning the clipped result.
-    fn _apply_clip(x: i64, y: i64, w: i64, h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+    fn _apply_clip(x: i64, y: i64, w: i64, h: i64) -> ClipRect?:
         val current = self.clip_stack.current_clip()
         if val c = current:
-            return clip_rect(x, y, w, h, c.first.first, c.first.second, c.second.first, c.second.second)
+            return clip_rect(x, y, w, h, c.x, c.y, c.w, c.h)
         # No clip — return original rect
-        val pos = Pair(first: x, second: y)
-        val sz = Pair(first: w, second: h)
-        Pair(first: pos, second: sz)
+        ClipRect(x: x, y: y, w: w, h: h)
 
     # Get the combined opacity from the opacity stack.
     fn _current_opacity() -> f64:
