@@ -186,7 +186,7 @@ Built-in runtime matchers only:
 
 ## Run Tracking
 
-Test results are automatically tracked in `doc/test/test_db.sdn`.
+Test results are automatically tracked in `doc/tracking/test/test_db.sdn`.
 
 ```bash
 bin/simple test --list-runs              # View run history
@@ -194,7 +194,7 @@ bin/simple test --cleanup-runs           # Clean stale runs
 bin/simple test --prune-runs=50          # Keep 50 most recent
 ```
 
-Reports are generated at `doc/test/test_result.md` after every test run.
+Reports are generated at `doc/tracking/test/test_result.md` after every test run.
 
 ## UI System Testing (Headless Web-Port)
 

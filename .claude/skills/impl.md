@@ -8,9 +8,9 @@
 
 | # | Phase | Agent | Output |
 |---|-------|-------|--------|
-| 1 | Requirements | main | `doc/requirement/<feature>.md` |
+| 1 | Requirements | main | `doc/plan/requirement/<feature>.md` |
 | 2 | Research | research-team | `doc/research/<feature>.md` |
-| 3 | Req Update | main | Updated `doc/requirement/<feature>.md` |
+| 3 | Req Update | main | Updated `doc/plan/requirement/<feature>.md` |
 | 4 | Plan + Design | design-team | `doc/plan/<feature>.md`, `doc/design/<feature>.md` |
 | 5 | Model Selection | main | Task-to-model assignment |
 | 6 | System Test (SSpec) | test-agent | `test/system/<feature>_spec.spl` |
@@ -18,7 +18,7 @@
 | 8 | Implementation | code-team | `src/**/<feature>.spl` |
 | 9 | Unit + IT Tests | test-agent | 80%+ branch coverage |
 | 10 | Doctest | code-agent | `"""..."""` sdoctest for public fns |
-| 11 | Bug Reports | review-agent | `doc/bug/<feature>_limitations.md` |
+| 11 | Bug Reports | review-agent | `doc/tracking/bug/<feature>_limitations.md` |
 | 12 | Duplication Check | review-agent | jscpd + semantic check |
 | 13 | Refactoring | code-agent | Files >800 lines split |
 | 14 | Full Test Suite | test-agent | All tests pass |
@@ -45,7 +45,7 @@ Use `agent_team_create` + `agent_team_run` MCP tools, or spawn Task agents manua
 
 **Agent:** main
 
-1. Create `doc/requirement/<feature>.md` with:
+1. Create `doc/plan/requirement/<feature>.md` with:
    - Feature name and motivation (why)
    - Scope (what's in, what's out)
    - I/O examples — suggest 3-5 examples, let user choose
@@ -65,7 +65,7 @@ Use `agent_team_create` + `agent_team_run` MCP tools, or spawn Task agents manua
 
 **Agent:** main
 
-1. Update `doc/requirement/<feature>.md` based on research findings
+1. Update `doc/plan/requirement/<feature>.md` based on research findings
 2. If research revealed significant new concerns, re-suggest I/O examples
 3. Get user approval on updated requirements
 
@@ -174,7 +174,7 @@ fn square(x: i64) -> i64:
 **Agent:** review-agent
 
 1. Document any workarounds discovered during implementation
-2. Output: `doc/bug/<feature>_limitations.md`
+2. Output: `doc/tracking/bug/<feature>_limitations.md`
 3. Each limitation includes: description, workaround, severity, related issue (if any)
 
 ### Phase 12: Duplication + Stub Check
@@ -244,14 +244,14 @@ Generated at `doc/report/<feature>_complete_<YYYY-MM-DD>.md`:
 
 | Type | Path |
 |------|------|
-| Requirement | doc/requirement/<feature>.md |
+| Requirement | doc/plan/requirement/<feature>.md |
 | Research | doc/research/<feature>.md |
 | Plan | doc/plan/<feature>.md |
 | Design | doc/design/<feature>.md |
 | System Tests | test/system/<feature>_spec.spl |
 | Source | src/.../<feature>.spl |
 | Unit Tests | test/.../<feature>_spec.spl |
-| Bug Report | doc/bug/<feature>_limitations.md |
+| Bug Report | doc/tracking/bug/<feature>_limitations.md |
 
 ## Test Results
 - Total: X passed, Y failed

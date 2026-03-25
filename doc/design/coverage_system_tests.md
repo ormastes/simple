@@ -1,7 +1,7 @@
 # Design: Coverage System Tests
 
 **Status:** Draft
-**Requirements:** [doc/requirement/coverage_system_tests.md](../requirement/coverage_system_tests.md)
+**Requirements:** [doc/requirement/coverage_system_tests.md](../plan/requirement/coverage_system_tests.md)
 **Plan:** [doc/plan/coverage_system_tests.md](../plan/coverage_system_tests.md)
 
 ---

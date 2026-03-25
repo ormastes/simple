@@ -1,0 +1,345 @@
+# Test Daemon Session Broker — Central control plane for session lifecycle
+#
+# One broker, many adapters. Manages leases, scheduling, health checks,
+# idle cleanup, and per-kind concurrency limits.
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    LEASE_IDLE, LEASE_ACTIVE, LEASE_RESETTING, LEASE_STOPPING,
+    SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
+    SESSION_KIND_OPENOCD, SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR,
+    REUSE_FRESH_PER_TEST,
+    session_key_to_id, session_key_matches, session_lease_new,
+    session_descriptor_new, session_kind_name, meta_to_session_key
+}
+use app.test_daemon.session_adapter.{SessionAdapter, AdapterRegistry, adapter_registry_new}
+use app.test_daemon.types.{TestResult}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Session Broker
+# ============================================================================
+
+class SessionBroker:
+    registry: AdapterRegistry
+    leases: [SessionLease]
+    max_sessions: {text: i64}
+    idle_timeout_ms: i64
+    startup_timeout_ms: i64
+
+fn session_broker_new() -> SessionBroker:
+    var max = {text: i64}{}
+    max["qemu_vm"] = 4
+    max["container_instance"] = 2
+    max["service_process"] = 8
+    max["openocd_board"] = 1
+    max["trace32_board"] = 1
+    max["simulator_process"] = 2
+    SessionBroker(
+        registry: adapter_registry_new(),
+        leases: [],
+        max_sessions: max,
+        idle_timeout_ms: 300000,
+        startup_timeout_ms: 60000
+    )
+
+impl SessionBroker:
+    # --- Adapter registration ---
+
+    me register_adapter(adapter: SessionAdapter):
+        self.registry.register(adapter)
+
+    # --- Acquire a session ---
+
+    me acquire(meta: TestSessionMeta) -> SessionLease:
+        """
+        Acquires a session for the given test metadata.
+        1. If fresh_per_test → always create new
+        2. Look for existing idle lease with matching key
+        3. If found → mark active, return
+        4. If under limit → start new via adapter
+        5. If at limit → evict oldest idle, then start new
+        """
+        val key = meta_to_session_key(meta)
+
+        # Fresh-per-test always gets a new session
+        if meta.reuse_mode == REUSE_FRESH_PER_TEST:
+            return self.start_new_session(meta, key)
+
+        # Look for existing idle session with matching key
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if (session_key_matches(lease.key, key) and
+                    lease.status == LEASE_IDLE):
+                # Reuse this session
+                val now = rt_time_now_unix_micros()
+                self.leases[i] = SessionLease(
+                    session_id: lease.session_id,
+                    key: lease.key,
+                    pid: lease.pid,
+                    qmp_socket: lease.qmp_socket,
+                    status: LEASE_ACTIVE,
+                    snapshot_name: lease.snapshot_name,
+                    created_at: lease.created_at,
+                    last_used_at: now,
+                    test_count: lease.test_count + 1
+                )
+                return self.leases[i]
+            i = i + 1
+
+        # No matching idle session — check concurrency limit
+        val kind_name = session_kind_name(key.kind)
+        val max = self.max_sessions[kind_name] ?? 4
+        val current = self.count_by_kind(key.kind)
+
+        if current >= max:
+            # Try to evict oldest idle of same kind
+            val evicted = self.evict_oldest_idle(key.kind)
+            if not evicted:
+                # No idle session to evict — return a pending lease
+                return session_lease_new(key)
+
+        self.start_new_session(meta, key)
+
+    # --- Release a session ---
+
+    me release(session_id: text):
+        """
+        Releases a session back to idle state.
+        """
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].session_id == session_id:
+                val lease = self.leases[i]
+                self.leases[i] = SessionLease(
+                    session_id: lease.session_id,
+                    key: lease.key,
+                    pid: lease.pid,
+                    qmp_socket: lease.qmp_socket,
+                    status: LEASE_IDLE,
+                    snapshot_name: lease.snapshot_name,
+                    created_at: lease.created_at,
+                    last_used_at: rt_time_now_unix_micros(),
+                    test_count: lease.test_count
+                )
+                return
+            i = i + 1
+
+    # --- Execute test in session ---
+
+    me execute_in_session(session_id: text, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test within an existing session via the appropriate adapter.
+        """
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].session_id == session_id:
+                val lease = self.leases[i]
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    return adapter.execute(lease, test_path, timeout_ms)
+                break
+            i = i + 1
+        # Fallback: return error result
+        TestResult(
+            test_path: test_path,
+            status: 3,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            duration_ms: 0,
+            output: "no adapter found for session {session_id}",
+            cached: false
+        )
+
+    # --- Reset session ---
+
+    me reset_session(session_id: text, policy: i64) -> bool:
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].session_id == session_id:
+                val lease = self.leases[i]
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    # Mark resetting
+                    self.leases[i] = SessionLease(
+                        session_id: lease.session_id,
+                        key: lease.key,
+                        pid: lease.pid,
+                        qmp_socket: lease.qmp_socket,
+                        status: LEASE_RESETTING,
+                        snapshot_name: lease.snapshot_name,
+                        created_at: lease.created_at,
+                        last_used_at: rt_time_now_unix_micros(),
+                        test_count: lease.test_count
+                    )
+                    val ok = adapter.reset(lease, policy)
+                    # Mark idle again
+                    self.leases[i] = SessionLease(
+                        session_id: lease.session_id,
+                        key: lease.key,
+                        pid: lease.pid,
+                        qmp_socket: lease.qmp_socket,
+                        status: LEASE_IDLE,
+                        snapshot_name: lease.snapshot_name,
+                        created_at: lease.created_at,
+                        last_used_at: rt_time_now_unix_micros(),
+                        test_count: lease.test_count
+                    )
+                    return ok
+                break
+            i = i + 1
+        false
+
+    # --- Health check all sessions ---
+
+    me health_check_all():
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            val adapter = self.registry.find_by_kind(lease.key.kind)
+            if adapter.?:
+                val healthy = adapter.health(lease)
+                if not healthy:
+                    # Mark as stopping and remove
+                    self.stop_session(lease.session_id)
+            i = i + 1
+
+    # --- Cleanup idle sessions past timeout ---
+
+    me cleanup_idle():
+        val now = rt_time_now_unix_micros()
+        val timeout_us = self.idle_timeout_ms * 1000
+        var new_leases: [SessionLease] = []
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if (lease.status == LEASE_IDLE and
+                    (now - lease.last_used_at) > timeout_us):
+                # Expired — stop via adapter
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    adapter.stop(lease)
+            else:
+                new_leases.push(lease)
+            i = i + 1
+        self.leases = new_leases
+
+    # --- Stop a specific session ---
+
+    me stop_session(session_id: text) -> bool:
+        var new_leases: [SessionLease] = []
+        var stopped = false
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if lease.session_id == session_id:
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    adapter.stop(lease)
+                stopped = true
+            else:
+                new_leases.push(lease)
+            i = i + 1
+        self.leases = new_leases
+        stopped
+
+    # --- Stop all sessions ---
+
+    me shutdown_all():
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            val adapter = self.registry.find_by_kind(lease.key.kind)
+            if adapter.?:
+                adapter.stop(lease)
+            i = i + 1
+        self.leases = []
+
+    # --- Status reporting ---
+
+    fn active_count() -> i64:
+        var count: i64 = 0
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].status == LEASE_ACTIVE:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn idle_count() -> i64:
+        var count: i64 = 0
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].status == LEASE_IDLE:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn total_count() -> i64:
+        self.leases.len()
+
+    fn count_by_kind(kind: i64) -> i64:
+        var count: i64 = 0
+        var i = 0
+        while i < self.leases.len():
+            if self.leases[i].key.kind == kind:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn status_report() -> text:
+        var report = "Session Broker Status:\n"
+        report = report + "  Total sessions: {self.leases.len()}\n"
+        report = report + "  Active: {self.active_count()}\n"
+        report = report + "  Idle: {self.idle_count()}\n"
+        report = report + "  QEMU: {self.count_by_kind(SESSION_KIND_QEMU_VM)}\n"
+        report = report + "  Container: {self.count_by_kind(SESSION_KIND_CONTAINER)}\n"
+        report = report + "  Service: {self.count_by_kind(SESSION_KIND_SERVICE)}\n"
+        report = report + "  Hardware: {self.count_by_kind(SESSION_KIND_OPENOCD) + self.count_by_kind(SESSION_KIND_TRACE32)}\n"
+        report
+
+    # --- Private helpers ---
+
+    me start_new_session(meta: TestSessionMeta, key: SessionKey) -> SessionLease:
+        val adapter = self.registry.find_by_kind(key.kind)
+        if adapter.?:
+            val desc = session_descriptor_new(key)
+            val lease = adapter.start(desc)
+            self.leases.push(lease)
+            return lease
+        # No adapter — return a default lease
+        val lease = session_lease_new(key)
+        self.leases.push(lease)
+        lease
+
+    me evict_oldest_idle(kind: i64) -> bool:
+        var oldest_idx = -1
+        var oldest_time: i64 = 9999999999999999
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if (lease.key.kind == kind and
+                    lease.status == LEASE_IDLE and
+                    lease.last_used_at < oldest_time):
+                oldest_idx = i
+                oldest_time = lease.last_used_at
+            i = i + 1
+
+        if oldest_idx >= 0:
+            val lease = self.leases[oldest_idx]
+            val adapter = self.registry.find_by_kind(kind)
+            if adapter.?:
+                adapter.stop(lease)
+            # Remove from list
+            var new_leases: [SessionLease] = []
+            var j = 0
+            while j < self.leases.len():
+                if j != oldest_idx:
+                    new_leases.push(self.leases[j])
+                j = j + 1
+            self.leases = new_leases
+            return true
+        false

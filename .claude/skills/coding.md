@@ -28,7 +28,7 @@ Simple provides helpful error messages when you use syntax from other languages.
 **Error Recovery System:**
 - The parser detects common mistakes and provides helpful suggestions
 - **Warnings** (not errors) for verbose but valid syntax like explicit return types
-- See error messages with examples: `doc/examples/error_messages_demo.spl`
+- See error messages with examples: `doc/guide/examples/error_messages_demo.spl`
 
 ## Language Rules
 
@@ -419,7 +419,7 @@ mul3(4)                       # → 12
 ## See Also
 
 - **`doc/guide/language/coding_style.md`** - Coding style guide + common mistakes
-- `doc/examples/error_messages_demo.spl` - Demo file showing all error types
+- `doc/guide/examples/error_messages_demo.spl` - Demo file showing all error types
 - `doc/spec/syntax.md` - Lexical structure
 - `doc/spec/types.md` - Type system
 - `doc/spec/functions.md` - Functions, pattern matching

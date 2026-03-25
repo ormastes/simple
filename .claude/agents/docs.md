@@ -8,12 +8,12 @@
 | Type | Location | When to Use |
 |------|----------|-------------|
 | Plan | `doc/plan/` | Project plans: why, scope, milestones, risks |
-| Requirement | `doc/requirement/` | User request + interpretation + REQ-NNN statements |
+| Requirement | `doc/plan/requirement/` | User request + interpretation + REQ-NNN statements |
 | Feature Spec | `doc/feature/` | BDD scenarios derived from requirements |
-| NFR / SLO | `doc/nfr/` | Performance, reliability, security targets |
+| NFR / SLO | `doc/plan/nfr/` | Performance, reliability, security targets |
 | Research | `doc/research/` | Investigation, options analysis, benchmarks |
 | Design | `doc/design/` | Architecture decisions, component design |
-| ADR | `doc/adr/` | Architecture Decision Records (major decisions) |
+| ADR | `doc/architecture/adr/` | Architecture Decision Records (major decisions) |
 | Guide | `doc/guide/` | User-facing tutorials, runbooks, how-to |
 | Report | `doc/report/` | Session summaries, completion reports |
 | BDD Tests | `test/*_spec.spl` | Executable feature specs (SSpec) |
@@ -38,8 +38,8 @@ RULES → enforced by CI + review
 
 - `doc/feature/feature.md` - All features
 - `doc/feature/pending_feature.md` - Incomplete features
-- `doc/test/test_result.md` - Test results + timing
-- `doc/build/recent_build.md` - Build errors/warnings
+- `doc/tracking/test/test_result.md` - Test results + timing
+- `doc/tracking/build/recent_build.md` - Build errors/warnings
 
 ## TODO Format
 

@@ -76,7 +76,7 @@ cat src/app/cli/main.spl
 ### 3. Document Findings
 ```
 # For bugs
-→ doc/bug/bug_report.md
+→ doc/tracking/bug/bug_report.md
 
 # For improvements
 → doc/improve_request.md

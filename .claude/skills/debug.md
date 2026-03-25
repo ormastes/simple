@@ -267,13 +267,13 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 
 **View registered bugs:**
 ```bash
-cat doc/bug/bug_db.sdn
+cat doc/tracking/bug/bug_db.sdn
 # SDN format: bugs, test_cases, fixes, notes
 ```
 
 **Bug Analysis Reports:**
-- `doc/bug/mcp_bug_analysis_2026-01-29.md` - MCP analysis
-- `doc/bug/bootstrap_mir_zero_modules.md` - Bootstrap bug details
+- `doc/tracking/bug/mcp_bug_analysis_2026-01-29.md` - MCP analysis
+- `doc/tracking/bug/bootstrap_mir_zero_modules.md` - Bootstrap bug details
 - `doc/report/bootstrap_investigation_2026-01-29.md` - Investigation log
 
 ### Live Debugging Workflow
@@ -295,7 +295,7 @@ cat doc/bug/bug_db.sdn
 
 4. **Register Bug:**
    ```bash
-   # Add to doc/bug/bug_db.sdn
+   # Add to doc/tracking/bug/bug_db.sdn
    bugs |id, severity, status, title, file, line, description|
        bug_id, P0, confirmed, "Description", "file.spl", 123, "Details", "test_case"
    ```
@@ -310,7 +310,7 @@ cat doc/bug/bug_db.sdn
 ## See Also
 
 - `doc/codegen_technical.md` - Codegen details
-- `doc/bug/bug_db.sdn` - Bug tracking database
+- `doc/tracking/bug/bug_db.sdn` - Bug tracking database
 - `src/app/mcp/` - MCP server and debugging tools
 - `src/app/interpreter/` - Interpreter modules
 - `src/compiler/` - Compiler source (Pure Simple)

@@ -2,7 +2,7 @@
 
 Reference for the project's mandatory engineering, architectural, testing, and operational rules.
 
-**Full rules document:** `doc/rule/README.md`
+**Full rules document:** `doc/architecture/rule/README.md`
 
 ---
 
@@ -32,7 +32,7 @@ Reference for the project's mandatory engineering, architectural, testing, and o
 ### Documentation
 - Spec files: include `**Requirements:**`, `**Plan:**`, `**Design:**`, `**Research:**` links
 - `sspec-docgen` warns on missing links
-- ADR required for major architectural decisions (see `doc/adr/`)
+- ADR required for major architectural decisions (see `doc/architecture/adr/`)
 
 ### Version Control
 - Use `jj` (Jujutsu) as primary VCS, colocated with git
@@ -53,20 +53,20 @@ Reference for the project's mandatory engineering, architectural, testing, and o
 | Folder | Purpose |
 |--------|---------|
 | `doc/plan/` | Plans: why, scope, milestones, risks |
-| `doc/requirement/` | Functional requirements (user request + interpretation) |
-| `doc/nfr/` | Non-functional requirements / SLOs |
+| `doc/plan/requirement/` | Functional requirements (user request + interpretation) |
+| `doc/plan/nfr/` | Non-functional requirements / SLOs |
 | `doc/design/` | Design documents |
 | `doc/architecture/` | Architecture overviews |
-| `doc/adr/` | Architecture Decision Records |
+| `doc/architecture/adr/` | Architecture Decision Records |
 | `doc/research/` | Research and option analysis |
 | `doc/guide/` | Developer guides, runbooks |
-| `doc/rule/` | Engineering rules |
+| `doc/architecture/rule/` | Engineering rules |
 
 ---
 
 ## Override Process
 
-Rules may only be overridden via a formal ADR in `doc/adr/`.
+Rules may only be overridden via a formal ADR in `doc/architecture/adr/`.
 
 No ad-hoc exceptions without documented rationale.
 
@@ -74,9 +74,9 @@ No ad-hoc exceptions without documented rationale.
 
 ## See Also
 
-- `doc/rule/README.md` — Full rules document
-- `doc/adr/README.md` — ADR format and when to write one
-- `doc/requirement/README.md` — Requirement format
+- `doc/architecture/rule/README.md` — Full rules document
+- `doc/architecture/adr/README.md` — ADR format and when to write one
+- `doc/plan/requirement/README.md` — Requirement format
 - `/sspec` skill — Test writing rules and docstring metadata
 - `/architecture` skill — Compiler layer structure
 - `/versioning` skill — Jujutsu workflow

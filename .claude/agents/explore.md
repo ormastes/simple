@@ -82,18 +82,18 @@ Source (.spl) -> Lexer -> Tokens -> Parser -> AST -> HIR -> MIR -> Codegen/Inter
 | Need | Location |
 |------|----------|
 | What needs work? | `doc/feature/pending_feature.md` |
-| Test results? | `doc/test/test_result.md` |
-| Build status? | `doc/build/recent_build.md` |
+| Test results? | `doc/tracking/test/test_result.md` |
+| Build status? | `doc/tracking/build/recent_build.md` |
 | All TODOs? | `doc/TODO.md` |
 | All features? | `doc/feature/feature.md` |
-| All bugs? | `doc/bug/bug_report.md` |
+| All bugs? | `doc/tracking/bug/bug_report.md` |
 | Syntax reference | `doc/guide/quick_reference/syntax_quick_reference.md` |
 
 ## Research Patterns
 
 - **"Where is X?"** - Grep for type/function name, check module structure
 - **"How does X work?"** - Find tests first, read docstrings, trace execution
-- **"What's the status of X?"** - Check `doc/feature/`, `doc/test/`, `doc/bug/`
+- **"What's the status of X?"** - Check `doc/feature/`, `doc/tracking/test/`, `doc/tracking/bug/`
 
 ## See Also
 

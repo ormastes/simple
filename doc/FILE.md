@@ -19,8 +19,11 @@
 | Codebase inventory | [architecture/file_class_structure.md](architecture/file_class_structure.md) |
 | See what features work | [feature/FEATURES_THAT_WORK.md](feature/FEATURES_THAT_WORK.md) |
 | Feature status | [feature/needed_feature.md](feature/needed_feature.md) |
-| Deploy to production | [release/PRODUCTION_READINESS.md](release/PRODUCTION_READINESS.md) |
-| Test results | [test/test_result.md](test/test_result.md) |
+| Deploy to production | [archive/release/PRODUCTION_READINESS.md](archive/release/PRODUCTION_READINESS.md) |
+| Test results | [tracking/test/test_result.md](tracking/test/test_result.md) |
+| Bug reports | [tracking/bug/bug_report.md](tracking/bug/bug_report.md) |
+| Build status | [tracking/build/recent_build.md](tracking/build/recent_build.md) |
+| Project metrics | [metrics/README.md](metrics/README.md) |
 
 ---
 
@@ -28,20 +31,23 @@
 
 | Category | Purpose | Key Files |
 |----------|---------|-----------|
-| **guide/** | User guides & tutorials | Start here for learning |
+| **guide/** | User guides, tutorials, contributing, examples | Start here for learning |
 | **spec/** | Language specifications | Formal grammar, semantics |
-| **report/** | Implementation reports | What's been done |
+| **report/** | Implementation reports (by year/month) | What's been done |
 | **design/** | Design documents | How features work |
-| **plan/** | Planning documents | Why, scope, milestones, risks |
-| **requirement/** | Functional requirements | User request + interpretation + REQ-NNN |
+| **plan/** | Planning, requirements, NFRs | Why, scope, milestones, risks |
+| **plan/requirement/** | Functional requirements | User request + interpretation + REQ-NNN |
+| **plan/nfr/** | Non-functional requirements / SLOs | Performance, reliability, security |
 | **feature/** | Feature specifications (BDD) | How user experiences the requirement |
-| **nfr/** | Non-functional requirements / SLOs | Performance, reliability, security |
-| **architecture/** | System design, glossary | Overall structure |
-| **adr/** | Architecture Decision Records | Why key decisions were made |
-| **research/** | Research and option analysis | What should we choose and why |
-| **rule/** | Engineering rules | How engineers must work |
+| **architecture/** | System design, glossary, ADRs, rules, formats | Overall structure |
+| **architecture/adr/** | Architecture Decision Records | Why key decisions were made |
+| **architecture/rule/** | Engineering rules | How engineers must work |
+| **architecture/format/** | Format specifications | SDN, SMF, binary formats |
+| **research/** | Research, option analysis, analysis reports | What should we choose and why |
 | **api/** | API documentation | Function references |
-| **format/** | Format specifications | SDN, SMF, binary formats |
+| **tracking/** | Bug, test, todo, task, build tracking | Project tracking hub |
+| **metrics/** | Dashboard data, coverage reports | Project metrics and analysis |
+| **archive/** | Historical docs, refactoring, releases | Deprecated/completed work |
 
 ---
 
@@ -50,19 +56,21 @@
 ```
 PLAN (doc/plan/)
   ↓
-REQUIREMENTS (doc/requirement/)
+REQUIREMENTS (doc/plan/requirement/)
   ↓                   ↘
-FEATURE (doc/feature/)  NFR (doc/nfr/)
+FEATURE (doc/feature/)  NFR (doc/plan/nfr/)
   ↓
 BDD TESTS (*_spec.spl)
   ↓
-TEST RESULTS (doc/test/)
+TEST RESULTS (doc/tracking/test/)
 
 Parallel flows:
-RESEARCH (doc/research/) → DESIGN (doc/design/) → ADR (doc/adr/)
+RESEARCH (doc/research/) → DESIGN (doc/design/) → ADR (doc/architecture/adr/)
 REQUIREMENTS → ARCHITECTURE (doc/architecture/)
 GUIDES (doc/guide/) ← OPERATIONS + RUNBOOKS
-RULES (doc/rule/) ← enforced via CI + review
+RULES (doc/architecture/rule/) ← enforced via CI + review
+TRACKING (doc/tracking/) ← bug, test, todo, task, build
+METRICS (doc/metrics/) ← dashboard, coverage
 ```
 
 | Doc Type | Answers |
@@ -276,9 +284,9 @@ These files are automatically updated by the build system:
 |------|--------------|-----------|
 | `feature/feature.md` | Test runner | Every test run |
 | `feature/pending_feature.md` | Test runner | Every test run |
-| `test/test_result.md` | Test runner | Every test run |
-| `build/recent_build.md` | Build system | Every build |
-| `bug/bug_report.md` | `bin/simple bug-gen` | On demand |
+| `tracking/test/test_result.md` | Test runner | Every test run |
+| `tracking/build/recent_build.md` | Build system | Every build |
+| `tracking/bug/bug_report.md` | `bin/simple bug-gen` | On demand |
 
 **Don't edit these files manually!** They will be overwritten.
 
@@ -353,18 +361,18 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ### For New Features
 1. **Plan:** `doc/plan/feature_name.md` — why, scope, milestones, risks
-2. **Requirements:** `doc/requirement/feature_name.md` — user request + REQ-NNN statements
+2. **Requirements:** `doc/plan/requirement/feature_name.md` — user request + REQ-NNN statements
 3. **Feature spec:** `doc/feature/feature_name.md` — BDD scenarios from requirements
-4. **NFR:** `doc/nfr/feature_name.md` — performance, reliability, security targets
+4. **NFR:** `doc/plan/nfr/feature_name.md` — performance, reliability, security targets
 5. **Research:** `doc/research/feature_name.md` — options analysis (if non-obvious)
 6. **Design:** `doc/design/feature_name.md` — internal structure and decisions
-7. **ADR:** `doc/adr/ADR-NNN-title.md` — for major architectural decisions made during design
+7. **ADR:** `doc/architecture/adr/ADR-NNN-title.md` — for major architectural decisions made during design
 8. **BDD tests:** `test/*_spec.spl` — link back to `**Requirements:**` + `**Design:**` in docstring
 9. **Completion report:** `doc/report/feature_complete_YYYY-MM-DD.md`
 10. **User guide:** `doc/guide/feature_usage.md` (if user-facing)
 
 ### For Bug Fixes
-1. **Bug analysis:** `doc/bug/bug_analysis_YYYY-MM-DD.md`
+1. **Bug analysis:** `doc/tracking/bug/bug_analysis_YYYY-MM-DD.md`
 2. **Fix report:** `doc/report/bug_fix_YYYY-MM-DD.md`
 
 ### For Refactoring

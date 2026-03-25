@@ -165,9 +165,9 @@ See [physics/README.md](physics/README.md) for details.
 ## Related Documentation
 
 - **[doc/design/](../design/)** — Design documents (where research conclusions land)
-- **[doc/adr/](../adr/)** — Architecture Decision Records (extracted from design)
+- **[doc/adr/](../architecture/adr/)** — Architecture Decision Records (extracted from design)
 - **[doc/plan/](../plan/)** — Implementation roadmaps
-- **[doc/requirement/](../requirement/)** — Functional requirements that drive research topics
+- **[doc/requirement/](../plan/requirement/)** — Functional requirements that drive research topics
 - **[doc/architecture/](../architecture/)** — Architecture principles
 - **[doc/spec/](../spec/)** — Stable language specifications
 

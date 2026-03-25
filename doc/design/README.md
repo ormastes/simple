@@ -36,7 +36,7 @@ REQUIREMENTS (doc/requirement/)  →  drives  →  DESIGN
 
 **Date:** YYYY-MM-DD
 **Status:** Draft | In Progress | Complete
-**Requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
+**Requirements:** [doc/requirement/xxx.md](../plan/requirement/xxx.md)
 **Research:** [doc/research/xxx.md](../research/xxx.md)
 
 ## 1. Context

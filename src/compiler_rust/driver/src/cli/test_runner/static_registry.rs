@@ -81,7 +81,7 @@ impl StaticTestRegistry {
     }
 
     /// Add a single file to the registry
-    fn add_file(&mut self, file_path: &Path) -> Result<(), String> {
+    pub fn add_file(&mut self, file_path: &Path) -> Result<(), String> {
         // Read file content
         let content = fs::read_to_string(file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 

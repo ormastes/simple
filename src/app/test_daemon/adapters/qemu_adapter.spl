@@ -1,0 +1,340 @@
+# QEMU Session Adapter — Manages QEMU VM sessions for the test daemon
+#
+# Spawns QEMU processes with QMP sockets, creates golden snapshots,
+# and executes tests inside QEMU environments. Uses composition with
+# SessionAdapter (no inheritance).
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    SESSION_KIND_QEMU_VM, LEASE_IDLE, LEASE_ACTIVE,
+    REUSE_SHARED_READ_ONLY, REUSE_SHARED_WITH_SNAPSHOT, REUSE_FRESH_PER_TEST,
+    RESET_NONE, RESET_SNAPSHOT_RESTORE, RESET_HARD,
+    session_key_to_id, session_lease_new
+}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+extern fn rt_process_spawn_async(binary: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_sleep_ms(ms: i64)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val GOLDEN_SNAPSHOT_NAME: text = "golden"
+val QMP_SOCKET_DIR: text = "/tmp/simple_test_qemu"
+val QEMU_BOOT_WAIT_MS: i64 = 3000
+val QEMU_BOOT_POLL_MS: i64 = 200
+val QEMU_BOOT_MAX_RETRIES: i64 = 30
+
+# ============================================================================
+# QemuAdapter
+# ============================================================================
+
+class QemuAdapter:
+    base: SessionAdapter
+    default_memory: text
+    default_machine: text
+
+fn qemu_adapter_new() -> QemuAdapter:
+    QemuAdapter(
+        base: session_adapter_new(SESSION_KIND_QEMU_VM, "qemu"),
+        default_memory: "256M",
+        default_machine: "virt"
+    )
+
+# ============================================================================
+# Adapter Methods
+# ============================================================================
+
+impl QemuAdapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        """
+        Returns true if this adapter handles QEMU VM sessions.
+        """
+        meta.session_kind == SESSION_KIND_QEMU_VM
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        Computes a session key from test metadata.
+        Key is based on target architecture and artifact hash so that
+        tests targeting the same arch+binary can share a QEMU session.
+        """
+        val arch = if meta.target != "": meta.target else: "riscv64"
+        val artifact_hash = if meta.artifact != "":
+            "{rt_hash_text(meta.artifact)}"
+        else:
+            "no_artifact"
+        SessionKey(
+            kind: SESSION_KIND_QEMU_VM,
+            target: arch,
+            artifact_hash: artifact_hash,
+            env_profile: "",
+            reuse_mode: meta.reuse_mode,
+            reset_policy: meta.reset_policy
+        )
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Spawns a QEMU process with QMP socket.
+        Creates a golden snapshot after boot for snapshot-based reuse.
+        Returns a lease with LEASE_ACTIVE on success, LEASE_IDLE on failure.
+        """
+        var lease = session_lease_new(desc.key)
+        val arch = desc.key.target
+        val qemu_binary = qemu_binary_for_arch(arch)
+
+        # Ensure QMP socket directory exists
+        rt_shell_exec("mkdir -p {QMP_SOCKET_DIR}")
+
+        # Build QMP socket path
+        val session_id = session_key_to_id(desc.key)
+        val qmp_socket = "{QMP_SOCKET_DIR}/{session_id}.sock"
+
+        # Determine machine and memory from config or defaults
+        val memory = if desc.config["memory"].? != nil: desc.config["memory"] else: self.default_memory
+        val machine = if desc.config["machine"].? != nil: desc.config["machine"] else: self.default_machine
+
+        # Build QEMU arguments
+        var args: [text] = [
+            "-machine", machine,
+            "-m", memory,
+            "-nographic",
+            "-qmp", "unix:{qmp_socket},server,nowait"
+        ]
+
+        # Add kernel/bios if specified in config
+        if desc.config["kernel"].? != nil:
+            args.push("-kernel")
+            args.push(desc.config["kernel"])
+        if desc.config["bios"].? != nil:
+            args.push("-bios")
+            args.push(desc.config["bios"])
+        if desc.config["drive"].? != nil:
+            args.push("-drive")
+            args.push(desc.config["drive"])
+
+        # Spawn QEMU process
+        val pid = rt_process_spawn_async(qemu_binary, args)
+        if pid <= 0:
+            print "[qemu_adapter] failed to spawn {qemu_binary} for {session_id}"
+            return lease
+
+        # Wait for QMP socket to appear
+        val connected = wait_for_qmp(qmp_socket, QEMU_BOOT_MAX_RETRIES, QEMU_BOOT_POLL_MS)
+        if not connected:
+            print "[qemu_adapter] QMP socket did not appear for {session_id}, killing pid {pid}"
+            rt_process_kill(pid)
+            return lease
+
+        # Create golden snapshot for snapshot-based reuse
+        var snapshot_name = ""
+        if (desc.key.reuse_mode == REUSE_SHARED_WITH_SNAPSHOT or
+            desc.key.reset_policy == RESET_SNAPSHOT_RESTORE):
+            val client = qmp_connect(qmp_socket)
+            # Wait a bit for the VM to fully boot before snapshotting
+            rt_sleep_ms(QEMU_BOOT_WAIT_MS)
+            val saved = qmp_savevm(client, GOLDEN_SNAPSHOT_NAME)
+            if saved:
+                snapshot_name = GOLDEN_SNAPSHOT_NAME
+            else:
+                print "[qemu_adapter] golden snapshot failed for {session_id}"
+
+        # Build successful lease
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_id,
+            key: desc.key,
+            pid: pid,
+            qmp_socket: qmp_socket,
+            status: LEASE_ACTIVE,
+            snapshot_name: snapshot_name,
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Returns true if the QEMU process is alive and QMP responds.
+        Checks both PID validity and QMP connectivity.
+        """
+        if lease.pid <= 0:
+            return false
+        if lease.qmp_socket == "":
+            return false
+        # Check if process is still running
+        val check_output = rt_shell_exec("kill -0 {lease.pid} 2>&1; echo $?")
+        if check_output.trim() != "0":
+            return false
+        # Verify QMP socket responds
+        val client = qmp_connect(lease.qmp_socket)
+        val status = qmp_query_status_text(client)
+        not status.starts_with("error")
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Resets the QEMU session according to the given policy.
+        RESET_NONE: no-op, returns true.
+        RESET_SNAPSHOT_RESTORE: restores the golden snapshot via QMP.
+        RESET_HARD: kills the QEMU process and restarts from descriptor.
+        """
+        if policy == RESET_NONE:
+            return true
+
+        if policy == RESET_SNAPSHOT_RESTORE:
+            if lease.qmp_socket == "":
+                return false
+            val snapshot = if lease.snapshot_name != "": lease.snapshot_name else: GOLDEN_SNAPSHOT_NAME
+            val client = qmp_connect(lease.qmp_socket)
+            return qmp_loadvm(client, snapshot)
+
+        if policy == RESET_HARD:
+            # Kill existing process
+            if lease.pid > 0:
+                rt_process_kill(lease.pid)
+                rt_sleep_ms(500)
+            # Hard reset requires the caller to re-start via start()
+            # Return true to indicate kill succeeded
+            return true
+
+        # Unknown policy
+        print "[qemu_adapter] unknown reset policy: {policy}"
+        false
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test inside the QEMU session.
+        Shells out to run the test binary/script via QEMU's serial or SSH.
+        Returns TestResult with pass/fail status and duration.
+        """
+        val start_time = rt_time_now_unix_micros()
+
+        # Build the command to execute inside QEMU
+        # Uses the session's QMP socket to identify which VM to target
+        val timeout_sec = timeout_ms / 1000
+        val cmd = "timeout {timeout_sec} bin/simple test {test_path} --qemu-socket {lease.qmp_socket} 2>&1"
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+
+        val end_time = rt_time_now_unix_micros()
+        val duration_ms = (end_time - start_time) / 1000
+
+        if exit_code == 0:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_COMPLETED,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
+        else:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_FAILED,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
+
+    me snapshot_create(lease: SessionLease, name: text) -> bool:
+        """
+        Creates a named snapshot of the QEMU VM state via QMP savevm.
+        """
+        if lease.qmp_socket == "":
+            print "[qemu_adapter] no QMP socket for snapshot_create"
+            return false
+        val client = qmp_connect(lease.qmp_socket)
+        qmp_savevm(client, name)
+
+    me snapshot_restore(lease: SessionLease, name: text) -> bool:
+        """
+        Restores a previously created snapshot via QMP loadvm.
+        """
+        if lease.qmp_socket == "":
+            print "[qemu_adapter] no QMP socket for snapshot_restore"
+            return false
+        val client = qmp_connect(lease.qmp_socket)
+        qmp_loadvm(client, name)
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Stops the QEMU process and cleans up the QMP socket file.
+        Returns true if the process was successfully killed.
+        """
+        if lease.pid <= 0:
+            return true
+
+        # Kill the QEMU process
+        val killed = rt_process_kill(lease.pid)
+        if not killed:
+            # Force kill
+            rt_shell_exec("kill -9 {lease.pid} 2>/dev/null")
+            rt_sleep_ms(200)
+
+        # Clean up QMP socket file
+        if lease.qmp_socket != "":
+            rt_shell_exec("rm -f {lease.qmp_socket}")
+
+        true
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn qemu_binary_for_arch(arch: text) -> text:
+    """
+    Returns the QEMU system binary name for a given architecture.
+    """
+    if arch == "riscv64": return "qemu-system-riscv64"
+    else if arch == "riscv32": return "qemu-system-riscv32"
+    else if arch == "aarch64" or arch == "arm64": return "qemu-system-aarch64"
+    else if arch == "arm": return "qemu-system-arm"
+    else if arch == "x86_64" or arch == "amd64": return "qemu-system-x86_64"
+    else if arch == "i386" or arch == "x86": return "qemu-system-i386"
+    else if arch == "mips": return "qemu-system-mips"
+    else if arch == "mips64": return "qemu-system-mips64"
+    "qemu-system-{arch}"
+
+fn wait_for_qmp(socket_path: text, max_retries: i64, poll_ms: i64) -> bool:
+    """
+    Polls for the QMP socket file to appear, then tries a handshake.
+    Returns true once QMP is reachable.
+    """
+    var attempt = 0
+    while attempt < max_retries:
+        if rt_file_exists(socket_path):
+            # Try QMP handshake
+            val client = qmp_connect(socket_path)
+            val status = qmp_query_status_text(client)
+            if not status.starts_with("error"):
+                return true
+        rt_sleep_ms(poll_ms)
+        attempt = attempt + 1
+    false
+
+fn qmp_query_status_text(client: QmpClient) -> text:
+    """
+    Queries QEMU status via QMP. Returns status text or error string.
+    Wraps the shell-based QMP query from qmp_client.
+    """
+    val json = "{\"execute\": \"query-status\"}"
+    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
+    val output = rt_shell_exec(cmd)
+    val exit_code = rt_shell_exit_code()
+    if exit_code != 0:
+        return "error: exit_code {exit_code}"
+    output

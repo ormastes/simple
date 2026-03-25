@@ -40,7 +40,7 @@ OUT:
 - Metric 2: target value
 
 ## Cross-References
-- **Requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
+- **Requirements:** [doc/requirement/xxx.md](requirement/xxx.md)
 - **Design:** [doc/design/xxx.md](../design/xxx.md)
 - **Research:** [doc/research/xxx.md](../research/xxx.md)
 ```

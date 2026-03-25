@@ -20,16 +20,16 @@ RULES → enforced by CI + review
 | Type | Location | Format | Answers |
 |------|----------|--------|---------|
 | **Plan** | `doc/plan/` | Markdown | What and when |
-| **Requirement** | `doc/requirement/` | Markdown | What must the system do |
+| **Requirement** | `doc/plan/requirement/` | Markdown | What must the system do |
 | **Feature Spec** | `doc/feature/` | Markdown | How user experiences the requirement |
-| **NFR / SLO** | `doc/nfr/` | Markdown | How well must it work |
+| **NFR / SLO** | `doc/plan/nfr/` | Markdown | How well must it work |
 | **Research** | `doc/research/` | Markdown | What should we choose and why |
 | **Design** | `doc/design/` | Markdown | How it is built |
 | **Architecture** | `doc/architecture/` | Markdown | Overall system structure |
-| **ADR** | `doc/adr/` | Markdown | Why this architectural decision |
+| **ADR** | `doc/architecture/adr/` | Markdown | Why this architectural decision |
 | **BDD Tests** | `test/*_spec.spl` | SSpec `.spl` | Executable scenarios (generate docs) |
 | **Guide / Runbook** | `doc/guide/` | Markdown | How to use or operate |
-| **Rule** | `doc/rule/` | Markdown | How engineers must work |
+| **Rule** | `doc/architecture/rule/` | Markdown | How engineers must work |
 | **Report** | `doc/report/` | Markdown | Session summaries, completion reports |
 | **API Docs** | `doc/spec/generated/` | Markdown | Auto-generated from SSpec tests |
 
@@ -517,12 +517,12 @@ users |id, name, role|
 ### For New Features (full lifecycle)
 
 1. **Plan** → `doc/plan/<feature>.md` — why, scope, milestones, risks
-2. **Requirements** → `doc/requirement/<feature>.md` — user request + REQ-NNN statements
+2. **Requirements** → `doc/plan/requirement/<feature>.md` — user request + REQ-NNN statements
 3. **Feature spec** → `doc/feature/<feature>.md` — BDD scenarios from requirements
-4. **NFR** → `doc/nfr/<feature>.md` — performance, reliability, security targets
+4. **NFR** → `doc/plan/nfr/<feature>.md` — performance, reliability, security targets
 5. **Research** → `doc/research/<feature>.md` — options analysis (if non-obvious)
 6. **Design** → `doc/design/<feature>.md` — components, decisions, failure handling
-7. **ADR** → `doc/adr/ADR-NNN-title.md` — for major architectural decisions in design
+7. **ADR** → `doc/architecture/adr/ADR-NNN-title.md` — for major architectural decisions in design
 8. **BDD Tests** → `test/*_spec.spl` — link `**Requirements:**` + `**Design:**` in docstring
 9. **Guide** → `doc/guide/<feature>_guide.md` — user-facing guide (if applicable)
 10. **Report** → `doc/report/<feature>_complete_YYYY-MM-DD.md` — on completion
@@ -609,8 +609,8 @@ bin/simple src/lib/test/features/generate_docs.spl
 - `/research` - Codebase exploration
 - `/rule` - Engineering rules + doc folder map
 - `doc/FILE.md` - Complete document relationship model
-- `doc/requirement/README.md` - Requirement doc template
+- `doc/plan/requirement/README.md` - Requirement doc template
 - `doc/feature/README.md` - Feature spec template
-- `doc/nfr/README.md` - NFR/SLO template
+- `doc/plan/nfr/README.md` - NFR/SLO template
 - `doc/design/README.md` - Design doc template
-- `doc/adr/README.md` - ADR format and lifecycle
+- `doc/architecture/adr/README.md` - ADR format and lifecycle

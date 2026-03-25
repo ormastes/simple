@@ -1,0 +1,306 @@
+# Test Daemon Session Types — Session kinds, reuse modes, reset policies, core structs
+#
+# Defines the session model for reusable long-lived test environments.
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_hash_text(s: text) -> i64
+
+# ============================================================================
+# Session Kind — what type of environment
+# ============================================================================
+
+val SESSION_KIND_QEMU_VM: i64 = 0
+val SESSION_KIND_CONTAINER: i64 = 1
+val SESSION_KIND_SERVICE: i64 = 2
+val SESSION_KIND_GUI: i64 = 3
+val SESSION_KIND_BROWSER: i64 = 4
+val SESSION_KIND_OPENOCD: i64 = 5
+val SESSION_KIND_TRACE32: i64 = 6
+val SESSION_KIND_SIMULATOR: i64 = 7
+val SESSION_KIND_LOCAL: i64 = 8
+
+fn session_kind_name(kind: i64) -> text:
+    if kind == SESSION_KIND_QEMU_VM: return "qemu_vm"
+    else if kind == SESSION_KIND_CONTAINER: return "container_instance"
+    else if kind == SESSION_KIND_SERVICE: return "service_process"
+    else if kind == SESSION_KIND_GUI: return "gui_session"
+    else if kind == SESSION_KIND_BROWSER: return "browser_session"
+    else if kind == SESSION_KIND_OPENOCD: return "openocd_board"
+    else if kind == SESSION_KIND_TRACE32: return "trace32_board"
+    else if kind == SESSION_KIND_SIMULATOR: return "simulator_process"
+    else if kind == SESSION_KIND_LOCAL: return "local"
+    "unknown"
+
+fn session_kind_from_name(name: text) -> i64:
+    if name == "qemu_vm": return SESSION_KIND_QEMU_VM
+    else if name == "container_instance": return SESSION_KIND_CONTAINER
+    else if name == "service_process": return SESSION_KIND_SERVICE
+    else if name == "gui_session": return SESSION_KIND_GUI
+    else if name == "browser_session": return SESSION_KIND_BROWSER
+    else if name == "openocd_board": return SESSION_KIND_OPENOCD
+    else if name == "trace32_board": return SESSION_KIND_TRACE32
+    else if name == "simulator_process": return SESSION_KIND_SIMULATOR
+    else if name == "local": return SESSION_KIND_LOCAL
+    -1
+
+# ============================================================================
+# Reuse Mode — how sessions are shared between tests
+# ============================================================================
+
+val REUSE_SHARED_READ_ONLY: i64 = 0
+val REUSE_SHARED_WITH_RESET: i64 = 1
+val REUSE_SHARED_WITH_SNAPSHOT: i64 = 2
+val REUSE_EXCLUSIVE_REUSED: i64 = 3
+val REUSE_FRESH_PER_TEST: i64 = 4
+
+fn reuse_mode_name(mode: i64) -> text:
+    if mode == REUSE_SHARED_READ_ONLY: return "shared_read_only"
+    else if mode == REUSE_SHARED_WITH_RESET: return "shared_with_reset"
+    else if mode == REUSE_SHARED_WITH_SNAPSHOT: return "shared_with_snapshot"
+    else if mode == REUSE_EXCLUSIVE_REUSED: return "exclusive_reused"
+    else if mode == REUSE_FRESH_PER_TEST: return "fresh_per_test"
+    "unknown"
+
+fn reuse_mode_from_name(name: text) -> i64:
+    if name == "shared_read_only": return REUSE_SHARED_READ_ONLY
+    else if name == "shared_with_reset": return REUSE_SHARED_WITH_RESET
+    else if name == "shared_with_snapshot": return REUSE_SHARED_WITH_SNAPSHOT
+    else if name == "exclusive_reused": return REUSE_EXCLUSIVE_REUSED
+    else if name == "fresh_per_test": return REUSE_FRESH_PER_TEST
+    -1
+
+# ============================================================================
+# Reset Policy — how to reset a session between tests
+# ============================================================================
+
+val RESET_NONE: i64 = 0
+val RESET_SOFT: i64 = 1
+val RESET_HARD: i64 = 2
+val RESET_RELOAD_BINARY: i64 = 3
+val RESET_SNAPSHOT_RESTORE: i64 = 4
+val RESET_RECREATE: i64 = 5
+
+fn reset_policy_name(policy: i64) -> text:
+    if policy == RESET_NONE: return "none"
+    else if policy == RESET_SOFT: return "soft_reset"
+    else if policy == RESET_HARD: return "hard_reset"
+    else if policy == RESET_RELOAD_BINARY: return "reload_binary"
+    else if policy == RESET_SNAPSHOT_RESTORE: return "snapshot_restore"
+    else if policy == RESET_RECREATE: return "recreate"
+    "unknown"
+
+fn reset_policy_from_name(name: text) -> i64:
+    if name == "none": return RESET_NONE
+    else if name == "soft_reset": return RESET_SOFT
+    else if name == "hard_reset": return RESET_HARD
+    else if name == "reload_binary": return RESET_RELOAD_BINARY
+    else if name == "snapshot_restore": return RESET_SNAPSHOT_RESTORE
+    else if name == "recreate": return RESET_RECREATE
+    -1
+
+# ============================================================================
+# Session Lease Status
+# ============================================================================
+
+val LEASE_IDLE: i64 = 0
+val LEASE_ACTIVE: i64 = 1
+val LEASE_RESETTING: i64 = 2
+val LEASE_STOPPING: i64 = 3
+
+# ============================================================================
+# Core Structs
+# ============================================================================
+
+struct SessionKey:
+    kind: i64
+    target: text
+    artifact_hash: text
+    env_profile: text
+    reuse_mode: i64
+    reset_policy: i64
+
+fn session_key_to_id(key: SessionKey) -> text:
+    val kind_name = session_kind_name(key.kind)
+    "{kind_name}_{key.target}_{key.artifact_hash}_{key.env_profile}_{key.reuse_mode}"
+
+fn session_key_matches(a: SessionKey, b: SessionKey) -> bool:
+    (a.kind == b.kind and
+        a.target == b.target and
+        a.artifact_hash == b.artifact_hash and
+        a.env_profile == b.env_profile and
+        a.reuse_mode == b.reuse_mode)
+
+struct SessionDescriptor:
+    key: SessionKey
+    config: {text: text}
+    timeout_ms: i64
+    max_concurrent: i64
+
+fn session_descriptor_new(key: SessionKey) -> SessionDescriptor:
+    SessionDescriptor(
+        key: key,
+        config: {},
+        timeout_ms: 60000,
+        max_concurrent: 1
+    )
+
+struct SessionLease:
+    session_id: text
+    key: SessionKey
+    pid: i64
+    qmp_socket: text
+    status: i64
+    snapshot_name: text
+    created_at: i64
+    last_used_at: i64
+    test_count: i64
+
+fn session_lease_new(key: SessionKey) -> SessionLease:
+    val now = rt_time_now_unix_micros()
+    SessionLease(
+        session_id: session_key_to_id(key),
+        key: key,
+        pid: 0,
+        qmp_socket: "",
+        status: LEASE_IDLE,
+        snapshot_name: "",
+        created_at: now,
+        last_used_at: now,
+        test_count: 0
+    )
+
+# ============================================================================
+# Test Session Metadata — parsed from test file markers
+# ============================================================================
+
+struct TestSessionMeta:
+    file_path: text
+    session_kind: i64
+    target: text
+    reuse_mode: i64
+    reset_policy: i64
+    artifact: text
+    startup_cmd: text
+    healthcheck: text
+
+fn test_session_meta_default(file_path: text) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: file_path,
+        session_kind: SESSION_KIND_LOCAL,
+        target: "",
+        reuse_mode: REUSE_FRESH_PER_TEST,
+        reset_policy: RESET_NONE,
+        artifact: "",
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+fn parse_session_meta(file_path: text, header_lines: [text]) -> TestSessionMeta:
+    """
+    Parses @session-kind, @target, @reuse, @reset, @artifact, @startup, @healthcheck
+    markers from the first N comment lines of a test file.
+    """
+    var meta = test_session_meta_default(file_path)
+    var i = 0
+    while i < header_lines.len():
+        val line = header_lines[i].trim()
+        if line.starts_with("# @session-kind:"):
+            val value = line.replace("# @session-kind:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: session_kind_from_name(value),
+                target: meta.target,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: meta.reset_policy,
+                artifact: meta.artifact,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @target:"):
+            val value = line.replace("# @target:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: value,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: meta.reset_policy,
+                artifact: meta.artifact,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @reuse:"):
+            val value = line.replace("# @reuse:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: meta.target,
+                reuse_mode: reuse_mode_from_name(value),
+                reset_policy: meta.reset_policy,
+                artifact: meta.artifact,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @reset:"):
+            val value = line.replace("# @reset:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: meta.target,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: reset_policy_from_name(value),
+                artifact: meta.artifact,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @artifact:"):
+            val value = line.replace("# @artifact:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: meta.target,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: meta.reset_policy,
+                artifact: value,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @startup:"):
+            val value = line.replace("# @startup:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: meta.target,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: meta.reset_policy,
+                artifact: meta.artifact,
+                startup_cmd: value,
+                healthcheck: meta.healthcheck
+            )
+        else if line.starts_with("# @healthcheck:"):
+            val value = line.replace("# @healthcheck:", "").trim()
+            meta = TestSessionMeta(
+                file_path: meta.file_path,
+                session_kind: meta.session_kind,
+                target: meta.target,
+                reuse_mode: meta.reuse_mode,
+                reset_policy: meta.reset_policy,
+                artifact: meta.artifact,
+                startup_cmd: meta.startup_cmd,
+                healthcheck: value
+            )
+        i = i + 1
+    meta
+
+fn meta_to_session_key(meta: TestSessionMeta) -> SessionKey:
+    val artifact_hash = if meta.artifact != "": "{rt_hash_text(meta.artifact)}" else: ""
+    SessionKey(
+        kind: meta.session_kind,
+        target: meta.target,
+        artifact_hash: artifact_hash,
+        env_profile: "",
+        reuse_mode: meta.reuse_mode,
+        reset_policy: meta.reset_policy
+    )
+
+fn meta_needs_session(meta: TestSessionMeta) -> bool:
+    meta.session_kind != SESSION_KIND_LOCAL

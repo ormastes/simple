@@ -189,10 +189,10 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 
 ```bash
 # View detected bugs
-cat doc/bug/bug_db.sdn
+cat doc/tracking/bug/bug_db.sdn
 
 # View analysis report
-cat doc/bug/mcp_bug_analysis_2026-01-29.md
+cat doc/tracking/bug/mcp_bug_analysis_2026-01-29.md
 ```
 
 ### 3. Interactive Analysis
@@ -210,7 +210,7 @@ bin/simple src/app/mcp/main.spl file_info src/compiler/driver.spl
 
 ### 4. Register Bugs
 
-**Format:** `doc/bug/bug_db.sdn`
+**Format:** `doc/tracking/bug/bug_db.sdn`
 
 ```sdn
 bugs |id, severity, status, title, file, line, description, reproducible_by|
@@ -230,7 +230,7 @@ notes |bug_id, timestamp, note|
 
 ```bash
 # MCP analysis report
-doc/bug/mcp_bug_analysis_2026-01-29.md
+doc/tracking/bug/mcp_bug_analysis_2026-01-29.md
 
 # Investigation log
 doc/report/bootstrap_investigation_2026-01-29.md
@@ -335,7 +335,7 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 bin/simple scripts/mcp_debug_bootstrap.spl
 
 # View results
-cat doc/bug/bug_db.sdn
+cat doc/tracking/bug/bug_db.sdn
 ```
 
 ### Debug Points
@@ -351,7 +351,7 @@ cat doc/bug/bug_db.sdn
 
 ### Bug Database Updates
 
-MCP automatically updates `doc/bug/bug_db.sdn`:
+MCP automatically updates `doc/tracking/bug/bug_db.sdn`:
 
 ```sdn
 bugs |id, severity, status, title, file, line, description, reproducible_by|
@@ -522,7 +522,7 @@ SDN File Format
 - `src/app/mcp/bugdb_resource.spl` - Bug database MCP integration
 - `src/lib/database/` - Unified database library
 - `scripts/mcp_debug_bootstrap.spl` - Automated debugging
-- `doc/bug/bug_db.sdn` - Bug database
+- `doc/tracking/bug/bug_db.sdn` - Bug database
 - `doc/report/mcp_database_integration_2026-02-05.md` - Integration report
 - `doc/report/mcp_fixes_and_tests_2026-02-05.md` - Fixes and tests
 - `.claude/skills/debug.md` - Debugging skill

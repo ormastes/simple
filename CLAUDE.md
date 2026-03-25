@@ -296,7 +296,7 @@ src/
     99.loader/      # Module resolver, loader
   i18n/             # Internationalization
 test/               # Test files (lib, app, compiler, benchmarks)
-doc/                # Documentation (report, design, guide, research, feature, test, bug)
+doc/                # Documentation (report, design, guide, research, feature, tracking, metrics, plan, archive)
 bin/                # Binaries (simple wrapper, release/simple = real binary)
 build/bootstrap/    # Temporal bootstrap binaries (c_simple/simple, cpp/simple)
 tools/              # Development tools (docker containers, windows/ build helpers)
@@ -320,10 +320,10 @@ Updated automatically:
 |------|-------|------|
 | Features | `doc/feature/feature.md` | Every test run |
 | Pending | `doc/feature/pending_feature.md` | Every test run |
-| Test results | `doc/test/test_result.md` | Every test run |
-| Build status | `doc/build/recent_build.md` | Every build |
+| Test results | `doc/tracking/test/test_result.md` | Every test run |
+| Build status | `doc/tracking/build/recent_build.md` | Every build |
 | TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
-| Bugs | `doc/bug/bug_report.md` | `bin/simple bug-gen` |
+| Bugs | `doc/tracking/bug/bug_report.md` | `bin/simple bug-gen` |
 
 ---
 

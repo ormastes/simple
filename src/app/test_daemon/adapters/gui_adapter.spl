@@ -1,0 +1,320 @@
+# Test Daemon GUI Adapter — Manages GUI and browser test sessions
+#
+# Handles native GUI applications, headless browser sessions, and
+# containerized GUI testing. Uses exclusive reuse with soft reset.
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    SESSION_KIND_GUI, SESSION_KIND_BROWSER, LEASE_IDLE, LEASE_ACTIVE,
+    REUSE_EXCLUSIVE_REUSED,
+    RESET_SOFT,
+    session_key_to_id, session_lease_new
+}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_spawn_async(cmd: text, args: [text], env: {text: text}) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_is_alive(pid: i64) -> bool
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+
+# ============================================================================
+# Helper Functions — Path classification and routing
+# ============================================================================
+
+fn is_gui_test_path(path: text) -> bool:
+    """
+    Returns true if the given path is a GUI or UI test target.
+    Matches system/gui specs, unit/app/ui specs, and .ui.sdn files.
+    """
+    if path.contains("system/gui/"):
+        return true
+    if path.contains("unit/app/ui/"):
+        return true
+    if path.contains("app/ui/"):
+        return true
+    if path.ends_with(".ui.sdn"):
+        return true
+    false
+
+fn gui_session_key_for_path(path: text) -> text:
+    """
+    Maps a GUI test path to a session key for sharing.
+    System GUI tests share one session, unit UI tests share another.
+    Unknown paths fall back to the full path as key.
+    """
+    if path.contains("system/gui/"):
+        return "system_gui"
+    if path.contains("unit/app/ui/"):
+        return "unit_ui"
+    path
+
+fn normalize_gui_mode(mode: text) -> text:
+    """
+    Normalizes a GUI mode string to one of: native, headless, container.
+    Returns empty string for unknown modes.
+    """
+    if mode == "container":
+        return "container"
+    if mode == "headed" or mode == "native":
+        return "native"
+    if mode == "none" or mode == "headless" or mode == "any":
+        return "headless"
+    ""
+
+fn infer_qemu_arch(path: text) -> text:
+    """
+    Infers the QEMU architecture from a test file path.
+    Looks for architecture names in the path segments.
+    """
+    if path.contains("riscv64") or path.contains("riscv_64"):
+        return "riscv64"
+    if path.contains("riscv32") or path.contains("riscv_32"):
+        return "riscv32"
+    if path.contains("arm64") or path.contains("aarch64"):
+        return "arm64"
+    if path.contains("arm32") or path.contains("armv7"):
+        return "arm32"
+    if path.contains("x86_64") or path.contains("amd64"):
+        return "x86_64"
+    if path.contains("x86") or path.contains("i386"):
+        return "x86"
+    # Default to x86_64 if no arch detected
+    "x86_64"
+
+# ============================================================================
+# GUI Adapter
+# ============================================================================
+
+class GuiAdapter:
+    base: SessionAdapter
+    mode: text
+
+fn gui_adapter_new(mode: text) -> GuiAdapter:
+    val normalized = normalize_gui_mode(mode)
+    val effective_mode = if normalized != "": normalized else: "headless"
+    GuiAdapter(
+        base: session_adapter_new(SESSION_KIND_GUI, "gui"),
+        mode: effective_mode
+    )
+
+impl GuiAdapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        (self.base.kind == meta.session_kind or
+            meta.session_kind == SESSION_KIND_BROWSER)
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        Computes session key. GUI tests with the same target and mode
+        share a session via exclusive reuse.
+        """
+        val target = if meta.target != "": meta.target
+            else: gui_session_key_for_path(meta.file_path)
+        SessionKey(
+            kind: meta.session_kind,
+            target: target,
+            artifact_hash: self.mode,
+            env_profile: "",
+            reuse_mode: REUSE_EXCLUSIVE_REUSED,
+            reset_policy: RESET_SOFT
+        )
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Launches a GUI application or headless browser depending on mode.
+        - native: launches the GUI app directly
+        - headless: launches with virtual framebuffer (Xvfb)
+        - container: launches inside a container with Xvfb
+        """
+        var lease = session_lease_new(desc.key)
+
+        if self.mode == "headless":
+            return self.start_headless(desc)
+        else if self.mode == "container":
+            return self.start_container(desc)
+        else:
+            return self.start_native(desc)
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a GUI test with the appropriate display environment.
+        Sets DISPLAY for X11-based tests.
+        """
+        val display_env = if self.mode == "headless": "DISPLAY=:99"
+            else if self.mode == "container": "DISPLAY=:99"
+            else: ""
+
+        val cmd = if display_env != "":
+            "{display_env} bin/simple test {test_path} 2>&1"
+        else:
+            "bin/simple test {test_path} 2>&1"
+
+        val start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        TestResult(
+            test_path: test_path,
+            status: status,
+            passed: passed,
+            failed: failed,
+            skipped: 0,
+            duration_ms: duration_ms,
+            output: output,
+            cached: false
+        )
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Checks if the GUI session process is still alive.
+        """
+        if lease.pid <= 0:
+            return false
+        rt_process_is_alive(lease.pid)
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Soft reset: kill and restart the GUI process.
+        """
+        if policy == RESET_SOFT:
+            if lease.pid > 0:
+                rt_process_kill(lease.pid)
+                rt_sleep_ms(300)
+            return true
+        true
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Kills the GUI session process and any associated Xvfb.
+        """
+        if lease.pid <= 0:
+            return true
+        rt_process_kill(lease.pid)
+
+        # Also clean up Xvfb if we started one (stored in qmp_socket field)
+        val xvfb_pid_str = lease.qmp_socket
+        if xvfb_pid_str != "":
+            val xvfb_pid = xvfb_pid_str.to_i64() ?? 0
+            if xvfb_pid > 0:
+                rt_process_kill(xvfb_pid)
+        true
+
+    # --- Private helpers ---
+
+    me start_headless(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts Xvfb virtual framebuffer, then launches the GUI app.
+        """
+        val xvfb_env: {text: text} = {}
+        val xvfb_pid = rt_process_spawn_async("Xvfb", [":99", "-screen", "0", "1280x1024x24"], xvfb_env)
+
+        if xvfb_pid <= 0:
+            return session_lease_new(desc.key)
+
+        rt_sleep_ms(500)
+
+        # Launch application with DISPLAY set
+        val app_cmd = desc.config["startup_cmd"] ?? ""
+        var app_pid: i64 = 0
+
+        if app_cmd != "":
+            val parts = app_cmd.split(" ")
+            val cmd = parts[0]
+            var args: [text] = []
+            var i = 1
+            while i < parts.len():
+                args.push(parts[i])
+                i = i + 1
+            val env: {text: text} = {}
+            env["DISPLAY"] = ":99"
+            app_pid = rt_process_spawn_async(cmd, args, env)
+
+        val effective_pid = if app_pid > 0: app_pid else: xvfb_pid
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_key_to_id(desc.key),
+            key: desc.key,
+            pid: effective_pid,
+            qmp_socket: "{xvfb_pid}",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    me start_container(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts a container with Xvfb for isolated GUI testing.
+        """
+        val image = desc.config["container_image"] ?? "simple-gui-test:latest"
+        val container_env: {text: text} = {}
+        val pid = rt_process_spawn_async(
+            "docker",
+            ["run", "--rm", "-d", "--name", "gui-test-session",
+             "-e", "DISPLAY=:99", image],
+            container_env
+        )
+
+        if pid <= 0:
+            return session_lease_new(desc.key)
+
+        rt_sleep_ms(1000)
+
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_key_to_id(desc.key),
+            key: desc.key,
+            pid: pid,
+            qmp_socket: "",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    me start_native(desc: SessionDescriptor) -> SessionLease:
+        """
+        Launches the GUI application directly on the current display.
+        """
+        val app_cmd = desc.config["startup_cmd"] ?? ""
+        if app_cmd == "":
+            return session_lease_new(desc.key)
+
+        val parts = app_cmd.split(" ")
+        val cmd = parts[0]
+        var args: [text] = []
+        var i = 1
+        while i < parts.len():
+            args.push(parts[i])
+            i = i + 1
+
+        val env: {text: text} = {}
+        val pid = rt_process_spawn_async(cmd, args, env)
+
+        if pid <= 0:
+            return session_lease_new(desc.key)
+
+        rt_sleep_ms(500)
+
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: session_key_to_id(desc.key),
+            key: desc.key,
+            pid: pid,
+            qmp_socket: "",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )

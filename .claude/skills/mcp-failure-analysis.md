@@ -165,7 +165,7 @@ query_failed_test_details(
 ## Database Files
 
 The tools read from:
-- `doc/test/test_db.sdn` - Test execution results
+- `doc/tracking/test/test_db.sdn` - Test execution results
 - `doc/feature/feature_db.sdn` - Feature implementation status
 
 These are automatically updated by `simple test` and other commands.

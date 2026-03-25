@@ -242,7 +242,7 @@ The TODO system automatically generates documentation when scanning:
 **Command:** `simple todo-scan`
 
 **Generated Files:**
-1. `doc/todo/todo_db.sdn` - TODO database (SDN format)
+1. `doc/tracking/todo/todo_db.sdn` - TODO database (SDN format)
 2. `doc/TODO.md` - Human-readable TODO documentation (NEW: auto-generated)
 
 **Workflow:**
@@ -257,7 +257,7 @@ simple todo-scan
 #   Updated: 2 TODOs
 #   Removed: 1 TODOs
 #   Total:   71 TODOs
-# Database saved to doc/todo/todo_db.sdn
+# Database saved to doc/tracking/todo/todo_db.sdn
 # Generated docs to doc/TODO.md  ← Automatic!
 ```
 
@@ -281,7 +281,7 @@ simple todo-gen    # Only generate docs
 
 | System | Command | Database | Docs | Updated |
 |--------|---------|----------|------|---------|
-| **TODO** | `simple todo-scan` | `doc/todo/todo_db.sdn` | `doc/TODO.md` | Manual command |
+| **TODO** | `simple todo-scan` | `doc/tracking/todo/todo_db.sdn` | `doc/TODO.md` | Manual command |
 | **Feature** | `simple test` | `doc/feature/feature_db.sdn` | `doc/feature/*.md` | **Every test run** |
 
 ## Migration
