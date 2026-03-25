@@ -39,6 +39,8 @@ pub mod monoio_executor;
 pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+pub mod vulkan_graphics_runtime;
+pub mod metal_graphics_runtime;
 
 // Initialize runtime thread on first use
 #[cfg(feature = "monoio-net")]

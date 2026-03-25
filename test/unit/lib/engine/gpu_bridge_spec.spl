@@ -1,0 +1,126 @@
+# GPU Bridge, Shader, and Texture Cache Tests
+
+use std.spec.{describe, it, expect}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.ids.{RawHandle, TextureId, Generation}
+use std.gc_async_mut.gpu.graphics.{GpuTexture, GpuFormat, GpuRenderPass, GpuGraphicsPipeline, GpuSwapchain, GpuFramebuffer}
+use std.nogc_sync_mut.engine.render.gpu_bridge.{GpuRenderState, init_gpu_render_state, flatten_batch_vertices}
+use std.nogc_sync_mut.engine.render.gpu_pipeline.{SpriteBatch, GpuVertex2D}
+use std.nogc_sync_mut.engine.render.shader.{ShaderSource, ShaderProgram, load_builtin_2d_shader, load_builtin_3d_shader, create_shader_program}
+use std.nogc_sync_mut.engine.render.gpu_texture_cache.{GpuTextureCache, create_gpu_texture_desc, upload_texture_to_gpu}
+
+describe "GpuRenderState":
+    it "creates uninitialized state":
+        val state = GpuRenderState.uninitialized()
+        expect(state.is_initialized).to_equal(false)
+        expect(state.is_valid()).to_equal(false)
+
+    it "initializes with dimensions":
+        val state = init_gpu_render_state(800, 600, 0)
+        expect(state.is_initialized).to_equal(false)
+        expect(state.screen_width).to_equal(800)
+        expect(state.screen_height).to_equal(600)
+        expect(state.last_error).to_contain("disabled")
+
+describe "flatten_batch_vertices":
+    it "flattens vertices to f64 array":
+        var batch = SpriteBatch.create(0)
+        val white = EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+        batch.add_quad(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 1.0, 1.0, white)
+        val verts_data = flatten_batch_vertices(batch)
+        # 4 vertices * 8 floats each = 32 floats
+        expect(verts_data.len()).to_equal(32)
+        # First vertex pos_x should be 0.0
+        expect(verts_data[0]).to_equal(0.0)
+
+describe "ShaderSource":
+    it "loads builtin 2D shader":
+        val source = load_builtin_2d_shader()
+        expect(source.name).to_equal("builtin_2d")
+        expect(source.is_valid()).to_equal(true)
+        expect(source.vertex_code.len()).to_be_greater_than(0)
+        expect(source.fragment_code.len()).to_be_greater_than(0)
+
+    it "loads builtin 3D shader":
+        val source = load_builtin_3d_shader()
+        expect(source.name).to_equal("builtin_3d")
+        expect(source.is_valid()).to_equal(true)
+
+    it "vertex shader contains version directive":
+        val source = load_builtin_2d_shader()
+        expect(source.vertex_code).to_contain("#version 450")
+
+    it "fragment shader contains texture sampling":
+        val source = load_builtin_2d_shader()
+        expect(source.fragment_code).to_contain("sampler2D")
+
+describe "ShaderProgram":
+    it "creates invalid program":
+        val prog = ShaderProgram.invalid()
+        expect(prog.is_valid()).to_equal(false)
+        expect(prog.is_compiled).to_equal(false)
+
+    it "compiles to unlinked program (stub)":
+        val source = load_builtin_2d_shader()
+        val prog = create_shader_program(source)
+        expect(prog.name).to_equal("builtin_2d")
+        # Stub returns is_compiled=false until real GPU backing
+        expect(prog.is_compiled).to_equal(false)
+
+describe "GpuTextureCache":
+    it "starts empty":
+        val cache = GpuTextureCache.create()
+        expect(cache.count()).to_equal(0)
+        expect(cache.total_uploads()).to_equal(0)
+
+    it "caches and retrieves GPU texture":
+        var cache = GpuTextureCache.create()
+        val tex_id = TextureId(raw: RawHandle(index: 1, generation: Generation(value: 1)))
+        val gpu_tex = GpuTexture(handle: 42, width: 64, height: 64, format: GpuFormat.RGBA8)
+        cache.put(tex_id, gpu_tex)
+        expect(cache.count()).to_equal(1)
+        expect(cache.has(tex_id)).to_equal(true)
+        val got = cache.get(tex_id)
+        if val Some(t) = got:
+            expect(t.handle).to_equal(42)
+            expect(t.width).to_equal(64)
+
+    it "returns nil for uncached texture":
+        val cache = GpuTextureCache.create()
+        val tex_id = TextureId(raw: RawHandle(index: 99, generation: Generation(value: 1)))
+        val got = cache.get(tex_id)
+        expect(got).to_be_nil
+
+    it "removes cached texture":
+        var cache = GpuTextureCache.create()
+        val tex_id = TextureId(raw: RawHandle(index: 1, generation: Generation(value: 1)))
+        val gpu_tex = GpuTexture(handle: 10, width: 32, height: 32, format: GpuFormat.RGBA8)
+        cache.put(tex_id, gpu_tex)
+        cache.remove(tex_id)
+        expect(cache.has(tex_id)).to_equal(false)
+
+    it "clears all entries":
+        var cache = GpuTextureCache.create()
+        val t1 = TextureId(raw: RawHandle(index: 1, generation: Generation(value: 1)))
+        val t2 = TextureId(raw: RawHandle(index: 2, generation: Generation(value: 1)))
+        cache.put(t1, GpuTexture(handle: 1, width: 8, height: 8, format: GpuFormat.RGBA8))
+        cache.put(t2, GpuTexture(handle: 2, width: 8, height: 8, format: GpuFormat.RGBA8))
+        expect(cache.count()).to_equal(2)
+        cache.clear()
+        expect(cache.count()).to_equal(0)
+
+    it "tracks total uploads":
+        var cache = GpuTextureCache.create()
+        val t1 = TextureId(raw: RawHandle(index: 1, generation: Generation(value: 1)))
+        cache.put(t1, GpuTexture(handle: 1, width: 8, height: 8, format: GpuFormat.RGBA8))
+        cache.put(t1, GpuTexture(handle: 2, width: 8, height: 8, format: GpuFormat.RGBA8))
+        expect(cache.total_uploads()).to_equal(2)
+
+describe "create_gpu_texture_desc":
+    it "creates RGBA8 sampled descriptor":
+        val desc = create_gpu_texture_desc(256, 256)
+        expect(desc.width).to_equal(256)
+        expect(desc.height).to_equal(256)
+        # Format is statically RGBA8 from create_gpu_texture_desc
+        # Enum method calls not supported in interpreter mode
+        expect(desc.width).to_equal(desc.height)

@@ -11,6 +11,7 @@ static NEXT_WORLD_ID: AtomicI64 = AtomicI64::new(1);
 static NEXT_CONTACT_LIST_ID: AtomicI64 = AtomicI64::new(1);
 static WORLDS: LazyLock<Mutex<HashMap<i64, PhysicsWorldState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static CONTACT_LISTS: LazyLock<Mutex<HashMap<i64, Vec<ContactRecord>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
 #[derive(Clone)]
 struct BodyState {
@@ -54,6 +55,14 @@ struct PhysicsWorldState {
     next_collider_id: i64,
     bodies: HashMap<i64, BodyState>,
     colliders: HashMap<i64, ColliderState>,
+}
+
+fn set_last_error(message: impl Into<String>) {
+    *LAST_ERROR.lock() = message.into();
+}
+
+fn clear_last_error() {
+    LAST_ERROR.lock().clear();
 }
 
 #[derive(Clone)]
@@ -222,6 +231,9 @@ fn resolve_dynamic_body(world: &mut PhysicsWorldState, body_id: i64, dt: f64) {
     if body_snapshot.body_type != 2 {
         return;
     }
+    if body_snapshot.sleeping {
+        return;
+    }
 
     let body_colliders: Vec<(i64, ColliderState)> = world
         .colliders
@@ -299,6 +311,7 @@ fn resolve_dynamic_body(world: &mut PhysicsWorldState, body_id: i64, dt: f64) {
 pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
     match name {
         "rt_rapier2d_world_new" => {
+            clear_last_error();
             let gravity_x = get_f64(args, 0, name)?;
             let gravity_y = get_f64(args, 1, name)?;
             let world_id = NEXT_WORLD_ID.fetch_add(1, Ordering::SeqCst);
@@ -316,11 +329,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(world_id))
         }
         "rt_rapier2d_world_free" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             WORLDS.lock().remove(&world_id);
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_world_step" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let dt = get_f64(args, 1, name)?;
             let mut worlds = WORLDS.lock();
@@ -333,6 +348,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_world_set_gravity" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let gravity_x = get_f64(args, 1, name)?;
             let gravity_y = get_f64(args, 2, name)?;
@@ -343,6 +359,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_new_dynamic" | "rt_rapier2d_body_new_static" | "rt_rapier2d_body_new_kinematic" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let x = get_f64(args, 1, name)?;
             let y = get_f64(args, 2, name)?;
@@ -381,6 +398,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(body_id))
         }
         "rt_rapier2d_body_free" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             if let Some(world) = WORLDS.lock().get_mut(&world_id) {
@@ -390,6 +408,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_get_position" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let worlds = WORLDS.lock();
@@ -405,6 +424,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Tuple(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]))
         }
         "rt_rapier2d_body_set_position" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let x = get_f64(args, 2, name)?;
@@ -418,6 +438,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_get_velocity" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let worlds = WORLDS.lock();
@@ -433,6 +454,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Tuple(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]))
         }
         "rt_rapier2d_body_set_velocity" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let vx = get_f64(args, 2, name)?;
@@ -446,6 +468,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_apply_force" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let fx = get_f64(args, 2, name)?;
@@ -458,6 +481,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_apply_impulse" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let ix = get_f64(args, 2, name)?;
@@ -469,8 +493,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             }
             Ok(Value::Bool(true))
         }
-        "rt_rapier2d_body_apply_torque" | "rt_rapier2d_body_apply_torque_impulse" => Ok(Value::Bool(true)),
+        "rt_rapier2d_body_apply_torque" | "rt_rapier2d_body_apply_torque_impulse" => {
+            set_last_error("torque is not modeled by the interpreter 2D physics runtime");
+            Ok(Value::Bool(false))
+        }
         "rt_rapier2d_body_set_mass" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let mass = get_f64(args, 2, name)?;
@@ -480,6 +508,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_get_mass" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let worlds = WORLDS.lock();
@@ -491,6 +520,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Float(mass))
         }
         "rt_rapier2d_body_set_linear_damping" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let damping = get_f64(args, 2, name)?;
@@ -500,6 +530,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_set_angular_damping" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let damping = get_f64(args, 2, name)?;
@@ -509,6 +540,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_is_sleeping" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let sleeping = WORLDS
@@ -519,9 +551,32 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 .unwrap_or(false);
             Ok(Value::Bool(sleeping))
         }
-        "rt_rapier2d_body_wake_up" => Ok(Value::Bool(true)),
-        "rt_rapier2d_body_sleep" => Ok(Value::Bool(true)),
+        "rt_rapier2d_body_wake_up" => {
+            clear_last_error();
+            let world_id = get_i64(args, 0, name)?;
+            let body_id = get_i64(args, 1, name)?;
+            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+                body.sleeping = false;
+                return Ok(Value::Bool(true));
+            }
+            set_last_error(format!("invalid body handle: {body_id}"));
+            Ok(Value::Bool(false))
+        }
+        "rt_rapier2d_body_sleep" => {
+            clear_last_error();
+            let world_id = get_i64(args, 0, name)?;
+            let body_id = get_i64(args, 1, name)?;
+            if let Some(body) = WORLDS.lock().get_mut(&world_id).and_then(|world| world.bodies.get_mut(&body_id)) {
+                body.sleeping = true;
+                body.vx = 0.0;
+                body.vy = 0.0;
+                return Ok(Value::Bool(true));
+            }
+            set_last_error(format!("invalid body handle: {body_id}"));
+            Ok(Value::Bool(false))
+        }
         "rt_rapier2d_collider_new_circle" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let radius = get_f64(args, 2, name)?;
@@ -545,6 +600,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(collider_id))
         }
         "rt_rapier2d_collider_new_box" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let half_width = get_f64(args, 2, name)?;
@@ -572,6 +628,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(collider_id))
         }
         "rt_rapier2d_collider_new_capsule" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let half_height = get_f64(args, 2, name)?;
@@ -596,6 +653,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(collider_id))
         }
         "rt_rapier2d_collider_new_polygon" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let body_id = get_i64(args, 1, name)?;
             let raw_vertices = get_f64_array(args, 2, name)?;
@@ -625,6 +683,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(collider_id))
         }
         "rt_rapier2d_collider_free" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let collider_id = get_i64(args, 1, name)?;
             if let Some(world) = WORLDS.lock().get_mut(&world_id) {
@@ -633,6 +692,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_collider_set_offset" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let collider_id = get_i64(args, 1, name)?;
             let offset_x = get_f64(args, 2, name)?;
@@ -646,9 +706,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_collider_set_restitution" | "rt_rapier2d_collider_set_friction" | "rt_rapier2d_collider_set_density" => {
-            Ok(Value::Bool(true))
+            set_last_error("material coefficients are not modeled by the interpreter 2D physics runtime");
+            Ok(Value::Bool(false))
         }
         "rt_rapier2d_collider_set_sensor" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let collider_id = get_i64(args, 1, name)?;
             let sensor = get_bool(args, 2, name)?;
@@ -658,6 +720,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_world_get_contacts" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let worlds = WORLDS.lock();
             let contacts = worlds.get(&world_id).map(compute_contacts).unwrap_or_default();
@@ -666,11 +729,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(list_id))
         }
         "rt_rapier2d_contacts_count" => {
+            clear_last_error();
             let list_id = get_i64(args, 0, name)?;
             let count = CONTACT_LISTS.lock().get(&list_id).map(|items| items.len() as i64).unwrap_or(0);
             Ok(Value::Int(count))
         }
         "rt_rapier2d_contacts_get" => {
+            clear_last_error();
             let list_id = get_i64(args, 0, name)?;
             let index = get_i64(args, 1, name)? as usize;
             let lists = CONTACT_LISTS.lock();
@@ -696,11 +761,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             ]))
         }
         "rt_rapier2d_contacts_free" => {
+            clear_last_error();
             let list_id = get_i64(args, 0, name)?;
             CONTACT_LISTS.lock().remove(&list_id);
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_world_intersection_test" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let collider1 = get_i64(args, 1, name)?;
             let collider2 = get_i64(args, 2, name)?;
@@ -715,24 +782,38 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             }
             Ok(Value::Bool(false))
         }
-        "rt_rapier2d_world_cast_ray" => Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0), Value::Float(0.0)])),
+        "rt_rapier2d_world_cast_ray" => {
+            set_last_error("ray casting is not implemented by the interpreter 2D physics runtime");
+            Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0), Value::Float(0.0)]))
+        }
         "rt_rapier2d_joint_distance"
         | "rt_rapier2d_joint_revolute"
         | "rt_rapier2d_joint_prismatic"
-        | "rt_rapier2d_joint_fixed" => Ok(Value::Int(0)),
-        "rt_rapier2d_joint_free" | "rt_rapier2d_joint_set_limits" | "rt_rapier2d_joint_set_motor" => Ok(Value::Bool(true)),
+        | "rt_rapier2d_joint_fixed" => {
+            set_last_error("joints are not implemented by the interpreter 2D physics runtime");
+            Ok(Value::Int(0))
+        }
+        "rt_rapier2d_joint_free" | "rt_rapier2d_joint_set_limits" | "rt_rapier2d_joint_set_motor" => {
+            set_last_error("joints are not implemented by the interpreter 2D physics runtime");
+            Ok(Value::Bool(false))
+        }
         "rt_rapier2d_world_body_count" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let count = WORLDS.lock().get(&world_id).map(|world| world.bodies.len() as i64).unwrap_or(0);
             Ok(Value::Int(count))
         }
         "rt_rapier2d_world_collider_count" => {
+            clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let count = WORLDS.lock().get(&world_id).map(|world| world.colliders.len() as i64).unwrap_or(0);
             Ok(Value::Int(count))
         }
-        "rt_rapier2d_world_joint_count" => Ok(Value::Int(0)),
-        "rt_rapier2d_get_last_error" => Ok(Value::Str(String::new())),
+        "rt_rapier2d_world_joint_count" => {
+            clear_last_error();
+            Ok(Value::Int(0))
+        }
+        "rt_rapier2d_get_last_error" => Ok(Value::Str(LAST_ERROR.lock().clone())),
         _ => Err(unknown_function(name)),
     }
 }

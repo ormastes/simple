@@ -1,28 +1,8 @@
 use std.spec
-
-# TODO: Replace DamageRect with std.common.engine.rect.Rect2 — near-duplicate
-# (same fields: x/y/width/height as f64; Rect2 has right(), bottom(), contains_point(), intersects()).
-# A rectangular damage region
-class DamageRect:
-    x: f64
-    y: f64
-    width: f64
-    height: f64
-
-    static fn create(x: f64, y: f64, w: f64, h: f64) -> DamageRect:
-        DamageRect(x: x, y: y, width: w, height: h)
-
-    fn area() -> f64:
-        self.width * self.height
-
-    fn right() -> f64:
-        self.x + self.width
-
-    fn bottom() -> f64:
-        self.y + self.height
+use std.common.engine.rect.{Rect2}
 
 # Check if two rects overlap
-fn rects_overlap(a: DamageRect, b: DamageRect) -> bool:
+fn rects_overlap(a: Rect2, b: Rect2) -> bool:
     if a.x >= b.right():
         return false
     if b.x >= a.right():
@@ -34,7 +14,7 @@ fn rects_overlap(a: DamageRect, b: DamageRect) -> bool:
     true
 
 # Compute union bounding box of two rects
-fn union_rect(a: DamageRect, b: DamageRect) -> DamageRect:
+fn union_rect(a: Rect2, b: Rect2) -> Rect2:
     var min_x = a.x
     if b.x < min_x:
         min_x = b.x
@@ -47,18 +27,18 @@ fn union_rect(a: DamageRect, b: DamageRect) -> DamageRect:
     var max_bottom = a.bottom()
     if b.bottom() > max_bottom:
         max_bottom = b.bottom()
-    DamageRect.create(min_x, min_y, max_right - min_x, max_bottom - min_y)
+    Rect2.new(min_x, min_y, max_right - min_x, max_bottom - min_y)
 
 # Damage tracker: collects damaged regions
 class DamageTracker:
-    regions: List<DamageRect>
+    regions: List<Rect2>
     viewport_width: f64
     viewport_height: f64
 
     static fn create(vw: f64, vh: f64) -> DamageTracker:
-        DamageTracker(regions: List<DamageRect>(), viewport_width: vw, viewport_height: vh)
+        DamageTracker(regions: List<Rect2>(), viewport_width: vw, viewport_height: vh)
 
-    me add_damage(rect: DamageRect):
+    me add_damage(rect: Rect2):
         # Try to merge with existing overlapping region
         var merged = false
         var i = 0
@@ -72,7 +52,7 @@ class DamageTracker:
             self.regions.push(rect)
 
     me clear():
-        self.regions = List<DamageRect>()
+        self.regions = List<Rect2>()
 
     fn total_damage_area() -> f64:
         var total = 0.0
@@ -94,12 +74,12 @@ class Tile:
     static fn create(x: i64, y: i64) -> Tile:
         Tile(x: x, y: y, dirty: false)
 
-fn mark_tiles_dirty(tiles: List<Tile>, damage: DamageRect, tile_size: f64) -> List<Tile>:
+fn mark_tiles_dirty(tiles: List<Tile>, damage: Rect2, tile_size: f64) -> List<Tile>:
     var result = List<Tile>()
     for tile in tiles:
         var tile_x = tile.x.to_f64() * tile_size
         var tile_y = tile.y.to_f64() * tile_size
-        var tile_rect = DamageRect.create(tile_x, tile_y, tile_size, tile_size)
+        var tile_rect = Rect2.new(tile_x, tile_y, tile_size, tile_size)
         if rects_overlap(tile_rect, damage):
             var dirty_tile = Tile.create(tile.x, tile.y)
             dirty_tile.dirty = true
@@ -112,15 +92,15 @@ describe "DamageTracking":
     describe "region management":
         it "add_damage records region":
             var tracker = DamageTracker.create(800.0, 600.0)
-            tracker.add_damage(DamageRect.create(10.0, 20.0, 100.0, 50.0))
+            tracker.add_damage(Rect2.new(10.0, 20.0, 100.0, 50.0))
             expect(tracker.regions.len()).to_equal(1)
             expect(tracker.regions[0].x).to_equal(10.0)
             expect(tracker.regions[0].y).to_equal(20.0)
 
         it "clear removes all regions":
             var tracker = DamageTracker.create(800.0, 600.0)
-            tracker.add_damage(DamageRect.create(0.0, 0.0, 50.0, 50.0))
-            tracker.add_damage(DamageRect.create(200.0, 200.0, 50.0, 50.0))
+            tracker.add_damage(Rect2.new(0.0, 0.0, 50.0, 50.0))
+            tracker.add_damage(Rect2.new(200.0, 200.0, 50.0, 50.0))
             expect(tracker.regions.len()).to_equal(2)
             tracker.clear()
             expect(tracker.regions.len()).to_equal(0)
@@ -128,20 +108,20 @@ describe "DamageTracking":
     describe "merging":
         it "overlapping rects merge":
             var tracker = DamageTracker.create(800.0, 600.0)
-            tracker.add_damage(DamageRect.create(10.0, 10.0, 100.0, 100.0))
-            tracker.add_damage(DamageRect.create(50.0, 50.0, 100.0, 100.0))
+            tracker.add_damage(Rect2.new(10.0, 10.0, 100.0, 100.0))
+            tracker.add_damage(Rect2.new(50.0, 50.0, 100.0, 100.0))
             # Should merge into one region
             expect(tracker.regions.len()).to_equal(1)
 
         it "non-overlapping rects stay separate":
             var tracker = DamageTracker.create(800.0, 600.0)
-            tracker.add_damage(DamageRect.create(0.0, 0.0, 50.0, 50.0))
-            tracker.add_damage(DamageRect.create(200.0, 200.0, 50.0, 50.0))
+            tracker.add_damage(Rect2.new(0.0, 0.0, 50.0, 50.0))
+            tracker.add_damage(Rect2.new(200.0, 200.0, 50.0, 50.0))
             expect(tracker.regions.len()).to_equal(2)
 
         it "merge produces union bounding box":
-            var a = DamageRect.create(10.0, 10.0, 100.0, 100.0)
-            var b = DamageRect.create(50.0, 50.0, 100.0, 100.0)
+            var a = Rect2.new(10.0, 10.0, 100.0, 100.0)
+            var b = Rect2.new(50.0, 50.0, 100.0, 100.0)
             var merged = union_rect(a, b)
             expect(merged.x).to_equal(10.0)
             expect(merged.y).to_equal(10.0)
@@ -151,8 +131,8 @@ describe "DamageTracking":
     describe "area and repaint":
         it "total_damage_area sums all regions":
             var tracker = DamageTracker.create(800.0, 600.0)
-            tracker.add_damage(DamageRect.create(0.0, 0.0, 100.0, 100.0))
-            tracker.add_damage(DamageRect.create(500.0, 500.0, 50.0, 50.0))
+            tracker.add_damage(Rect2.new(0.0, 0.0, 100.0, 100.0))
+            tracker.add_damage(Rect2.new(500.0, 500.0, 50.0, 50.0))
             var total = tracker.total_damage_area()
             # 100*100 + 50*50 = 10000 + 2500 = 12500
             expect(total).to_equal(12500.0)
@@ -160,7 +140,7 @@ describe "DamageTracking":
         it "is_full_repaint detects large damage":
             var tracker = DamageTracker.create(800.0, 600.0)
             # viewport area = 480000, 80% = 384000
-            tracker.add_damage(DamageRect.create(0.0, 0.0, 800.0, 500.0))
+            tracker.add_damage(Rect2.new(0.0, 0.0, 800.0, 500.0))
             # damage area = 400000 > 384000
             expect(tracker.is_full_repaint()).to_equal(true)
 
@@ -172,7 +152,7 @@ describe "DamageTracking":
                 Tile.create(2, 0),
                 Tile.create(0, 1)
             ]
-            var damage = DamageRect.create(10.0, 10.0, 50.0, 50.0)
+            var damage = Rect2.new(10.0, 10.0, 50.0, 50.0)
             var result = mark_tiles_dirty(tiles, damage, 256.0)
             # Tile (0,0) covers 0..256 x 0..256, overlaps with damage at 10,10
             expect(result[0].dirty).to_equal(true)

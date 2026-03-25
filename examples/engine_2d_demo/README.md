@@ -7,9 +7,15 @@ The example code now uses the new engine path only:
 - keyboard and mouse input only
 - explicit silent audio backend until host audio runtime is wired
 
-The remaining end-to-end blockers are below the demo: window and physics host
-runtime support are still missing in the Rust driver, and the self-hosted
-`bin/simple_native` run/check path still segfaults.
+The demo now runs through interpreter-backed window and 2D physics runtime
+support in the Rust driver. Those backends are functional for the demo path,
+but they are still a limited interpreter subset rather than full native
+`winit` / Rapier integrations.
+
+Remaining blockers sit outside the demo path:
+- the self-hosted `bin/simple_native` run/check path still segfaults
+- GPU renderer mode is intentionally disabled until real device/pipeline wiring exists
+- audio stays on the explicit silent backend until host audio runtime support exists
 
 ## Run
 
@@ -23,8 +29,8 @@ Current direct check:
 src/compiler_rust/target/debug/simple examples/engine_2d_demo/main.spl
 ```
 
-That command currently fails honestly on missing `rt_winit_*` / `rt_rapier2d_*`
-runtime support. The wrapper script reports those blockers directly.
+That command should now create the demo window through the interpreter-backed
+`rt_winit_*` / `rt_rapier2d_*` runtime support used by the Rust driver.
 
 ## Controls
 

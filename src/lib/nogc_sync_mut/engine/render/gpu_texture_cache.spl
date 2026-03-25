@@ -1,0 +1,94 @@
+#![allow(primitive_api)]
+# GPU Texture Cache — Maps CPU textures to GPU handles
+#
+# Caches TextureId -> GpuTexture mappings so textures are only
+# uploaded to GPU once. Provides get-or-upload semantics.
+
+use std.common.engine.ids.{TextureId}
+use std.gc_async_mut.gpu.graphics.{GpuTexture, GpuTextureDesc, GpuFormat, GpuTextureUsage}
+use std.nogc_sync_mut.engine.sprite.texture.{Texture, TextureStore}
+
+# ============================================================================
+# GPU Texture Cache
+# ============================================================================
+
+class GpuTextureCache:
+    entries: Dict<i64, GpuTexture>
+    upload_count: i64
+
+impl GpuTextureCache:
+    static fn create() -> GpuTextureCache:
+        GpuTextureCache(entries: {}, upload_count: 0)
+
+    fn get(tex_id: TextureId) -> GpuTexture?:
+        # Look up a cached GPU texture by TextureId
+        val key = tex_id.to_index()
+        if val Some(gpu_tex) = self.entries.get(key):
+            return gpu_tex
+        nil
+
+    me put(tex_id: TextureId, gpu_tex: GpuTexture):
+        # Cache a GPU texture handle
+        val key = tex_id.to_index()
+        self.entries[key] = gpu_tex
+        self.upload_count = self.upload_count + 1
+
+    me remove(tex_id: TextureId):
+        # Remove a cached entry (e.g., when CPU texture is freed)
+        val key = tex_id.to_index()
+        self.entries.remove(key)
+
+    fn has(tex_id: TextureId) -> bool:
+        # Check if a texture is cached
+        val key = tex_id.to_index()
+        if val Some(_) = self.entries.get(key):
+            return true
+        false
+
+    fn count() -> i64:
+        # Number of cached GPU textures
+        self.entries.keys().len()
+
+    fn total_uploads() -> i64:
+        self.upload_count
+
+    me clear():
+        # Clear all cached entries
+        # In real implementation, would also destroy GPU textures
+        self.entries = {}
+
+# ============================================================================
+# Texture Upload Helper
+# ============================================================================
+
+fn create_gpu_texture_desc(width: i64, height: i64) -> GpuTextureDesc:
+    # Create a texture descriptor suitable for sprite rendering
+    GpuTextureDesc(
+        width: width,
+        height: height,
+        format: GpuFormat.RGBA8,
+        usage: GpuTextureUsage.Sampled
+    )
+
+fn upload_texture_to_gpu(texture: Texture) -> GpuTexture:
+    # Upload CPU texture pixel data to a GPU texture
+    # In real implementation, this would:
+    #   1. Create GPU texture via ctx.create_texture()
+    #   2. Copy pixel data to GPU memory
+    #   3. Return the GPU texture handle
+    # For now, return a descriptive but invalid handle
+    GpuTexture(handle: 0, width: texture.width, height: texture.height, format: GpuFormat.RGBA8)
+
+fn get_or_upload(cache: GpuTextureCache, tex_id: TextureId, store: TextureStore) -> GpuTexture:
+    # Get cached GPU texture, or upload from CPU texture store
+    val cached = cache.get(tex_id)
+    if val Some(gpu_tex) = cached:
+        return gpu_tex
+    # Not cached — try to upload
+    val maybe_tex = store.get(tex_id)
+    if val Some(cpu_tex) = maybe_tex:
+        val gpu_tex = upload_texture_to_gpu(cpu_tex)
+        cache.put(tex_id, gpu_tex)
+        return gpu_tex
+    # Neither cached nor in store — return invalid
+    GpuTexture(handle: 0, width: 0, height: 0, format: GpuFormat.RGBA8)

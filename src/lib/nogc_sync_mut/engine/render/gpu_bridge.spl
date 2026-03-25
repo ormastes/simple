@@ -1,0 +1,121 @@
+#![allow(primitive_api)]
+# GPU Render Bridge — Connects batch renderer to GPU Context
+#
+# Manages GPU resource lifecycle and provides frame-level GPU operations.
+# The bridge holds handles to persistent GPU resources (render pass, pipeline,
+# swapchain) and provides methods to upload batch data and issue draw calls.
+#
+# When no GPU is available (ctx_handle == 0), all operations are no-ops
+# and the engine falls back to software rendering.
+
+use std.common.engine.color.{EngineColor}
+use std.gc_async_mut.gpu.graphics.{
+    GpuFormat, GpuTextureUsage, GpuTextureDesc, GpuTexture,
+    GpuRenderPassDesc, GpuRenderPass, GpuLoadOp, GpuStoreOp,
+    GpuBlendMode, GpuTopology, GpuVertexFormat, GpuVertexAttribute,
+    GpuVertexLayout, GpuShaderStage, GpuShader,
+    GpuPipelineDesc, GpuGraphicsPipeline,
+    GpuSwapchainDesc, GpuSwapchain, GpuFramebuffer
+}
+use std.nogc_sync_mut.engine.render.gpu_pipeline.{SpriteBatch, GpuVertex2D}
+use std.nogc_sync_mut.engine.render.types.{DrawStats}
+
+# ============================================================================
+# GPU Render State — persistent resources for a frame
+# ============================================================================
+
+class GpuRenderState:
+    render_pass: GpuRenderPass
+    pipeline: GpuGraphicsPipeline
+    swapchain: GpuSwapchain
+    framebuffer: GpuFramebuffer
+    color_texture: GpuTexture
+    is_initialized: bool
+    screen_width: i64
+    screen_height: i64
+    last_error: text
+
+impl GpuRenderState:
+    static fn uninitialized() -> GpuRenderState:
+        GpuRenderState(
+            render_pass: GpuRenderPass(handle: 0),
+            pipeline: GpuGraphicsPipeline(handle: 0),
+            swapchain: GpuSwapchain(handle: 0, width: 0, height: 0, format: GpuFormat.RGBA8),
+            framebuffer: GpuFramebuffer(handle: 0, width: 0, height: 0),
+            color_texture: GpuTexture(handle: 0, width: 0, height: 0, format: GpuFormat.RGBA8),
+            is_initialized: false,
+            screen_width: 0,
+            screen_height: 0,
+            last_error: "GPU backend is unavailable"
+        )
+
+    fn is_valid() -> bool:
+        self.is_initialized and self.render_pass.is_valid()
+
+# ============================================================================
+# Initialization — create GPU resources via Context
+# ============================================================================
+
+fn init_gpu_render_state(width: i64, height: i64, window_handle: i64) -> GpuRenderState:
+    # The engine has batching code, but no real device/context-backed 2D GPU submission path yet.
+    # Returning an uninitialized state keeps renderer mode honest and forces software fallback.
+    GpuRenderState(
+        render_pass: GpuRenderPass(handle: 0),
+        pipeline: GpuGraphicsPipeline(handle: 0),
+        swapchain: GpuSwapchain(handle: 0, width: width, height: height, format: GpuFormat.BGRA8),
+        framebuffer: GpuFramebuffer(handle: 0, width: width, height: height),
+        color_texture: GpuTexture(handle: 0, width: width, height: height, format: GpuFormat.BGRA8),
+        is_initialized: false,
+        screen_width: width,
+        screen_height: height,
+        last_error: "GPU renderer mode is disabled until the 2D backend has real device/pipeline wiring"
+    )
+
+# ============================================================================
+# Frame Operations
+# ============================================================================
+
+fn begin_gpu_frame(state: GpuRenderState, clear_color: EngineColor):
+    # Begin render pass with clear color
+    # In real implementation, this calls ctx.begin_render_pass()
+    pass_do_nothing
+
+fn submit_gpu_batch(state: GpuRenderState, batch: SpriteBatch) -> DrawStats:
+    if not state.is_initialized:
+        return DrawStats.zero()
+    val tri_count = batch.indices.len() / 3
+    DrawStats(draw_calls: 1, triangles: tri_count, vertices: batch.vertices.len())
+
+fn end_gpu_frame(state: GpuRenderState):
+    # End render pass and present
+    # In real implementation:
+    #   ctx.end_render_pass()
+    #   ctx.present(state.swapchain)
+    pass_do_nothing
+
+fn destroy_gpu_render_state(state: GpuRenderState):
+    # Destroy all GPU resources
+    # In real implementation, call ctx.destroy_* for each resource
+    pass_do_nothing
+
+# ============================================================================
+# Batch Data Conversion
+# ============================================================================
+
+fn flatten_batch_vertices(batch: SpriteBatch) -> [f64]:
+    # Convert [GpuVertex2D] to flat [f64] for GPU upload
+    # Each vertex: pos_x, pos_y, uv_x, uv_y, color_r, color_g, color_b, color_a
+    var result: [f64] = []
+    var i = 0
+    while i < batch.vertices.len():
+        val v = batch.vertices[i]
+        result.push(v.pos_x)
+        result.push(v.pos_y)
+        result.push(v.uv_x)
+        result.push(v.uv_y)
+        result.push(v.color_r)
+        result.push(v.color_g)
+        result.push(v.color_b)
+        result.push(v.color_a)
+        i = i + 1
+    result
