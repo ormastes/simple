@@ -1,0 +1,766 @@
+#![allow(primitive_api)]
+# Flexbox Layout — generic flex formatting context.
+# Implements the full flex layout algorithm: item generation, line collection,
+# flexible length resolution, main-axis justification, and cross-axis alignment.
+#
+# Extracted from browser CSS Flexbox Level 1 implementation.
+# Works on any box model, not just CSS boxes.
+#
+# Reference: https://www.w3.org/TR/css-flexbox-1/#layout-algorithm (Section 9)
+
+use std.common.layout.box_model.(LayoutBox, BoxModel, BoxKind)
+
+# ---------------------------------------------------------------------------
+# Flex enums — axis direction, wrapping, alignment.
+# ---------------------------------------------------------------------------
+
+enum FlexDirection:
+    Row
+    RowReverse
+    Column
+    ColumnReverse
+
+enum FlexWrap:
+    NoWrap
+    Wrap
+    WrapReverse
+
+enum JustifyContent:
+    FlexStart
+    FlexEnd
+    Center
+    SpaceBetween
+    SpaceAround
+    SpaceEvenly
+
+enum AlignItems:
+    FlexStart
+    FlexEnd
+    Center
+    Stretch
+    Baseline
+
+enum AlignContent:
+    FlexStart
+    FlexEnd
+    Center
+    Stretch
+    SpaceBetween
+    SpaceAround
+
+enum AlignSelf:
+    Auto
+    FlexStart
+    FlexEnd
+    Center
+    Stretch
+    Baseline
+
+# ---------------------------------------------------------------------------
+# FlexBasis — how the flex base size is determined.
+# ---------------------------------------------------------------------------
+
+enum FlexBasis:
+    Fixed(size: f64)
+    Percent(pct: f64)
+    Auto
+
+# ---------------------------------------------------------------------------
+# FlexItem — one child participating in flex layout.
+# ---------------------------------------------------------------------------
+
+class FlexItem:
+    node_id: i64
+    order: i64
+    flex_grow: f64
+    flex_shrink: f64
+    flex_basis: FlexBasis
+    align_self: AlignSelf
+    min_width: f64
+    max_width: f64
+    min_height: f64
+    max_height: f64
+    hypothetical_main_size: f64
+    target_main_size: f64
+    cross_size: f64
+    outer_main_size: f64
+    outer_cross_size: f64
+    margin_main_start: f64
+    margin_main_end: f64
+    margin_cross_start: f64
+    margin_cross_end: f64
+    box_node: LayoutBox
+    frozen: bool
+    violation: f64
+
+    static fn from_box(child: LayoutBox, is_row: bool) -> FlexItem:
+        val bm = child.box_model
+        val m_main_start = if is_row: bm.margin_left else: bm.margin_top
+        val m_main_end = if is_row: bm.margin_right else: bm.margin_bottom
+        val m_cross_start = if is_row: bm.margin_top else: bm.margin_left
+        val m_cross_end = if is_row: bm.margin_bottom else: bm.margin_right
+        val content_main = if is_row: child.width else: child.height
+        val content_cross = if is_row: child.height else: child.width
+        FlexItem(
+            node_id: child.node_id,
+            order: 0,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: FlexBasis.Auto,
+            align_self: AlignSelf.Auto,
+            min_width: 0.0,
+            max_width: 999999.0,
+            min_height: 0.0,
+            max_height: 999999.0,
+            hypothetical_main_size: content_main,
+            target_main_size: content_main,
+            cross_size: content_cross,
+            outer_main_size: content_main + m_main_start + m_main_end,
+            outer_cross_size: content_cross + m_cross_start + m_cross_end,
+            margin_main_start: m_main_start,
+            margin_main_end: m_main_end,
+            margin_cross_start: m_cross_start,
+            margin_cross_end: m_cross_end,
+            box_node: child,
+            frozen: false,
+            violation: 0.0
+        )
+
+# ---------------------------------------------------------------------------
+# FlexLine — a single line of flex items (single-line or one of many in wrap).
+# ---------------------------------------------------------------------------
+
+class FlexLine:
+    items: List<FlexItem>
+    cross_size: f64
+    main_offset: f64
+    cross_offset: f64
+
+    static fn create(items: List<FlexItem>) -> FlexLine:
+        FlexLine(items: items, cross_size: 0.0, main_offset: 0.0, cross_offset: 0.0)
+
+# ---------------------------------------------------------------------------
+# FlexConfig — configuration for a flex layout pass.
+# ---------------------------------------------------------------------------
+
+class FlexConfig:
+    direction: FlexDirection
+    wrap: FlexWrap
+    justify: JustifyContent
+    align: AlignItems
+
+    static fn default() -> FlexConfig:
+        FlexConfig(
+            direction: FlexDirection.Row,
+            wrap: FlexWrap.NoWrap,
+            justify: JustifyContent.FlexStart,
+            align: AlignItems.Stretch
+        )
+
+# ---------------------------------------------------------------------------
+# FlexFormatter — the main entry point for flex layout.
+# ---------------------------------------------------------------------------
+
+class FlexFormatter:
+    # Full flex layout algorithm (Flexbox spec Section 9).
+    #
+    # 1.  Generate flex items from container children.
+    # 2.  Determine available main/cross space.
+    # 3.  Resolve flex base sizes and hypothetical main sizes.
+    # 4.  Collect flex items into flex lines (wrapping).
+    # 5.  Resolve flexible lengths (grow/shrink distribution).
+    # 6.  Determine hypothetical cross sizes per item.
+    # 7.  Determine cross sizes of each line.
+    # 8.  Handle align-content for multi-line containers.
+    # 9.  Apply main-axis alignment (justify-content).
+    # 10. Apply cross-axis alignment (align-items / align-self).
+    # 11. Position items with resolved sizes.
+    me layout_flex(container: LayoutBox, config: FlexConfig) -> LayoutBox:
+        val direction = config.direction
+        val wrap = config.wrap
+        val justify = config.justify
+        val align = config.align
+        val is_row = is_row_direction(direction)
+        val reversed = is_reversed(direction)
+
+        # Step 1 — generate flex items
+        var items = List<FlexItem>()
+        for child in container.children:
+            var item = FlexItem.from_box(child, is_row)
+            items.push(item)
+
+        # Sort by order property
+        items = sort_by_order(items)
+
+        # Step 2 — available main and cross space
+        val available_main = if is_row: container.width else: container.height
+        val available_cross = if is_row: container.height else: container.width
+
+        # Step 3 — resolve flex base sizes
+        var resolved_items = List<FlexItem>()
+        for item in items:
+            var ri = item
+            val base = resolve_flex_basis(ri.flex_basis, available_main)
+            ri.hypothetical_main_size = clamp_main_size(base, ri, is_row)
+            ri.target_main_size = ri.hypothetical_main_size
+            ri.outer_main_size = ri.target_main_size + ri.margin_main_start + ri.margin_main_end
+            resolved_items.push(ri)
+
+        # Step 4 — collect into lines
+        var lines = collect_into_lines(resolved_items, available_main, wrap)
+
+        # Step 5 — resolve flexible lengths per line
+        var resolved_lines = List<FlexLine>()
+        for line in lines:
+            val rl = resolve_flexible_lengths(line, available_main)
+            resolved_lines.push(rl)
+        lines = resolved_lines
+
+        # Step 6 — determine hypothetical cross size of each item
+        var cross_resolved_lines = List<FlexLine>()
+        for line in lines:
+            var updated_items = List<FlexItem>()
+            for item in line.items:
+                var ui = item
+                # Cross size is the content cross dimension of the child box
+                if is_row:
+                    ui.cross_size = ui.box_node.height
+                else:
+                    ui.cross_size = ui.box_node.width
+                ui.outer_cross_size = ui.cross_size + ui.margin_cross_start + ui.margin_cross_end
+                updated_items.push(ui)
+            var updated_line = FlexLine(
+                items: updated_items, cross_size: line.cross_size,
+                main_offset: line.main_offset, cross_offset: line.cross_offset
+            )
+            cross_resolved_lines.push(updated_line)
+        lines = cross_resolved_lines
+
+        # Step 7 — determine cross size of each line
+        var cross_sized_lines = List<FlexLine>()
+        for line in lines:
+            var max_cross = 0.0
+            for item in line.items:
+                if item.outer_cross_size > max_cross:
+                    max_cross = item.outer_cross_size
+            var csl = line
+            csl.cross_size = max_cross
+            cross_sized_lines.push(csl)
+        lines = cross_sized_lines
+
+        # Step 8 — distribute cross space among lines (align-content)
+        val total_line_cross = _sum_line_cross(lines)
+        val free_cross = available_cross - total_line_cross
+        if free_cross > 0.0:
+            lines = _distribute_cross_space(lines, free_cross, AlignContent.Stretch)
+
+        # Step 9 — justify items on the main axis per line
+        var justified_lines = List<FlexLine>()
+        for line in lines:
+            val jl = justify_items(line, available_main, justify)
+            justified_lines.push(jl)
+        lines = justified_lines
+
+        # Step 10 — align items on the cross axis per line
+        var aligned_lines = List<FlexLine>()
+        for line in lines:
+            val al = align_items_cross(line, align)
+            aligned_lines.push(al)
+        lines = aligned_lines
+
+        # Step 11 — position items and build final children list
+        var result_children = List<LayoutBox>()
+        var cross_cursor = 0.0
+
+        for line in lines:
+            var main_cursor = line.main_offset
+            for item in line.items:
+                var child = item.box_node
+                if is_row:
+                    child.x = container.x + main_cursor + item.margin_main_start
+                    child.y = container.y + cross_cursor + item.margin_cross_start
+                    child.width = item.target_main_size
+                    # Stretch cross if needed
+                    val effective_align = _effective_align(item.align_self, align)
+                    match effective_align:
+                        AlignItems.Stretch:
+                            child.height = line.cross_size - item.margin_cross_start - item.margin_cross_end
+                        _:
+                            child.height = item.cross_size
+                else:
+                    child.y = container.y + main_cursor + item.margin_main_start
+                    child.x = container.x + cross_cursor + item.margin_cross_start
+                    child.height = item.target_main_size
+                    val effective_align = _effective_align(item.align_self, align)
+                    match effective_align:
+                        AlignItems.Stretch:
+                            child.width = line.cross_size - item.margin_cross_start - item.margin_cross_end
+                        _:
+                            child.width = item.cross_size
+                main_cursor = main_cursor + item.margin_main_start + item.target_main_size + item.margin_main_end
+                result_children.push(child)
+            cross_cursor = cross_cursor + line.cross_size
+
+        # If reversed, reverse the positioned children within each line
+        if reversed:
+            result_children = _reverse_main_positions(result_children, container, is_row, available_main)
+
+        var result = container
+        result.children = result_children
+        result
+
+# ---------------------------------------------------------------------------
+# Flex basis resolution.
+# ---------------------------------------------------------------------------
+
+fn resolve_flex_basis(basis: FlexBasis, main_size: f64) -> f64:
+    match basis:
+        FlexBasis.Fixed(size):
+            size
+        FlexBasis.Percent(pct):
+            (pct / 100.0) * main_size
+        FlexBasis.Auto:
+            # Auto — use content size (caller provides hypothetical)
+            0.0
+
+# ---------------------------------------------------------------------------
+# Line collection — wrapping or single-line.
+# ---------------------------------------------------------------------------
+
+fn collect_into_lines(items: List<FlexItem>, available: f64, wrap: FlexWrap) -> List<FlexLine>:
+    var lines = List<FlexLine>()
+
+    match wrap:
+        FlexWrap.NoWrap:
+            # All items on a single line
+            lines.push(FlexLine.create(items))
+        _:
+            # Wrap: start a new line when items exceed available main space
+            var current_items = List<FlexItem>()
+            var current_main = 0.0
+
+            for item in items:
+                val item_outer = item.outer_main_size
+                val would_exceed = (current_main + item_outer > available)
+                val has_items = (current_items.len() > 0)
+                if would_exceed and has_items:
+                    lines.push(FlexLine.create(current_items))
+                    current_items = List<FlexItem>()
+                    current_main = 0.0
+                current_items.push(item)
+                current_main = current_main + item_outer
+
+            if current_items.len() > 0:
+                lines.push(FlexLine.create(current_items))
+
+            # For WrapReverse, reverse the order of lines
+            match wrap:
+                FlexWrap.WrapReverse:
+                    var reversed_lines = List<FlexLine>()
+                    var idx = lines.len() - 1
+                    while idx >= 0:
+                        reversed_lines.push(lines[idx])
+                        idx = idx - 1
+                    lines = reversed_lines
+                _:
+                    pass_dn
+
+    lines
+
+# ---------------------------------------------------------------------------
+# Flexible length resolution — grow/shrink algorithm (spec 9.7).
+# ---------------------------------------------------------------------------
+
+fn resolve_flexible_lengths(line: FlexLine, available: f64) -> FlexLine:
+    # Calculate used main space by hypothetical sizes
+    var used_main = 0.0
+    for item in line.items:
+        used_main = used_main + item.outer_main_size
+
+    val free_space = available - used_main
+    val is_grow = (free_space >= 0.0)
+
+    # Check if any item can flex
+    var total_factor = 0.0
+    for item in line.items:
+        if is_grow:
+            total_factor = total_factor + item.flex_grow
+        else:
+            total_factor = total_factor + item.flex_shrink
+
+    if total_factor == 0.0:
+        # No flex factors — nothing to distribute
+        return line
+
+    # Distribute free space
+    val distributed = distribute_free_space(line.items, free_space, is_grow)
+
+    # Clamp and freeze loop (simplified — one pass clamping)
+    var final_items = List<FlexItem>()
+    for item in distributed:
+        var fi = item
+        fi.target_main_size = _clamp(fi.target_main_size, fi.min_width, fi.max_width)
+        fi.outer_main_size = fi.target_main_size + fi.margin_main_start + fi.margin_main_end
+        fi.frozen = true
+        final_items.push(fi)
+
+    FlexLine(
+        items: final_items, cross_size: line.cross_size,
+        main_offset: line.main_offset, cross_offset: line.cross_offset
+    )
+
+# ---------------------------------------------------------------------------
+# Free space distribution — proportional to grow or shrink factors.
+# ---------------------------------------------------------------------------
+
+fn distribute_free_space(items: List<FlexItem>, free_space: f64, is_grow: bool) -> List<FlexItem>:
+    # Sum the relevant flex factors
+    var total_factor = 0.0
+    for item in items:
+        if is_grow:
+            total_factor = total_factor + item.flex_grow
+        else:
+            total_factor = total_factor + item.flex_shrink
+
+    if total_factor == 0.0:
+        return items
+
+    var result = List<FlexItem>()
+    val abs_free = if free_space < 0.0: -free_space else: free_space
+
+    for item in items:
+        var ri = item
+        val factor = if is_grow: ri.flex_grow else: ri.flex_shrink
+
+        if factor > 0.0:
+            if is_grow:
+                # Grow: add proportional share of positive free space
+                val share = (factor / total_factor) * free_space
+                ri.target_main_size = ri.hypothetical_main_size + share
+            else:
+                # Shrink: weighted by flex-shrink * base size (spec 9.7)
+                val scaled_shrink = factor * ri.hypothetical_main_size
+                var total_scaled = 0.0
+                for other in items:
+                    total_scaled = total_scaled + (other.flex_shrink * other.hypothetical_main_size)
+                if total_scaled > 0.0:
+                    val ratio = scaled_shrink / total_scaled
+                    val shrink_amount = ratio * abs_free
+                    ri.target_main_size = ri.hypothetical_main_size - shrink_amount
+                else:
+                    ri.target_main_size = ri.hypothetical_main_size
+        else:
+            ri.target_main_size = ri.hypothetical_main_size
+
+        # Ensure non-negative
+        if ri.target_main_size < 0.0:
+            ri.target_main_size = 0.0
+
+        ri.outer_main_size = ri.target_main_size + ri.margin_main_start + ri.margin_main_end
+        result.push(ri)
+
+    result
+
+# ---------------------------------------------------------------------------
+# Main-axis justification (justify-content).
+# ---------------------------------------------------------------------------
+
+fn justify_items(line: FlexLine, available: f64, justify: JustifyContent) -> FlexLine:
+    var used = 0.0
+    for item in line.items:
+        used = used + item.outer_main_size
+
+    val free = available - used
+    val n = line.items.len()
+    var offset = 0.0
+    var gap = 0.0
+
+    if n == 0:
+        return line
+
+    match justify:
+        JustifyContent.FlexStart:
+            offset = 0.0
+            gap = 0.0
+        JustifyContent.FlexEnd:
+            offset = free
+            gap = 0.0
+        JustifyContent.Center:
+            offset = free / 2.0
+            gap = 0.0
+        JustifyContent.SpaceBetween:
+            offset = 0.0
+            if n > 1:
+                gap = free / (n - 1).to_f64()
+            else:
+                gap = 0.0
+        JustifyContent.SpaceAround:
+            val item_space = free / n.to_f64()
+            offset = item_space / 2.0
+            gap = item_space
+        JustifyContent.SpaceEvenly:
+            val slot = free / (n + 1).to_f64()
+            offset = slot
+            gap = slot
+
+    # Ensure non-negative offset
+    if offset < 0.0:
+        offset = 0.0
+    if gap < 0.0:
+        gap = 0.0
+
+    # Assign main offsets to each item (cumulative)
+    var result_items = List<FlexItem>()
+    var cursor = offset
+    for item in line.items:
+        var ri = item
+        ri.margin_main_start = ri.margin_main_start  # preserve original margins
+        result_items.push(ri)
+        cursor = cursor + item.outer_main_size + gap
+
+    FlexLine(
+        items: result_items, cross_size: line.cross_size,
+        main_offset: offset, cross_offset: line.cross_offset
+    )
+
+# ---------------------------------------------------------------------------
+# Cross-axis alignment (align-items) — applied per line.
+# ---------------------------------------------------------------------------
+
+fn align_items_cross(line: FlexLine, align: AlignItems) -> FlexLine:
+    var result_items = List<FlexItem>()
+    for item in line.items:
+        val resolved = align_self_item(item, line.cross_size, _align_items_to_self(align))
+        result_items.push(resolved)
+
+    FlexLine(
+        items: result_items, cross_size: line.cross_size,
+        main_offset: line.main_offset, cross_offset: line.cross_offset
+    )
+
+# ---------------------------------------------------------------------------
+# Per-item cross-axis alignment (align-self).
+# ---------------------------------------------------------------------------
+
+fn align_self_item(item: FlexItem, line_cross: f64, align: AlignSelf) -> FlexItem:
+    var ri = item
+    val available_cross = line_cross - ri.margin_cross_start - ri.margin_cross_end
+
+    match align:
+        AlignSelf.FlexStart:
+            # Item stays at cross-start — no adjustment
+            pass_dn
+        AlignSelf.FlexEnd:
+            val extra = available_cross - ri.cross_size
+            ri.margin_cross_start = ri.margin_cross_start + extra
+        AlignSelf.Center:
+            val extra = available_cross - ri.cross_size
+            ri.margin_cross_start = ri.margin_cross_start + (extra / 2.0)
+        AlignSelf.Stretch:
+            ri.cross_size = available_cross
+            ri.outer_cross_size = ri.cross_size + ri.margin_cross_start + ri.margin_cross_end
+        AlignSelf.Baseline:
+            # Baseline alignment approximated as flex-start
+            pass_dn
+        AlignSelf.Auto:
+            # Auto resolves to the container's align-items — treated as Stretch
+            ri.cross_size = available_cross
+            ri.outer_cross_size = ri.cross_size + ri.margin_cross_start + ri.margin_cross_end
+
+    ri
+
+# ---------------------------------------------------------------------------
+# Direction helpers.
+# ---------------------------------------------------------------------------
+
+fn is_row_direction(dir: FlexDirection) -> bool:
+    match dir:
+        FlexDirection.Row: true
+        FlexDirection.RowReverse: true
+        _: false
+
+fn is_reversed(dir: FlexDirection) -> bool:
+    match dir:
+        FlexDirection.RowReverse: true
+        FlexDirection.ColumnReverse: true
+        _: false
+
+# ---------------------------------------------------------------------------
+# Sort items by order property (stable insertion sort).
+# ---------------------------------------------------------------------------
+
+fn sort_by_order(items: List<FlexItem>) -> List<FlexItem>:
+    var sorted = List<FlexItem>()
+    for item in items:
+        sorted.push(item)
+
+    # Simple insertion sort — stable for equal order values
+    var i = 1
+    while i < sorted.len():
+        val key_order = sorted[i].order
+        var j = i - 1
+        while j >= 0 and sorted[j].order > key_order:
+            val temp = sorted[j + 1]
+            sorted[j + 1] = sorted[j]
+            sorted[j] = temp
+            j = j - 1
+        i = i + 1
+
+    sorted
+
+# ---------------------------------------------------------------------------
+# Parsing helpers — text keywords to enum values.
+# ---------------------------------------------------------------------------
+
+fn parse_flex_direction(dir: text) -> FlexDirection:
+    match dir:
+        "row": FlexDirection.Row
+        "row-reverse": FlexDirection.RowReverse
+        "column": FlexDirection.Column
+        "column-reverse": FlexDirection.ColumnReverse
+        _: FlexDirection.Row
+
+fn parse_flex_wrap(wrap: text) -> FlexWrap:
+    match wrap:
+        "nowrap": FlexWrap.NoWrap
+        "wrap": FlexWrap.Wrap
+        "wrap-reverse": FlexWrap.WrapReverse
+        _: FlexWrap.NoWrap
+
+fn parse_justify_content(jc: text) -> JustifyContent:
+    match jc:
+        "flex-start": JustifyContent.FlexStart
+        "flex-end": JustifyContent.FlexEnd
+        "center": JustifyContent.Center
+        "space-between": JustifyContent.SpaceBetween
+        "space-around": JustifyContent.SpaceAround
+        "space-evenly": JustifyContent.SpaceEvenly
+        _: JustifyContent.FlexStart
+
+fn parse_align_items(ai: text) -> AlignItems:
+    match ai:
+        "flex-start": AlignItems.FlexStart
+        "flex-end": AlignItems.FlexEnd
+        "center": AlignItems.Center
+        "stretch": AlignItems.Stretch
+        "baseline": AlignItems.Baseline
+        _: AlignItems.Stretch
+
+fn parse_align_self(s: text) -> AlignSelf:
+    match s:
+        "auto": AlignSelf.Auto
+        "flex-start": AlignSelf.FlexStart
+        "flex-end": AlignSelf.FlexEnd
+        "center": AlignSelf.Center
+        "stretch": AlignSelf.Stretch
+        "baseline": AlignSelf.Baseline
+        _: AlignSelf.Auto
+
+# ---------------------------------------------------------------------------
+# Internal helpers.
+# ---------------------------------------------------------------------------
+
+fn _clamp(value: f64, min_val: f64, max_val: f64) -> f64:
+    if value < min_val:
+        min_val
+    else if value > max_val:
+        max_val
+    else:
+        value
+
+fn clamp_main_size(base: f64, item: FlexItem, is_row: bool) -> f64:
+    if is_row:
+        _clamp(base, item.min_width, item.max_width)
+    else:
+        _clamp(base, item.min_height, item.max_height)
+
+fn _align_items_to_self(align: AlignItems) -> AlignSelf:
+    match align:
+        AlignItems.FlexStart: AlignSelf.FlexStart
+        AlignItems.FlexEnd: AlignSelf.FlexEnd
+        AlignItems.Center: AlignSelf.Center
+        AlignItems.Stretch: AlignSelf.Stretch
+        AlignItems.Baseline: AlignSelf.Baseline
+
+fn _effective_align(self_align: AlignSelf, container_align: AlignItems) -> AlignItems:
+    match self_align:
+        AlignSelf.Auto: container_align
+        AlignSelf.FlexStart: AlignItems.FlexStart
+        AlignSelf.FlexEnd: AlignItems.FlexEnd
+        AlignSelf.Center: AlignItems.Center
+        AlignSelf.Stretch: AlignItems.Stretch
+        AlignSelf.Baseline: AlignItems.Baseline
+
+fn _sum_line_cross(lines: List<FlexLine>) -> f64:
+    var total = 0.0
+    for line in lines:
+        total = total + line.cross_size
+    total
+
+fn _distribute_cross_space(lines: List<FlexLine>, free_cross: f64, align: AlignContent) -> List<FlexLine>:
+    val n = lines.len()
+    if n == 0:
+        return lines
+
+    var result = List<FlexLine>()
+    var cross_cursor = 0.0
+
+    match align:
+        AlignContent.FlexStart:
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                cross_cursor = cross_cursor + rl.cross_size
+                result.push(rl)
+        AlignContent.FlexEnd:
+            cross_cursor = free_cross
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                cross_cursor = cross_cursor + rl.cross_size
+                result.push(rl)
+        AlignContent.Center:
+            cross_cursor = free_cross / 2.0
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                cross_cursor = cross_cursor + rl.cross_size
+                result.push(rl)
+        AlignContent.Stretch:
+            val extra_per_line = free_cross / n.to_f64()
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                rl.cross_size = rl.cross_size + extra_per_line
+                cross_cursor = cross_cursor + rl.cross_size
+                result.push(rl)
+        AlignContent.SpaceBetween:
+            val gap = if n > 1: free_cross / (n - 1).to_f64() else: 0.0
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                cross_cursor = cross_cursor + rl.cross_size + gap
+                result.push(rl)
+        AlignContent.SpaceAround:
+            val item_space = free_cross / n.to_f64()
+            cross_cursor = item_space / 2.0
+            for line in lines:
+                var rl = line
+                rl.cross_offset = cross_cursor
+                cross_cursor = cross_cursor + rl.cross_size + item_space
+                result.push(rl)
+
+    result
+
+fn _reverse_main_positions(children: List<LayoutBox>, container: LayoutBox, is_row: bool, available: f64) -> List<LayoutBox>:
+    var result = List<LayoutBox>()
+    for child in children:
+        var rc = child
+        if is_row:
+            val offset_from_start = rc.x - container.x
+            rc.x = container.x + available - offset_from_start - rc.width
+        else:
+            val offset_from_start = rc.y - container.y
+            rc.y = container.y + available - offset_from_start - rc.height
+        result.push(rc)
+    result

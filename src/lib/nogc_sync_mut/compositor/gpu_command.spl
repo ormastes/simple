@@ -1,0 +1,223 @@
+#![allow(primitive_api)]
+# GPU command submission abstraction — records drawing commands into
+# command buffers that can be submitted and executed against surfaces.
+#
+# Generic compositor module — no browser-specific dependencies.
+
+use std.common.engine.color.{EngineColor}
+use std.compositor.gpu_surface.{GpuSurface, SurfacePool}
+use std.compositor.rasterizer.{Rasterizer}
+use core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# GpuCommand — individual GPU commands recorded into command buffers.
+# ---------------------------------------------------------------------------
+
+enum GpuCommand:
+    Clear(surface_id: i64, color: EngineColor)
+    Blit(src_surface: i64, dst_surface: i64, src_x: i64, src_y: i64, src_w: i64, src_h: i64, dst_x: i64, dst_y: i64, dst_w: i64, dst_h: i64)
+    DrawQuad(surface_id: i64, x: f64, y: f64, w: f64, h: f64, texture_id: i64, opacity: f64)
+    SetScissor(x: i64, y: i64, w: i64, h: i64)
+    ClearScissor
+    Present(swapchain_id: i64)
+    Fence(id: i64)
+
+# ---------------------------------------------------------------------------
+# CommandBuffer — a list of GPU commands recorded for later submission.
+# ---------------------------------------------------------------------------
+
+class CommandBuffer:
+    commands: List<GpuCommand>
+    id: i64
+    is_recording: bool
+
+    static fn create(id: i64) -> CommandBuffer:
+        CommandBuffer(
+            commands: List<GpuCommand>(),
+            id: id,
+            is_recording: true
+        )
+
+    # Record a clear command.
+    me clear(surface_id: i64, color: EngineColor):
+        if self.is_recording:
+            self.commands.push(GpuCommand.Clear(surface_id: surface_id, color: color))
+
+    # Record a blit command.
+    me blit(src_surface: i64, dst_surface: i64, src_x: i64, src_y: i64, src_w: i64, src_h: i64, dst_x: i64, dst_y: i64, dst_w: i64, dst_h: i64):
+        if self.is_recording:
+            self.commands.push(GpuCommand.Blit(
+                src_surface: src_surface,
+                dst_surface: dst_surface,
+                src_x: src_x,
+                src_y: src_y,
+                src_w: src_w,
+                src_h: src_h,
+                dst_x: dst_x,
+                dst_y: dst_y,
+                dst_w: dst_w,
+                dst_h: dst_h
+            ))
+
+    # Record a textured quad draw command.
+    me draw_quad(surface_id: i64, x: f64, y: f64, w: f64, h: f64, texture_id: i64, opacity: f64):
+        if self.is_recording:
+            self.commands.push(GpuCommand.DrawQuad(
+                surface_id: surface_id,
+                x: x,
+                y: y,
+                w: w,
+                h: h,
+                texture_id: texture_id,
+                opacity: opacity
+            ))
+
+    # Record a scissor (clip) rectangle.
+    me set_scissor(x: i64, y: i64, w: i64, h: i64):
+        if self.is_recording:
+            self.commands.push(GpuCommand.SetScissor(x: x, y: y, w: w, h: h))
+
+    # Record clearing the scissor rect.
+    me clear_scissor():
+        if self.is_recording:
+            self.commands.push(GpuCommand.ClearScissor)
+
+    # Record a present command for a swapchain.
+    me present(swapchain_id: i64):
+        if self.is_recording:
+            self.commands.push(GpuCommand.Present(swapchain_id: swapchain_id))
+
+    # Record a fence for synchronization.
+    me insert_fence(fence_id: i64):
+        if self.is_recording:
+            self.commands.push(GpuCommand.Fence(id: fence_id))
+
+    # Get the number of recorded commands.
+    fn command_count() -> i64:
+        self.commands.len()
+
+# ---------------------------------------------------------------------------
+# CommandQueue — manages recording, submission, and execution of buffers.
+# ---------------------------------------------------------------------------
+
+class CommandQueue:
+    buffers: List<CommandBuffer>
+    next_id: i64
+    submitted: List<i64>
+    completed: List<i64>
+    next_fence_id: i64
+
+    static fn new() -> CommandQueue:
+        CommandQueue(
+            buffers: List<CommandBuffer>(),
+            next_id: 1,
+            submitted: List<i64>(),
+            completed: List<i64>(),
+            next_fence_id: 1
+        )
+
+    # Begin recording a new command buffer.
+    me begin_recording() -> CommandBuffer:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val buffer = CommandBuffer.create(id)
+        buffer
+
+    # End recording and store the command buffer. Returns the buffer ID.
+    me end_recording(buffer: CommandBuffer) -> i64:
+        buffer.is_recording = false
+        val id = buffer.id
+        self.buffers.push(buffer)
+        id
+
+    # Submit a command buffer for execution. Returns true on success.
+    me submit(buffer_id: i64) -> bool:
+        var found = false
+        for buf in self.buffers:
+            if buf.id == buffer_id:
+                found = true
+                if buf.is_recording:
+                    return false
+
+        if not found:
+            return false
+
+        self.submitted.push(buffer_id)
+        true
+
+    # Wait for a fence to complete (placeholder for GPU sync).
+    me wait_fence(fence_id: i64):
+        pass_todo
+
+    # Generate a new fence ID.
+    me allocate_fence() -> i64:
+        val id = self.next_fence_id
+        self.next_fence_id = self.next_fence_id + 1
+        id
+
+    # Check if a command buffer has completed execution.
+    fn is_complete(buffer_id: i64) -> bool:
+        for id in self.completed:
+            if id == buffer_id:
+                return true
+        false
+
+    # Execute a command buffer against the provided surface pool and rasterizer.
+    me execute(buffer: CommandBuffer, surfaces: SurfacePool, rasterizer: Rasterizer) -> bool:
+        for cmd in buffer.commands:
+            if not self._execute_command(cmd, surfaces, rasterizer):
+                return false
+
+        self.completed.push(buffer.id)
+        true
+
+    # Execute a single GPU command. Returns true on success.
+    me _execute_command(cmd: GpuCommand, surfaces: SurfacePool, rasterizer: Rasterizer) -> bool:
+        match cmd:
+            GpuCommand.Clear(surface_id, color):
+                val surface = surfaces.get_surface(surface_id)
+                if val s = surface:
+                    # Clear the surface — actual pixel fill pass_todo
+                    pass_todo
+                else:
+                    return false
+                true
+
+            GpuCommand.Blit(src_surface, dst_surface, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h):
+                val src = surfaces.get_surface(src_surface)
+                val dst = surfaces.get_surface(dst_surface)
+                if src.? and dst.?:
+                    pass_todo
+                else:
+                    return false
+                true
+
+            GpuCommand.DrawQuad(surface_id, x, y, w, h, texture_id, opacity):
+                pass_todo
+                true
+
+            GpuCommand.SetScissor(x, y, w, h):
+                true
+
+            GpuCommand.ClearScissor:
+                true
+
+            GpuCommand.Present(swapchain_id):
+                true
+
+            GpuCommand.Fence(id):
+                true
+
+    # Flush all submitted buffers by executing them. Returns true if all succeed.
+    me flush(surfaces: SurfacePool, rasterizer: Rasterizer) -> bool:
+        var pending = List<i64>()
+        for id in self.submitted:
+            pending.push(id)
+        self.submitted = List<i64>()
+
+        for buffer_id in pending:
+            for buf in self.buffers:
+                if buf.id == buffer_id:
+                    if not self.execute(buf, surfaces, rasterizer):
+                        return false
+        true

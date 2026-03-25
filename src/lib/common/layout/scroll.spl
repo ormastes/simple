@@ -1,0 +1,339 @@
+#![allow(primitive_api)]
+# Scroll containers and overflow handling for layout engines.
+# Implements overflow (visible, hidden, scroll, auto), scroll state
+# management, scrollbar geometry, and visibility queries. Each scroll
+# container tracks its own viewport and content dimensions and supports
+# both absolute and relative scrolling with clamping.
+#
+# Extracted from browser scroll management. Works on any box model.
+
+# ---------------------------------------------------------------------------
+# Overflow — overflow property values.
+# ---------------------------------------------------------------------------
+
+enum Overflow:
+    Visible
+    Hidden
+    Scroll
+    Auto
+
+# ---------------------------------------------------------------------------
+# ScrollState — current scroll offset and limits for a container.
+# ---------------------------------------------------------------------------
+
+class ScrollState:
+    scroll_x: f64
+    scroll_y: f64
+    max_scroll_x: f64
+    max_scroll_y: f64
+
+    static fn zero() -> ScrollState:
+        ScrollState(scroll_x: 0.0, scroll_y: 0.0, max_scroll_x: 0.0, max_scroll_y: 0.0)
+
+    static fn create(max_x: f64, max_y: f64) -> ScrollState:
+        ScrollState(scroll_x: 0.0, scroll_y: 0.0, max_scroll_x: max_x, max_scroll_y: max_y)
+
+# ---------------------------------------------------------------------------
+# ScrollContainer — an element that can scroll its overflow content.
+# ---------------------------------------------------------------------------
+
+class ScrollContainer:
+    node_id: i64
+    overflow_x: Overflow
+    overflow_y: Overflow
+    content_width: f64
+    content_height: f64
+    viewport_width: f64
+    viewport_height: f64
+    scroll: ScrollState
+    has_scrollbar_x: bool
+    has_scrollbar_y: bool
+
+    static fn create(
+        node_id: i64,
+        overflow_x: Overflow,
+        overflow_y: Overflow,
+        vw: f64,
+        vh: f64,
+        cw: f64,
+        ch: f64
+    ) -> ScrollContainer:
+        val max_sx = if cw > vw: cw - vw else: 0.0
+        val max_sy = if ch > vh: ch - vh else: 0.0
+        val has_x = needs_scrollbar(overflow_x, cw, vw)
+        val has_y = needs_scrollbar(overflow_y, ch, vh)
+
+        ScrollContainer(
+            node_id: node_id,
+            overflow_x: overflow_x,
+            overflow_y: overflow_y,
+            content_width: cw,
+            content_height: ch,
+            viewport_width: vw,
+            viewport_height: vh,
+            scroll: ScrollState.create(max_sx, max_sy),
+            has_scrollbar_x: has_x,
+            has_scrollbar_y: has_y
+        )
+
+# ---------------------------------------------------------------------------
+# ScrollManager — manages all scroll containers.
+# ---------------------------------------------------------------------------
+
+class ScrollManager:
+    containers: List<ScrollContainer>
+    scrollbar_width: f64
+
+    static fn create() -> ScrollManager:
+        ScrollManager(
+            containers: List<ScrollContainer>(),
+            scrollbar_width: 15.0
+        )
+
+    static fn with_scrollbar_width(width: f64) -> ScrollManager:
+        ScrollManager(
+            containers: List<ScrollContainer>(),
+            scrollbar_width: width
+        )
+
+    # -------------------------------------------------------------------
+    # Create and register a new scroll container.
+    # -------------------------------------------------------------------
+    me create_scroll_container(
+        node_id: i64,
+        overflow_x: Overflow,
+        overflow_y: Overflow,
+        viewport_w: f64,
+        viewport_h: f64,
+        content_w: f64,
+        content_h: f64
+    ) -> ScrollContainer:
+        # Adjust viewport for scrollbar presence
+        var adj_vw = viewport_w
+        var adj_vh = viewport_h
+
+        val needs_v = needs_scrollbar(overflow_y, content_h, viewport_h)
+        val needs_h = needs_scrollbar(overflow_x, content_w, viewport_w)
+
+        # Vertical scrollbar reduces available width
+        if needs_v:
+            adj_vw = viewport_w - self.scrollbar_width
+            if adj_vw < 0.0:
+                adj_vw = 0.0
+
+        # Horizontal scrollbar reduces available height
+        if needs_h:
+            adj_vh = viewport_h - self.scrollbar_width
+            if adj_vh < 0.0:
+                adj_vh = 0.0
+
+        # Recheck after adjustment (adding one scrollbar might require the other)
+        val needs_v2 = needs_scrollbar(overflow_y, content_h, adj_vh)
+        val needs_h2 = needs_scrollbar(overflow_x, content_w, adj_vw)
+
+        if needs_h2 and not needs_h:
+            adj_vh = adj_vh - self.scrollbar_width
+            if adj_vh < 0.0:
+                adj_vh = 0.0
+
+        if needs_v2 and not needs_v:
+            adj_vw = adj_vw - self.scrollbar_width
+            if adj_vw < 0.0:
+                adj_vw = 0.0
+
+        val container = ScrollContainer.create(
+            node_id, overflow_x, overflow_y,
+            adj_vw, adj_vh, content_w, content_h
+        )
+
+        self.containers.push(container)
+        container
+
+    # -------------------------------------------------------------------
+    # Scroll to an absolute position (with clamping).
+    # -------------------------------------------------------------------
+    me scroll_to(container_id: i64, x: f64, y: f64):
+        var idx = 0
+        for container in self.containers:
+            if container.node_id == container_id:
+                var c = container
+                c.scroll.scroll_x = clamp_scroll(x, c.scroll.max_scroll_x)
+                c.scroll.scroll_y = clamp_scroll(y, c.scroll.max_scroll_y)
+                self.containers[idx] = c
+                return
+            idx = idx + 1
+
+    # -------------------------------------------------------------------
+    # Scroll by a relative amount.
+    # -------------------------------------------------------------------
+    me scroll_by(container_id: i64, dx: f64, dy: f64):
+        var idx = 0
+        for container in self.containers:
+            if container.node_id == container_id:
+                var c = container
+                val new_x = c.scroll.scroll_x + dx
+                val new_y = c.scroll.scroll_y + dy
+                c.scroll.scroll_x = clamp_scroll(new_x, c.scroll.max_scroll_x)
+                c.scroll.scroll_y = clamp_scroll(new_y, c.scroll.max_scroll_y)
+                self.containers[idx] = c
+                return
+            idx = idx + 1
+
+    # -------------------------------------------------------------------
+    # Find a container by node ID.
+    # -------------------------------------------------------------------
+    fn find_container(node_id: i64) -> ScrollContainer:
+        for container in self.containers:
+            if container.node_id == node_id:
+                return container
+        # Return a default empty container if not found
+        ScrollContainer.create(
+            node_id, Overflow.Visible, Overflow.Visible,
+            0.0, 0.0, 0.0, 0.0
+        )
+
+# ---------------------------------------------------------------------------
+# Scrollbar necessity check.
+# ---------------------------------------------------------------------------
+
+fn needs_scrollbar(overflow: Overflow, content_size: f64, viewport_size: f64) -> bool:
+    match overflow:
+        Overflow.Scroll:
+            # Always show scrollbar
+            true
+        Overflow.Auto:
+            # Show scrollbar only if content overflows
+            content_size > viewport_size
+        Overflow.Hidden:
+            # Never show scrollbar (content is clipped)
+            false
+        Overflow.Visible:
+            # No scrollbar — content overflows visibly
+            false
+
+# ---------------------------------------------------------------------------
+# Scroll clamping — keep scroll position within valid range.
+# ---------------------------------------------------------------------------
+
+fn clamp_scroll(value: f64, max_val: f64) -> f64:
+    if value < 0.0:
+        0.0
+    else if value > max_val:
+        max_val
+    else:
+        value
+
+# ---------------------------------------------------------------------------
+# Visible rectangle — the portion of content visible in the viewport.
+# Returns ((x1, y1), (x2, y2)) as nested Pairs.
+# ---------------------------------------------------------------------------
+
+fn get_visible_rect(container: ScrollContainer) -> Pair<Pair<f64, f64>, Pair<f64, f64>>:
+    val x1 = container.scroll.scroll_x
+    val y1 = container.scroll.scroll_y
+    val x2 = x1 + container.viewport_width
+    val y2 = y1 + container.viewport_height
+    Pair(Pair(x1, y1), Pair(x2, y2))
+
+# ---------------------------------------------------------------------------
+# Visibility check — is a rectangle visible within the scroll viewport?
+# ---------------------------------------------------------------------------
+
+fn is_visible(x: f64, y: f64, w: f64, h: f64, container: ScrollContainer) -> bool:
+    val sx = container.scroll.scroll_x
+    val sy = container.scroll.scroll_y
+    val vw = container.viewport_width
+    val vh = container.viewport_height
+
+    # Check if the rectangle overlaps the visible viewport
+    val rect_right = x + w
+    val rect_bottom = y + h
+    val view_right = sx + vw
+    val view_bottom = sy + vh
+
+    # No overlap if completely outside on any side
+    if rect_right <= sx:
+        return false
+    if x >= view_right:
+        return false
+    if rect_bottom <= sy:
+        return false
+    if y >= view_bottom:
+        return false
+
+    true
+
+# ---------------------------------------------------------------------------
+# Scrollbar geometry — compute scrollbar thumb size and position.
+# ---------------------------------------------------------------------------
+
+fn scrollbar_track_size(viewport_size: f64, content_size: f64) -> f64:
+    # Thumb size is proportional to the ratio of viewport to content.
+    # Minimum thumb size is 20px.
+    if content_size <= 0.0 or viewport_size <= 0.0:
+        return 0.0
+    if content_size <= viewport_size:
+        return viewport_size  # No scrolling needed, thumb fills track
+
+    val ratio = viewport_size / content_size
+    val thumb = ratio * viewport_size
+    val min_thumb = 20.0
+
+    if thumb < min_thumb: min_thumb else: thumb
+
+fn scrollbar_position(scroll_pos: f64, max_scroll: f64, track_size: f64) -> f64:
+    # Map scroll position to scrollbar thumb position on the track.
+    if max_scroll <= 0.0:
+        return 0.0
+    if track_size <= 0.0:
+        return 0.0
+
+    val ratio = scroll_pos / max_scroll
+    val position = ratio * track_size
+    clamp_scroll(position, track_size)
+
+# ---------------------------------------------------------------------------
+# Overflow parsing — convert overflow text to enum.
+# ---------------------------------------------------------------------------
+
+fn parse_overflow(value: text) -> Overflow:
+    match value:
+        "hidden": Overflow.Hidden
+        "scroll": Overflow.Scroll
+        "auto": Overflow.Auto
+        "visible": Overflow.Visible
+        _: Overflow.Visible
+
+# ---------------------------------------------------------------------------
+# Scroll position as percentage (0.0 to 1.0).
+# ---------------------------------------------------------------------------
+
+fn scroll_percentage_x(container: ScrollContainer) -> f64:
+    if container.scroll.max_scroll_x <= 0.0:
+        return 0.0
+    container.scroll.scroll_x / container.scroll.max_scroll_x
+
+fn scroll_percentage_y(container: ScrollContainer) -> f64:
+    if container.scroll.max_scroll_y <= 0.0:
+        return 0.0
+    container.scroll.scroll_y / container.scroll.max_scroll_y
+
+# ---------------------------------------------------------------------------
+# Check if a container is scrolled to the bottom/end.
+# ---------------------------------------------------------------------------
+
+fn is_at_bottom(container: ScrollContainer) -> bool:
+    if container.scroll.max_scroll_y <= 0.0:
+        return true
+    container.scroll.scroll_y >= container.scroll.max_scroll_y
+
+fn is_at_right(container: ScrollContainer) -> bool:
+    if container.scroll.max_scroll_x <= 0.0:
+        return true
+    container.scroll.scroll_x >= container.scroll.max_scroll_x
+
+fn is_at_top(container: ScrollContainer) -> bool:
+    container.scroll.scroll_y <= 0.0
+
+fn is_at_left(container: ScrollContainer) -> bool:
+    container.scroll.scroll_x <= 0.0

@@ -1,0 +1,246 @@
+#![allow(primitive_api)]
+# Software rasterization onto GPU surfaces.
+# Provides basic drawing operations (rect, text, line, image) with
+# alpha blending and clip-stack management.
+#
+# Generic compositor module — no browser-specific dependencies.
+#
+# TODO: Integrate with std.gpu 2D rendering engine for hardware-accelerated
+# raster — replace software fill/blit with GPU draw calls via a graphics
+# module. This enables multiple rendering subsystems to share a single
+# GPU-backed 2D pipeline.
+
+use std.common.engine.color.{EngineColor}
+use std.compositor.gpu_surface.{GpuSurface, SurfaceFormat, bytes_per_pixel}
+use core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# ClipStack — manages nested clip rectangles.
+# ---------------------------------------------------------------------------
+
+class ClipStack:
+    clips: List<Pair<Pair<i64, i64>, Pair<i64, i64>>>
+
+    static fn empty() -> ClipStack:
+        ClipStack(clips: List<Pair<Pair<i64, i64>, Pair<i64, i64>>>())
+
+    # Push a new clip rectangle onto the stack.
+    me push_clip(x: i64, y: i64, w: i64, h: i64):
+        val top_left = Pair(first: x, second: y)
+        val size = Pair(first: w, second: h)
+        val clip = Pair(first: top_left, second: size)
+        self.clips.push(clip)
+
+    # Pop the topmost clip rectangle from the stack.
+    me pop_clip():
+        if self.clips.len() > 0:
+            self.clips.pop()
+
+    # Get the current (topmost) clip rectangle.
+    fn current_clip() -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+        if self.clips.len() == 0:
+            return nil
+        self.clips.get(self.clips.len() - 1)
+
+# ---------------------------------------------------------------------------
+# Clip intersection utility
+# ---------------------------------------------------------------------------
+
+# Compute the intersection of two axis-aligned rectangles.
+# Returns nil if no intersection exists.
+fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i64, clip_h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+    val left = if x > clip_x: x else: clip_x
+    val top = if y > clip_y: y else: clip_y
+
+    val right_a = x + w
+    val right_b = clip_x + clip_w
+    val right = if right_a < right_b: right_a else: right_b
+
+    val bottom_a = y + h
+    val bottom_b = clip_y + clip_h
+    val bottom = if bottom_a < bottom_b: bottom_a else: bottom_b
+
+    val cw = right - left
+    val ch = bottom - top
+
+    if cw <= 0 or ch <= 0:
+        return nil
+
+    val pos = Pair(first: left, second: top)
+    val sz = Pair(first: cw, second: ch)
+    Pair(first: pos, second: sz)
+
+# ---------------------------------------------------------------------------
+# Color utility functions
+# ---------------------------------------------------------------------------
+
+# Alpha-blend a source color over a destination color.
+fn blend_pixel(src: EngineColor, dst: EngineColor, alpha: f64) -> EngineColor:
+    val a = alpha
+    val inv_a = 1.0 - a
+
+    val r = (src.r.to_f64() * a + dst.r.to_f64() * inv_a).to_i64()
+    val g_val = (src.g.to_f64() * a + dst.g.to_f64() * inv_a).to_i64()
+    val b = (src.b.to_f64() * a + dst.b.to_f64() * inv_a).to_i64()
+    val out_a = (src.a.to_f64() * a + dst.a.to_f64() * inv_a).to_i64()
+
+    EngineColor(r: clamp_byte(r), g: clamp_byte(g_val), b: clamp_byte(b), a: clamp_byte(out_a))
+
+# Linearly interpolate between two colors.
+fn lerp_color(a: EngineColor, b: EngineColor, t: f64) -> EngineColor:
+    val inv_t = 1.0 - t
+    val r = (a.r.to_f64() * inv_t + b.r.to_f64() * t).to_i64()
+    val g_val = (a.g.to_f64() * inv_t + b.g.to_f64() * t).to_i64()
+    val bl = (a.b.to_f64() * inv_t + b.b.to_f64() * t).to_i64()
+    val al = (a.a.to_f64() * inv_t + b.a.to_f64() * t).to_i64()
+
+    EngineColor(r: clamp_byte(r), g: clamp_byte(g_val), b: clamp_byte(bl), a: clamp_byte(al))
+
+# Clamp an integer to byte range [0, 255].
+fn clamp_byte(value: i64) -> i64:
+    if value < 0:
+        return 0
+    if value > 255:
+        return 255
+    value
+
+# Pre-multiply alpha into a color.
+fn premultiply_alpha(color: EngineColor) -> EngineColor:
+    val a = color.a.to_f64() / 255.0
+    val r = (color.r.to_f64() * a).to_i64()
+    val g_val = (color.g.to_f64() * a).to_i64()
+    val b = (color.b.to_f64() * a).to_i64()
+    EngineColor(r: clamp_byte(r), g: clamp_byte(g_val), b: clamp_byte(b), a: color.a)
+
+# ---------------------------------------------------------------------------
+# Rasterizer — software rasterizer for generic rendering.
+# ---------------------------------------------------------------------------
+
+class Rasterizer:
+    clip_stack: ClipStack
+    opacity_stack: List<f64>
+
+    static fn new() -> Rasterizer:
+        Rasterizer(
+            clip_stack: ClipStack.empty(),
+            opacity_stack: List<f64>()
+        )
+
+    # Push a clip rectangle onto the stack.
+    me push_clip(x: i64, y: i64, w: i64, h: i64):
+        self.clip_stack.push_clip(x, y, w, h)
+
+    # Pop the topmost clip rectangle.
+    me pop_clip():
+        self.clip_stack.pop_clip()
+
+    # Push an opacity value onto the stack.
+    me push_opacity(alpha: f64):
+        self.opacity_stack.push(alpha)
+
+    # Pop the topmost opacity value.
+    me pop_opacity():
+        if self.opacity_stack.len() > 0:
+            self.opacity_stack.pop()
+
+    # Fill a rectangle on the target surface with a solid color.
+    me raster_fill_rect(target: GpuSurface, x: i64, y: i64, w: i64, h: i64, color: EngineColor):
+        # Apply clip rectangle if any
+        val clipped = self._apply_clip(x, y, w, h)
+        if val cr = clipped:
+            val alpha = self._current_opacity()
+            # Actual pixel writing would happen here via GPU or framebuffer
+            pass_todo
+
+    # Draw text at a position (placeholder — actual glyph rasterization is pass_todo).
+    me raster_draw_text(target: GpuSurface, x: i64, y: i64, text_content: text, font_size: f64, color: EngineColor):
+        val alpha = self._current_opacity()
+        # Actual glyph rasterization requires a font atlas
+        pass_todo
+
+    # Draw a line between two points with the given color and width.
+    me raster_draw_line(target: GpuSurface, x1: i64, y1: i64, x2: i64, y2: i64, color: EngineColor, line_width: f64):
+        val alpha = self._current_opacity()
+        # Bresenham line rasterization would go here
+        pass_todo
+
+    # Draw a border as four filled rectangles.
+    me raster_draw_border(target: GpuSurface, x: i64, y: i64, w: i64, h: i64, widths: List<f64>, colors: List<EngineColor>):
+        if widths.len() < 4 or colors.len() < 4:
+            return
+
+        val top_w = widths.get(0).unwrap_or(0.0).to_i64()
+        val right_w = widths.get(1).unwrap_or(0.0).to_i64()
+        val bottom_w = widths.get(2).unwrap_or(0.0).to_i64()
+        val left_w = widths.get(3).unwrap_or(0.0).to_i64()
+
+        val top_color = colors.get(0).unwrap_or(EngineColor.black())
+        val right_color = colors.get(1).unwrap_or(EngineColor.black())
+        val bottom_color = colors.get(2).unwrap_or(EngineColor.black())
+        val left_color = colors.get(3).unwrap_or(EngineColor.black())
+
+        # Top border
+        if top_w > 0:
+            self.raster_fill_rect(target, x, y, w, top_w, top_color)
+        # Bottom border
+        if bottom_w > 0:
+            self.raster_fill_rect(target, x, y + h - bottom_w, w, bottom_w, bottom_color)
+        # Left border
+        if left_w > 0:
+            self.raster_fill_rect(target, x, y + top_w, left_w, h - top_w - bottom_w, left_color)
+        # Right border
+        if right_w > 0:
+            self.raster_fill_rect(target, x + w - right_w, y + top_w, right_w, h - top_w - bottom_w, right_color)
+
+    # Apply the current clip stack to a rectangle, returning the clipped result.
+    fn _apply_clip(x: i64, y: i64, w: i64, h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+        val current = self.clip_stack.current_clip()
+        if val c = current:
+            return clip_rect(x, y, w, h, c.first.first, c.first.second, c.second.first, c.second.second)
+        # No clip — return original rect
+        val pos = Pair(first: x, second: y)
+        val sz = Pair(first: w, second: h)
+        Pair(first: pos, second: sz)
+
+    # Get the combined opacity from the opacity stack.
+    fn _current_opacity() -> f64:
+        var combined = 1.0
+        for alpha in self.opacity_stack:
+            combined = combined * alpha
+        combined
+
+# ---------------------------------------------------------------------------
+# Sorting helpers
+# ---------------------------------------------------------------------------
+
+# Sort items by z-index (ascending — low z paints first).
+# Takes a list of Pair<i64, i64> where first=id, second=z_index.
+fn sort_by_z_index(items: List<Pair<i64, i64>>) -> List<Pair<i64, i64>>:
+    # Simple insertion sort for display lists (typically small)
+    var sorted = List<Pair<i64, i64>>()
+    for item in items:
+        sorted.push(item)
+
+    val n = sorted.len()
+    var i = 1
+    while i < n:
+        val key = sorted.get(i)
+        if val k = key:
+            var j = i - 1
+            while j >= 0:
+                val prev = sorted.get(j)
+                if val p = prev:
+                    if p.second > k.second:
+                        sorted.set(j + 1, p)
+                        j = j - 1
+                    else:
+                        j = -1  # break
+                else:
+                    j = -1
+            sorted.set(j + 1, k)
+        i = i + 1
+    sorted
+
+# Check if a point is inside a rectangle.
+fn point_in_rect(px: i64, py: i64, rx: i64, ry: i64, rw: i64, rh: i64) -> bool:
+    px >= rx and px < rx + rw and py >= ry and py < ry + rh
