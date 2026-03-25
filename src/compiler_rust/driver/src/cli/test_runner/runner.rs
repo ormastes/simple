@@ -16,7 +16,7 @@ use super::build_cache::BuildCache;
 use super::doctest::run_cached_doctests;
 use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
-use super::discovery::{discover_all_doctests, print_discovery_summary};
+use super::discovery::{discover_all_doctests, print_discovery_summary, DoctestCache};
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
 use super::test_db_update::{update_test_database, update_rust_test_database};
@@ -136,8 +136,12 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
 
-    // Discover doctests once (used for both summary display and execution)
-    let doctest_cache = discover_all_doctests(&options);
+    // Discover doctests only when running full suite (no specific path given)
+    let doctest_cache = if options.path.is_none() {
+        discover_all_doctests(&options)
+    } else {
+        DoctestCache { src_examples: vec![], doc_examples: vec![], md_examples: vec![] }
+    };
 
     // Handle --list-skip-features: show features from .skip files
     if options.list_skip_features {
@@ -178,9 +182,11 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Print discovery summary (uses cached doctest counts)
     print_discovery_summary(&test_files, &doctest_cache, quiet);
 
-    // Start test run tracking
+    // Start test run tracking (only for full suite — DB lock is expensive)
     let db_path = PathBuf::from("doc/test/test_db.sdn");
-    let test_run = match crate::test_db::start_test_run(&db_path) {
+    let test_run = if options.path.is_some() {
+        None  // Skip DB tracking for targeted runs
+    } else { match crate::test_db::start_test_run(&db_path) {
         Ok(run) => {
             if !quiet {
                 debug_log!(DebugLevel::Basic, "Runner", "Started test run: {}", run.run_id);
@@ -193,7 +199,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             }
             None
         }
-    };
+    } };
 
     // Create build cache for SMF/native modes
     let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native) {
@@ -223,8 +229,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let all_tests_run =
         options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
 
-    // Skip database updates in list mode
-    if !list_mode {
+    // Skip database updates in list mode or when running specific path (expensive I/O)
+    if !list_mode && all_tests_run {
         // Update feature database
         update_feature_database(&test_files, &mut results, &mut total_failed);
 

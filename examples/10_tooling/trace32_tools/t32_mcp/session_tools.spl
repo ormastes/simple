@@ -3,7 +3,7 @@
 # Handles: sessions_list, session_open, session_resume, session_close,
 #          core_list, core_select, cmd_run, cmm_run, eval
 
-use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed}
+use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
@@ -306,13 +306,35 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         connected: false,
         cores: []
     )
-    # Try PING to verify connection
-    var ping_result = ""
-    var ping_rc: i64 = 0
-    (ping_result, ping_rc) = t32_run_remote(session, "PING")
+    # Try PING to verify connection — retry up to 3 attempts with exponential backoff
+    val max_attempts: i64 = 3
+    var backoff_ms: [i64] = [1000, 2000, 4000]
+    var attempt: i64 = 0
     var connected = false
-    if ping_rc == 0:
-        connected = true
+    var last_ping_result = ""
+    var last_ping_rc: i64 = 0
+    while attempt < max_attempts:
+        var ping_result = ""
+        var ping_rc: i64 = 0
+        (ping_result, ping_rc) = t32_run_remote(session, "PING")
+        last_ping_result = ping_result
+        last_ping_rc = ping_rc
+        if ping_rc == 0:
+            connected = true
+            break
+        attempt = attempt + 1
+        # Sleep with exponential backoff before next attempt (skip sleep after last attempt)
+        if attempt < max_attempts:
+            val delay_secs = backoff_ms[attempt - 1] / 1000
+            var sleep_stdout = ""
+            var sleep_stderr = ""
+            var sleep_rc: i64 = 0
+            (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep " + str(delay_secs)])
+    val backend_attempts = attempt + 1
+    if not connected:
+        # All attempts failed — return error without creating a duplicate session
+        val err_msg = t32_err_connection_failed(host, str(port), str(backend_attempts), last_ping_result.trim(), t32_get_backend_type())
+        return t32_make_tool_error(id, -32000, err_msg)
     val final_session = McpT32Session(
         id: session_id,
         host: host,
@@ -331,11 +353,9 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     r = r + "," + t32_jp("port", str(port))
     r = r + "," + t32_jp("intercom_name", t32_js(intercom_name))
     r = r + "," + t32_jp("architecture", t32_js(architecture))
-    var conn_str = "false"
-    if connected:
-        conn_str = "true"
-    r = r + "," + t32_jp("connected", conn_str)
+    r = r + "," + t32_jp("connected", "true")
     r = r + "," + t32_jp("backend", t32_js(t32_get_backend_type()))
+    r = r + "," + t32_jp("backend_attempts", str(backend_attempts))
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 

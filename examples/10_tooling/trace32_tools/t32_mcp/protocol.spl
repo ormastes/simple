@@ -107,7 +107,7 @@ fn t32_make_init_response(id: text) -> text:
     val server_info = t32_jo3(
         t32_jp("name", t32_js(T32_SERVER_NAME)),
         t32_jp("version", t32_js(T32_SERVER_VERSION)),
-        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 23 tools for session management, window capture, action invocation, field manipulation, headless setup, and command database."))
+        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 31 tools for session management, window capture, action invocation, field manipulation, headless setup, command database, CMM validation, and async jobs."))
     )
     val result = t32_jo3(
         t32_jp("protocolVersion", t32_js("2025-06-18")),
@@ -117,7 +117,7 @@ fn t32_make_init_response(id: text) -> text:
     T32_INIT_CACHE = result
     t32_make_json_result(id, result)
 
-# --- Tools list (23 T32 tools) ---
+# --- Tools list (27 T32 tools) ---
 
 fn t32_make_tools_list(id: text) -> text:
     if T32_TOOLS_CACHE != "":
@@ -155,6 +155,18 @@ fn t32_make_tools_list(id: text) -> text:
     tool_parts.push(t32_make_tool_schema("t32_setup_headless", "One-shot headless setup: SCREEN.OFF + AREA.Create + AREA.Select + SYStem.Option SemiHost ON + error handler"))
     tool_parts.push(t32_make_tool_schema("t32_area_read", "Read AREA buffer content via WinPrint.AREA, optionally clear"))
     tool_parts.push(t32_make_tool_schema("t32_cmm_commands", "Query PRACTICE command database (120+ commands) by group or search"))
+
+    # Gap closure tools (4)
+    tool_parts.push(t32_make_tool_schema("t32_session_info", "Get detailed session metadata including core list and connection state"))
+    tool_parts.push(t32_make_tool_schema("t32_action_list", "List available actions, optionally filtered by window key"))
+    tool_parts.push(t32_make_tool_schema("t32_status_snapshot", "Get current target CPU run state (running/stopped/unknown)"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_validate", "Validate CMM script for headless safety (blocking pattern detection)"))
+
+    # Job tools (4)
+    tool_parts.push(t32_make_tool_schema("t32_job_list", "List async jobs, optionally filtered by session"))
+    tool_parts.push(t32_make_tool_schema("t32_job_get", "Get status and details of an async job"))
+    tool_parts.push(t32_make_tool_schema("t32_job_cancel", "Cancel a running or queued async job"))
+    tool_parts.push(t32_make_tool_schema("t32_job_result", "Get the result of a completed async job"))
 
     val tools = t32_SB_L() + tool_parts.join(",") + t32_SB_R()
     val result = t32_jo1(t32_jp("tools", tools))
@@ -280,6 +292,33 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
             t32_jp("search", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Search substring in command name or description"))))
         )
 
+    # Gap closure tools
+    elif name == "t32_session_info":
+        props = t32_jo1(t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)")))))
+    elif name == "t32_action_list":
+        props = t32_jo1(t32_jp("window_key", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Filter actions to this window key (optional, lists all if omitted)")))))
+    elif name == "t32_status_snapshot":
+        props = t32_LB() + t32_RB()
+    elif name == "t32_cmm_validate":
+        props = t32_jo2(
+            t32_jp("source", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("CMM script source text or file path to validate")))),
+            t32_jp("mode", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Validation mode: check (default), report, or suggest"))))
+        )
+        req = "[" + t32_js("source") + "]"
+
+    # Job tools
+    elif name == "t32_job_list":
+        props = t32_jo1(t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Filter by session ID (optional, lists all if omitted)")))))
+    elif name == "t32_job_get":
+        props = t32_jo1(t32_jp("job_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Job ID to query")))))
+        req = "[" + t32_js("job_id") + "]"
+    elif name == "t32_job_cancel":
+        props = t32_jo1(t32_jp("job_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Job ID to cancel")))))
+        req = "[" + t32_js("job_id") + "]"
+    elif name == "t32_job_result":
+        props = t32_jo1(t32_jp("job_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Job ID to get result for")))))
+        req = "[" + t32_js("job_id") + "]"
+
     var schema = t32_LB()
     schema = schema + t32_jp("type", t32_js("object"))
     schema = schema + "," + t32_jp("properties", props)
@@ -295,7 +334,11 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         name == "t32_window_describe" or name == "t32_field_get" or
         name == "t32_history_tail" or name == "t32_eval" or
         name == "t32_resources_list" or name == "t32_resource_read" or
-        name == "t32_area_read" or name == "t32_cmm_commands"):
+        name == "t32_area_read" or name == "t32_cmm_commands" or
+        name == "t32_session_info" or name == "t32_action_list" or
+        name == "t32_status_snapshot" or name == "t32_cmm_validate" or
+        name == "t32_job_list" or name == "t32_job_get" or
+        name == "t32_job_result"):
         read_only = "true"
     if name == "t32_session_close":
         destructive = "true"

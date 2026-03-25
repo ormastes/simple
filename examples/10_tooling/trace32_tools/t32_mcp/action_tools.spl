@@ -6,31 +6,94 @@
 use app.t32_cli.error_codes.{T4050, T4082, T4090, t32_err_action_not_found, t32_err_missing_param, t32_err_no_session_mcp, t32_err_unknown_tool, t32_err_missing_tool_name, t32_err_resource_not_found}
 
 # --- Action/field state ---
-# Field state is stored per-session in a flat Dict<text, text>
+# Field state is stored per-session in a T32FieldDict
 # keyed as "session_id:field_key"
+# Uses hash-bucket approach for O(1)-ish lookup
 
-var MCP_T32_FIELD_STATE: [text] = []
-var MCP_T32_FIELD_VALUES: [text] = []
+val T32_FIELD_DICT_BUCKETS: i64 = 64
+
+class T32FieldDict:
+    bucket_keys: [[text]]
+    bucket_values: [[text]]
+
+    static fn create() -> T32FieldDict:
+        var bk: [[text]] = []
+        var bv: [[text]] = []
+        var i: i64 = 0
+        while i < T32_FIELD_DICT_BUCKETS:
+            bk.push([])
+            bv.push([])
+            i = i + 1
+        T32FieldDict(bucket_keys: bk, bucket_values: bv)
+
+    fn hash_key(key: text) -> i64:
+        var h: i64 = 5381
+        var i: i64 = 0
+        while i < key.len():
+            h = ((h * 33) + key.char_at(i)) % 1000000007
+            i = i + 1
+        if h < 0:
+            h = 0 - h
+        h % T32_FIELD_DICT_BUCKETS
+
+    fn get(key: text) -> text:
+        val b = self.hash_key(key)
+        val keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                return self.bucket_values[b][idx]
+            idx = idx + 1
+        ""
+
+    me set(key: text, value: text):
+        val b = self.hash_key(key)
+        var keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                self.bucket_values[b][idx] = value
+                return
+            idx = idx + 1
+        self.bucket_keys[b].push(key)
+        self.bucket_values[b].push(value)
+
+    me delete(key: text):
+        val b = self.hash_key(key)
+        var keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                # Remove by swapping with last element
+                val last_idx = keys.len() - 1
+                if idx != last_idx:
+                    self.bucket_keys[b][idx] = self.bucket_keys[b][last_idx]
+                    self.bucket_values[b][idx] = self.bucket_values[b][last_idx]
+                self.bucket_keys[b].pop()
+                self.bucket_values[b].pop()
+                return
+            idx = idx + 1
+
+var MCP_T32_FIELD_DICT: T32FieldDict = T32FieldDict.create()
+
+fn t32_resolve_field_alias(key: text) -> text:
+    if key == "pc": return "register.PC"
+    if key == "sp": return "register.SP"
+    if key == "lr": return "register.LR"
+    if key == "cpsr": return "register.CPSR"
+    key
 
 fn t32_field_state_get(session_id: text, field_key: text) -> text:
     val lookup = session_id + ":" + field_key
-    var idx = 0
-    for k in MCP_T32_FIELD_STATE:
-        if k == lookup:
-            return MCP_T32_FIELD_VALUES[idx]
-        idx = idx + 1
-    ""
+    MCP_T32_FIELD_DICT.get(lookup)
 
 fn t32_field_state_set(session_id: text, field_key: text, value: text):
     val lookup = session_id + ":" + field_key
-    var idx = 0
-    for k in MCP_T32_FIELD_STATE:
-        if k == lookup:
-            MCP_T32_FIELD_VALUES[idx] = value
-            return
-        idx = idx + 1
-    MCP_T32_FIELD_STATE = MCP_T32_FIELD_STATE + [lookup]
-    MCP_T32_FIELD_VALUES = MCP_T32_FIELD_VALUES + [value]
+    MCP_T32_FIELD_DICT.set(lookup, value)
+
+fn t32_field_state_delete(session_id: text, field_key: text):
+    val lookup = session_id + ":" + field_key
+    MCP_T32_FIELD_DICT.delete(lookup)
 
 # --- Helpers for error suggestions ---
 
@@ -473,5 +536,47 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
         return handle_t32_area_read(id, args_raw)
     elif tool_name == "t32_cmm_commands":
         return handle_t32_cmm_commands(id, args_raw)
+
+    # Gap closure tools
+    elif tool_name == "t32_session_info":
+        return handle_t32_session_info(id, args_raw)
+    elif tool_name == "t32_action_list":
+        return handle_t32_action_list(id, args_raw)
+    elif tool_name == "t32_status_snapshot":
+        return handle_t32_status_snapshot(id, args_raw)
+    elif tool_name == "t32_cmm_validate":
+        return handle_t32_cmm_validate(id, args_raw)
+
+    # Job tools
+    elif tool_name == "t32_job_list":
+        val session_filter = t32_extract_field(args_raw, "session_id")
+        val jobs = t32_job_list(session_filter)
+        var parts: [text] = []
+        for job in jobs:
+            parts.push(t32_job_to_json(job))
+        val result = t32_SB_L() + parts.join(",") + t32_SB_R()
+        return t32_make_tool_result(id, result)
+    elif tool_name == "t32_job_get":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val job = t32_job_get(job_id)
+        if job.status == "not_found":
+            return t32_make_tool_error(id, "Job not found: " + job_id)
+        return t32_make_tool_result(id, t32_job_to_json(job))
+    elif tool_name == "t32_job_cancel":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val ok = t32_job_cancel(job_id)
+        if ok:
+            return t32_make_tool_result(id, t32_jo1(t32_jp("cancelled", "true")))
+        return t32_make_tool_error(id, "Cannot cancel job: " + job_id + " (not found or already terminal)")
+    elif tool_name == "t32_job_result":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val job = t32_job_get(job_id)
+        if job.status == "not_found":
+            return t32_make_tool_error(id, "Job not found: " + job_id)
+        if job.status == "completed":
+            return t32_make_tool_result(id, t32_jo2(t32_jp("job_id", t32_js(job_id)), t32_jp("result", job.result)))
+        if job.status == "failed":
+            return t32_make_tool_error(id, "Job failed: " + job.error)
+        return t32_make_tool_error(id, "Job not yet complete (status: " + job.status + ")")
 
     t32_make_error(id, -32602, t32_err_unknown_tool(tool_name))
