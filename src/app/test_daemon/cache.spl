@@ -49,6 +49,8 @@ impl TestResultCache:
         val entry = self.entries[test_path]
         if entry.?:
             val existing = entry
+            if dep_paths.len() != existing.dep_hashes.keys().len():
+                return stale
 
             # Fast path: check test file size first (no read needed)
             val current_size = rt_file_size(test_path)
@@ -142,6 +144,7 @@ impl TestResultCache:
             lines.push("result_failed={entry.result_failed}")
             lines.push("result_skipped={entry.result_skipped}")
             lines.push("result_duration_ms={entry.result_duration_ms}")
+            lines.push("result_output={cache_escape_text(entry.result_output)}")
             lines.push("last_run_timestamp={entry.last_run_timestamp}")
 
             lines.push("test_size={entry.test_size}")
@@ -182,6 +185,7 @@ fn test_result_cache_load(cache_path: text) -> TestResultCache:
     var current_failed: i64 = 0
     var current_skipped: i64 = 0
     var current_duration: i64 = 0
+    var current_output = ""
     var current_timestamp: i64 = 0
     var current_deps: {text: i64} = {}
     var current_dep_sizes: {text: i64} = {}
@@ -204,7 +208,7 @@ fn test_result_cache_load(cache_path: text) -> TestResultCache:
                     result_failed: current_failed,
                     result_skipped: current_skipped,
                     result_duration_ms: current_duration,
-                    result_output: "",
+                    result_output: current_output,
                     last_run_timestamp: current_timestamp
                 )
                 cache.entries[current_key] = entry
@@ -218,6 +222,7 @@ fn test_result_cache_load(cache_path: text) -> TestResultCache:
             current_failed = 0
             current_skipped = 0
             current_duration = 0
+            current_output = ""
             current_timestamp = 0
             current_deps = {}
             current_dep_sizes = {}
@@ -233,6 +238,8 @@ fn test_result_cache_load(cache_path: text) -> TestResultCache:
             current_skipped = line.substring(15).to_i64() ?? 0
         else if line.starts_with("result_duration_ms="):
             current_duration = line.substring(19).to_i64() ?? 0
+        else if line.starts_with("result_output="):
+            current_output = cache_unescape_text(line.substring(14))
         else if line.starts_with("last_run_timestamp="):
             current_timestamp = line.substring(19).to_i64() ?? 0
         else if line.starts_with("test_size="):
@@ -266,7 +273,7 @@ fn test_result_cache_load(cache_path: text) -> TestResultCache:
             result_failed: current_failed,
             result_skipped: current_skipped,
             result_duration_ms: current_duration,
-            result_output: "",
+            result_output: current_output,
             last_run_timestamp: current_timestamp
         )
         cache.entries[current_key] = entry
@@ -282,3 +289,9 @@ fn cache_path_parent(path: text) -> text:
     if last_slash < 0:
         return "."
     path.substring(0, last_slash)
+
+fn cache_escape_text(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\n", "\\n")
+
+fn cache_unescape_text(s: text) -> text:
+    s.replace("\\n", "\n").replace("\\\\", "\\")

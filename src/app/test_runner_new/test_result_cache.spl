@@ -53,6 +53,8 @@ impl TestResultCache:
         val entry = self.entries[test_path]
         if entry.?:
             val existing = entry
+            if dep_paths.len() != existing.dep_hashes.keys().len():
+                return stale_entry()
 
             # Fast path: check test file size first (no read needed)
             val current_size = rt_file_size(test_path)
@@ -65,13 +67,18 @@ impl TestResultCache:
             if current_hash != existing.test_hash:
                 return stale_entry()
 
-            # Check each dependency: size-only (fast, no file reads)
+            # Check each dependency: size first, then hash to catch same-size edits.
             var i = 0
             while i < dep_paths.len():
                 val dep_path = dep_paths[i]
                 val dep_size = rt_file_size(dep_path)
                 val cached_size = existing.dep_sizes[dep_path] ?? -1
                 if dep_size != cached_size:
+                    return stale_entry()
+                val dep_source = rt_file_read_text(dep_path) ?? ""
+                val dep_hash = rt_hash_text(dep_source)
+                val cached_hash = existing.dep_hashes[dep_path] ?? 0
+                if dep_hash != cached_hash:
                     return stale_entry()
                 i = i + 1
 
@@ -88,8 +95,6 @@ impl TestResultCache:
         val source = rt_file_read_text(test_path) ?? ""
         val test_hash = rt_hash_text(source)
 
-        # Use size-only for deps — avoids expensive re-reads of all dependency files.
-        # Size changes are sufficient to detect dep modifications between runs.
         var dep_hashes: {text: i64} = {}
         var dep_sizes: {text: i64} = {}
         var i = 0
@@ -97,7 +102,8 @@ impl TestResultCache:
             val dep_path = dep_paths[i]
             val dep_size = rt_file_size(dep_path)
             dep_sizes[dep_path] = dep_size
-            dep_hashes[dep_path] = dep_size
+            val dep_source = rt_file_read_text(dep_path) ?? ""
+            dep_hashes[dep_path] = rt_hash_text(dep_source)
             i = i + 1
 
         var status = 0
