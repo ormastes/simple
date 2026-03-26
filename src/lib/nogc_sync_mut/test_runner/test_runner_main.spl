@@ -43,8 +43,7 @@ use test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cl
 # use sdoctest.result_db.write_sdoctest_db
 # use sdoctest.doc_gen.generate_sdoctest_report
 # Change-detection cache for incremental test runs
-use app.test_runner_new.test_result_cache.{TestResultCache, TestCacheEntry, test_result_cache_new, test_result_cache_load, stale_entry}
-use app.test_runner_new.test_dep_graph.{TestDepGraph, test_dep_graph_new}
+use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new, incremental_test_state_load}
 # GROUP 6: Self-protection imports
 use app.test_runner_new.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
 use app.test_runner_new.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
@@ -213,19 +212,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
-    var cache = test_result_cache_new(cache_path)
+    var incremental_state = incremental_test_state_new(cache_path, "", false)
     var use_result_cache = not updated_options.clean
     if use_result_cache:
-        cache = test_result_cache_load(cache_path)
+        incremental_state = incremental_test_state_load(cache_path, "", false)
     else:
         print "Change-detection cache bypassed (--clean)"
 
     # Smart test ordering: sort longest-first to avoid tail blockers
     if use_result_cache:
-        files = order_tests_by_duration(files, cache)
-
-    # Build dependency graph for cache checks
-    var dep_graph = test_dep_graph_new()
+        files = order_tests_by_duration(files, incremental_state.entries)
 
     # Session env setup complete — record setup time
     val session_setup_end = time_now_unix_micros()
@@ -259,9 +255,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
         # Check change-detection cache before running
         if use_result_cache:
-            dep_graph.analyze_test(file_path)
-            val dep_paths = dep_graph.get_deps(file_path)
-            val cached_entry = cache.check_freshness(file_path, dep_paths)
+            val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
                     path: file_path,
@@ -292,8 +286,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
         # Record result in cache
         if use_result_cache:
-            val dep_paths_for_record = dep_graph.get_deps(file_path)
-            cache.record_result(file_path, dep_paths_for_record, result.passed, result.failed, result.skipped, result.duration_ms)
+            incremental_state.record_runner_result(file_path, result.passed, result.failed, result.skipped, result.duration_ms)
 
         total_passed = total_passed + result.passed
         total_failed = total_failed + result.failed
@@ -314,7 +307,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     # Save cache
     if use_result_cache:
-        cache.save()
+        incremental_state.save()
 
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
@@ -347,21 +340,16 @@ fn run_tests_parallel_mode(
 
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
-    var cache = test_result_cache_new(cache_path)
+    var incremental_state = incremental_test_state_new(cache_path, "", false)
     var use_result_cache = not options.clean
     if use_result_cache:
-        cache = test_result_cache_load(cache_path)
-
-    # Build dependency graph and filter cached tests
-    var dep_graph = test_dep_graph_new()
+        incremental_state = incremental_test_state_load(cache_path, "", false)
     var cached_results: [TestFileResult] = []
     var uncached_files: [text] = []
 
     if use_result_cache:
         for file_path in files:
-            dep_graph.analyze_test(file_path)
-            val dep_paths = dep_graph.get_deps(file_path)
-            val cached_entry = cache.check_freshness(file_path, dep_paths)
+            val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
                     path: file_path,
@@ -383,7 +371,7 @@ fn run_tests_parallel_mode(
 
     # Smart test ordering: sort longest-first to avoid tail blockers
     if use_result_cache:
-        uncached_files = order_tests_by_duration(uncached_files, cache)
+        uncached_files = order_tests_by_duration(uncached_files, incremental_state.entries)
 
     # Session-aware routing: if --session-daemon, route session tests through daemon
     var daemon_results: [TestFileResult] = []
@@ -468,8 +456,7 @@ fn run_tests_parallel_mode(
 
         # Record result in cache
         if use_result_cache:
-            val dep_paths_r = dep_graph.get_deps(result.path)
-            cache.record_result(result.path, dep_paths_r, result.passed, result.failed, result.skipped, result.duration_ms)
+            incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     for result in qemu_results:
         total_passed = total_passed + result.passed
@@ -494,12 +481,11 @@ fn run_tests_parallel_mode(
         all_results.push(result)
 
         if use_result_cache:
-            val dep_paths_d = dep_graph.get_deps(result.path)
-            cache.record_result(result.path, dep_paths_d, result.passed, result.failed, result.skipped, result.duration_ms)
+            incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     # Save cache
     if use_result_cache:
-        cache.save()
+        incremental_state.save()
 
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
