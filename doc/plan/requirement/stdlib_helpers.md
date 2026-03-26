@@ -9,14 +9,14 @@
 
 ## Executive Summary
 
-Cross-referenced Simple's existing stdlib (~850+ methods) against Python (404), Ruby (769), Go (430), and TypeScript (322) method inventories. Simple already has excellent coverage in most areas. This plan identifies **83 missing methods** worth implementing, organized into 6 priority tiers.
+Cross-referenced Simple's existing stdlib (~850+ methods) against Python (404), Ruby (769), Go (430), and TypeScript (322) method inventories. This plan targets **100% coverage** — every useful method from all 4 languages. Total: **159 new methods + 25 aliases = 184 additions**.
 
-**Coverage by category:**
-| Category | Simple Has | Cross-Lang Union | Coverage | Missing |
-|----------|-----------|-----------------|----------|---------|
-| Text/String | ~200 | ~250 | ~80% | ~25 |
-| Collections | ~350 | ~400 | ~87% | ~33 |
-| File/IO | ~300 | ~325 | ~92% | ~25 |
+**Coverage target:**
+| Category | Simple Has | Cross-Lang Union | Current | After Plan | To Add |
+|----------|-----------|-----------------|---------|-----------|--------|
+| Text/String | ~200 | ~245 | ~82% | 100% | 45 |
+| Collections | ~350 | ~426 | ~82% | 100% | 76 |
+| File/IO | ~300 | ~338 | ~89% | 100% | 38 |
 
 ---
 
@@ -53,6 +53,26 @@ Methods present in 3+ languages that Simple lacks. Highest developer productivit
 | T23 | `to_int_radix(base)` | `(i64) -> i64?` | Parse string as number in given base | Python(int(s,base)), Go(ParseInt) | P2 |
 | T24 | `multiply(n)` | `(i64) -> text` | Alias for repeat (Ruby's * operator) | Ruby(*), Python(*) | P3-alias |
 | T25 | `insert(idx, s)` | `(i64, text) -> text` | Insert string at index | Ruby(insert) | P2 |
+| T26 | `contains_any(chars)` | `(text) -> bool` | Contains any char from set | Go(ContainsAny) | P1 |
+| T27 | `index_of_any(chars)` | `(text) -> i64?` | Index of any char from set | Go(IndexAny) | P2 |
+| T28 | `index_of_func(fn)` | `(fn(text)->bool) -> i64?` | Index of first char matching fn | Go(IndexFunc) | P2 |
+| T29 | `last_index_of_func(fn)` | `(fn(text)->bool) -> i64?` | Last index of char matching fn | Go(LastIndexFunc) | P2 |
+| T30 | `fields_func(fn)` | `(fn(text)->bool) -> [text]` | Split by custom char predicate | Go(FieldsFunc) | P2 |
+| T31 | `delete_chars(chars)` | `(text) -> text` | Delete all chars in set | Ruby(delete) | P2 |
+| T32 | `succ()` | `() -> text` | Next string in sequence ("a"->"b","az"->"ba") | Ruby(succ/next) | P3 |
+| T33 | `scrub(replacement?)` | `(text?) -> text` | Replace invalid UTF-8 bytes | Ruby(scrub), Go(ToValidUTF8) | P2 |
+| T34 | `dump()` | `() -> text` | Escape all non-printable characters | Ruby(dump) | P3 |
+| T35 | `grapheme_clusters()` | `() -> [text]` | Split into Unicode grapheme clusters | Ruby(grapheme_clusters), JS(Intl.Segmenter) | P2 |
+| T36 | `is_printable()` | `() -> bool` | All chars are printable (as method) | Python(isprintable) | P2 |
+| T37 | `is_ascii()` | `() -> bool` | All chars are ASCII (as method) | Python(isascii), Ruby(ascii_only?) | P2 |
+| T38 | `is_upper()` | `() -> bool` | Entire string is uppercase | Python(isupper), Ruby | P2 |
+| T39 | `is_lower()` | `() -> bool` | Entire string is lowercase | Python(islower), Ruby | P2 |
+| T40 | `cut(sep)` | `(text) -> (text, text, bool)` | Cut at separator -> (before, after, found) | Go(strings.Cut) | P1 |
+| T41 | `multi_replace(pairs)` | `([(text,text)]) -> text` | Replace multiple pairs at once | Go(strings.Replacer) | P2 |
+| T42 | `quote()` | `() -> text` | Escape string for safe repr (add quotes+escapes) | Go(strconv.Quote), Ruby(inspect) | P2 |
+| T43 | `unquote()` | `() -> text` | Unescape quoted string | Go(strconv.Unquote) | P3 |
+| T44 | `split_after(sep)` | `(text) -> [text]` | Split but keep separator at end of each part | Go(SplitAfter) | P3 |
+| T45 | `format(args)` | `([text]) -> text` | Positional placeholder formatting ({0}, {1}) | Python(str.format), Go(fmt.Sprintf) | P2 |
 
 ### 1.2 Collection Methods
 
@@ -91,6 +111,49 @@ Methods present in 3+ languages that Simple lacks. Highest developer productivit
 | C31 | `select(fn)` | Array | `(fn(T)->bool) -> [T]` | Alias for filter | Ruby(select) | P3-alias |
 | C32 | `inject(init, fn)` | Array | `(U, fn(U,T)->U) -> U` | Alias for reduce | Ruby(inject) | P3-alias |
 | C33 | `none(fn)` | Array | `(fn(T)->bool) -> bool` | No elements match predicate | Ruby(none?), JS(none equiv), Python | P1 |
+| C34 | `find_last(fn)` | Array | `(fn(T)->bool) -> T?` | Find last matching element | JS(findLast), Ruby(reverse.find) | P1 |
+| C35 | `find_last_index(fn)` | Array | `(fn(T)->bool) -> i64?` | Index of last matching element | JS(findLastIndex) | P1 |
+| C36 | `at(idx)` | Array | `(i64) -> T?` | Element at index (supports negative) | JS(at), Python(a[-1]) | P1 |
+| C37 | `clone()` | Array | `() -> [T]` | Shallow copy of array | Go(slices.Clone), Ruby(clone) | P1 |
+| C38 | `compare(other)` | Array | `([T]) -> i64` | Lexicographic comparison (-1/0/1) | Go(slices.Compare) | P2 |
+| C39 | `dedup_by(fn)` | Array | `(fn(T,T)->bool) -> [T]` | Dedup with custom equality | Go(slices.CompactFunc) | P2 |
+| C40 | `replace_range(start,end,items)` | Array | `(i64,i64,[T]) -> [T]` | Replace range of elements | Go(slices.Replace), JS(splice) | P2 |
+| C41 | `sort_stable()` | Array | `() -> [T]` | Stable sort (preserves equal order) | Go(sort.Stable), Python(default) | P2 |
+| C42 | `sort_stable_by(fn)` | Array | `(fn(T,T)->i64) -> [T]` | Stable sort with comparator | Go(sort.StableFunc) | P2 |
+| C43 | `one(fn)` | Array | `(fn(T)->bool) -> bool` | Exactly one element matches | Ruby(one?) | P2 |
+| C44 | `top_n(n)` | Array | `(i64) -> [T]` | N largest elements | Ruby(max(n)), Python(heapq.nlargest) | P2 |
+| C45 | `bottom_n(n)` | Array | `(i64) -> [T]` | N smallest elements | Ruby(min(n)), Python(heapq.nsmallest) | P2 |
+| C46 | `slice_when(fn)` | Array | `(fn(T,T)->bool) -> [[T]]` | Split when pred true between consecutive | Ruby(slice_when) | P2 |
+| C47 | `chunk_while(fn)` | Array | `(fn(T,T)->bool) -> [[T]]` | Chunk while pred true between consecutive | Ruby(chunk_while) | P2 |
+| C48 | `dig(keys)` | Array | `([i64]) -> T?` | Nested array access by index chain | Ruby(dig) | P2 |
+| C49 | `assoc(key)` | Array | `(T) -> [T]?` | Find sub-array by first element | Ruby(assoc) | P3 |
+| C50 | `rassoc(value)` | Array | `(T) -> [T]?` | Find sub-array by second element | Ruby(rassoc) | P3 |
+| C51 | `repeated_combination(n)` | Array | `(i64) -> [[T]]` | Combinations with repetition | Ruby(repeated_combination) | P3 |
+| C52 | `repeated_permutation(n)` | Array | `(i64) -> [[T]]` | Permutations with repetition | Ruby(repeated_permutation) | P3 |
+| C53 | `each_with_object(init,fn)` | Array | `(U, fn(T,U)) -> U` | Iterate accumulating into object | Ruby(each_with_object) | P2 |
+| C54 | `zip_longest(other, default)` | Array | `([U], T) -> [(T,U)]` | Zip with fill for unequal lengths | Python(zip_longest) | P2 |
+| C55 | `pairwise()` | Array | `() -> [(T,T)]` | Consecutive pairs | Python(itertools.pairwise) | P2 |
+| C56 | `compress(selectors)` | Array | `([bool]) -> [T]` | Filter by boolean selector array | Python(itertools.compress) | P2 |
+| C57 | `reduce_right(init, fn)` | Array | `(U, fn(U,T)->U) -> U` | Right fold on arrays | JS(reduceRight) | P2 |
+| C58 | `copy_within(target,start,end)` | Array | `(i64,i64,i64) -> [T]` | Copy elements within array | JS(copyWithin) | P3 |
+| C59 | `product()` | Array | `() -> i64` | Multiply all numeric elements | Ruby(inject(:*)), Python(math.prod) | P2 |
+| C60 | `map_dig(keys)` | Map | `([K]) -> V?` | Nested map access by key chain | Ruby(Hash#dig) | P2 |
+| C61 | `map_fetch(key)` | Map | `(K) -> Result<V,E>` | Get with error on missing key | Ruby(Hash#fetch) | P2 |
+| C62 | `map_fetch_or(key, default)` | Map | `(K, V) -> V` | Get with default, error-safe | Ruby(Hash#fetch) | P2 |
+| C63 | `map_min_by(fn)` | Map | `(fn(K,V)->C) -> (K,V)?` | Entry with min by function | Ruby(min_by) | P2 |
+| C64 | `map_max_by(fn)` | Map | `(fn(K,V)->C) -> (K,V)?` | Entry with max by function | Ruby(max_by) | P2 |
+| C65 | `map_sort_by(fn)` | Map | `(fn(K,V)->C) -> [(K,V)]` | Sort entries by function | Ruby(sort_by) | P2 |
+| C66 | `map_flat_map(fn)` | Map | `(fn(K,V)->[(K2,V2)]) -> Map` | Flat map on entries | Ruby(flat_map) | P3 |
+| C67 | `map_each_with_object(init,fn)` | Map | `(U, fn(K,V,U)) -> U` | Iterate accumulating object | Ruby(each_with_object) | P3 |
+| C68 | `map_clone()` | Map | `() -> Map<K,V>` | Shallow copy | Go(maps.Clone), Ruby(clone) | P2 |
+| C69 | `map_reject(fn)` | Map | `(fn(K,V)->bool) -> Map` | Inverse filter on map | Ruby(reject) | P2 |
+| C70 | `set_classify(fn)` | Set | `(fn(T)->K) -> Map<K,Set<T>>` | Group set by function | Ruby(Set#classify) | P3 |
+| C71 | `set_divide(fn)` | Set | `(fn(T,T)->bool) -> Set<Set<T>>` | Partition into equivalence classes | Ruby(Set#divide) | P3 |
+| C72 | `partial(fn, args)` | Functional | `(fn, ...) -> fn` | Partial function application | Python(functools.partial) | P2 |
+| C73 | `memoize(fn)` | Functional | `(fn) -> fn` | Memoization/caching wrapper | Python(lru_cache) | P2 |
+| C74 | `identity(x)` | Functional | `(T) -> T` | Identity function | Haskell(id), lodash | P2 |
+| C75 | `constantly(value)` | Functional | `(T) -> fn()->T` | Function that always returns value | Clojure(constantly) | P3 |
+| C76 | `Heap<T>` | Data Structure | Min/max heap with push/pop/peek | Go(container/heap), Python(heapq) | P2 |
 
 ### 1.3 File/IO Methods
 
@@ -121,6 +184,19 @@ Methods present in 3+ languages that Simple lacks. Highest developer productivit
 | F23 | `File.created_time(path)` | File | `(text) -> i64` | Get creation timestamp | All languages | P2 |
 | F24 | `File.chmod(path, mode)` | File | `(text, i64) -> bool` | Change file permissions | Python, Ruby, Go, JS | P2 |
 | F25 | `Dir.glob(pattern)` | Dir | `(text) -> [text]` | Glob pattern matching from dir | Python(glob), Ruby(Dir.glob), Go(filepath.Glob) | P1 |
+| F26 | `File.ftype(path)` | File | `(text) -> text` | File type as string ("file","directory","link") | Ruby(File.ftype) | P3 |
+| F27 | `File.is_zero(path)` | File | `(text) -> bool` | Check if file is empty (0 bytes) | Ruby(File.zero?) | P2 |
+| F28 | `File.link(target, link)` | File | `(text, text) -> bool` | Create hard link | Python(os.link), Ruby(File.link), Go(os.Link) | P2 |
+| F29 | `File.identical(a, b)` | File | `(text, text) -> bool` | Check if same inode (not content) | Ruby(File.identical?), Go(os.SameFile) | P3 |
+| F30 | `File.truncate(path, size)` | File | `(text, i64) -> bool` | Truncate file to size | Python, Ruby, Go, JS | P2 |
+| F31 | `File.foreach(path, fn)` | File | `(text, fn(text))` | Iterate lines with callback | Ruby(File.foreach), Python(for line in f) | P1 |
+| F32 | `File.write_lines(path, lines)` | File | `(text, [text]) -> bool` | Write array of lines | Python(writelines) | P2 |
+| F33 | `Dir.children(path)` | Dir | `(text) -> [text]` | List entries (no . and ..) | Ruby(Dir.children), Python(iterdir) | P2 |
+| F34 | `Dir.each_child(path, fn)` | Dir | `(text, fn(text))` | Iterate children with callback | Ruby(Dir.each_child) | P2 |
+| F35 | `Dir.rglob(pattern)` | Dir | `(text) -> [text]` | Recursive glob pattern matching | Python(Path.rglob), Ruby(Dir.glob("**/...")) | P1 |
+| F36 | `disk_usage(path)` | Standalone | `(text) -> (i64, i64, i64)` | Disk usage (total, used, free) | Python(shutil.disk_usage) | P3 |
+| F37 | `Path.suffixes()` | Path | `() -> [text]` | All extensions (.tar.gz -> [".tar", ".gz"]) | Python(Path.suffixes) | P3 |
+| F38 | `Path.as_uri()` | Path | `() -> text` | Convert to file:// URI | Python(Path.as_uri), Go(url.Parse) | P3 |
 
 ---
 
@@ -176,107 +252,156 @@ Higher-level utilities that combine multiple operations.
 | U8 | `FileIterator` | File | Lazy line-by-line file reading | P2 |
 | U9 | `text.template(vars)` | Text | Simple string templating beyond {key} | P3 |
 | U10 | `Comparable` trait | Collection | Spaceship operator for custom sorting | P3 |
+| U11 | `Heap<T>` | Collection | Min/max heap with push/pop/peek/heapify | Go(container/heap), Python(heapq) | P2 |
+| U12 | `ChainMap<K,V>` | Collection | Layered map search (Python collections.ChainMap) | P3 |
+| U13 | `partial(fn, args)` | Functional | Partial function application | Python(functools.partial) | P2 |
+| U14 | `memoize(fn)` | Functional | Memoization/caching wrapper | Python(functools.lru_cache) | P2 |
+| U15 | `identity(x)` / `constantly(v)` | Functional | Identity and constant functions | Standard FP | P2 |
 
 ---
 
-## Implementation Plan
+## Implementation Plan (100% Coverage)
 
-### Phase A: Core Methods (P1) — 28 items
+### Phase A: Core Methods (P1) — 42 items
 
 **Target:** Built-in methods and most-requested standalone functions.
 
-#### A1: Text P1 Methods (6 items)
+#### A1: Text P1 Methods (9 items)
 - `to_kebab_case()`, `to_pascal_case()`, `to_screaming_snake()` — case conversions
 - `chars_map(fn)`, `tr(from, to)` — character transformation
 - `gsub(pattern, fn)` — replace with callback
 - `split_n(sep, n)` — split with limit
+- `contains_any(chars)` — contains any char from set
+- `cut(sep)` — cut at separator -> (before, after, found)
 
 **Location:** `src/lib/common/text_advanced.spl` (case conversions), runtime built-in (methods)
-**Difficulty:** 2-3 | **Estimated methods:** 7
+**Difficulty:** 2-3
 
-#### A2: Collection P1 Methods (12 items)
+#### A2: Collection P1 Methods (18 items)
 - `sort_by_key(fn)`, `min_by(fn)`, `max_by(fn)`, `min_by_key(fn)`, `max_by_key(fn)` — sorting/extrema
 - `each(fn)`, `each_with_index(fn)`, `flat_map(fn)` — iteration as built-in methods
 - `insert_at(idx, item)`, `remove_at(idx)`, `pop()`, `shift()` — array mutation
 - `reject(fn)`, `none(fn)` — filtering
+- `find_last(fn)`, `find_last_index(fn)` — reverse search
+- `at(idx)` with negative index, `clone()` — access/copy
 
 **Location:** Runtime built-in methods (interpreter_method), `src/lib/nogc_sync_mut/array.spl`
-**Difficulty:** 2-3 | **Estimated methods:** 14
+**Difficulty:** 2-3
 
-#### A3: File P1 Methods (5 items)
+#### A3: File P1 Methods (8 items)
 - `File.touch(path)` — create/update mtime
 - `File.move(src, dst)` — cross-device move
 - `File.readlines(path)` — read lines array
+- `File.foreach(path, fn)` — iterate lines with callback
 - `File.modified_time(path)` — mod time (standardize existing)
 - `which(name)` — find executable in PATH
 - `Dir.glob(pattern)` — glob matching
+- `Dir.rglob(pattern)` — recursive glob
 
 **Location:** `src/lib/nogc_sync_mut/fs.spl`, `src/lib/nogc_sync_mut/io/file_ops.spl`
-**Difficulty:** 2 | **Estimated methods:** 6
+**Difficulty:** 2
 
-### Phase B: Productivity Methods (P2) — 38 items
+### Phase B: Productivity Methods (P2) — 90 items
 
-#### B1: Text P2 Methods (10 items)
+#### B1: Text P2 Methods (22 items)
 - `encode(encoding)`, `decode(bytes, encoding)` — charset encoding
 - `normalize(form)` — Unicode normalization
-- `is_title()` — title case check
-- `scan(pattern)` — alias for regex_find_all on text
+- `is_title()`, `is_upper()`, `is_lower()`, `is_printable()`, `is_ascii()` — string predicates
+- `scan(pattern)`, `match_all(pattern)` — pattern matching
 - `each_char(fn)`, `each_line(fn)` — iteration callbacks
-- `match_all(pattern)` — iterator over regex matches
 - `replace_n(old, new, n)` — limited replacement
 - `hex_to_int()`, `to_int_radix(base)` — radix parsing
 - `insert(idx, s)` — string insertion
+- `index_of_any(chars)`, `index_of_func(fn)`, `last_index_of_func(fn)` — advanced search
+- `fields_func(fn)`, `delete_chars(chars)` — char-level operations
+- `scrub(replacement?)`, `grapheme_clusters()` — Unicode safety
+- `multi_replace(pairs)`, `quote()`, `format(args)` — formatting
 
 **Location:** Runtime built-in, `src/lib/common/text_advanced.spl`
-**Difficulty:** 3 | **Estimated methods:** 12
+**Difficulty:** 2-3
 
-#### B2: Collection P2 Methods (16 items)
-- `minmax()` — min+max in one pass
+#### B2: Collection P2 Methods (46 items)
+**Array methods (28):**
+- `minmax()`, `compare(other)` — comparison
 - `sample(n?)`, `shuffle()` — random operations
 - `combination(n)`, `permutation(n?)` — combinatorics
-- `compact_map(fn)` — map+filter nil
-- `fill(value)` — fill array
-- `values_at(indices)` — multi-index access
-- `bsearch(target)` — binary search
+- `compact_map(fn)`, `dedup_by(fn)` — transformation
+- `fill(value)`, `replace_range(start,end,items)` — mutation
+- `values_at(indices)`, `bsearch(target)` — access
 - `shift()`, `unshift(item)` — front operations
-- `sum_by(fn)` — sum with extractor
+- `sum_by(fn)`, `product()`, `reduce_right(init,fn)` — aggregation
 - `tally()` — frequency map
-- `each_slice(n, fn)`, `each_cons(n, fn)` — chunk/window iteration
-- `DefaultMap<K,V>`, `Counter<T>` — utility classes
+- `each_slice(n, fn)`, `each_cons(n, fn)`, `each_with_object(init,fn)` — iteration
+- `sort_stable()`, `sort_stable_by(fn)` — stable sorting
+- `one(fn)`, `top_n(n)`, `bottom_n(n)` — predicates/selection
+- `slice_when(fn)`, `chunk_while(fn)`, `pairwise()` — partitioning
+- `zip_longest(other, default)`, `compress(selectors)` — combining
+- `dig(keys)` — nested access
+
+**Map methods (10):**
+- `map_dig(keys)`, `map_fetch(key)`, `map_fetch_or(key,default)` — access
+- `map_min_by(fn)`, `map_max_by(fn)`, `map_sort_by(fn)` — ordering
+- `map_clone()`, `map_reject(fn)` — copy/filter
+- `map_flat_map(fn)`, `map_each_with_object(init,fn)` — transformation
+
+**Utility classes (5):**
+- `DefaultMap<K,V>` — map with default factory
+- `Counter<T>` — frequency counter
+- `Heap<T>` — min/max heap
+- `partial(fn, args)`, `memoize(fn)` — functional utilities
+- `identity(x)`, `constantly(value)` — function combinators
 
 **Location:** `src/lib/nogc_sync_mut/array.spl`, `src/lib/common/pure/collections.spl`, new files
-**Difficulty:** 3-4 | **Estimated methods:** 18
+**Difficulty:** 2-4
 
-#### B3: File P2 Methods (12 items)
-- `File.compare(a, b)` — file comparison
+#### B3: File P2 Methods (22 items)
+- `File.compare(a, b)` — content comparison
 - `File.write_lines(path, lines)` — write line array
 - `File.temp(prefix?, suffix?)` — temp file creation
+- `File.is_zero(path)` — check empty file
+- `File.link(target, link)` — hard link
+- `File.truncate(path, size)` — truncate to size
 - `Dir.temp(prefix?)` — temp dir creation
 - `Dir.copy(src, dst)`, `Dir.move(src, dst)` — directory operations
+- `Dir.children(path)`, `Dir.each_child(path, fn)` — listing
 - `Path.realpath()`, `Path.match(pattern)`, `Path.with_name(name)` — path ops
-- `File.is_readable/writable/executable(path)` — permission checks
-- `File.is_symlink/symlink/readlink` — symlink operations
+- `File.is_readable/writable/executable(path)` — permission checks (3)
+- `File.is_symlink/symlink/readlink` — symlink operations (3)
+- `File.chmod(path, mode)`, `File.created_time(path)` — metadata
 - `Glob.recursive(pattern)`, `FileIterator` — lazy file iteration
 
 **Location:** `src/lib/nogc_sync_mut/fs.spl`, `src/lib/nogc_sync_mut/io/file_ops.spl`
-**Difficulty:** 2-3 | **Estimated methods:** 14
+**Difficulty:** 2-3
 
-### Phase C: Aliases & Compatibility (P3) — 25 aliases + 8 methods
+### Phase C: Aliases & Full Completion (P3) — 25 aliases + 27 methods
 
 #### C1: Aliases (25 items)
 Add Python/Ruby/JS naming aliases to existing built-in methods. Most are one-line delegations.
 
 **Location:** Runtime built-in (already has alias infrastructure)
-**Difficulty:** 1 | **Estimated work:** Trivial
+**Difficulty:** 1
 
-#### C2: Remaining P3 Methods (8 items)
-- `expandtabs(tabsize?)`, `casefold()`, `oct_to_int()` — text niche
-- `fill_range(value, start, end)` — array fill with range
-- `Dir.size(path)`, `Path.expand_user()` — file niche
-- `OrderedMap<K,V>`, `LazyIterator<T>`, `TextScanner`, `Comparable` trait — utility classes
+#### C2: Remaining Text P3 (7 items)
+- `expandtabs(tabsize?)`, `casefold()` — text niche
+- `oct_to_int()`, `succ()` — parsing/sequence
+- `dump()`, `unquote()` — escaping
+- `split_after(sep)` — split variant
 
-**Location:** Various
-**Difficulty:** 2-4 | **Estimated methods:** 10
+#### C3: Remaining Collection P3 (12 items)
+- `fill_range(value, start, end)`, `copy_within(target,start,end)` — array mutation
+- `assoc(key)`, `rassoc(value)` — pair lookup
+- `repeated_combination(n)`, `repeated_permutation(n)` — combinatorics
+- `map_flat_map(fn)`, `map_each_with_object(init,fn)` — map iteration
+- `set_classify(fn)`, `set_divide(fn)` — set partitioning
+- `constantly(value)` — functional
+- `OrderedMap<K,V>`, `LazyIterator<T>`, `ChainMap<K,V>` — utility classes
+- `TextScanner`, `Comparable` trait
+
+#### C4: Remaining File P3 (8 items)
+- `Dir.size(path)`, `Path.expand_user()` — directory/path
+- `File.ftype(path)`, `File.identical(a,b)` — metadata
+- `disk_usage(path)` — disk stats
+- `Path.suffixes()`, `Path.as_uri()` — path utilities
 
 ---
 
@@ -404,19 +529,23 @@ Methods that other languages have which Simple **already implements** (no action
 
 ---
 
-## Implementation Order (Recommended)
+## Implementation Order (100% Coverage)
 
 ```
-Week 1: Phase A1 (Text P1)     — 7 methods  — case conversions, char transforms
-Week 2: Phase A2 (Collection P1) — 14 methods — sort_by_key, min/max_by, array mutation
-Week 3: Phase A3 (File P1)     — 6 methods  — touch, move, readlines, which
-Week 4: Phase B1 (Text P2)     — 12 methods — encoding, normalization, radix parsing
-Week 5: Phase B2 (Collection P2) — 18 methods — combinatorics, random, bsearch
-Week 6: Phase B3 (File P2)     — 14 methods — permissions, symlinks, temp files
-Week 7: Phase C (Aliases+P3)   — 33 items   — compatibility aliases, niche methods
+Week 1:  Phase A1 (Text P1)       —  9 methods — case conversions, char transforms, cut, split_n
+Week 2:  Phase A2 (Collection P1) — 18 methods — sort_by_key, min/max_by, array mutation, find_last
+Week 3:  Phase A3 (File P1)       —  8 methods — touch, move, readlines, foreach, which, glob
+Week 4:  Phase B1 (Text P2)       — 22 methods — encoding, normalization, predicates, Unicode
+Week 5:  Phase B2a (Array P2)     — 28 methods — combinatorics, random, bsearch, stable sort
+Week 6:  Phase B2b (Map+Util P2)  — 18 methods — map methods, DefaultMap, Counter, Heap, FP utils
+Week 7:  Phase B3 (File P2)       — 22 methods — permissions, symlinks, temp files, dir ops
+Week 8:  Phase C1 (Aliases)       — 25 aliases — Python/Ruby/JS naming compatibility
+Week 9:  Phase C2 (Text P3)       —  7 methods — expandtabs, casefold, succ, dump
+Week 10: Phase C3 (Collection P3) — 12 methods — repeated_comb/perm, set classify, OrderedMap
+Week 11: Phase C4 (File P3)       —  8 methods — ftype, disk_usage, suffixes, as_uri
 ```
 
-**Total: 83 new methods + 25 aliases = 108 additions**
+**Total: 159 new methods + 25 aliases = 184 additions → 100% coverage**
 
 ---
 
@@ -429,12 +558,15 @@ Week 7: Phase C (Aliases+P3)   — 33 items   — compatibility aliases, niche m
 
 ---
 
-## Acceptance Criteria
+## Acceptance Criteria (100% Target)
 
-1. All P1 methods implemented with tests
-2. All P1 methods have sdoctest examples
+1. **ALL** methods (P1+P2+P3) implemented — no exceptions
+2. ALL methods have sdoctest examples
 3. Built-in methods accessible via dot-call syntax on native types
 4. Library methods importable via `use std.X`
 5. No breaking changes to existing method signatures
 6. 80%+ branch coverage on new code
 7. Documentation coverage for all public functions
+8. Every method from Python, Ruby, Go, TypeScript has a Simple equivalent
+9. Cross-language compatibility aliases enable familiar naming from any background
+10. All utility classes (DefaultMap, Counter, Heap, OrderedMap, ChainMap) fully operational

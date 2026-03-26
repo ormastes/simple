@@ -26,8 +26,7 @@ impl Lowerer {
 
     fn is_integer_type(&self, ty: TypeId) -> bool {
         // Dynamic language: allow any type as index — runtime handles coercion.
-        // Only reject VOID (TypeId(0)) which is never a valid index.
-        ty != TypeId::VOID
+        true
     }
 
     pub(super) fn require_integer_index_operand(&self, receiver_ty: TypeId, index_ty: TypeId) -> LowerResult<()> {
