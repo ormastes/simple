@@ -157,7 +157,9 @@ if [ -x "bin/release/simple" ]; then
   fi
 fi
 
+export SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap"
 echo "Running bootstrap pipeline..."
+echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
 echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
 echo "  output:   ${output_dir}"
@@ -166,6 +168,7 @@ if [ "${can_full_bootstrap}" -eq 1 ]; then
   # Full CLI available — use high-level staged bootstrap
   echo "  mode:     full CLI (build bootstrap)"
   RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
     bin/release/simple build bootstrap "--backend=${backend}" "--output=${output_dir}"
 else
   # Bootstrap-only or missing — manual staged bootstrap via seed
@@ -179,6 +182,8 @@ else
   # Stage 2: seed compiles bootstrap_main.spl
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
+  rm -rf .simple/native_cache/
+  SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
   "${seed_bin}" native-build \
     --entry src/app/cli/bootstrap_main.spl \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
@@ -186,6 +191,8 @@ else
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
+  rm -rf .simple/native_cache/
+  SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
   "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --entry src/app/cli/bootstrap_main.spl \
     -o "${output_dir}/stage3/${PLATFORM}/simple"
@@ -228,6 +235,8 @@ echo "Bootstrap verification passed."
 echo "Stage 4: compiling full CLI (main.spl) with verified bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
+rm -rf .simple/native_cache/
+SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
 "${stage3}" native-build \
   --entry src/app/cli/main.spl \
   -o "${full_dir}/simple"
