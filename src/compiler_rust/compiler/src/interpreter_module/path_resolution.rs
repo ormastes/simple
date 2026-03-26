@@ -18,6 +18,16 @@ use tracing::trace;
 
 use crate::error::CompileError;
 
+fn normalize_base_dir(base_dir: &Path) -> PathBuf {
+    if base_dir.is_absolute() {
+        return base_dir.to_path_buf();
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(base_dir))
+        .unwrap_or_else(|_| base_dir.to_path_buf())
+}
+
 // Profiling counters (active when SIMPLE_PROFILE env var is set)
 static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -333,16 +343,17 @@ pub fn clear_path_resolution_cache() {
 /// Absolute path to the module file, or an error if not found
 pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
     RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    let normalized_base_dir = normalize_base_dir(base_dir);
 
     // Check cache first — O(1) hash lookup, no allocation
-    let cache_key = compute_cache_key(parts, base_dir);
+    let cache_key = compute_cache_key(parts, &normalized_base_dir);
     let cached = PATH_RESOLUTION_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
     if let Some(cached_result) = cached {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return cached_result.ok_or_else(|| crate::error::factory::cannot_resolve_module(&parts.join(".")));
     }
 
-    let result = resolve_module_path_uncached(parts, base_dir);
+    let result = resolve_module_path_uncached(parts, &normalized_base_dir);
 
     // Cache the result
     let cache_value = result.as_ref().ok().cloned();
@@ -351,6 +362,26 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
     });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_base_dir, resolve_module_path};
+    use std::path::Path;
+
+    #[test]
+    fn normalizes_relative_base_dirs_to_absolute_paths() {
+        let normalized = normalize_base_dir(Path::new("src/lib/nogc_sync_mut/test_runner"));
+        assert!(normalized.is_absolute());
+        assert!(normalized.ends_with("src/lib/nogc_sync_mut/test_runner"));
+    }
+
+    #[test]
+    fn resolves_std_io_from_relative_base_dir() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let resolved = resolve_module_path(&parts, Path::new("src/lib/nogc_sync_mut/test_runner")).unwrap();
+        assert!(resolved.ends_with("src/lib/nogc_sync_mut/io.spl"));
+    }
 }
 
 fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {

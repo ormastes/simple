@@ -33,6 +33,48 @@ use super::path_resolution::resolve_module_path;
 
 type Enums = HashMap<String, EnumDef>;
 
+fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
+    match &use_stmt.target {
+        ImportTarget::Group(items) => Some(
+            items.iter()
+                .filter_map(|item| match item {
+                    ImportTarget::Single(name) => Some(name.clone()),
+                    ImportTarget::Aliased { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn sibling_might_define_requested_names(path: &Path, requested_names: &[String]) -> bool {
+    if requested_names.is_empty() {
+        return true;
+    }
+
+    let Ok(source) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    requested_names.iter().any(|name| {
+        let fn_pat = format!("fn {}(", name);
+        let extern_pat = format!("extern fn {}(", name);
+        let class_pat = format!("class {}", name);
+        let struct_pat = format!("struct {}", name);
+        let enum_pat = format!("enum {}", name);
+        let trait_pat = format!("trait {}", name);
+        let let_pat = format!("let {}", name);
+        source.contains(&fn_pat)
+            || source.contains(&extern_pat)
+            || source.contains(&class_pat)
+            || source.contains(&struct_pat)
+            || source.contains(&enum_pat)
+            || source.contains(&trait_pat)
+            || source.contains(&let_pat)
+    })
+}
+
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
     match &use_stmt.target {
         ImportTarget::Group(_) | ImportTarget::Glob => {
@@ -376,6 +418,7 @@ pub fn load_and_merge_module(
                 if let Some(dir) = parent_dir {
                     let mut merged_exports: HashMap<String, Value> = HashMap::new();
                     // Collect sibling .spl files (not __init__.spl itself)
+                    let requested_names = requested_group_import_names(use_stmt);
                     if let Ok(entries) = fs::read_dir(dir) {
                         let mut sibling_files: Vec<std::path::PathBuf> = entries
                             .filter_map(|e| e.ok())
@@ -385,6 +428,9 @@ pub fn load_and_merge_module(
                                     && p.file_name().map_or(false, |f| f != "__init__.spl")
                                     && p.file_name().map_or(false, |f| f != "mod_stub.spl")
                                     && p.is_file()
+                                    && requested_names
+                                        .as_ref()
+                                        .is_none_or(|names| sibling_might_define_requested_names(p, names))
                             })
                             .collect();
                         // Sort for deterministic load order; mod.spl first if present
@@ -558,10 +604,13 @@ pub fn load_and_merge_module(
 
 #[cfg(test)]
 mod tests {
-    use super::prefer_package_init_for_member_import;
+    use super::{load_and_merge_module, prefer_package_init_for_member_import};
+    use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
     use std::fs;
+    use std::path::Path;
+    use std::collections::HashMap;
 
     fn use_stmt_with_target(target: ImportTarget) -> UseStmt {
         UseStmt {
@@ -611,5 +660,75 @@ mod tests {
         );
 
         assert_eq!(resolved, file_path);
+    }
+
+    fn use_stmt_with_path(path: &[&str], target: ImportTarget) -> UseStmt {
+        UseStmt {
+            span: Span::new(0, 0, 0, 0),
+            path: ModulePath {
+                segments: path.iter().map(|s| s.to_string()).collect(),
+            },
+            target,
+            is_type_only: false,
+            is_lazy: false,
+        }
+    }
+
+    #[test]
+    fn loads_real_exports_from_nogc_sync_mut_io_package() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["std", "nogc_sync_mut", "io"],
+                ImportTarget::Group(vec![
+                    ImportTarget::Single("env_get".to_string()),
+                    ImportTarget::Single("dir_walk".to_string()),
+                ]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("dir_walk"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_real_exports_from_std_io_package() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["std", "io"],
+                ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
     }
 }

@@ -11,6 +11,102 @@ use simple_parser::Parser;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::CompileError as _;
 
+fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
+    match &use_stmt.target {
+        ImportTarget::Group(_) | ImportTarget::Glob => {
+            if resolved.extension().is_some_and(|ext| ext == "spl")
+                && resolved.file_name().is_none_or(|name| name != "__init__.spl")
+            {
+                let package_init = resolved.with_extension("").join("__init__.spl");
+                if package_init.exists() && package_init.is_file() {
+                    return package_init;
+                }
+            }
+            resolved
+        }
+        _ => resolved,
+    }
+}
+
+fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
+    match target {
+        ImportTarget::Glob => {}
+        ImportTarget::Single(name) => out.push(name.clone()),
+        ImportTarget::Aliased { name, .. } => out.push(name.clone()),
+        ImportTarget::Group(targets) => {
+            for nested in targets {
+                requested_import_names(nested, out);
+            }
+        }
+    }
+}
+
+fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
+    if requested_names.is_empty() {
+        return true;
+    }
+
+    let Ok(source) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    requested_names.iter().any(|name| {
+        let fn_pat = format!("fn {}(", name);
+        let extern_pat = format!("extern fn {}(", name);
+        let class_pat = format!("class {}", name);
+        let struct_pat = format!("struct {}", name);
+        let enum_pat = format!("enum {}", name);
+        let trait_pat = format!("trait {}", name);
+        let let_pat = format!("let {}", name);
+        let const_pat = format!("const {}", name);
+        source.contains(&fn_pat)
+            || source.contains(&extern_pat)
+            || source.contains(&class_pat)
+            || source.contains(&struct_pat)
+            || source.contains(&enum_pat)
+            || source.contains(&trait_pat)
+            || source.contains(&let_pat)
+            || source.contains(&const_pat)
+    })
+}
+
+fn load_matching_package_siblings(
+    package_init_path: &Path,
+    use_stmt: &UseStmt,
+    visited: &mut HashSet<PathBuf>,
+    importing_capabilities: Option<&[Capability]>,
+) -> Result<Vec<Node>, CompileError> {
+    let Some(package_dir) = package_init_path.parent() else {
+        return Ok(Vec::new());
+    };
+
+    let mut requested_names = Vec::new();
+    requested_import_names(&use_stmt.target, &mut requested_names);
+
+    let mut sibling_files: Vec<PathBuf> = match fs::read_dir(package_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "spl")
+                    && path.file_name().is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                    && path.is_file()
+                    && file_might_define_requested_symbol(path, &requested_names)
+            })
+            .collect(),
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    sibling_files.sort();
+
+    let mut collected = Vec::new();
+    for sibling_path in sibling_files {
+        let imported = load_module_with_imports_validated(&sibling_path, visited, importing_capabilities)?;
+        collected.extend(imported.items);
+    }
+
+    Ok(collected)
+}
+
 /// Display parser error hints (warnings, etc.) to stderr
 fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     let hints = parser.error_hints();
@@ -424,7 +520,15 @@ pub fn load_module_with_imports_validated(
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
-                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    imported.items.extend(load_matching_package_siblings(
+                        &resolved,
+                        use_stmt,
+                        visited,
+                        Some(effective_caps),
+                    )?);
+                }
 
                 // Validate imported functions against our capabilities
                 if !effective_caps.is_empty() {
@@ -464,7 +568,15 @@ pub fn load_module_with_imports_validated(
                 is_lazy: false,
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    imported.items.extend(load_matching_package_siblings(
+                        &resolved,
+                        &temp_use,
+                        visited,
+                        Some(effective_caps),
+                    )?);
+                }
 
                 if !effective_caps.is_empty() {
                     let func_effects = extract_function_effects(&imported);
@@ -495,7 +607,15 @@ pub fn load_module_with_imports_validated(
                 is_lazy: false,
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    imported.items.extend(load_matching_package_siblings(
+                        &resolved,
+                        &temp_use,
+                        visited,
+                        Some(effective_caps),
+                    )?);
+                }
 
                 if !effective_caps.is_empty() {
                     let func_effects = extract_function_effects(&imported);
@@ -528,7 +648,15 @@ pub fn load_module_with_imports_validated(
                     is_lazy: false,
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                    let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                    let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                        imported.items.extend(load_matching_package_siblings(
+                            &resolved,
+                            &temp_use,
+                            visited,
+                            Some(effective_caps),
+                        )?);
+                    }
 
                     // Validate imported functions against our capabilities
                     if !effective_caps.is_empty() {
@@ -595,7 +723,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     }
     resolved.set_extension("spl");
     if resolved.exists() && resolved.is_file() {
-        return Some(resolved);
+        return Some(prefer_package_init_for_member_import(resolved, use_stmt));
     }
 
     // Try __init__.spl in directory (Python-style package imports)
@@ -635,7 +763,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             }
             parent_resolved.set_extension("spl");
             if parent_resolved.exists() && parent_resolved.is_file() {
-                return Some(parent_resolved);
+                return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
             }
 
             // Try __init__.spl
@@ -670,6 +798,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     for _ in 0..10 {
         // Try various stdlib locations (matching interpreter behavior)
         for stdlib_subpath in &[
+            "src/lib",
             // Preferred: repo layout uses src/std/*
             "src/std",
             // Legacy layouts kept for compatibility with older checkouts
@@ -700,7 +829,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                     }
                     stdlib_path.set_extension("spl");
                     if stdlib_path.exists() && stdlib_path.is_file() {
-                        return Some(stdlib_path);
+                        return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
                     }
 
                     // Also try __init__.spl in stdlib
@@ -724,6 +853,34 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                     if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
                         return Some(stdlib_mod_path);
                     }
+
+                    for subdir in &[
+                        "nogc_async_mut",
+                        "nogc_sync_mut",
+                        "nogc_async_immut",
+                        "common",
+                        "gc_async_mut",
+                        "nogc_async_mut_noalloc",
+                    ] {
+                        let mut sub_path = stdlib_candidate.join(subdir);
+                        for part in &stdlib_parts {
+                            sub_path = sub_path.join(part);
+                        }
+                        sub_path.set_extension("spl");
+                        if sub_path.exists() && sub_path.is_file() {
+                            return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+                        }
+
+                        let mut sub_init_path = stdlib_candidate.join(subdir);
+                        for part in &stdlib_parts {
+                            sub_init_path = sub_init_path.join(part);
+                        }
+                        sub_init_path = sub_init_path.join("__init__");
+                        sub_init_path.set_extension("spl");
+                        if sub_init_path.exists() && sub_init_path.is_file() {
+                            return Some(sub_init_path);
+                        }
+                    }
                 }
             }
         }
@@ -740,6 +897,10 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
+    use simple_parser::token::Span;
+    use std::collections::HashSet;
+    use std::path::Path;
 
     #[test]
     fn test_startup_app_type_parsing() {
@@ -775,6 +936,49 @@ mod tests {
         assert_eq!(config.app_type, StartupAppType::Cli);
         assert!(!config.has_app_type);
         assert!(!config.has_window_hints);
+    }
+
+    fn use_stmt(path: &[&str], target: ImportTarget) -> UseStmt {
+        UseStmt {
+            span: Span::new(0, 0, 0, 0),
+            path: ModulePath::new(path.iter().map(|s| s.to_string()).collect()),
+            target,
+            is_type_only: false,
+            is_lazy: false,
+        }
+    }
+
+    #[test]
+    fn resolves_std_io_to_package_init_from_src_lib() {
+        let resolved = resolve_use_to_path(
+            &use_stmt(
+                &["std", "io"],
+                ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())]),
+            ),
+            Path::new("src/lib/nogc_sync_mut/test_runner"),
+        )
+        .unwrap();
+
+        assert!(resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl"));
+    }
+
+    #[test]
+    fn flattens_std_io_group_imports_into_module_items() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("main.spl");
+        fs::write(
+            &entry,
+            "use std.io.{env_get}\nfn main() -> int:\n    env_get(\"HOME\").len()\n",
+        )
+        .unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_env_get = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "env_get"));
+
+        assert!(has_env_get);
     }
 
     #[test]
