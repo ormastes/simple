@@ -14,6 +14,7 @@
 #   )
 
 use common.ui.widget.{WidgetNode, UITree, WidgetProp}
+use common.ui.profile.{Orientation, SizeClass, LayoutProfile, ProfileSet}
 
 # =========================================================================
 # Container Builders
@@ -412,3 +413,87 @@ fn with_on_focus(node: WidgetNode, handler_id: text) -> WidgetNode:
 fn with_on_blur(node: WidgetNode, handler_id: text) -> WidgetNode:
     """Set the on_blur lifecycle handler id on a widget."""
     return node.set_prop("on_blur", handler_id)
+
+# =========================================================================
+# Adaptive / Responsive Builders
+# =========================================================================
+
+fn adaptive(id: text, landscape: WidgetNode, portrait: WidgetNode) -> ProfileSet:
+    """Create a profile set with landscape and portrait variants.
+
+    sdoctest:
+        val ps = adaptive("main", row("r", []), column("c", []))
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
+    """
+    var ps = ProfileSet.new(landscape)
+    ps = ps.with_landscape(landscape)
+    ps = ps.with_portrait(portrait)
+    return ps
+
+fn with_profile(node: WidgetNode, orientation: Orientation, alternate: WidgetNode) -> ProfileSet:
+    """Create a profile set with a default and one orientation-specific alternate.
+
+    sdoctest:
+        val ps = with_profile(row("r", []), Orientation.Portrait, column("c", []))
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
+    """
+    var ps = ProfileSet.new(node)
+    match orientation:
+        Orientation.Portrait:
+            ps = ps.with_portrait(alternate)
+        Orientation.Landscape | Orientation.Square:
+            ps = ps.with_landscape(alternate)
+    return ps
+
+fn adaptive_stack(id: text, children: [WidgetNode], profile: LayoutProfile) -> WidgetNode:
+    """Row in landscape, column in portrait. Like SwiftUI ViewThatFits.
+
+    sdoctest:
+        val p = LayoutProfile(horizontal: SizeClass.Regular, vertical: SizeClass.Compact, orientation: Orientation.Landscape, width: 120, height: 40)
+        val node = adaptive_stack("s", [], p)
+        expect(node.layout_name()).to_equal("hbox")
+    """
+    if profile.is_landscape():
+        return row(id, children)
+    return column(id, children)
+
+fn adaptive_sidebar(id: text, sidebar: WidgetNode, content: WidgetNode, profile: LayoutProfile) -> WidgetNode:
+    """Sidebar visible in Regular+, hidden in Compact."""
+    match profile.horizontal:
+        SizeClass.Compact:
+            return column(id, [content])
+        SizeClass.Regular:
+            val sb = with_width(with_flex(sidebar, 1), profile.width / 4)
+            val ct = with_flex(content, 3)
+            return row(id, [sb, ct])
+        SizeClass.Expanded:
+            val sb = with_width(with_flex(sidebar, 1), profile.width / 3)
+            val ct = with_flex(content, 2)
+            return row(id, [sb, ct])
+
+fn adaptive_grid(id: text, children: [WidgetNode], profile: LayoutProfile) -> WidgetNode:
+    """Grid with 1 col in Compact, 2 in Regular, 3+ in Expanded."""
+    val cols = match profile.horizontal:
+        SizeClass.Compact: 1
+        SizeClass.Regular: 2
+        SizeClass.Expanded: 3
+    var node = grid(id, children)
+    node = node.set_prop("columns", "{cols}")
+    return node
+
+fn responsive(id: text, profile: LayoutProfile, compact: WidgetNode, regular: WidgetNode, expanded: WidgetNode) -> WidgetNode:
+    """Pick a widget variant based on horizontal size class."""
+    match profile.horizontal:
+        SizeClass.Compact:
+            return compact
+        SizeClass.Regular:
+            return regular
+        SizeClass.Expanded:
+            return expanded
+
+fn responsive_if_wide(id: text, profile: LayoutProfile, narrow: WidgetNode, wide: WidgetNode) -> WidgetNode:
+    """Two-variant responsive: narrow (Compact) vs wide (Regular+)."""
+    if profile.horizontal == SizeClass.Compact:
+        return narrow
+    return wide

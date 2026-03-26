@@ -2893,9 +2893,16 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).
 fn find_native_all_library() -> Option<PathBuf> {
-    // Check env var override first
+    // Check env var overrides first
     if let Ok(path) = std::env::var("SIMPLE_NATIVE_ALL_PATH") {
         let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Also check SIMPLE_RUNTIME_PATH for native_all library
+    if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+        let p = PathBuf::from(&path).join("libsimple_native_all.a");
         if p.exists() {
             return Some(p);
         }
@@ -2946,6 +2953,22 @@ fn find_native_all_library() -> Option<PathBuf> {
 
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
+    // Check env var override first
+    if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+        let p = PathBuf::from(&path);
+        // Check for both runtime and native_all in the given directory
+        for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
+            let lib = p.join(name);
+            if lib.exists() {
+                return Some(lib);
+            }
+        }
+        // Maybe the path IS the library file directly
+        if p.exists() && p.is_file() {
+            return Some(p);
+        }
+    }
+
     // Check common locations
     let mut candidates: Vec<&str> = vec![
         // Bootstrap profile (smallest optimized build, used for seed compiler)
