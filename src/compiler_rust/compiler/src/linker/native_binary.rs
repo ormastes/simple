@@ -339,18 +339,19 @@ impl NativeBinaryOptions {
     /// 2. Adjacent to the current executable (for installed binaries)
     /// 3. Cargo target directory (for development)
     pub fn find_runtime_library_path() -> Option<PathBuf> {
-        // Check environment variable first
-        match std::env::var("SIMPLE_RUNTIME_PATH") {
-            Ok(path) => {
-                let p = PathBuf::from(&path);
-                let lib_path = p.join("libsimple_runtime.a");
-                eprintln!("[RUNTIME_SEARCH] env SIMPLE_RUNTIME_PATH={}, dir_exists={}, lib_exists={}", path, p.exists(), lib_path.exists());
-                if p.exists() {
-                    return Some(p);
-                }
+        // Check environment variable first (runtime)
+        if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return Some(p);
             }
-            Err(e) => {
-                eprintln!("[RUNTIME_SEARCH] SIMPLE_RUNTIME_PATH not set: {}", e);
+        }
+
+        // Check compile-time embedded path (for bootstrapped binaries)
+        if let Some(path) = option_env!("SIMPLE_RUNTIME_PATH") {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Some(p);
             }
         }
 

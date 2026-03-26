@@ -1,7 +1,7 @@
 #!/bin/bash
 # System test: MCP simple_check and simple_test tools
 # Verifies that the async bg_task_spawn conversion works correctly
-# by piping JSON-RPC messages to the MCP server and checking responses.
+# by piping framed MCP JSON-RPC messages to the server and checking responses.
 
 set -e
 
@@ -9,28 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_DIR"
 
-# Find runtime binary (same logic as bin/simple_mcp_server)
-find_runtime() {
-  if [ -n "${SIMPLE_RUNTIME:-}" ] && [ -x "$SIMPLE_RUNTIME" ]; then
-    echo "$SIMPLE_RUNTIME"; return
-  fi
-  local arch=$(uname -m) os=$(uname -s | tr '[:upper:]' '[:lower:]')
-  case "$arch" in x86_64|amd64) arch="x86_64" ;; aarch64|arm64) arch="arm64" ;; esac
-  case "$os" in linux) os="linux" ;; darwin) os="macos" ;; esac
-  local platform="${os}-${arch}"
-  local platform_bin="bin/release/${platform}/simple"
-  if [ -x "$platform_bin" ]; then echo "$platform_bin"; return; fi
-  if [ -x "bin/release/simple" ]; then echo "bin/release/simple"; return; fi
-  echo "bin/simple"
-}
+MCP_SERVER="bin/simple_mcp_server"
 
-RUNTIME="$(find_runtime)"
-MCP_MAIN="src/app/mcp/main.spl"
-export SIMPLE_LIB="$PROJECT_DIR/src"
-export SIMPLE_LOG=error
-
-echo "Using runtime: $RUNTIME"
-echo "MCP entry: $MCP_MAIN"
+echo "Using MCP server: $MCP_SERVER"
 
 PASS=0
 FAIL=0
@@ -52,10 +33,22 @@ check_result() {
     fi
 }
 
-# Helper: send JSON-RPC messages to MCP server and capture output
+# Helper: frame a JSON-RPC body as an MCP stdio message.
+frame_mcp() {
+    local body="$1"
+    local len=${#body}
+    printf 'Content-Length: %s\r\n\r\n%s' "$len" "$body"
+}
+
+# Helper: send framed MCP messages to MCP server and capture output
 run_mcp() {
-    local messages="$1"
-    echo "$messages" | timeout 120 "$RUNTIME" "$MCP_MAIN" 2>/dev/null || true
+    local bodies=("$@")
+    {
+        local body
+        for body in "${bodies[@]}"; do
+            frame_mcp "$body"
+        done
+    } | timeout 120 "$MCP_SERVER" 2>/dev/null || true
 }
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
@@ -69,7 +62,7 @@ echo ""
 echo "Test 1: simple_check on valid file"
 CHECK_VALID='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"simple_check","arguments":{"path":"test/system/mcp/fixtures/tiny_valid.spl"}}}'
 
-OUTPUT1=$(run_mcp "$(printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$CHECK_VALID")")
+OUTPUT1=$(run_mcp "$INIT" "$INITIALIZED" "$CHECK_VALID")
 
 check_result "returns jsonrpc response" "$OUTPUT1" '"jsonrpc"'
 check_result "returns id 2" "$OUTPUT1" '"id":2'
@@ -88,7 +81,7 @@ echo ""
 echo "Test 2: simple_check with missing path"
 CHECK_MISSING='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"simple_check","arguments":{}}}'
 
-OUTPUT2=$(run_mcp "$(printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$CHECK_MISSING")")
+OUTPUT2=$(run_mcp "$INIT" "$INITIALIZED" "$CHECK_MISSING")
 
 check_result "missing path returns error" "$OUTPUT2" 'Missing required parameter'
 
@@ -98,7 +91,7 @@ echo ""
 echo "Test 3: simple_test on tiny spec"
 TEST_SPEC='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"simple_test","arguments":{"path":"test/system/mcp/fixtures/tiny_test_spec.spl"}}}'
 
-OUTPUT3=$(run_mcp "$(printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$TEST_SPEC")")
+OUTPUT3=$(run_mcp "$INIT" "$INITIALIZED" "$TEST_SPEC")
 
 check_result "test returns jsonrpc" "$OUTPUT3" '"jsonrpc"'
 check_result "test returns id 4" "$OUTPUT3" '"id":4'
@@ -117,7 +110,7 @@ echo ""
 echo "Test 4: simple_test --list"
 TEST_LIST='{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"simple_test","arguments":{"list":"true"}}}'
 
-OUTPUT4=$(run_mcp "$(printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$TEST_LIST")")
+OUTPUT4=$(run_mcp "$INIT" "$INITIALIZED" "$TEST_LIST")
 
 check_result "test list returns jsonrpc" "$OUTPUT4" '"jsonrpc"'
 check_result "test list returns id 5" "$OUTPUT4" '"id":5'
@@ -127,7 +120,7 @@ echo ""
 # --- Test 5: Timing test — check should respond without excessive blocking ---
 echo "Test 5: Response timing"
 START_TIME=$(date +%s)
-OUTPUT5=$(run_mcp "$(printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$CHECK_VALID")")
+OUTPUT5=$(run_mcp "$INIT" "$INITIALIZED" "$CHECK_VALID")
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 
