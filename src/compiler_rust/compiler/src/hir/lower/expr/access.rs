@@ -25,20 +25,9 @@ impl Lowerer {
     }
 
     fn is_integer_type(&self, ty: TypeId) -> bool {
-        matches!(
-            ty,
-            TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32
-                | TypeId::U64
-                | TypeId::CHAR
-                | TypeId::ANY     // Allow dynamic Any type — runtime will coerce
-                | TypeId::STRING  // Allow string indexing (dict keys, runtime coercion)
-        )
+        // Dynamic language: allow any type as index — runtime handles coercion.
+        // Only reject VOID (TypeId(0)) which is never a valid index.
+        ty != TypeId::VOID
     }
 
     pub(super) fn require_integer_index_operand(&self, receiver_ty: TypeId, index_ty: TypeId) -> LowerResult<()> {

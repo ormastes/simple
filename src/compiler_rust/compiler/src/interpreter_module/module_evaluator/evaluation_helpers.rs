@@ -319,6 +319,7 @@ pub(super) fn process_imports_and_assignments(
                     global_functions,
                     global_classes,
                     global_enums,
+                    exports,
                 )?;
             }
             Node::Let(stmt) => {
@@ -389,6 +390,7 @@ fn process_use_stmt(
     global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
+    exports: &mut HashMap<String, Value>,
 ) -> Result<(), CompileError> {
     // Skip type-only imports at runtime - they're only for compile-time type checking
     if use_stmt.is_type_only {
@@ -424,9 +426,10 @@ fn process_use_stmt(
     ) {
         Ok(value) => {
             // Unpack module exports into current namespace
-            if let Value::Dict(exports) = &value {
-                for (name, export_value) in exports {
+            if let Value::Dict(module_exports) = &value {
+                for (name, export_value) in module_exports {
                     env.insert(name.clone(), export_value.clone());
+                    exports.insert(name.clone(), export_value.clone());
                 }
             }
             // For glob imports, don't overwrite the unpacked exports with the module dict
