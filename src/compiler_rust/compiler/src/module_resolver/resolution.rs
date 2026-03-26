@@ -43,6 +43,35 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
     None
 }
 
+fn resolve_stdlib_from_root(
+    resolver: &ModuleResolver,
+    root: &Path,
+    segments: &[String],
+    original_path: &ModulePath,
+) -> ResolveResult<ResolvedModule> {
+    if let Ok(resolved) = resolver.resolve_from_base(root, segments, original_path) {
+        return Ok(resolved);
+    }
+
+    for subdir in &[
+        "nogc_async_mut",
+        "nogc_sync_mut",
+        "nogc_async_immut",
+        "common",
+        "gc_async_mut",
+        "nogc_async_mut_noalloc",
+    ] {
+        let candidate = root.join(subdir);
+        if candidate.is_dir() {
+            if let Ok(resolved) = resolver.resolve_from_base(&candidate, segments, original_path) {
+                return Ok(resolved);
+            }
+        }
+    }
+
+    Err(CompileError::semantic("stdlib module not found".to_string()))
+}
+
 impl ModuleResolver {
     /// Resolve a module path to a filesystem path
     ///
@@ -82,19 +111,37 @@ impl ModuleResolver {
 
                 // Strategy 1: Try stdlib
                 if segments[0] != "crate" {
-                    if let Some(ref stdlib_root) = self.stdlib_root {
-                        let stdlib_segments = if !segments.is_empty() && segments[0] == "std_lib" {
-                            &segments[1..]
-                        } else if !segments.is_empty() && (segments[0] == "std" || segments[0] == "lib") {
-                            // std.X and lib.X both resolve from stdlib
-                            &segments[1..]
-                        } else {
-                            segments
-                        };
+                    let stdlib_segments = if !segments.is_empty() && segments[0] == "std_lib" {
+                        &segments[1..]
+                    } else if !segments.is_empty() && (segments[0] == "std" || segments[0] == "lib") {
+                        &segments[1..]
+                    } else {
+                        segments
+                    };
 
-                        if !stdlib_segments.is_empty() {
-                            if let Ok(resolved) = self.resolve_from_base(stdlib_root, stdlib_segments, path) {
-                                return Ok(resolved);
+                    if !stdlib_segments.is_empty() {
+                        let mut stdlib_roots = vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
+                        if let Some(ref stdlib_root) = self.stdlib_root {
+                            stdlib_roots.push(stdlib_root.clone());
+                        }
+
+                        for root in stdlib_roots {
+                            if root.is_dir() {
+                                if stdlib_segments.len() == 1 && stdlib_segments[0] == "io" {
+                                    let compat_root = root.join("nogc_sync_mut");
+                                    if compat_root.is_dir() {
+                                        if let Ok(resolved) =
+                                            self.resolve_from_base(&compat_root, stdlib_segments, path)
+                                        {
+                                            return Ok(resolved);
+                                        }
+                                    }
+                                }
+                                if let Ok(resolved) =
+                                    resolve_stdlib_from_root(self, &root, stdlib_segments, path)
+                                {
+                                    return Ok(resolved);
+                                }
                             }
                         }
                     }

@@ -822,6 +822,13 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                 };
 
                 if !stdlib_parts.is_empty() {
+                    if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+                        let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
+                        if compat_init.exists() && compat_init.is_file() {
+                            return Some(compat_init);
+                        }
+                    }
+
                     // Try resolving from stdlib
                     let mut stdlib_path = stdlib_candidate.clone();
                     for part in &stdlib_parts {
@@ -862,15 +869,6 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                         "gc_async_mut",
                         "nogc_async_mut_noalloc",
                     ] {
-                        let mut sub_path = stdlib_candidate.join(subdir);
-                        for part in &stdlib_parts {
-                            sub_path = sub_path.join(part);
-                        }
-                        sub_path.set_extension("spl");
-                        if sub_path.exists() && sub_path.is_file() {
-                            return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
-                        }
-
                         let mut sub_init_path = stdlib_candidate.join(subdir);
                         for part in &stdlib_parts {
                             sub_init_path = sub_init_path.join(part);
@@ -879,6 +877,15 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                         sub_init_path.set_extension("spl");
                         if sub_init_path.exists() && sub_init_path.is_file() {
                             return Some(sub_init_path);
+                        }
+
+                        let mut sub_path = stdlib_candidate.join(subdir);
+                        for part in &stdlib_parts {
+                            sub_path = sub_path.join(part);
+                        }
+                        sub_path.set_extension("spl");
+                        if sub_path.exists() && sub_path.is_file() {
+                            return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
                         }
                     }
                 }

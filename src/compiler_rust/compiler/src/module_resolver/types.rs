@@ -190,17 +190,42 @@ impl ModuleResolver {
 
     /// Create a resolver for single-file mode (no project)
     pub fn single_file(file_path: &std::path::Path) -> Self {
-        let parent = file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let normalized_file_path = if file_path.is_absolute() {
+            file_path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(file_path))
+                .unwrap_or_else(|_| file_path.to_path_buf())
+        };
+        let parent = normalized_file_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let mut project_root = parent.clone();
+        loop {
+            if project_root.join("src").is_dir() || project_root.join("Cargo.toml").is_file() {
+                break;
+            }
+            if !project_root.pop() {
+                project_root = parent.clone();
+                break;
+            }
+        }
+        let source_root = if project_root.join("src").is_dir() {
+            project_root.join("src")
+        } else {
+            parent.clone()
+        };
 
         // Try to detect stdlib even in single-file mode
         // Check multiple possible stdlib locations
-        let stdlib_candidates = ["src/std/src", "src/lib/std/src", "simple/std_lib/src", "std_lib/src"];
+        let stdlib_candidates = ["src/lib", "src/std", "src/std/src", "src/lib/std/src", "simple/std_lib/src", "std_lib/src"];
 
         let stdlib_root = {
             // First try relative to current file
             let mut found = None;
             for candidate_path in &stdlib_candidates {
-                let candidate = parent.join(candidate_path);
+                let candidate = project_root.join(candidate_path);
                 if candidate.exists() {
                     found = Some(candidate);
                     break;
@@ -229,8 +254,8 @@ impl ModuleResolver {
         };
 
         Self {
-            project_root: parent.clone(),
-            source_root: parent,
+            project_root,
+            source_root,
             stdlib_root,
             manifests: HashMap::new(),
             features: HashSet::new(),

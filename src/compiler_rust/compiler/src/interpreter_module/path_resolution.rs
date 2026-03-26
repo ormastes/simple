@@ -367,7 +367,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
 #[cfg(test)]
 mod tests {
     use super::{normalize_base_dir, resolve_module_path};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn normalizes_relative_base_dirs_to_absolute_paths() {
@@ -379,8 +379,20 @@ mod tests {
     #[test]
     fn resolves_std_io_from_relative_base_dir() {
         let parts = vec!["std".to_string(), "io".to_string()];
-        let resolved = resolve_module_path(&parts, Path::new("src/lib/nogc_sync_mut/test_runner")).unwrap();
-        assert!(resolved.ends_with("src/lib/nogc_sync_mut/io.spl"));
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+        assert!(
+            resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
+                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
     }
 }
 
@@ -486,6 +498,13 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                 let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
+                if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+                    let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
+                    if compat_init.exists() && compat_init.is_file() {
+                        return Ok(compat_init);
+                    }
+                }
+
                 // Try module.spl
                 let mut stdlib_path = stdlib_candidate.join(&stdlib_relative);
                 stdlib_path.set_extension("spl");
@@ -509,16 +528,16 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     "gc_async_mut",
                     "nogc_async_mut_noalloc",
                 ] {
-                    let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
-                    sub_path.set_extension("spl");
-                    if sub_path.exists() && sub_path.is_file() {
-                        return Ok(sub_path);
-                    }
                     // Also try __init__.spl in subdirectory
                     let mut sub_init = stdlib_candidate.join(subdir).join(&stdlib_relative);
                     sub_init.push("__init__.spl");
                     if sub_init.exists() && sub_init.is_file() {
                         return Ok(sub_init);
+                    }
+                    let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
+                    sub_path.set_extension("spl");
+                    if sub_path.exists() && sub_path.is_file() {
+                        return Ok(sub_path);
                     }
                 }
 
