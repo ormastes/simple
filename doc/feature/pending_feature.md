@@ -1,7 +1,7 @@
 # Pending Features
 
 **Generated:** 2026-03-26
-**Total Pending:** 0 features
+**Total Pending:** 3 features
 
 ## Summary
 
@@ -9,10 +9,24 @@
 |--------|-------|---------|
 | Failed | 0 | 🔴 Critical |
 | In Progress | 0 | 🟡 High |
-| Planned | 0 | 🟢 Medium |
+| Planned | 3 | 🟢 Medium |
 | Ignored | 0 | ⚪ Low |
 
-**Completion:** 0.0% (0 complete / 0 total)
+**Completion:** 0.0% (0 complete / 3 total)
+
+---
+
+## 🟢 Planned Features (3)
+
+Features specified but not yet implemented
+
+### Uncategorized (3)
+
+| ID | Feature | Description | Spec |
+|----|---------|-------------|------|
+| 700 | Database SDN table import/export | Simple DB supports reading and writing table data as SDN named tables. | [spec](/home/ormastes/dev/pub/simple/test/rust/system/db_sdn_spec.spl) |
+| 700.1 | Export users table to SDN | When a table is exported, the SDN file contains a named table whose | [spec](/home/ormastes/dev/pub/simple/test/rust/system/db_sdn_spec.spl) |
+| 700.2 | Import users table from SDN | When a table is imported, each SDN row is inserted as a database row. | [spec](/home/ormastes/dev/pub/simple/test/rust/system/db_sdn_spec.spl) |
 
 ---
 
@@ -20,6 +34,7 @@
 
 | Category | Total | Complete | Pending | % Complete |
 |----------|-------|----------|---------|------------|
+| Uncategorized | 3 | 0 | 3 | 0.0% |
 
 ---
 
@@ -31,5 +46,6 @@
 3. Planned features with dependencies
 
 ### Medium (Backlog)
+4. Remaining planned features (3 features)
 
 ### Low (Future)

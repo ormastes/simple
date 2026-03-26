@@ -549,6 +549,17 @@ fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<Pat
         test_files.retain(|path| is_skip_test_file(path));
     }
 
+    // Filter out files marked # @pending unless --only-skipped is set
+    if !options.only_skipped {
+        test_files.retain(|path| {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                !content.contains("# @pending")
+            } else {
+                true
+            }
+        });
+    }
+
     debug_log!(DebugLevel::Basic, "Discovery", "Found {} test files", test_files.len());
 
     // Apply tag filter

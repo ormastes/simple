@@ -1,0 +1,499 @@
+"""
+Diagram Generation Module
+
+Stub implementation for test compatibility.
+Provides CallEventRecorder, CallEvent, CallType, and diagram generators.
+"""
+
+# ================================================================
+# CallType enum
+# ================================================================
+
+enum CallType:
+    Direct
+    Method
+    Constructor
+    Static
+
+# ================================================================
+# CallEvent struct
+# ================================================================
+
+class CallEvent:
+    sequence_num: i64
+    timestamp: i64
+    caller: text
+    callee: text
+    caller_class: text?
+    callee_class: text?
+    arguments: [text]
+    call_type: CallType
+    depth: i64
+    is_return: bool
+    return_value: text?
+
+    static fn new_call(
+        sequence_num: i64,
+        timestamp: i64,
+        caller: text,
+        callee: text,
+        caller_class: text?,
+        callee_class: text?,
+        arguments: [text],
+        call_type: CallType,
+        depth: i64
+    ) -> CallEvent:
+        CallEvent(
+            sequence_num: sequence_num,
+            timestamp: timestamp,
+            caller: caller,
+            callee: callee,
+            caller_class: caller_class,
+            callee_class: callee_class,
+            arguments: arguments,
+            call_type: call_type,
+            depth: depth,
+            is_return: false,
+            return_value: nil
+        )
+
+    static fn new_return(
+        sequence_num: i64,
+        timestamp: i64,
+        caller: text,
+        callee: text,
+        caller_class: text?,
+        callee_class: text?,
+        return_value: text?,
+        depth: i64
+    ) -> CallEvent:
+        CallEvent(
+            sequence_num: sequence_num,
+            timestamp: timestamp,
+            caller: caller,
+            callee: callee,
+            caller_class: caller_class,
+            callee_class: callee_class,
+            arguments: [],
+            call_type: CallType.Direct,
+            depth: depth,
+            is_return: true,
+            return_value: return_value
+        )
+
+    fn format_call() -> text:
+        val args_str = self.arguments.join(", ")
+        match self.callee_class:
+            case Some(cls):
+                "{cls}.{self.callee}({args_str})"
+            case nil:
+                "{self.callee}({args_str})"
+
+    fn format_return() -> text:
+        match self.return_value:
+            case Some(v): v
+            case nil: "(void)"
+
+    fn get_caller_participant() -> text:
+        match self.caller_class:
+            case Some(cls): cls
+            case nil: self.caller
+
+    fn get_callee_participant() -> text:
+        match self.callee_class:
+            case Some(cls): cls
+            case nil: self.callee
+
+# ================================================================
+# CallEventRecorder class
+# ================================================================
+
+class CallEventRecorder:
+    test_name: text
+    is_recording: bool
+    _events: [CallEvent]
+    _call_stack: [text]
+    _classes: [text]
+    _architectural: [text]
+
+    static fn new(test_name: text) -> CallEventRecorder:
+        CallEventRecorder(
+            test_name: test_name,
+            is_recording: true,
+            _events: [],
+            _call_stack: [],
+            _classes: [],
+            _architectural: []
+        )
+
+    fn event_count() -> i64:
+        self._events.len()
+
+    fn current_depth() -> i64:
+        self._call_stack.len()
+
+    me record_call(callee: text, callee_class: text?, arguments: [text], call_type: CallType):
+        if not self.is_recording:
+            return ()
+        val caller = if self._call_stack.len() > 0:
+            self._call_stack[self._call_stack.len() - 1]
+        else:
+            "({self.test_name})"
+        val event = CallEvent.new_call(
+            self._events.len(), 0, caller, callee,
+            nil, callee_class, arguments, call_type,
+            self._call_stack.len()
+        )
+        self._events.push(event)
+        self._call_stack.push(callee)
+        match callee_class:
+            case Some(cls):
+                if not self._classes.contains(cls):
+                    self._classes.push(cls)
+            case nil: pass_dn
+
+    me record_return(return_value: text?):
+        if not self.is_recording:
+            return ()
+        val callee = if self._call_stack.len() > 0:
+            val top = self._call_stack[self._call_stack.len() - 1]
+            self._call_stack.pop()
+            top
+        else:
+            ""
+        val event = CallEvent.new_return(
+            self._events.len(), 0, "", callee,
+            nil, nil, return_value,
+            self._call_stack.len()
+        )
+        self._events.push(event)
+
+    fn get_events() -> [CallEvent]:
+        self._events
+
+    fn get_classes() -> [text]:
+        self._classes
+
+    me mark_architectural(entity: text):
+        if not self._architectural.contains(entity):
+            self._architectural.push(entity)
+
+    fn is_architectural(entity: text) -> bool:
+        self._architectural.contains(entity)
+
+    fn get_architectural_entities() -> [text]:
+        self._architectural
+
+    me stop():
+        self.is_recording = false
+
+    me start():
+        self.is_recording = true
+
+    me clear():
+        self._events = []
+        self._call_stack = []
+        self._classes = []
+        self._architectural = []
+
+# ================================================================
+# Convenience functions (module-level)
+# ================================================================
+
+fn record_call(rec: CallEventRecorder, callee: text, callee_class: text?, arguments: [text], call_type: CallType):
+    rec.record_call(callee, callee_class, arguments, call_type)
+
+fn record_return(rec: CallEventRecorder, return_value: text?):
+    rec.record_return(return_value)
+
+# ================================================================
+# DiagramConfig class
+# ================================================================
+
+class DiagramConfig:
+    diagram_type: text
+    include_timing: bool
+    include_args: bool
+    max_events: i64
+    include_filter: text
+    exclude_filter: text
+
+    static fn new() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: "sequence",
+            include_timing: true,
+            include_args: true,
+            max_events: 1000,
+            include_filter: "",
+            exclude_filter: ""
+        )
+
+    fn with_sequence() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: "sequence",
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn with_class_diagram() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: "class",
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn with_architecture() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: "arch",
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn without_timing() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: self.diagram_type,
+            include_timing: false,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn without_args() -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: self.diagram_type,
+            include_timing: self.include_timing,
+            include_args: false,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn with_max_events(n: i64) -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: self.diagram_type,
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: n,
+            include_filter: self.include_filter,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn with_include(pattern: text) -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: self.diagram_type,
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: pattern,
+            exclude_filter: self.exclude_filter
+        )
+
+    fn with_exclude(pattern: text) -> DiagramConfig:
+        DiagramConfig(
+            diagram_type: self.diagram_type,
+            include_timing: self.include_timing,
+            include_args: self.include_args,
+            max_events: self.max_events,
+            include_filter: self.include_filter,
+            exclude_filter: pattern
+        )
+
+# ================================================================
+# Pattern matching helpers
+# ================================================================
+
+fn _matches_pattern(name: text, pattern: text) -> bool:
+    if pattern == "":
+        return true
+    val parts = pattern.split(",")
+    for p in parts:
+        val trimmed = p.trim()
+        if trimmed.starts_with("*") and trimmed.ends_with("*"):
+            val mid = trimmed.slice(1, trimmed.len() - 1)
+            if name.contains(mid):
+                return true
+        elif trimmed.starts_with("*"):
+            val suffix = trimmed.slice(1, trimmed.len())
+            if name.ends_with(suffix):
+                return true
+        elif trimmed.ends_with("*"):
+            val prefix = trimmed.slice(0, trimmed.len() - 1)
+            if name.starts_with(prefix):
+                return true
+        elif name == trimmed:
+            return true
+    false
+
+fn _get_participant(event: CallEvent) -> text:
+    match event.callee_class:
+        case Some(cls): cls
+        case nil: event.callee
+
+fn _filter_events(events: [CallEvent], config: DiagramConfig) -> [CallEvent]:
+    var result = []
+    var count = 0
+    for event in events:
+        if count >= config.max_events:
+            break
+        val participant = _get_participant(event)
+        if config.include_filter != "" and not _matches_pattern(participant, config.include_filter):
+            continue
+        if config.exclude_filter != "" and _matches_pattern(participant, config.exclude_filter):
+            continue
+        result.push(event)
+        count += 1
+    result
+
+# ================================================================
+# Sequence diagram generator
+# ================================================================
+
+class SequenceGenerator:
+    _config: DiagramConfig
+
+    static fn new(config: DiagramConfig) -> SequenceGenerator:
+        SequenceGenerator(_config: config)
+
+fn generate_sequence(rec: CallEventRecorder, config: DiagramConfig) -> text:
+    var lines = ["```mermaid", "sequenceDiagram", "autonumber"]
+    val events = _filter_events(rec.get_events(), config)
+    var participants = []
+    for event in events:
+        if not event.is_return:
+            val p = _get_participant(event)
+            if not participants.contains(p):
+                participants.push(p)
+                lines.push("    participant {p}")
+    for event in events:
+        if event.is_return:
+            val callee_p = match event.callee_class:
+                case Some(cls): cls
+                case nil: event.callee
+            val caller_p = match event.caller_class:
+                case Some(cls): cls
+                case nil: event.caller
+            val rv = match event.return_value:
+                case Some(v): v
+                case nil: ""
+            lines.push("    {callee_p}-->>{caller_p}: {rv}")
+            lines.push("    deactivate {callee_p}")
+        else:
+            val callee_p = _get_participant(event)
+            val caller_p = if event.caller == "" or event.caller.starts_with("("):
+                "Client"
+            else:
+                event.caller
+            val label = if config.include_args:
+                val args = event.arguments.join(", ")
+                "{event.callee}({args})"
+            else:
+                event.callee
+            lines.push("    {caller_p}->>{callee_p}: {label}")
+            lines.push("    activate {callee_p}")
+            if config.include_timing:
+                lines.push("    Note over {callee_p}: {event.timestamp}ms")
+    lines.push("```")
+    lines.join("\n")
+
+fn to_mermaid_sequence(rec: CallEventRecorder) -> text:
+    generate_sequence(rec, DiagramConfig.new().with_sequence())
+
+# ================================================================
+# Class diagram generator
+# ================================================================
+
+class ClassDiagramGenerator:
+    _config: DiagramConfig
+
+    static fn new(config: DiagramConfig) -> ClassDiagramGenerator:
+        ClassDiagramGenerator(_config: config)
+
+fn generate_class_diagram(rec: CallEventRecorder, config: DiagramConfig) -> text:
+    var lines = ["```mermaid", "classDiagram"]
+    val events = _filter_events(rec.get_events(), config)
+    var class_methods: {text: [text]} = {}
+    for event in events:
+        if not event.is_return:
+            match event.callee_class:
+                case Some(cls):
+                    if not class_methods.contains_key(cls):
+                        class_methods[cls] = []
+                    val methods = class_methods[cls]
+                    if not methods.contains(event.callee):
+                        methods.push(event.callee)
+                case nil: pass_dn
+    for (cls, methods) in class_methods.items():
+        lines.push("    class {cls} {")
+        for m in methods:
+            lines.push("        +{m}()")
+        lines.push("    }")
+    lines.push("```")
+    lines.join("\n")
+
+fn to_mermaid_class(rec: CallEventRecorder) -> text:
+    generate_class_diagram(rec, DiagramConfig.new().with_class_diagram())
+
+# ================================================================
+# Architecture diagram generator
+# ================================================================
+
+class ArchDiagramGenerator:
+    _config: DiagramConfig
+
+    static fn new(config: DiagramConfig) -> ArchDiagramGenerator:
+        ArchDiagramGenerator(_config: config)
+
+fn generate_arch_diagram(rec: CallEventRecorder, config: DiagramConfig) -> text:
+    var lines = ["```mermaid", "flowchart TD"]
+    val events = _filter_events(rec.get_events(), config)
+    var arch_entities = []
+    for entity in rec.get_architectural_entities():
+        if config.include_filter != "" and not _matches_pattern(entity, config.include_filter):
+            continue
+        if config.exclude_filter != "" and _matches_pattern(entity, config.exclude_filter):
+            continue
+        arch_entities.push(entity)
+    for event in events:
+        if not event.is_return:
+            match event.callee_class:
+                case Some(cls):
+                    val is_package = cls.contains(".") or cls.contains("::")
+                    if is_package and not arch_entities.contains(cls):
+                        arch_entities.push(cls)
+                case nil: pass_dn
+    for entity in arch_entities:
+        if entity.contains("."):
+            val parts = entity.split(".")
+            val pkg = parts[0]
+            if not lines.contains("    subgraph {pkg}"):
+                lines.push("    subgraph {pkg}")
+                lines.push("    end")
+        elif entity.contains("::"):
+            val parts = entity.split("::")
+            val pkg = parts[0]
+            if not lines.contains("    subgraph {pkg}"):
+                lines.push("    subgraph {pkg}")
+                lines.push("    end")
+        else:
+            lines.push("    {entity}[{entity}]")
+    lines.push("```")
+    lines.join("\n")
+
+fn to_mermaid_arch(rec: CallEventRecorder) -> text:
+    generate_arch_diagram(rec, DiagramConfig.new().with_architecture())
+
+export CallType, CallEvent, CallEventRecorder, record_call, record_return
+export DiagramConfig
+export SequenceGenerator, generate_sequence, to_mermaid_sequence
+export ClassDiagramGenerator, generate_class_diagram, to_mermaid_class
+export ArchDiagramGenerator, generate_arch_diagram, to_mermaid_arch
