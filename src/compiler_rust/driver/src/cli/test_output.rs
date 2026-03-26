@@ -26,7 +26,9 @@ fn print_summary_text(result: &TestRunResult) {
     println!("═══════════════════════════════════════════════════════════════");
     println!("Files: {}", result.files.len());
 
-    if result.total_failed > 0 {
+    if result.total_listed > 0 && result.total_passed == 0 && result.total_failed == 0 {
+        println!("Listed: {}", result.total_listed);
+    } else if result.total_failed > 0 {
         println!("\x1b[32mPassed: {}\x1b[0m", result.total_passed);
         println!("\x1b[31mFailed: {}\x1b[0m", result.total_failed);
     } else {
@@ -70,6 +72,7 @@ fn print_summary_json(result: &TestRunResult) {
     // Build JSON manually to avoid serde dependency
     println!("{{");
     println!("  \"success\": {},", result.success());
+    println!("  \"total_listed\": {},", result.total_listed);
     println!("  \"total_passed\": {},", result.total_passed);
     println!("  \"total_failed\": {},", result.total_failed);
     println!("  \"total_duration_ms\": {},", result.total_duration_ms);
@@ -152,7 +155,9 @@ fn print_summary_doc(result: &TestRunResult) {
     println!("─────────────────────────────────────────────────────────────────");
 
     // Summary line
-    if result.success() {
+    if result.total_listed > 0 && result.total_passed == 0 && result.total_failed == 0 {
+        println!("{} listed ({}ms)", result.total_listed, result.total_duration_ms);
+    } else if result.success() {
         println!(
             "\x1b[32m{} examples, 0 failures\x1b[0m ({}ms)",
             result.total_passed, result.total_duration_ms
@@ -395,7 +400,8 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
 
     // Add summary
     md.push_str("\n---\n\n## Summary\n\n");
-    md.push_str(&format!("- **Total:** {} tests\n", result.files.len()));
+    let total_items = if result.total_listed > 0 { result.total_listed } else { result.files.len() };
+    md.push_str(&format!("- **Total:** {} tests\n", total_items));
     md.push_str(&format!("- **Passed:** {} ✅\n", result.total_passed));
     md.push_str(&format!("- **Failed:** {} ❌\n", result.total_failed));
     md.push_str(&format!("- **Duration:** {}ms\n", result.total_duration_ms));

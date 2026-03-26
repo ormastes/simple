@@ -1,0 +1,57 @@
+# Test Daemon QEMU Broker Snapshot — QMP-dependent snapshot operations
+#
+# Separated from qemu_broker.spl to avoid pulling in the heavy
+# std.qemu.qmp_client import (which uses std.io shell calls) when
+# only the pure in-memory broker logic is needed.
+
+
+use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
+use app.test_daemon.qemu_broker.{QemuBroker, QemuSessionEntry, QEMU_IN_USE}
+
+impl QemuBroker:
+    me acquire_with_snapshot(arch: text, binary_path: text) -> QemuSessionEntry:
+        var session = self.acquire(arch, binary_path)
+        # If session has QMP and no golden snapshot, create one
+        if session.qmp_socket != "" and not session.has_golden_snapshot:
+            val client = qmp_connect(session.qmp_socket)
+            val saved = qmp_savevm(client, "golden")
+            if saved:
+                # Update session to mark golden snapshot
+                var i = 0
+                while i < self.sessions.len():
+                    if self.sessions[i].session_key == session.session_key:
+                        self.sessions[i] = QemuSessionEntry(
+                            session_key: session.session_key,
+                            arch: session.arch,
+                            binary_hash: session.binary_hash,
+                            status: QEMU_IN_USE,
+                            test_count: session.test_count,
+                            last_used: session.last_used,
+                            qmp_socket: session.qmp_socket,
+                            has_golden_snapshot: true,
+                            pid: session.pid
+                        )
+                        session = self.sessions[i]
+                        break
+                    i = i + 1
+        session
+
+    me snapshot_save(session_key: text, name: text) -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            val s = self.sessions[i]
+            if s.session_key == session_key and s.qmp_socket != "":
+                val client = qmp_connect(s.qmp_socket)
+                return qmp_savevm(client, name)
+            i = i + 1
+        false
+
+    me snapshot_restore(session_key: text, name: text) -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            val s = self.sessions[i]
+            if s.session_key == session_key and s.qmp_socket != "":
+                val client = qmp_connect(s.qmp_socket)
+                return qmp_loadvm(client, name)
+            i = i + 1
+        false

@@ -16,7 +16,7 @@ use simple_driver::cli::basic::{create_runner, run_code, run_file_with_args, wat
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::gen_lean::run_gen_lean;
-use simple_driver::cli::help::{print_help, print_version, version};
+use simple_driver::cli::help::{print_help, print_test_help, print_version, version};
 use simple_driver::cli::llm_tools::{run_constr, run_context, run_diff, run_mcp};
 use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::native_build::handle_native_build;
@@ -802,9 +802,15 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     // Parse test options from remaining args
     let test_args: Vec<String> = args[1..].to_vec();
+    if test_args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_test_help();
+        return 0;
+    }
+
     let mut options = test_runner::parse_test_args(&test_args);
     options.gc_log = gc_log;
     options.gc_off = gc_off;
+    let is_run_management = options.list_runs || options.cleanup_runs || options.prune_runs.is_some();
 
     // Check if watch mode is enabled
     if options.watch {
@@ -826,7 +832,9 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 
         let format = options.format;
         let result = test_runner::run_tests(options);
-        test_runner::print_summary(&result, format);
+        if !is_run_management {
+            test_runner::print_summary(&result, format);
+        }
 
         if result.success() {
             0

@@ -30,8 +30,12 @@ pub fn discover_all_doctests(options: &TestOptions) -> DoctestCache {
             cwd.join(path)
         }
     });
+    let targeted_ext = targeted_path
+        .as_ref()
+        .and_then(|path| path.extension().and_then(|ext| ext.to_str()))
+        .map(|ext| ext.to_string());
 
-    let src_examples = if options.doctest_src {
+    let src_examples = if options.doctest_src && targeted_ext.as_deref() != Some("md") {
         let src_path = targeted_path.clone().unwrap_or_else(|| {
             options.doctest_src_dir.clone().unwrap_or_else(|| {
                 for dir in &["src", "simple/std_lib", "lib"] {
@@ -71,15 +75,21 @@ pub fn discover_all_doctests(options: &TestOptions) -> DoctestCache {
         doc_examples,
         md_examples,
     };
-    dedupe_doctest_cache(&mut cache);
+    dedupe_doctest_cache(&mut cache, targeted_ext.as_deref());
     cache
 }
 
-fn dedupe_doctest_cache(cache: &mut DoctestCache) {
+fn dedupe_doctest_cache(cache: &mut DoctestCache, targeted_ext: Option<&str>) {
     let mut seen = HashSet::new();
-    dedupe_examples(&mut cache.src_examples, &mut seen);
-    dedupe_examples(&mut cache.doc_examples, &mut seen);
-    dedupe_examples(&mut cache.md_examples, &mut seen);
+    if matches!(targeted_ext, Some("md")) {
+        dedupe_examples(&mut cache.doc_examples, &mut seen);
+        dedupe_examples(&mut cache.md_examples, &mut seen);
+        dedupe_examples(&mut cache.src_examples, &mut seen);
+    } else {
+        dedupe_examples(&mut cache.src_examples, &mut seen);
+        dedupe_examples(&mut cache.doc_examples, &mut seen);
+        dedupe_examples(&mut cache.md_examples, &mut seen);
+    }
 }
 
 fn dedupe_examples(examples: &mut Vec<DoctestExample>, seen: &mut HashSet<String>) {

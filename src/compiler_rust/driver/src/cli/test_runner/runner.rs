@@ -292,6 +292,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     let result = TestRunResult {
         files: results,
+        total_listed: 0,
         total_passed,
         total_failed,
         total_skipped,
@@ -944,6 +945,7 @@ fn run_list_mode_static(
             // Return empty result on failure - caller can fall back to runtime
             return TestRunResult {
                 files: Vec::new(),
+                total_listed: 0,
                 total_passed: 0,
                 total_failed: 0,
                 total_skipped: 0,
@@ -953,24 +955,7 @@ fn run_list_mode_static(
         }
     };
 
-    // Print list output
-    if !quiet {
-        let output = registry.format_list(
-            options.show_tags,
-            options.only_slow,
-            options.only_skipped,
-            options.list_ignored,
-        );
-        print!("{}", output);
-
-        let doctest_output = format_doctest_list(doctest_cache);
-        if !doctest_output.is_empty() {
-            print!("{}", doctest_output);
-        }
-    }
-
-    // Return result with counts from static analysis
-    let _total_tests = if options.only_slow {
+    let listed_tests = if options.only_slow {
         registry.slow_count()
     } else if options.only_skipped {
         registry.skipped_count()
@@ -979,9 +964,28 @@ fn run_list_mode_static(
     } else {
         registry.total_count()
     };
+    let (doctest_output, doctest_total) = format_doctest_list(doctest_cache);
+
+    // Print list output
+    if !quiet {
+        if listed_tests > 0 || doctest_total == 0 {
+            let output = registry.format_list(
+                options.show_tags,
+                options.only_slow,
+                options.only_skipped,
+                options.list_ignored,
+            );
+            print!("{}", output);
+        }
+
+        if !doctest_output.is_empty() {
+            print!("{}", doctest_output);
+        }
+    }
 
     TestRunResult {
         files: Vec::new(), // No file results in list mode
+        total_listed: listed_tests + doctest_total,
         total_passed: 0,
         total_failed: 0,
         total_skipped: registry.skipped_count(),
@@ -990,10 +994,10 @@ fn run_list_mode_static(
     }
 }
 
-fn format_doctest_list(cache: &DoctestCache) -> String {
+fn format_doctest_list(cache: &DoctestCache) -> (String, usize) {
     let total = cache.src_examples.len() + cache.doc_examples.len() + cache.md_examples.len();
     if total == 0 {
-        return String::new();
+        return (String::new(), 0);
     }
 
     let mut out = String::new();
@@ -1002,7 +1006,7 @@ fn format_doctest_list(cache: &DoctestCache) -> String {
     append_doctest_examples(&mut out, "Doc doctests", &cache.doc_examples);
     append_doctest_examples(&mut out, "MD doctests", &cache.md_examples);
     out.push_str(&format!("Total doctests: {}\n", total));
-    out
+    (out, total)
 }
 
 fn append_doctest_examples(out: &mut String, label: &str, examples: &[DoctestExample]) {
@@ -1049,11 +1053,12 @@ mod list_mode_tests {
             md_examples: vec![sample_doctest("README.md", 7, None)],
         };
 
-        let formatted = format_doctest_list(&cache);
+        let (formatted, total) = format_doctest_list(&cache);
         assert!(formatted.contains("Doctests:"));
         assert!(formatted.contains("doc/guide.md:12 - Intro #1"));
         assert!(formatted.contains("README.md:7"));
         assert!(formatted.contains("Total doctests: 2"));
+        assert_eq!(total, 2);
     }
 }
 
@@ -1217,6 +1222,7 @@ fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: boo
 
     TestRunResult {
         files: Vec::new(),
+        total_listed: features.len(),
         total_passed: 0,
         total_failed: 0,
         total_skipped: test_files.len(),
@@ -1243,14 +1249,19 @@ use crate::test_db::{TestRunRecord, TestRunStatus, cleanup_stale_runs, list_runs
 /// Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
 fn handle_run_management(options: &TestOptions) -> TestRunResult {
     let db_path = PathBuf::from("doc/test/test_db.sdn");
+    handle_run_management_with_db(options, &db_path)
+}
+
+fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
 
-    // Cleanup stale runs first (if requested or before listing)
-    if options.cleanup_runs {
+    // Cleanup stale/dead runs before listing so stale "running" entries do not
+    // survive indefinitely in the visible output.
+    if options.cleanup_runs || options.list_runs {
         match cleanup_stale_runs(&db_path, 2) {
             // 2 hours = stale
             Ok(cleaned) => {
-                if !quiet {
+                if options.cleanup_runs && !quiet {
                     if cleaned.is_empty() {
                         println!("No stale runs found.");
                     } else {
@@ -1293,7 +1304,7 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
     if options.list_runs {
         let status_filter = options.runs_status_filter.as_ref().map(|s| TestRunStatus::parse_str(s));
 
-        match list_runs(&db_path, status_filter) {
+        match list_runs(db_path, status_filter) {
             Ok(runs) => {
                 if !quiet {
                     if runs.is_empty() {
@@ -1349,10 +1360,51 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
     // Return empty result for run management commands
     TestRunResult {
         files: Vec::new(),
+        total_listed: 0,
         total_passed: 0,
         total_failed: 0,
         total_skipped: 0,
         total_ignored: 0,
         total_duration_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::handle_run_management_with_db;
+    use crate::cli::test_runner::types::{OutputFormat, TestOptions};
+    use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
+    use crate::unified_db::Database;
+
+    #[test]
+    fn list_runs_marks_stale_running_entries_crashed_before_listing() {
+        let temp = tempdir().expect("tempdir");
+        let db_dir = temp.path().join("doc/test");
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("test_db.sdn");
+        let runs_path = db_dir.join("test_db_runs.sdn");
+
+        let mut run = TestRunRecord::new_running();
+        run.run_id = "run_stale_for_list".to_string();
+        run.start_time = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+
+        let mut db = Database::<TestRunRecord>::new(&runs_path);
+        db.insert(run);
+        db.save().expect("save runs db");
+
+        let mut options = TestOptions::default();
+        options.list_runs = true;
+        options.format = OutputFormat::Json;
+
+        handle_run_management_with_db(&options, &db_path);
+
+        let runs = list_runs(&db_path, Some(TestRunStatus::Crashed)).expect("list runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run_stale_for_list");
+        assert_eq!(runs[0].status, TestRunStatus::Crashed);
     }
 }

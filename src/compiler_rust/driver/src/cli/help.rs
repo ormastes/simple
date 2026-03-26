@@ -208,6 +208,77 @@ pub fn print_help() {
     eprintln!("  simple script.spl --sandbox --time-limit 60 --memory-limit 256M  # Combined");
 }
 
+pub fn test_help_text() -> String {
+    format!(
+        "Simple Test Runner v{VERSION}\n\
+\n\
+Usage:\n\
+  simple test [path] [options]\n\
+\n\
+Filters:\n\
+  --unit                  Run unit tests only\n\
+  --integration           Run integration tests only\n\
+  --system                Run system tests only\n\
+  --tag <name>            Filter by tag\n\
+  --only-slow             Run slow tests only\n\
+  --only-skipped          Run skipped tests only\n\
+\n\
+Output:\n\
+  --list                  List tests without running them\n\
+  --list-ignored          List ignored tests only\n\
+  --format <text|json|doc>\n\
+  --json                  Shorthand for --format json\n\
+  --doc                   Shorthand for --format doc\n\
+  --watch                 Watch and auto-rerun on changes\n\
+\n\
+Doctests:\n\
+  --doctest, --sdoctest   Run all doctest modes\n\
+  --doctest-src           Run src doctests\n\
+  --doctest-doc           Run doc/ doctests\n\
+  --doctest-md            Run README-style markdown doctests\n\
+  --doctest-src-dir <dir>\n\
+  --doctest-doc-dir <dir>\n\
+  --doctest-md-dir <dir>\n\
+\n\
+Execution:\n\
+  --mode <interpreter|smf|native>\n\
+  --parallel, -p          Enable parallel execution\n\
+  --sequential            Force sequential execution\n\
+  --threads, -j <N>       Set worker threads\n\
+  --timeout <sec>         Safe-mode timeout\n\
+  --fail-fast             Stop on first failure\n\
+\n\
+Run Management:\n\
+  --list-runs             Show tracked test runs\n\
+  --cleanup-runs          Mark stale/dead runs as crashed\n\
+  --prune-runs <N>        Keep only the most recent N runs\n\
+  --runs-status <status>  Filter listed runs by status\n\
+\n\
+Examples:\n\
+  simple test\n\
+  simple test test/unit/\n\
+  simple test --sdoctest README.md\n\
+  simple test --list-runs\n"
+    )
+}
+
+pub fn print_test_help() {
+    eprint!("{}", test_help_text());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_help_text;
+
+    #[test]
+    fn test_test_help_mentions_doctest_and_run_management_flags() {
+        let help = test_help_text();
+        assert!(help.contains("--sdoctest"));
+        assert!(help.contains("--list-runs"));
+        assert!(help.contains("simple test [path] [options]"));
+    }
+}
+
 pub fn print_version() {
     println!("Simple Language v{}", VERSION);
 }

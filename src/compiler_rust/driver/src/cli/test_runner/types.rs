@@ -329,6 +329,7 @@ pub struct TestFileResult {
 #[derive(Debug)]
 pub struct TestRunResult {
     pub files: Vec<TestFileResult>,
+    pub total_listed: usize,
     pub total_passed: usize,
     pub total_failed: usize,
     pub total_skipped: usize,
@@ -350,6 +351,7 @@ mod tests {
     fn test_run_result_success() {
         let result = TestRunResult {
             files: vec![],
+            total_listed: 0,
             total_passed: 10,
             total_failed: 0,
             total_skipped: 0,
@@ -360,6 +362,7 @@ mod tests {
 
         let failed_result = TestRunResult {
             files: vec![],
+            total_listed: 0,
             total_passed: 10,
             total_failed: 1,
             total_skipped: 0,

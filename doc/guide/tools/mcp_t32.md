@@ -80,6 +80,44 @@ Every `t32_cmd_run`, `t32_cmm_run`, `t32_eval`, and dialog tool response include
 
 With the ctypes backend, status is queried via `T32_GetMessage()` and `STATE.RUN()` directly. With subprocess backends, two additional EVAL commands are sent.
 
+## Error Checking
+
+### Automatic Error Append
+
+When a command produces a warning or error (via `MESSAGE.STR()` or subprocess stderr), an `errors` array is automatically appended to the response:
+
+```json
+{
+  "command": "Data.Set 0x0 0xFF",
+  "output": "",
+  "status_bar": {"message": "access denied", "type": "error"},
+  "target_state": "stopped",
+  "errors": [
+    {"source": "t32_message", "type": "error", "message": "access denied"},
+    {"source": "stderr", "type": "error", "message": "t32rem: command failed"}
+  ]
+}
+```
+
+The `errors` key is **omitted** when there are no errors (keeps payloads small). Sources:
+- `t32_message`: TRACE32 message area (warning or error type)
+- `stderr`: subprocess stderr output (t32rem or python bridge)
+
+### `t32_error_check` Tool
+
+Explicitly query TRACE32 error state without running a command:
+
+```text
+t32_error_check()
+```
+
+Returns:
+- `message`: Current message area text
+- `type`: `info`, `warning`, or `error`
+- `stderr`: Last subprocess stderr (empty for ctypes backend)
+- `practice_state`: PRACTICE script state (0=idle, 1=running, 2=dialog, -1=unknown)
+- `has_error`: `true` if any error/warning detected
+
 ## Blocking Guard
 
 Both `t32_cmd_run` and `t32_cmm_run` use `t32_check_blocking()` before execution in headless mode.
