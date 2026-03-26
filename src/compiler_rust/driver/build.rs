@@ -10,6 +10,7 @@
 
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use walkdir::WalkDir;
@@ -245,9 +246,9 @@ fn {prefix}_{test_name}() {{
 
 /// Convert a file path to a valid Rust test function name.
 ///
-/// "unit/doctest/parser_spec.spl" -> "unit_doctest_parser_spec"
+/// "unit/doctest/parser_spec.spl" -> "unit_doctest_parser_spec_a1b2c3d4"
 fn sanitize_test_name(path: &str) -> String {
-    path.trim_end_matches(".spl")
+    let base: String = path.trim_end_matches(".spl")
         .trim_end_matches(".simple")
         .trim_end_matches(".sscript")
         .chars()
@@ -256,5 +257,26 @@ fn sanitize_test_name(path: &str) -> String {
             c if c.is_ascii_alphanumeric() || c == '_' => c,
             _ => '_',
         })
-        .collect()
+        .collect();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let suffix = hasher.finish();
+
+    format!("{base}_{suffix:08x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_test_name;
+
+    #[test]
+    fn sanitize_test_name_avoids_path_separator_collisions() {
+        let nested = sanitize_test_name("unit/app/build/coverage_spec.spl");
+        let flat = sanitize_test_name("unit/app/build_coverage_spec.spl");
+
+        assert_ne!(nested, flat);
+        assert!(nested.starts_with("unit_app_build_coverage_spec_"));
+        assert!(flat.starts_with("unit_app_build_coverage_spec_"));
+    }
 }

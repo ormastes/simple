@@ -44,7 +44,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             "--json" => options.format = OutputFormat::Json,
             "--doc" => options.format = OutputFormat::Doc,
             "--watch" => options.watch = true,
-            "--doctest" => {
+            "--doctest" | "--sdoctest" => {
                 options.doctest_src = true;
                 options.doctest_doc = true;
                 options.doctest_md = true;
@@ -55,24 +55,24 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 options.doctest_doc = true;
                 options.doctest_md = true;
             }
-            "--doctest-src" => options.doctest_src = true,
-            "--doctest-doc" => options.doctest_doc = true,
-            "--doctest-md" => options.doctest_md = true,
-            "--doctest-src-dir" => {
+            "--doctest-src" | "--sdoctest-src" => options.doctest_src = true,
+            "--doctest-doc" | "--sdoctest-doc" => options.doctest_doc = true,
+            "--doctest-md" | "--sdoctest-md" => options.doctest_md = true,
+            "--doctest-src-dir" | "--sdoctest-src-dir" => {
                 i += 1;
                 if i < args.len() {
                     options.doctest_src_dir = Some(PathBuf::from(&args[i]));
                     options.doctest_src = true;
                 }
             }
-            "--doctest-doc-dir" => {
+            "--doctest-doc-dir" | "--sdoctest-doc-dir" => {
                 i += 1;
                 if i < args.len() {
                     options.doctest_doc_dir = Some(PathBuf::from(&args[i]));
                     options.doctest_doc = true;
                 }
             }
-            "--doctest-md-dir" => {
+            "--doctest-md-dir" | "--sdoctest-md-dir" => {
                 i += 1;
                 if i < args.len() {
                     options.doctest_md_dir = Some(PathBuf::from(&args[i]));
@@ -437,5 +437,29 @@ mod tests {
             TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
         );
         assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_sdoctest_alias_enables_all_doctest_modes() {
+        let args = vec!["--sdoctest".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.doctest_src);
+        assert!(opts.doctest_doc);
+        assert!(opts.doctest_md);
+    }
+
+    #[test]
+    fn test_parse_sdoctest_dir_aliases() {
+        let args = vec![
+            "--sdoctest-doc-dir".to_string(),
+            "doc".to_string(),
+            "--sdoctest-md-dir".to_string(),
+            "guides".to_string(),
+        ];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.doctest_doc_dir, Some(PathBuf::from("doc")));
+        assert_eq!(opts.doctest_md_dir, Some(PathBuf::from("guides")));
+        assert!(opts.doctest_doc);
+        assert!(opts.doctest_md);
     }
 }

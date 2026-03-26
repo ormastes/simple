@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use simple_compiler::{init_coverage, is_coverage_enabled};
+use crate::doctest::DoctestExample;
 
 use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag};
 use super::types::{
@@ -136,12 +137,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
 
-    // Discover doctests only when running full suite (no specific path given)
-    let doctest_cache = if options.path.is_none() {
-        discover_all_doctests(&options)
-    } else {
-        DoctestCache { src_examples: vec![], doc_examples: vec![], md_examples: vec![] }
-    };
+    // Discover doctests for both full-suite and targeted doctest paths.
+    let doctest_cache = discover_all_doctests(&options);
 
     // Handle --list-skip-features: show features from .skip files
     if options.list_skip_features {
@@ -150,7 +147,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // FAST PATH: Use static analysis for list mode (no DSL execution)
     if list_mode {
-        return run_list_mode_static(&test_files, &options, quiet);
+        return run_list_mode_static(&test_files, &doctest_cache, &options, quiet);
     }
 
     // CRITICAL: Set environment variables BEFORE creating runner/interpreter
@@ -921,7 +918,12 @@ fn finalize_profiling(options: &TestOptions, quiet: bool) {
 ///
 /// This uses the static test registry to list tests without executing
 /// any DSL code. Target performance: ~1 second for 1000+ tests.
-fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bool) -> TestRunResult {
+fn run_list_mode_static(
+    test_files: &[PathBuf],
+    doctest_cache: &DoctestCache,
+    options: &TestOptions,
+    quiet: bool,
+) -> TestRunResult {
     let start = Instant::now();
 
     debug_log!(
@@ -960,6 +962,11 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
             options.list_ignored,
         );
         print!("{}", output);
+
+        let doctest_output = format_doctest_list(doctest_cache);
+        if !doctest_output.is_empty() {
+            print!("{}", doctest_output);
+        }
     }
 
     // Return result with counts from static analysis
@@ -980,6 +987,73 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
         total_skipped: registry.skipped_count(),
         total_ignored: registry.ignored_count(),
         total_duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+fn format_doctest_list(cache: &DoctestCache) -> String {
+    let total = cache.src_examples.len() + cache.doc_examples.len() + cache.md_examples.len();
+    if total == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("Doctests:\n");
+    append_doctest_examples(&mut out, "Src doctests", &cache.src_examples);
+    append_doctest_examples(&mut out, "Doc doctests", &cache.doc_examples);
+    append_doctest_examples(&mut out, "MD doctests", &cache.md_examples);
+    out.push_str(&format!("Total doctests: {}\n", total));
+    out
+}
+
+fn append_doctest_examples(out: &mut String, label: &str, examples: &[DoctestExample]) {
+    if examples.is_empty() {
+        return;
+    }
+
+    out.push_str(&format!("  {}:\n", label));
+    for example in examples {
+        let section = example
+            .section_name
+            .as_ref()
+            .map(|s| format!(" - {}", s))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "    {}:{}{}\n",
+            example.source.display(),
+            example.start_line,
+            section
+        ));
+    }
+}
+
+#[cfg(test)]
+mod list_mode_tests {
+    use super::*;
+    use crate::doctest::Expected;
+
+    fn sample_doctest(path: &str, line: usize, section: Option<&str>) -> DoctestExample {
+        DoctestExample {
+            source: PathBuf::from(path),
+            start_line: line,
+            commands: vec!["1 + 1".to_string()],
+            expected: Expected::Output("2".to_string()),
+            section_name: section.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn format_doctest_list_includes_targeted_examples() {
+        let cache = DoctestCache {
+            src_examples: vec![],
+            doc_examples: vec![sample_doctest("doc/guide.md", 12, Some("Intro #1"))],
+            md_examples: vec![sample_doctest("README.md", 7, None)],
+        };
+
+        let formatted = format_doctest_list(&cache);
+        assert!(formatted.contains("Doctests:"));
+        assert!(formatted.contains("doc/guide.md:12 - Intro #1"));
+        assert!(formatted.contains("README.md:7"));
+        assert!(formatted.contains("Total doctests: 2"));
     }
 }
 

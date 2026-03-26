@@ -7,21 +7,25 @@ use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_n
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
-var MCP_T32_BACKEND_TYPE = ""    # "t32rem" | "python_rcl" | ""
+var MCP_T32_BACKEND_TYPE = ""    # "ctypes" | "t32rem" | "python_rcl" | ""
 var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
 
 fn t32_find_python_rcl_bridge() -> text:
-    # Check if python3 has lauterbach.trace32.rcl installed
+    val python_bin = T32_PYTHON_BINARY
+    # Check if python has lauterbach.trace32.rcl installed
     var py_stdout = ""
     var py_stderr = ""
     var py_rc: i64 = 0
-    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", "python3 -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
+    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", python_bin + " -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
     if py_rc != 0:
         return ""
+    # Check T32_PYTHON_BRIDGE_PATH module global (set from SDN config)
+    if T32_PYTHON_BRIDGE_PATH != "" and rt_file_exists(T32_PYTHON_BRIDGE_PATH):
+        return python_bin + " " + T32_PYTHON_BRIDGE_PATH
     # Check T32_PYTHON_BRIDGE env var
     val bridge_env = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
     if bridge_env != "" and rt_file_exists(bridge_env):
-        return "python3 " + bridge_env
+        return python_bin + " " + bridge_env
     # Search common paths for bridge script
     val candidates = [
         "examples/10_tooling/trace32_tools/t32_mcp/t32_python_bridge.py",
@@ -30,21 +34,29 @@ fn t32_find_python_rcl_bridge() -> text:
     ]
     for path in candidates:
         if rt_file_exists(path):
-            return "python3 " + path
+            return python_bin + " " + path
     # Try PATH
     var which_stdout = ""
     var which_stderr = ""
     var which_rc: i64 = 0
     (which_stdout, which_stderr, which_rc) = rt_process_run("/bin/sh", ["-c", "which t32_python_bridge.py 2>/dev/null"])
     if which_rc == 0 and which_stdout.trim() != "":
-        return "python3 " + which_stdout.trim()
+        return python_bin + " " + which_stdout.trim()
     ""
 
 fn t32_find_backend() -> text:
     # Return cached result
     if MCP_T32_BACKEND_CMD != "":
         return MCP_T32_BACKEND_CMD
-    val prefer_python = T32_BACKEND_PREFERENCE.to_lower() == "python_rcl"
+    val pref_lower = T32_BACKEND_PREFERENCE.to_lower()
+    # --- ctypes bridge (fastest, in-process) ---
+    val try_ctypes_first = (pref_lower == "" or pref_lower == "ctypes")
+    if try_ctypes_first:
+        if t32_ctypes_load():
+            MCP_T32_BACKEND_TYPE = "ctypes"
+            MCP_T32_BACKEND_CMD = "ctypes"
+            return "ctypes"
+    val prefer_python = pref_lower == "python_rcl"
     if prefer_python:
         val python_bridge = t32_find_python_rcl_bridge()
         if python_bridge != "":
@@ -82,6 +94,12 @@ fn t32_find_backend() -> text:
         MCP_T32_BACKEND_TYPE = "python_rcl"
         MCP_T32_BACKEND_CMD = python_bridge
         return python_bridge
+    # --- Last fallback: ctypes (if not tried first) ---
+    if not try_ctypes_first:
+        if t32_ctypes_load():
+            MCP_T32_BACKEND_TYPE = "ctypes"
+            MCP_T32_BACKEND_CMD = "ctypes"
+            return "ctypes"
     ""
 
 fn t32_get_backend_type() -> text:
@@ -89,10 +107,81 @@ fn t32_get_backend_type() -> text:
         t32_find_backend()
     MCP_T32_BACKEND_TYPE
 
+# --- Status bar helpers ---
+
+fn t32_parse_msg_type(mtype: i64) -> text:
+    if mtype == 0:
+        return "info"
+    if mtype == 1:
+        return "warning"
+    if mtype == 2:
+        return "error"
+    "info"
+
+fn t32_parse_target_state(raw: text) -> text:
+    val lower = raw.trim().to_lower()
+    if lower == "true" or lower == "true.":
+        return "running"
+    if lower == "false" or lower == "false.":
+        return "stopped"
+    "unknown"
+
+fn t32_query_status_bar(session: McpT32Session) -> (text, text, text):
+    var message = ""
+    var msg_type_str = "info"
+    var target_state = "unknown"
+    if MCP_T32_BACKEND_TYPE == "ctypes":
+        # Fast path: direct C API calls
+        var msg = ""
+        var mtype: i64 = 0
+        (msg, mtype) = t32_ctypes_get_message()
+        message = msg
+        msg_type_str = t32_parse_msg_type(mtype)
+        var state_out = ""
+        var state_rc: i64 = 0
+        (state_out, state_rc) = t32_ctypes_eval("STATE.RUN()")
+        if state_rc == 0:
+            target_state = t32_parse_target_state(state_out)
+    else:
+        # Subprocess path: extra t32_run_remote calls
+        var msg_out = ""
+        var msg_rc: i64 = 0
+        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STR()")
+        if msg_rc == 0:
+            message = msg_out.trim()
+        var state_out = ""
+        var state_rc: i64 = 0
+        (state_out, state_rc) = t32_run_remote(session, "EVAL STATE.RUN()")
+        if state_rc == 0:
+            target_state = t32_parse_target_state(state_out)
+    (message, msg_type_str, target_state)
+
+fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
+    var msg = ""
+    var msg_type = ""
+    var target_state = ""
+    (msg, msg_type, target_state) = t32_query_status_bar(session)
+    var result = r
+    var status_bar = t32_LB()
+    status_bar = status_bar + t32_jp("message", t32_js(msg))
+    status_bar = status_bar + "," + t32_jp("type", t32_js(msg_type))
+    status_bar = status_bar + t32_RB()
+    result = result + "," + t32_jp("status_bar", status_bar)
+    result = result + "," + t32_jp("target_state", t32_js(target_state))
+    result
+
 fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
     val backend = t32_find_backend()
     if backend == "":
         return (t32_err_backend_not_found(), -1)
+    # --- ctypes dispatch (in-process, no subprocess) ---
+    if MCP_T32_BACKEND_TYPE == "ctypes":
+        if not t32_ctypes_available():
+            val init_rc = t32_ctypes_init(session.host, session.port)
+            if init_rc != 0:
+                return ("ctypes init failed (rc=" + str(init_rc) + ")", init_rc)
+        return t32_ctypes_run_remote(session, cmd)
+    # --- subprocess dispatch (t32rem / python_rcl) ---
     val intercom = session.intercom_name
     var full_cmd = backend + " " + session.host + " port=" + str(session.port)
     if intercom != "":
@@ -512,6 +601,7 @@ fn handle_t32_cmd_run(id: text, body: text) -> text:
                     warn_arr = warn_arr + t32_js(w)
                 warn_arr = warn_arr + t32_SB_R()
                 r = r + "," + t32_jp("warnings", warn_arr)
+            r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 
@@ -602,6 +692,7 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
             r = r + "," + t32_jp("practice_state", t32_js(practice_status))
             if area_output != "":
                 r = r + "," + t32_jp("area_output", t32_js(area_output))
+            r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 
@@ -647,5 +738,6 @@ fn handle_t32_eval(id: text, body: text) -> text:
             var r = t32_LB()
             r = r + t32_jp("expression", t32_js(expression))
             r = r + "," + t32_jp("result", t32_js(stdout.trim()))
+            r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)

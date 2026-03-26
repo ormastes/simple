@@ -1,0 +1,245 @@
+# MCP T32 Status Bar spec — tests status bar parsing, JSON construction, state mapping
+# Covers: message type mapping, target state parsing, JSON output structure
+
+# --- Helpers (sb_ prefix to avoid name collisions) ---
+
+fn sb_parse_msg_type(mtype: i64) -> text:
+    if mtype == 0:
+        return "info"
+    if mtype == 1:
+        return "warning"
+    if mtype == 2:
+        return "error"
+    "info"
+
+fn sb_parse_target_state(raw: text) -> text:
+    val lower = raw.trim().to_lower()
+    if lower == "true" or lower == "true.":
+        return "running"
+    if lower == "false" or lower == "false.":
+        return "stopped"
+    "unknown"
+
+fn sb_find_pos(haystack: text, needle: text) -> i64:
+    var i = 0
+    while i + needle.len() <= haystack.len():
+        if haystack.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn sb_contains(s: text, sub: text) -> bool:
+    sb_find_pos(s, sub) >= 0
+
+fn sb_build_status_bar_json(message: text, msg_type: text, target_state: text) -> text:
+    var status_bar = "{\"message\":\"" + message + "\",\"type\":\"" + msg_type + "\"}"
+    var result = ",\"status_bar\":" + status_bar
+    result = result + ",\"target_state\":\"" + target_state + "\""
+    result
+
+fn sb_build_full_response(command: text, output: text, message: text, msg_type: text, target_state: text) -> text:
+    var r = "{\"command\":\"" + command + "\""
+    r = r + ",\"output\":\"" + output + "\""
+    r = r + sb_build_status_bar_json(message, msg_type, target_state)
+    r = r + "}"
+    r
+
+# --- Python binary config helper ---
+
+fn sb_resolve_python_binary(env_val: text, sdn_val: text) -> text:
+    if env_val != "":
+        return env_val
+    if sdn_val != "":
+        return sdn_val
+    "python3"
+
+# --- Bridge path config helper ---
+
+fn sb_resolve_bridge_path(global_val: text, env_val: text) -> text:
+    if global_val != "":
+        return global_val
+    if env_val != "":
+        return env_val
+    ""
+
+# --- SSpec tests ---
+
+describe "T32 Status Bar":
+    context "message type mapping":
+        it "maps type 0 to info":
+            expect(sb_parse_msg_type(0)).to_equal("info")
+
+        it "maps type 1 to warning":
+            expect(sb_parse_msg_type(1)).to_equal("warning")
+
+        it "maps type 2 to error":
+            expect(sb_parse_msg_type(2)).to_equal("error")
+
+        it "maps type 3 to info as default":
+            expect(sb_parse_msg_type(3)).to_equal("info")
+
+        it "maps type -1 to info as default":
+            expect(sb_parse_msg_type(-1)).to_equal("info")
+
+        it "maps type 100 to info as default":
+            expect(sb_parse_msg_type(100)).to_equal("info")
+
+    context "target state parsing":
+        it "TRUE means running":
+            expect(sb_parse_target_state("TRUE")).to_equal("running")
+
+        it "true means running":
+            expect(sb_parse_target_state("true")).to_equal("running")
+
+        it "TRUE. means running":
+            expect(sb_parse_target_state("TRUE.")).to_equal("running")
+
+        it "true. means running":
+            expect(sb_parse_target_state("true.")).to_equal("running")
+
+        it "FALSE means stopped":
+            expect(sb_parse_target_state("FALSE")).to_equal("stopped")
+
+        it "false means stopped":
+            expect(sb_parse_target_state("false")).to_equal("stopped")
+
+        it "FALSE. means stopped":
+            expect(sb_parse_target_state("FALSE.")).to_equal("stopped")
+
+        it "false. means stopped":
+            expect(sb_parse_target_state("false.")).to_equal("stopped")
+
+        it "empty string means unknown":
+            expect(sb_parse_target_state("")).to_equal("unknown")
+
+        it "whitespace only means unknown":
+            expect(sb_parse_target_state("   ")).to_equal("unknown")
+
+        it "random text means unknown":
+            expect(sb_parse_target_state("halted")).to_equal("unknown")
+
+        it "1 means unknown not running":
+            expect(sb_parse_target_state("1")).to_equal("unknown")
+
+        it "0 means unknown not stopped":
+            expect(sb_parse_target_state("0")).to_equal("unknown")
+
+        it "trims leading whitespace":
+            expect(sb_parse_target_state("  TRUE")).to_equal("running")
+
+        it "trims trailing whitespace":
+            expect(sb_parse_target_state("FALSE  ")).to_equal("stopped")
+
+        it "trims both sides":
+            expect(sb_parse_target_state("  true.  ")).to_equal("running")
+
+    context "status bar JSON construction":
+        it "builds valid JSON with info type":
+            val json = sb_build_status_bar_json("system halted", "info", "stopped")
+            expect(sb_contains(json, "\"status_bar\"")).to_equal(true)
+            expect(sb_contains(json, "\"target_state\":\"stopped\"")).to_equal(true)
+
+        it "builds valid JSON with warning type":
+            val json = sb_build_status_bar_json("breakpoint hit", "warning", "stopped")
+            expect(sb_contains(json, "\"type\":\"warning\"")).to_equal(true)
+
+        it "builds valid JSON with error type":
+            val json = sb_build_status_bar_json("connection lost", "error", "unknown")
+            expect(sb_contains(json, "\"type\":\"error\"")).to_equal(true)
+            expect(sb_contains(json, "\"target_state\":\"unknown\"")).to_equal(true)
+
+        it "includes message text":
+            val json = sb_build_status_bar_json("ready", "info", "running")
+            expect(sb_contains(json, "\"message\":\"ready\"")).to_equal(true)
+
+        it "includes running target state":
+            val json = sb_build_status_bar_json("executing", "info", "running")
+            expect(sb_contains(json, "\"target_state\":\"running\"")).to_equal(true)
+
+        it "handles empty message":
+            val json = sb_build_status_bar_json("", "info", "unknown")
+            expect(sb_contains(json, "\"message\":\"\"")).to_equal(true)
+
+    context "full response construction":
+        it "includes command field":
+            val resp = sb_build_full_response("Break.Set main", "ok", "ready", "info", "stopped")
+            expect(sb_contains(resp, "\"command\":\"Break.Set main\"")).to_equal(true)
+
+        it "includes output field":
+            val resp = sb_build_full_response("EVAL 1+1", "2", "ready", "info", "stopped")
+            expect(sb_contains(resp, "\"output\":\"2\"")).to_equal(true)
+
+        it "includes status_bar object":
+            val resp = sb_build_full_response("SYStem.Up", "", "system up", "info", "stopped")
+            expect(sb_contains(resp, "\"status_bar\":")).to_equal(true)
+            expect(sb_contains(resp, "\"message\":\"system up\"")).to_equal(true)
+
+        it "includes target_state field":
+            val resp = sb_build_full_response("Go", "", "running", "info", "running")
+            expect(sb_contains(resp, "\"target_state\":\"running\"")).to_equal(true)
+
+        it "starts with opening brace":
+            val resp = sb_build_full_response("PING", "ok", "", "info", "unknown")
+            expect(resp.starts_with("{")).to_equal(true)
+
+        it "ends with closing brace":
+            val resp = sb_build_full_response("PING", "ok", "", "info", "unknown")
+            expect(resp.ends_with("}")).to_equal(true)
+
+    context "python binary configuration":
+        it "env var overrides default":
+            val result = sb_resolve_python_binary("/usr/bin/python3.11", "")
+            expect(result).to_equal("/usr/bin/python3.11")
+
+        it "SDN config overrides default":
+            val result = sb_resolve_python_binary("", "/usr/bin/python3.10")
+            expect(result).to_equal("/usr/bin/python3.10")
+
+        it "env var overrides SDN":
+            val result = sb_resolve_python_binary("/env/python", "/sdn/python")
+            expect(result).to_equal("/env/python")
+
+        it "returns python3 as default":
+            val result = sb_resolve_python_binary("", "")
+            expect(result).to_equal("python3")
+
+    context "bridge path configuration":
+        it "global config takes priority":
+            val result = sb_resolve_bridge_path("/config/bridge.py", "/env/bridge.py")
+            expect(result).to_equal("/config/bridge.py")
+
+        it "falls back to env var":
+            val result = sb_resolve_bridge_path("", "/env/bridge.py")
+            expect(result).to_equal("/env/bridge.py")
+
+        it "returns empty when both empty":
+            val result = sb_resolve_bridge_path("", "")
+            expect(result).to_equal("")
+
+    context "backend type strings":
+        it "ctypes is valid backend type":
+            val bt = "ctypes"
+            expect(bt).to_equal("ctypes")
+
+        it "t32rem is valid backend type":
+            val bt = "t32rem"
+            expect(bt).to_equal("t32rem")
+
+        it "python_rcl is valid backend type":
+            val bt = "python_rcl"
+            expect(bt).to_equal("python_rcl")
+
+    context "edge cases":
+        it "status bar with all empty fields":
+            val json = sb_build_status_bar_json("", "info", "unknown")
+            expect(sb_contains(json, "\"status_bar\"")).to_equal(true)
+            expect(sb_contains(json, "\"target_state\":\"unknown\"")).to_equal(true)
+
+        it "status bar message with special characters":
+            val json = sb_build_status_bar_json("error: timeout", "error", "unknown")
+            expect(sb_contains(json, "error: timeout")).to_equal(true)
+
+        it "long message preserved":
+            val msg = "TRACE32 PowerView system halted at breakpoint main+0x10"
+            val json = sb_build_status_bar_json(msg, "info", "stopped")
+            expect(sb_contains(json, "breakpoint main")).to_equal(true)

@@ -36,8 +36,8 @@ use test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cl
 # GROUP 5: Doc generation & sdoctest
 # use doc_generator.generate_all_docs
 # use rust_test_runner.{run_rust_tests, RustTestResult}
-# use sdoctest.config.load_sdoctest_config
-# use sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
+use sdoctest.config.load_sdoctest_config
+use sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
 # use sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
 # use doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
 # use sdoctest.result_db.write_sdoctest_db
@@ -637,36 +637,41 @@ fn main() -> i64:
     var run_spec = config.run_spec_tests
     var run_sdoc = config.run_sdoctests
 
-    # NOTE: sdoctest/combined modes remain disabled while memory triage is active
-
     if not run_spec and not run_sdoc:
         print "Error: No test types enabled. Check config/simple.test.sdn configuration."
         print "  run_spec_tests: {config.run_spec_tests}"
         print "  run_sdoctests: {config.run_sdoctests}"
         return 1
 
+    if options.sdoctest:
+        run_sdoc = true
+
     propagate_env_vars(options)
 
-    # Run spec tests (default path) with self-protection enabled in run_tests()
+    var exit_code = 0
+
+    # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
         print "Simple Test Runner v0.8.1"
         print ""
 
-        val run_start = time_now_unix_micros()
         val result = run_tests(options)
-        val run_end = time_now_unix_micros()
 
         val result_files = result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
         print_summary(result, options.format)
 
-        if result.is_ok():
-            return 0
-        return 1
+        if not result.is_ok():
+            exit_code = 1
 
-    # If only sdoctest were enabled (currently disabled), exit gracefully
-    print "Sdoctest-only mode is currently disabled."
-    1
+    if run_sdoc:
+        val sdoctest_config = load_sdoctest_config("config/sdoctest.sdn")
+        val sdoctest_result = run_sdoctest_mode(options, sdoctest_config)
+        print_sdoctest_summary(sdoctest_result)
+        if not sdoctest_result.is_ok():
+            exit_code = 1
+
+    exit_code
 
 # =========================================================================
 # Exports
