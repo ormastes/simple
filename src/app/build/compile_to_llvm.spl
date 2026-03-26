@@ -1,1 +1,95 @@
-../../compiler/80.driver/build/compile_to_llvm.spl
+# Pure Simple Compilation to LLVM IR
+#
+# Compiles Simple source files to LLVM IR using the pure Simple compiler.
+# No Rust FFI required - everything is in Simple!
+
+use compiler.driver.driver (CompilerDriver)
+use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
+use compiler.backend.llvm_backend (MirToLlvm, CodegenTarget, OptimizationLevel)
+use compiler.mir_opt.mir_opt_integration.{OptimizationConfig}
+use compiler.backend.linker.target_triple (normalize_triple)
+
+fn select_target(target_triple: text) -> CodegenTarget:
+    val lower = target_triple.lower()
+    if lower.contains("x86_64"):
+        CodegenTarget.X86_64
+    elif lower.contains("aarch64") or lower.contains("arm64"):
+        CodegenTarget.AArch64
+    elif lower.contains("armv7") or lower.contains("thumb") or (lower.contains("arm") and not lower.contains("aarch64")):
+        CodegenTarget.Arm
+    elif lower.contains("riscv32"):
+        CodegenTarget.Riscv32
+    elif lower.contains("riscv64"):
+        CodegenTarget.Riscv64
+    elif lower.contains("wasm64"):
+        CodegenTarget.Wasm64
+    elif lower.contains("wasm"):
+        CodegenTarget.Wasm32
+    else:
+        CodegenTarget.X86
+
+
+# Compile Simple source file to LLVM IR text
+fn compile_to_llvm_ir_pure(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64):
+    """
+    Compile Simple source to LLVM IR using pure Simple compiler.
+
+    Returns: (llvm_ir: text, stderr: text, exit_code: i64)
+    """
+
+    # Step 1: Parse and compile to MIR using CompilerDriver
+    var options = CompileOptions.default()
+    options.mode = CompileMode.Aot
+    options.input_files = [source_file]
+    options.output_file = nil
+    options.output_format = OutputFormat.Native
+    options.optimize = false
+    options.opt_level = nil
+    options.release = not bare_metal
+    options.debug_info = true
+    options.verbose = false
+    options.log_level = 4
+    options.profile = "dev"
+    options.no_borrow_check = false
+    options.backend = "auto"
+    options.interpreter_mode = "optimized"
+    options.gc_off = false
+
+    val driver = CompilerDriver.create(options)
+
+    # Run phases manually so we can capture MIR without linking
+    if not driver.load_sources_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Load error:\n{msg}", 1)
+
+    if not driver.parse_all_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Parse error:\n{msg}", 1)
+
+    if not driver.lower_and_check_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Type error:\n{msg}", 1)
+
+    if not driver.monomorphize_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Monomorphization error:\n{msg}", 1)
+
+    if not driver.lower_to_mir():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "MIR lowering error:\n{msg}", 1)
+
+    driver.optimize_mir(OptimizationConfig.speed())
+
+    # Translate each MIR module to LLVM IR and concatenate
+    val target = select_target(normalize_triple(target_triple))
+    val translator = if bare_metal:
+        MirToLlvm.create_baremetal("module", target, nil)
+    else:
+        MirToLlvm.create("module", target, nil)
+
+    var llvm_ir = ""
+    for name in driver.ctx.mir_modules.keys():
+        val mir = driver.ctx.mir_modules[name]
+        llvm_ir = llvm_ir + translator.translate_module(mir) + "\n"
+
+    (llvm_ir, "", 0)
