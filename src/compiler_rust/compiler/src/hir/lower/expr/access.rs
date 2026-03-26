@@ -36,6 +36,8 @@ impl Lowerer {
                 | TypeId::U32
                 | TypeId::U64
                 | TypeId::CHAR
+                | TypeId::ANY     // Allow dynamic Any type — runtime will coerce
+                | TypeId::STRING  // Allow string indexing (dict keys, runtime coercion)
         )
     }
 

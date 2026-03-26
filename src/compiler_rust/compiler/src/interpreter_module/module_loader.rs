@@ -33,6 +33,23 @@ use super::path_resolution::resolve_module_path;
 
 type Enums = HashMap<String, EnumDef>;
 
+fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
+    match &use_stmt.target {
+        ImportTarget::Group(_) | ImportTarget::Glob => {
+            if module_path.extension().map_or(false, |ext| ext == "spl")
+                && module_path.file_name().map_or(true, |name| name != "__init__.spl")
+            {
+                let package_init = module_path.with_extension("").join("__init__.spl");
+                if package_init.exists() && package_init.is_file() {
+                    return package_init;
+                }
+            }
+            module_path.to_path_buf()
+        }
+        _ => module_path.to_path_buf(),
+    }
+}
+
 /// Validate that imported function effects are compatible with importer's capabilities.
 ///
 /// If the importer has no `requires [capabilities]`, it's unrestricted and can import anything.
@@ -254,6 +271,7 @@ pub fn load_and_merge_module(
             return Err(e);
         }
     };
+    let module_path = prefer_package_init_for_member_import(&module_path, use_stmt);
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
 
     // Check cache first - if we've already loaded this module, return cached exports
@@ -523,4 +541,62 @@ pub fn load_and_merge_module(
 
     // Otherwise, return the full module dict (for glob imports or module-level imports)
     Ok(Value::Dict(exports))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefer_package_init_for_member_import;
+    use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
+    use simple_parser::token::Span;
+    use std::fs;
+
+    fn use_stmt_with_target(target: ImportTarget) -> UseStmt {
+        UseStmt {
+            span: Span::new(0, 0, 0, 0),
+            path: ModulePath {
+                segments: vec!["std".to_string(), "io".to_string()],
+            },
+            target,
+            is_type_only: false,
+            is_lazy: false,
+        }
+    }
+
+    #[test]
+    fn prefers_package_init_for_group_imports_when_both_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let file_path = root.join("io.spl");
+        let package_dir = root.join("io");
+        let init_path = package_dir.join("__init__.spl");
+        fs::write(&file_path, "# file module\n").unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&init_path, "# package module\n").unwrap();
+
+        let resolved = prefer_package_init_for_member_import(
+            &file_path,
+            &use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())])),
+        );
+
+        assert_eq!(resolved, init_path);
+    }
+
+    #[test]
+    fn keeps_file_module_for_single_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let file_path = root.join("io.spl");
+        let package_dir = root.join("io");
+        let init_path = package_dir.join("__init__.spl");
+        fs::write(&file_path, "# file module\n").unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&init_path, "# package module\n").unwrap();
+
+        let resolved = prefer_package_init_for_member_import(
+            &file_path,
+            &use_stmt_with_target(ImportTarget::Single("io".to_string())),
+        );
+
+        assert_eq!(resolved, file_path);
+    }
 }

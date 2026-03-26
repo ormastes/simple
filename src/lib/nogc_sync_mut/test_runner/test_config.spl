@@ -83,66 +83,72 @@ fn apply_test_config_value(config: TestConfig, key: text, value: text):
         case _:
             ()
 
+fn parse_test_config_content(config: TestConfig, content: text) -> TestConfig:
+    val lines = content.split("\n")
+
+    var in_test_section = false
+    var in_cpu_throttle = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "test:":
+            in_test_section = true
+            in_cpu_throttle = false
+            continue
+        if not line.starts_with("  ") and trimmed.ends_with(":"):
+            in_test_section = false
+            in_cpu_throttle = false
+            continue
+        if not in_test_section:
+            val (top_key, top_value) = parse_config_key_value(trimmed)
+            if top_key != "":
+                apply_test_config_value(config, top_key, top_value)
+            continue
+
+        if trimmed == "cpu_throttle:":
+            in_cpu_throttle = true
+            continue
+        if line.starts_with("  ") and not line.starts_with("    ") and trimmed.ends_with(":"):
+            in_cpu_throttle = false
+            continue
+
+        val (key, value) = parse_config_key_value(trimmed)
+        if key == "":
+            continue
+        if in_cpu_throttle:
+            if key == "enabled":
+                apply_test_config_value(config, "throttle_enabled", value)
+            elif key == "threshold":
+                apply_test_config_value(config, "cpu_threshold", value)
+            elif key == "memory_threshold":
+                apply_test_config_value(config, "memory_threshold", value)
+        else:
+            apply_test_config_value(config, key, value)
+
+    val ci_env = env_get("CI")
+    if ci_env == "true" or ci_env == "1":
+        config.ci_mode = true
+        config.run_slow_tests = true
+        config.fail_fast = false
+
+    config
+
+fn load_test_config_from_path(config_path: text) -> TestConfig:
+    val config = TestConfig.defaults()
+    if config_path == "":
+        return config
+
+    val content = file_read(config_path) ?? ""
+    if content == "":
+        return config
+
+    parse_test_config_content(config, content)
+
+impl TestConfig:
     static fn load() -> TestConfig:
-        val config = TestConfig.defaults()
-        val config_path = find_config_file()
-        if config_path == "":
-            return config
-
-        val content = file_read(config_path) ?? ""
-        if content == "":
-            return config
-        val lines = content.split("\n")
-
-        var in_test_section = false
-        var in_cpu_throttle = false
-
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed == "" or trimmed.starts_with("#"):
-                continue
-            if trimmed == "test:":
-                in_test_section = true
-                in_cpu_throttle = false
-                continue
-            if not line.starts_with("  ") and trimmed.ends_with(":"):
-                in_test_section = false
-                in_cpu_throttle = false
-                continue
-            if not in_test_section:
-                val (top_key, top_value) = parse_config_key_value(trimmed)
-                if top_key != "":
-                    apply_test_config_value(config, top_key, top_value)
-                continue
-
-            if trimmed == "cpu_throttle:":
-                in_cpu_throttle = true
-                continue
-            if line.starts_with("  ") and not line.starts_with("    ") and trimmed.ends_with(":"):
-                in_cpu_throttle = false
-                continue
-
-            val (key, value) = parse_config_key_value(trimmed)
-            if key == "":
-                continue
-            if in_cpu_throttle:
-                if key == "enabled":
-                    apply_test_config_value(config, "throttle_enabled", value)
-                elif key == "threshold":
-                    apply_test_config_value(config, "cpu_threshold", value)
-                elif key == "memory_threshold":
-                    apply_test_config_value(config, "memory_threshold", value)
-            else:
-                apply_test_config_value(config, key, value)
-
-        # Apply CI mode overrides from environment
-        val ci_env = env_get("CI")
-        if ci_env == "true" or ci_env == "1":
-            config.ci_mode = true
-            config.run_slow_tests = true
-            config.fail_fast = false
-
-        config
+        load_test_config_from_path(find_config_file())
 
     static fn defaults() -> TestConfig:
         TestConfig(
@@ -164,52 +170,8 @@ fn apply_test_config_value(config: TestConfig, key: text, value: text):
             ci_mode: false
         )
 
-# Standalone function wrappers for interpreter mode (static methods unsupported)
 fn load_test_config() -> TestConfig:
-    var config = test_config_defaults()
-    val config_path = find_config_file()
-    if config_path == "":
-        return config
-    val content = file_read(config_path) ?? ""
-    if content == "":
-        return config
-    val lines = content.split("\n")
-    var in_test_section = false
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            continue
-        if trimmed == "test:":
-            in_test_section = true
-            continue
-        if not line.starts_with("  ") and trimmed.ends_with(":"):
-            in_test_section = false
-            continue
-        if in_test_section:
-            val (key, value) = parse_config_key_value(trimmed)
-            if key != "":
-                config = apply_test_config_value(config, key, value)
-    config
-
-fn test_config_defaults() -> TestConfig:
-    TestConfig(
-        timeout_seconds: 60,
-        memory_limit_mb: 512,
-        cpu_limit_seconds: 30,
-        max_fds: 256,
-        max_procs: 64,
-        parallel: true,
-        fail_fast: false,
-        slow_threshold_ms: 5000,
-        cpu_threshold: 80.0,
-        memory_threshold: 80.0,
-        throttle_enabled: false,
-        run_spec_tests: true,
-        run_sdoctests: true,
-        run_slow_tests: false,
-        run_spl_doctests: false,
-        ci_mode: false
-    )
+    load_test_config_from_path(find_config_file())
 
 # =========================================================================
 # H1: Multi-level config file search
