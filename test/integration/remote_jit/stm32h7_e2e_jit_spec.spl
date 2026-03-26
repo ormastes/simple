@@ -1,124 +1,124 @@
 """
- # STM32H7 Remote JIT E2E Test
- 
- **Feature IDs:** #RJE-011
- **Category:** Integration
- **Difficulty:** 4/5
- **Status:** Implemented
- 
- ## Overview
- 
- End-to-end test of the remote JIT pipeline on real STM32H7 hardware.
- Compiles ARM Thumb-2 code on the host, uploads to SRAM via OpenOCD telnet,
- executes on the Cortex-M7, and verifies the result register.
- 
- Uses OpenOCD telnet interface (not GDB MI) because the system GDB does not
- support ARM architecture (gdb-multiarch not installed).
- 
- ## Requirements
- 
- - STM32H7 eval board with STLINK-V3 probe physically connected
- - OpenOCD installed
- - clang, ld.lld, llvm-objcopy for ARM cross-compilation
- """
- 
+# STM32H7 Remote JIT E2E Test
+
+**Feature IDs:** #RJE-011
+**Category:** Integration
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+End-to-end test of the remote JIT pipeline on real STM32H7 hardware.
+Compiles ARM Thumb-2 code on the host, uploads to SRAM via OpenOCD telnet,
+executes on the Cortex-M7, and verifies the result register.
+
+Uses OpenOCD telnet interface (not GDB MI) because the system GDB does not
+support ARM architecture (gdb-multiarch not installed).
+
+## Requirements
+
+- STM32H7 eval board with STLINK-V3 probe physically connected
+- OpenOCD installed
+- clang, ld.lld, llvm-objcopy for ARM cross-compilation
+"""
+
 use std.io_runtime.{shell}
- 
- # ============================================================================
- # Constants
- # ============================================================================
- 
- val OPENOCD_CFG = "board/stm32h7x3i_eval.cfg"
- val TELNET_PORT = 14444
- val GDB_PORT = 13444
- val SRAM_CODE_BASE = "0x24010000"
- val SRAM_STACK_TOP = "0x24080000"
- val STLINK_SERIAL = "002600213137510833333639"
- 
- # ============================================================================
- # Hardware Detection
- # ============================================================================
- 
- fn openocd_available() -> bool:
-     val result = shell("command -v openocd >/dev/null 2>&1")
-     result.exit_code == 0
- 
- fn cross_tools_available() -> bool:
-     val clang_ok = shell("command -v clang >/dev/null 2>&1")
-     val lld_ok = shell("command -v ld.lld >/dev/null 2>&1")
-     val objcopy_ok = shell("command -v llvm-objcopy >/dev/null 2>&1")
-     clang_ok.exit_code == 0 and lld_ok.exit_code == 0 and objcopy_ok.exit_code == 0
- 
- fn stlink_probe_detected() -> bool:
-     val result = shell("lsusb 2>/dev/null | grep -q '0483:374e'")
-     result.exit_code == 0
- 
- fn hardware_ready() -> bool:
-     openocd_available() and cross_tools_available() and stlink_probe_detected()
- 
- fn skip_reason() -> text:
-     if not openocd_available():
-         return "openocd not installed"
-     if not cross_tools_available():
-         return "clang/ld.lld/llvm-objcopy not available"
-     if not stlink_probe_detected():
-         return "ST-LINK V3 probe (0483:374e) not detected on USB"
-     ""
- 
- # ============================================================================
- # OpenOCD Telnet Helpers
- # ============================================================================
- 
- fn ocd_start() -> i64:
-     """Start OpenOCD in background, return PID."""
-     val cmd = "openocd -f {OPENOCD_CFG} -c 'adapter serial {STLINK_SERIAL}' -c 'gdb_port {GDB_PORT}' -c 'telnet_port {TELNET_PORT}' >/dev/null 2>&1 & echo $!"
-     val result = shell(cmd)
-     val pid_text = result.stdout.trim()
-     if pid_text.len() > 0:
-         val pid = parse_i64(pid_text)
-         # Wait for OpenOCD to initialize and ports to open
-         shell("sleep 2")
-         return pid
-     -1
- 
- fn ocd_cmd(cmd: text) -> text:
-     """Send a telnet command to OpenOCD, return output."""
-     val result = shell("echo '{cmd}' | nc -q 1 localhost {TELNET_PORT} 2>/dev/null")
-     result.stdout
- 
- fn ocd_stop(pid: i64):
-     """Stop OpenOCD process."""
-     if pid > 0:
-         shell("kill {pid} >/dev/null 2>&1; sleep 0.3; kill -9 {pid} >/dev/null 2>&1")
- 
- fn parse_i64(s: text) -> i64:
-     """Parse a decimal integer string to i64."""
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val OPENOCD_CFG = "board/stm32h7x3i_eval.cfg"
+val TELNET_PORT = 14444
+val GDB_PORT = 13444
+val SRAM_CODE_BASE = "0x24010000"
+val SRAM_STACK_TOP = "0x24080000"
+val STLINK_SERIAL = "002600213137510833333639"
+
+# ============================================================================
+# Hardware Detection
+# ============================================================================
+
+fn openocd_available() -> bool:
+    val result = shell("command -v openocd >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn cross_tools_available() -> bool:
+    val clang_ok = shell("command -v clang >/dev/null 2>&1")
+    val lld_ok = shell("command -v ld.lld >/dev/null 2>&1")
+    val objcopy_ok = shell("command -v llvm-objcopy >/dev/null 2>&1")
+    clang_ok.exit_code == 0 and lld_ok.exit_code == 0 and objcopy_ok.exit_code == 0
+
+fn stlink_probe_detected() -> bool:
+    val result = shell("lsusb 2>/dev/null | grep -q '0483:374e'")
+    result.exit_code == 0
+
+fn hardware_ready() -> bool:
+    openocd_available() and cross_tools_available() and stlink_probe_detected()
+
+fn skip_reason() -> text:
+    if not openocd_available():
+        return "openocd not installed"
+    if not cross_tools_available():
+        return "clang/ld.lld/llvm-objcopy not available"
+    if not stlink_probe_detected():
+        return "ST-LINK V3 probe (0483:374e) not detected on USB"
+    ""
+
+# ============================================================================
+# OpenOCD Telnet Helpers
+# ============================================================================
+
+fn ocd_start() -> i64:
+    """Start OpenOCD in background, return PID."""
+    val cmd = "openocd -f {OPENOCD_CFG} -c 'adapter serial {STLINK_SERIAL}' -c 'gdb_port {GDB_PORT}' -c 'telnet_port {TELNET_PORT}' >/dev/null 2>&1 & echo $!"
+    val result = shell(cmd)
+    val pid_text = result.stdout.trim()
+    if pid_text.len() > 0:
+        val pid = parse_i64(pid_text)
+        # Wait for OpenOCD to initialize and ports to open
+        shell("sleep 2")
+        return pid
+    -1
+
+fn ocd_cmd(cmd: text) -> text:
+    """Send a telnet command to OpenOCD, return output."""
+    val result = shell("echo '{cmd}' | nc -q 1 localhost {TELNET_PORT} 2>/dev/null")
+    result.stdout
+
+fn ocd_stop(pid: i64):
+    """Stop OpenOCD process."""
+    if pid > 0:
+        shell("kill {pid} >/dev/null 2>&1; sleep 0.3; kill -9 {pid} >/dev/null 2>&1")
+
+fn parse_i64(s: text) -> i64:
+    """Parse a decimal integer string to i64."""
     val trimmed = s.trim()
     trimmed.parse_int() ?? -1
- 
- fn parse_hex(s: text) -> i64:
-     """Parse a hex string (with or without 0x prefix) to i64."""
-     var hex = s.trim()
-     if hex.starts_with("0x") or hex.starts_with("0X"):
-         hex = hex[2:hex.len()]
-     var result: i64 = 0
-     var i = 0
-     while i < hex.len():
+
+fn parse_hex(s: text) -> i64:
+    """Parse a hex string (with or without 0x prefix) to i64."""
+    var hex = s.trim()
+    if hex.starts_with("0x") or hex.starts_with("0X"):
+        hex = hex[2:hex.len()]
+    var result: i64 = 0
+    var i = 0
+    while i < hex.len():
         val c = hex[i:i + 1]
-         var digit: i64 = 0
+        var digit: i64 = 0
         if c >= "0" and c <= "9":
             digit = (c.parse_int() ?? 0) as i64
         elif c >= "a" and c <= "f":
             digit = 10 + hex_alpha_offset(c)
         elif c >= "A" and c <= "F":
             digit = 10 + hex_alpha_offset(c.lower())
-         else:
-             i = i + 1
-             continue
-         result = result * 16 + digit
-         i = i + 1
-     result
- 
+        else:
+            i = i + 1
+            continue
+        result = result * 16 + digit
+        i = i + 1
+    result
+
 fn hex_alpha_offset(c: text) -> i64:
     if c == "a": return 0
     if c == "b": return 1
@@ -128,138 +128,138 @@ fn hex_alpha_offset(c: text) -> i64:
     if c == "f": return 5
     0
 
- fn extract_reg_value(output: text) -> i64:
-     """Extract register value from OpenOCD 'reg' output.
- 
-     Format: 'r0 (/32): 0x0000002a'
-     """
-     var idx = output.index_of("0x")
-     if idx < 0:
-         return -1
-     var hex_start = idx + 2
-     var hex_end = hex_start
-     while hex_end < output.len():
+fn extract_reg_value(output: text) -> i64:
+    """Extract register value from OpenOCD 'reg' output.
+
+    Format: 'r0 (/32): 0x0000002a'
+    """
+    var idx = output.index_of("0x")
+    if idx < 0:
+        return -1
+    var hex_start = idx + 2
+    var hex_end = hex_start
+    while hex_end < output.len():
         val c = output[hex_end:hex_end + 1]
         val is_hex = (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
-         if not is_hex:
-             break
-         hex_end = hex_end + 1
-     if hex_end > hex_start:
-         return parse_hex(output[hex_start:hex_end])
-     -1
- 
- fn extract_mdw_value(output: text) -> i64:
-     """Extract memory word from OpenOCD 'mdw' output.
- 
-     Format: '0x24010000: be00202a'
-     """
-     var idx = output.index_of(": ")
-     if idx < 0:
-         return -1
-     var val_start = idx + 2
-     # Skip leading whitespace
+        if not is_hex:
+            break
+        hex_end = hex_end + 1
+    if hex_end > hex_start:
+        return parse_hex(output[hex_start:hex_end])
+    -1
+
+fn extract_mdw_value(output: text) -> i64:
+    """Extract memory word from OpenOCD 'mdw' output.
+
+    Format: '0x24010000: be00202a'
+    """
+    var idx = output.index_of(": ")
+    if idx < 0:
+        return -1
+    var val_start = idx + 2
+    # Skip leading whitespace
     while val_start < output.len() and output[val_start:val_start + 1] == " ":
-         val_start = val_start + 1
-     var val_end = val_start
-     while val_end < output.len():
+        val_start = val_start + 1
+    var val_end = val_start
+    while val_end < output.len():
         val c = output[val_end:val_end + 1]
         val is_hex = (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
-         if not is_hex:
-             break
-         val_end = val_end + 1
-     if val_end > val_start:
-         return parse_hex(output[val_start:val_end])
-     -1
- 
- # ============================================================================
- # ARM Thumb-2 Code Generation
- # ============================================================================
- 
- fn compile_arm_return42() -> text:
-     """Compile a minimal ARM Thumb-2 program that returns 42 in R0.
- 
-     Assembly:
-         .syntax unified
-         .thumb
-         _start:
-             movs r0, #42    @ R0 = 42
-             bkpt #0          @ halt
- 
-     Returns path to flat binary, or empty string on failure.
-     """
-     val tmpdir = shell("mktemp -d").stdout.trim()
-     val asm_path = "{tmpdir}/test.S"
-     val obj_path = "{tmpdir}/test.o"
-     val elf_path = "{tmpdir}/test.elf"
-     val bin_path = "{tmpdir}/test.bin"
- 
-     # Write assembly source
-     val asm_src = ".syntax unified\n.thumb\n.section .text\n.globl _start\n_start:\n    movs r0, #42\n    bkpt #0\n"
-     shell("printf '{asm_src}' > '{asm_path}'")
- 
-     # Compile
-     val compile = shell("clang --target=arm-none-eabi -march=armv7e-m -mthumb -c -o '{obj_path}' '{asm_path}' 2>&1")
-     if compile.exit_code != 0:
-         print "COMPILE FAILED: {compile.stdout} {compile.stderr}"
-         return ""
- 
-     # Link at SRAM address
-     val link = shell("ld.lld -Ttext={SRAM_CODE_BASE} -e _start --oformat=elf -o '{elf_path}' '{obj_path}' 2>&1")
-     if link.exit_code != 0:
-         print "LINK FAILED: {link.stdout} {link.stderr}"
-         return ""
- 
-     # Extract flat binary
-     val objcopy = shell("llvm-objcopy -O binary '{elf_path}' '{bin_path}' 2>&1")
-     if objcopy.exit_code != 0:
-         print "OBJCOPY FAILED: {objcopy.stdout} {objcopy.stderr}"
-         return ""
- 
-     bin_path
- 
- fn read_binary_as_hex_words(bin_path: text) -> [i64]:
-     """Read a binary file and return as list of 32-bit little-endian hex words."""
-     val hex_dump = shell("xxd -p '{bin_path}'")
-     val hex_str = hex_dump.stdout.trim()
-     # Each word is 8 hex chars (4 bytes), but we need to handle LE byte swap
-     # xxd outputs bytes in order: 2a 20 00 be
-     # As 32-bit LE word: 0xbe00202a
-     var words: [i64] = []
-     var i = 0
-     while i + 7 < hex_str.len():
-         val b0 = hex_str[i:i+2]
-         val b1 = hex_str[i+2:i+4]
-         val b2 = hex_str[i+4:i+6]
-         val b3 = hex_str[i+6:i+8]
-         # Little-endian: b3 b2 b1 b0
-         val word = parse_hex("{b3}{b2}{b1}{b0}")
-         words = words + [word]
-         i = i + 8
-     # Handle remaining bytes (pad with zeros)
-     if i < hex_str.len():
-         var remaining = hex_str[i:hex_str.len()]
-         while remaining.len() < 8:
-             remaining = remaining + "00"
-         val b0 = remaining[0:2]
-         val b1 = remaining[2:4]
-         val b2 = remaining[4:6]
-         val b3 = remaining[6:8]
-         val word = parse_hex("{b3}{b2}{b1}{b0}")
-         words = words + [word]
-     words
- 
- fn hex_i64(value: i64) -> text:
-     """Format i64 as hex string with 0x prefix."""
-     if value == 0:
-         return "0x0"
-     var result = ""
-     var v = value
-     while v > 0:
-         val digit = v % 16
+        if not is_hex:
+            break
+        val_end = val_end + 1
+    if val_end > val_start:
+        return parse_hex(output[val_start:val_end])
+    -1
+
+# ============================================================================
+# ARM Thumb-2 Code Generation
+# ============================================================================
+
+fn compile_arm_return42() -> text:
+    """Compile a minimal ARM Thumb-2 program that returns 42 in R0.
+
+    Assembly:
+        .syntax unified
+        .thumb
+        _start:
+            movs r0, #42    @ R0 = 42
+            bkpt #0          @ halt
+
+    Returns path to flat binary, or empty string on failure.
+    """
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    val asm_path = "{tmpdir}/test.S"
+    val obj_path = "{tmpdir}/test.o"
+    val elf_path = "{tmpdir}/test.elf"
+    val bin_path = "{tmpdir}/test.bin"
+
+    # Write assembly source
+    val asm_src = ".syntax unified\n.thumb\n.section .text\n.globl _start\n_start:\n    movs r0, #42\n    bkpt #0\n"
+    shell("printf '{asm_src}' > '{asm_path}'")
+
+    # Compile
+    val compile = shell("clang --target=arm-none-eabi -march=armv7e-m -mthumb -c -o '{obj_path}' '{asm_path}' 2>&1")
+    if compile.exit_code != 0:
+        print "COMPILE FAILED: {compile.stdout} {compile.stderr}"
+        return ""
+
+    # Link at SRAM address
+    val link = shell("ld.lld -Ttext={SRAM_CODE_BASE} -e _start --oformat=elf -o '{elf_path}' '{obj_path}' 2>&1")
+    if link.exit_code != 0:
+        print "LINK FAILED: {link.stdout} {link.stderr}"
+        return ""
+
+    # Extract flat binary
+    val objcopy = shell("llvm-objcopy -O binary '{elf_path}' '{bin_path}' 2>&1")
+    if objcopy.exit_code != 0:
+        print "OBJCOPY FAILED: {objcopy.stdout} {objcopy.stderr}"
+        return ""
+
+    bin_path
+
+fn read_binary_as_hex_words(bin_path: text) -> [i64]:
+    """Read a binary file and return as list of 32-bit little-endian hex words."""
+    val hex_dump = shell("xxd -p '{bin_path}'")
+    val hex_str = hex_dump.stdout.trim()
+    # Each word is 8 hex chars (4 bytes), but we need to handle LE byte swap
+    # xxd outputs bytes in order: 2a 20 00 be
+    # As 32-bit LE word: 0xbe00202a
+    var words: [i64] = []
+    var i = 0
+    while i + 7 < hex_str.len():
+        val b0 = hex_str[i:i+2]
+        val b1 = hex_str[i+2:i+4]
+        val b2 = hex_str[i+4:i+6]
+        val b3 = hex_str[i+6:i+8]
+        # Little-endian: b3 b2 b1 b0
+        val word = parse_hex("{b3}{b2}{b1}{b0}")
+        words = words + [word]
+        i = i + 8
+    # Handle remaining bytes (pad with zeros)
+    if i < hex_str.len():
+        var remaining = hex_str[i:hex_str.len()]
+        while remaining.len() < 8:
+            remaining = remaining + "00"
+        val b0 = remaining[0:2]
+        val b1 = remaining[2:4]
+        val b2 = remaining[4:6]
+        val b3 = remaining[6:8]
+        val word = parse_hex("{b3}{b2}{b1}{b0}")
+        words = words + [word]
+    words
+
+fn hex_i64(value: i64) -> text:
+    """Format i64 as hex string with 0x prefix."""
+    if value == 0:
+        return "0x0"
+    var result = ""
+    var v = value
+    while v > 0:
+        val digit = v % 16
         result = hex_digit_text(digit) + result
-         v = v / 16
-     "0x{result}"
- 
+        v = v / 16
+    "0x{result}"
+
 fn hex_digit_text(digit: i64) -> text:
     if digit == 0: return "0"
     if digit == 1: return "1"
@@ -278,123 +278,123 @@ fn hex_digit_text(digit: i64) -> text:
     if digit == 14: return "e"
     "f"
 
- # ============================================================================
- # Tests
- # ============================================================================
- 
- describe "STM32H7 remote JIT end-to-end":
- 
-     slow_it "detects hardware availability":
-         if not hardware_ready():
-             print "SKIP: {skip_reason()}"
-         else:
-             expect(openocd_available()).to_equal(true)
-             expect(cross_tools_available()).to_equal(true)
-             expect(stlink_probe_detected()).to_equal(true)
- 
-     slow_it "connects to STM32H7 via OpenOCD and reads SRAM":
-         if not hardware_ready():
-             print "SKIP: {skip_reason()}"
-         else:
-             var pid = ocd_start()
-             expect(pid).to_be_greater_than(0)
- 
-             # Reset and halt
-             val halt_out = ocd_cmd("reset halt")
-             expect(halt_out).to_contain("halted")
- 
-             # Write a known pattern to SRAM
-             ocd_cmd("mww 0x24010000 0xdeadbeef")
-             val readback = ocd_cmd("mdw 0x24010000")
-             expect(readback).to_contain("deadbeef")
- 
-             ocd_cmd("shutdown")
-             ocd_stop(pid)
- 
-     slow_it "compiles ARM Thumb-2 binary on host":
-         if not cross_tools_available():
-             print "SKIP: cross-compilation tools not available"
-         else:
-             val bin_path = compile_arm_return42()
-             expect(bin_path.len()).to_be_greater_than(0)
- 
-             # Verify binary size (should be 4 bytes: movs + bkpt)
-             val size_out = shell("wc -c < '{bin_path}'")
-             val size = parse_i64(size_out.stdout.trim())
-             expect(size).to_equal(4)
- 
-             # Verify correct machine code
-             val hex_out = shell("xxd -p '{bin_path}'")
-             expect(hex_out.stdout.trim()).to_equal("2a2000be")
- 
-             # Cleanup
-             shell("rm -rf '{bin_path}'")
- 
-     slow_it "executes ARM code on STM32H7 and returns 42 in R0":
-         """
-         Full E2E pipeline:
-         1. Compile ARM Thumb-2 on host (movs r0, #42; bkpt)
-         2. Start OpenOCD, connect to STM32H7
-         3. Reset and halt CPU
-         4. Write compiled bytes to SRAM at 0x24010000
-         5. Read back and verify memory contents
-         6. Clear R0, set PC and SP
-         7. Resume execution
-         8. Wait for BKPT halt
-         9. Read R0 -- should be 42
-         """
-         if not hardware_ready():
-             print "SKIP: {skip_reason()}"
-         else:
-             # --- Phase 1: Compile on host ---
-             val bin_path = compile_arm_return42()
-             expect(bin_path.len()).to_be_greater_than(0)
- 
-             # --- Phase 2: Connect to hardware ---
-             var pid = ocd_start()
-             expect(pid).to_be_greater_than(0)
- 
-             # --- Phase 3: Reset and halt ---
-             val halt_out = ocd_cmd("reset halt")
-             expect(halt_out).to_contain("halted")
- 
-             # --- Phase 4: Upload code to SRAM ---
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "STM32H7 remote JIT end-to-end":
+
+    slow_it "detects hardware availability":
+        if not hardware_ready():
+            print "SKIP: {skip_reason()}"
+        else:
+            expect(openocd_available()).to_equal(true)
+            expect(cross_tools_available()).to_equal(true)
+            expect(stlink_probe_detected()).to_equal(true)
+
+    slow_it "connects to STM32H7 via OpenOCD and reads SRAM":
+        if not hardware_ready():
+            print "SKIP: {skip_reason()}"
+        else:
+            var pid = ocd_start()
+            expect(pid).to_be_greater_than(0)
+
+            # Reset and halt
+            val halt_out = ocd_cmd("reset halt")
+            expect(halt_out).to_contain("halted")
+
+            # Write a known pattern to SRAM
+            ocd_cmd("mww 0x24010000 0xdeadbeef")
+            val readback = ocd_cmd("mdw 0x24010000")
+            expect(readback).to_contain("deadbeef")
+
+            ocd_cmd("shutdown")
+            ocd_stop(pid)
+
+    slow_it "compiles ARM Thumb-2 binary on host":
+        if not cross_tools_available():
+            print "SKIP: cross-compilation tools not available"
+        else:
+            val bin_path = compile_arm_return42()
+            expect(bin_path.len()).to_be_greater_than(0)
+
+            # Verify binary size (should be 4 bytes: movs + bkpt)
+            val size_out = shell("wc -c < '{bin_path}'")
+            val size = parse_i64(size_out.stdout.trim())
+            expect(size).to_equal(4)
+
+            # Verify correct machine code
+            val hex_out = shell("xxd -p '{bin_path}'")
+            expect(hex_out.stdout.trim()).to_equal("2a2000be")
+
+            # Cleanup
+            shell("rm -rf '{bin_path}'")
+
+    slow_it "executes ARM code on STM32H7 and returns 42 in R0":
+        """
+        Full E2E pipeline:
+        1. Compile ARM Thumb-2 on host (movs r0, #42; bkpt)
+        2. Start OpenOCD, connect to STM32H7
+        3. Reset and halt CPU
+        4. Write compiled bytes to SRAM at 0x24010000
+        5. Read back and verify memory contents
+        6. Clear R0, set PC and SP
+        7. Resume execution
+        8. Wait for BKPT halt
+        9. Read R0 -- should be 42
+        """
+        if not hardware_ready():
+            print "SKIP: {skip_reason()}"
+        else:
+            # --- Phase 1: Compile on host ---
+            val bin_path = compile_arm_return42()
+            expect(bin_path.len()).to_be_greater_than(0)
+
+            # --- Phase 2: Connect to hardware ---
+            var pid = ocd_start()
+            expect(pid).to_be_greater_than(0)
+
+            # --- Phase 3: Reset and halt ---
+            val halt_out = ocd_cmd("reset halt")
+            expect(halt_out).to_contain("halted")
+
+            # --- Phase 4: Upload code to SRAM ---
             # Known-good encoded word for:
             #   movs r0, #42
             #   bkpt #0
             ocd_cmd("mww 0x24010000 0xbe00202a")
- 
-             # --- Phase 5: Verify memory ---
-             val mem_out = ocd_cmd("mdw 0x24010000")
+
+            # --- Phase 5: Verify memory ---
+            val mem_out = ocd_cmd("mdw 0x24010000")
             expect(mem_out.lower()).to_contain("be00202a")
- 
-             # --- Phase 6: Set registers ---
-             # Clear R0 to prove execution changes it
-             ocd_cmd("reg r0 0")
+
+            # --- Phase 6: Set registers ---
+            # Clear R0 to prove execution changes it
+            ocd_cmd("reg r0 0")
             expect(ocd_cmd("reg r0").lower()).to_contain("0x00000000")
- 
-             # Set SP to safe location in SRAM
-             ocd_cmd("reg sp {SRAM_STACK_TOP}")
- 
-             # Set PC to code start (bit 0 = 1 for Thumb mode)
-             ocd_cmd("reg pc 0x24010001")
+
+            # Set SP to safe location in SRAM
+            ocd_cmd("reg sp {SRAM_STACK_TOP}")
+
+            # Set PC to code start (bit 0 = 1 for Thumb mode)
+            ocd_cmd("reg pc 0x24010001")
             expect(ocd_cmd("reg pc").lower()).to_contain("0x24010001")
- 
-             # --- Phase 7: Execute ---
-             ocd_cmd("resume")
-             # BKPT fires immediately (2 instructions), but give it a moment
-             shell("sleep 0.5")
- 
-             # --- Phase 8: Read result ---
+
+            # --- Phase 7: Execute ---
+            ocd_cmd("resume")
+            # BKPT fires immediately (2 instructions), but give it a moment
+            shell("sleep 0.5")
+
+            # --- Phase 8: Read result ---
             val r0_after = ocd_cmd("reg r0").lower()
             val pc_after = ocd_cmd("reg pc").lower()
- 
+
             expect(r0_after).to_contain("0x0000002a")
             expect(pc_after).to_contain("0x24010002")
- 
+
             print "E2E PASS: r0={r0_after.trim()} pc={pc_after.trim()}"
- 
-             # --- Phase 9: Cleanup ---
-             ocd_cmd("shutdown")
-             ocd_stop(pid)
-             shell("rm -rf '{bin_path}'")
+
+            # --- Phase 9: Cleanup ---
+            ocd_cmd("shutdown")
+            ocd_stop(pid)
+            shell("rm -rf '{bin_path}'")
