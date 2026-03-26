@@ -32,8 +32,12 @@ impl TestDepGraph:
 
     # Analyze a test file's imports and build dependency list
     me analyze_test(test_path: text):
+        val previous = self.deps[test_path] ?? []
+        clear_reverse_deps(self.reverse_deps, test_path, previous)
+
         val source = rt_file_read_text(test_path) ?? ""
         if source == "":
+            self.deps[test_path] = []
             return
 
         val imports = extract_imports(source)
@@ -46,7 +50,7 @@ impl TestDepGraph:
                 if not (seen[module_path] ?? false):
                     resolved.push(module_path)
                     seen[module_path] = true
-                # Transitive: analyze imports of this dependency too
+                # Walk transitive imports recursively up to a bounded depth.
                 val transitive = extract_transitive_deps(module_path, 5)
                 var j = 0
                 while j < transitive.len():
@@ -55,15 +59,6 @@ impl TestDepGraph:
                         seen[transitive[j]] = true
                     j = j + 1
             i = i + 1
-
-        val previous = self.deps[test_path] ?? []
-        var pi = 0
-        while pi < previous.len():
-            val old_dep = previous[pi]
-            var tests = self.reverse_deps[old_dep] ?? []
-            tests = list_remove(tests, test_path)
-            self.reverse_deps[old_dep] = tests
-            pi = pi + 1
 
         self.deps[test_path] = resolved
 
@@ -252,25 +247,47 @@ fn extract_transitive_deps(file_path: text, max_depth: i64) -> [text]:
     if max_depth <= 0:
         return []
 
-    val source = rt_file_read_text(file_path) ?? ""
-    if source == "":
-        return []
-
-    val imports = extract_imports(source)
     var result: [text] = []
     var seen: {text: bool} = {}
-    var i = 0
-    while i < imports.len():
-        val resolved = resolve_module_to_file(imports[i])
-        if resolved != "" and not (seen[resolved] ?? false):
-            result.push(resolved)
-            seen[resolved] = true
-        i = i + 1
+    var pending_paths: [text] = [file_path]
+    var pending_depths: [i64] = [max_depth]
+    var pending_index = 0
+    while pending_index < pending_paths.len():
+        val current_path = pending_paths[pending_index]
+        val remaining_depth = pending_depths[pending_index]
+        pending_index = pending_index + 1
+
+        if remaining_depth <= 0:
+            continue
+
+        val source = rt_file_read_text(current_path) ?? ""
+        if source == "":
+            continue
+
+        val imports = extract_imports(source)
+        var i = 0
+        while i < imports.len():
+            val resolved = resolve_module_to_file(imports[i])
+            if resolved != "" and not (seen[resolved] ?? false):
+                result.push(resolved)
+                seen[resolved] = true
+                pending_paths.push(resolved)
+                pending_depths.push(remaining_depth - 1)
+            i = i + 1
     result
 
 # ============================================================================
 # Helpers
 # ============================================================================
+
+fn clear_reverse_deps(reverse_deps: {text: [text]}, test_path: text, dep_list: [text]):
+    var i = 0
+    while i < dep_list.len():
+        val dep_path = dep_list[i]
+        var tests = reverse_deps[dep_path] ?? []
+        tests = list_remove(tests, test_path)
+        reverse_deps[dep_path] = tests
+        i = i + 1
 
 fn list_contains(list: [text], item: text) -> bool:
     var i = 0
