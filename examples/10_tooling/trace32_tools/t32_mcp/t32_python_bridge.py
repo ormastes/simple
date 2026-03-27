@@ -95,7 +95,7 @@ def run_command(t32, command):
                 pass
 
     # DIALOG action commands (explicit recognition for better error handling)
-    if upper.startswith("DIALOG.SET ") or upper.startswith("DIALOG.DISABLE ") or \
+    if upper.startswith("DIALOG.SET ") or upper.startswith("DIALOG.DESELECT ") or upper.startswith("DIALOG.DISABLE ") or \
        upper.startswith("DIALOG.ENABLE ") or upper.startswith("DIALOG.EXECUTE ") or \
        upper == "DIALOG.END":
         t32.cmd(command)

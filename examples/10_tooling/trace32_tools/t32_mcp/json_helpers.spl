@@ -185,15 +185,56 @@ fn t32_make_error(id: text, code: i64, message: text) -> text:
 
 # --- MCP Tool Result helpers ---
 
+fn t32_tool_output_has_key(output: text, key: text) -> bool:
+    output.contains(t32_Q() + key + t32_Q() + ":")
+
+fn t32_normalize_tool_output(output: text) -> text:
+    val trimmed = output.trim()
+    var normalized = trimmed
+    if trimmed.starts_with(t32_LB()) and trimmed.ends_with(t32_RB()):
+        normalized = trimmed
+    elif trimmed.starts_with(t32_SB_L()) and trimmed.ends_with(t32_SB_R()):
+        normalized = t32_jo1(t32_jp("items", trimmed))
+    else:
+        normalized = t32_jo1(t32_jp("value", t32_js(trimmed)))
+    if t32_tool_output_has_key(normalized, "gui_status"):
+        return normalized
+    val gui_status = t32_current_gui_status_json()
+    val msg = t32_extract_field(gui_status, "message_line")
+    val msg_type = t32_extract_field(gui_status, "message_type")
+    val target_state = t32_extract_field(gui_status, "target_state")
+    var body = normalized
+    if body.starts_with(t32_LB()) and body.ends_with(t32_RB()):
+        body = body.substring(1, body.len() - 1)
+    var parts: [text] = []
+    if body != "":
+        parts.push(body)
+    parts.push(t32_jp("gui_status", gui_status))
+    if not t32_tool_output_has_key(normalized, "status_bar"):
+        val status_bar = t32_jo2(t32_jp("message", t32_js(msg)), t32_jp("type", t32_js(msg_type)))
+        parts.push(t32_jp("status_bar", status_bar))
+    if not t32_tool_output_has_key(normalized, "target_state"):
+        parts.push(t32_jp("target_state", t32_js(target_state)))
+    var wrapped = t32_LB() + parts.join(",") + t32_RB()
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        Some(session):
+            return t32_append_errors_json(wrapped, session)
+        nil:
+            return wrapped
+
 fn t32_make_tool_result(id: text, output: text) -> text:
-    val escaped = t32_escape_json(output)
+    val normalized = t32_normalize_tool_output(output)
+    val escaped = t32_escape_json(normalized)
     val quoted = t32_Q() + escaped + t32_Q()
     val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", quoted)) + t32_SB_R()
     val result = t32_jo1(t32_jp("content", content))
     t32_make_json_result(id, result)
 
 fn t32_make_tool_error(id: text, code: i64, msg: text) -> text:
-    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", t32_js("ERROR " + str(code) + ": " + msg))) + t32_SB_R()
+    val err_payload = t32_jo1(t32_jp("error", t32_jo2(t32_jp("code", str(code)), t32_jp("message", t32_js(msg)))))
+    val normalized = t32_normalize_tool_output(err_payload)
+    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", t32_js(normalized))) + t32_SB_R()
     var err_result = t32_LB() + t32_jp("content", content) + "," + t32_jp("isError", "true") + t32_RB()
     t32_make_json_result(id, err_result)
 

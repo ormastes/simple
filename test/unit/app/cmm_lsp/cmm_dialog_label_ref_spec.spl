@@ -38,6 +38,40 @@ class DialogLabelDiag:
     message: text
     line_num: i64
 
+fn dlr_collect_duplicate_labels(source: text) -> [text]:
+    val labels = dlr_collect_labels(source)
+    val lines = source.split("\n")
+    var duplicates: [text] = []
+    var in_dialog = false
+    for line in lines:
+        val trimmed = line.trim()
+        val upper = trimmed.to_upper()
+        if upper.starts_with("DIALOG"):
+            in_dialog = true
+            continue
+        if trimmed == "(":
+            continue
+        if trimmed == ")":
+            in_dialog = false
+            continue
+        if not in_dialog:
+            continue
+        val colon_pos = dlr_find_colon(trimmed)
+        if colon_pos > 0:
+            val maybe_label = trimmed.substring(0, colon_pos).trim()
+            var seen = 0
+            for label in labels:
+                if label == maybe_label:
+                    seen = seen + 1
+            if seen > 0 and not dlr_list_has(duplicates, maybe_label):
+                var count = 0
+                for scan in lines:
+                    if scan.trim().starts_with(maybe_label + ":"):
+                        count = count + 1
+                if count > 1:
+                    duplicates.push(maybe_label)
+    duplicates
+
 fn dlr_collect_labels(source: text) -> [text]:
     val lines = source.split("\n")
     var labels: [text] = []
@@ -184,6 +218,13 @@ fn cmm_eval_invalid() -> text:
     s = s + "EVAL DIALOG.BOOLEAN(missing_label)"
     s
 
+fn cmm_duplicate_labels() -> text:
+    var s = "DIALOG\n(\n"
+    s = s + "  same: EDIT \"\" \"\"\n"
+    s = s + "  same: CHECKBOX \"A\" \"\"\n"
+    s = s + ")"
+    s
+
 # --- SSpec tests ---
 
 describe "CMM Dialog Label Reference Checking":
@@ -248,3 +289,8 @@ describe "CMM Dialog Label Reference Checking":
         it "does not collect TEXT as label":
             val labels = dlr_collect_labels("DIALOG\n(\n  TEXT \"Info\"\n)")
             expect(labels.len()).to_equal(0)
+
+    context "duplicate labels":
+        it "detects duplicate labels in a dialog block":
+            val duplicates = dlr_collect_duplicate_labels(cmm_duplicate_labels())
+            expect(duplicates).to_contain("same")

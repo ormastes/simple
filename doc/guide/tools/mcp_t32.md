@@ -69,14 +69,27 @@ Every `t32_cmd_run`, `t32_cmm_run`, `t32_eval`, and dialog tool response include
 
 ```json
 {
+  "gui_status": {
+    "message_line": "system halted",
+    "message_type": "info",
+    "debug": "system ready, stopped",
+    "mode": "HLL",
+    "system": "Up",
+    "task": "idle",
+    "cores": "0",
+    "target_state": "stopped"
+  },
   "status_bar": {"message": "system halted", "type": "info"},
   "target_state": "stopped"
 }
 ```
 
+- `gui_status`: structured TRACE32 bottom/status-line snapshot
 - `status_bar.message`: Current TRACE32 status bar text
 - `status_bar.type`: `info`, `warning`, or `error`
 - `target_state`: `running`, `stopped`, or `unknown`
+
+The `gui_status` object is always present on T32 MCP tool responses, including tool errors. Fields that TRACE32 does not expose through the active backend are returned as empty strings, while normalized `target_state` always falls back to `unknown`.
 
 With the ctypes backend, status is queried via `T32_GetMessage()` and `STATE.RUN()` directly. With subprocess backends, two additional EVAL commands are sent.
 
@@ -84,7 +97,7 @@ With the ctypes backend, status is queried via `T32_GetMessage()` and `STATE.RUN
 
 ### Automatic Error Append
 
-When a command produces a warning or error (via `MESSAGE.STR()` or subprocess stderr), an `errors` array is automatically appended to the response:
+When a command produces subprocess stderr, an `errors` array is appended. When TRACE32 is still carrying an older warning or error in its message buffer, it is surfaced as `last_buffered_error` so callers can distinguish stale state from the current command result:
 
 ```json
 {
@@ -92,16 +105,42 @@ When a command produces a warning or error (via `MESSAGE.STR()` or subprocess st
   "output": "",
   "status_bar": {"message": "access denied", "type": "error"},
   "target_state": "stopped",
-  "errors": [
+  "last_buffered_error": [
     {"source": "t32_message", "type": "error", "message": "access denied"},
+  ],
+  "errors": [
     {"source": "stderr", "type": "error", "message": "t32rem: command failed"}
   ]
 }
 ```
 
-The `errors` key is **omitted** when there are no errors (keeps payloads small). Sources:
+The `errors` and `last_buffered_error` keys are omitted when empty. Sources:
 - `t32_message`: TRACE32 message area (warning or error type)
 - `stderr`: subprocess stderr output (t32rem or python bridge)
+
+## Dialog Tools
+
+`t32_dialog_parse` now returns normalized dialog metadata for every parsed widget type, including unlabeled `EDIT`, `CHECKBOX`, `CHOOSEBOX`, `PULLDOWN`, `BUTTON`, and `DEFBUTTON` items.
+
+Per element, the response includes:
+- `label`: explicit label when present, otherwise an auto-generated virtual label
+- `declared_label`: raw CMM label, empty when the label was generated
+- `generated_label`: `true` when the label was synthesized for LLM/UI use
+- `clickable`, `queryable`, `settable`
+- `query_type`: `boolean`, `string`, `value`, or empty
+- `supported_actions`
+- `runtime_access`: `label`, `callback`, or `parse_only`
+
+Generated labels are stable within a parse result and make unlabeled widgets visible to the caller. Runtime behavior depends on `runtime_access`:
+- `label`: safe to use with `t32_dialog_get`, `t32_dialog_set`, and `t32_dialog_click`
+- `callback`: clickable through `t32_dialog_click`, which runs the parsed callback directly
+- `parse_only`: visible to analysis/LLM tooling, but TRACE32 cannot address it without an explicit label
+
+`t32_dialog_set` and `t32_dialog_click` accept `mode: "sync" | "async"`:
+- `sync` is the default and polls `PRACTICE.STATE()` until idle or timeout
+- `async` dispatches immediately and returns a completion hint telling the caller to poll `EVAL PRACTICE.STATE()` until it returns `0`
+
+`t32_dialog_set` supports `set`, `select`, `deselect`, `disable`, and `enable`. The handler validates the parsed widget type first when dialog metadata is available, so boolean-only actions do not run against text or header widgets.
 
 ### `t32_error_check` Tool
 

@@ -127,6 +127,24 @@ fn t32_parse_target_state(raw: text) -> text:
         return "stopped"
     "unknown"
 
+fn t32_strip_t32_quotes(raw: text) -> text:
+    var trimmed = raw.trim()
+    if trimmed.len() >= 2:
+        if trimmed.starts_with("\"") and trimmed.ends_with("\""):
+            trimmed = trimmed.substring(1, trimmed.len() - 1)
+    trimmed
+
+fn t32_eval_gui_field(session: McpT32Session, expr: text) -> text:
+    var out = ""
+    var rc: i64 = 0
+    if MCP_T32_BACKEND_TYPE == "ctypes":
+        (out, rc) = t32_ctypes_eval(expr)
+    else:
+        (out, rc) = t32_run_remote(session, "EVAL " + expr)
+    if rc != 0:
+        return ""
+    t32_strip_t32_quotes(out)
+
 fn t32_query_status_bar(session: McpT32Session) -> (text, text, text):
     var message = ""
     var msg_type_str = "info"
@@ -157,6 +175,72 @@ fn t32_query_status_bar(session: McpT32Session) -> (text, text, text):
             target_state = t32_parse_target_state(state_out)
     (message, msg_type_str, target_state)
 
+fn t32_debug_field_text(system: text, target_state: text) -> text:
+    if system == "Up":
+        if target_state == "running":
+            return "system ready, running"
+        if target_state == "stopped":
+            return "system ready, stopped"
+        return "system ready"
+    if system == "Down":
+        return "system down"
+    ""
+
+fn t32_gui_status_unknown_json() -> text:
+    var gui = t32_LB()
+    gui = gui + t32_jp("message_line", t32_js(""))
+    gui = gui + "," + t32_jp("message_type", t32_js("info"))
+    gui = gui + "," + t32_jp("cursor", t32_js(""))
+    gui = gui + "," + t32_jp("debug", t32_js(""))
+    gui = gui + "," + t32_jp("debugger_activity", t32_js(""))
+    gui = gui + "," + t32_jp("trace", t32_js(""))
+    gui = gui + "," + t32_jp("mode", t32_js(""))
+    gui = gui + "," + t32_jp("system", t32_js(""))
+    gui = gui + "," + t32_jp("task", t32_js(""))
+    gui = gui + "," + t32_jp("cores", t32_js(""))
+    gui = gui + "," + t32_jp("target", t32_js(""))
+    gui = gui + "," + t32_jp("monitor", t32_js(""))
+    gui = gui + "," + t32_jp("target_state", t32_js("unknown"))
+    gui = gui + t32_RB()
+    gui
+
+fn t32_query_gui_status_json(session: McpT32Session) -> text:
+    var message = ""
+    var msg_type = "info"
+    var target_state = "unknown"
+    (message, msg_type, target_state) = t32_query_status_bar(session)
+    var mode = t32_eval_gui_field(session, "DEBUGMODE()")
+    var task = t32_eval_gui_field(session, "TASK()")
+    var cores = t32_eval_gui_field(session, "CORE()")
+    var system = ""
+    if session.connected:
+        system = "Up"
+    var debug = t32_debug_field_text(system, target_state)
+    var gui = t32_LB()
+    gui = gui + t32_jp("message_line", t32_js(message))
+    gui = gui + "," + t32_jp("message_type", t32_js(msg_type))
+    gui = gui + "," + t32_jp("cursor", t32_js(""))
+    gui = gui + "," + t32_jp("debug", t32_js(debug))
+    gui = gui + "," + t32_jp("debugger_activity", t32_js(""))
+    gui = gui + "," + t32_jp("trace", t32_js(""))
+    gui = gui + "," + t32_jp("mode", t32_js(mode))
+    gui = gui + "," + t32_jp("system", t32_js(system))
+    gui = gui + "," + t32_jp("task", t32_js(task))
+    gui = gui + "," + t32_jp("cores", t32_js(cores))
+    gui = gui + "," + t32_jp("target", t32_js(""))
+    gui = gui + "," + t32_jp("monitor", t32_js(""))
+    gui = gui + "," + t32_jp("target_state", t32_js(target_state))
+    gui = gui + t32_RB()
+    gui
+
+fn t32_current_gui_status_json() -> text:
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        Some(session):
+            return t32_query_gui_status_json(session)
+        nil:
+            return t32_gui_status_unknown_json()
+
 fn t32_query_errors(session: McpT32Session) -> (text, text, text):
     # Returns (error_message, error_type, last_stderr)
     var message = ""
@@ -175,28 +259,20 @@ fn t32_query_errors(session: McpT32Session) -> (text, text, text):
             message = msg_out.trim()
     (message, msg_type, MCP_T32_LAST_STDERR)
 
-fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
-    var msg = ""
-    var msg_type = ""
-    var target_state = ""
-    (msg, msg_type, target_state) = t32_query_status_bar(session)
-    var result = r
-    var status_bar = t32_LB()
-    status_bar = status_bar + t32_jp("message", t32_js(msg))
-    status_bar = status_bar + "," + t32_jp("type", t32_js(msg_type))
-    status_bar = status_bar + t32_RB()
-    result = result + "," + t32_jp("status_bar", status_bar)
-    result = result + "," + t32_jp("target_state", t32_js(target_state))
-    # Auto-append errors block if error/warning detected or stderr present
+fn t32_append_errors_json(result: text, session: McpT32Session) -> text:
+    if result.contains("\"errors\":") or result.contains("\"last_buffered_error\":"):
+        return result
+    var next_result = result
     var err_msg = ""
     var err_type = ""
     var err_stderr = ""
     (err_msg, err_type, err_stderr) = t32_query_errors(session)
-    val has_error = (err_type == "warning" or err_type == "error" or err_stderr != "")
+    val has_buffered_message = (err_type == "warning" or err_type == "error")
+    val has_error = (has_buffered_message or err_stderr != "")
     if has_error:
         var errors_arr = t32_SB_L()
         var efirst = true
-        if err_type == "warning" or err_type == "error":
+        if has_buffered_message:
             var e = t32_LB()
             e = e + t32_jp("source", t32_js("t32_message"))
             e = e + "," + t32_jp("type", t32_js(err_type))
@@ -214,8 +290,28 @@ fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
             e = e + t32_RB()
             errors_arr = errors_arr + e
         errors_arr = errors_arr + t32_SB_R()
-        result = result + "," + t32_jp("errors", errors_arr)
-    result
+        if err_stderr != "":
+            next_result = next_result + "," + t32_jp("errors", errors_arr)
+        else:
+            next_result = next_result + "," + t32_jp("last_buffered_error", errors_arr)
+    next_result
+
+fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
+    var result = r
+    val gui_status = t32_query_gui_status_json(session)
+    val msg = t32_extract_field(gui_status, "message_line")
+    val msg_type = t32_extract_field(gui_status, "message_type")
+    val target_state = t32_extract_field(gui_status, "target_state")
+    result = result + "," + t32_jp("gui_status", gui_status)
+    if not result.contains("\"status_bar\":"):
+        var status_bar = t32_LB()
+        status_bar = status_bar + t32_jp("message", t32_js(msg))
+        status_bar = status_bar + "," + t32_jp("type", t32_js(msg_type))
+        status_bar = status_bar + t32_RB()
+        result = result + "," + t32_jp("status_bar", status_bar)
+    if not result.contains("\"target_state\":"):
+        result = result + "," + t32_jp("target_state", t32_js(target_state))
+    t32_append_errors_json(result, session)
 
 fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
     val backend = t32_find_backend()
