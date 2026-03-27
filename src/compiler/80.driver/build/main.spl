@@ -4,12 +4,11 @@
 
 use app.build.config (parse_build_args)
 use app.build.orchestrator (orchestrate_build, orchestrate_test, orchestrate_clean)
-use std.log.{error, debug}
+use std.log.{error}
 use app.build.test (TestOrchestrator, TestConfig, default_test_config, run_test_orchestrator)
 use app.build.coverage (Coverage, CoverageConfig, default_coverage_config)
 use app.build.quality (Lint, Format, Check, LintConfig, FormatConfig, CheckConfig, default_lint_config, default_format_config, default_check_config)
-use app.build.bootstrap_simple (Bootstrap, default_simple_bootstrap_config as default_bootstrap_simple_config)
-use app.build.bootstrap_multiphase (Pipeline, parse_pipeline_args)
+use app.build.bootstrap (Bootstrap, BootstrapConfig, default_bootstrap_config)
 use app.build.package (Package, default_package_bootstrap_config, default_full_config)
 use app.build.metrics (MetricsTracker, print_metrics)
 use app.build.watch (WatchOrchestrator, default_watch_config, print_watch_result)
@@ -31,7 +30,6 @@ fn print_help():
     print "  simple build fmt                Format code"
     print "  simple build bootstrap          Run bootstrap pipeline"
     print "  simple build bootstrap-rebuild  Rebuild from bootstrap binary"
-    print "  simple build pipeline           Run 8-stage build pipeline"
     print "  simple build package            Create packages"
     print ""
     print "Rust Subproject:"
@@ -48,13 +46,6 @@ fn print_help():
     print "  simple build baremetal --target=<arch>  Build for bare-metal target"
     print "  simple build baremetal --list-targets   List available targets"
     print "  Targets: arm, x86_64, riscv"
-    print ""
-    print "Pipeline (8-stage bootstrap):"
-    print "  simple build pipeline                    Full 8-stage pipeline"
-    print "  simple build pipeline --to=check         Just check prerequisites"
-    print "  simple build pipeline --from=seed        Skip check/bootstrap/build"
-    print "  simple build pipeline --from=build --to=build  Just build seed_cpp"
-    print "  simple build pipeline --no-verify        Skip reproducibility checks"
     print ""
     print "Advanced Features:"
     print "  simple build watch              Watch mode (auto-rebuild on changes)"
@@ -330,14 +321,30 @@ fn main(args: [text]) -> i64:
                 else:
                     return 1
             case "bootstrap":
-                var bootstrap_config = default_bootstrap_simple_config()
+                var bootstrap_config = default_bootstrap_config()
                 var bi = 1
                 while bi < args.len():
                     val barg = args[bi]
                     if barg.starts_with("--backend="):
-                        bootstrap_config.backend = barg.substring(10)
+                        bootstrap_config = BootstrapConfig(
+                            profile: bootstrap_config.profile,
+                            verify: bootstrap_config.verify,
+                            keep_artifacts: bootstrap_config.keep_artifacts,
+                            workspace_root: bootstrap_config.workspace_root,
+                            output_dir: bootstrap_config.output_dir,
+                            backend: barg.substring(10),
+                            rust_seed_binary: bootstrap_config.rust_seed_binary
+                        )
                     if barg.starts_with("--output="):
-                        bootstrap_config.output_dir = barg.substring(9)
+                        bootstrap_config = BootstrapConfig(
+                            profile: bootstrap_config.profile,
+                            verify: bootstrap_config.verify,
+                            keep_artifacts: bootstrap_config.keep_artifacts,
+                            workspace_root: bootstrap_config.workspace_root,
+                            output_dir: barg.substring(9),
+                            backend: bootstrap_config.backend,
+                            rust_seed_binary: bootstrap_config.rust_seed_binary
+                        )
                     bi = bi + 1
                 val result = Bootstrap.run(bootstrap_config)
                 if result.overall_success:
@@ -346,14 +353,6 @@ fn main(args: [text]) -> i64:
                     return 1
             case "bootstrap-rebuild":
                 return handle_bootstrap_rebuild(args[1:])
-            case "pipeline":
-                val pipeline_config = parse_pipeline_args(args[1:])
-                debug("pipeline", "After parse_pipeline_args: from_stage={pipeline_config.from_stage}, to_stage={pipeline_config.to_stage}")
-                val result = Pipeline.run(pipeline_config)
-                if result.overall_success:
-                    return 0
-                else:
-                    return 1
             case "package" | "package-bootstrap":
                 val result = Package.bootstrap()
                 if result.success:

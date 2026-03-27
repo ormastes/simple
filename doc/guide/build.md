@@ -184,20 +184,6 @@ build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
 | `--keep-artifacts` | Keep `build/` directory |
 | `--no-verify` | Compatibility flag; wrapper still verifies stage hashes |
 
-### C Backend Bootstrap (Experimental)
-
-The C bootstrap wrapper exists for temporal bootstrap and C backend debugging:
-
-```bash
-scripts/bootstrap/bootstrap-c.sh
-```
-
-Status in this checkout:
-
-- the wrapper is present
-- the generated CLI C bootstrap still fails to compile cleanly
-- the canonical Linux bootstrap path is `scripts/bootstrap/bootstrap-from-scratch.sh`
-
 ### Bootstrap Scripts
 
 | Script | Purpose |
@@ -206,7 +192,6 @@ Status in this checkout:
 | `scripts/setup.cmd` | Windows CMD/PowerShell equivalent |
 | `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux/FreeBSD bootstrap |
 | `scripts/bootstrap/bootstrap-windows.sh` | Windows bootstrap (MSVC / MinGW auto-detect) |
-| `scripts/bootstrap/bootstrap-c.sh` | Experimental C bootstrap wrapper |
 
 ---
 
@@ -239,7 +224,6 @@ rustc --version     # 1.75+
 | Artifact | Path | Description |
 |----------|------|-------------|
 | Production binary | `bin/release/simple` | Self-sufficient compiler/interpreter |
-| C bootstrap | `bin/bootstrap/cpp/simple` | Built from generated C++20 |
 | Build artifacts | `build/` | Intermediate files (safe to delete) |
 
 The production binary (`bin/release/simple`) is fully self-sufficient. All compilation, interpretation, and test running happens in-process. The only external tool calls are to system compilers and linkers (`clang`, `gcc`, `mold`/`lld`/`ld`, `llc`).

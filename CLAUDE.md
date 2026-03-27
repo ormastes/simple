@@ -4,7 +4,7 @@
 
 Impl in simple unless it has big performance differences.
 
-**100% Pure Simple** - No Rust source. Self-hosted compiler written entirely in Simple.
+**Primary compiler implementation is in Simple.** Bootstrap uses a Rust seed and produces a self-hosted Simple compiler.
 
 ### Binary Architecture
 
@@ -267,8 +267,7 @@ src/
     nogc_async_mut/ # Async mutable, no GC (actors, async, threads, generators, etc.)
     gc_async_mut/   # GC + async (gpu, cuda, torch, pure ML library)
     nogc_async_mut_noalloc/  # Baremetal, execution, memory, qemu
-  compiler_cpp/     # Legacy C bootstrap (deprecated — use Rust seed bootstrap)
-  runtime/          # C runtime (runtime.c/runtime.h — linked by generated C++)
+  runtime/          # Native runtime and support libraries
   compiler/         # Unified compiler — numbered layers (NN.name/ prefix stripped for imports)
     00.common/      # Error types, config, effects, visibility, diagnostics, registry
     10.frontend/    # Lexer, parser, AST, treesitter, desugar, parser types

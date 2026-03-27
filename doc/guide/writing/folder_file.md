@@ -94,8 +94,7 @@ src/
 │   ├── io/             # I/O subsystem
 │   └── desugar/        # Code transformations
 │
-├── runtime/        # C runtime (runtime.c/runtime.h -- linked by generated C++)
-├── compiler_cpp/   # Generated C from Simple source (temporal bootstrap)
+├── runtime/        # Native runtime and support libraries
 └── i18n/           # Internationalization
 ```
 
