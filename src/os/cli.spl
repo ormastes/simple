@@ -1,0 +1,177 @@
+# SimpleOS CLI — Subcommand handler for `bin/simple os`
+#
+# Routes `os build`, `os run`, `os test` to qemu_runner functions.
+# Default architecture: x86_64
+#
+# Usage:
+#   bin/simple os build                     # Build x86_64 (default)
+#   bin/simple os build --arch=riscv64      # Build specific arch
+#   bin/simple os run                       # Build + run x86_64
+#   bin/simple os run --arch=arm64          # Build + run specific arch
+#   bin/simple os test                      # Build + test x86_64
+#   bin/simple os test --all                # Test all 6 architectures
+#   bin/simple os test --arch=riscv32       # Test specific arch
+#   bin/simple os targets                   # List supported architectures
+
+use os.qemu_runner.{get_target, get_all_targets, arch_from_name,
+    build_os, run_os, test_os, test_all_architectures, arch_display_name}
+
+# ===========================================================================
+# Argument Parsing
+# ===========================================================================
+
+fn parse_arch_arg(args: [text]) -> text:
+    """Extract --arch=<name> or --target=<name> from args. Returns 'x86_64' as default."""
+    for arg in args:
+        if arg.starts_with("--arch="):
+            return arg[7:]
+        if arg.starts_with("--target="):
+            return arg[9:]
+        if arg == "--arch" or arg == "--target":
+            # Next arg would be the value, but we scan pairs below
+            pass_do_nothing
+    # Check two-arg form: --arch <value>
+    var i = 0
+    while i < args.len() - 1:
+        if args[i] == "--arch" or args[i] == "--target":
+            return args[i + 1]
+        i = i + 1
+    "x86_64"
+
+fn has_flag(args: [text], flag: text) -> bool:
+    """Check if a flag is present in the argument list."""
+    for arg in args:
+        if arg == flag:
+            return true
+    false
+
+# ===========================================================================
+# Help
+# ===========================================================================
+
+fn print_os_help():
+    print "SimpleOS — Multi-Architecture OS Build & Run"
+    print ""
+    print "Usage:"
+    print "  simple os <command> [options]"
+    print ""
+    print "Commands:"
+    print "  build              Build the OS kernel"
+    print "  run                Build and run in QEMU"
+    print "  test               Build and run boot smoke test"
+    print "  targets            List supported architectures"
+    print ""
+    print "Options:"
+    print "  --arch=<name>      Target architecture (default: x86_64)"
+    print "  --target=<name>    Alias for --arch"
+    print "  --all              Test all architectures (with 'test' command)"
+    print ""
+    print "Architectures:"
+    print "  x86_64   x86_32   riscv64   riscv32   arm64   arm32"
+    print ""
+    print "Examples:"
+    print "  simple os build --arch=riscv64"
+    print "  simple os run"
+    print "  simple os test --all"
+
+fn print_os_targets():
+    """List all supported OS target architectures."""
+    print "Supported SimpleOS architectures:"
+    print ""
+    val targets = get_all_targets()
+    for target in targets:
+        val name = arch_display_name(target.arch)
+        print "  {name}  ->  {target.target_triple}  ({target.qemu_system})"
+    print ""
+    print "Default: x86_64"
+
+# ===========================================================================
+# Command Dispatch
+# ===========================================================================
+
+fn handle_os_build(args: [text]) -> i64:
+    """Handle `os build` — compile the OS kernel for the specified architecture."""
+    val arch_name = parse_arch_arg(args)
+    val arch = arch_from_name(arch_name)
+    if arch.?:
+        val target = get_target(arch!)
+        val ok = build_os(target)
+        if ok: 0 else: 1
+    else:
+        print "Error: unknown architecture '{arch_name}'"
+        print "Run 'simple os targets' for supported architectures."
+        1
+
+fn handle_os_run(args: [text]) -> i64:
+    """Handle `os run` — build and run the OS in QEMU."""
+    val arch_name = parse_arch_arg(args)
+    val arch = arch_from_name(arch_name)
+    if arch.?:
+        val target = get_target(arch!)
+        val built = build_os(target)
+        if not built:
+            print "Error: build failed for {arch_display_name(target.arch)}"
+            return 1
+        val ok = run_os(target)
+        if ok: 0 else: 1
+    else:
+        print "Error: unknown architecture '{arch_name}'"
+        print "Run 'simple os targets' for supported architectures."
+        1
+
+fn handle_os_test(args: [text]) -> i64:
+    """Handle `os test` — build and smoke-test the OS boot."""
+    if has_flag(args, "--all"):
+        val ok = test_all_architectures()
+        if ok: 0 else: 1
+    else:
+        val arch_name = parse_arch_arg(args)
+        val arch = arch_from_name(arch_name)
+        if arch.?:
+            val target = get_target(arch!)
+            val built = build_os(target)
+            if not built:
+                print "Error: build failed for {arch_display_name(target.arch)}"
+                return 1
+            val ok = test_os(target, 10000)
+            if ok: 0 else: 1
+        else:
+            print "Error: unknown architecture '{arch_name}'"
+            print "Run 'simple os targets' for supported architectures."
+            1
+
+# ===========================================================================
+# Entry Point — called from main CLI
+# ===========================================================================
+
+fn handle_os(args: [text]) -> i64:
+    """Main entry point for `bin/simple os` subcommand.
+
+    Args should be the arguments after 'os', e.g. for `simple os build --arch=arm64`
+    args would be ["build", "--arch=arm64"].
+    """
+    if args.len() == 0:
+        print_os_help()
+        return 0
+
+    val subcmd = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+
+    match subcmd:
+        "build":
+            handle_os_build(rest)
+        "run":
+            handle_os_run(rest)
+        "test":
+            handle_os_test(rest)
+        "targets":
+            print_os_targets()
+            0
+        "-h" | "--help" | "help":
+            print_os_help()
+            0
+        _:
+            print "Error: unknown os subcommand '{subcmd}'"
+            print ""
+            print_os_help()
+            1

@@ -1,7 +1,7 @@
 # Platform API Contract
 
 All platform headers (`platform_*.h`) must implement this exact API contract.
-The seed compiler is platform-independent; all platform differences are isolated to these headers.
+The bootstrap/runtime interface is platform-independent; platform differences are isolated to these headers.
 
 ## Directory Operations
 
